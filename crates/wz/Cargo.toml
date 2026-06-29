@@ -848,7 +848,9 @@ storage-mgr-wildcard-updates = []
 # SourceInfo-sequencing publisher in wz-runtime-tokio); forward them. The
 # remaining §5.25 atoms stay reserved `= []` until built.
 ext-pubsub-advanced-cache = ["wz-runtime-tokio?/ext-pubsub-advanced-cache"]
-ext-pubsub-advanced-history = []
+# R311y86 — ext-pubsub-advanced-history is now a real cfg gate (the startup
+# `<ke>/@adv/**` history GET in wz-runtime-tokio's AdvancedSubscriber); forward it.
+ext-pubsub-advanced-history = ["wz-runtime-tokio?/ext-pubsub-advanced-history"]
 ext-pubsub-advanced-publisher = ["wz-runtime-tokio?/ext-pubsub-advanced-publisher"]
 # R311y82 — ext-pubsub-advanced-recovery is now a real cfg gate (the
 # subscriber-side reorder buffer + sample-driven `_sn`-range recovery GET in

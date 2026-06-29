@@ -173,6 +173,11 @@ pub struct RecoveryConfig {
     /// beacon instead of a local timer (the producer beacon is the separate
     /// `ext-pubsub-sample-miss-detection` atom). `false` (default) = off.
     pub heartbeat: bool,
+    /// R311y86 — when `Some`, issue a startup history GET over `<key_expr>/@adv/**`
+    /// on declare so a LATE JOINER recovers the publishers' cached history (zenoh
+    /// `AdvancedSubscriberBuilder::history`). `None` (default) = no history.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    pub history: Option<HistoryConfig>,
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -182,6 +187,8 @@ impl Default for RecoveryConfig {
             allowed_destination: Locality::Any,
             periodic_queries: None,
             heartbeat: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            history: None,
         }
     }
 }
@@ -210,6 +217,43 @@ impl RecoveryConfig {
     /// Enable the heartbeat recovery trigger (see [`Self::heartbeat`]).
     pub fn with_heartbeat(mut self) -> Self {
         self.heartbeat = true;
+        self
+    }
+
+    /// Enable the startup history query (see [`Self::history`]). Requires a tokio
+    /// runtime at declare time (the history GET fires on declare).
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    pub fn with_history(mut self, history: HistoryConfig) -> Self {
+        self.history = Some(history);
+        self
+    }
+}
+
+/// Startup-history configuration ([`RecoveryConfig::with_history`]). Mirror of
+/// zenoh-ext `HistoryConfig` (advanced_subscriber.rs:54-89). R311y86 builds the
+/// `max_samples` (`_max`) cap; the `max_age` time-range filter + late-publisher
+/// liveliness detection are documented follow-ons.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+#[derive(Clone, Copy, Debug, Default)]
+#[non_exhaustive]
+pub struct HistoryConfig {
+    /// `Some(N)` caps the startup history GET to the newest `N` samples per
+    /// source (the `_max=N` selector); `None` recovers the publishers' whole
+    /// caches (zenoh `HistoryConfig::max_samples`).
+    pub sample_depth: Option<usize>,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-history")]
+impl HistoryConfig {
+    /// History with no cap (recover each publisher's whole cache).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cap the startup history GET to the newest `depth` samples per source
+    /// (the `_max` selector).
+    pub fn max_samples(mut self, depth: usize) -> Self {
+        self.sample_depth = Some(depth);
         self
     }
 }
@@ -241,6 +285,13 @@ struct State {
     /// deliver past the gap (false, the plain [`AdvancedSubscriber::declare`]).
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     retransmission: bool,
+    /// R311y86 — true while the startup history GET is in flight: a live sample
+    /// from an as-yet-undelivered source BUFFERS instead of delivering, so the
+    /// (older) history delivers first (zenoh `global_pending_queries`,
+    /// advanced_subscriber.rs:504-516). Cleared + the buffer flushed when the
+    /// history GET's terminal Final fires ([`State::finish_history`]).
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    history_pending: bool,
 }
 
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
@@ -326,6 +377,8 @@ impl State {
         live: bool,
     ) -> Option<RecoveryRequest> {
         let retransmission = self.retransmission;
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        let history_pending = self.history_pending;
         let State {
             sequenced,
             on_sample,
@@ -338,7 +391,18 @@ impl State {
 
         match state.last_delivered {
             // First sample / in order: deliver, advance, drain contiguous buffer.
-            None => deliver_and_flush(state, sn, sample, on_sample),
+            None => {
+                // R311y86 — while the startup history GET is in flight, BUFFER a
+                // first sample (live or recovered) so the whole history delivers
+                // in order on completion (zenoh advanced_subscriber.rs:504-516).
+                // Skip the recovery trigger — the history GET is recovering it.
+                #[cfg(feature = "ext-pubsub-advanced-history")]
+                if history_pending {
+                    state.pending_samples.insert(sn, sample);
+                    return None;
+                }
+                deliver_and_flush(state, sn, sample, on_sample);
+            }
             Some(last) if sn == last.wrapping_add(1) => {
                 deliver_and_flush(state, sn, sample, on_sample)
             }
@@ -396,6 +460,30 @@ impl State {
         let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
         if let Some(state) = sequenced.get_mut(key) {
             state.pending_queries = state.pending_queries.saturating_sub(1);
+            if state.pending_queries == 0 {
+                flush_sequenced(state, &key.0, key.1, on_sample, on_miss);
+            }
+        }
+    }
+
+    /// R311y86 — the startup history GET completed (its terminal Final fired):
+    /// clear `history_pending` and flush EVERY source's buffer in order, so the
+    /// history accumulated during the query delivers oldest-first (zenoh
+    /// `InitialRepliesHandler::drop` -> per-source `flush_sequenced_source`,
+    /// advanced_subscriber.rs:1334-1352). A source with a per-source recovery GET
+    /// still in flight is left for [`Self::finish_recovery`] to flush.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    fn finish_history(&mut self) {
+        self.history_pending = false;
+        let State {
+            sequenced,
+            on_sample,
+            on_miss,
+            ..
+        } = self;
+        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
+        let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
+        for (key, state) in sequenced.iter_mut() {
             if state.pending_queries == 0 {
                 flush_sequenced(state, &key.0, key.1, on_sample, on_miss);
             }
@@ -559,35 +647,90 @@ fn issue_recovery_query<R, T>(
         &recovery_ke,
         opts,
         move |reply: &dyn ReplyView| {
-            if reply.kind() != ReplyKind::Put {
-                return;
+            if let Some((rkey, rsn, sample)) = recovered_sample_from_reply(reply) {
+                reply_states
+                    .lock()
+                    .expect("advanced subscriber state mutex poisoned")
+                    .handle_recovered(rkey, rsn, sample);
             }
-            // A recovery reply with no source identity cannot be re-keyed into
-            // a per-source stream (it needs `reply-source-info` on the answerer).
-            let Some(source_info) = reply.source_info() else {
-                return;
-            };
-            let rkey = (source_info.zid_prefix().to_vec(), source_info.eid);
-            let rsn = source_info.sn;
-            let mut sample = Sample::new_put(reply.keyexpr(), reply.payload().to_vec());
-            sample.source_info = Some(source_info.clone());
-            sample.attachment = reply.attachment().map(<[u8]>::to_vec);
-            if let Some((packed_id, schema)) = reply.put_encoding() {
-                sample.encoding = Some(EncodingHint {
-                    packed_id,
-                    schema: schema.map(String::from),
-                });
-            }
-            reply_states
-                .lock()
-                .expect("advanced subscriber state mutex poisoned")
-                .handle_recovered(rkey, rsn, sample);
         },
         move |_rid| {
             final_states
                 .lock()
                 .expect("advanced subscriber state mutex poisoned")
                 .finish_recovery(&final_key);
+        },
+    );
+}
+
+/// Re-key a recovery / history reply into a `(source-key, sn, Sample)` for the
+/// per-source ordering: read the source identity off the reply's source_info
+/// (the `reply-source-info` seam) + rebuild the Put sample. `None` for a
+/// non-Put reply or one with no source identity (it cannot be re-keyed — the
+/// answerer needs `reply-source-info` on). Shared by the recovery + history GETs.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<((Vec<u8>, u32), u32, Sample)> {
+    if reply.kind() != ReplyKind::Put {
+        return None;
+    }
+    let source_info = reply.source_info()?;
+    let key = (source_info.zid_prefix().to_vec(), source_info.eid);
+    let sn = source_info.sn;
+    let mut sample = Sample::new_put(reply.keyexpr(), reply.payload().to_vec());
+    sample.source_info = Some(source_info.clone());
+    sample.attachment = reply.attachment().map(<[u8]>::to_vec);
+    if let Some((packed_id, schema)) = reply.put_encoding() {
+        sample.encoding = Some(EncodingHint {
+            packed_id,
+            schema: schema.map(String::from),
+        });
+    }
+    Some((key, sn, sample))
+}
+
+/// R311y86 — issue the startup history GET over `<base>/@adv/**` (capped by
+/// `_max=N` when `sample_depth` is set), feeding the recovered cached samples
+/// from EVERY publisher into the per-source ordering. On the terminal Final,
+/// [`State::finish_history`] clears `history_pending` + flushes the buffered
+/// history oldest-first. MUST be called with the [`State`] lock RELEASED.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+fn issue_history_query<R, T>(
+    session: &Session<R, T, Unicast>,
+    statesref: &Arc<Mutex<State>>,
+    base_keyexpr: &str,
+    sample_depth: Option<usize>,
+    dest: Locality,
+) where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let history_ke = format!("{base_keyexpr}/@adv/**");
+    let opts = QueryOptions::get().with_allowed_destination(dest);
+    let opts = match sample_depth {
+        Some(max) => opts.with_parameters(format!("_max={max}").into_bytes()),
+        None => opts,
+    };
+
+    let reply_states = Arc::clone(statesref);
+    let final_states = Arc::clone(statesref);
+    let _ = session.query(
+        &history_ke,
+        opts,
+        move |reply: &dyn ReplyView| {
+            if let Some((rkey, rsn, sample)) = recovered_sample_from_reply(reply) {
+                reply_states
+                    .lock()
+                    .expect("advanced subscriber state mutex poisoned")
+                    .handle_recovered(rkey, rsn, sample);
+            }
+        },
+        move |_rid| {
+            final_states
+                .lock()
+                .expect("advanced subscriber state mutex poisoned")
+                .finish_history();
         },
     );
 }
@@ -783,6 +926,8 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             .unwrap_or(Locality::Any);
         let periodic = recovery.and_then(|c| c.periodic_queries);
         let heartbeat = recovery.map(|c| c.heartbeat).unwrap_or(false);
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        let history = recovery.and_then(|c| c.history);
         let base_keyexpr: String = keyexpr.into();
 
         let state = Arc::new(Mutex::new(State {
@@ -790,6 +935,8 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             on_sample: Box::new(on_sample),
             on_miss: Box::new(on_miss),
             retransmission,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            history_pending: history.is_some(),
         }));
         let cb_state = Arc::clone(&state);
         let q_session = session.clone();
@@ -869,6 +1016,16 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         } else {
             None
         };
+
+        // R311y86 — the startup history GET: fire it AFTER the live subscriber is
+        // declared (so a live sample arriving during the GET is gated by
+        // `history_pending` + buffered) to recover the publishers' cached history.
+        // In loopback it completes synchronously here (the cache answers + the
+        // terminal Final flushes the buffered history oldest-first).
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        if let Some(history) = history {
+            issue_history_query(session, &state, &base_keyexpr, history.sample_depth, dest);
+        }
 
         Ok(Self {
             _subscriber: subscriber,
@@ -1090,6 +1247,8 @@ mod tests {
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
             on_miss: Box::new(move |miss: Miss| m.lock().unwrap().push(miss)),
             retransmission: true,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            history_pending: false,
         };
         let key = (vec![0x02u8], 7u32);
         let mk = |sn: u32, v: u8| {
@@ -1150,6 +1309,8 @@ mod tests {
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
             on_miss: Box::new(move |miss: Miss| m.lock().unwrap().push(miss)),
             retransmission: true,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            history_pending: false,
         };
         let key = (vec![0x02u8], 7u32);
         let mk = |sn: u32, v: u8| {
@@ -1293,6 +1454,8 @@ mod tests {
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: true,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            history_pending: false,
         };
         state.sequenced.insert(
             (vec![0x01u8], 1u32),
@@ -1333,6 +1496,8 @@ mod tests {
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            history_pending: false,
         };
         plain.sequenced.insert(
             (vec![0x01u8], 1u32),
@@ -1465,6 +1630,8 @@ mod tests {
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: true,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            history_pending: false,
         };
         let key = (vec![0x09u8], 4u32);
         state.sequenced.insert(
@@ -1491,6 +1658,8 @@ mod tests {
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            history_pending: false,
         };
         assert!(
             plain.handle_heartbeat(vec![0x01], 1, 9).is_none(),
@@ -1592,6 +1761,103 @@ mod tests {
             *misses.lock().unwrap(),
             0,
             "the heartbeat recovery filled it -> no Miss"
+        );
+    }
+
+    /// R311y86 history-gating unit (no session): while `history_pending`, a
+    /// sample BUFFERS instead of delivering; `finish_history` flushes the
+    /// buffer oldest-first so the (older) history delivers in order.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn history_pending_buffers_then_flushes_in_order() {
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let mut state = State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
+            on_miss: Box::new(|_| {}),
+            retransmission: true,
+            history_pending: true,
+        };
+        let key = (vec![0x02u8], 7u32);
+        let mk = |sn: u32, v: u8| {
+            let mut s = Sample::new_put("demo/data", vec![v]);
+            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
+            s
+        };
+
+        // History in flight -> the recovered history buffers, nothing delivers.
+        state.handle_recovered(key.clone(), 0, mk(0, 0xA0));
+        state.handle_recovered(key.clone(), 1, mk(1, 0xA1));
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "samples buffer while the history GET is in flight"
+        );
+        // History completes -> flush oldest-first.
+        state.finish_history();
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xA0, 0xA1],
+            "the buffered history flushes in order on completion"
+        );
+    }
+
+    /// R311y86 composed history e2e: a LATE JOINER recovers the publisher's
+    /// cached history via the startup GET. The cache holds 0,1,2; a
+    /// history-enabled subscriber's declare issues a GET over `demo/data/@adv/**`
+    /// that the cache answers, and the buffered history flushes in order on the
+    /// terminal Final — all synchronously within declare (loopback).
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-cache",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn composed_history_recovers_cache_for_late_joiner() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x09u8];
+        let pub_eid = 4u32;
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+        let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
+        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
+            .expect("advanced cache declares");
+        for sn in 0u8..3 {
+            cache.cache_sample(CachedSample {
+                keyexpr: "demo/data".to_string(),
+                payload: vec![sn],
+                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                timestamp: TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: pub_zid.clone(),
+                },
+            });
+        }
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        // The startup history GET fires on declare and recovers the cache.
+        let _sub = AdvancedSubscriber::declare_with_recovery(
+            &session,
+            "demo/data",
+            RecoveryConfig::new()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_history(HistoryConfig::new()),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            |_miss: Miss| {},
+        )
+        .expect("history-enabled advanced subscriber declares");
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0, 1, 2],
+            "the late joiner recovered the publisher's cached history (0,1,2) on declare"
         );
     }
 }

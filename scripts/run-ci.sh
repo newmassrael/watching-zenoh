@@ -1536,6 +1536,29 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
         && cargo build -p wz --features ext-pubsub-sample-miss-detection --quiet)
 }
 
+# ─── Layer C1av — ext-pubsub-advanced-history §5.25: startup history query ─
+#
+# R311y86: ext-pubsub-advanced-history is the startup `<ke>/@adv/**` history GET
+# (a late joiner recovers the publishers' cached history on declare). Off-default
+# and composing ext-pubsub-advanced-recovery (it reuses the reorder buffer +
+# recovered-reply ordering), so no default / C1at lane compiles the history path.
+# This lane CO-ENABLES ext-pubsub-advanced-publisher (-> the cache answerer) +
+# pubsub-allow-loop so the composed late-joiner history e2e runs (cache holds
+# 0,1,2 -> a history-enabled subscriber's declare GETs them -> the `history_pending`
+# gate buffers, the terminal Final flushes oldest-first), plus the gating unit.
+# Then clippy-gates the history surface + validates the facade forward target.
+# Deferred (documented follow-on): the `_time` age filter + detect_late_publishers.
+layer_c1av_cargo_test_ext_pubsub_advanced_history() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio \
+            --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
+            --lib advanced_subscriber --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets \
+            --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
+            --quiet -- -D warnings \
+        && cargo build -p wz --features ext-pubsub-advanced-history --quiet)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -4266,6 +4289,7 @@ run_layer C1ar layer_c1ar_cargo_test_ext_pubsub_advanced_sub || overall=1
 run_layer C1as layer_c1as_cargo_test_reply_source_info || overall=1
 run_layer C1at layer_c1at_cargo_test_ext_pubsub_advanced_recovery || overall=1
 run_layer C1au layer_c1au_cargo_test_ext_pubsub_sample_miss_detection || overall=1
+run_layer C1av layer_c1av_cargo_test_ext_pubsub_advanced_history || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

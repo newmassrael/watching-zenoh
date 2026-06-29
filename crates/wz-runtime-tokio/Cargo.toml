@@ -277,6 +277,18 @@ ext-pubsub-advanced-recovery = [
     "query-selector-parameters",
     "wz-session-core/reply-source-info",
 ]
+# R311y86 — ext-pubsub-advanced-history (§5.25): the startup history query. A
+# history-enabled AdvancedSubscriber issues a GET over `<ke>/@adv/**` (with a
+# `_max=N` cap) on declare, recovering the publishers' cached samples so a LATE
+# JOINER gets the history (zenoh advanced_subscriber.rs:763-811, HistoryConfig).
+# A `global_pending_queries` gate buffers live samples until the history query
+# completes so the (older) history delivers first (zenoh :504-516). Composes
+# ext-pubsub-advanced-recovery — it reuses the reorder buffer + the recovered-
+# reply ordering + the query plane. DEFERRED (a documented follow-on): the `_max`
+# query is built; the `_time` age filter (HistoryConfig::max_age + the cache
+# `_time`-range filter still ignored in advanced_cache.rs) and late-publisher
+# detection via liveliness (HistoryConfig::detect_late_publishers) land later.
+ext-pubsub-advanced-history = ["ext-pubsub-advanced-recovery"]
 # R311y85 — ext-pubsub-sample-miss-detection (§5.25): the heartbeat PRODUCER
 # beacon. An AdvancedPublisher with sample_miss_detection spawns a background
 # task that periodically publishes its last published sequence number
