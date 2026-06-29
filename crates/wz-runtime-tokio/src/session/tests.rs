@@ -1701,7 +1701,7 @@ fn query_loopback_propagates_del_body() {
         .unwrap()
         .clone()
         .expect("on_reply must fire");
-    assert_eq!(got.body, InboundReplyBody::Del);
+    assert_eq!(got.body, InboundReplyBody::Del { source_info: None });
     assert_eq!(got.keyexpr_literal, "clear/me");
 }
 

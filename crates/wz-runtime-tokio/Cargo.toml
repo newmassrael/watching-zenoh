@@ -253,6 +253,26 @@ ext-pubsub-advanced-publisher = [
 # (pubsub-source-info). The timestamped-dedup path is deferred (see the
 # module docs), so no pubsub-timestamp dependency yet.
 ext-pubsub-advanced-subscriber = ["declare-subscriber", "pubsub-source-info"]
+# R311y82 — ext-pubsub-advanced-subscriber + the gap-recovery query plane:
+# turns the advanced subscriber's forward-gap handling from "miss + deliver"
+# into "BUFFER + sample-driven `_sn`-range recovery GET + in-order drain"
+# (zenoh advanced_subscriber.rs:517-540 retransmission path + the sub_callback
+# recovery get :704-748). Composes the subscriber (the reorder buffer lives
+# there) + the requester query plane (query-get for `Session::query`,
+# query-selector-parameters for the `_sn=START..` selector) + the cache's
+# reply-side source identity (wz-session-core/reply-source-info — the recovery
+# reply must carry the original `(zid, eid, sn)` so the subscriber re-keys the
+# retransmitted sample). A composed deployment additionally enables
+# ext-pubsub-advanced-publisher/-cache (the answerer); recovery itself is the
+# CONSUMER half. The periodic(tokio::time) + heartbeat(z_deserialize::<u32>)
+# triggers (zenoh :585-643 / :1045-1149) are follow-on under this same gate
+# (R311y83); the sample-driven trigger is the recovery core built here.
+ext-pubsub-advanced-recovery = [
+    "ext-pubsub-advanced-subscriber",
+    "query-get",
+    "query-selector-parameters",
+    "wz-session-core/reply-source-info",
+]
 # adminspace-read (§5.23) — the permissions.read GET gate: declare_adminspace's
 # handler answers nothing when AdminSpacePermissions.read=false (the querier gets
 # only the terminating Final), the wz mirror of zenoh's read-permission check

@@ -4,17 +4,16 @@
 //! R311y70 — `ext-pubsub-advanced-subscriber` (§5.25): the per-source
 //! ordering / de-duplication subscriber that consumes the `SourceInfo`
 //! sequence numbers an [`crate::advanced_publisher::AdvancedPublisher`]
-//! stamps.
+//! stamps. R311y82 adds the gap-recovery half (`ext-pubsub-advanced-recovery`).
 //!
 //! The wz mirror of zenoh-ext `advanced_subscriber.rs`'s `handle_sample`
 //! state machine (advanced_subscriber.rs:476-566). It wraps a plain
 //! subscriber and tracks, per source, the last in-order delivered marker:
 //!
 //! - **Sequenced** (the sample carries `SourceInfo(zid, eid, sn)`): keyed
-//!   by `(zid, eid)`. `sn == last + 1` delivers in order; `sn > last + 1`
-//!   is a forward GAP — it fires a [`Miss`] callback (`nb = sn - last - 1`)
-//!   then delivers and advances (the no-retransmission path); `sn <= last`
-//!   is a duplicate / out-of-order-late sample and is DROPPED.
+//!   by `(zid, eid)`. `sn == last + 1` delivers in order; `sn <= last` is a
+//!   duplicate / out-of-order-late sample and is DROPPED. A forward GAP
+//!   (`sn > last + 1`) is handled per the recovery mode (below).
 //! - **No sequenced source-id**: delivered immediately, no de-duplication.
 //!
 //! The TIMESTAMPED de-duplication path (a `Sequencing::Timestamp`
@@ -27,21 +26,47 @@
 //! round builds the SEQUENCED path the `SequenceNumber` publisher (the
 //! R311y69 default) produces.
 //!
-//! ## Scope vs zenoh (the reorder buffer is deferred to advanced-recovery)
+//! ## Forward-gap handling: `Miss` vs recovery (R311y82)
 //!
-//! zenoh's `handle_sample` also BUFFERS a forward gap into a
-//! `pending_samples` BTreeMap when retransmission is on, to be back-filled
-//! by a recovery query, and buffers during a startup history query. Both
-//! the buffer and its drainers (`deliver_and_flush`, the recovery `get`,
-//! the history gating) are only FUNCTIONAL once
-//! `ext-pubsub-advanced-recovery` / `-advanced-history` compose their
-//! query machinery — without a drainer a buffered sample would never be
-//! delivered. So this round builds the faithful SUBSET (retransmission
-//! off: gap -> Miss + deliver): the per-source `last_delivered` tracking,
-//! in-order delivery, gap detection, and duplicate drop. The reorder
-//! buffer + the `retransmission` flag land in the recovery round WITH the
-//! query that drains them (each structure built with its consumer — the
-//! same sequencing as the R311y69 cache reply-seam deferral).
+//! What happens on a forward gap is set at declare time:
+//!
+//! - **Plain** ([`AdvancedSubscriber::declare`], the always-present form):
+//!   the gap fires a [`Miss`] callback (`nb = sn - last - 1`), then delivers
+//!   the just-received sample and advances past the hole (zenoh
+//!   advanced_subscriber.rs:521-535 no-retransmission path). Lost samples are
+//!   reported, never recovered.
+//! - **Recovering** ([`AdvancedSubscriber::declare_with_recovery`], gated
+//!   `ext-pubsub-advanced-recovery`): the gap is BUFFERED into a per-source
+//!   sn-ordered reorder buffer ([`SourceState::pending_samples`]) instead of
+//!   delivered, and a sample-driven `_sn=last+1..` recovery GET is issued to
+//!   the publisher's `@adv` cache. The recovered (retransmitted) replies —
+//!   each carrying the original `(zid, eid, sn)` on its inner-body source_info
+//!   ext (the R311y74-y81 `reply-source-info` seam) — are re-keyed back into
+//!   the per-source stream and the buffer drains in order as the holes fill;
+//!   a hole the recovery does NOT fill surfaces a [`Miss`] at flush. This is
+//!   the wz mirror of zenoh's `retransmission` path (advanced_subscriber.rs:
+//!   517-540) + the sub_callback recovery get (:704-748) +
+//!   `flush_sequenced_source` (:1266-1306).
+//!
+//! Issuing the GET re-enters `Session::query` from inside the subscriber
+//! callback; this is safe because the wz subscriber callback runs at a
+//! deferred-fire drain site OUTSIDE the observer lock (R311lh), so the
+//! re-entrant query (and the loopback cache replies it drains) cannot
+//! self-deadlock.
+//!
+//! ### Scope vs zenoh (the other recovery triggers + timestamp dedup)
+//!
+//! zenoh drives recovery from THREE triggers: the sample-driven GET built
+//! here, a periodic `Timer` GET (advanced_subscriber.rs:585-643), and a
+//! heartbeat-subscriber GET keyed off the publisher's last-sn beacon
+//! (:1045-1149, `z_deserialize::<u32>`). The periodic + heartbeat triggers
+//! are follow-on under this same `ext-pubsub-advanced-recovery` gate
+//! (R311y83); the sample-driven trigger is the recovery core. A recovered
+//! reply also cannot carry its original body timestamp (the [`crate::reply_sink::ReplyView`]
+//! seam surfaces source_info / encoding / attachment, not the reply
+//! timestamp), so a retransmitted sample is delivered timestamp-less — a
+//! documented fidelity gap, not silent (the recovery essential is the source
+//! identity that re-keys it).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -53,6 +78,20 @@ use wz_session_core::sink::SampleView;
 
 use crate::session::{Session, SubscribeError, SubscribeOptions, Subscriber, Unicast};
 use crate::session_glue::SessionLinkActions;
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use std::collections::BTreeMap;
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use wz_session_core::locality::Locality;
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use wz_session_core::reply_sink::{ReplyKind, ReplyView};
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use wz_session_core::sample::EncodingHint;
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use crate::session::QueryOptions;
 
 /// A detected gap in a sequenced source's stream: `nb` samples between the
 /// last in-order delivery and the just-received `sn` were missed. Mirror
@@ -68,53 +107,378 @@ pub struct Miss {
     pub nb: u32,
 }
 
+/// Per-source ordering state. Tracks the last in-order delivered sequence
+/// number; the recovery build adds the reorder buffer ([`Self::pending_samples`],
+/// sn-ordered) + the in-flight recovery-GET count ([`Self::pending_queries`])
+/// — the wz mirror of zenoh-ext `SourceState<u32>` (advanced_subscriber.rs:
+/// 444-448).
+#[derive(Default)]
+struct SourceState {
+    /// Last in-order delivered sequence number (`None` before the first
+    /// sample from this source).
+    last_delivered: Option<u32>,
+    /// Recovery reorder buffer: forward-gap samples held sn-ordered until a
+    /// `_sn`-range recovery GET back-fills the hole, then drained in order.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    pending_samples: BTreeMap<u32, Sample>,
+    /// In-flight recovery GETs for this source (zenoh `pending_queries`): a
+    /// new GET is only issued when this is 0, and the buffer is flushed when
+    /// it returns to 0.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    pending_queries: u64,
+}
+
+/// Configuration for a recovering subscriber ([`AdvancedSubscriber::declare_with_recovery`]).
+/// The sample-driven `_sn`-range recovery GET is implied by recovering at all
+/// (zenoh's `retransmission.is_some()`); the periodic / heartbeat triggers are
+/// R311y83 follow-on fields under this same gate.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct RecoveryConfig {
+    /// Locality for the recovery `_sn`-range GET. `Any` (default) reaches a
+    /// remote publisher's `@adv` cache AND the local loopback; `SessionLocal`
+    /// pins it to loopback (single-host composition tests). Mirrors zenoh's
+    /// recovery get target (advanced_subscriber.rs:603, `query_target` All).
+    pub allowed_destination: Locality,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            allowed_destination: Locality::Any,
+        }
+    }
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl RecoveryConfig {
+    /// Sample-driven recovery with default routing (`Locality::Any`).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pin the recovery GET's locality (e.g. `SessionLocal` for a loopback
+    /// composition).
+    pub fn with_allowed_destination(mut self, locality: Locality) -> Self {
+        self.allowed_destination = locality;
+        self
+    }
+}
+
+/// What [`State::handle_live`] asks the caller to do AFTER releasing the state
+/// lock: issue a `_sn={from_sn}..` recovery GET against `(zid, eid)`'s `@adv`
+/// cache. Returned (not issued inline) so the re-entrant `Session::query` runs
+/// without the state mutex held.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+struct RecoveryRequest {
+    zid: Vec<u8>,
+    eid: u32,
+    from_sn: u32,
+}
+
 /// Per-source last-in-order-delivered tracking + the user callbacks.
 /// Behind an `Arc<Mutex>` because the session may fire the subscriber
 /// callback from different worker threads (the storage-service idiom).
 struct State {
-    /// `(zid, eid)` -> last in-order delivered sequence number.
-    sequenced: HashMap<(Vec<u8>, u32), u32>,
+    /// `(zid, eid)` -> per-source ordering state.
+    sequenced: HashMap<(Vec<u8>, u32), SourceState>,
     on_sample: Box<dyn FnMut(Sample) + Send>,
     on_miss: Box<dyn FnMut(Miss) + Send>,
+    /// R311y82 — whether forward gaps BUFFER + trigger a recovery GET (true,
+    /// [`AdvancedSubscriber::declare_with_recovery`]) or report a [`Miss`] and
+    /// deliver past the gap (false, the plain [`AdvancedSubscriber::declare`]).
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    retransmission: bool,
 }
 
+#[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
 impl State {
     /// The zenoh `handle_sample` state machine (retransmission-off subset).
     fn handle(&mut self, view: &dyn SampleView) {
-        if let Some(source_info) = view.source_info() {
-            let key = (source_info.zid_prefix().to_vec(), source_info.eid);
-            let sn = source_info.sn;
-            match self.sequenced.get(&key).copied() {
-                // First sample from this source: deliver, record.
-                None => {
-                    (self.on_sample)(Sample::from_view(view));
-                    self.sequenced.insert(key, sn);
-                }
-                // In order: deliver, advance.
-                Some(last) if sn == last.wrapping_add(1) => {
-                    (self.on_sample)(Sample::from_view(view));
-                    self.sequenced.insert(key, sn);
-                }
-                // Forward gap (no retransmission): report the miss, deliver,
-                // advance past it (zenoh advanced_subscriber.rs:521-535).
-                Some(last) if sn > last => {
-                    (self.on_miss)(Miss {
+        let Some(source_info) = view.source_info() else {
+            // No sequenced source-id: deliver, no de-duplication (the
+            // timestamped-dedup path is deferred — see the module docs).
+            (self.on_sample)(Sample::from_view(view));
+            return;
+        };
+        let key = (source_info.zid_prefix().to_vec(), source_info.eid);
+        let sn = source_info.sn;
+        let State {
+            sequenced,
+            on_sample,
+            on_miss,
+        } = self;
+        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
+        let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
+        let state = sequenced.entry(key.clone()).or_default();
+        match state.last_delivered {
+            // First sample from this source: deliver, record.
+            None => {
+                on_sample(Sample::from_view(view));
+                state.last_delivered = Some(sn);
+            }
+            // In order: deliver, advance.
+            Some(last) if sn == last.wrapping_add(1) => {
+                on_sample(Sample::from_view(view));
+                state.last_delivered = Some(sn);
+            }
+            // Forward gap (no retransmission): report the miss, deliver,
+            // advance past it (zenoh advanced_subscriber.rs:521-535).
+            Some(last) if sn > last => {
+                on_miss(Miss {
+                    source_zid: key.0.clone(),
+                    source_eid: key.1,
+                    nb: sn - last - 1,
+                });
+                on_sample(Sample::from_view(view));
+                state.last_delivered = Some(sn);
+            }
+            // `sn <= last`: duplicate / out-of-order-late — drop.
+            Some(_) => {}
+        }
+    }
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl State {
+    /// Ingest a LIVE sample (the subscriber callback path). Returns a
+    /// [`RecoveryRequest`] when a forward gap on a retransmission-enabled
+    /// source needs a `_sn`-range recovery GET; the caller issues it OUTSIDE
+    /// the state lock.
+    fn handle_live(&mut self, view: &dyn SampleView) -> Option<RecoveryRequest> {
+        let Some(source_info) = view.source_info() else {
+            // No sequenced source-id: deliver, no de-duplication.
+            (self.on_sample)(Sample::from_view(view));
+            return None;
+        };
+        let key = (source_info.zid_prefix().to_vec(), source_info.eid);
+        let sn = source_info.sn;
+        self.ingest_sequenced(key, sn, Sample::from_view(view), true)
+    }
+
+    /// Ingest a RECOVERED (retransmitted) reply sample — re-keyed by the
+    /// reply's `source_info` and ordered like a live sample, but never issues
+    /// a follow-on GET (the in-flight GET is what produced it).
+    fn handle_recovered(&mut self, key: (Vec<u8>, u32), sn: u32, sample: Sample) {
+        let _ = self.ingest_sequenced(key, sn, sample, false);
+    }
+
+    /// The shared sequenced-ordering core (zenoh `handle_sample`
+    /// advanced_subscriber.rs:497-540). `live` gates whether a forward gap may
+    /// trigger a new recovery GET.
+    fn ingest_sequenced(
+        &mut self,
+        key: (Vec<u8>, u32),
+        sn: u32,
+        sample: Sample,
+        live: bool,
+    ) -> Option<RecoveryRequest> {
+        let retransmission = self.retransmission;
+        let State {
+            sequenced,
+            on_sample,
+            on_miss,
+            ..
+        } = self;
+        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
+        let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
+        let state = sequenced.entry(key.clone()).or_default();
+
+        match state.last_delivered {
+            // First sample / in order: deliver, advance, drain contiguous buffer.
+            None => deliver_and_flush(state, sn, sample, on_sample),
+            Some(last) if sn == last.wrapping_add(1) => {
+                deliver_and_flush(state, sn, sample, on_sample)
+            }
+            // Forward gap.
+            Some(last) if sn > last => {
+                if retransmission {
+                    // BUFFER; the recovery GET (below) back-fills the hole.
+                    state.pending_samples.insert(sn, sample);
+                } else {
+                    // No retransmission: report the miss, deliver, advance.
+                    on_miss(Miss {
                         source_zid: key.0.clone(),
                         source_eid: key.1,
                         nb: sn - last - 1,
                     });
-                    (self.on_sample)(Sample::from_view(view));
-                    self.sequenced.insert(key, sn);
+                    on_sample(sample);
+                    state.last_delivered = Some(sn);
                 }
-                // `sn <= last`: duplicate / out-of-order-late — drop.
-                Some(_) => {}
             }
+            // `sn <= last`: duplicate / out-of-order-late — drop.
+            Some(_) => {}
+        }
+
+        // Sample-driven trigger (zenoh sub_callback advanced_subscriber.rs:
+        // 704-712): a live sample that left the buffer non-empty with no GET
+        // in flight issues one for `_sn=last_delivered+1..`.
+        if live && retransmission && state.pending_queries == 0 && !state.pending_samples.is_empty()
+        {
+            state.pending_queries += 1;
+            Some(RecoveryRequest {
+                zid: key.0,
+                eid: key.1,
+                from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
+            })
         } else {
-            // No sequenced source-id: deliver, no de-duplication (the
-            // timestamped-dedup path is deferred — see the module docs).
-            (self.on_sample)(Sample::from_view(view));
+            None
         }
     }
+
+    /// A recovery GET completed (its terminal Final fired): decrement the
+    /// in-flight count and, when it reaches 0, flush the reorder buffer —
+    /// delivering recovered + buffered samples in order and reporting a
+    /// [`Miss`] for any hole the recovery did not fill (zenoh
+    /// `SequencedRepliesHandler::drop` -> `flush_sequenced_source`,
+    /// advanced_subscriber.rs:1362-1382 / 1266-1306).
+    fn finish_recovery(&mut self, key: &(Vec<u8>, u32)) {
+        let State {
+            sequenced,
+            on_sample,
+            on_miss,
+            ..
+        } = self;
+        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
+        let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
+        if let Some(state) = sequenced.get_mut(key) {
+            state.pending_queries = state.pending_queries.saturating_sub(1);
+            if state.pending_queries == 0 {
+                flush_sequenced(state, &key.0, key.1, on_sample, on_miss);
+            }
+        }
+    }
+}
+
+/// Deliver `sample` (sn = `sn`), advance `last_delivered`, then drain every
+/// contiguous buffered sample (`last+1`, `last+2`, ...) in order. The wz
+/// mirror of zenoh's `deliver_and_flush` (advanced_subscriber.rs:482-495).
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+fn deliver_and_flush(
+    state: &mut SourceState,
+    sn: u32,
+    sample: Sample,
+    on_sample: &mut dyn FnMut(Sample),
+) {
+    on_sample(sample);
+    let mut delivered = sn;
+    state.last_delivered = Some(delivered);
+    while let Some(next) = state.pending_samples.remove(&delivered.wrapping_add(1)) {
+        on_sample(next);
+        delivered = delivered.wrapping_add(1);
+        state.last_delivered = Some(delivered);
+    }
+}
+
+/// Flush the reorder buffer after a recovery GET completed: drain it
+/// sn-ordered, delivering each contiguous sample and reporting a [`Miss`] for
+/// any hole the recovery did not fill (zenoh `flush_sequenced_source`,
+/// advanced_subscriber.rs:1266-1306). Caller guarantees `pending_queries == 0`.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+fn flush_sequenced(
+    state: &mut SourceState,
+    zid: &[u8],
+    eid: u32,
+    on_sample: &mut dyn FnMut(Sample),
+    on_miss: &mut dyn FnMut(Miss),
+) {
+    if state.pending_samples.is_empty() {
+        return;
+    }
+    let pending = core::mem::take(&mut state.pending_samples);
+    for (sn, sample) in pending {
+        match state.last_delivered {
+            None => {
+                state.last_delivered = Some(sn);
+                on_sample(sample);
+            }
+            Some(last) if sn == last.wrapping_add(1) => {
+                state.last_delivered = Some(sn);
+                on_sample(sample);
+            }
+            Some(last) if sn > last => {
+                on_miss(Miss {
+                    source_zid: zid.to_vec(),
+                    source_eid: eid,
+                    nb: sn - last - 1,
+                });
+                state.last_delivered = Some(sn);
+                on_sample(sample);
+            }
+            // duplicate — drop.
+            Some(_) => {}
+        }
+    }
+}
+
+/// Issue a sample-driven `_sn={from_sn}..` recovery GET against the gapped
+/// source's `@adv` cache and feed the recovered replies back into the
+/// per-source ordering. The recovery KE mirrors zenoh's
+/// `key_expr/@adv/*/<zid>/<eid>/**` (advanced_subscriber.rs:710-715): the `*`
+/// matches the `pub` chunk, the `**` matches the publisher's trailing empty
+/// meta chunk. MUST be called with the [`State`] lock RELEASED — `Session::query`
+/// re-enters the session (and locks the state again from the reply callback).
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+fn issue_recovery_query<R, T>(
+    session: &Session<R, T, Unicast>,
+    statesref: &Arc<Mutex<State>>,
+    base_keyexpr: &str,
+    req: RecoveryRequest,
+    dest: Locality,
+) where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let zid_hex = zid_to_zenoh_hex(&req.zid);
+    let recovery_ke = format!("{base_keyexpr}/@adv/*/{zid_hex}/{}/**", req.eid);
+    let params = format!("_sn={}..", req.from_sn).into_bytes();
+    let opts = QueryOptions::get()
+        .with_allowed_destination(dest)
+        .with_parameters(params);
+
+    let key = (req.zid, req.eid);
+    let reply_states = Arc::clone(statesref);
+    let final_states = Arc::clone(statesref);
+    let final_key = key;
+    let _ = session.query(
+        &recovery_ke,
+        opts,
+        move |reply: &dyn ReplyView| {
+            if reply.kind() != ReplyKind::Put {
+                return;
+            }
+            // A recovery reply with no source identity cannot be re-keyed into
+            // a per-source stream (it needs `reply-source-info` on the answerer).
+            let Some(source_info) = reply.source_info() else {
+                return;
+            };
+            let rkey = (source_info.zid_prefix().to_vec(), source_info.eid);
+            let rsn = source_info.sn;
+            let mut sample = Sample::new_put(reply.keyexpr(), reply.payload().to_vec());
+            sample.source_info = Some(source_info.clone());
+            sample.attachment = reply.attachment().map(<[u8]>::to_vec);
+            if let Some((packed_id, schema)) = reply.put_encoding() {
+                sample.encoding = Some(EncodingHint {
+                    packed_id,
+                    schema: schema.map(String::from),
+                });
+            }
+            reply_states
+                .lock()
+                .expect("advanced subscriber state mutex poisoned")
+                .handle_recovered(rkey, rsn, sample);
+        },
+        move |_rid| {
+            final_states
+                .lock()
+                .expect("advanced subscriber state mutex poisoned")
+                .finish_recovery(&final_key);
+        },
+    );
 }
 
 /// A live advanced subscriber bound to a [`Session`]: owns the wrapped
@@ -124,6 +488,7 @@ pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRunt
     _subscriber: Subscriber<R>,
 }
 
+#[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
 impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// Declare an advanced subscriber on `keyexpr`. `on_sample` receives
     /// each in-order / de-duplicated [`Sample`]; `on_miss` receives a
@@ -155,6 +520,100 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                     .lock()
                     .expect("advanced subscriber state mutex poisoned")
                     .handle(view);
+            },
+        )?;
+        Ok(Self {
+            _subscriber: subscriber,
+        })
+    }
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl<R: SessionRuntime> AdvancedSubscriber<R> {
+    /// Declare a plain advanced subscriber (no recovery): a forward gap fires
+    /// a [`Miss`] and delivers past the hole. See [`Self::declare_with_recovery`]
+    /// for the gap-recovering form.
+    pub fn declare<T, OnSample, OnMiss>(
+        session: &Session<R, T, Unicast>,
+        keyexpr: impl Into<String>,
+        on_sample: OnSample,
+        on_miss: OnMiss,
+    ) -> Result<Self, SubscribeError>
+    where
+        T: TimeSource + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        OnSample: FnMut(Sample) + Send + 'static,
+        OnMiss: FnMut(Miss) + Send + 'static,
+    {
+        Self::declare_impl(session, keyexpr, on_sample, on_miss, None)
+    }
+
+    /// Declare a gap-recovering advanced subscriber: a forward gap is buffered
+    /// and a sample-driven `_sn`-range recovery GET refills it from the
+    /// publisher's `@adv` cache (see the module docs). `on_miss` fires only
+    /// for a hole the recovery does NOT fill.
+    pub fn declare_with_recovery<T, OnSample, OnMiss>(
+        session: &Session<R, T, Unicast>,
+        keyexpr: impl Into<String>,
+        recovery: RecoveryConfig,
+        on_sample: OnSample,
+        on_miss: OnMiss,
+    ) -> Result<Self, SubscribeError>
+    where
+        T: TimeSource + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        OnSample: FnMut(Sample) + Send + 'static,
+        OnMiss: FnMut(Miss) + Send + 'static,
+    {
+        Self::declare_impl(session, keyexpr, on_sample, on_miss, Some(recovery))
+    }
+
+    fn declare_impl<T, OnSample, OnMiss>(
+        session: &Session<R, T, Unicast>,
+        keyexpr: impl Into<String>,
+        on_sample: OnSample,
+        on_miss: OnMiss,
+        recovery: Option<RecoveryConfig>,
+    ) -> Result<Self, SubscribeError>
+    where
+        T: TimeSource + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        OnSample: FnMut(Sample) + Send + 'static,
+        OnMiss: FnMut(Miss) + Send + 'static,
+    {
+        let retransmission = recovery.is_some();
+        let dest = recovery
+            .map(|c| c.allowed_destination)
+            .unwrap_or(Locality::Any);
+        let base_keyexpr: String = keyexpr.into();
+
+        let state = Arc::new(Mutex::new(State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(on_sample),
+            on_miss: Box::new(on_miss),
+            retransmission,
+        }));
+        let cb_state = Arc::clone(&state);
+        let q_session = session.clone();
+        let q_base = base_keyexpr.clone();
+        let subscriber = session.declare_subscriber(
+            base_keyexpr,
+            SubscribeOptions::default(),
+            move |view: &dyn SampleView| {
+                let request = cb_state
+                    .lock()
+                    .expect("advanced subscriber state mutex poisoned")
+                    .handle_live(view);
+                // Issue the recovery GET OUTSIDE the state lock: Session::query
+                // re-enters the session (the loopback fan drains the cache's
+                // replies, which lock `cb_state` again). R311lh deferred-fire
+                // makes this re-entrant call safe.
+                if let Some(request) = request {
+                    issue_recovery_query(&q_session, &cb_state, &q_base, request, dest);
+                }
             },
         )?;
         Ok(Self {
@@ -196,7 +655,7 @@ mod tests {
     }
 
     /// State-machine unit test (synthetic source, controlled sns): a source
-    /// feeds 0,1, then 3 (a gap at 2), then a duplicate 1. The advanced
+    /// feeds 0,1, then 3 (a gap at 2), then a duplicate 1. The plain advanced
     /// subscriber must deliver 0,1,3 in order, fire one Miss(nb=1) on the
     /// 1->3 gap, and DROP the duplicate.
     #[test]
@@ -350,6 +809,216 @@ mod tests {
             *misses.lock().unwrap(),
             0,
             "a contiguous 0,1,2 stream has no gaps -> no Miss"
+        );
+    }
+
+    /// R311y82 state-machine unit test (recovery core, no session): a live
+    /// forward gap BUFFERS instead of delivering + asks for a recovery GET;
+    /// when the recovered sample fills the hole, the buffer drains in order
+    /// with no miss. Drives [`State`] directly so the buffer / drain logic is
+    /// exercised without the query plane (the composed loopback test below
+    /// covers the genuine GET).
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    #[test]
+    fn recovery_buffers_forward_gap_and_drains_when_filled() {
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let misses = Arc::new(Mutex::new(Vec::<Miss>::new()));
+        let d = Arc::clone(&delivered);
+        let m = Arc::clone(&misses);
+        let mut state = State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
+            on_miss: Box::new(move |miss: Miss| m.lock().unwrap().push(miss)),
+            retransmission: true,
+        };
+        let key = (vec![0x02u8], 7u32);
+        let mk = |sn: u32, v: u8| {
+            let mut s = Sample::new_put("demo/data", vec![v]);
+            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
+            s
+        };
+
+        // Live 0,1 in order — no recovery request.
+        assert!(state
+            .ingest_sequenced(key.clone(), 0, mk(0, 0xA0), true)
+            .is_none());
+        assert!(state
+            .ingest_sequenced(key.clone(), 1, mk(1, 0xA1), true)
+            .is_none());
+        // Live gap at 2: sn 3 arrives. retransmission -> buffer + request GET.
+        let req = state
+            .ingest_sequenced(key.clone(), 3, mk(3, 0xA3), true)
+            .expect("a forward gap with retransmission requests recovery");
+        assert_eq!(
+            (req.zid.clone(), req.eid),
+            key,
+            "GET targets the gapped source"
+        );
+        assert_eq!(req.from_sn, 2, "GET starts at last_delivered+1 = 2");
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xA0, 0xA1],
+            "sn 3 buffered, not delivered while the hole is open"
+        );
+
+        // The recovery GET returns sn 2 — drains 2 then the buffered 3.
+        state.handle_recovered(key.clone(), 2, mk(2, 0xA2));
+        state.finish_recovery(&key);
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xA0, 0xA1, 0xA2, 0xA3],
+            "the recovered sn 2 fills the hole; the buffered sn 3 drains in order"
+        );
+        assert!(
+            misses.lock().unwrap().is_empty(),
+            "the recovery filled the hole -> no Miss"
+        );
+    }
+
+    /// R311y82 state-machine unit test: a hole the recovery GET does NOT fill
+    /// surfaces a [`Miss`] at flush, and the buffered sample past it is still
+    /// delivered (zenoh `flush_sequenced_source` miss arm).
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    #[test]
+    fn recovery_flush_reports_miss_for_unfilled_hole() {
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let misses = Arc::new(Mutex::new(Vec::<Miss>::new()));
+        let d = Arc::clone(&delivered);
+        let m = Arc::clone(&misses);
+        let mut state = State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
+            on_miss: Box::new(move |miss: Miss| m.lock().unwrap().push(miss)),
+            retransmission: true,
+        };
+        let key = (vec![0x02u8], 7u32);
+        let mk = |sn: u32, v: u8| {
+            let mut s = Sample::new_put("demo/data", vec![v]);
+            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
+            s
+        };
+
+        state.ingest_sequenced(key.clone(), 0, mk(0, 0xB0), true);
+        // Gap at 1: sn 2 buffered, GET requested for _sn=1..
+        let req = state
+            .ingest_sequenced(key.clone(), 2, mk(2, 0xB2), true)
+            .expect("gap requests recovery");
+        assert_eq!(req.from_sn, 1);
+        // The GET finalises with NOTHING for sn 1 (the cache never had it).
+        state.finish_recovery(&key);
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xB0, 0xB2],
+            "the unfillable hole is skipped; the buffered sn 2 still delivers"
+        );
+        assert_eq!(
+            misses.lock().unwrap().clone(),
+            vec![Miss {
+                source_zid: vec![0x02],
+                source_eid: 7,
+                nb: 1,
+            }],
+            "the unfilled hole surfaces one Miss(nb=1) at flush"
+        );
+    }
+
+    /// R311y82 composed loopback recovery e2e — the CONSUMER half
+    /// (`ext-pubsub-advanced-recovery`) co-compiled with the PRODUCER answerer
+    /// (`ext-pubsub-advanced-cache`). A real [`crate::advanced_cache::AdvancedCache`]
+    /// holds the full stream 0..=4; a recovering [`AdvancedSubscriber`] sees a
+    /// live stream with a hole at sn 3 (a single-session loopback cannot DROP a
+    /// delivery, so the gap is injected synthetically under the publisher
+    /// identity); the subscriber buffers sn 4, issues `_sn=3..` to the cache's
+    /// `@adv` KE, and the cache replies sn 3 (and 4) carrying their source_info
+    /// (`reply-source-info`, composed by the recovery gate) — proving the
+    /// recovered sn 3 came from the CACHE (its payload `0x03`, distinct from the
+    /// live `0xA*` convention), re-keyed and delivered in order with no Miss.
+    /// The genuine GET runs synchronously inside the gapped publish via the
+    /// R311lh deferred-fire re-entrant drain.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-cache",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn composed_recovery_refills_gap_from_cache_over_loopback() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        // The publisher identity the synthetic live stream + the cache both
+        // stamp, so the subscriber's recovery GET targets the cache's KE.
+        let pub_zid = vec![0x09u8];
+        let pub_eid = 4u32;
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+
+        // The cache answers on the publisher's `@adv` recovery suffix; populate
+        // it with the FULL stream 0..=4 (cache payload = sn) so the recovery
+        // GET can refill any hole.
+        let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
+        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
+            .expect("advanced cache declares");
+        for sn in 0u8..5 {
+            cache.cache_sample(CachedSample {
+                keyexpr: "demo/data".to_string(),
+                payload: vec![sn],
+                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                timestamp: TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: pub_zid.clone(),
+                },
+            });
+        }
+
+        // The recovering subscriber; recovery GET pinned to SessionLocal (the
+        // loopback cache is the only answerer — the test has no remote peer).
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let misses = Arc::new(Mutex::new(0usize));
+        let d = Arc::clone(&delivered);
+        let m = Arc::clone(&misses);
+        let _sub = AdvancedSubscriber::declare_with_recovery(
+            &session,
+            "demo/data",
+            RecoveryConfig::new().with_allowed_destination(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            move |_miss: Miss| *m.lock().unwrap() += 1,
+        )
+        .expect("recovering advanced subscriber declares");
+
+        // Drive the LIVE stream with a hole at sn 3 (live payloads 0xA*).
+        let live = |sn: u32, v: u8| {
+            session
+                .publish(
+                    "demo/data",
+                    &[v],
+                    PublishOptions::put()
+                        .with_locality(Locality::SessionLocal)
+                        .with_source_info(SourceInfo::new(&pub_zid, pub_eid, sn)),
+                )
+                .expect("loopback live publish");
+        };
+        live(0, 0xA0);
+        live(1, 0xA1);
+        live(2, 0xA2);
+        // sn 3 missing -> buffer the live sn 4, GET _sn=3.. -> cache replies
+        // sn 3 (0x03) + sn 4 (0x04, a dup, dropped). The recovered sn 3 drains
+        // the hole, then the buffered live sn 4 (0xA4) drains behind it.
+        live(4, 0xA4);
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xA0, 0xA1, 0xA2, 0x03, 0xA4],
+            "0,1,2 live; the recovered sn 3 (cache payload 0x03) fills the hole; \
+             the buffered live sn 4 (0xA4) drains in order"
+        );
+        assert_eq!(
+            *misses.lock().unwrap(),
+            0,
+            "the recovery filled the hole -> no Miss"
         );
     }
 }

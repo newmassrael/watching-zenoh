@@ -850,7 +850,12 @@ storage-mgr-wildcard-updates = []
 ext-pubsub-advanced-cache = ["wz-runtime-tokio?/ext-pubsub-advanced-cache"]
 ext-pubsub-advanced-history = []
 ext-pubsub-advanced-publisher = ["wz-runtime-tokio?/ext-pubsub-advanced-publisher"]
-ext-pubsub-advanced-recovery = []
+# R311y82 — ext-pubsub-advanced-recovery is now a real cfg gate (the
+# subscriber-side reorder buffer + sample-driven `_sn`-range recovery GET in
+# wz-runtime-tokio); forward it. Composes the consumer half (advanced-subscriber
+# + query plane + reply-source-info); a recovering deployment also enables
+# ext-pubsub-advanced-publisher/-cache for the answerer.
+ext-pubsub-advanced-recovery = ["wz-runtime-tokio?/ext-pubsub-advanced-recovery"]
 # R311y70 — ext-pubsub-advanced-subscriber is now a real cfg gate (the
 # per-source ordering/dedup subscriber in wz-runtime-tokio); forward it.
 ext-pubsub-advanced-subscriber = ["wz-runtime-tokio?/ext-pubsub-advanced-subscriber"]
