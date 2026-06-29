@@ -101,6 +101,19 @@ pub trait ReplyView {
     fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
         None
     }
+    /// R311y78 — the source identity `(zid, eid, sn)` a Put reply carried on
+    /// its inner-body source_info ext (id 0x01), or `None` for Del / Err or a
+    /// Put with no source_info. The receive twin of the producer emit seam
+    /// (R311y74-y76): what an `ext-pubsub-advanced-subscriber` re-keys /
+    /// reorders a recovered (retransmitted) sample by — a recovery GET reply
+    /// carries the original sample's identity so it lands in the right
+    /// per-source stream. Default `None` so impls predating the seam stay
+    /// valid. `alloc`-gated (the [`crate::sample::SourceInfo`] type lives in
+    /// the `alloc`-gated `sample` module), mirroring [`crate::query_sink::QueryView::source_info`].
+    #[cfg(feature = "alloc")]
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        None
+    }
 }
 
 /// A [`ReplyView`] over loose borrowed fields — the canonical impl for a

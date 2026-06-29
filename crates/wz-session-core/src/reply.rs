@@ -201,6 +201,13 @@ pub enum InboundReplyBody {
         /// carried no encoding or `pubsub-encoding` is off. What a querier
         /// reconstructs the aligner's `RetrievedValue.encoding` from.
         encoding: Option<(u32, Option<String>)>,
+        /// R311y78 — the source identity `(zid, eid, sn)` the Put reply carried
+        /// on its inner-body source_info ext (id 0x01), or `None` when the
+        /// reply had no source_info or `reply-source-info` is off (the decode
+        /// is gated, mirroring the producer emit seam). What an
+        /// advanced-recovery subscriber re-keys / reorders a recovered
+        /// (retransmitted) sample by.
+        source_info: Option<crate::sample::SourceInfo>,
     },
     /// Delete-keyexpr reply — `MsgDel` inner body. Carries no
     /// payload bytes (the wire-form `MsgDel` body has only a header
@@ -291,6 +298,12 @@ impl ReplyView for InboundReply {
             _ => None,
         }
     }
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        match &self.body {
+            InboundReplyBody::Put { source_info, .. } => source_info.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -310,6 +323,7 @@ impl InboundReply {
                 encoding: view
                     .put_encoding()
                     .map(|(id, schema)| (id, schema.map(String::from))),
+                source_info: view.source_info().cloned(),
             },
             ReplyKind::Del => InboundReplyBody::Del,
             ReplyKind::Err => InboundReplyBody::Err {
@@ -366,6 +380,26 @@ fn loopback_put_encoding(
     }
 }
 
+/// R311y78 — gate a loopback Put reply's staged source_info on the SAME
+/// `reply-source-info` feature the wire decode uses, so a SessionLocal recovery
+/// reply surfaces the same source identity a wire (Remote) reply would (and with
+/// the gate off neither carries one). The source_info twin of
+/// [`loopback_put_attachment`].
+#[cfg(all(feature = "query-queryable", feature = "alloc"))]
+fn loopback_put_source_info(
+    source_info: Option<crate::sample::SourceInfo>,
+) -> Option<crate::sample::SourceInfo> {
+    #[cfg(feature = "reply-source-info")]
+    {
+        source_info
+    }
+    #[cfg(not(feature = "reply-source-info"))]
+    {
+        let _ = source_info;
+        None
+    }
+}
+
 /// A8b — extract an inbound Put reply's body attachment (push-body ext id
 /// 0x03) for the [`InboundReplyBody::Put`] slot, gated on `pubsub-attachment`
 /// (the wire policy: with the gate off the reply carries no attachment,
@@ -389,6 +423,32 @@ fn put_reply_attachment(put: &wz_codecs::msg_put::MsgPutOwned) -> Option<Vec<u8>
         })
     }
     #[cfg(not(feature = "pubsub-attachment"))]
+    {
+        let _ = put;
+        None
+    }
+}
+
+/// R311y78 — extract an inbound Put reply's body source_info (ext id 0x01) for
+/// the [`InboundReplyBody::Put`] slot, gated on `reply-source-info` (the wire
+/// policy: with the gate off the decode drops it, mirroring the producer emit
+/// seam). Reuses the shared [`crate::sample::extract_source_info`] decode SSOT
+/// — the receive twin of the emit's `encode_source_info_ext_body`.
+#[cfg(all(
+    feature = "codec-response",
+    feature = "alloc",
+    any(feature = "pubsub-put", feature = "query-reply")
+))]
+fn put_reply_source_info(
+    put: &wz_codecs::msg_put::MsgPutOwned,
+) -> Option<crate::sample::SourceInfo> {
+    #[cfg(feature = "reply-source-info")]
+    {
+        put.extensions
+            .as_ref()
+            .and_then(|exts| crate::sample::extract_source_info(exts))
+    }
+    #[cfg(not(feature = "reply-source-info"))]
     {
         let _ = put;
         None
@@ -457,23 +517,24 @@ impl From<QueryReply> for InboundReply {
                 timestamp: _,
                 responder: _,
                 attachment,
-                // R311y75 — the recovery source_info (id 0x01) is producer-side
-                // only this round; surfacing it on the loopback InboundReply so
-                // an advanced-recovery subscriber can re-key/reorder recovered
-                // samples lands with the subscriber reorder buffer (the
-                // consumer, advanced-recovery piece #3), mirroring the deferred
-                // timestamp/responder surfacing above.
-                source_info: _,
+                // R311y78 — surface the recovery source_info (id 0x01) onto the
+                // loopback InboundReply (gated reply-source-info via
+                // loopback_put_source_info, matching the wire decode) so an
+                // advanced-recovery subscriber re-keys / reorders a recovered
+                // sample identically whether it arrived loopback or over the
+                // wire. Put-only (a Del reply carries no source_info slot).
+                source_info,
             } => {
                 let body = match body {
                     ReplyBody::Put(payload) => InboundReplyBody::Put {
                         payload,
                         // Gate the side-bands on the same `pubsub-attachment` /
-                        // `pubsub-encoding` the wire decode uses (see
-                        // loopback_put_attachment), so the CONTENT matches a
-                        // wire reply when both paths are present.
+                        // `pubsub-encoding` / `reply-source-info` the wire decode
+                        // uses (see loopback_put_attachment), so the CONTENT
+                        // matches a wire reply when both paths are present.
                         attachment: loopback_put_attachment(attachment),
                         encoding: loopback_put_encoding(encoding),
+                        source_info: loopback_put_source_info(source_info),
                     },
                     ReplyBody::Del => InboundReplyBody::Del,
                 };
@@ -714,6 +775,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
                     payload: put.payload.as_slice().to_vec(),
                     attachment: put_reply_attachment(put),
                     encoding: put_reply_encoding(put),
+                    source_info: put_reply_source_info(put),
                 },
                 #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgDel(_) => InboundReplyBody::Del,
@@ -1315,6 +1377,7 @@ mod tests {
                 payload,
                 attachment,
                 encoding,
+                source_info: _,
             } => {
                 assert_eq!(payload, b"stored-value");
                 assert_eq!(attachment.as_deref(), Some(&b"align-reply"[..]));
@@ -1325,6 +1388,81 @@ mod tests {
         // The same metadata via the ReplyView seam accessors (A8b contract).
         assert_eq!(reply.attachment(), Some(&b"align-reply"[..]));
         assert_eq!(reply.put_encoding(), Some((13, None)));
+    }
+
+    /// R311y78 — the source_info emit->receive closure: a reply built with the
+    /// producer `ResponseReplyBuilder.source_info()` (R311y74) decodes back
+    /// through `dispatch_response`, so the `InboundReply` surfaces the
+    /// `(zid, eid, sn)` via the `ReplyView::source_info()` accessor — what an
+    /// advanced-recovery subscriber re-keys / reorders a recovered sample by.
+    #[cfg(all(
+        feature = "codec-response",
+        feature = "reply-source-info",
+        feature = "query-reply"
+    ))]
+    #[test]
+    fn dispatch_response_surfaces_put_source_info() {
+        use crate::reply_sink::ReplyView;
+        use crate::response_build::ResponseReplyBuilder;
+        use crate::sample::SourceInfo;
+
+        let mut reg = ReplyRegistry::new();
+        let captured: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let cb = captured.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            move |r| cb.lock().unwrap().push(InboundReply::from_view(r)),
+            |_| {},
+        );
+
+        let si = SourceInfo::new(&[0xAA; 4], 11, 17);
+        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+            .source_info(&si)
+            .build()
+            .unwrap();
+        reg.dispatch_response(&resp, &HashMap::new());
+
+        let snap = captured.lock().unwrap();
+        assert_eq!(snap.len(), 1);
+        let got = snap[0]
+            .source_info()
+            .expect("recovered reply surfaces source_info via ReplyView");
+        assert_eq!(got.zid_prefix(), &[0xAA; 4]);
+        assert_eq!(got.eid, 11);
+        assert_eq!(got.sn, 17);
+    }
+
+    /// R311y78 — the loopback receive twin: a `QueryReply` staged with
+    /// source_info (the advanced cache's recovery reply) projects through
+    /// `From<QueryReply>` so a SessionLocal reply surfaces the same source
+    /// identity a wire (Remote) reply would (gated reply-source-info, matching
+    /// the wire decode path).
+    #[cfg(all(feature = "query-queryable", feature = "reply-source-info"))]
+    #[test]
+    fn from_query_reply_put_surfaces_source_info() {
+        use crate::query::{QueryReply, ReplyBody};
+        use crate::reply_sink::ReplyView;
+        use crate::sample::SourceInfo;
+
+        let si = SourceInfo::new(&[0x09; 1], 3, 5);
+        let qr = QueryReply::Reply {
+            rid: 11,
+            keyexpr_literal: "sensors/a".to_string(),
+            body: ReplyBody::Put(b"value".to_vec()),
+            encoding: None,
+            timestamp: None,
+            responder: None,
+            attachment: None,
+            source_info: Some(si.clone()),
+        };
+        let inbound: InboundReply = qr.into();
+        let got = inbound
+            .source_info()
+            .expect("loopback reply surfaces source_info");
+        assert_eq!(got.zid_prefix(), &[0x09][..]);
+        assert_eq!((got.eid, got.sn), (3, 5));
     }
 
     /// A8c session-review — the aligner's HEADLINE reply shape: an
@@ -1370,6 +1508,7 @@ mod tests {
                 payload,
                 attachment,
                 encoding,
+                source_info: _,
             } => {
                 assert!(payload.is_empty(), "metadata-only reply: empty payload");
                 assert_eq!(
@@ -1753,6 +1892,7 @@ mod tests {
                 payload: b"21.0".to_vec(),
                 attachment: None,
                 encoding: None,
+                source_info: None,
             },
         };
         reg.deliver_local_reply(&inbound);
@@ -1957,6 +2097,7 @@ mod tests {
                 payload,
                 attachment,
                 encoding,
+                source_info: _,
             } => {
                 assert_eq!(payload, b"value");
                 assert_eq!(attachment.as_deref(), Some(&b"align"[..]));
