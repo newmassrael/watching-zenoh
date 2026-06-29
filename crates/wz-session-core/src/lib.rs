@@ -556,7 +556,13 @@ pub mod wireexpr_build;
     any(
         feature = "codec-push",
         feature = "codec-declare",
-        feature = "codec-request"
+        feature = "codec-request",
+        // R311y74 — the codec-response reply path needs the chain-`Z`-bit
+        // SSOT too: a recovery reply that composes source_info (0x01) +
+        // attachment (0x03) on its inner push-body must normalise the
+        // per-entry continuation bits via `apply_chain_z_bits`
+        // (response_build.rs), exactly as the Push body does.
+        feature = "codec-response"
     )
 ))]
 pub mod ext_nodeid;

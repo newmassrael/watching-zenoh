@@ -437,6 +437,54 @@ fn gated_reply_attachment(attachment: Option<&[u8]>) -> Result<Option<ExtEntryOw
     }
 }
 
+/// R311y74 — SSOT for the reply-side `reply-source-info` gate: build the
+/// single inner-body source_info ext (push-body ext id `0x01`) from a
+/// [`crate::sample::SourceInfo`] iff `reply-source-info` is on, else
+/// `None`. The reply-side twin of the source_info branch of
+/// `push_build::build_body_extensions` (the `codec-push` / `codec-response`
+/// module gate-split forbids sharing one fn, same rationale as
+/// [`gated_reply_attachment`]). The genuine wire SSOT —
+/// [`crate::source_info_ext::encode_source_info_ext_body`] — is reused, so
+/// a reply's source_info ext is byte-identical to a pubsub Put's (a Reply
+/// body IS a Put push-body, zenoh-pico `_z_reply_encode` ->
+/// `_z_push_body_encode`, message.c:517 -> :291-293 emits ext 0x01 exactly
+/// like a normal Put). Returns `None` for a `SourceInfo` whose
+/// `zid_prefix()` is empty (the `Default::default()` sentinel — no source
+/// to identify), mirroring `build_body_extensions`. The per-entry Z
+/// chain-continuation bit is NOT pre-set — the caller's
+/// `apply_chain_z_bits` normalises it once the full body chain is known.
+/// Fallible (the owned ext-zbuf copy), so it runs in `build`'s `Result`.
+#[cfg(feature = "codec-response")]
+fn gated_reply_source_info(
+    source_info: Option<&crate::sample::SourceInfo>,
+) -> Result<Option<ExtEntryOwned>, CodecError> {
+    #[cfg(feature = "reply-source-info")]
+    {
+        if let Some(si) = source_info {
+            let prefix = si.zid_prefix();
+            if !prefix.is_empty() {
+                let body_bytes = encode_source_info_ext_body(prefix, si.eid, si.sn);
+                return Ok(Some(ExtEntryOwned {
+                    // ENC_ZBUF(0x40) | id_source_info(0x01). No M flag —
+                    // source_info is informational. Z chain-continuation
+                    // applied by the caller's apply_chain_z_bits.
+                    header: 0x40 | 0x01,
+                    body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                        value_len: body_bytes.len() as u64,
+                        value: owned_bytes(&body_bytes)?,
+                    }),
+                }));
+            }
+        }
+        Ok(None)
+    }
+    #[cfg(not(feature = "reply-source-info"))]
+    {
+        let _ = source_info;
+        Ok(None)
+    }
+}
+
 /// The wz minimal `Err` BODY — MID `0x05` only, NO E (encoding) / Z (exts), with
 /// just the always-present payload (zenoh-pico `_z_err_encode`'s minimal shape).
 /// The SSOT the three `build_response_err_*` builders share, so the Err body is
@@ -466,11 +514,21 @@ fn err_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
 ///   - `(N, Some(s))`: compound — alias `N`'s prefix + suffix `s`.
 ///
 /// Reply-layer setters today: `consolidation` (R121j-3a), `reply_del`
-/// body-arm swap (R121j-3d), and `responder` envelope-level ext
-/// (R121j-3c). R121j-3b (Reply-body source_info as a Reply-LEVEL ext)
-/// is wire-absent per zenoh-pico `_z_reply_encode` at
-/// `src/protocol/codec/message.c:507-519` (no extensions chain on the
-/// Reply body); the carry was retracted in Round 121j-4-retract.
+/// body-arm swap (R121j-3d), `responder` envelope-level ext (R121j-3c),
+/// and `source_info` inner-body ext (R311y74, gated `reply-source-info`).
+///
+/// Reply-LEVEL exts remain wire-absent: zenoh-pico `_z_reply_encode`
+/// (`src/protocol/codec/message.c:507-519`) emits no extension chain at
+/// the Reply layer itself — only an optional consolidation byte, then the
+/// push-body. The R121j-3b carry (source_info as a Reply-LEVEL ext) was
+/// correctly retracted in Round 121j-4-retract. R311y74 instead places
+/// source_info on the inner Put/Del BODY — the faithful location: a Reply
+/// body IS a Put push-body (`_z_reply_encode` -> `_z_push_body_encode`,
+/// message.c:517 -> :291-293), so its source_info rides body ext 0x01
+/// exactly like a normal Put. This is the advanced-recovery placement
+/// (the recovery cache stamps each reply with the sample's (zid, eid, sn)
+/// so the subscriber can re-key/reorder); default OFF keeps storage /
+/// query replies byte-unchanged.
 #[cfg(feature = "codec-response")]
 pub struct ResponseReplyBuilder {
     request_id: u64,
@@ -503,6 +561,17 @@ pub struct ResponseReplyBuilder {
     // `_is_put`), so it is dropped on a `.reply_del()` builder. What the
     // storage aligner carries its serialized `AlignmentReply` on.
     attachment: Option<Vec<u8>>,
+    // R311y74: optional inner-body source_info ext (push-body ext id 0x01)
+    // — the (zid, eid, sn) triple a recovery reply carries so the advanced
+    // subscriber can re-key/reorder it. Emitted iff `reply-source-info` is
+    // on (the advanced-recovery composition gate); OFF the body ext chain
+    // carries no source_info and storage / query replies stay byte-
+    // unchanged. Applies to BOTH the Put and Del arms (it sits in the
+    // shared push-body `_commons`, zenoh-pico `_z_push_body_encode`
+    // message.c:291-293, unlike attachment which is Put-only). Held as the
+    // wz-side `SourceInfo` and built into the ext at build() (fallible
+    // owned copy). The Reply-body twin of the Push path's source_info.
+    source_info: Option<crate::sample::SourceInfo>,
     // R121j-3c: Response-ENVELOPE-level responder ext (ext_id 0x03 ZBUF).
     // Tuple = (zid bytes 1..=16, eid). Distinct from R121j-4b Err.source_info
     // (Err-body-level): responder sits on the outer Response.extensions
@@ -535,6 +604,7 @@ impl ResponseReplyBuilder {
             encoding: None,
             timestamp: None,
             attachment: None,
+            source_info: None,
             responder: None,
         }
     }
@@ -579,6 +649,23 @@ impl ResponseReplyBuilder {
         self
     }
 
+    /// R311y74 — set the inner-body `source_info` ext (the push-body
+    /// ext id 0x01: `(zid, eid, sn)`). Subsequent calls overwrite
+    /// (last-wins). Emitted iff `reply-source-info` is on (the
+    /// advanced-recovery composition gate); otherwise the body ext chain
+    /// carries no source_info and the reply is byte-unchanged. Applies to
+    /// BOTH the Put and Del arms (source_info sits in the shared push-body
+    /// `_commons`, unlike attachment which is Put-only). When composed with
+    /// `.attachment()` on a Put body, source_info emits FIRST (ext 0x01)
+    /// then attachment (ext 0x03), matching zenoh-pico's
+    /// `_z_push_body_encode` emit order (message.c:291-298). What the
+    /// advanced-recovery cache stamps each recovery reply with so the
+    /// advanced subscriber can re-key/reorder the retransmitted samples.
+    pub fn source_info(mut self, source_info: &crate::sample::SourceInfo) -> Self {
+        self.source_info = Some(source_info.clone());
+        self
+    }
+
     /// Set the Reply-body consolidation mode. Subsequent calls
     /// overwrite (last-wins). Mirror of
     /// `RequestQueryBuilder::consolidation` — same
@@ -615,10 +702,13 @@ impl ResponseReplyBuilder {
     /// **Envelope-level vs body-level**: the responder ext sits on
     /// `Response.extensions` (alongside future qos / timestamp exts —
     /// network.c emit order is qos → tstamp → responder), NOT on the
-    /// Reply body's own extensions chain. The Reply body has no
-    /// extensions surface (see `_z_reply_encode` message.c:507-519);
-    /// envelope-level identification of the responding queryable is
-    /// the wire-level shape regardless of Reply vs Err inner body.
+    /// Reply body's inner push-body extensions chain. The Reply LAYER
+    /// itself has no extensions surface (`_z_reply_encode`
+    /// message.c:507-519 emits only an optional consolidation byte then
+    /// the push-body); body-level exts (source_info 0x01 / attachment
+    /// 0x03) ride the inner Put/Del push-body instead. Envelope-level
+    /// identification of the responding queryable is the wire-level shape
+    /// regardless of Reply vs Err inner body.
     ///
     /// Today this lands as the sole entry in `Response.extensions`
     /// (no Z chain-continuation bit). When future envelope exts (qos,
@@ -649,6 +739,7 @@ impl ResponseReplyBuilder {
         let reply_timestamp = gated_reply_timestamp(self.timestamp.as_ref())?;
         let reply_encoding = gated_reply_encoding(self.encoding.as_ref())?;
         let reply_attachment = gated_reply_attachment(self.attachment.as_deref())?;
+        let reply_source_info = gated_reply_source_info(self.source_info.as_ref())?;
         let mut response = if self.keyexpr_mapping_id == 0 {
             let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
                 panic!(
@@ -713,21 +804,48 @@ impl ResponseReplyBuilder {
                     put.header |= 0x40; // _Z_FLAG_Z_P_E
                 }
             }
-            // Stamp the inner-MsgPut body attachment ext (id 0x03) + the Z
-            // (0x80) body-ext-chain header bit. Put-only — a Reply Del body
-            // has no attachment (zenoh-pico gates `has_attachment` on
+            // Stamp the inner body's source_info (ext 0x01) + attachment
+            // (ext 0x03) as a combined body ext chain + the Z (0x80)
+            // body-ext-chain header bit. Emit order is source_info THEN
+            // attachment, matching zenoh-pico's `_z_push_body_encode`
+            // (message.c:291-298). source_info applies to BOTH the Put and
+            // Del arms (it lives in the shared push-body `_commons`);
+            // attachment is Put-only (zenoh-pico gates `has_attachment` on
             // `_is_put`), so a `.attachment()` on a `.reply_del()` builder is
-            // dropped here. The single attachment ext is the sole body ext on
-            // a reply (a reply body carries no source_info — wire-absent), so
-            // it is the chain terminator (Z-continuation clear, set by
-            // `encode_attachment_ext`); the MsgPut header Z bit signals the
-            // chain's presence, exactly as the Push path's
-            // `build_msg_put_with_meta` does (push_build.rs:532-533).
-            if let Some(att_ext) = reply_attachment {
-                if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &mut reply.body {
-                    put.extensions = Some(vec![att_ext]);
-                    put.header |= 0x80; // _Z_FLAG_Z_Z
+            // dropped here. The per-entry Z chain-continuation bits are
+            // normalised by the `apply_chain_z_bits` SSOT (source_info gets
+            // Z-continuation when an attachment follows; the last entry
+            // terminates with Z clear), exactly as the Push path's
+            // `build_body_extensions` does. The body header Z bit signals
+            // chain presence. Both gates default OFF, so a storage / query
+            // reply with neither stays byte-unchanged.
+            match &mut reply.body {
+                ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                    let mut exts: Vec<ExtEntryOwned> = Vec::new();
+                    if let Some(si_ext) = reply_source_info {
+                        exts.push(si_ext);
+                    }
+                    if let Some(att_ext) = reply_attachment {
+                        exts.push(att_ext);
+                    }
+                    if !exts.is_empty() {
+                        crate::ext_nodeid::apply_chain_z_bits(&mut exts);
+                        put.extensions = Some(exts);
+                        put.header |= 0x80; // _Z_FLAG_Z_Z
+                    }
                 }
+                ReplyOwnedVariant::CodecZenohMsgDel(del) => {
+                    // Del body: source_info only — no attachment slot
+                    // (`has_attachment = _is_put && ..`), so any attachment is
+                    // dropped on the del arm.
+                    if let Some(si_ext) = reply_source_info {
+                        let mut exts = vec![si_ext];
+                        crate::ext_nodeid::apply_chain_z_bits(&mut exts);
+                        del.extensions = Some(exts);
+                        del.header |= 0x80; // _Z_FLAG_Z_Z
+                    }
+                }
+                _ => {}
             }
         } else {
             unreachable!(
@@ -2154,6 +2272,164 @@ mod tests {
                         "a Del reply carries no attachment (Put-only)"
                     );
                     assert_eq!(del.header & 0x80, 0x00, "no Z bit on the Del body");
+                }
+                _ => panic!("expected MsgDel after reply_del()"),
+            }
+        } else {
+            panic!("expected Reply");
+        }
+    }
+
+    /// R311y74 — `.source_info()` on a Put reply emits the inner push-body
+    /// source_info ext (id 0x01) before the payload and sets the MsgPut Z
+    /// bit, byte-identical to a normal Put (a Reply body IS a Put
+    /// push-body). Sole body ext, so it terminates the chain (header 0x41,
+    /// Z-continuation clear). The value body is `[(zid_len-1)<<4, zid...,
+    /// VLE(eid), VLE(sn)]` per the shared `encode_source_info_ext_body`
+    /// SSOT. Aliased rid=42 / map=7 keeps the prefix offsets stable.
+    #[cfg(all(feature = "codec-response", feature = "reply-source-info"))]
+    #[test]
+    fn response_reply_builder_source_info_emits_push_body_ext_on_wire() {
+        let si = crate::sample::SourceInfo::new(&[0xAA; 4], 11, 17);
+        let wire = ResponseReplyBuilder::new(42, 7, None, b"v")
+            .source_info(&si)
+            .build()
+            .unwrap()
+            .wire();
+        // Response.header(0x5B) | VLE(42) | wireexpr id=7 | Reply.header(0x04)
+        // | MsgPut.header | ext chain | payload.
+        assert_eq!(
+            wire[0], 0x5B,
+            "Response MID(0x1B) | M(0x40), no N (aliased)"
+        );
+        assert_eq!(wire[1], 0x2A, "VLE(rid=42)");
+        assert_eq!(wire[2], 0x07, "wireexpr id=7 (pure alias)");
+        assert_eq!(wire[3], 0x04, "Reply.header MID only");
+        assert_eq!(
+            wire[4], 0x81,
+            "MsgPut.header MID(0x01) | Z(0x80) for the body ext chain"
+        );
+        assert_eq!(
+            wire[5], 0x41,
+            "source_info ext header = ENC_ZBUF(0x40) | 0x01; sole entry, Z-continuation clear"
+        );
+        assert_eq!(
+            wire[6], 0x07,
+            "ExtZbuf value_len = 1 leading + 4 zid + VLE(eid) + VLE(sn)"
+        );
+        assert_eq!(
+            wire[7], 0x30,
+            "leading byte = (zid_len-1)<<4 = 0x30 for zid_len=4"
+        );
+        assert_eq!(
+            &wire[8..12],
+            &[0xAA; 4],
+            "zid bytes follow the leading byte"
+        );
+        assert_eq!(wire[12], 0x0B, "VLE(eid=11)");
+        assert_eq!(wire[13], 0x11, "VLE(sn=17)");
+        assert_eq!(wire[14], 0x01, "VLE(payload_len=1) follows the ext chain");
+        assert_eq!(wire[15], b'v', "payload byte after the length prefix");
+    }
+
+    /// R311y74 — source_info (0x01) and attachment (0x03) compose on one Put
+    /// reply body in zenoh-pico emit order: source_info FIRST with the Z
+    /// chain-continuation bit set (0x41 | 0x80 = 0xC1), attachment LAST as
+    /// the terminator (0x43, Z clear), exactly as `_z_push_body_encode`
+    /// emits them (message.c:291-298) and the Push path's
+    /// `build_body_extensions` normalises via `apply_chain_z_bits`. This is
+    /// the faithfulness property the advanced-recovery cache relies on when
+    /// a recovery reply carries both a source tag and a side-band blob.
+    #[cfg(all(
+        feature = "codec-response",
+        feature = "reply-source-info",
+        feature = "pubsub-attachment"
+    ))]
+    #[test]
+    fn response_reply_builder_source_info_then_attachment_emit_order() {
+        let si = crate::sample::SourceInfo::new(&[0xAA; 4], 11, 17);
+        let response = ResponseReplyBuilder::new(42, 7, None, b"v")
+            .source_info(&si)
+            .attachment(b"abc")
+            .build()
+            .unwrap();
+        match &response.body {
+            ResponseOwnedVariant::CodecZenohReply(reply) => match &reply.body {
+                ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                    assert_eq!(
+                        put.header & 0x80,
+                        0x80,
+                        "MsgPut Z-flag set for the body ext chain"
+                    );
+                    let exts = put.extensions.as_ref().expect("body ext chain present");
+                    assert_eq!(exts.len(), 2, "source_info + attachment");
+                    assert_eq!(
+                        exts[0].header, 0xC1,
+                        "source_info FIRST: ENC_ZBUF(0x40) | 0x01 | Z-continuation(0x80) = 0xC1"
+                    );
+                    assert_eq!(
+                        exts[1].header, 0x43,
+                        "attachment LAST: ENC_ZBUF(0x40) | 0x03, Z-continuation clear (terminator)"
+                    );
+                }
+                _ => panic!("expected CodecZenohMsgPut inner body"),
+            },
+            _ => panic!("expected CodecZenohReply body"),
+        }
+        // On the wire the source_info ext (header 0xC1) precedes the
+        // attachment ext (header 0x43, value "abc"). The MsgPut::encode
+        // iterates the ext Vec in order, so the structural order above IS
+        // the wire order — this window check is the byte-level confirmation.
+        let wire = ResponseReplyBuilder::new(42, 7, None, b"v")
+            .source_info(&si)
+            .attachment(b"abc")
+            .build()
+            .unwrap()
+            .wire();
+        let si_win = [0xC1u8, 0x07, 0x30, 0xAA, 0xAA, 0xAA, 0xAA, 0x0B, 0x11];
+        let att_win = [0x43u8, 0x03, b'a', b'b', b'c'];
+        let si_at = wire
+            .windows(si_win.len())
+            .position(|w| w == si_win)
+            .expect("source_info ext window present on the wire");
+        let att_at = wire
+            .windows(att_win.len())
+            .position(|w| w == att_win)
+            .expect("attachment ext window present on the wire");
+        assert!(
+            si_at < att_at,
+            "source_info ext precedes attachment ext on the wire"
+        );
+    }
+
+    /// R311y74 — source_info applies to the Del reply arm too (unlike
+    /// attachment, which is Put-only): it lives in the shared push-body
+    /// `_commons` (zenoh-pico `_z_push_body_encode` emits the source_info
+    /// ext for both Put and Del). A `.reply_del().source_info()` builder
+    /// stamps the ext on the Del body and sets the Del Z bit.
+    #[cfg(all(feature = "codec-response", feature = "reply-source-info"))]
+    #[test]
+    fn response_reply_builder_source_info_applies_to_del_arm() {
+        let si = crate::sample::SourceInfo::new(&[0xAA; 4], 11, 17);
+        let response = ResponseReplyBuilder::new(42, 7, None, b"v")
+            .reply_del()
+            .source_info(&si)
+            .build()
+            .unwrap();
+        if let ResponseOwnedVariant::CodecZenohReply(reply) = &response.body {
+            match &reply.body {
+                ReplyOwnedVariant::CodecZenohMsgDel(del) => {
+                    assert_eq!(
+                        del.header & 0x80,
+                        0x80,
+                        "Del Z-flag set (source_info ext chain)"
+                    );
+                    let exts = del.extensions.as_ref().expect("Del body ext chain present");
+                    assert_eq!(exts.len(), 1, "source_info is the sole Del body ext");
+                    assert_eq!(
+                        exts[0].header, 0x41,
+                        "source_info ext header on the Del arm = ENC_ZBUF(0x40) | 0x01, sole entry"
+                    );
                 }
                 _ => panic!("expected MsgDel after reply_del()"),
             }

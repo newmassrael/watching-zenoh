@@ -453,6 +453,17 @@ query-reply-err = []
 # decoder). Receive-side only at this round; send-side stamping is a
 # follow-up.
 query-source-info = []
+# R311y74 — reply-source-info gates the queryable REPLY-side emission of
+# the inner Put-body source-info ext (id 0x01 ENC_ZBUF), the Reply-body
+# twin of pubsub-source-info (Push) / query-source-info (Query). A Reply
+# body IS a Put push-body (zenoh-pico `_z_reply_encode` ->
+# `_z_push_body_encode`, message.c:517 -> :291-293 emits ext 0x01 exactly
+# like a normal Put), so the advanced-recovery cache can stamp its
+# recovery replies with the original sample's (zid, eid, sn) and the
+# subscriber can re-key/reorder them. OFF (default) = pico-faithful
+# no-emit: storage / query replies stay byte-unchanged. Composed in by
+# ext-pubsub-advanced-recovery.
+reply-source-info = []
 # R311fm — the z_get consumer's reply-body decode plane. Gates the
 # inbound `Response(Reply)` Put / Del body arms in `reply.rs`
 # `dispatch_response` (the projection to `InboundReplyBody::Put` /
