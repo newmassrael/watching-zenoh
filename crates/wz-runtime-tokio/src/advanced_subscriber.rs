@@ -54,22 +54,26 @@
 //! re-entrant query (and the loopback cache replies it drains) cannot
 //! self-deadlock.
 //!
-//! ### Recovery triggers (sample-driven + periodic built; heartbeat follow-on)
+//! ### Recovery triggers (all three built)
 //!
-//! zenoh drives recovery from THREE triggers: the sample-driven GET (the gap
-//! handling above), a periodic `Timer` GET (advanced_subscriber.rs:585-643),
-//! and a heartbeat-subscriber GET keyed off the publisher's last-sn beacon
-//! (:1045-1149, `z_deserialize::<u32>`). wz builds the **sample-driven**
-//! (R311y82) + **periodic** (R311y83, [`RecoveryConfig::periodic_queries`]:
-//! a background task re-asks every source `_sn=last+1..` every period, catching
-//! a lost LAST sample no later live sample would trigger recovery for). The
-//! **heartbeat** trigger is the remaining follow-on under this same
-//! `ext-pubsub-advanced-recovery` gate. A recovered reply cannot carry its
-//! original body timestamp (the [`crate::reply_sink::ReplyView`] seam surfaces
-//! source_info / encoding / attachment, not the reply timestamp), so a
-//! retransmitted sample is delivered timestamp-less — a documented fidelity
-//! gap, not silent (the recovery essential is the source identity that re-keys
-//! it).
+//! zenoh drives recovery from THREE triggers, all mirrored here:
+//! - **sample-driven** (R311y82) — the forward-gap handling above issues an
+//!   open `_sn=last+1..` GET when a live gap leaves the buffer non-empty.
+//! - **periodic** (R311y83, [`RecoveryConfig::periodic_queries`]) — a
+//!   background task re-asks every source `_sn=last+1..` every period, catching
+//!   a lost LAST sample no later live sample would trigger recovery for (zenoh
+//!   advanced_subscriber.rs:585-643).
+//! - **heartbeat** (R311y84, [`RecoveryConfig::heartbeat`]) — a second
+//!   subscriber on `<key_expr>/@adv/pub/**` decodes each publisher's last-sn
+//!   beacon (`z_deserialize::<u32>`) and issues a BOUNDED `_sn=last+1..hb` GET
+//!   when the beacon is ahead of `last_delivered` (zenoh :1045-1149). The
+//!   producer beacon is the separate `ext-pubsub-sample-miss-detection` atom.
+//!
+//! A recovered reply cannot carry its original body timestamp (the
+//! [`crate::reply_sink::ReplyView`] seam surfaces source_info / encoding /
+//! attachment, not the reply timestamp), so a retransmitted sample is delivered
+//! timestamp-less — a documented fidelity gap, not silent (the recovery
+//! essential is the source identity that re-keys it).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -93,7 +97,11 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_session_core::sample::EncodingHint;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-use wz_session_core::zid_hex::zid_to_zenoh_hex;
+use wz_session_core::sample_kind::SampleKind;
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use wz_session_core::serde_codec::z_deserialize;
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use wz_session_core::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use crate::session::QueryOptions;
@@ -156,6 +164,15 @@ pub struct RecoveryConfig {
     /// the caller MUST be inside a tokio runtime context (the sample-driven and
     /// no-recovery paths have no such requirement).
     pub periodic_queries: Option<Duration>,
+    /// R311y84 — when `true`, declare a second subscriber on
+    /// `<key_expr>/@adv/pub/**` that decodes each publisher's last-sn heartbeat
+    /// beacon (`z_deserialize::<u32>`) and issues a BOUNDED `_sn=last+1..hb`
+    /// recovery GET when the beacon reports samples past `last_delivered` (zenoh
+    /// heartbeat subscriber, advanced_subscriber.rs:1045-1149). Catches a lost
+    /// last sample like the periodic trigger, but driven by the publisher's
+    /// beacon instead of a local timer (the producer beacon is the separate
+    /// `ext-pubsub-sample-miss-detection` atom). `false` (default) = off.
+    pub heartbeat: bool,
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -164,6 +181,7 @@ impl Default for RecoveryConfig {
         Self {
             allowed_destination: Locality::Any,
             periodic_queries: None,
+            heartbeat: false,
         }
     }
 }
@@ -188,17 +206,26 @@ impl RecoveryConfig {
         self.periodic_queries = Some(period);
         self
     }
+
+    /// Enable the heartbeat recovery trigger (see [`Self::heartbeat`]).
+    pub fn with_heartbeat(mut self) -> Self {
+        self.heartbeat = true;
+        self
+    }
 }
 
-/// What [`State::handle_live`] asks the caller to do AFTER releasing the state
-/// lock: issue a `_sn={from_sn}..` recovery GET against `(zid, eid)`'s `@adv`
-/// cache. Returned (not issued inline) so the re-entrant `Session::query` runs
-/// without the state mutex held.
+/// What a recovery trigger asks the caller to do AFTER releasing the state
+/// lock: issue a recovery GET against `(zid, eid)`'s `@adv` cache. Returned
+/// (not issued inline) so the re-entrant `Session::query` runs without the
+/// state mutex held. `to_sn = None` is the OPEN `_sn={from_sn}..` selector
+/// (sample-driven + periodic); `Some(hb)` is the BOUNDED `_sn={from_sn}..{hb}`
+/// the heartbeat trigger uses (it knows the publisher's last sn).
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 struct RecoveryRequest {
     zid: Vec<u8>,
     eid: u32,
     from_sn: u32,
+    to_sn: Option<u32>,
 }
 
 /// Per-source last-in-order-delivered tracking + the user callbacks.
@@ -345,6 +372,7 @@ impl State {
                 zid: key.0,
                 eid: key.1,
                 from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
+                to_sn: None,
             })
         } else {
             None
@@ -393,10 +421,39 @@ impl State {
                     zid: key.0.clone(),
                     eid: key.1,
                     from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
+                    to_sn: None,
                 });
             }
         }
         requests
+    }
+
+    /// R311y84 — the heartbeat trigger: a beacon reporting the publisher's last
+    /// sn `hb_sn` for source `(zid, eid)`. When the beacon is ahead of
+    /// `last_delivered` and no GET is in flight, request a BOUNDED
+    /// `_sn=last+1..hb_sn` recovery GET (zenoh heartbeat callback,
+    /// advanced_subscriber.rs:1095-1118). No-op when retransmission is off.
+    fn handle_heartbeat(&mut self, zid: Vec<u8>, eid: u32, hb_sn: u32) -> Option<RecoveryRequest> {
+        if !self.retransmission {
+            return None;
+        }
+        let key = (zid, eid);
+        let state = self.sequenced.entry(key.clone()).or_default();
+        let caught_up = state
+            .last_delivered
+            .map(|last| hb_sn <= last)
+            .unwrap_or(false);
+        if !caught_up && state.pending_queries == 0 {
+            state.pending_queries += 1;
+            Some(RecoveryRequest {
+                zid: key.0,
+                eid: key.1,
+                from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
+                to_sn: Some(hb_sn),
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -483,7 +540,13 @@ fn issue_recovery_query<R, T>(
 {
     let zid_hex = zid_to_zenoh_hex(&req.zid);
     let recovery_ke = format!("{base_keyexpr}/@adv/*/{zid_hex}/{}/**", req.eid);
-    let params = format!("_sn={}..", req.from_sn).into_bytes();
+    // Open `_sn=from..` (sample-driven / periodic) or bounded `_sn=from..to`
+    // (heartbeat, which knows the publisher's last sn) — zenoh `seq_num_range`.
+    let params = match req.to_sn {
+        Some(to) => format!("_sn={}..{}", req.from_sn, to),
+        None => format!("_sn={}..", req.from_sn),
+    }
+    .into_bytes();
     let opts = QueryOptions::get()
         .with_allowed_destination(dest)
         .with_parameters(params);
@@ -573,6 +636,24 @@ impl Drop for PeriodicTask {
     }
 }
 
+/// R311y84 — parse a heartbeat sample's keyexpr
+/// `<base>/@adv/pub/<zid_hex>/<eid>/_` back into its source `(zid, eid)`,
+/// the wz analogue of zenoh's `ke_liveliness::parse` (advanced_subscriber.rs:
+/// 1062). Returns `None` on a malformed beacon KE (bad `@adv/pub` layout,
+/// un-decodable zid hex, or non-numeric eid). The trailing `_` meta chunk +
+/// any further chunks are ignored.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+fn parse_heartbeat_source(keyexpr: &str) -> Option<(Vec<u8>, u32)> {
+    let chunks: Vec<&str> = keyexpr.split('/').collect();
+    let adv = chunks.iter().position(|c| *c == "@adv")?;
+    if chunks.get(adv + 1) != Some(&"pub") {
+        return None;
+    }
+    let zid = zenoh_hex_to_zid(chunks.get(adv + 2)?)?;
+    let eid = chunks.get(adv + 3)?.parse::<u32>().ok()?;
+    Some((zid, eid))
+}
+
 /// A live advanced subscriber bound to a [`Session`]: owns the wrapped
 /// plain [`Subscriber`] (RAII: dropping it undeclares) whose callback runs
 /// the per-source ordering / de-duplication state machine.
@@ -588,6 +669,10 @@ pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRunt
     /// when `RecoveryConfig::periodic_queries` was set.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     _periodic: Option<PeriodicTask>,
+    /// R311y84 — the heartbeat subscriber on `<ke>/@adv/pub/**` (RAII
+    /// undeclare-on-drop), `Some` only when `RecoveryConfig::heartbeat` was set.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    _heartbeat_sub: Option<Subscriber<R>>,
 }
 
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
@@ -697,6 +782,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             .map(|c| c.allowed_destination)
             .unwrap_or(Locality::Any);
         let periodic = recovery.and_then(|c| c.periodic_queries);
+        let heartbeat = recovery.map(|c| c.heartbeat).unwrap_or(false);
         let base_keyexpr: String = keyexpr.into();
 
         let state = Arc::new(Mutex::new(State {
@@ -735,7 +821,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         let periodic_task = periodic.map(|period| {
             let p_session = session.clone();
             let p_state = Arc::clone(&state);
-            let p_base = base_keyexpr;
+            let p_base = base_keyexpr.clone();
             let clock = Arc::clone(session.clock());
             let period_ms = period.as_millis() as u64;
             PeriodicTask {
@@ -748,10 +834,47 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             }
         });
 
+        // R311y84 — the heartbeat subscriber: on each `<ke>/@adv/pub/**` beacon,
+        // decode the publisher's last sn (`z_deserialize::<u32>`) and issue a
+        // bounded `_sn=last+1..hb` recovery GET (zenoh advanced_subscriber.rs:
+        // 1053-1145). Callback-driven (no task); the GET re-enters Session::query
+        // OUTSIDE the state lock, the sample-driven re-entrancy discipline.
+        let heartbeat_sub = if heartbeat {
+            let hb_state = Arc::clone(&state);
+            let hb_session = session.clone();
+            let hb_base = base_keyexpr.clone();
+            let hb_keyexpr = format!("{base_keyexpr}/@adv/pub/**");
+            Some(session.declare_subscriber(
+                hb_keyexpr,
+                SubscribeOptions::default(),
+                move |hb_view: &dyn SampleView| {
+                    if hb_view.kind() != SampleKind::Put {
+                        return;
+                    }
+                    let Some((zid, eid)) = parse_heartbeat_source(hb_view.keyexpr()) else {
+                        return;
+                    };
+                    let Ok(hb_sn) = z_deserialize::<u32>(hb_view.payload()) else {
+                        return;
+                    };
+                    let request = hb_state
+                        .lock()
+                        .expect("advanced subscriber state mutex poisoned")
+                        .handle_heartbeat(zid, eid, hb_sn);
+                    if let Some(request) = request {
+                        issue_recovery_query(&hb_session, &hb_state, &hb_base, request, dest);
+                    }
+                },
+            )?)
+        } else {
+            None
+        };
+
         Ok(Self {
             _subscriber: subscriber,
             _statesref: state,
             _periodic: periodic_task,
+            _heartbeat_sub: heartbeat_sub,
         })
     }
 }
@@ -1311,6 +1434,161 @@ mod tests {
             *misses.lock().unwrap(),
             0,
             "the periodic recovery filled it -> no Miss"
+        );
+    }
+
+    /// R311y84 heartbeat-source KE parser unit.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    #[test]
+    fn parse_heartbeat_source_round_trips_and_rejects_malformed() {
+        let zid = vec![0x09u8, 0xAB];
+        let ke = format!("demo/data/@adv/pub/{}/7/_", zid_to_zenoh_hex(&zid));
+        assert_eq!(parse_heartbeat_source(&ke), Some((zid, 7)));
+        // Malformed: no @adv, wrong marker, non-numeric eid.
+        assert_eq!(parse_heartbeat_source("demo/data"), None);
+        assert_eq!(parse_heartbeat_source("demo/@adv/sub/ff/7/_"), None);
+        assert_eq!(parse_heartbeat_source("demo/@adv/pub/ff/xx/_"), None);
+    }
+
+    /// R311y84 heartbeat-trigger unit (no session): a beacon ahead of
+    /// `last_delivered` requests a BOUNDED `_sn=last+1..hb` GET once; a beacon
+    /// at-or-behind `last_delivered`, or one while a GET is in flight, is a
+    /// no-op; retransmission-off is inert.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    #[test]
+    fn handle_heartbeat_requests_bounded_get_when_ahead() {
+        let mut state = State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(|_| {}),
+            on_miss: Box::new(|_| {}),
+            retransmission: true,
+        };
+        let key = (vec![0x09u8], 4u32);
+        state.sequenced.insert(
+            key.clone(),
+            SourceState {
+                last_delivered: Some(1),
+                ..Default::default()
+            },
+        );
+
+        // Beacon last sn = 4 > last_delivered 1 -> bounded _sn=2..4.
+        let req = state
+            .handle_heartbeat(key.0.clone(), key.1, 4)
+            .expect("a beacon ahead of last_delivered requests recovery");
+        assert_eq!((req.from_sn, req.to_sn), (2, Some(4)));
+        // A GET is now in flight -> a second beacon is a no-op.
+        assert!(state.handle_heartbeat(key.0.clone(), key.1, 5).is_none());
+        // A caught-up beacon (<= last_delivered) on a fresh source is a no-op.
+        state.sequenced.get_mut(&key).unwrap().pending_queries = 0;
+        assert!(state.handle_heartbeat(key.0.clone(), key.1, 1).is_none());
+
+        let mut plain = State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(|_| {}),
+            on_miss: Box::new(|_| {}),
+            retransmission: false,
+        };
+        assert!(
+            plain.handle_heartbeat(vec![0x01], 1, 9).is_none(),
+            "no retransmission -> heartbeat is inert"
+        );
+    }
+
+    /// R311y84 composed heartbeat recovery e2e: the publisher's last-sn beacon
+    /// drives recovery of a lost LAST sample. The cache holds 0..=2; live 0,1
+    /// arrive but sn 2 is lost and undetected; a heartbeat beacon
+    /// (`z_serialize::<u32>(2)` on the publisher's `@adv` KE) fires the
+    /// heartbeat subscriber, which issues a bounded `_sn=2..2` GET that the
+    /// cache refills. The beacon is synthesised in-test (the producer beacon is
+    /// the separate `ext-pubsub-sample-miss-detection` atom — the live-gap-
+    /// injection pattern), and runs synchronously via R311lh deferred-fire.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-cache",
+        feature = "ext-pubsub-serde-codec",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn composed_heartbeat_recovers_lost_last_sample() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+        use wz_session_core::serde_codec::z_serialize;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x09u8];
+        let pub_eid = 4u32;
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+        let adv_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
+
+        let cache =
+            AdvancedCache::declare(&session, adv_ke.clone(), CacheConfig { max_samples: 8 })
+                .expect("advanced cache declares");
+        for sn in 0u8..3 {
+            cache.cache_sample(CachedSample {
+                keyexpr: "demo/data".to_string(),
+                payload: vec![sn],
+                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                timestamp: TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: pub_zid.clone(),
+                },
+            });
+        }
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let misses = Arc::new(Mutex::new(0usize));
+        let d = Arc::clone(&delivered);
+        let m = Arc::clone(&misses);
+        let _sub = AdvancedSubscriber::declare_with_recovery(
+            &session,
+            "demo/data",
+            RecoveryConfig::new()
+                .with_heartbeat()
+                .with_allowed_destination(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            move |_miss: Miss| *m.lock().unwrap() += 1,
+        )
+        .expect("heartbeat-recovering advanced subscriber declares");
+
+        let live = |sn: u32, v: u8| {
+            session
+                .publish(
+                    "demo/data",
+                    &[v],
+                    PublishOptions::put()
+                        .with_locality(Locality::SessionLocal)
+                        .with_source_info(SourceInfo::new(&pub_zid, pub_eid, sn)),
+                )
+                .expect("loopback live publish");
+        };
+        live(0, 0xA0);
+        live(1, 0xA1);
+        assert_eq!(*delivered.lock().unwrap(), vec![0xA0, 0xA1]);
+
+        // The publisher's heartbeat beacon: last sn = 2 on its `@adv` KE.
+        session
+            .publish(
+                &adv_ke,
+                &z_serialize::<u32>(&2u32),
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .expect("heartbeat beacon publish");
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xA0, 0xA1, 0x02],
+            "the heartbeat beacon (last sn 2) drove a bounded GET that recovered \
+             the lost sn 2 (cache payload 0x02)"
+        );
+        assert_eq!(
+            *misses.lock().unwrap(),
+            0,
+            "the heartbeat recovery filled it -> no Miss"
         );
     }
 }

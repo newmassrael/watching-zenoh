@@ -264,11 +264,15 @@ ext-pubsub-advanced-subscriber = ["declare-subscriber", "pubsub-source-info"]
 # reply must carry the original `(zid, eid, sn)` so the subscriber re-keys the
 # retransmitted sample). A composed deployment additionally enables
 # ext-pubsub-advanced-publisher/-cache (the answerer); recovery itself is the
-# CONSUMER half. The periodic(tokio::time) + heartbeat(z_deserialize::<u32>)
-# triggers (zenoh :585-643 / :1045-1149) are follow-on under this same gate
-# (R311y83); the sample-driven trigger is the recovery core built here.
+# CONSUMER half. Three triggers under this gate: sample-driven (R311y82, the
+# core), periodic re-ask (R311y83, a background tokio task), and heartbeat
+# (R311y84 — a 2nd subscriber on `<ke>/@adv/pub/**` decoding the publisher's
+# last-sn beacon via `z_deserialize::<u32>`, hence ext-pubsub-serde-codec; zenoh
+# :585-643 / :1045-1149). The heartbeat PRODUCER beacon is the separate
+# ext-pubsub-sample-miss-detection atom.
 ext-pubsub-advanced-recovery = [
     "ext-pubsub-advanced-subscriber",
+    "ext-pubsub-serde-codec",
     "query-get",
     "query-selector-parameters",
     "wz-session-core/reply-source-info",
