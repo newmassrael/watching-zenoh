@@ -226,8 +226,13 @@ ext-pubsub-serde-codec = ["wz-session-core/ext-pubsub-serde-codec"]
 
 # ext-pubsub-advanced-cache (§5.25) — the publisher-side sample ring +
 # the @adv queryable answering _sn / _max recovery selectors. Needs the
-# queryable (query-queryable) + reply timestamps (pubsub-timestamp).
-ext-pubsub-advanced-cache = ["query-queryable", "pubsub-timestamp"]
+# queryable (query-queryable) + reply timestamps (pubsub-timestamp) +
+# codec-response-final (R311y71 review fix: the cache declares a COMPLETE
+# queryable, which MUST terminate its recovery/history answers with a
+# ResponseFinal; query-queryable pulls only codec-request/-response, so
+# without this the Final is a silent no-op and a remote querier hangs to
+# timeout — the storage-backend feature pulls it for the same reason).
+ext-pubsub-advanced-cache = ["query-queryable", "codec-response-final", "pubsub-timestamp"]
 
 # ext-pubsub-advanced-publisher (§5.25) — the SourceInfo-sequencing
 # publisher composing the cache. Stamps source_info (pubsub-source-info)

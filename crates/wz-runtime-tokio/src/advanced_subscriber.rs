@@ -171,9 +171,16 @@ mod tests {
     use wz_session_core::locality::Locality;
     use wz_session_core::sample::SourceInfo;
 
-    /// Publish a sequenced sample under a REMOTE source zid (so the R231
-    /// self-echo dedup does not suppress the loopback delivery — a
-    /// genuine "remote advanced publisher" feeding this subscriber).
+    /// Drive the subscriber with one controlled sequence number under a
+    /// fixed synthetic source identity. These are STATE-MACHINE unit tests:
+    /// they inject specific sns (incl a deliberate gap + a duplicate) that a
+    /// real, always-incrementing `AdvancedPublisher` cannot produce, so they
+    /// synthesize the wire `SourceInfo` directly. The zid value is arbitrary
+    /// — SessionLocal loopback applies NO self-echo dedup (that is gated
+    /// `if is_remote` only, pubsub.rs; proven by
+    /// `pubsub::tests::local_publish_ignores_own_zid_dedup`), so own-vs-remote
+    /// zid is irrelevant here. The genuine producer->consumer link is the
+    /// separate composed test (`composed_advanced_publisher_to_subscriber_*`).
     fn put_sequenced(session: &TokioSession, sn: u32) -> usize {
         session
             .publish(
@@ -186,8 +193,8 @@ mod tests {
             .expect("loopback sequenced publish")
     }
 
-    /// Composed wire-level e2e: a remote sequenced publisher feeds samples
-    /// 0,1, then 3 (a gap at 2), then a duplicate 1. The advanced
+    /// State-machine unit test (synthetic source, controlled sns): a source
+    /// feeds 0,1, then 3 (a gap at 2), then a duplicate 1. The advanced
     /// subscriber must deliver 0,1,3 in order, fire one Miss(nb=1) on the
     /// 1->3 gap, and DROP the duplicate.
     #[test]
@@ -274,6 +281,73 @@ mod tests {
             *delivered.lock().unwrap(),
             vec![(7, 0xA0), (8, 0xB0), (7, 0xA1)],
             "each source's stream is ordered independently; eid=8's first sn=5 delivers with no miss"
+        );
+    }
+
+    /// Composed producer->consumer e2e — the HIGH-priority fix from the
+    /// R311y70 session review (the prior tests exercised each half in
+    /// isolation; this co-compiles BOTH atoms and proves the seqnum
+    /// producer/consumer contract that is the atom's whole point). A REAL
+    /// `AdvancedPublisher` (its own zid + `SequenceNumber` sequencing) feeds
+    /// a REAL `AdvancedSubscriber` on one session over the loopback
+    /// (`Locality::Any` -> the local subscriber fires; session-API loopback,
+    /// no wire codec). A contiguous 0,1,2 publish must deliver 0,1,2 in
+    /// order with zero misses.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn composed_advanced_publisher_to_subscriber_in_order() {
+        use crate::advanced_cache::CacheConfig;
+        use crate::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions, Sequencing};
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let misses = Arc::new(Mutex::new(0usize));
+        let d = Arc::clone(&delivered);
+        let m = Arc::clone(&misses);
+        let _sub = AdvancedSubscriber::declare(
+            &session,
+            "demo/data",
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            move |_miss: Miss| *m.lock().unwrap() += 1,
+        )
+        .expect("advanced subscriber declares");
+
+        // A REAL publisher with its OWN zid (its genuine identity) +
+        // SequenceNumber sequencing; default Locality::Any -> the loopback
+        // leg fires the local subscriber (own-zid loopback delivers — no
+        // self-echo dedup on the loopback path).
+        let publisher = AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            AdvancedPublisherOptions {
+                sequencing: Sequencing::SequenceNumber,
+                cache: Some(CacheConfig { max_samples: 8 }),
+                publisher_detection: true,
+            },
+            vec![0x09],
+        )
+        .expect("advanced publisher declares");
+
+        for v in 0u8..3 {
+            publisher.put(&[v]).expect("advanced put");
+        }
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0u8, 1, 2],
+            "the real publisher's incrementing seqnums delivered in order by the real subscriber"
+        );
+        assert_eq!(
+            *misses.lock().unwrap(),
+            0,
+            "a contiguous 0,1,2 stream has no gaps -> no Miss"
         );
     }
 }

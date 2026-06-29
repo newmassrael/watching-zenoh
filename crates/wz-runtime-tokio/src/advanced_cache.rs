@@ -26,6 +26,18 @@
 //! seam-extension paired with its consumer). The cache already FILTERS
 //! by `source_sn` (it stores the publisher-stamped sn per sample), so the
 //! query side is faithful today; only the reply carry-back waits.
+//!
+//! ## `_time` time-range filter (deferred to advanced-history)
+//!
+//! zenoh's cache also applies a `_time` time-range filter in both query
+//! branches (zenoh-ext advanced_cache.rs:264-272, :308-316). wz parses
+//! only `_sn` + `_max` here; a `_time` selector is currently IGNORED (the
+//! cache returns time-unfiltered samples). This is consumer-paired: the
+//! `_time` selector is emitted by the startup HISTORY query
+//! (`age`/`max_age` -> `_time=[now-age,..]`), so `_time` filtering lands
+//! WITH `ext-pubsub-advanced-history`. Until then a wz cache answering a
+//! zenoh `AdvancedSubscriber`'s age-bounded history query over-returns
+//! (a documented interop divergence, not silent).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

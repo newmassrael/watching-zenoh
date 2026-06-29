@@ -1410,7 +1410,8 @@ layer_c1ap_cargo_test_ext_pubsub_serde() {
     (cd crates \
         && cargo test -p wz-session-core --features ext-pubsub-serde-codec --lib serde_codec --quiet \
         && cargo clippy -p wz-session-core --all-targets --features ext-pubsub-serde-codec --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --features ext-pubsub-serde-codec --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --features ext-pubsub-serde-codec --quiet -- -D warnings \
+        && cargo build -p wz --features ext-pubsub-serde-codec --quiet)
 }
 
 # ─── Layer C1aq — ext-pubsub advanced-publisher/cache §5.25: @adv ring + queryable ─
@@ -1431,26 +1432,31 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
             --lib advanced_ --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
-            --quiet -- -D warnings)
+            --quiet -- -D warnings \
+        && cargo build -p wz --features ext-pubsub-advanced-publisher --quiet)
 }
 
 # ─── Layer C1ar — ext-pubsub advanced-subscriber §5.25: per-source order/dedup ─
 #
 # R311y70: ext-pubsub-advanced-subscriber is off-default, so the default Layer C1
 # never compiles advanced_subscriber — this lane is its only run-site. It runs the
-# wire-level e2e (a remote sequenced publisher feeds 0,1,3 + a dup over the
-# loopback; the subscriber delivers 0,1,3 in order, fires ONE Miss(nb=1), drops the
-# dup) + the distinct-sources test, then clippy-gates the feature. pubsub-allow-loop
-# supplies the loopback dispatch; the inbound source_info decode rides
-# pubsub-source-info (pulled by the feature).
+# state-machine unit tests (synthetic source: 0,1,3+dup -> deliver 0,1,3 + ONE
+# Miss(nb=1) + drop; distinct-sources independence), then clippy-gates the feature.
+# R311y71 (session-review HIGH fix): this lane now CO-ENABLES ext-pubsub-advanced-
+# publisher so the COMPOSED producer->consumer e2e runs — a REAL AdvancedPublisher
+# feeds a REAL AdvancedSubscriber on one session (the two atoms are co-compiled +
+# composed, not green-per-atom in isolation). pubsub-allow-loop supplies the loopback
+# dispatch; inbound source_info decode rides pubsub-source-info (pulled by the
+# features). The trailing `cargo build -p wz` validates the facade forward target.
 layer_c1ar_cargo_test_ext_pubsub_advanced_sub() {
     (cd crates \
         && cargo test -p wz-runtime-tokio \
-            --features ext-pubsub-advanced-subscriber,pubsub-allow-loop \
+            --features ext-pubsub-advanced-subscriber,ext-pubsub-advanced-publisher,pubsub-allow-loop \
             --lib advanced_subscriber --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets \
-            --features ext-pubsub-advanced-subscriber,pubsub-allow-loop \
-            --quiet -- -D warnings)
+            --features ext-pubsub-advanced-subscriber,ext-pubsub-advanced-publisher,pubsub-allow-loop \
+            --quiet -- -D warnings \
+        && cargo build -p wz --features ext-pubsub-advanced-subscriber --quiet)
 }
 
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─

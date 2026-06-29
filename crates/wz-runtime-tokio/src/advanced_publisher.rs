@@ -12,7 +12,7 @@
 //! (`(zid, eid, sn)`), (2) stamps a timestamp, (3) publishes, and (4)
 //! pushes the sample into its cache ring. A subscriber detects the
 //! publisher via the liveliness token on
-//! `<key_expr>/@adv/pub/<zid>/<eid|uhlc>` and recovers missed samples by
+//! `<key_expr>/@adv/pub/<zid>/<eid|uhlc>/_` and recovers missed samples by
 //! `get`-ing the cache there with an `_sn` range (the
 //! `ext-pubsub-advanced-recovery` round).
 //!
@@ -99,6 +99,16 @@ impl From<LivelinessAliasError> for AdvancedPublisherError {
 /// The `@adv` key-expr prefix (zenoh `KE_ADV_PREFIX`, admin.rs:48).
 const KE_ADV_PREFIX: &str = "@adv";
 
+/// The trailing empty chunk zenoh appends to the `@adv` suffix
+/// (`KE_EMPTY = ke!("_")`, zenoh admin.rs:58). zenoh adds it
+/// "because of a routing matching bug" (advanced_publisher.rs:328-329):
+/// the publisher-detection / recovery queries are wildcard-tailed
+/// (`.../@adv/*/<zid>/<eid>/**`), and the concrete `_` chunk keeps the
+/// declared keyexpr matchable through a zenoh router. wz mirrors it so
+/// the `@adv` namespace is byte-identical to zenoh (a wz<->zenoh-router
+/// mesh would otherwise re-trip the bug zenoh shaped this to dodge).
+const KE_EMPTY: &str = "_";
+
 /// A live advanced publisher bound to a [`Session`]. Owns the (optional)
 /// cache + liveliness token (RAII: dropping it tears them down) and the
 /// per-publisher sequence counter.
@@ -125,7 +135,7 @@ where
     /// sample's `SourceInfo` and rendered into the `@adv` KE. Allocates the
     /// publisher entity id from the session counter, then (per `options`)
     /// declares the cache queryable + the liveliness token on
-    /// `<keyexpr>/@adv/pub/<zid>/<eid|uhlc>`.
+    /// `<keyexpr>/@adv/pub/<zid>/<eid|uhlc>/_`.
     pub fn declare(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
@@ -142,15 +152,17 @@ where
         // counter that also backs token ids).
         let eid = session.actions().alloc_next_token_id() as u32;
 
-        // `@adv/pub/<zid>/<eid|uhlc>` — the detection + recovery suffix
-        // (zenoh advanced_publisher.rs:317-323). The `<eid>` discriminator
+        // `@adv/pub/<zid>/<eid|uhlc>/_` — the detection + recovery suffix
+        // (zenoh advanced_publisher.rs:317-329). The `<eid>` discriminator
         // marks sequence-number sequencing; `uhlc` marks timestamp/none.
+        // The trailing `_` (KE_EMPTY) is the empty meta chunk zenoh appends
+        // (no publisher_detection_metadata set here = the empty case).
         let discriminator = match options.sequencing {
             Sequencing::SequenceNumber => eid.to_string(),
             Sequencing::Timestamp | Sequencing::None => "uhlc".to_string(),
         };
         let adv_keyexpr = format!(
-            "{keyexpr}/{KE_ADV_PREFIX}/pub/{}/{}",
+            "{keyexpr}/{KE_ADV_PREFIX}/pub/{}/{}/{KE_EMPTY}",
             zid_to_zenoh_hex(&local_zid),
             discriminator
         );
@@ -231,11 +243,13 @@ where
 mod tests {
     use super::*;
 
-    /// Composed wire-level e2e (the R311y66 standard — a real loopback
-    /// query through the declared queryable, NOT a kernel-proxy): an
-    /// `AdvancedPublisher` with a cache publishes three sequenced samples,
-    /// then a loopback `session.query` over the `@adv` namespace fires the
-    /// cache queryable inline and recovers all three. Proves
+    /// Composed session-API loopback e2e (a real `session.query` through
+    /// the declared queryable, NOT a kernel-proxy — though SessionLocal
+    /// dispatch stays in-process and does NOT traverse the Push/Response
+    /// wire codec, so this is "session-API loopback", not "wire-level"):
+    /// an `AdvancedPublisher` with a cache publishes three sequenced
+    /// samples, then a loopback `session.query` over the `@adv` namespace
+    /// fires the cache queryable inline and recovers all three. Proves
     /// publisher -> cache_sample -> queryable -> get composition.
     #[cfg(feature = "query-get")]
     #[test]
@@ -274,7 +288,7 @@ mod tests {
         );
 
         // A loopback GET over `demo/data/**` covers BOTH the cache
-        // queryable KE (`demo/data/@adv/pub/<zid>/<eid>`) and the reply
+        // queryable KE (`demo/data/@adv/pub/<zid>/<eid>/_`) and the reply
         // keys (`demo/data`, the original sample key the cache replies
         // under) — the `reply ⊆ query` contract holds.
         let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
