@@ -852,7 +852,11 @@ ext-pubsub-fetching-subscriber = []
 ext-pubsub-group-membership = []
 ext-pubsub-querying-subscriber = []
 ext-pubsub-sample-miss-detection = []
-ext-pubsub-serde-codec = []
+# R311y68 — ext-pubsub-serde-codec is now a real cfg gate (the Zenoh
+# Serialization Format codec in wz-session-core::serde_codec); forward
+# the feature through wz-runtime-tokio. The other §5.25 atoms stay
+# reserved `= []` until built.
+ext-pubsub-serde-codec = ["wz-runtime-tokio?/ext-pubsub-serde-codec"]
 
 # ----- §5.26 rest (2 atomic, all reserved) -----
 rest-http-bridge = []

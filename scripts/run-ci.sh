@@ -1397,6 +1397,22 @@ layer_c1ao_cargo_test_config_mutate_runtime() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast --quiet -- -D warnings)
 }
 
+# ─── Layer C1ap — ext-pubsub-serde-codec §5.25: Zenoh Serialization Format codec ─
+#
+# R311y68: ext-pubsub-serde-codec is off-default (an opt-in atom), so the default
+# Layer C1 (`cargo test --workspace`) never compiles the `serde_codec` module —
+# this lane is the only run-site for the codec. It runs the golden-vector +
+# round-trip unit tests under the feature (byte-exact vs zenoh-ext
+# serialization.rs:653-673) and clippy-gates BOTH the owning crate
+# (wz-session-core::serde_codec) AND the facade forward (wz-runtime-tokio's
+# re-export at crate::serde_codec), proving the 3-stage feature chain composes.
+layer_c1ap_cargo_test_ext_pubsub_serde() {
+    (cd crates \
+        && cargo test -p wz-session-core --features ext-pubsub-serde-codec --lib serde_codec --quiet \
+        && cargo clippy -p wz-session-core --all-targets --features ext-pubsub-serde-codec --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --features ext-pubsub-serde-codec --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -4121,6 +4137,7 @@ run_layer C1al layer_c1al_cargo_test_unixpipe || overall=1
 run_layer C1am layer_c1am_cargo_test_adminspace || overall=1
 run_layer C1an layer_c1an_cargo_test_adminspace_nodefault || overall=1
 run_layer C1ao layer_c1ao_cargo_test_config_mutate_runtime || overall=1
+run_layer C1ap layer_c1ap_cargo_test_ext_pubsub_serde || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

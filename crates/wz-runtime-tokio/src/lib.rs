@@ -214,6 +214,14 @@ pub use wz_session_core::decl_sink;
 #[cfg(feature = "adminspace-core")]
 pub use wz_session_core::adminspace;
 
+/// R311y68 (§5.25) — the Zenoh Serialization Format codec
+/// (`z_serialize` / `z_deserialize`), re-exported under
+/// `ext-pubsub-serde-codec` so an AP consumer serializes typed payloads
+/// (and the advanced pub/sub miss-detection heartbeat) without
+/// depending on `wz-session-core` directly.
+#[cfg(feature = "ext-pubsub-serde-codec")]
+pub use wz_session_core::serde_codec;
+
 /// R311y52 (§5.23 `adminspace-write`) — resolve the effective config-WRITE permit
 /// from the embedder's [`adminspace::AdminSpacePermissions`]. This is the
 /// library-resident write-side mirror of the `adminspace-read` GET gate's per-call

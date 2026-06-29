@@ -85,6 +85,15 @@ adminspace-core = ["alloc", "keyexpr-wildcard-double", "pubsub-encoding"]
 # (the metrics dispatch branch) lives in wz-runtime-tokio's adminspace-metrics.
 adminspace-metrics = ["adminspace-core"]
 
+# ext-pubsub-serde-codec (§5.25) — the Zenoh Serialization Format codec
+# (z_serialize / z_deserialize), the leaf prerequisite for the advanced
+# pub/sub miss-detection heartbeat (z_serialize::<u32>(last_sn)). Pure
+# data codec: it serializes into a `Vec<u8>` and reads from a `&[u8]`,
+# reusing the `vle` VLE SSOT for its VarInt length prefix, so it needs
+# only `alloc` (no_std-feasible). The gate lives in this crate's
+# `serde_codec` module; wz-runtime-tokio + the wz facade forward it.
+ext-pubsub-serde-codec = ["alloc"]
+
 # Transport reassembly subsystem (Tier B). Gates the SCE-generated
 # reassembly slot statechart module (build.rs codegens
 # sources/network/reassembly_slot.scxml only under this feature) and the

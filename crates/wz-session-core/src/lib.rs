@@ -456,6 +456,14 @@ pub mod adminspace;
 #[cfg(feature = "alloc")]
 pub mod vle;
 
+/// R311y68 — `ext-pubsub-serde-codec` (§5.25): the Zenoh Serialization
+/// Format codec (`z_serialize` / `z_deserialize`), the leaf prerequisite
+/// for the advanced pub/sub miss-detection heartbeat. Reuses the
+/// [`vle`] VLE SSOT for its `VarInt` length prefix. The `= ["alloc"]`
+/// feature implies `alloc`, so the gate subsumes the allocator need.
+#[cfg(feature = "ext-pubsub-serde-codec")]
+pub mod serde_codec;
+
 /// R74 / R311di-11 — `NetworkMessage` application-layer envelope batch
 /// + `parse_frame_payload` dispatcher. Uses `Box<Request>` etc. so
 /// gated on `alloc`. Body variants (Request / Push / Response /

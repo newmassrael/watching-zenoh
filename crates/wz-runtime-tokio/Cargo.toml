@@ -218,6 +218,11 @@ adminspace-core = ["query-queryable", "wz-session-core/adminspace-core"]
 # build-info body (text/plain). Composes adminspace-core (the dispatch + the
 # metrics_text builder).
 adminspace-metrics = ["adminspace-core", "wz-session-core/adminspace-metrics"]
+
+# ext-pubsub-serde-codec (§5.25) — pure forward of the Zenoh
+# Serialization Format codec from wz-session-core (no runtime wiring;
+# the codec is standalone). Re-exported at `crate::serde_codec`.
+ext-pubsub-serde-codec = ["wz-session-core/ext-pubsub-serde-codec"]
 # adminspace-read (§5.23) — the permissions.read GET gate: declare_adminspace's
 # handler answers nothing when AdminSpacePermissions.read=false (the querier gets
 # only the terminating Final), the wz mirror of zenoh's read-permission check
