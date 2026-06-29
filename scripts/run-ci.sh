@@ -1459,6 +1459,32 @@ layer_c1ar_cargo_test_ext_pubsub_advanced_sub() {
         && cargo build -p wz --features ext-pubsub-advanced-subscriber --quiet)
 }
 
+# ─── Layer C1as — reply source_info (advanced-recovery producer seam) §5.25 ──
+#
+# R311y79 (session-review HIGH fix): reply-source-info is a brand-new off-default
+# wz-session-core feature (R311y74-y78, the advanced-recovery reply source_info
+# producer + decode seam) that NO default / C1e / C1f lane enables — so its 7
+# wire-faithfulness tests (response_build emit + emit-order, query into_response +
+# reply_keyed_sourced, reply dispatch_response + loopback surfacing) and the gated
+# ON-branch codec (gated_reply_source_info / put_reply_source_info /
+# loopback_put_source_info) were never run or compiled feature-on in CI — the
+# exact recurring "feature-gated test needs a same-round lane or it is never-run"
+# pattern. This lane co-enables the full surface (codec-response{,-final} +
+# query-{queryable,reply,attachment,selector-parameters,reply-err} +
+# pubsub-attachment for the compose-order test + reply-source-info), runs the lib
+# suite, and clippy-gates the ON-branch. The subscriber-composed e2e + the
+# ext-pubsub-advanced-recovery active flip stay deferred (they need the reorder
+# buffer); this lane covers the producer seam NOW, not 3 rounds later.
+layer_c1as_cargo_test_reply_source_info() {
+    (cd crates \
+        && cargo test -p wz-session-core \
+            --features codec-response,codec-response-final,query-queryable,query-reply,query-attachment,query-selector-parameters,query-reply-err,pubsub-attachment,reply-source-info \
+            --lib --quiet \
+        && cargo clippy -p wz-session-core --all-targets \
+            --features codec-response,codec-response-final,query-queryable,query-reply,query-attachment,query-selector-parameters,query-reply-err,pubsub-attachment,reply-source-info \
+            --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -4186,6 +4212,7 @@ run_layer C1ao layer_c1ao_cargo_test_config_mutate_runtime || overall=1
 run_layer C1ap layer_c1ap_cargo_test_ext_pubsub_serde || overall=1
 run_layer C1aq layer_c1aq_cargo_test_ext_pubsub_advanced || overall=1
 run_layer C1ar layer_c1ar_cargo_test_ext_pubsub_advanced_sub || overall=1
+run_layer C1as layer_c1as_cargo_test_reply_source_info || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1
