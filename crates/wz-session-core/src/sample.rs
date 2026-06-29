@@ -112,6 +112,42 @@ impl TimestampHint {
     }
 }
 
+/// The uhlc-faithful ordering key for a timestamp: `(time, zid-as-16-byte
+/// little-endian array)`. The SSOT every `alloc` consumer compares on —
+/// the storage newer-wins gate ([`timestamp_strictly_newer`]), the storage
+/// version-list sort ([`crate::storage_history`]), and (R311y73+) the
+/// ext-pubsub advanced-subscriber timestamped-dedup path — so one place
+/// encodes uhlc's `Timestamp` `Ord` contract. R311y73 lifted it here next
+/// to its subject [`TimestampHint`] out of the `storage-backend`-gated
+/// `storage_state` (the `crate::zid_hex` precedent: a shared recipe must
+/// not be trapped behind one consumer's feature gate).
+///
+/// uhlc's `Timestamp` derives `Ord` over `(time: NTP64, id: ID)`
+/// (`uhlc-0.8.1/src/timestamp.rs:33-38`), and `ID` is a `[u8; 16]`
+/// (`#[repr(transparent)]`, `id.rs:56-59`) holding the id's FULL
+/// little-endian bytes, zero-padded — so uhlc compares the whole 16-byte
+/// array. wz's wire/[`TimestampHint`] `zid` is the same LE bytes but
+/// length-TRIMMED (zenoh-pico `_z_id_len` drops trailing zero high bytes).
+/// Comparing the trimmed `Vec`s lexicographically diverges from uhlc for a
+/// non-canonically-encoded zid (a peer's, or a carelessly chosen
+/// `local_zid`): the dropped high bytes are NOT guaranteed zero in general,
+/// so a shorter zid is not always uhlc-less-than a longer one. Zero-padding
+/// both to the full 16-byte array before comparison reproduces uhlc's
+/// answer exactly (the trimmed bytes are the LE prefix; the pad supplies
+/// the zero high bytes uhlc compares against). A zid longer than 16 (a
+/// malformed input) is truncated to 16 — uhlc ids are exactly 16 bytes.
+pub(crate) fn timestamp_order_key(ts: &TimestampHint) -> (u64, [u8; 16]) {
+    (ts.time, crate::zid_hex::zid_to_le_array(&ts.zid))
+}
+
+/// Whether timestamp `a` is *strictly newer* than `b`, by the uhlc
+/// `Timestamp` `Ord` semantic — `(time, 16-byte LE id)` lexicographic (see
+/// [`timestamp_order_key`]). The single comparison the storage newer-wins
+/// gate keys off.
+pub fn timestamp_strictly_newer(a: &TimestampHint, b: &TimestampHint) -> bool {
+    timestamp_order_key(a) > timestamp_order_key(b)
+}
+
 /// Application-level mirror of [`wz_codecs::encoding::Encoding`].
 ///
 /// Same `Clone`-vs-codec rationale as [`TimestampHint`]. The wz wrapper

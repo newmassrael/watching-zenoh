@@ -96,7 +96,7 @@ use alloc::string::String;
 use xxhash_rust::xxh3::Xxh3;
 
 use crate::sample::TimestampHint;
-use crate::storage_state::zid_to_le_array;
+use crate::zid_hex::zid_to_le_array;
 
 /// A 64-bit fingerprint of the content it represents. zenoh
 /// `digest::Fingerprint` (digest.rs:27-57).

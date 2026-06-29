@@ -41,13 +41,13 @@
 //!
 //! ## Timestamp ordering
 //!
-//! [`timestamp_strictly_newer`] mirrors uhlc's `Timestamp` `Ord`
-//! (`uhlc-0.8.1/src/timestamp.rs:33-38`: derived `Ord` over
+//! [`crate::sample::timestamp_strictly_newer`] mirrors uhlc's `Timestamp`
+//! `Ord` (`uhlc-0.8.1/src/timestamp.rs:33-38`: derived `Ord` over
 //! `(time: NTP64, id: ID)`) — `time` first, then the id. The id tiebreak
-//! is uhlc-faithful: [`timestamp_order_key`] zero-pads the trimmed `zid` to
-//! the full 16-byte LE array uhlc's `ID` (`[u8; 16]`) compares, NOT a raw
-//! trimmed-`Vec` lexicographic compare (which diverges for a
-//! non-canonically-encoded zid). See [`timestamp_order_key`] for the why.
+//! is uhlc-faithful: [`crate::sample::timestamp_order_key`] zero-pads the
+//! trimmed `zid` to the full 16-byte LE array uhlc's `ID` (`[u8; 16]`)
+//! compares, NOT a raw trimmed-`Vec` lexicographic compare (which diverges
+//! for a non-canonically-encoded zid). See it for the why.
 //!
 //! ## Deliberate divergences (each layer/profile-driven)
 //!
@@ -102,45 +102,16 @@ use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, St
 #[cfg(feature = "storage-replication")]
 use crate::storage_replication::{build_digest, Digest, IntervalIdx, ReplicationConfig};
 
-/// The uhlc-faithful ordering key for a timestamp: `(time, zid-as-16-byte
-/// little-endian array)`. The SSOT both the newer-wins gate
-/// ([`timestamp_strictly_newer`]) and the version-list sort
-/// ([`crate::storage_history`]) compare on, so one place encodes uhlc's
-/// `Timestamp` `Ord` contract.
-///
-/// uhlc's `Timestamp` derives `Ord` over `(time: NTP64, id: ID)`
-/// (`uhlc-0.8.1/src/timestamp.rs:33-38`), and `ID` is a `[u8; 16]`
-/// (`#[repr(transparent)]`, `id.rs:56-59`) holding the id's FULL
-/// little-endian bytes, zero-padded — so uhlc compares the whole 16-byte
-/// array. wz's wire/[`TimestampHint`] `zid` is the same LE bytes but
-/// length-TRIMMED (zenoh-pico `_z_id_len` drops trailing zero high bytes).
-/// Comparing the trimmed `Vec`s lexicographically diverges from uhlc for a
-/// non-canonically-encoded zid (a peer's, or a carelessly chosen
-/// `local_zid`): the dropped high bytes are NOT guaranteed zero in general,
-/// so a shorter zid is not always uhlc-less-than a longer one. Zero-padding
-/// both to the full 16-byte array before comparison reproduces uhlc's
-/// answer exactly (the trimmed bytes are the LE prefix; the pad supplies
-/// the zero high bytes uhlc compares against). A zid longer than 16 (a
-/// malformed input) is truncated to 16 — uhlc ids are exactly 16 bytes.
-pub(crate) fn timestamp_order_key(ts: &TimestampHint) -> (u64, [u8; 16]) {
-    (ts.time, zid_to_le_array(&ts.zid))
-}
-
-/// The canonical 16-byte LE zid array (`[u8; 16]`) now lives in the
-/// foundational [`crate::zid_hex`] SSOT (the admin space §5.23 needs the same
-/// recipe without the `storage-replication` gate). Re-exported here so the
-/// storage hashing call sites — the newer-wins ordering key
-/// ([`timestamp_order_key`]) and, when `storage-replication` is enabled, the
-/// replication event fingerprint — read unchanged.
-pub(crate) use crate::zid_hex::zid_to_le_array;
-
-/// Whether timestamp `a` is *strictly newer* than `b`, by the uhlc
-/// `Timestamp` `Ord` semantic — `(time, 16-byte LE id)` lexicographic (see
-/// [`timestamp_order_key`]). The single comparison the newer-wins gate
-/// keys off.
-pub fn timestamp_strictly_newer(a: &TimestampHint, b: &TimestampHint) -> bool {
-    timestamp_order_key(a) > timestamp_order_key(b)
-}
+// R311y73 — the uhlc timestamp-order SSOT (`timestamp_order_key` /
+// `timestamp_strictly_newer`) moved to its natural home
+// [`crate::sample`], next to the [`TimestampHint`] it orders, so every
+// `alloc` consumer (storage AND the ext-pubsub advanced subscriber) shares
+// one ordering recipe without pulling `storage-backend` (the
+// `crate::zid_hex` precedent for `zid_to_le_array`). storage_state keeps
+// only the comparison it keys newer-wins on; the `zid_to_le_array`
+// re-export is retired — its remaining consumers (storage_replication,
+// storage_aligner) now import it from `crate::zid_hex` directly.
+use crate::sample::timestamp_strictly_newer;
 
 /// The storage service gate: a [`StorageBackend`] plus the newer-wins
 /// versioning + query-match logic that turns the dumb store into a storage.

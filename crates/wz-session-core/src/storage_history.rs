@@ -49,7 +49,7 @@ use alloc::vec::Vec;
 use crate::sample::{EncodingHint, TimestampHint};
 use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
 
-use crate::storage_state::timestamp_order_key;
+use crate::sample::timestamp_order_key;
 
 /// In-memory [`History::All`] [`StorageBackend`]: a
 /// `key -> Vec<StoredData>` map, each key's versions kept sorted by

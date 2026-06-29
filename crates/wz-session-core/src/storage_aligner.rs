@@ -506,7 +506,7 @@ pub mod wire {
     // R311y34); `storage_replication` re-exports it for back-compat and this
     // import rides that re-export. The Discovery arm is one consumer.
     use crate::storage_replication::{zenoh_hex_to_zid, zid_to_zenoh_hex};
-    use crate::storage_state::zid_to_le_array;
+    use crate::zid_hex::zid_to_le_array;
     // The genuinely-shared bincode-1.3 cursor core + length guard (the digest
     // codec uses these too); the aligner-only widths (u8/u32 reads, String,
     // push_u32) layer on top here since the digest never had them.

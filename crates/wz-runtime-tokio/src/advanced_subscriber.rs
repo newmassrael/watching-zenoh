@@ -19,11 +19,13 @@
 //!
 //! The TIMESTAMPED de-duplication path (a `Sequencing::Timestamp`
 //! publisher's samples, keyed by the timestamp id) is DEFERRED to the
-//! round that composes + tests a Timestamp-mode publisher — together with
-//! lifting the `(time, id)` timestamp-order primitive out of the
-//! storage-backend-gated `storage_state` into a shared SSOT (the
-//! ext-pubsub atom must not pull storage). This round builds the SEQUENCED
-//! path the `SequenceNumber` publisher (the R311y69 default) produces.
+//! round that composes + tests a Timestamp-mode publisher. Its ordering
+//! primitive — `wz_session_core::sample::timestamp_strictly_newer` — is now
+//! a shared SSOT (R311y73 lifted it out of the storage-backend-gated
+//! `storage_state` so this ext-pubsub atom can consume it WITHOUT pulling
+//! storage), so the path is unblocked: when built it imports that fn. This
+//! round builds the SEQUENCED path the `SequenceNumber` publisher (the
+//! R311y69 default) produces.
 //!
 //! ## Scope vs zenoh (the reorder buffer is deferred to advanced-recovery)
 //!
