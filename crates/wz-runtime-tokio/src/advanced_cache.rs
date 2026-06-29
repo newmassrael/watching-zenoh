@@ -13,19 +13,22 @@
 //! range) and/or `_max=N` selector; the cache replies the matching ring
 //! samples (zenoh advanced_cache.rs:209-346).
 //!
-//! ## Reply-side `source_info` gap (deferred to `advanced-recovery`)
+//! ## Reply-side `source_info` (R311y75 seam + R311y76 cache emit)
 //!
 //! zenoh replies the cached `Sample` whole, so each reply carries the
-//! original `SourceInfo` and a subscriber re-keys it by `source_sn`. The
-//! wz reply seam ([`ReplyOut`]) carries keyexpr + payload + encoding +
-//! timestamp but NOT `source_info`, so the cache replies are
-//! timestamp-stamped ([`ReplyOut::reply_keyed_stamped`]) here. The
-//! `source_sn`-on-reply that a sequenced subscriber needs to re-key
-//! recovered samples is a `ReplyOut` / `Response`-codec extension built
-//! WITH its consumer in the `ext-pubsub-advanced-recovery` round (each
-//! seam-extension paired with its consumer). The cache already FILTERS
-//! by `source_sn` (it stores the publisher-stamped sn per sample), so the
-//! query side is faithful today; only the reply carry-back waits.
+//! original `SourceInfo` and a subscriber re-keys it by its sequence
+//! number. wz now mirrors this: each [`CachedSample`] stores the full
+//! [`SourceInfo`] (R311y76), and [`answer_from_ring`] replies it via
+//! [`ReplyOut::reply_keyed_sourced`] (R311y75), which threads the
+//! `(zid, eid, sn)` onto the inner Put-body source_info ext (id 0x01).
+//! The wire EMISSION is gated `reply-source-info` at the codec: OFF (the
+//! default for `ext-pubsub-advanced-cache` alone) the recovery reply is
+//! source_info-free (pico-faithful), and the
+//! `ext-pubsub-advanced-recovery` composition turns it on. The remaining
+//! CONSUMER side — surfacing the recovered reply's source_info on the
+//! subscriber so it re-keys / reorders — lands with the subscriber
+//! reorder buffer (advanced-recovery piece #3, each seam paired with its
+//! consumer).
 //!
 //! ## `_time` time-range filter (deferred to advanced-history)
 //!
@@ -45,15 +48,16 @@ use std::sync::{Arc, Mutex};
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
-use wz_session_core::sample::TimestampHint;
+use wz_session_core::sample::{SourceInfo, TimestampHint};
 
 use crate::session::{Queryable, QueryableError, QueryableOptions, Session, Unicast};
 use crate::session_glue::SessionLinkActions;
 
 /// One sample retained in the cache ring for recovery / history replies.
-/// `source_sn` is the publisher-stamped sequence number used by the `_sn`
-/// range filter (`None` for a timestamp-sequenced publisher, which an
-/// `_sn` query then never matches — only time/`_max` queries do).
+/// `source_info` carries the sample's `(zid, eid, sn)`; the `_sn` range
+/// filter reads `sn` from it (`None` for a timestamp / no-sequencing
+/// publisher, which an `_sn` query then never matches — only time/`_max`
+/// queries do), and a recovery reply re-stamps the whole identity.
 #[derive(Clone, Debug)]
 pub struct CachedSample {
     /// The concrete keyexpr the sample was published under (each reply
@@ -61,11 +65,17 @@ pub struct CachedSample {
     pub keyexpr: String,
     /// Put payload bytes.
     pub payload: Vec<u8>,
-    /// Publisher-stamped sequence number, or `None` under timestamp
-    /// sequencing.
-    pub source_sn: Option<u32>,
+    /// The sample's source identity `(zid, eid, sn)`, or `None` under
+    /// timestamp / no sequencing (a publisher that stamps no `SourceInfo`).
+    /// The `_sn` range filter reads `sn` from it, and a recovery reply
+    /// re-stamps it ([`ReplyOut::reply_keyed_sourced`]) so a subscriber
+    /// re-keys / reorders the retransmitted sample — zenoh caches the whole
+    /// `Sample` with its `SourceInfo`, so the cached source identity ==
+    /// the wire's. The SSOT for the sample's source: the publisher builds
+    /// ONE `SourceInfo` for both the wire publish and this cache entry.
+    pub source_info: Option<SourceInfo>,
     /// The sample's timestamp (the publisher stamps every cached put), used
-    /// to order replies and stamp them back ([`ReplyOut::reply_keyed_stamped`]).
+    /// to order replies and stamp them back ([`ReplyOut::reply_keyed_sourced`]).
     pub timestamp: TimestampHint,
 }
 
@@ -172,7 +182,7 @@ fn answer_from_ring(ring: &VecDeque<CachedSample>, view: &dyn QueryView, out: &m
 
     let mut matched: Vec<&CachedSample> = ring
         .iter()
-        .filter(|s| sample_matches_sn(s.source_sn, sn_range))
+        .filter(|s| sample_matches_sn(s.source_info.as_ref().map(|si| si.sn), sn_range))
         .collect();
 
     // `_max`: keep the newest `m` (the ring tail), still replied oldest-first.
@@ -183,7 +193,18 @@ fn answer_from_ring(ring: &VecDeque<CachedSample>, view: &dyn QueryView, out: &m
     }
 
     for s in matched {
-        out.reply_keyed_stamped(&s.keyexpr, &s.payload, None, &s.timestamp);
+        // reply_keyed_sourced carries the sample's source_info (the inner-body
+        // ext id 0x01) so a recovery subscriber re-keys / reorders it. The
+        // emission is gated `reply-source-info` at the codec (default OFF = the
+        // recovery reply is source_info-free, i.e. advanced-cache without the
+        // advanced-recovery composition); the cache passes it unconditionally.
+        out.reply_keyed_sourced(
+            &s.keyexpr,
+            &s.payload,
+            None,
+            &s.timestamp,
+            s.source_info.as_ref(),
+        );
     }
 }
 
@@ -260,19 +281,25 @@ mod tests {
         #[derive(Default)]
         struct Rec {
             keyed: Vec<(String, Vec<u8>)>,
+            // Per reply: the captured source identity (zid_prefix, eid, sn),
+            // or None when the sample carried no source_info.
+            sourced: Vec<Option<(Vec<u8>, u32, u32)>>,
         }
         impl ReplyOut for Rec {
             fn reply(&mut self, payload: &[u8]) {
                 self.keyed.push((String::new(), payload.to_vec()));
             }
-            fn reply_keyed_stamped(
+            fn reply_keyed_sourced(
                 &mut self,
                 keyexpr: &str,
                 payload: &[u8],
                 _encoding: Option<&EncodingHint>,
                 _timestamp: &TimestampHint,
+                source_info: Option<&SourceInfo>,
             ) {
                 self.keyed.push((keyexpr.to_string(), payload.to_vec()));
+                self.sourced
+                    .push(source_info.map(|si| (si.zid_prefix().to_vec(), si.eid, si.sn)));
             }
             fn reply_del(&mut self) {}
             fn reply_err(&mut self, _: Option<u32>, _: Option<&str>, _: &[u8]) {}
@@ -288,7 +315,7 @@ mod tests {
             ring.push_back(CachedSample {
                 keyexpr: "demo/k".to_string(),
                 payload: vec![sn as u8],
-                source_sn: Some(sn),
+                source_info: Some(SourceInfo::new(&[0x07], 9, sn)),
                 timestamp: TimestampHint {
                     time: 100 + sn as u64,
                     zid: vec![1],
@@ -320,10 +347,20 @@ mod tests {
         answer_from_ring(&ring, &q(Some(b"_max=1")), &mut out);
         assert_eq!(out.keyed, vec![("demo/k".to_string(), vec![2])]);
 
-        // No params → all three.
+        // No params → all three, each carrying its source_info (zid, eid, sn)
+        // so a recovery subscriber can re-key / reorder the retransmissions.
         let mut out = Rec::default();
         answer_from_ring(&ring, &q(None), &mut out);
         assert_eq!(out.keyed.len(), 3);
+        assert_eq!(
+            out.sourced,
+            vec![
+                Some((vec![0x07], 9, 0)),
+                Some((vec![0x07], 9, 1)),
+                Some((vec![0x07], 9, 2)),
+            ],
+            "each recovery reply carries the cached sample's source_info",
+        );
     }
 
     #[test]

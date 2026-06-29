@@ -213,9 +213,17 @@ where
             .map(|counter| counter.fetch_add(1, Ordering::Relaxed));
         let timestamp = self.stamp.stamp();
 
+        // Construct the SourceInfo ONCE (SSOT): the same `(zid, eid, sn)` rides
+        // BOTH the wire publish (pubsub-source-info) AND the cache ring, so a
+        // recovery reply re-stamps the identical identity the live sample
+        // carried. zenoh caches the whole `Sample` with its `SourceInfo`; this
+        // mirrors that without the prior dual source_sn-vs-SourceInfo::new
+        // construction. `None` under timestamp / no sequencing.
+        let source_info = sn.map(|sn| SourceInfo::new(&self.zid, self.eid, sn));
+
         let mut opts = PublishOptions::put().with_timestamp(timestamp.clone());
-        if let Some(sn) = sn {
-            opts = opts.with_source_info(SourceInfo::new(&self.zid, self.eid, sn));
+        if let Some(si) = &source_info {
+            opts = opts.with_source_info(si.clone());
         }
         let written = self.session.publish(&self.keyexpr, payload, opts)?;
 
@@ -223,7 +231,7 @@ where
             cache.cache_sample(CachedSample {
                 keyexpr: self.keyexpr.clone(),
                 payload: payload.to_vec(),
-                source_sn: sn,
+                source_info,
                 timestamp,
             });
         }
