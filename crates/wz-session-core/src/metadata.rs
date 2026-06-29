@@ -86,6 +86,7 @@ impl PushMetadata {
 /// | `target`           | `RequestQueryBuilder::request_target` |
 /// | `consolidation`    | `RequestQueryBuilder::consolidation` |
 /// | `attachment`       | `RequestQueryBuilder::query_attachment` |
+/// | `parameters`       | `RequestQueryBuilder::parameters` (`Q_P` 0x40) |
 /// | `timeout_ms`       | `RequestQueryBuilder::request_timeout_ms` |
 /// | `payload`          | R241+ carry — wz codec has no Q_B body slot yet |
 /// | `encoding`         | R241+ carry — wz codec has no Q_E inline slot yet |
@@ -105,6 +106,12 @@ pub struct QueryMetadata {
     /// Query-level attachment blob (ext_id=0x05 ZBUF on the Query
     /// ext chain). `None` elides the ext.
     pub attachment: Option<Vec<u8>>,
+    /// Query selector parameters (the `_sn=START..&_max=N` URL-style
+    /// selector after `?`; the `Q_P` flag 0x40 + the params slice on the
+    /// Query body). `None` (or empty) elides the flag + slice. What a
+    /// recovery / history GET carries so the advanced cache's
+    /// `answer_from_ring` filters its ring.
+    pub parameters: Option<Vec<u8>>,
     /// Query-level source-info (querier identity: zid / eid / sn;
     /// ext_id=0x01 ZBUF on the Query ext chain). `None` elides the ext.
     pub source_info: Option<SourceInfo>,
@@ -123,6 +130,7 @@ impl QueryMetadata {
         self.target.is_none()
             && self.consolidation.is_none()
             && self.attachment.is_none()
+            && self.parameters.is_none()
             && self.source_info.is_none()
             && self.timeout_ms == 0
     }

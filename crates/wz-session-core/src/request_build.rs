@@ -202,6 +202,18 @@ pub fn build_request_query_with_meta(
             builder = builder.query_attachment(attachment);
         }
     }
+    // Query selector-parameters threading — gated `query-selector-parameters`
+    // (the receive side gates the inbound parameters projection on the same
+    // feature, query.rs). The builder's `parameters` setter asserts non-empty
+    // (zenoh-pico's encoder clears Q_P on len=0), so the QueryMetadata
+    // contract "parameters = Some(empty) means clear Q_P" is honoured by
+    // skipping the call when the inner slice is empty.
+    #[cfg(feature = "query-selector-parameters")]
+    if let Some(params) = meta.parameters.as_deref() {
+        if !params.is_empty() {
+            builder = builder.parameters(params);
+        }
+    }
     if meta.timeout_ms != 0 {
         builder = builder.request_timeout_ms(meta.timeout_ms as u64);
     }
@@ -1239,6 +1251,46 @@ mod tests {
             }
             _ => panic!("expected CodecZenohQuery"),
         }
+    }
+
+    /// R311y77 — `build_request_query_with_meta` threads the QueryMetadata
+    /// `parameters` slot onto the Query body's Q_P flag + params slice,
+    /// byte-identical to the direct `build_request_query_with_parameters`
+    /// helper. The composition proof for the
+    /// QueryOptions.parameters -> QueryMetadata -> wire recovery-GET-selector
+    /// path; empty parameters elide Q_P (the "Some(empty) = clear" contract).
+    #[cfg(all(feature = "codec-request", feature = "query-selector-parameters"))]
+    #[test]
+    fn build_request_query_with_meta_threads_parameters_to_q_p() {
+        let meta = crate::metadata::QueryMetadata {
+            parameters: Some(b"_sn=1..".to_vec()),
+            ..Default::default()
+        };
+        let via_meta = build_request_query_with_meta(42, 7, None, &meta)
+            .unwrap()
+            .wire();
+        let via_helper = build_request_query_with_parameters(42, 7, None, b"_sn=1..")
+            .unwrap()
+            .wire();
+        assert_eq!(
+            via_meta, via_helper,
+            "QueryMetadata.parameters must thread onto Q_P byte-for-byte vs \
+             the direct build_request_query_with_parameters helper",
+        );
+        // Empty parameters elide Q_P (the QueryMetadata "Some(empty) = clear"
+        // contract) — byte-identical to the no-meta path.
+        let empty = crate::metadata::QueryMetadata {
+            parameters: Some(Vec::new()),
+            ..Default::default()
+        };
+        let via_empty = build_request_query_with_meta(42, 7, None, &empty)
+            .unwrap()
+            .wire();
+        let no_meta = build_request_query(42, 7, None).unwrap().wire();
+        assert_eq!(
+            via_empty, no_meta,
+            "empty parameters must elide Q_P (no-meta parity)",
+        );
     }
 
     #[cfg(feature = "codec-request")]

@@ -84,6 +84,13 @@ pub struct QueryOptions {
     /// Optional Query-level attachment blob. Mirror of
     /// `z_get_options_t.attachment`. R239 carry.
     pub attachment: Option<Vec<u8>>,
+    /// Optional Query selector parameters (the `_sn=START..&_max=N`
+    /// URL-style selector after `?`). `None` (or empty) elides the `Q_P`
+    /// flag + params slice on the outbound Query body. What an
+    /// `ext-pubsub-advanced-subscriber` recovery / history GET carries so
+    /// the advanced cache's `answer_from_ring` filters its ring. Mirror of
+    /// zenoh's `z_get(keyexpr, parameters, ..)`.
+    pub parameters: Option<Vec<u8>>,
     /// Optional Query-level source-info (querier identity: zid / eid /
     /// sn) stamped on the outbound Query body (ext 0x01 ZBUF). `None`
     /// elides the ext. Symmetric to `PublishOptions::source_info`.
@@ -180,6 +187,20 @@ impl QueryOptions {
         self
     }
 
+    /// Attach Query selector parameters (the `_sn=START..&_max=N` URL-style
+    /// selector). Gated on `query-selector-parameters` (the same wire feature
+    /// the receive side gates the inbound parameters projection on, query.rs):
+    /// the get path threads this onto the Query body's `Q_P` flag + params
+    /// slice only when the feature is composed, so the setter gates with it.
+    /// The field stays (struct stability). What an
+    /// `ext-pubsub-advanced-subscriber` recovery GET carries so the advanced
+    /// cache's `answer_from_ring` filters its ring.
+    #[cfg(feature = "query-selector-parameters")]
+    pub fn with_parameters(mut self, parameters: Vec<u8>) -> Self {
+        self.parameters = Some(parameters);
+        self
+    }
+
     /// Stamp the querier's source-info (zid / eid / sn) on the outbound
     /// Query body (ext 0x01 ZBUF). Gated on `query-source-info`
     /// (wire-data helper): the get path threads this into the Query
@@ -269,6 +290,7 @@ impl QueryOptions {
             target: self.target,
             consolidation: self.consolidation,
             attachment: self.attachment.clone(),
+            parameters: self.parameters.clone(),
             source_info: self.source_info.clone(),
             timeout_ms: self.timeout_ms,
         }
@@ -846,5 +868,23 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
         #[cfg(not(feature = "declare-queryable"))]
         let matching = false;
         Ok(MatchingStatus { matching })
+    }
+}
+
+#[cfg(all(test, feature = "query-get", feature = "query-selector-parameters"))]
+mod tests {
+    use super::*;
+
+    /// R311y77 — `QueryOptions::with_parameters` threads onto the
+    /// `query_metadata` parameters slot, so a recovery GET's `_sn`-range
+    /// selector reaches the wire builder (`build_request_query_with_meta` ->
+    /// `Q_P`). The QueryOptions -> QueryMetadata half of the recovery-GET
+    /// selector path (the wire half is locked in request_build.rs).
+    #[test]
+    fn with_parameters_threads_into_query_metadata() {
+        let opts = QueryOptions::get().with_parameters(b"_sn=1..".to_vec());
+        let meta = opts.query_metadata();
+        assert_eq!(meta.parameters.as_deref(), Some(b"_sn=1..".as_slice()));
+        assert!(!meta.is_empty(), "parameters make the metadata non-empty");
     }
 }
