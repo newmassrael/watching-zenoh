@@ -241,6 +241,13 @@ ext-pubsub-advanced-publisher = [
     "pubsub-timestamp",
     "liveliness-token",
 ]
+
+# ext-pubsub-advanced-subscriber (§5.25) — the per-source ordering/dedup
+# subscriber that consumes the publisher's SourceInfo seqnums. Needs the
+# subscriber (declare-subscriber) + the inbound source_info decode
+# (pubsub-source-info). The timestamped-dedup path is deferred (see the
+# module docs), so no pubsub-timestamp dependency yet.
+ext-pubsub-advanced-subscriber = ["declare-subscriber", "pubsub-source-info"]
 # adminspace-read (§5.23) — the permissions.read GET gate: declare_adminspace's
 # handler answers nothing when AdminSpacePermissions.read=false (the querier gets
 # only the terminating Final), the wz mirror of zenoh's read-permission check

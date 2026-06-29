@@ -745,6 +745,12 @@ pub mod advanced_cache;
 #[cfg(feature = "ext-pubsub-advanced-publisher")]
 pub mod advanced_publisher;
 
+/// R311y70 — `ext-pubsub-advanced-subscriber` (§5.25): the per-source
+/// ordering / de-duplication subscriber consuming the `SourceInfo`
+/// sequence numbers the advanced publisher stamps.
+#[cfg(feature = "ext-pubsub-advanced-subscriber")]
+pub mod advanced_subscriber;
+
 /// Round 311vm — the storage-replication DRIVER, digest publisher half
 /// (§5.11 storage, replication 6/N): the tokio binding that periodically
 /// publishes this storage's replication

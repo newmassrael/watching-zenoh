@@ -851,7 +851,9 @@ ext-pubsub-advanced-cache = ["wz-runtime-tokio?/ext-pubsub-advanced-cache"]
 ext-pubsub-advanced-history = []
 ext-pubsub-advanced-publisher = ["wz-runtime-tokio?/ext-pubsub-advanced-publisher"]
 ext-pubsub-advanced-recovery = []
-ext-pubsub-advanced-subscriber = []
+# R311y70 — ext-pubsub-advanced-subscriber is now a real cfg gate (the
+# per-source ordering/dedup subscriber in wz-runtime-tokio); forward it.
+ext-pubsub-advanced-subscriber = ["wz-runtime-tokio?/ext-pubsub-advanced-subscriber"]
 ext-pubsub-fetching-subscriber = []
 ext-pubsub-group-membership = []
 ext-pubsub-querying-subscriber = []

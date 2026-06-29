@@ -1434,6 +1434,25 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
             --quiet -- -D warnings)
 }
 
+# ─── Layer C1ar — ext-pubsub advanced-subscriber §5.25: per-source order/dedup ─
+#
+# R311y70: ext-pubsub-advanced-subscriber is off-default, so the default Layer C1
+# never compiles advanced_subscriber — this lane is its only run-site. It runs the
+# wire-level e2e (a remote sequenced publisher feeds 0,1,3 + a dup over the
+# loopback; the subscriber delivers 0,1,3 in order, fires ONE Miss(nb=1), drops the
+# dup) + the distinct-sources test, then clippy-gates the feature. pubsub-allow-loop
+# supplies the loopback dispatch; the inbound source_info decode rides
+# pubsub-source-info (pulled by the feature).
+layer_c1ar_cargo_test_ext_pubsub_advanced_sub() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio \
+            --features ext-pubsub-advanced-subscriber,pubsub-allow-loop \
+            --lib advanced_subscriber --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets \
+            --features ext-pubsub-advanced-subscriber,pubsub-allow-loop \
+            --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -4160,6 +4179,7 @@ run_layer C1an layer_c1an_cargo_test_adminspace_nodefault || overall=1
 run_layer C1ao layer_c1ao_cargo_test_config_mutate_runtime || overall=1
 run_layer C1ap layer_c1ap_cargo_test_ext_pubsub_serde || overall=1
 run_layer C1aq layer_c1aq_cargo_test_ext_pubsub_advanced || overall=1
+run_layer C1ar layer_c1ar_cargo_test_ext_pubsub_advanced_sub || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1
