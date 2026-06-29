@@ -141,6 +141,35 @@ struct SourceState {
     pending_queries: u64,
 }
 
+/// R311y90 (review C5) — why declaring a RECOVERING advanced subscriber failed.
+/// Distinct from the base [`SubscribeError`] (which stays the plain
+/// `Session::declare_subscriber` surface): the recovery form additionally spawns
+/// the periodic-recovery background task, so it has one extra failure mode
+/// ([`Self::NoRuntime`]). Kept OUT of `SubscribeError` so toggling the additive
+/// `ext-pubsub-advanced-recovery` feature cannot change `SubscribeError`'s shape
+/// and break a base-subscriber caller's exhaustive match (the H1
+/// signature-stability invariant); mirrors the publisher's dedicated
+/// [`crate::advanced_publisher::AdvancedPublisherError`].
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum AdvancedSubscribeError {
+    /// The base / recovery / heartbeat subscriber declaration was rejected.
+    Subscribe(SubscribeError),
+    /// The periodic-recovery task could not be spawned: no tokio runtime was
+    /// active. `declare_with_recovery` with `periodic_queries` set must be called
+    /// from within a tokio runtime context. Fail-clear instead of the
+    /// `tokio::spawn` panic.
+    NoRuntime,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl From<SubscribeError> for AdvancedSubscribeError {
+    fn from(e: SubscribeError) -> Self {
+        AdvancedSubscribeError::Subscribe(e)
+    }
+}
+
 /// Configuration for a recovering subscriber ([`AdvancedSubscriber::declare_with_recovery`]).
 /// The sample-driven `_sn`-range recovery GET is implied by recovering at all
 /// (zenoh's `retransmission.is_some()`); [`Self::periodic_queries`] adds the
@@ -1005,7 +1034,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         recovery: RecoveryConfig,
         on_sample: OnSample,
         on_miss: OnMiss,
-    ) -> Result<Self, SubscribeError>
+    ) -> Result<Self, AdvancedSubscribeError>
     where
         R: 'static,
         T: TimeSource + Send + Sync + 'static,
@@ -1024,7 +1053,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         on_sample: OnSample,
         on_miss: OnMiss,
         recovery: Option<RecoveryConfig>,
-    ) -> Result<Self, SubscribeError>
+    ) -> Result<Self, AdvancedSubscribeError>
     where
         R: 'static,
         T: TimeSource + Send + Sync + 'static,
@@ -1039,6 +1068,13 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             .map(|c| c.allowed_destination)
             .unwrap_or(Locality::Any);
         let periodic = recovery.and_then(|c| c.periodic_queries);
+        // R311y90 (review C5) — fail fast & clear if off-runtime: the periodic
+        // task (below) is a tokio::spawn, which PANICS without a runtime. Check
+        // before declaring the subscriber so no half-declared subscriber needs
+        // rollback. The sample-driven / heartbeat-sub / history paths do not spawn.
+        if periodic.is_some() {
+            tokio::runtime::Handle::try_current().map_err(|_| AdvancedSubscribeError::NoRuntime)?;
+        }
         let heartbeat = recovery.map(|c| c.heartbeat).unwrap_or(false);
         // R311y89 (review C3) — the recovery / history GET timeout (zenoh's shared
         // `RecoveryConfig::query_timeout`), threaded to every GET so the deadline
@@ -2139,6 +2175,33 @@ mod tests {
             *delivered.lock().unwrap(),
             vec![0x42],
             "the timeout sweep released the wedged history; the buffered sample delivered"
+        );
+    }
+
+    /// R311y90 (review C5) regression: declaring a recovering subscriber with
+    /// periodic_queries OFF a tokio runtime must FAIL CLEAR with NoRuntime, not
+    /// panic inside tokio::spawn. This `#[test]` runs outside any runtime, so
+    /// Handle::try_current() returns Err -> the declare returns NoRuntime before
+    /// any subscriber is declared. Pre-fix the periodic-task spawn panicked
+    /// (aborting the test); the guard makes it a clean Result.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    #[test]
+    fn declare_with_periodic_off_runtime_fails_clear_not_panic() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let result = AdvancedSubscriber::declare_with_recovery(
+            &session,
+            "demo/data",
+            RecoveryConfig::new().with_periodic_queries(Duration::from_millis(100)),
+            |_sample: Sample| {},
+            |_miss: Miss| {},
+        );
+        assert!(
+            matches!(result, Err(AdvancedSubscribeError::NoRuntime)),
+            "periodic recovery off-runtime must fail clear with NoRuntime, not panic"
         );
     }
 }

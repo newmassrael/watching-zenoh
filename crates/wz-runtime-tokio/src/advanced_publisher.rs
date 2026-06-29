@@ -116,6 +116,7 @@ impl Default for AdvancedPublisherOptions {
 
 /// Why declaring an [`AdvancedPublisher`] failed.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum AdvancedPublisherError {
     /// `local_zid` was empty or longer than 16 bytes (the `SourceInfo`
     /// wire constraint).
@@ -124,6 +125,13 @@ pub enum AdvancedPublisherError {
     Cache(QueryableError),
     /// The `@adv` liveliness token declaration was rejected.
     Token(LivelinessAliasError),
+    /// R311y90 (review C5) — the heartbeat beacon task could not be spawned: no
+    /// tokio runtime was active. An [`AdvancedPublisher`] with a
+    /// `sample_miss_detection` heartbeat spawns a background beacon task, so it
+    /// must be declared from within a tokio runtime context. Fail-clear instead
+    /// of the `tokio::spawn` panic.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    NoRuntime,
 }
 
 impl From<QueryableError> for AdvancedPublisherError {
@@ -194,6 +202,18 @@ where
     ) -> Result<Self, AdvancedPublisherError> {
         if local_zid.is_empty() || local_zid.len() > 16 {
             return Err(AdvancedPublisherError::InvalidZid);
+        }
+
+        // R311y90 (review C5) — fail fast & clear if off-runtime: the heartbeat
+        // beacon (below) is a tokio::spawn task, which PANICS without a runtime.
+        // Check the spawn precondition BEFORE declaring the cache / token so no
+        // half-declared publisher needs rollback. The condition mirrors the
+        // heartbeat-task spawn arm exactly (state_publisher set + SequenceNumber).
+        #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+        if options.sample_miss_detection.state_publisher.is_some()
+            && matches!(options.sequencing, Sequencing::SequenceNumber)
+        {
+            tokio::runtime::Handle::try_current().map_err(|_| AdvancedPublisherError::NoRuntime)?;
         }
         let keyexpr = keyexpr.into();
         // Allocate the publisher entity id from the session's dedicated
@@ -687,6 +707,45 @@ mod tests {
             publisher.cache().map(|c| c.len()),
             Some(1),
             "a 0-depth cache degenerately retains exactly one (if-evict, zenoh-faithful)"
+        );
+    }
+
+    /// R311y90 (review C5) regression: declaring an advanced publisher with a
+    /// heartbeat beacon OFF a tokio runtime must FAIL CLEAR with NoRuntime, not
+    /// panic inside tokio::spawn. This `#[test]` runs outside any runtime, so
+    /// Handle::try_current() returns Err -> the declare returns NoRuntime before
+    /// any cache / token is declared. Pre-fix the beacon spawn panicked (aborting
+    /// the test); the guard makes it a clean Result.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    #[test]
+    fn declare_with_heartbeat_off_runtime_fails_clear_not_panic() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let result = AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            AdvancedPublisherOptions {
+                sequencing: Sequencing::SequenceNumber,
+                cache: None,
+                publisher_detection: false,
+                sample_miss_detection: MissDetectionConfig::default()
+                    .heartbeat(Duration::from_millis(100)),
+            },
+            vec![0x09],
+        );
+        assert!(
+            matches!(result, Err(AdvancedPublisherError::NoRuntime)),
+            "heartbeat beacon off-runtime must fail clear with NoRuntime, not panic"
         );
     }
 }
