@@ -37,7 +37,7 @@ use crate::metadata::PushMetadata;
 // codec-push subset without those metadata features carries no unused
 // import.
 #[cfg(feature = "pubsub-source-info")]
-use crate::source_info_ext::encode_source_info_ext_body;
+use crate::source_info_ext::encode_source_info_ext_entry;
 #[cfg(any(
     feature = "pubsub-source-info",
     feature = "pubsub-priority",
@@ -45,8 +45,6 @@ use crate::source_info_ext::encode_source_info_ext_body;
     feature = "pubsub-express"
 ))]
 use wz_codecs::ext_entry::ExtEntryOwnedVariant;
-#[cfg(feature = "pubsub-source-info")]
-use wz_codecs::ext_zbuf::ExtZbufOwned;
 #[cfg(any(
     feature = "pubsub-priority",
     feature = "pubsub-congestion-control",
@@ -363,19 +361,11 @@ fn build_body_extensions(
     if let Some(si) = source_info {
         let prefix = si.zid_prefix();
         if !prefix.is_empty() {
-            let body_bytes = encode_source_info_ext_body(prefix, si.eid, si.sn);
-            exts.push(ExtEntryOwned {
-                // ENC_ZBUF(0x40) | id_source_info(0x01). No M flag —
-                // source_info is informational (zenoh-pico
-                // `_z_msg_ext_t._source_info` emit at
-                // message.c:_z_push_body_encode_extensions has no M
-                // bit). Z chain-continuation bit applied below.
-                header: 0x40 | 0x01,
-                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                    value_len: body_bytes.len() as u64,
-                    value: crate::codec_owned::owned_bytes(&body_bytes)?,
-                }),
-            });
+            // The full-entry SSOT (header ENC_ZBUF|0x01 + ExtZbuf wrap). The
+            // empty-prefix skip stays here — a body that knows no source omits
+            // the ext. Z chain-continuation bit applied by apply_chain_z_bits
+            // below.
+            exts.push(encode_source_info_ext_entry(prefix, si.eid, si.sn)?);
         }
     }
     #[cfg(not(feature = "pubsub-source-info"))]

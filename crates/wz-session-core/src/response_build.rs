@@ -41,7 +41,7 @@ use sce_forge_runtime::codec::CodecError;
 // to the codec-feature-agnostic `source_info_ext` module so the
 // `codec-push` body-extension path can reach the encoder too; the
 // responder encoder below keeps borrowing the VLE helper from there.
-use crate::source_info_ext::encode_source_info_ext_body;
+use crate::source_info_ext::encode_source_info_ext_entry;
 use crate::vle::encode_vle_u64_into;
 
 /// R121j-3 — build a `Response(Reply(MsgPut))` network-message in
@@ -463,17 +463,10 @@ fn gated_reply_source_info(
         if let Some(si) = source_info {
             let prefix = si.zid_prefix();
             if !prefix.is_empty() {
-                let body_bytes = encode_source_info_ext_body(prefix, si.eid, si.sn);
-                return Ok(Some(ExtEntryOwned {
-                    // ENC_ZBUF(0x40) | id_source_info(0x01). No M flag —
-                    // source_info is informational. Z chain-continuation
-                    // applied by the caller's apply_chain_z_bits.
-                    header: 0x40 | 0x01,
-                    body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                        value_len: body_bytes.len() as u64,
-                        value: owned_bytes(&body_bytes)?,
-                    }),
-                }));
+                // The full-entry source_info SSOT (header ENC_ZBUF|0x01 +
+                // ExtZbuf wrap); Z chain-continuation applied by the caller's
+                // apply_chain_z_bits. The empty-prefix skip stays here.
+                return Ok(Some(encode_source_info_ext_entry(prefix, si.eid, si.sn)?));
             }
         }
         Ok(None)
@@ -1029,23 +1022,15 @@ impl ResponseErrBuilder {
                 });
             }
             if let Some((zid, eid, sn)) = self.source_info {
-                let value = encode_source_info_ext_body(&zid, eid, sn);
                 // _Z_FLAG_Z_Z(0x80) signals ext-chain presence to the
                 // peer's `_z_err_decode` (message.c:594-595).
                 err.header |= 0x80;
-                err.extensions = Some(vec![ExtEntryOwned {
-                    // ENC_ZBUF(0x40) | id_source_info(0x01). No M flag
-                    // (informational hint) and no Z chain-continuation
-                    // (single entry today; the chain-plumb step lands
-                    // once a second Err ext exists, mirroring
-                    // RequestQueryBuilder.build at
-                    // session_glue.rs:2772-2782).
-                    header: 0x40 | 0x01,
-                    body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                        value_len: value.len() as u64,
-                        value: owned_bytes(&value)?,
-                    }),
-                }]);
+                // The full-entry source_info SSOT (header ENC_ZBUF|0x01 +
+                // ExtZbuf wrap). Sole Err ext today, so no Z chain-continuation
+                // (the chain-plumb step lands once a second Err ext exists,
+                // mirroring RequestQueryBuilder.build at
+                // session_glue.rs:2772-2782).
+                err.extensions = Some(vec![encode_source_info_ext_entry(&zid, eid, sn)?]);
             }
         } else {
             unreachable!(

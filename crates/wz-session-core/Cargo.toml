@@ -460,9 +460,13 @@ query-source-info = []
 # `_z_push_body_encode`, message.c:517 -> :291-293 emits ext 0x01 exactly
 # like a normal Put), so the advanced-recovery cache can stamp its
 # recovery replies with the original sample's (zid, eid, sn) and the
-# subscriber can re-key/reorder them. OFF (default) = pico-faithful
-# no-emit: storage / query replies stay byte-unchanged. Composed in by
-# ext-pubsub-advanced-recovery.
+# subscriber can re-key/reorder them. OFF (default) = pico-faithful no-emit.
+# Composed in by ext-pubsub-advanced-recovery. The gate is DEDICATED (not a
+# reuse of pubsub-source-info) for consistency with the per-message-kind
+# source-info gate family (query-source-info already has its own); storage /
+# query replies stay byte-unchanged regardless of the gate choice, since no
+# such queryable calls `.source_info()` -- exactly as reply-attachment safely
+# reuses pubsub-attachment.
 reply-source-info = []
 # R311fm — the z_get consumer's reply-body decode plane. Gates the
 # inbound `Response(Reply)` Put / Del body arms in `reply.rs`

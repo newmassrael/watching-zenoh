@@ -539,21 +539,13 @@ impl RequestQueryBuilder {
             let mut query_exts: Vec<ExtEntryOwned> = Vec::new();
             #[cfg(feature = "query-source-info")]
             if let Some(si) = self.query_source_info {
-                let body_bytes = crate::source_info_ext::encode_source_info_ext_body(
+                // The full-entry source_info SSOT (header ENC_ZBUF|0x01 +
+                // ExtZbuf wrap); the Z bit is applied in the finalize loop.
+                query_exts.push(crate::source_info_ext::encode_source_info_ext_entry(
                     si.zid_prefix(),
                     si.eid,
                     si.sn,
-                );
-                query_exts.push(ExtEntryOwned {
-                    // ENC_ZBUF(0x40) | id_source_info(0x01). No M flag —
-                    // source_info is informational (zenoh-pico
-                    // message.c:439). Z bit applied in the finalize loop.
-                    header: 0x40 | 0x01,
-                    body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                        value_len: body_bytes.len() as u64,
-                        value: owned_bytes(&body_bytes)?,
-                    }),
-                });
+                )?);
             }
             #[cfg(feature = "query-attachment")]
             if let Some(attachment) = self.query_attachment {
