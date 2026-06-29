@@ -1413,6 +1413,27 @@ layer_c1ap_cargo_test_ext_pubsub_serde() {
         && cargo clippy -p wz-runtime-tokio --features ext-pubsub-serde-codec --quiet -- -D warnings)
 }
 
+# ─── Layer C1aq — ext-pubsub advanced-publisher/cache §5.25: @adv ring + queryable ─
+#
+# R311y69: ext-pubsub-advanced-publisher (which pulls ext-pubsub-advanced-cache)
+# is off-default, so the default Layer C1 never compiles the advanced_publisher /
+# advanced_cache modules — this lane is their only run-site. It runs the
+# selector-filter + answer_from_ring unit tests AND the WIRE-LEVEL composed e2e
+# (a real loopback session.query through the declared cache queryable recovers
+# the three published sequenced samples — the R311y66 composition standard, not
+# a kernel-proxy), then clippy-gates the feature (incl the wz facade forward via
+# wz-runtime-tokio). query-get supplies the loopback get; pubsub-allow-loop the
+# loopback dispatch.
+layer_c1aq_cargo_test_ext_pubsub_advanced() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio \
+            --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
+            --lib advanced_ --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets \
+            --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
+            --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -4138,6 +4159,7 @@ run_layer C1am layer_c1am_cargo_test_adminspace || overall=1
 run_layer C1an layer_c1an_cargo_test_adminspace_nodefault || overall=1
 run_layer C1ao layer_c1ao_cargo_test_config_mutate_runtime || overall=1
 run_layer C1ap layer_c1ap_cargo_test_ext_pubsub_serde || overall=1
+run_layer C1aq layer_c1aq_cargo_test_ext_pubsub_advanced || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

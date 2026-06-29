@@ -722,11 +722,28 @@ pub mod session_open;
 /// optional [`uhlc::HLC`] source (`time-hlc`, active). Consumed by
 /// [`storage_service`] to stamp un-timestamped captured samples — wz's only
 /// auto-stamp site today — so the module is gated on `storage-backend`.
-#[cfg(feature = "storage-backend")]
+// R311y69 — `timestamp_source` (the §5.18 FallbackStamp seam) gained a
+// second consumer: `ext-pubsub-advanced-publisher` stamps every cached
+// put through it. Widen the gate so the module compiles for either
+// consumer (the storage-backend OR the advanced-publisher atom).
+#[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
 pub mod timestamp_source;
 
 #[cfg(feature = "storage-backend")]
 pub mod storage_service;
+
+/// R311y69 — `ext-pubsub-advanced-cache` (§5.25): the publisher-side
+/// sample ring + the `@adv` queryable answering `_sn` / `_max` recovery
+/// and history selectors from it.
+#[cfg(feature = "ext-pubsub-advanced-cache")]
+pub mod advanced_cache;
+
+/// R311y69 — `ext-pubsub-advanced-publisher` (§5.25): a publisher that
+/// stamps a per-sample `SourceInfo` sequence number, retains samples in an
+/// [`advanced_cache::AdvancedCache`], and announces itself with an `@adv`
+/// liveliness token.
+#[cfg(feature = "ext-pubsub-advanced-publisher")]
+pub mod advanced_publisher;
 
 /// Round 311vm — the storage-replication DRIVER, digest publisher half
 /// (§5.11 storage, replication 6/N): the tokio binding that periodically

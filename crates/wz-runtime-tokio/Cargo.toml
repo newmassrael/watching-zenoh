@@ -223,6 +223,24 @@ adminspace-metrics = ["adminspace-core", "wz-session-core/adminspace-metrics"]
 # Serialization Format codec from wz-session-core (no runtime wiring;
 # the codec is standalone). Re-exported at `crate::serde_codec`.
 ext-pubsub-serde-codec = ["wz-session-core/ext-pubsub-serde-codec"]
+
+# ext-pubsub-advanced-cache (§5.25) — the publisher-side sample ring +
+# the @adv queryable answering _sn / _max recovery selectors. Needs the
+# queryable (query-queryable) + reply timestamps (pubsub-timestamp).
+ext-pubsub-advanced-cache = ["query-queryable", "pubsub-timestamp"]
+
+# ext-pubsub-advanced-publisher (§5.25) — the SourceInfo-sequencing
+# publisher composing the cache. Stamps source_info (pubsub-source-info)
+# + timestamp (pubsub-timestamp) on each put (pubsub-put), declares the
+# @adv liveliness token (liveliness-token), and owns the cache
+# (ext-pubsub-advanced-cache).
+ext-pubsub-advanced-publisher = [
+    "ext-pubsub-advanced-cache",
+    "pubsub-put",
+    "pubsub-source-info",
+    "pubsub-timestamp",
+    "liveliness-token",
+]
 # adminspace-read (§5.23) — the permissions.read GET gate: declare_adminspace's
 # handler answers nothing when AdminSpacePermissions.read=false (the querier gets
 # only the terminating Final), the wz mirror of zenoh's read-permission check

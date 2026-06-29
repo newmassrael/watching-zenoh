@@ -843,9 +843,13 @@ storage-mgr-strip-prefix = ["wz-runtime-tokio?/storage-mgr-strip-prefix"]
 storage-mgr-wildcard-updates = []
 
 # ----- §5.25 ext-pubsub (10 atomic, all reserved) -----
-ext-pubsub-advanced-cache = []
+# R311y69 — ext-pubsub-advanced-cache + ext-pubsub-advanced-publisher are
+# now real cfg gates (the @adv sample ring/queryable + the
+# SourceInfo-sequencing publisher in wz-runtime-tokio); forward them. The
+# remaining §5.25 atoms stay reserved `= []` until built.
+ext-pubsub-advanced-cache = ["wz-runtime-tokio?/ext-pubsub-advanced-cache"]
 ext-pubsub-advanced-history = []
-ext-pubsub-advanced-publisher = []
+ext-pubsub-advanced-publisher = ["wz-runtime-tokio?/ext-pubsub-advanced-publisher"]
 ext-pubsub-advanced-recovery = []
 ext-pubsub-advanced-subscriber = []
 ext-pubsub-fetching-subscriber = []
