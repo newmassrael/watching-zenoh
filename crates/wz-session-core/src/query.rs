@@ -169,7 +169,7 @@ use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::response_build::{ResponseErrBuilder, ResponseReplyBuilder};
 #[cfg(feature = "alloc")]
-use crate::sample::{EncodingHint, TimestampHint};
+use crate::sample::{EncodingHint, SourceInfo, TimestampHint};
 
 /// R311v — extract the attachment payload view from an inbound
 /// [`Query`]'s extensions chain.
@@ -396,6 +396,17 @@ pub enum QueryReply {
         /// for a value-less metadata reply (an empty-payload Put). Threaded
         /// into [`crate::response_build::ResponseReplyBuilder::attachment`].
         attachment: Option<Vec<u8>>,
+        /// Optional inner-body `source_info` ext (id 0x01: `(zid, eid, sn)`)
+        /// carried on the inner Put/Del body. `None` emits no source_info
+        /// ext; `Some` stamps the sample's source identity so a recovery
+        /// querier (an `ext-pubsub-advanced-subscriber`) can re-key /
+        /// reorder a retransmitted sample — what an
+        /// [`ext-pubsub-advanced-cache`](crate) recovery reply carries
+        /// (zenoh replies the cached `Sample` whole, so its `SourceInfo`
+        /// rides back). Emitted iff `reply-source-info` is on (the
+        /// advanced-recovery gate); threaded into
+        /// [`crate::response_build::ResponseReplyBuilder::source_info`].
+        source_info: Option<SourceInfo>,
     },
     /// Error reply — `MID = _Z_MID_Z_ERR(0x05)`. The `encoding` tuple
     /// (id, optional schema) maps onto
@@ -446,6 +457,7 @@ impl QueryReply {
                 timestamp,
                 responder,
                 attachment,
+                source_info,
             } => {
                 let mut builder = match body {
                     ReplyBody::Put(payload) => {
@@ -476,6 +488,13 @@ impl QueryReply {
                 // it). `None` leaves the body ext chain empty / Z bit clear.
                 if let Some(att) = attachment {
                     builder = builder.attachment(&att);
+                }
+                // Thread the inner-body source_info ext (id 0x01), emitted
+                // iff `reply-source-info` is on (the builder gates it). `None`
+                // leaves the body source_info-free. What an advanced-recovery
+                // cache reply carries so the subscriber re-keys / reorders.
+                if let Some(si) = source_info {
+                    builder = builder.source_info(&si);
                 }
                 if let Some((zid, eid)) = responder {
                     builder = builder.responder(&zid, eid);
@@ -558,6 +577,7 @@ impl<'a> QueryResponder<'a> {
             timestamp: None,
             responder: self.responder.clone(),
             attachment: None,
+            source_info: None,
         });
     }
 
@@ -581,6 +601,7 @@ impl<'a> QueryResponder<'a> {
             timestamp: None,
             responder: self.responder.clone(),
             attachment: None,
+            source_info: None,
         });
     }
 
@@ -609,6 +630,39 @@ impl<'a> QueryResponder<'a> {
             timestamp: Some(timestamp.clone()),
             responder: self.responder.clone(),
             attachment: None,
+            source_info: None,
+        });
+    }
+
+    /// R311y75 — emit a Put-form recovery reply carrying the full recovery
+    /// metadata: an explicit `keyexpr`, the value `payload`, an optional
+    /// value `encoding` (the `MsgPut` E-flag), the value `timestamp` (the
+    /// T-flag), AND the sample's `source_info` (the inner-body source_info
+    /// ext id 0x01). The faithful shape an `ext-pubsub-advanced-cache`
+    /// recovery reply needs — each retransmitted sample replies under its
+    /// own key carrying the `(zid, eid, sn)` the subscriber re-keys /
+    /// reorders it by (zenoh replies the cached `Sample` whole, so its
+    /// `SourceInfo` rides back). The source_info threads through
+    /// [`QueryReply::into_response`] into
+    /// [`crate::response_build::ResponseReplyBuilder::source_info`] (emitted
+    /// iff `reply-source-info` is on, the advanced-recovery gate).
+    pub fn send_reply_keyed_sourced(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&EncodingHint>,
+        timestamp: &TimestampHint,
+        source_info: Option<&SourceInfo>,
+    ) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: keyexpr.to_string(),
+            body: ReplyBody::Put(payload.to_vec()),
+            encoding: encoding.cloned(),
+            timestamp: Some(timestamp.clone()),
+            responder: self.responder.clone(),
+            attachment: None,
+            source_info: source_info.cloned(),
         });
     }
 
@@ -642,6 +696,7 @@ impl<'a> QueryResponder<'a> {
             timestamp: None,
             responder: self.responder.clone(),
             attachment: Some(attachment.to_vec()),
+            source_info: None,
         });
     }
 
@@ -668,6 +723,7 @@ impl<'a> QueryResponder<'a> {
             timestamp: None,
             responder: self.responder.clone(),
             attachment: None,
+            source_info: None,
         });
     }
 
@@ -684,6 +740,7 @@ impl<'a> QueryResponder<'a> {
             timestamp: None,
             responder: self.responder.clone(),
             attachment: None,
+            source_info: None,
         });
     }
 
@@ -821,6 +878,16 @@ impl ReplyOut for QueryResponder<'_> {
         attachment: &[u8],
     ) {
         self.send_reply_keyed_attached(keyexpr, payload, encoding, attachment);
+    }
+    fn reply_keyed_sourced(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&EncodingHint>,
+        timestamp: &TimestampHint,
+        source_info: Option<&SourceInfo>,
+    ) {
+        self.send_reply_keyed_sourced(keyexpr, payload, encoding, timestamp, source_info);
     }
     fn reply_del(&mut self) {
         self.send_reply_del();
@@ -2385,6 +2452,7 @@ mod tests {
             timestamp: None,
             responder: None,
             attachment: None,
+            source_info: None,
         };
         let response = reply.into_response().unwrap();
         // The Response should encode to the same bytes as the
@@ -2400,6 +2468,86 @@ mod tests {
         );
     }
 
+    /// R311y75 — a `QueryReply::Reply` carrying `source_info` threads it into
+    /// [`ResponseReplyBuilder::source_info`], so a recovery reply's wire bytes
+    /// carry the inner-body source_info ext (id 0x01). The composition proof
+    /// for the advanced-recovery reply seam (R311y75) over the R311y74 codec:
+    /// `into_response` output == the direct builder path, byte-for-byte.
+    #[cfg(feature = "reply-source-info")]
+    #[test]
+    fn query_reply_into_response_threads_source_info_to_builder() {
+        let si = crate::sample::SourceInfo::new(&[0xAA; 4], 11, 17);
+        let reply = QueryReply::Reply {
+            rid: 42,
+            keyexpr_literal: "demo/data".to_string(),
+            body: ReplyBody::Put(b"v".to_vec()),
+            encoding: None,
+            timestamp: None,
+            responder: None,
+            attachment: None,
+            source_info: Some(si.clone()),
+        };
+        let via_chain = reply.into_response().unwrap().wire();
+        let via_builder = ResponseReplyBuilder::new(42, 0, Some("demo/data"), b"v")
+            .source_info(&si)
+            .build()
+            .unwrap()
+            .wire();
+        assert_eq!(
+            via_chain, via_builder,
+            "QueryReply::into_response must thread source_info into \
+             ResponseReplyBuilder.source_info byte-for-byte",
+        );
+        // The wire actually carries the source_info ext: header 0x41
+        // (ENC_ZBUF|0x01, sole entry) + value_len 0x07.
+        assert!(
+            via_chain.windows(2).any(|w| w == [0x41, 0x07]),
+            "recovery reply wire carries the source_info ext (0x41, value_len 7)",
+        );
+    }
+
+    /// R311y75 — the full ReplyOut → QueryResponder path: a queryable that
+    /// calls `out.reply_keyed_sourced(..)` (the advanced-recovery cache) stages
+    /// a `QueryReply` carrying the source_info, so `into_response` emits the
+    /// source_info ext on the wire. Locks the trait-method → staging → wire
+    /// chain byte-for-byte against the direct builder.
+    #[cfg(feature = "reply-source-info")]
+    #[test]
+    fn reply_keyed_sourced_emits_source_info_ext_through_responder() {
+        let si = crate::sample::SourceInfo::new(&[0x09; 1], 3, 5);
+        let si_cb = si.clone();
+        let ts = TimestampHint {
+            time: 1,
+            zid: vec![0x09],
+        };
+        let ts_cb = ts.clone();
+        let mut reg = QueryableRegistry::new();
+        reg.register("demo/data", move |_q, responder| {
+            responder.reply_keyed_sourced("demo/data", b"v", None, &ts_cb, Some(&si_cb));
+        });
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(7, 0, Some("demo/data")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        assert_eq!(replies.len(), 1);
+        let via_chain = replies.pop().unwrap().into_response().unwrap().wire();
+        // Match the direct builder with the SAME timestamp so the comparison
+        // holds regardless of the `pubsub-timestamp` gate state.
+        let via_builder = ResponseReplyBuilder::new(7, 0, Some("demo/data"), b"v")
+            .timestamp(&ts)
+            .source_info(&si)
+            .build()
+            .unwrap()
+            .wire();
+        assert_eq!(
+            via_chain, via_builder,
+            "reply_keyed_sourced → QueryResponder → into_response must emit the \
+             source_info ext byte-for-byte",
+        );
+    }
+
     #[test]
     fn query_reply_into_response_del_path_flips_inner_arm() {
         let reply = QueryReply::Reply {
@@ -2410,6 +2558,7 @@ mod tests {
             timestamp: None,
             responder: None,
             attachment: None,
+            source_info: None,
         };
         let response = reply.into_response().unwrap();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("clear/me"), &[])

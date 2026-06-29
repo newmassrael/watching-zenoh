@@ -200,6 +200,34 @@ pub trait ReplyOut {
         let _ = (encoding, attachment);
         self.reply_keyed(keyexpr, payload);
     }
+    /// Emit a Put-form reply carrying the full recovery metadata: an
+    /// explicit concrete `keyexpr`, the value `payload`, an optional value
+    /// `encoding` (the inner `MsgPut` E-flag), the value `timestamp` (the
+    /// T-flag), AND the sample's `source_info` (the inner-body source_info
+    /// ext id 0x01). The faithful shape an `ext-pubsub-advanced-cache`
+    /// recovery reply needs: each retransmitted sample replies under its
+    /// own key carrying the `(zid, eid, sn)` the subscriber re-keys /
+    /// reorders it by — zenoh replies the cached `Sample` whole, so its
+    /// `SourceInfo` rides back (zenoh-ext advanced_cache.rs:209-346).
+    ///
+    /// Default impl falls back to [`Self::reply_keyed_stamped`] (dropping
+    /// the source_info), so impls that predate the recovery seam stay valid
+    /// — a build without `reply-source-info` (or a sink that does not carry
+    /// it) simply omits the body source_info ext. `alloc`-gated (the
+    /// [`crate::sample::SourceInfo`] type lives in the `alloc`-gated
+    /// `sample` module), mirroring [`Self::reply_keyed_stamped`].
+    #[cfg(feature = "alloc")]
+    fn reply_keyed_sourced(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&crate::sample::EncodingHint>,
+        timestamp: &crate::sample::TimestampHint,
+        source_info: Option<&crate::sample::SourceInfo>,
+    ) {
+        let _ = source_info;
+        self.reply_keyed_stamped(keyexpr, payload, encoding, timestamp);
+    }
     /// Emit a Del-form reply (the queryable signals deletion at the
     /// keyexpr).
     fn reply_del(&mut self);

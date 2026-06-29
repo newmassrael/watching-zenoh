@@ -457,6 +457,13 @@ impl From<QueryReply> for InboundReply {
                 timestamp: _,
                 responder: _,
                 attachment,
+                // R311y75 — the recovery source_info (id 0x01) is producer-side
+                // only this round; surfacing it on the loopback InboundReply so
+                // an advanced-recovery subscriber can re-key/reorder recovered
+                // samples lands with the subscriber reorder buffer (the
+                // consumer, advanced-recovery piece #3), mirroring the deferred
+                // timestamp/responder surfacing above.
+                source_info: _,
             } => {
                 let body = match body {
                     ReplyBody::Put(payload) => InboundReplyBody::Put {
@@ -1905,6 +1912,7 @@ mod tests {
             timestamp: None,
             responder: None,
             attachment: None,
+            source_info: None,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 11);
@@ -1941,6 +1949,7 @@ mod tests {
             timestamp: None,
             responder: None,
             attachment: Some(b"align".to_vec()),
+            source_info: None,
         };
         let inbound: InboundReply = qr.into();
         match inbound.body {
@@ -1969,6 +1978,7 @@ mod tests {
             timestamp: None,
             responder: Some((vec![0xaa, 0xbb], 5)),
             attachment: None,
+            source_info: None,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 12);
