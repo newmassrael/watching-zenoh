@@ -146,11 +146,13 @@ where
             return Err(AdvancedPublisherError::InvalidZid);
         }
         let keyexpr = keyexpr.into();
-        // Allocate the publisher entity id from the session's monotonic
-        // counter (zenoh derives `eid` from the inner publisher's
-        // EntityGlobalId; wz folds the entity ids into the one session
-        // counter that also backs token ids).
-        let eid = session.actions().alloc_next_token_id() as u32;
+        // Allocate the publisher entity id from the session's dedicated
+        // entity-id SSOT (the `SourceInfo.eid` id-space). zenoh-pico draws
+        // every entity id from one `_z_get_entity_id`; wz keeps per-purpose
+        // id counters, so the publisher eid has its own (R311y72: it was
+        // minted from the token-id counter — a conflated namespace + a
+        // truncating `as u32`; now a real u32 entity counter).
+        let eid = session.actions().alloc_next_entity_id();
 
         // `@adv/pub/<zid>/<eid|uhlc>/_` — the detection + recovery suffix
         // (zenoh advanced_publisher.rs:317-329). The `<eid>` discriminator

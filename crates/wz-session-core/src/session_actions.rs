@@ -31,9 +31,9 @@ use hashbrown::HashMap;
 // origin used portable-atomic unconditionally because the tokio crate always
 // carries it; here it splits across the two session-core profiles.
 #[cfg(not(feature = "no_std"))]
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(feature = "no_std")]
-use portable_atomic::{AtomicU64, Ordering};
+use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 
 // CodecError is the return type of `encode_init_with_role` /
 // `encode_open_with_role` only; gate it on those encoders' codecs so a
@@ -571,6 +571,18 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// returns `0` matching the post-increment-from-zero convention.
     /// `Relaxed` ordering — uniqueness is the only invariant.
     pub next_outbound_interest_id: AtomicU64,
+
+    /// R311y72 — outbound ENTITY id generator for the `SourceInfo.eid` an
+    /// entity (today the `ext-pubsub-advanced-publisher`) stamps onto its
+    /// samples. zenoh-pico keeps ONE shared `_z_get_entity_id` for every
+    /// entity (pub / sub / queryable / token); wz already split the wire
+    /// id-spaces per purpose (request / token / interest above), so the
+    /// SourceInfo entity id gets its own counter rather than borrowing the
+    /// token-id space (R311y71 review: minting a publisher eid from
+    /// `alloc_next_token_id` conflated two id namespaces). `AtomicU32`
+    /// because `SourceInfo.eid` is a `u32` — no truncating `as u32` cast.
+    /// `Relaxed`; first call returns `0`.
+    pub next_outbound_entity_id: AtomicU32,
 }
 
 /// R121f1 — wire-spec-mandatory Patch extension entry for the Init
@@ -779,6 +791,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             next_outbound_request_id: AtomicU64::new(0),
             next_outbound_token_id: AtomicU64::new(0),
             next_outbound_interest_id: AtomicU64::new(0),
+            next_outbound_entity_id: AtomicU32::new(0),
         })
     }
 }
@@ -2172,6 +2185,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `Relaxed` ordering — uniqueness is the only invariant.
     pub fn alloc_next_token_id(&self) -> u64 {
         self.next_outbound_token_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// R311y72 — outbound ENTITY id generator (the `SourceInfo.eid` a
+    /// publisher stamps). Returns the next `u32` entity id and advances the
+    /// counter; first call returns `0`. Drawn from its own id-space (not
+    /// the token-id counter), the SSOT for "this session's next entity id".
+    /// `Relaxed` — uniqueness within the session is the only invariant
+    /// (cross-session collisions are keyed out by the accompanying zid).
+    pub fn alloc_next_entity_id(&self) -> u32 {
+        self.next_outbound_entity_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// R279 — outbound liveliness-subscriber `interest_id` generator.
