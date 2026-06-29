@@ -875,6 +875,14 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// Declare a plain advanced subscriber (no recovery): a forward gap fires
     /// a [`Miss`] and delivers past the hole. See [`Self::declare_with_recovery`]
     /// for the gap-recovering form.
+    ///
+    /// R311y88 (review H1) — this form does NOT route through `declare_impl`
+    /// (which `tokio::spawn`s + whose callback captures the session): it builds
+    /// a non-spawning subscriber whose callback only orders. Its bounds are
+    /// therefore IDENTICAL to the recovery-OFF build's `declare` — so toggling
+    /// `ext-pubsub-advanced-recovery` (an additive feature) cannot tighten this
+    /// signature and break a downstream `declare` caller (the signature-stability
+    /// invariant). The spawn-requiring bounds live only on `declare_with_recovery`.
     pub fn declare<T, OnSample, OnMiss>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
@@ -882,15 +890,41 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         on_miss: OnMiss,
     ) -> Result<Self, SubscribeError>
     where
-        R: 'static,
-        T: TimeSource + Send + Sync + 'static,
+        T: TimeSource + 'static,
         <R as SessionRuntime>::LinkSink: Send + Sync,
         SessionLinkActions<R, T>: Send + Sync + 'static,
-        Session<R, T, Unicast>: Send + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
         OnMiss: FnMut(Miss) + Send + 'static,
     {
-        Self::declare_impl(session, keyexpr, on_sample, on_miss, None)
+        let state = Arc::new(Mutex::new(State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(on_sample),
+            on_miss: Box::new(on_miss),
+            retransmission: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            history_pending: false,
+        }));
+        let cb_state = Arc::clone(&state);
+        let subscriber = session.declare_subscriber(
+            keyexpr,
+            SubscribeOptions::default(),
+            move |view: &dyn SampleView| {
+                // retransmission off + no history -> `handle_live` never returns a
+                // RecoveryRequest, so the callback neither captures the session nor
+                // spawns. Identical behaviour to the recovery-OFF `handle`
+                // (forward gap = Miss + deliver), with no spawn-requiring bounds.
+                let _ = cb_state
+                    .lock()
+                    .expect("advanced subscriber state mutex poisoned")
+                    .handle_live(view);
+            },
+        )?;
+        Ok(Self {
+            _subscriber: subscriber,
+            _statesref: state,
+            _periodic: None,
+            _heartbeat_sub: None,
+        })
     }
 
     /// Declare a gap-recovering advanced subscriber: a forward gap is buffered
