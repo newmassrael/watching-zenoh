@@ -173,6 +173,17 @@ pub struct RecoveryConfig {
     /// beacon instead of a local timer (the producer beacon is the separate
     /// `ext-pubsub-sample-miss-detection` atom). `false` (default) = off.
     pub heartbeat: bool,
+    /// R311y89 (review C3) — timeout applied to the recovery / history
+    /// `Session::query` GETs. A no-answerer GET (no `@adv` cache replies) registers
+    /// a pending reply entry that waits on a peer `Final` which never arrives; with
+    /// a non-zero timeout the reply registry's deadline sweep
+    /// ([`crate::reply::ReplyRegistry::sweep_timed_out`], driven by the runtime's
+    /// sweep task) fires the synthetic `Final`, so [`State::finish_recovery`] /
+    /// [`State::finish_history`] run and the subscriber stops waiting forever
+    /// (without it `history_pending` / `pending_queries` wedge and the subscriber
+    /// delivers nothing). Default `Duration::from_secs(10)` — zenoh-ext
+    /// `RecoveryConfig::query_timeout` default + zenoh-pico `Z_GET_TIMEOUT_DEFAULT`.
+    pub query_timeout: Duration,
     /// R311y86 — when `Some`, issue a startup history GET over `<key_expr>/@adv/**`
     /// on declare so a LATE JOINER recovers the publishers' cached history (zenoh
     /// `AdvancedSubscriberBuilder::history`). `None` (default) = no history.
@@ -187,6 +198,7 @@ impl Default for RecoveryConfig {
             allowed_destination: Locality::Any,
             periodic_queries: None,
             heartbeat: false,
+            query_timeout: Duration::from_secs(10),
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history: None,
         }
@@ -217,6 +229,16 @@ impl RecoveryConfig {
     /// Enable the heartbeat recovery trigger (see [`Self::heartbeat`]).
     pub fn with_heartbeat(mut self) -> Self {
         self.heartbeat = true;
+        self
+    }
+
+    /// Pin the recovery / history GET timeout (see [`Self::query_timeout`]).
+    /// Converted to the `QueryOptions::with_timeout_ms` value at GET-issue time
+    /// by [`recovery_query_timeout_ms`], which clamps to `>= 1` ms — a `0` would
+    /// register the GET with a `None` deadline that the sweep skips forever
+    /// (the C3 no-answerer wedge).
+    pub fn with_query_timeout(mut self, query_timeout: Duration) -> Self {
+        self.query_timeout = query_timeout;
         self
     }
 
@@ -618,6 +640,19 @@ fn flush_sequenced(
     }
 }
 
+/// R311y89 (review C3) — convert a [`RecoveryConfig::query_timeout`] `Duration`
+/// into the `QueryOptions::with_timeout_ms` `u32` ms value, clamped to
+/// `[1, u32::MAX]`. The lower clamp is the correctness bite: a `0` (a zero or
+/// sub-ms `Duration` truncates to `0`) is the `timeout_ms == 0` "never-expire"
+/// sentinel, so the GET's pending reply entry registers with `deadline_ms == None`
+/// and [`crate::reply::ReplyRegistry::sweep_timed_out`] skips it on every pass —
+/// a no-answerer recovery / history GET would then wedge the subscriber forever.
+/// The upper clamp keeps the cast lossless (the `with_timeout_ms` field is `u32`).
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+fn recovery_query_timeout_ms(query_timeout: Duration) -> u32 {
+    query_timeout.as_millis().clamp(1, u32::MAX as u128) as u32
+}
+
 /// Issue a sample-driven `_sn={from_sn}..` recovery GET against the gapped
 /// source's `@adv` cache and feed the recovered replies back into the
 /// per-source ordering. The recovery KE mirrors zenoh's
@@ -632,6 +667,7 @@ fn issue_recovery_query<R, T>(
     base_keyexpr: &str,
     req: RecoveryRequest,
     dest: Locality,
+    timeout_ms: u32,
 ) where
     R: SessionRuntime,
     T: TimeSource + 'static,
@@ -647,15 +683,19 @@ fn issue_recovery_query<R, T>(
         None => format!("_sn={}..", req.from_sn),
     }
     .into_bytes();
+    // R311y89 (review C3) — bound the GET with a timeout so the deadline sweep can
+    // fire `finish_recovery` if no `@adv` cache answers (else `pending_queries`
+    // wedges this source's reorder buffer forever).
     let opts = QueryOptions::get()
         .with_allowed_destination(dest)
-        .with_parameters(params);
+        .with_parameters(params)
+        .with_timeout_ms(timeout_ms);
 
     let key = (req.zid, req.eid);
     let reply_states = Arc::clone(statesref);
     let final_states = Arc::clone(statesref);
-    let final_key = key;
-    let _ = session.query(
+    let final_key = key.clone();
+    let issued = session.query(
         &recovery_ke,
         opts,
         move |reply: &dyn ReplyView| {
@@ -673,6 +713,17 @@ fn issue_recovery_query<R, T>(
                 .finish_recovery(&final_key);
         },
     );
+    // R311y89 (review C3) — a GET that failed to issue never registered a pending
+    // reply entry (`Session::query` rolls it back on a wire-emit error), so neither
+    // its `on_final` nor the deadline sweep can ever fire `finish_recovery`. Roll
+    // back here so the `pending_queries` the caller bumped before this GET does not
+    // wedge the source's buffer behind a phantom in-flight query.
+    if issued.is_err() {
+        statesref
+            .lock()
+            .expect("advanced subscriber state mutex poisoned")
+            .finish_recovery(&key);
+    }
 }
 
 /// Re-key a recovery / history reply into a `(source-key, sn, Sample)` for the
@@ -712,6 +763,7 @@ fn issue_history_query<R, T>(
     base_keyexpr: &str,
     sample_depth: Option<usize>,
     dest: Locality,
+    timeout_ms: u32,
 ) where
     R: SessionRuntime,
     T: TimeSource + 'static,
@@ -719,7 +771,13 @@ fn issue_history_query<R, T>(
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
     let history_ke = format!("{base_keyexpr}/@adv/**");
-    let opts = QueryOptions::get().with_allowed_destination(dest);
+    // R311y89 (review C3) — bound the GET with a timeout so the deadline sweep can
+    // fire `finish_history` if no `@adv` cache answers. Without it `history_pending`
+    // stays set forever and EVERY live sample buffers undelivered (the subscriber
+    // delivers nothing at all).
+    let opts = QueryOptions::get()
+        .with_allowed_destination(dest)
+        .with_timeout_ms(timeout_ms);
     let opts = match sample_depth {
         Some(max) => opts.with_parameters(format!("_max={max}").into_bytes()),
         None => opts,
@@ -727,7 +785,7 @@ fn issue_history_query<R, T>(
 
     let reply_states = Arc::clone(statesref);
     let final_states = Arc::clone(statesref);
-    let _ = session.query(
+    let issued = session.query(
         &history_ke,
         opts,
         move |reply: &dyn ReplyView| {
@@ -745,6 +803,15 @@ fn issue_history_query<R, T>(
                 .finish_history();
         },
     );
+    // R311y89 (review C3) — a history GET that failed to issue never registered, so
+    // `finish_history` (which clears `history_pending` + flushes the buffer) would
+    // never run and the subscriber would buffer live samples forever. Clear it here.
+    if issued.is_err() {
+        statesref
+            .lock()
+            .expect("advanced subscriber state mutex poisoned")
+            .finish_history();
+    }
 }
 
 /// R311y83 — run ONE periodic recovery tick: collect each source's
@@ -758,6 +825,7 @@ fn run_periodic_tick<R, T>(
     statesref: &Arc<Mutex<State>>,
     base_keyexpr: &str,
     dest: Locality,
+    timeout_ms: u32,
 ) where
     R: SessionRuntime,
     T: TimeSource + 'static,
@@ -771,7 +839,7 @@ fn run_periodic_tick<R, T>(
         state.periodic_requests()
     };
     for req in requests {
-        issue_recovery_query(session, statesref, base_keyexpr, req, dest);
+        issue_recovery_query(session, statesref, base_keyexpr, req, dest, timeout_ms);
     }
 }
 
@@ -972,6 +1040,14 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             .unwrap_or(Locality::Any);
         let periodic = recovery.and_then(|c| c.periodic_queries);
         let heartbeat = recovery.map(|c| c.heartbeat).unwrap_or(false);
+        // R311y89 (review C3) — the recovery / history GET timeout (zenoh's shared
+        // `RecoveryConfig::query_timeout`), threaded to every GET so the deadline
+        // sweep can release a no-answerer query (default 10s when unset).
+        let timeout_ms = recovery_query_timeout_ms(
+            recovery
+                .map(|c| c.query_timeout)
+                .unwrap_or(Duration::from_secs(10)),
+        );
         #[cfg(feature = "ext-pubsub-advanced-history")]
         let history = recovery.and_then(|c| c.history);
         let base_keyexpr: String = keyexpr.into();
@@ -1000,7 +1076,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 // replies, which lock `cb_state` again). R311lh deferred-fire
                 // makes this re-entrant call safe.
                 if let Some(request) = request {
-                    issue_recovery_query(&q_session, &cb_state, &q_base, request, dest);
+                    issue_recovery_query(&q_session, &cb_state, &q_base, request, dest, timeout_ms);
                 }
             },
         )?;
@@ -1023,7 +1099,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 handle: tokio::spawn(async move {
                     loop {
                         clock.sleep(period_ms).await;
-                        run_periodic_tick(&p_session, &p_state, &p_base, dest);
+                        run_periodic_tick(&p_session, &p_state, &p_base, dest, timeout_ms);
                     }
                 }),
             }
@@ -1057,7 +1133,14 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                         .expect("advanced subscriber state mutex poisoned")
                         .handle_heartbeat(zid, eid, hb_sn);
                     if let Some(request) = request {
-                        issue_recovery_query(&hb_session, &hb_state, &hb_base, request, dest);
+                        issue_recovery_query(
+                            &hb_session,
+                            &hb_state,
+                            &hb_base,
+                            request,
+                            dest,
+                            timeout_ms,
+                        );
                     }
                 },
             )?)
@@ -1072,7 +1155,14 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         // terminal Final flushes the buffered history oldest-first).
         #[cfg(feature = "ext-pubsub-advanced-history")]
         if let Some(history) = history {
-            issue_history_query(session, &state, &base_keyexpr, history.sample_depth, dest);
+            issue_history_query(
+                session,
+                &state,
+                &base_keyexpr,
+                history.sample_depth,
+                dest,
+                timeout_ms,
+            );
         }
 
         Ok(Self {
@@ -1639,6 +1729,7 @@ mod tests {
             &sub._statesref,
             "demo/data",
             Locality::SessionLocal,
+            recovery_query_timeout_ms(Duration::from_secs(10)),
         );
 
         assert_eq!(
@@ -1960,6 +2051,94 @@ mod tests {
             *delivered.lock().unwrap(),
             vec![0xA0, 0xA1],
             "the deferred flush delivers 0,1 in order; the mid-history recovery did not lose sn 0"
+        );
+    }
+
+    /// R311y89 (review C3) — the pure timeout-ms conversion. The lower clamp is the
+    /// correctness bite: a `0`/sub-ms `Duration` must NOT pass through as the
+    /// `timeout_ms == 0` "never-expire" sentinel (which registers the GET with a
+    /// `None` deadline the sweep skips forever — the no-answerer wedge).
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    #[test]
+    fn recovery_query_timeout_ms_clamps_to_a_live_deadline() {
+        // The zenoh default (10s) maps to 10000 ms.
+        assert_eq!(recovery_query_timeout_ms(Duration::from_secs(10)), 10_000);
+        // A zero / sub-ms timeout clamps UP to 1 ms — never the 0 "never-expire"
+        // sentinel.
+        assert_eq!(recovery_query_timeout_ms(Duration::ZERO), 1);
+        assert_eq!(recovery_query_timeout_ms(Duration::from_micros(500)), 1);
+        // A timeout past u32::MAX ms caps at u32::MAX (the with_timeout_ms field is u32).
+        assert_eq!(
+            recovery_query_timeout_ms(Duration::from_millis(u64::from(u32::MAX) + 1)),
+            u32::MAX
+        );
+    }
+
+    /// R311y89 (review C3) regression: a startup history GET with NO `@adv` answerer
+    /// must not wedge the subscriber forever. `Locality::Any` emits a wire Query
+    /// (expecting a peer `Final` that never arrives) and fans loopback; with no cache
+    /// declared the loopback yields only its synthetic `Final` (1 of the 2 expected),
+    /// so `history_pending` stays set and a live sample buffers undelivered. The C3
+    /// timeout registers the GET with a live deadline, so the reply registry's
+    /// deadline sweep fires the synthetic terminal `Final` -> `finish_history` clears
+    /// the gate and flushes the buffer. WITHOUT the timeout (`timeout_ms == 0` ->
+    /// `deadline_ms == None`) the sweep skips the entry forever and `delivered`
+    /// stays empty — the diagnose-first failing arm.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn history_get_with_no_answerer_is_rescued_by_the_timeout_sweep() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let timeout = Duration::from_millis(50);
+        let _sub = AdvancedSubscriber::declare_with_recovery(
+            &session,
+            "demo/data",
+            RecoveryConfig::new()
+                .with_allowed_destination(Locality::Any)
+                .with_query_timeout(timeout)
+                .with_history(HistoryConfig::new()),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            |_miss: Miss| {},
+        )
+        .expect("history-enabled advanced subscriber declares");
+
+        // A live sample arrives while history is pending -> buffered, NOT delivered.
+        session
+            .publish(
+                "demo/data",
+                &[0x42],
+                PublishOptions::put()
+                    .with_locality(Locality::SessionLocal)
+                    .with_source_info(SourceInfo::new(&[0x02], 7, 0)),
+            )
+            .expect("loopback live publish");
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "the live sample is buffered while the un-answered history GET is pending"
+        );
+
+        // Drive the reply registry's deadline sweep past the GET's timeout: the
+        // synthetic terminal Final fires finish_history (clears history_pending +
+        // flushes the buffered sample). now + timeout + 1 is guaranteed past the
+        // deadline (= now_at_issue + timeout, now_at_issue <= now by monotonicity).
+        let now_past_deadline = session.clock().now_monotonic_ms() + timeout.as_millis() as u64 + 1;
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .replies
+            .sweep_timed_out(now_past_deadline);
+        session.drain_deferred_fires();
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0x42],
+            "the timeout sweep released the wedged history; the buffered sample delivered"
         );
     }
 }
