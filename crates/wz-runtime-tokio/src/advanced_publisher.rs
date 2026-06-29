@@ -256,7 +256,9 @@ where
                 let hb_keyexpr = adv_keyexpr.clone();
                 let hb_seqnum = Arc::clone(seqnum);
                 let clock = Arc::clone(session.clock());
-                let period_ms = period.as_millis() as u64;
+                // R311y87 (review C4) — clamp to >=1ms: a sub-ms Duration
+                // truncates to 0, turning the beacon loop into a busy spin.
+                let period_ms = (period.as_millis() as u64).max(1);
                 Some(HeartbeatTask {
                     handle: tokio::spawn(async move {
                         let mut last_emitted = 0u32;
@@ -643,6 +645,48 @@ mod tests {
             *misses.lock().unwrap(),
             0,
             "the beacon-driven recovery filled every hole -> no Miss"
+        );
+    }
+
+    /// R311y87 (review C1) regression: a degenerate `max_samples == 0` cache must
+    /// not hang on push. Pre-fix `while ring.len() >= 0 { pop_front }` spins
+    /// forever (the empty-ring pop never reduces len) while holding the ring
+    /// mutex; the `if`-evict bounds it at one. The test COMPLETING is the proof
+    /// of no-hang; the retained count is the zenoh-faithful degenerate 1.
+    #[test]
+    fn cache_max_samples_zero_does_not_hang() {
+        use std::sync::Mutex;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let publisher = AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            AdvancedPublisherOptions {
+                sequencing: Sequencing::SequenceNumber,
+                cache: Some(CacheConfig { max_samples: 0 }),
+                publisher_detection: true,
+                sample_miss_detection: MissDetectionConfig::default(),
+            },
+            vec![0x01],
+        )
+        .expect("advanced publisher declares");
+        for v in 0u8..3 {
+            publisher
+                .put(&[v])
+                .expect("put into a 0-depth cache must not hang");
+        }
+        assert_eq!(
+            publisher.cache().map(|c| c.len()),
+            Some(1),
+            "a 0-depth cache degenerately retains exactly one (if-evict, zenoh-faithful)"
         );
     }
 }

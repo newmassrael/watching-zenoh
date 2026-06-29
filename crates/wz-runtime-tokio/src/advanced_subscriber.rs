@@ -450,6 +450,15 @@ impl State {
     /// `SequencedRepliesHandler::drop` -> `flush_sequenced_source`,
     /// advanced_subscriber.rs:1362-1382 / 1266-1306).
     fn finish_recovery(&mut self, key: &(Vec<u8>, u32)) {
+        // R311y87 (review C2) — do NOT flush while the startup history GET is
+        // still in flight: a per-source recovery GET (heartbeat/periodic) can
+        // complete mid-history; flushing then advances `last_delivered`, so a
+        // later (older-sn) history reply for this source hits the dup-drop arm
+        // and is silently LOST. Defer the flush to `finish_history` (zenoh gates
+        // SequencedRepliesHandler::drop on `global_pending_queries == 0`,
+        // advanced_subscriber.rs:1368).
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        let history_pending = self.history_pending;
         let State {
             sequenced,
             on_sample,
@@ -460,7 +469,10 @@ impl State {
         let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
         if let Some(state) = sequenced.get_mut(key) {
             state.pending_queries = state.pending_queries.saturating_sub(1);
-            if state.pending_queries == 0 {
+            let may_flush = state.pending_queries == 0;
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            let may_flush = may_flush && !history_pending;
+            if may_flush {
                 flush_sequenced(state, &key.0, key.1, on_sample, on_miss);
             }
         }
@@ -970,7 +982,9 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             let p_state = Arc::clone(&state);
             let p_base = base_keyexpr.clone();
             let clock = Arc::clone(session.clock());
-            let period_ms = period.as_millis() as u64;
+            // R311y87 (review C4) — clamp to >=1ms: a sub-ms Duration truncates
+            // to 0, turning the loop into a zero-delay GET storm / busy spin.
+            let period_ms = (period.as_millis() as u64).max(1);
             PeriodicTask {
                 handle: tokio::spawn(async move {
                     loop {
@@ -1858,6 +1872,60 @@ mod tests {
             *delivered.lock().unwrap(),
             vec![0, 1, 2],
             "the late joiner recovered the publisher's cached history (0,1,2) on declare"
+        );
+    }
+
+    /// R311y87 (review C2) regression: a per-source recovery GET that completes
+    /// WHILE the startup history GET is still in flight must NOT flush — flushing
+    /// advances `last_delivered`, after which an older-sn history reply is
+    /// silently dropped. The flush is deferred to `finish_history`. Without the
+    /// `!history_pending` gate, delivered would be `[0xA1]` (sn 0 LOST); with it,
+    /// `[0xA0, 0xA1]`.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn recovery_completing_mid_history_defers_flush() {
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let mut state = State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
+            on_miss: Box::new(|_| {}),
+            retransmission: true,
+            history_pending: true,
+        };
+        let key = (vec![0x02u8], 7u32);
+        let mk = |sn: u32, v: u8| {
+            let mut s = Sample::new_put("demo/data", vec![v]);
+            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
+            s
+        };
+        // A per-source recovery GET is in flight (pending_queries=1) and has
+        // buffered sn 1, while the startup history GET is also in flight.
+        let mut buffered = BTreeMap::new();
+        buffered.insert(1u32, mk(1, 0xA1));
+        state.sequenced.insert(
+            key.clone(),
+            SourceState {
+                last_delivered: None,
+                pending_samples: buffered,
+                pending_queries: 1,
+            },
+        );
+
+        // The recovery GET completes mid-history -> must NOT flush.
+        state.finish_recovery(&key);
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "no flush while history is pending (a flush would lose later history)"
+        );
+        // An older history reply (sn 0) arrives -> buffered (history-gated).
+        state.handle_recovered(key.clone(), 0, mk(0, 0xA0));
+        // History completes -> flush 0,1 in order; sn 0 was NOT lost.
+        state.finish_history();
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xA0, 0xA1],
+            "the deferred flush delivers 0,1 in order; the mid-history recovery did not lose sn 0"
         );
     }
 }

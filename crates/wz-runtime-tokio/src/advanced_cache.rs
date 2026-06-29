@@ -147,12 +147,19 @@ where
 
     /// Push a freshly published sample into the ring, evicting the oldest
     /// when the depth bound is reached (zenoh advanced_cache.rs:368-377).
+    ///
+    /// Uses `if` (evict at most one) rather than `while` (evict until under
+    /// budget): each push adds exactly one, so for any `max_samples >= 1` the
+    /// two are equivalent — but `while` infinite-loops on the degenerate
+    /// `max_samples == 0` (`0 >= 0` stays true while `pop_front()` on the empty
+    /// ring never reduces `len`), hanging the thread WITH the ring mutex held.
+    /// `if` matches zenoh and bounds a 0-depth cache at one retained sample.
     pub fn cache_sample(&self, sample: CachedSample) {
         let mut ring = self
             .ring
             .lock()
             .expect("advanced cache ring mutex poisoned");
-        while ring.len() >= self.max_samples {
+        if ring.len() >= self.max_samples {
             ring.pop_front();
         }
         ring.push_back(sample);
