@@ -1018,7 +1018,9 @@ mod tests {
     #[test]
     fn composed_advanced_publisher_to_subscriber_in_order() {
         use crate::advanced_cache::CacheConfig;
-        use crate::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions, Sequencing};
+        use crate::advanced_publisher::{
+            AdvancedPublisher, AdvancedPublisherOptions, MissDetectionConfig, Sequencing,
+        };
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
@@ -1048,6 +1050,7 @@ mod tests {
                 sequencing: Sequencing::SequenceNumber,
                 cache: Some(CacheConfig { max_samples: 8 }),
                 publisher_detection: true,
+                sample_miss_detection: MissDetectionConfig::default(),
             },
             vec![0x09],
         )

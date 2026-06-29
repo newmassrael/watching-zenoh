@@ -23,11 +23,15 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::sample::SourceInfo;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+use wz_session_core::serde_codec::z_serialize;
 
 use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
 use crate::session::{
@@ -50,6 +54,37 @@ pub enum Sequencing {
     SequenceNumber,
 }
 
+/// Heartbeat (last-sample-miss-detection) configuration. Mirror of zenoh-ext
+/// `MissDetectionConfig` (advanced_publisher.rs:66-104). `heartbeat` /
+/// `sporadic_heartbeat` are mutually exclusive (the last one wins); both set the
+/// `(period, sporadic)` state-publisher tuple. Always present (signature-stable);
+/// the beacon-emit task is `ext-pubsub-sample-miss-detection`-gated, so the
+/// option is a documented no-op when the feature is off.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MissDetectionConfig {
+    /// `Some((period, sporadic))` enables the heartbeat beacon: every `period`
+    /// the publisher emits its last published sn. `sporadic = false` emits every
+    /// period regardless; `true` emits only when the sn advanced since the last
+    /// beacon (zenoh advanced_publisher.rs:385-419).
+    state_publisher: Option<(Duration, bool)>,
+}
+
+impl MissDetectionConfig {
+    /// Periodic heartbeat: emit the last sn every `period` (zenoh
+    /// `MissDetectionConfig::heartbeat`).
+    pub fn heartbeat(mut self, period: Duration) -> Self {
+        self.state_publisher = Some((period, false));
+        self
+    }
+
+    /// Sporadic heartbeat: emit the last sn every `period` but only when it
+    /// changed since the last beacon (zenoh `sporadic_heartbeat`).
+    pub fn sporadic_heartbeat(mut self, period: Duration) -> Self {
+        self.state_publisher = Some((period, true));
+        self
+    }
+}
+
 /// Construction options for an [`AdvancedPublisher`].
 #[derive(Clone, Copy, Debug)]
 pub struct AdvancedPublisherOptions {
@@ -61,6 +96,11 @@ pub struct AdvancedPublisherOptions {
     /// When `true`, declare the `@adv` liveliness token so subscribers can
     /// detect this publisher (zenoh `publisher_detection`).
     pub publisher_detection: bool,
+    /// R311y85 — last-sample-miss-detection: when its `state_publisher` is set,
+    /// spawn the heartbeat beacon task. Requires `SequenceNumber` sequencing and
+    /// the `ext-pubsub-sample-miss-detection` feature (a documented no-op
+    /// otherwise), plus a tokio runtime at declare time for the spawn.
+    pub sample_miss_detection: MissDetectionConfig,
 }
 
 impl Default for AdvancedPublisherOptions {
@@ -69,6 +109,7 @@ impl Default for AdvancedPublisherOptions {
             sequencing: Sequencing::SequenceNumber,
             cache: Some(CacheConfig::default()),
             publisher_detection: true,
+            sample_miss_detection: MissDetectionConfig::default(),
         }
     }
 }
@@ -121,14 +162,23 @@ pub struct AdvancedPublisher<R: SessionRuntime, T: TimeSource> {
     stamp: FallbackStamp,
     cache: Option<AdvancedCache<R, T>>,
     _token: Option<LivelinessToken<R, T>>,
+    /// R311y85 — the publisher's `@adv` KE, retained so the heartbeat-beacon
+    /// emit (the background task + the `emit_heartbeat_once` seam) can publish on it.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    adv_keyexpr: String,
+    /// R311y85 — the heartbeat beacon task (RAII abort-on-drop), `Some` only
+    /// when `MissDetectionConfig` set a `state_publisher` + sequencing is on.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    _heartbeat_task: Option<HeartbeatTask>,
 }
 
 impl<R, T> AdvancedPublisher<R, T>
 where
-    R: SessionRuntime,
-    T: TimeSource + 'static,
+    R: SessionRuntime + 'static,
+    T: TimeSource + Send + Sync + 'static,
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
+    Session<R, T, Unicast>: Send + 'static,
 {
     /// Declare an advanced publisher on `keyexpr`. `local_zid` (1..=16
     /// bytes) is this publisher's source identity, stamped into every
@@ -179,7 +229,7 @@ where
         };
 
         let token = if options.publisher_detection {
-            Some(session.declare_token(adv_keyexpr, LivelinessOptions::default())?)
+            Some(session.declare_token(adv_keyexpr.clone(), LivelinessOptions::default())?)
         } else {
             None
         };
@@ -188,6 +238,50 @@ where
             Sequencing::SequenceNumber => Some(Arc::new(AtomicU32::new(0))),
             Sequencing::Timestamp | Sequencing::None => None,
         };
+
+        // R311y85 — the heartbeat beacon task: every `period`, publish the last
+        // published sn (`z_serialize::<u32>(seqnum-1)`) on the `@adv` KE so a
+        // heartbeat-recovering subscriber can detect + recover a lost last
+        // sample (zenoh advanced_publisher.rs:373-419). Needs the `SequenceNumber`
+        // seqnum (no seqnum -> no beacon); sporadic emits only when the sn
+        // advanced. Spawned here (the caller is in a tokio runtime), aborted on
+        // drop; the loop is thin glue over the deterministic `emit_heartbeat`.
+        #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+        let heartbeat_task = match (
+            options.sample_miss_detection.state_publisher,
+            seqnum.as_ref(),
+        ) {
+            (Some((period, sporadic)), Some(seqnum)) => {
+                let hb_session = session.clone();
+                let hb_keyexpr = adv_keyexpr.clone();
+                let hb_seqnum = Arc::clone(seqnum);
+                let clock = Arc::clone(session.clock());
+                let period_ms = period.as_millis() as u64;
+                Some(HeartbeatTask {
+                    handle: tokio::spawn(async move {
+                        let mut last_emitted = 0u32;
+                        loop {
+                            clock.sleep(period_ms).await;
+                            let sn = hb_seqnum.load(Ordering::Relaxed);
+                            // Non-sporadic emits every tick (emit_heartbeat skips
+                            // sn==0); sporadic only when the sn advanced.
+                            if (!sporadic || sn > last_emitted)
+                                && emit_heartbeat(&hb_session, &hb_keyexpr, sn)
+                            {
+                                last_emitted = sn;
+                            }
+                        }
+                    }),
+                })
+            }
+            _ => None,
+        };
+
+        // adv_keyexpr is consumed by the cache / token clones + (feature-on) the
+        // struct; explicitly drop it on the feature-off path so the cache-None +
+        // detection-false combination does not warn unused.
+        #[cfg(not(feature = "ext-pubsub-sample-miss-detection"))]
+        let _ = adv_keyexpr;
 
         Ok(Self {
             session: session.clone(),
@@ -198,6 +292,10 @@ where
             stamp: FallbackStamp::new(local_zid),
             cache,
             _token: token,
+            #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+            adv_keyexpr,
+            #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+            _heartbeat_task: heartbeat_task,
         })
     }
 
@@ -249,6 +347,72 @@ where
     }
 }
 
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+impl<R, T> AdvancedPublisher<R, T>
+where
+    R: SessionRuntime + 'static,
+    T: TimeSource + Send + Sync + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+    Session<R, T, Unicast>: Send + 'static,
+{
+    /// Emit ONE heartbeat beacon now — the publisher's last published sn on its
+    /// `@adv` KE — the deterministic core the background task loops. Returns
+    /// whether a beacon was emitted (`false` if nothing has been published yet,
+    /// or this is a non-`SequenceNumber` publisher). Both an on-demand trigger
+    /// (a wz superset over zenoh's timer-only beacon) and the test seam over the
+    /// same path the timer drives.
+    pub fn emit_heartbeat_once(&self) -> bool {
+        match self.seqnum.as_ref() {
+            Some(seqnum) => emit_heartbeat(
+                &self.session,
+                &self.adv_keyexpr,
+                seqnum.load(Ordering::Relaxed),
+            ),
+            None => false,
+        }
+    }
+}
+
+/// R311y85 — publish ONE heartbeat beacon: the last published sn
+/// (`z_serialize::<u32>(seqnum_now - 1)`; the counter is the NEXT sn) on the
+/// `@adv` KE. Returns `false` (no beacon) when nothing has been published yet
+/// (`seqnum_now == 0`). A publish error (e.g. a torn-down link) is non-fatal —
+/// the next tick re-emits (zenoh advanced_publisher.rs:392-394).
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+fn emit_heartbeat<R, T>(
+    session: &Session<R, T, Unicast>,
+    adv_keyexpr: &str,
+    seqnum_now: u32,
+) -> bool
+where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    if seqnum_now == 0 {
+        return false;
+    }
+    let payload = z_serialize::<u32>(&(seqnum_now - 1));
+    let _ = session.publish(adv_keyexpr, &payload, PublishOptions::put());
+    true
+}
+
+/// RAII handle for the heartbeat beacon task: dropping it aborts the loop so a
+/// torn-down publisher stops emitting (the `_periodic` / DigestPublisher shape).
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+struct HeartbeatTask {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+impl Drop for HeartbeatTask {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +446,7 @@ mod tests {
             sequencing: Sequencing::SequenceNumber,
             cache: Some(CacheConfig { max_samples: 8 }),
             publisher_detection: true,
+            sample_miss_detection: MissDetectionConfig::default(),
         };
         let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
             .expect("advanced publisher declares against the test link");
@@ -326,6 +491,158 @@ mod tests {
                 ("demo/data".to_string(), vec![2]),
             ],
             "the loopback query recovered all three cached samples under their original key"
+        );
+    }
+
+    /// R311y85 — the heartbeat beacon emits the publisher's last published sn on
+    /// its `@adv` KE. A plain subscriber on the `@adv/pub/**` namespace records
+    /// beacons; `emit_heartbeat_once` (the deterministic core the timer loops)
+    /// publishes one, and its payload decodes to `last_sn` (= seqnum-1). The
+    /// publisher is declared WITHOUT a heartbeat period (no background task -> no
+    /// tokio runtime needed); the on-demand seam drives the same emit.
+    #[cfg(all(
+        feature = "ext-pubsub-sample-miss-detection",
+        feature = "declare-subscriber",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn heartbeat_beacon_emits_last_sn_on_adv_ke() {
+        use std::sync::Mutex;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::{SubscribeOptions, TokioSession};
+        use wz_session_core::serde_codec::z_deserialize;
+        use wz_session_core::sink::SampleView;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let beacons = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+        let b = Arc::clone(&beacons);
+        let _hb_rec = session
+            .declare_subscriber(
+                "demo/data/@adv/pub/**",
+                SubscribeOptions::default(),
+                move |v: &dyn SampleView| {
+                    b.lock()
+                        .unwrap()
+                        .push((v.keyexpr().to_string(), v.payload().to_vec()))
+                },
+            )
+            .expect("beacon recorder subscribes");
+
+        let publisher = AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            AdvancedPublisherOptions::default(),
+            vec![0x09],
+        )
+        .expect("advanced publisher declares");
+
+        // Nothing published yet -> no beacon.
+        assert!(
+            !publisher.emit_heartbeat_once(),
+            "no beacon before any sample is published"
+        );
+        for v in 0u8..3 {
+            publisher.put(&[v]).expect("advanced put");
+        }
+        // seqnum = 3 -> last published sn = 2.
+        assert!(publisher.emit_heartbeat_once(), "beacon emitted after puts");
+
+        let got = beacons.lock().unwrap().clone();
+        let last = got.last().expect("a beacon was recorded");
+        assert!(
+            last.0.starts_with("demo/data/@adv/pub/"),
+            "beacon published on the @adv KE, got {}",
+            last.0
+        );
+        assert_eq!(
+            z_deserialize::<u32>(&last.1).unwrap(),
+            2,
+            "the beacon carries the last published sn = 2"
+        );
+    }
+
+    /// R311y85 composed PRODUCER->CONSUMER heartbeat recovery e2e: a real
+    /// producer's beacon drives a real consumer's recovery. The publisher
+    /// publishes 0,1,2 (cached) BEFORE the subscriber exists, so the
+    /// heartbeat-recovering subscriber is a LATE JOINER that genuinely missed
+    /// them live (last_delivered = None — a faithful in-loopback model of loss).
+    /// The producer's beacon (last sn = 2) fires the consumer's heartbeat sub ->
+    /// a bounded `_sn=0..2` GET -> the cache refills the whole stream. Co-compiles
+    /// the producer (sample-miss-detection) + consumer (advanced-recovery) atoms.
+    #[cfg(all(
+        feature = "ext-pubsub-sample-miss-detection",
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn composed_producer_beacon_drives_late_joiner_recovery() {
+        use std::sync::Mutex;
+
+        use crate::advanced_subscriber::{AdvancedSubscriber, Miss, RecoveryConfig};
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+        use wz_session_core::locality::Locality;
+        use wz_session_core::sample::Sample;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        // A real publisher with a cache deep enough to hold the whole stream
+        // (the Default cache depth is 1) + miss-detection. Publish 0,1,2 BEFORE
+        // the subscriber exists -> it never saw them live.
+        let publisher = AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            AdvancedPublisherOptions {
+                sequencing: Sequencing::SequenceNumber,
+                cache: Some(CacheConfig { max_samples: 8 }),
+                publisher_detection: true,
+                sample_miss_detection: MissDetectionConfig::default(),
+            },
+            vec![0x09],
+        )
+        .expect("advanced publisher declares");
+        publisher.put(&[0xA0]).expect("put 0");
+        publisher.put(&[0xA1]).expect("put 1");
+        publisher.put(&[0xA2]).expect("put 2"); // cache {0,1,2}, seqnum = 3
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let misses = Arc::new(Mutex::new(0usize));
+        let d = Arc::clone(&delivered);
+        let m = Arc::clone(&misses);
+        let _sub = AdvancedSubscriber::declare_with_recovery(
+            &session,
+            "demo/data",
+            RecoveryConfig::new()
+                .with_heartbeat()
+                .with_allowed_destination(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            move |_miss: Miss| *m.lock().unwrap() += 1,
+        )
+        .expect("late-joiner heartbeat-recovering subscriber declares");
+
+        // The producer's heartbeat beacon (last sn = 2) -> the consumer's
+        // heartbeat sub -> bounded _sn=0..2 GET (last_delivered None) -> refill.
+        assert!(publisher.emit_heartbeat_once(), "producer beacon emitted");
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xA0, 0xA1, 0xA2],
+            "the late joiner recovered the full cached stream via the producer's beacon"
+        );
+        assert_eq!(
+            *misses.lock().unwrap(),
+            0,
+            "the beacon-driven recovery filled every hole -> no Miss"
         );
     }
 }

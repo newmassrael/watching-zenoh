@@ -1513,6 +1513,29 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
         && cargo build -p wz --features ext-pubsub-advanced-recovery --quiet)
 }
 
+# ─── Layer C1au — ext-pubsub-sample-miss-detection §5.25: heartbeat PRODUCER ─
+#
+# R311y85: ext-pubsub-sample-miss-detection is the heartbeat PRODUCER beacon (an
+# AdvancedPublisher background task emitting `z_serialize::<u32>(last_sn)` on the
+# @adv KE). Off-default and composing ext-pubsub-advanced-publisher + serde-codec,
+# so no default / C1aq / C1at lane compiles the beacon. This lane CO-ENABLES the
+# CONSUMER (ext-pubsub-advanced-recovery) + pubsub-allow-loop so the composed
+# PRODUCER->CONSUMER e2e runs: a real producer's beacon drives a real late-joining
+# subscriber's heartbeat recovery from the cache (a faithful in-loopback model of
+# loss — the subscriber missed the pre-declaration puts), plus the beacon-
+# faithfulness test (the emitted payload decodes to last_sn on the @adv KE). Then
+# clippy-gates the producer surface + validates the facade forward target.
+layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio \
+            --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
+            --lib advanced_publisher --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets \
+            --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
+            --quiet -- -D warnings \
+        && cargo build -p wz --features ext-pubsub-sample-miss-detection --quiet)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -4242,6 +4265,7 @@ run_layer C1aq layer_c1aq_cargo_test_ext_pubsub_advanced || overall=1
 run_layer C1ar layer_c1ar_cargo_test_ext_pubsub_advanced_sub || overall=1
 run_layer C1as layer_c1as_cargo_test_reply_source_info || overall=1
 run_layer C1at layer_c1at_cargo_test_ext_pubsub_advanced_recovery || overall=1
+run_layer C1au layer_c1au_cargo_test_ext_pubsub_sample_miss_detection || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

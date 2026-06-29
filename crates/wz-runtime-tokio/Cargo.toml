@@ -277,6 +277,18 @@ ext-pubsub-advanced-recovery = [
     "query-selector-parameters",
     "wz-session-core/reply-source-info",
 ]
+# R311y85 — ext-pubsub-sample-miss-detection (§5.25): the heartbeat PRODUCER
+# beacon. An AdvancedPublisher with sample_miss_detection spawns a background
+# task that periodically publishes its last published sequence number
+# (`z_serialize::<u32>(seqnum-1)`) on the publisher's `<ke>/@adv/pub/<zid>/<eid>/_`
+# KE (zenoh advanced_publisher.rs:373-425, MissDetectionConfig::heartbeat /
+# sporadic_heartbeat). The CONSUMER half (a subscriber's heartbeat trigger that
+# decodes the beacon) is ext-pubsub-advanced-recovery. Composes the publisher
+# (the seqnum source + the @adv KE) + serde-codec (the u32 beacon encode).
+ext-pubsub-sample-miss-detection = [
+    "ext-pubsub-advanced-publisher",
+    "ext-pubsub-serde-codec",
+]
 # adminspace-read (§5.23) — the permissions.read GET gate: declare_adminspace's
 # handler answers nothing when AdminSpacePermissions.read=false (the querier gets
 # only the terminating Final), the wz mirror of zenoh's read-permission check
