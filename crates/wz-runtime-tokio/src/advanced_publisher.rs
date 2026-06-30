@@ -606,7 +606,9 @@ mod tests {
     fn composed_producer_beacon_drives_late_joiner_recovery() {
         use std::sync::Mutex;
 
-        use crate::advanced_subscriber::{AdvancedSubscriber, Miss, RecoveryConfig};
+        use crate::advanced_subscriber::{
+            AdvancedSubscriber, AdvancedSubscriberOptions, Miss, RecoveryConfig,
+        };
         use crate::observer::ApplicationLayerObserver;
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
@@ -641,11 +643,11 @@ mod tests {
         let misses = Arc::new(Mutex::new(0usize));
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
-        let _sub = AdvancedSubscriber::declare_with_recovery(
+        let _sub = AdvancedSubscriber::declare_with_options(
             &session,
             "demo/data",
-            RecoveryConfig::new()
-                .with_heartbeat()
+            AdvancedSubscriberOptions::new()
+                .with_recovery(RecoveryConfig::new().with_heartbeat())
                 .with_allowed_destination(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             move |_miss: Miss| *m.lock().unwrap() += 1,

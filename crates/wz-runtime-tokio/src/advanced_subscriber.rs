@@ -35,7 +35,7 @@
 //!   the just-received sample and advances past the hole (zenoh
 //!   advanced_subscriber.rs:521-535 no-retransmission path). Lost samples are
 //!   reported, never recovered.
-//! - **Recovering** ([`AdvancedSubscriber::declare_with_recovery`], gated
+//! - **Recovering** ([`AdvancedSubscriber::declare_with_options`], gated
 //!   `ext-pubsub-advanced-recovery`): the gap is BUFFERED into a per-source
 //!   sn-ordered reorder buffer ([`SourceState::pending_samples`]) instead of
 //!   delivered, and a sample-driven `_sn=last+1..` recovery GET is issued to
@@ -157,7 +157,7 @@ pub enum AdvancedSubscribeError {
     /// The base / recovery / heartbeat subscriber declaration was rejected.
     Subscribe(SubscribeError),
     /// The periodic-recovery task could not be spawned: no tokio runtime was
-    /// active. `declare_with_recovery` with `periodic_queries` set must be called
+    /// active. `declare_with_options` with `periodic_queries` set must be called
     /// from within a tokio runtime context. Fail-clear instead of the
     /// `tokio::spawn` panic.
     NoRuntime,
@@ -170,20 +170,19 @@ impl From<SubscribeError> for AdvancedSubscribeError {
     }
 }
 
-/// Configuration for a recovering subscriber ([`AdvancedSubscriber::declare_with_recovery`]).
-/// The sample-driven `_sn`-range recovery GET is implied by recovering at all
-/// (zenoh's `retransmission.is_some()`); [`Self::periodic_queries`] adds the
-/// R311y83 periodic trigger. The heartbeat trigger is a follow-on field under
-/// this same gate.
+/// Retransmission (gap-recovery) configuration
+/// ([`AdvancedSubscriberOptions::with_recovery`]). Mirror of zenoh-ext
+/// `RecoveryConfig` (advanced_subscriber.rs:91-134): it carries ONLY the
+/// retransmission triggers. The sample-driven `_sn`-range recovery GET is implied
+/// by recovering at all (`RecoveryConfig::default()`); [`Self::periodic_queries`] +
+/// [`Self::heartbeat`] add the periodic / beacon triggers. The GET locality + GET
+/// timeout + the (independent) startup history live on [`AdvancedSubscriberOptions`],
+/// NOT here — zenoh keeps `.recovery()` and `.history()` SEPARATE so
+/// history-without-retransmission is representable (R311y91, review M1).
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 #[non_exhaustive]
 pub struct RecoveryConfig {
-    /// Locality for the recovery `_sn`-range GET. `Any` (default) reaches a
-    /// remote publisher's `@adv` cache AND the local loopback; `SessionLocal`
-    /// pins it to loopback (single-host composition tests). Mirrors zenoh's
-    /// recovery get target (advanced_subscriber.rs:603, `query_target` All).
-    pub allowed_destination: Locality,
     /// R311y83 — when `Some(period)`, a background task re-asks every known
     /// source `_sn=last+1..` every `period`, catching a lost LAST sample that
     /// no further live sample would trigger sample-driven recovery for (zenoh's
@@ -202,50 +201,13 @@ pub struct RecoveryConfig {
     /// beacon instead of a local timer (the producer beacon is the separate
     /// `ext-pubsub-sample-miss-detection` atom). `false` (default) = off.
     pub heartbeat: bool,
-    /// R311y89 (review C3) — timeout applied to the recovery / history
-    /// `Session::query` GETs. A no-answerer GET (no `@adv` cache replies) registers
-    /// a pending reply entry that waits on a peer `Final` which never arrives; with
-    /// a non-zero timeout the reply registry's deadline sweep
-    /// ([`crate::reply::ReplyRegistry::sweep_timed_out`], driven by the runtime's
-    /// sweep task) fires the synthetic `Final`, so [`State::finish_recovery`] /
-    /// [`State::finish_history`] run and the subscriber stops waiting forever
-    /// (without it `history_pending` / `pending_queries` wedge and the subscriber
-    /// delivers nothing). Default `Duration::from_secs(10)` — zenoh-ext
-    /// `RecoveryConfig::query_timeout` default + zenoh-pico `Z_GET_TIMEOUT_DEFAULT`.
-    pub query_timeout: Duration,
-    /// R311y86 — when `Some`, issue a startup history GET over `<key_expr>/@adv/**`
-    /// on declare so a LATE JOINER recovers the publishers' cached history (zenoh
-    /// `AdvancedSubscriberBuilder::history`). `None` (default) = no history.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    pub history: Option<HistoryConfig>,
-}
-
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl Default for RecoveryConfig {
-    fn default() -> Self {
-        Self {
-            allowed_destination: Locality::Any,
-            periodic_queries: None,
-            heartbeat: false,
-            query_timeout: Duration::from_secs(10),
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            history: None,
-        }
-    }
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl RecoveryConfig {
-    /// Sample-driven recovery with default routing (`Locality::Any`).
+    /// Sample-driven recovery (no periodic / heartbeat trigger).
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Pin the recovery GET's locality (e.g. `SessionLocal` for a loopback
-    /// composition).
-    pub fn with_allowed_destination(mut self, locality: Locality) -> Self {
-        self.allowed_destination = locality;
-        self
     }
 
     /// Enable the periodic recovery trigger with the given re-ask period (see
@@ -260,30 +222,103 @@ impl RecoveryConfig {
         self.heartbeat = true;
         self
     }
+}
 
-    /// Pin the recovery / history GET timeout (see [`Self::query_timeout`]).
-    /// Converted to the `QueryOptions::with_timeout_ms` value at GET-issue time
-    /// by [`recovery_query_timeout_ms`], which clamps to `>= 1` ms — a `0` would
-    /// register the GET with a `None` deadline that the sweep skips forever
-    /// (the C3 no-answerer wedge).
-    pub fn with_query_timeout(mut self, query_timeout: Duration) -> Self {
-        self.query_timeout = query_timeout;
+/// Options for a configured advanced subscriber
+/// ([`AdvancedSubscriber::declare_with_options`]). Mirror of the zenoh-ext
+/// `AdvancedSubscriberBuilder` knobs wz implements: the (independent) retransmission
+/// and startup-history configs, the shared GET locality, and the shared GET timeout.
+/// zenoh exposes `.recovery()` / `.history()` as SEPARATE builder methods
+/// (advanced_subscriber.rs:261/287), so [`Self::recovery`] and [`Self::history`] are
+/// independent `Option`s — a `history`-only subscriber (no retransmission) is
+/// representable (R311y91, review M1: the prior `RecoveryConfig`-carries-everything
+/// shape made history-without-retransmission unrepresentable).
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct AdvancedSubscriberOptions {
+    /// Retransmission (gap recovery). `None` (default) = no recovery: a forward gap
+    /// reports a [`Miss`] and delivers past the hole. `Some` enables the reorder
+    /// buffer + the sample-driven `_sn`-range recovery GET (+ the periodic /
+    /// heartbeat triggers the [`RecoveryConfig`] selects). Mirror of zenoh
+    /// `.recovery()`.
+    pub recovery: Option<RecoveryConfig>,
+    /// Startup history query. `None` (default) = no history. `Some` issues a
+    /// `<key_expr>/@adv/**` GET on declare so a LATE JOINER recovers the publishers'
+    /// cached history. INDEPENDENT of [`Self::recovery`] (zenoh `.history()` is a
+    /// separate builder method): history-without-retransmission is valid.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    pub history: Option<HistoryConfig>,
+    /// Locality for the recovery + history GETs. `Any` (default) reaches a remote
+    /// publisher's `@adv` cache AND the local loopback; `SessionLocal` pins it to
+    /// loopback (single-host composition tests). Mirror of zenoh's GET target /
+    /// `allowed_origin`.
+    pub allowed_destination: Locality,
+    /// Timeout applied to BOTH the recovery + history GETs (zenoh's builder
+    /// `query_timeout`, shared by history + retransmission; default 10s). A
+    /// no-answerer GET (no `@adv` cache replies) would otherwise wait on a peer
+    /// `Final` that never arrives; the non-zero timeout lets the reply registry's
+    /// deadline sweep ([`crate::reply::ReplyRegistry::sweep_timed_out`]) fire the
+    /// synthetic `Final` so [`State::finish_recovery`] / [`State::finish_history`]
+    /// run (R311y89, review C3). Converted by [`recovery_query_timeout_ms`].
+    pub query_timeout: Duration,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl Default for AdvancedSubscriberOptions {
+    fn default() -> Self {
+        Self {
+            recovery: None,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            history: None,
+            allowed_destination: Locality::Any,
+            query_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl AdvancedSubscriberOptions {
+    /// Default options: no recovery, no history, `Locality::Any`, 10s GET timeout.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable retransmission (gap recovery) with the given [`RecoveryConfig`]
+    /// (zenoh `.recovery()`).
+    pub fn with_recovery(mut self, recovery: RecoveryConfig) -> Self {
+        self.recovery = Some(recovery);
         self
     }
 
-    /// Enable the startup history query (see [`Self::history`]). Requires a tokio
-    /// runtime at declare time (the history GET fires on declare).
+    /// Enable the startup history query with the given [`HistoryConfig`]
+    /// (zenoh `.history()`). Independent of [`Self::with_recovery`].
     #[cfg(feature = "ext-pubsub-advanced-history")]
     pub fn with_history(mut self, history: HistoryConfig) -> Self {
         self.history = Some(history);
         self
     }
+
+    /// Pin the recovery + history GET locality (e.g. `SessionLocal` for a loopback
+    /// composition).
+    pub fn with_allowed_destination(mut self, locality: Locality) -> Self {
+        self.allowed_destination = locality;
+        self
+    }
+
+    /// Pin the recovery + history GET timeout (zenoh `.query_timeout()`). Converted
+    /// to the `QueryOptions::with_timeout_ms` value by [`recovery_query_timeout_ms`],
+    /// clamped to `>= 1` ms (a `0` re-opens the C3 no-answerer wedge).
+    pub fn with_query_timeout(mut self, query_timeout: Duration) -> Self {
+        self.query_timeout = query_timeout;
+        self
+    }
 }
 
-/// Startup-history configuration ([`RecoveryConfig::with_history`]). Mirror of
-/// zenoh-ext `HistoryConfig` (advanced_subscriber.rs:54-89). R311y86 builds the
-/// `max_samples` (`_max`) cap; the `max_age` time-range filter + late-publisher
-/// liveliness detection are documented follow-ons.
+/// Startup-history configuration ([`AdvancedSubscriberOptions::with_history`]).
+/// Mirror of zenoh-ext `HistoryConfig` (advanced_subscriber.rs:54-89). R311y86
+/// builds the `max_samples` (`_max`) cap; the `max_age` time-range filter +
+/// late-publisher liveliness detection are documented follow-ons.
 #[cfg(feature = "ext-pubsub-advanced-history")]
 #[derive(Clone, Copy, Debug, Default)]
 #[non_exhaustive]
@@ -332,7 +367,7 @@ struct State {
     on_sample: Box<dyn FnMut(Sample) + Send>,
     on_miss: Box<dyn FnMut(Miss) + Send>,
     /// R311y82 — whether forward gaps BUFFER + trigger a recovery GET (true,
-    /// [`AdvancedSubscriber::declare_with_recovery`]) or report a [`Miss`] and
+    /// [`AdvancedSubscriber::declare_with_options`]) or report a [`Miss`] and
     /// deliver past the gap (false, the plain [`AdvancedSubscriber::declare`]).
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     retransmission: bool,
@@ -970,7 +1005,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// Declare a plain advanced subscriber (no recovery): a forward gap fires
-    /// a [`Miss`] and delivers past the hole. See [`Self::declare_with_recovery`]
+    /// a [`Miss`] and delivers past the hole. See [`Self::declare_with_options`]
     /// for the gap-recovering form.
     ///
     /// R311y88 (review H1) — this form does NOT route through `declare_impl`
@@ -979,7 +1014,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// therefore IDENTICAL to the recovery-OFF build's `declare` — so toggling
     /// `ext-pubsub-advanced-recovery` (an additive feature) cannot tighten this
     /// signature and break a downstream `declare` caller (the signature-stability
-    /// invariant). The spawn-requiring bounds live only on `declare_with_recovery`.
+    /// invariant). The spawn-requiring bounds live only on `declare_with_options`.
     pub fn declare<T, OnSample, OnMiss>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
@@ -1024,14 +1059,19 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         })
     }
 
-    /// Declare a gap-recovering advanced subscriber: a forward gap is buffered
-    /// and a sample-driven `_sn`-range recovery GET refills it from the
-    /// publisher's `@adv` cache (see the module docs). `on_miss` fires only
-    /// for a hole the recovery does NOT fill.
-    pub fn declare_with_recovery<T, OnSample, OnMiss>(
+    /// Declare a configured advanced subscriber from [`AdvancedSubscriberOptions`]:
+    /// any combination of retransmission (gap recovery), a startup history query,
+    /// the GET locality, and the GET timeout. Recovery and history are INDEPENDENT
+    /// (zenoh `.recovery()` / `.history()`): `options` with only `history` set is a
+    /// history-without-retransmission subscriber. With recovery on, a forward gap is
+    /// buffered and a sample-driven `_sn`-range recovery GET refills it from the
+    /// publisher's `@adv` cache; `on_miss` fires only for a hole recovery does NOT
+    /// fill. With recovery off, a forward gap reports a [`Miss`] and delivers past
+    /// the hole.
+    pub fn declare_with_options<T, OnSample, OnMiss>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
-        recovery: RecoveryConfig,
+        options: AdvancedSubscriberOptions,
         on_sample: OnSample,
         on_miss: OnMiss,
     ) -> Result<Self, AdvancedSubscribeError>
@@ -1044,7 +1084,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         OnSample: FnMut(Sample) + Send + 'static,
         OnMiss: FnMut(Miss) + Send + 'static,
     {
-        Self::declare_impl(session, keyexpr, on_sample, on_miss, Some(recovery))
+        Self::declare_impl(session, keyexpr, on_sample, on_miss, options)
     }
 
     fn declare_impl<T, OnSample, OnMiss>(
@@ -1052,7 +1092,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         keyexpr: impl Into<String>,
         on_sample: OnSample,
         on_miss: OnMiss,
-        recovery: Option<RecoveryConfig>,
+        options: AdvancedSubscriberOptions,
     ) -> Result<Self, AdvancedSubscribeError>
     where
         R: 'static,
@@ -1063,10 +1103,13 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         OnSample: FnMut(Sample) + Send + 'static,
         OnMiss: FnMut(Miss) + Send + 'static,
     {
+        // R311y91 (review M1) — recovery + history are INDEPENDENT (zenoh keeps
+        // `.recovery()` / `.history()` separate): `retransmission` is driven by
+        // `options.recovery`, `history_pending` by `options.history` — a
+        // history-only subscriber (recovery None) is now representable.
+        let recovery = options.recovery;
         let retransmission = recovery.is_some();
-        let dest = recovery
-            .map(|c| c.allowed_destination)
-            .unwrap_or(Locality::Any);
+        let dest = options.allowed_destination;
         let periodic = recovery.and_then(|c| c.periodic_queries);
         // R311y90 (review C5) — fail fast & clear if off-runtime: the periodic
         // task (below) is a tokio::spawn, which PANICS without a runtime. Check
@@ -1076,16 +1119,12 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             tokio::runtime::Handle::try_current().map_err(|_| AdvancedSubscribeError::NoRuntime)?;
         }
         let heartbeat = recovery.map(|c| c.heartbeat).unwrap_or(false);
-        // R311y89 (review C3) — the recovery / history GET timeout (zenoh's shared
-        // `RecoveryConfig::query_timeout`), threaded to every GET so the deadline
-        // sweep can release a no-answerer query (default 10s when unset).
-        let timeout_ms = recovery_query_timeout_ms(
-            recovery
-                .map(|c| c.query_timeout)
-                .unwrap_or(Duration::from_secs(10)),
-        );
+        // R311y89 (review C3) — the recovery + history GET timeout (zenoh's shared
+        // builder `query_timeout`), threaded to every GET so the deadline sweep can
+        // release a no-answerer query.
+        let timeout_ms = recovery_query_timeout_ms(options.query_timeout);
         #[cfg(feature = "ext-pubsub-advanced-history")]
-        let history = recovery.and_then(|c| c.history);
+        let history = options.history;
         let base_keyexpr: String = keyexpr.into();
 
         let state = Arc::new(Mutex::new(State {
@@ -1575,10 +1614,12 @@ mod tests {
         let misses = Arc::new(Mutex::new(0usize));
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
-        let _sub = AdvancedSubscriber::declare_with_recovery(
+        let _sub = AdvancedSubscriber::declare_with_options(
             &session,
             "demo/data",
-            RecoveryConfig::new().with_allowed_destination(Locality::SessionLocal),
+            AdvancedSubscriberOptions::new()
+                .with_recovery(RecoveryConfig::new())
+                .with_allowed_destination(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             move |_miss: Miss| *m.lock().unwrap() += 1,
         )
@@ -1730,10 +1771,12 @@ mod tests {
         let misses = Arc::new(Mutex::new(0usize));
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
-        let sub = AdvancedSubscriber::declare_with_recovery(
+        let sub = AdvancedSubscriber::declare_with_options(
             &session,
             "demo/data",
-            RecoveryConfig::new().with_allowed_destination(Locality::SessionLocal),
+            AdvancedSubscriberOptions::new()
+                .with_recovery(RecoveryConfig::new())
+                .with_allowed_destination(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             move |_miss: Miss| *m.lock().unwrap() += 1,
         )
@@ -1891,11 +1934,11 @@ mod tests {
         let misses = Arc::new(Mutex::new(0usize));
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
-        let _sub = AdvancedSubscriber::declare_with_recovery(
+        let _sub = AdvancedSubscriber::declare_with_options(
             &session,
             "demo/data",
-            RecoveryConfig::new()
-                .with_heartbeat()
+            AdvancedSubscriberOptions::new()
+                .with_recovery(RecoveryConfig::new().with_heartbeat())
                 .with_allowed_destination(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             move |_miss: Miss| *m.lock().unwrap() += 1,
@@ -2018,12 +2061,13 @@ mod tests {
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
         let d = Arc::clone(&delivered);
         // The startup history GET fires on declare and recovers the cache.
-        let _sub = AdvancedSubscriber::declare_with_recovery(
+        let _sub = AdvancedSubscriber::declare_with_options(
             &session,
             "demo/data",
-            RecoveryConfig::new()
-                .with_allowed_destination(Locality::SessionLocal)
-                .with_history(HistoryConfig::new()),
+            AdvancedSubscriberOptions::new()
+                .with_recovery(RecoveryConfig::new())
+                .with_history(HistoryConfig::new())
+                .with_allowed_destination(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             |_miss: Miss| {},
         )
@@ -2131,13 +2175,14 @@ mod tests {
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
         let d = Arc::clone(&delivered);
         let timeout = Duration::from_millis(50);
-        let _sub = AdvancedSubscriber::declare_with_recovery(
+        let _sub = AdvancedSubscriber::declare_with_options(
             &session,
             "demo/data",
-            RecoveryConfig::new()
+            AdvancedSubscriberOptions::new()
+                .with_recovery(RecoveryConfig::new())
+                .with_history(HistoryConfig::new())
                 .with_allowed_destination(Locality::Any)
-                .with_query_timeout(timeout)
-                .with_history(HistoryConfig::new()),
+                .with_query_timeout(timeout),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             |_miss: Miss| {},
         )
@@ -2192,16 +2237,75 @@ mod tests {
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
-        let result = AdvancedSubscriber::declare_with_recovery(
+        let result = AdvancedSubscriber::declare_with_options(
             &session,
             "demo/data",
-            RecoveryConfig::new().with_periodic_queries(Duration::from_millis(100)),
+            AdvancedSubscriberOptions::new().with_recovery(
+                RecoveryConfig::new().with_periodic_queries(Duration::from_millis(100)),
+            ),
             |_sample: Sample| {},
             |_miss: Miss| {},
         );
         assert!(
             matches!(result, Err(AdvancedSubscribeError::NoRuntime)),
             "periodic recovery off-runtime must fail clear with NoRuntime, not panic"
+        );
+    }
+
+    /// R311y91 (review M1) — history-WITHOUT-retransmission is now representable
+    /// (zenoh keeps `.recovery()` / `.history()` separate). An
+    /// `AdvancedSubscriberOptions` with history set but NO recovery (retransmission
+    /// off) still recovers a late joiner's cached history on declare. Before the
+    /// split, history rode `RecoveryConfig`, so `retransmission = recovery.is_some()`
+    /// was forced ON whenever history was set -- this config was unrepresentable.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn history_only_without_recovery_recovers_late_joiner_cache() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x09u8];
+        let pub_eid = 4u32;
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+        let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
+        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
+            .expect("advanced cache declares");
+        for sn in 0u8..3 {
+            cache.cache_sample(CachedSample {
+                keyexpr: "demo/data".to_string(),
+                payload: vec![sn],
+                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                timestamp: TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: pub_zid.clone(),
+                },
+            });
+        }
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        // history ON, recovery OFF (no with_recovery -> recovery None -> retransmission
+        // false): the startup history GET still fires and recovers the cache.
+        let _sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_history(HistoryConfig::new())
+                .with_allowed_destination(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            |_miss: Miss| {},
+        )
+        .expect("history-only (no recovery) advanced subscriber declares");
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0, 1, 2],
+            "history-only (retransmission off) still recovered the cache (0,1,2) on declare"
         );
     }
 }
