@@ -371,33 +371,15 @@ impl ReplicationConfig {
     }
 }
 
-/// Converts an NTP64 `time` to milliseconds since the UNIX epoch,
-/// reproducing uhlc's `NTP64::to_duration().as_millis()` exactly.
-///
-/// An NTP64 packs seconds in the high 32 bits and a fraction-of-a-second (in
-/// units of 1/2^32 s) in the low 32 bits (`uhlc-0.8.1/src/ntp64.rs:71`). The
-/// conversion mirrors:
-/// - `as_secs` = `time >> 32` (ntp64.rs:95);
-/// - `subsec_nanos` = `(frac * 1e9).div_ceil(2^32)` (ntp64.rs:109-112) — the
-///   `div_ceil` is what makes `NTP64::from(Duration).as_nanos()` round-trip,
-///   so reproducing it (not a plain divide) is required to land in the same
-///   bucket as zenoh;
-/// - `Duration::new(secs, subsec_nanos).as_millis()` = `secs * 1000 +
-///   subsec_nanos / 1_000_000`.
-///
-/// zenoh classifies on this exact value (configuration.rs:197-201), so a wz
-/// replica and a zenoh replica bucket the same event identically.
+/// Converts an NTP64 `time` to milliseconds since the UNIX epoch via the
+/// [`Ntp64`](crate::ntp64::Ntp64) SSOT, which reproduces uhlc's
+/// `NTP64::to_duration().as_millis()` bit-for-bit (the `div_ceil` fraction
+/// conversion lives there). Retained as a thin private wrapper, called at the
+/// `classify` site, because zenoh classifies on this exact value
+/// (configuration.rs:197-201), so a wz replica and a zenoh replica bucket the
+/// same event identically.
 fn ntp64_to_ms(time: u64) -> u128 {
-    const FRAC_PER_SEC: u64 = 1u64 << 32;
-    const NANO_PER_SEC: u64 = 1_000_000_000;
-    const FRAC_MASK: u64 = 0xFFFF_FFFF;
-
-    let secs = (time >> 32) as u128;
-    let frac = time & FRAC_MASK;
-    // frac < 2^32, so frac * 1e9 < 2^62 — no overflow in u64.
-    let subsec_nanos = (frac * NANO_PER_SEC).div_ceil(FRAC_PER_SEC) as u128;
-
-    secs * 1000 + subsec_nanos / 1_000_000
+    crate::ntp64::Ntp64::from_word(time).to_millis()
 }
 
 /// The [`Fingerprint`] of a single stored event — a `(key, timestamp)` pair.

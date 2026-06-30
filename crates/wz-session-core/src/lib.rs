@@ -906,6 +906,14 @@ pub mod storage_strip_prefix;
 #[cfg(feature = "storage-history")]
 pub mod storage_history;
 
+/// R311y104 — the NTP64 timestamp-word SSOT ([`ntp64::Ntp64`]): the
+/// `(unix_secs << 32) | fraction` layout uhlc / zenoh `Timestamp` carry, with
+/// the `2^32` fraction-per-second magnitude defined once. A pure-core helper
+/// (always compiled) the storage-replication classification, the AP wall-clock
+/// source, and the advanced-cache `_time` resolver all build on, so the
+/// magnitude is no longer stated four ways.
+pub mod ntp64;
+
 /// Round 311vh — the storage-replication *primitives* atom (§5.11 storage,
 /// replication 1/N): the [`storage_replication::Fingerprint`], the
 /// time-bucket classification ([`storage_replication::IntervalIdx`] /

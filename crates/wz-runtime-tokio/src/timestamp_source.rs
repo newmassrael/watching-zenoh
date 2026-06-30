@@ -71,6 +71,7 @@
 //! borrows the shared node HLC instead of building its own. Until then, a
 //! single node HLC would have exactly one consumer.
 
+use wz_session_core::ntp64::Ntp64;
 // `TimestampHint` is used only by the gated `FallbackStamp` stamp seam (the
 // cache `_time` consumer reads only `wall_clock_ntp64`), so the import carries
 // the same consumer gate to stay clean under `ext-pubsub-advanced-cache` alone.
@@ -99,9 +100,7 @@ pub fn wall_clock_ntp64() -> u64 {
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = since_epoch.as_secs();
-    let frac = (u64::from(since_epoch.subsec_nanos()) << 32) / 1_000_000_000;
-    (secs << 32) | frac
+    Ntp64::from_unix(since_epoch.as_secs(), since_epoch.subsec_nanos()).as_word()
 }
 
 /// The fallback timestamp source for an un-timestamped sample: the seam that
@@ -222,7 +221,7 @@ mod tests {
         // source returning a tiny counter value that every real timestamp
         // would dominate under newer-wins.
         assert!(
-            ts.time >= (1u64 << 32),
+            ts.time >= Ntp64::FRAC_PER_SEC,
             "the fallback NTP64 carries real wall-clock seconds in the high 32 bits"
         );
     }

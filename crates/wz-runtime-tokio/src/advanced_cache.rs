@@ -55,6 +55,7 @@ use std::sync::{Arc, Mutex};
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
+use wz_session_core::ntp64::Ntp64;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::sample::{SourceInfo, TimestampHint};
 
@@ -278,10 +279,11 @@ fn sample_matches_sn(sample_sn: Option<u32>, range: Option<(Option<u32>, Option<
     }
 }
 
-/// One NTP64 second = `2^32` in the `(unix_secs << 32) | fraction` word
-/// ([`crate::timestamp_source::wall_clock_ntp64`]), so a duration in seconds
-/// scales to the NTP64 magnitude by `secs * 2^32`.
-const NTP64_SECOND: f64 = (1u64 << 32) as f64;
+/// One NTP64 second = `2^32` in the `(unix_secs << 32) | fraction` word, so a
+/// duration in seconds scales to the NTP64 magnitude by `secs * 2^32`. The
+/// `f64` view of the [`Ntp64::FRAC_PER_SEC`] magnitude SSOT, for the
+/// `now(±duration)` offset arithmetic below.
+const NTP64_SECOND: f64 = Ntp64::FRAC_PER_SEC as f64;
 
 /// Whether a sample's NTP64 timestamp satisfies the parsed `_time` range.
 /// No range (absent or unparseable `_time`) matches every sample.
