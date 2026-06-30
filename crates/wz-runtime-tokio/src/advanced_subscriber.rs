@@ -739,7 +739,7 @@ fn issue_recovery_query<R, T>(
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
     let zid_hex = zid_to_zenoh_hex(&req.zid);
-    let recovery_ke = format!("{base_keyexpr}/@adv/*/{zid_hex}/{}/**", req.eid);
+    let recovery_ke = crate::advanced_ke::recovery_get_ke(base_keyexpr, &zid_hex, req.eid);
     // Open `_sn=from..` (sample-driven / periodic) or bounded `_sn=from..to`
     // (heartbeat, which knows the publisher's last sn) — zenoh `seq_num_range`.
     let params = match req.to_sn {
@@ -834,7 +834,7 @@ fn issue_history_query<R, T>(
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
-    let history_ke = format!("{base_keyexpr}/@adv/**");
+    let history_ke = crate::advanced_ke::history_get_ke(base_keyexpr);
     // R311y89 (review C3) — bound the GET with a timeout so the deadline sweep can
     // fire `finish_history` if no `@adv` cache answers. Without it `history_pending`
     // stays set forever and EVERY live sample buffers undelivered (the subscriber
@@ -932,8 +932,10 @@ impl Drop for PeriodicTask {
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 fn parse_heartbeat_source(keyexpr: &str) -> Option<(Vec<u8>, u32)> {
     let chunks: Vec<&str> = keyexpr.split('/').collect();
-    let adv = chunks.iter().position(|c| *c == "@adv")?;
-    if chunks.get(adv + 1) != Some(&"pub") {
+    let adv = chunks
+        .iter()
+        .position(|c| *c == crate::advanced_ke::KE_ADV_PREFIX)?;
+    if chunks.get(adv + 1) != Some(&crate::advanced_ke::KE_ADV_PUB) {
         return None;
     }
     let zid = zenoh_hex_to_zid(chunks.get(adv + 2)?)?;
@@ -1189,7 +1191,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             let hb_state = Arc::clone(&state);
             let hb_session = session.clone();
             let hb_base = base_keyexpr.clone();
-            let hb_keyexpr = format!("{base_keyexpr}/@adv/pub/**");
+            let hb_keyexpr = crate::advanced_ke::heartbeat_sub_ke(&base_keyexpr);
             Some(session.declare_subscriber(
                 hb_keyexpr,
                 SubscribeOptions::default(),
@@ -1834,6 +1836,32 @@ mod tests {
         assert_eq!(parse_heartbeat_source("demo/data"), None);
         assert_eq!(parse_heartbeat_source("demo/@adv/sub/ff/7/_"), None);
         assert_eq!(parse_heartbeat_source("demo/@adv/pub/ff/xx/_"), None);
+    }
+
+    /// R311y92 (review S1) — the `@adv` namespace SSOT round-trip: a KE built by the
+    /// publisher's [`crate::advanced_ke::publisher_adv_ke`] parses back through the
+    /// subscriber's `parse_heartbeat_source` to the same `(zid, eid)`. This couples
+    /// the two sides through the shared `advanced_ke` module, so a drift on either
+    /// the construct or the parse side fails here (previously the publisher consts +
+    /// the subscriber inline literals could diverge silently).
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "ext-pubsub-advanced-recovery"
+    ))]
+    #[test]
+    fn publisher_adv_ke_round_trips_through_parse() {
+        let zid = vec![0x09u8, 0xAB];
+        let zid_hex = zid_to_zenoh_hex(&zid);
+        let ke = crate::advanced_ke::publisher_adv_ke("demo/data", &zid_hex, "7");
+        assert!(
+            ke.starts_with("demo/data/@adv/pub/") && ke.ends_with("/7/_"),
+            "the publisher @adv KE has the @adv/pub/.../_ shape, got {ke}"
+        );
+        assert_eq!(
+            parse_heartbeat_source(&ke),
+            Some((zid, 7)),
+            "the publisher-built KE parses back to its (zid, eid) via the shared @adv SSOT"
+        );
     }
 
     /// R311y84 heartbeat-trigger unit (no session): a beacon ahead of

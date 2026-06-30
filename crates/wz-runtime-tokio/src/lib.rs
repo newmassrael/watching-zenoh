@@ -738,6 +738,16 @@ pub mod storage_service;
 #[cfg(feature = "ext-pubsub-advanced-cache")]
 pub mod advanced_cache;
 
+/// R311y92 (review S1) — the `@adv` key-expr namespace SSOT: the consts +
+/// builders shared by the advanced publisher (constructs the `@adv/pub/.../_`
+/// KE) and the advanced subscriber (matches it with the recovery / history /
+/// heartbeat GETs + the beacon parser), so the namespace has one source of truth.
+#[cfg(any(
+    feature = "ext-pubsub-advanced-publisher",
+    feature = "ext-pubsub-advanced-recovery"
+))]
+pub(crate) mod advanced_ke;
+
 /// R311y69 — `ext-pubsub-advanced-publisher` (§5.25): a publisher that
 /// stamps a per-sample `SourceInfo` sequence number, retains samples in an
 /// [`advanced_cache::AdvancedCache`], and announces itself with an `@adv`

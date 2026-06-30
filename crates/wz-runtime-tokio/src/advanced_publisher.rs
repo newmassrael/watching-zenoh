@@ -145,19 +145,6 @@ impl From<LivelinessAliasError> for AdvancedPublisherError {
     }
 }
 
-/// The `@adv` key-expr prefix (zenoh `KE_ADV_PREFIX`, admin.rs:48).
-const KE_ADV_PREFIX: &str = "@adv";
-
-/// The trailing empty chunk zenoh appends to the `@adv` suffix
-/// (`KE_EMPTY = ke!("_")`, zenoh admin.rs:58). zenoh adds it
-/// "because of a routing matching bug" (advanced_publisher.rs:328-329):
-/// the publisher-detection / recovery queries are wildcard-tailed
-/// (`.../@adv/*/<zid>/<eid>/**`), and the concrete `_` chunk keeps the
-/// declared keyexpr matchable through a zenoh router. wz mirrors it so
-/// the `@adv` namespace is byte-identical to zenoh (a wz<->zenoh-router
-/// mesh would otherwise re-trip the bug zenoh shaped this to dodge).
-const KE_EMPTY: &str = "_";
-
 /// A live advanced publisher bound to a [`Session`]. Owns the (optional)
 /// cache + liveliness token (RAII: dropping it tears them down) and the
 /// per-publisher sequence counter.
@@ -226,17 +213,16 @@ where
 
         // `@adv/pub/<zid>/<eid|uhlc>/_` — the detection + recovery suffix
         // (zenoh advanced_publisher.rs:317-329). The `<eid>` discriminator
-        // marks sequence-number sequencing; `uhlc` marks timestamp/none.
-        // The trailing `_` (KE_EMPTY) is the empty meta chunk zenoh appends
-        // (no publisher_detection_metadata set here = the empty case).
+        // marks sequence-number sequencing; `uhlc` marks timestamp/none. The
+        // KE shape is the shared `@adv` SSOT ([`crate::advanced_ke`]).
         let discriminator = match options.sequencing {
             Sequencing::SequenceNumber => eid.to_string(),
             Sequencing::Timestamp | Sequencing::None => "uhlc".to_string(),
         };
-        let adv_keyexpr = format!(
-            "{keyexpr}/{KE_ADV_PREFIX}/pub/{}/{}/{KE_EMPTY}",
-            zid_to_zenoh_hex(&local_zid),
-            discriminator
+        let adv_keyexpr = crate::advanced_ke::publisher_adv_ke(
+            &keyexpr,
+            &zid_to_zenoh_hex(&local_zid),
+            &discriminator,
         );
 
         let cache = match options.cache {
