@@ -30,19 +30,27 @@
 //! reorder buffer (advanced-recovery piece #3, each seam paired with its
 //! consumer).
 //!
-//! ## `_time` time-range filter (deferred to advanced-history)
+//! ## `_time` time-range filter (R311y98)
 //!
-//! zenoh's cache also applies a `_time` time-range filter in both query
-//! branches (zenoh-ext advanced_cache.rs:264-272, :308-316). wz parses
-//! only `_sn` + `_max` here; a `_time` selector is currently IGNORED (the
-//! cache returns time-unfiltered samples). This is consumer-paired: the
-//! `_time` selector is emitted by the startup HISTORY query
-//! (`age`/`max_age` -> `_time=[now-age,..]`), so `_time` filtering lands
-//! WITH `ext-pubsub-advanced-history`. Until then a wz cache answering a
-//! zenoh `AdvancedSubscriber`'s age-bounded history query over-returns
-//! (a documented interop divergence, not silent).
+//! zenoh's cache applies a `_time` time-range filter in both query branches
+//! (zenoh-ext advanced_cache.rs:264-272, :308-316): a sample is replied only
+//! if its timestamp falls in the query's `_time` range. wz now mirrors this —
+//! [`answer_from_ring`] parses the `_time` selector ([`parse_time_range_ntp64`])
+//! and drops out-of-range samples. The "now" the relative `now(-age)` bounds
+//! resolve against is [`crate::timestamp_source::wall_clock_ntp64`] read at
+//! query time (the same NTP64 wall-clock base the publisher stamps each cached
+//! sample with), so the filter lives on the ANSWERER side and works for a
+//! publisher-only node serving a remote history subscriber — it does NOT
+//! require `ext-pubsub-advanced-history` on the cache's node. The `_time`
+//! selector is emitted by the startup HISTORY query (`max_age` ->
+//! `_time=[now(-age)..]`, the advanced-subscriber side). A `_time` form wz does
+//! not parse (an absolute RFC3339 bound, or the `[t;duration]` form) leaves the
+//! range unresolved = unfiltered, so an exotic zenoh-peer form degrades to the
+//! prior over-return rather than wrongly dropping samples (a documented, narrow
+//! interop divergence; the wz↔wz `now(±duration)` form filters exactly).
 
 use std::collections::VecDeque;
+use std::ops::Bound;
 use std::sync::{Arc, Mutex};
 
 use wz_runtime_core::TimeSource;
@@ -135,7 +143,10 @@ where
                 let guard = query_ring
                     .lock()
                     .expect("advanced cache ring mutex poisoned");
-                answer_from_ring(&guard, view, out);
+                // "now" for the `_time` age filter, read at query time from the
+                // same NTP64 wall-clock base the publisher stamps samples with.
+                let now = crate::timestamp_source::wall_clock_ntp64();
+                answer_from_ring(&guard, view, out, now);
             },
         )?;
         Ok(Self {
@@ -182,14 +193,28 @@ where
 /// Answer one inbound query from the ring: filter by the `_sn` range +
 /// `_max` cap, reply matching samples oldest-first (each under its own
 /// concrete keyexpr + timestamp).
-fn answer_from_ring(ring: &VecDeque<CachedSample>, view: &dyn QueryView, out: &mut dyn ReplyOut) {
+fn answer_from_ring(
+    ring: &VecDeque<CachedSample>,
+    view: &dyn QueryView,
+    out: &mut dyn ReplyOut,
+    now_ntp64: u64,
+) {
     let params = view.parameters();
     let sn_range = param_value(params, "_sn").map(parse_sn_range);
     let max = param_value(params, "_max").and_then(|v| v.parse::<usize>().ok());
+    // R311y98 — the `_time` age filter (zenoh advanced_cache.rs:264-272). A
+    // history GET carries `_time=[now(-age)..]`; only samples whose timestamp
+    // lies in the range are replied. Absent OR an unparseable form (absolute
+    // RFC3339, the `[t;dur]` form) leaves this `None` = unfiltered (the
+    // documented over-return), so wz never wrongly drops on a form it cannot
+    // resolve while the wz↔wz `now(±duration)` form filters exactly.
+    let time_range =
+        param_value(params, "_time").and_then(|v| parse_time_range_ntp64(v, now_ntp64));
 
     let mut matched: Vec<&CachedSample> = ring
         .iter()
         .filter(|s| sample_matches_sn(s.source_info.as_ref().map(|si| si.sn), sn_range))
+        .filter(|s| sample_matches_time(s.timestamp.time, time_range))
         .collect();
 
     // `_max`: keep the newest `m` (the ring tail), still replied oldest-first.
@@ -253,9 +278,162 @@ fn sample_matches_sn(sample_sn: Option<u32>, range: Option<(Option<u32>, Option<
     }
 }
 
+/// One NTP64 second = `2^32` in the `(unix_secs << 32) | fraction` word
+/// ([`crate::timestamp_source::wall_clock_ntp64`]), so a duration in seconds
+/// scales to the NTP64 magnitude by `secs * 2^32`.
+const NTP64_SECOND: f64 = (1u64 << 32) as f64;
+
+/// Whether a sample's NTP64 timestamp satisfies the parsed `_time` range.
+/// No range (absent or unparseable `_time`) matches every sample.
+fn sample_matches_time(sample_time: u64, range: Option<(Bound<u64>, Bound<u64>)>) -> bool {
+    match range {
+        None => true,
+        Some((lo, hi)) => {
+            let lo_ok = match lo {
+                Bound::Included(l) => sample_time >= l,
+                Bound::Excluded(l) => sample_time > l,
+                Bound::Unbounded => true,
+            };
+            let hi_ok = match hi {
+                Bound::Included(h) => sample_time <= h,
+                Bound::Excluded(h) => sample_time < h,
+                Bound::Unbounded => true,
+            };
+            lo_ok && hi_ok
+        }
+    }
+}
+
+/// Parse a `_time` time-range selector into resolved inclusive/exclusive NTP64
+/// bounds, mirroring zenoh's `TimeRange<TimeExpr>` grammar (zenoh-util
+/// time_range.rs:158-211): `[`/`]` opens an inclusive/exclusive start, `]`/`[`
+/// closes an inclusive/exclusive end, `start..end` are the two bounds (empty =
+/// unbounded). Returns `None` (= unfiltered, the documented over-return) for
+/// any form wz does not resolve to a wall-clock instant: an absolute RFC3339
+/// bound or the `[start;duration]` form. The wz history query only ever emits
+/// `[now(-age)..]`, so wz↔wz filters exactly.
+fn parse_time_range_ntp64(val: &str, now_ntp64: u64) -> Option<(Bound<u64>, Bound<u64>)> {
+    let bytes = val.as_bytes();
+    if bytes.len() < 4 {
+        return None;
+    }
+    let incl_start = match bytes[0] {
+        b'[' => true,
+        b']' => false,
+        _ => return None,
+    };
+    let incl_end = match bytes[bytes.len() - 1] {
+        b']' => true,
+        b'[' => false,
+        _ => return None,
+    };
+    let inner = &val[1..val.len() - 1];
+    // Only the `start..end` form (the `[start;duration]` form -> None/unfiltered).
+    let (start, end) = inner.split_once("..")?;
+    Some((
+        parse_time_bound_ntp64(start, incl_start, now_ntp64)?,
+        parse_time_bound_ntp64(end, incl_end, now_ntp64)?,
+    ))
+}
+
+/// Resolve one `_time` bound: empty = unbounded, else a `now(±duration)`
+/// instant carried into an inclusive/exclusive bound.
+fn parse_time_bound_ntp64(s: &str, inclusive: bool, now_ntp64: u64) -> Option<Bound<u64>> {
+    if s.is_empty() {
+        return Some(Bound::Unbounded);
+    }
+    let t = parse_now_expr_ntp64(s, now_ntp64)?;
+    Some(if inclusive {
+        Bound::Included(t)
+    } else {
+        Bound::Excluded(t)
+    })
+}
+
+/// Resolve a `now(±duration)` / `now()` expression to an NTP64 instant against
+/// `now_ntp64`, mirroring zenoh's `TimeExpr::Now` (time_range.rs:344-356). An
+/// absolute (RFC3339) time returns `None` — wz does not carry an absolute
+/// wall-clock parser here, so such a bound leaves the range unfiltered.
+fn parse_now_expr_ntp64(s: &str, now_ntp64: u64) -> Option<u64> {
+    let inner = s.strip_prefix("now(")?.strip_suffix(')')?;
+    if inner.is_empty() {
+        return Some(now_ntp64);
+    }
+    let (sign, dur) = match inner.strip_prefix('-') {
+        Some(rest) => (-1.0_f64, rest),
+        None => (1.0_f64, inner),
+    };
+    let secs = parse_duration_secs(dur)?;
+    // Resolve in signed NTP64 space so a `now(-age)` underflow clamps at 0
+    // rather than wrapping. `now_ntp64` (~1.8e18 today) fits in i64.
+    let offset = (sign * secs * NTP64_SECOND) as i64;
+    Some((now_ntp64 as i64).saturating_add(offset).max(0) as u64)
+}
+
+/// Parse a zenoh duration literal to seconds, mirroring zenoh-util
+/// `parse_duration` (time_range.rs): a bare `<f64>` is seconds; the suffixes
+/// `u` (micros), `ms` (millis), `s`, `m` (minutes), `h`, `d`, `w` scale it.
+fn parse_duration_secs(s: &str) -> Option<f64> {
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    if n == 0 {
+        return None;
+    }
+    match bytes[n - 1] {
+        b'u' => s[..n - 1].parse::<f64>().ok().map(|u| u * 1e-6),
+        b's' => {
+            if n >= 2 && bytes[n - 2] == b'm' {
+                s[..n - 2].parse::<f64>().ok().map(|ms| ms * 1e-3)
+            } else {
+                s[..n - 1].parse::<f64>().ok()
+            }
+        }
+        b'm' => s[..n - 1].parse::<f64>().ok().map(|m| m * 60.0),
+        b'h' => s[..n - 1].parse::<f64>().ok().map(|h| h * 3600.0),
+        b'd' => s[..n - 1].parse::<f64>().ok().map(|d| d * 86_400.0),
+        b'w' => s[..n - 1].parse::<f64>().ok().map(|w| w * 604_800.0),
+        _ => s.parse::<f64>().ok(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use wz_session_core::sample::EncodingHint;
+
+    /// Shared `ReplyOut` recorder for the `answer_from_ring` integration
+    /// tests: captures each reply's `(keyexpr, payload)` and its source
+    /// identity `(zid_prefix, eid, sn)` (or `None`).
+    #[derive(Default)]
+    struct Rec {
+        keyed: Vec<(String, Vec<u8>)>,
+        sourced: Vec<Option<(Vec<u8>, u32, u32)>>,
+    }
+    impl ReplyOut for Rec {
+        fn reply(&mut self, payload: &[u8]) {
+            self.keyed.push((String::new(), payload.to_vec()));
+        }
+        fn reply_keyed_sourced(
+            &mut self,
+            keyexpr: &str,
+            payload: &[u8],
+            _encoding: Option<&EncodingHint>,
+            _timestamp: &TimestampHint,
+            source_info: Option<&SourceInfo>,
+        ) {
+            self.keyed.push((keyexpr.to_string(), payload.to_vec()));
+            self.sourced
+                .push(source_info.map(|si| (si.zid_prefix().to_vec(), si.eid, si.sn)));
+        }
+        fn reply_del(&mut self) {}
+        fn reply_err(&mut self, _: Option<u32>, _: Option<&str>, _: &[u8]) {}
+        fn with_responder(&mut self, _: &[u8], _: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
+    }
 
     #[test]
     fn param_value_extracts_selectors() {
@@ -283,39 +461,6 @@ mod tests {
     #[test]
     fn answer_from_ring_filters_and_replies() {
         use wz_session_core::query_sink::BorrowedQuery;
-        use wz_session_core::sample::EncodingHint;
-
-        #[derive(Default)]
-        struct Rec {
-            keyed: Vec<(String, Vec<u8>)>,
-            // Per reply: the captured source identity (zid_prefix, eid, sn),
-            // or None when the sample carried no source_info.
-            sourced: Vec<Option<(Vec<u8>, u32, u32)>>,
-        }
-        impl ReplyOut for Rec {
-            fn reply(&mut self, payload: &[u8]) {
-                self.keyed.push((String::new(), payload.to_vec()));
-            }
-            fn reply_keyed_sourced(
-                &mut self,
-                keyexpr: &str,
-                payload: &[u8],
-                _encoding: Option<&EncodingHint>,
-                _timestamp: &TimestampHint,
-                source_info: Option<&SourceInfo>,
-            ) {
-                self.keyed.push((keyexpr.to_string(), payload.to_vec()));
-                self.sourced
-                    .push(source_info.map(|si| (si.zid_prefix().to_vec(), si.eid, si.sn)));
-            }
-            fn reply_del(&mut self) {}
-            fn reply_err(&mut self, _: Option<u32>, _: Option<&str>, _: &[u8]) {}
-            fn with_responder(&mut self, _: &[u8], _: u32) {}
-            fn clear_responder(&mut self) {}
-            fn responder(&self) -> Option<(&[u8], u32)> {
-                None
-            }
-        }
 
         let mut ring = VecDeque::new();
         for sn in 0..3u32 {
@@ -338,9 +483,10 @@ mod tests {
             is_local: true,
         };
 
-        // `_sn=1..` → sn 1 and 2, oldest-first.
+        // `_sn=1..` → sn 1 and 2, oldest-first. (No `_time` param, so the
+        // `now` argument is irrelevant here — passed `0`.)
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q(Some(b"_sn=1..")), &mut out);
+        answer_from_ring(&ring, &q(Some(b"_sn=1..")), &mut out, 0);
         assert_eq!(
             out.keyed,
             vec![
@@ -351,13 +497,13 @@ mod tests {
 
         // `_max=1` → only the newest (sn 2).
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q(Some(b"_max=1")), &mut out);
+        answer_from_ring(&ring, &q(Some(b"_max=1")), &mut out, 0);
         assert_eq!(out.keyed, vec![("demo/k".to_string(), vec![2])]);
 
         // No params → all three, each carrying its source_info (zid, eid, sn)
         // so a recovery subscriber can re-key / reorder the retransmissions.
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q(None), &mut out);
+        answer_from_ring(&ring, &q(None), &mut out, 0);
         assert_eq!(out.keyed.len(), 3);
         assert_eq!(
             out.sourced,
@@ -385,5 +531,110 @@ mod tests {
         assert!(!sample_matches_sn(Some(21), Some((Some(10), Some(20)))));
         // Bounded range needs a present sn.
         assert!(!sample_matches_sn(None, Some((Some(10), None))));
+    }
+
+    #[test]
+    fn parse_duration_units_match_zenoh() {
+        assert_eq!(parse_duration_secs("30"), Some(30.0)); // bare = seconds
+        assert_eq!(parse_duration_secs("30s"), Some(30.0));
+        assert_eq!(parse_duration_secs("500ms"), Some(0.5));
+        assert_eq!(parse_duration_secs("2m"), Some(120.0));
+        assert_eq!(parse_duration_secs("1h"), Some(3600.0));
+        assert_eq!(parse_duration_secs("1d"), Some(86_400.0));
+        assert_eq!(parse_duration_secs("1w"), Some(604_800.0));
+        assert_eq!(parse_duration_secs("1000u"), Some(1e-3)); // 1000us = 1ms
+        assert_eq!(parse_duration_secs("xs"), None);
+        assert_eq!(parse_duration_secs(""), None);
+    }
+
+    #[test]
+    fn parse_time_range_resolves_now_relative_bounds() {
+        let now = 1_000u64 << 32; // NTP64 = 1000 wall-clock seconds
+                                  // `[now(-30s)..]` -> [970s, unbounded) — the wz history-query form.
+        assert_eq!(
+            parse_time_range_ntp64("[now(-30s)..]", now),
+            Some((Bound::Included(970u64 << 32), Bound::Unbounded))
+        );
+        // `[now()..]` -> [1000s, unbounded).
+        assert_eq!(
+            parse_time_range_ntp64("[now()..]", now),
+            Some((Bound::Included(now), Bound::Unbounded))
+        );
+        // Closed, exclusive both ends: `]now(-2m)..now(-1m)[`.
+        assert_eq!(
+            parse_time_range_ntp64("]now(-2m)..now(-1m)[", now),
+            Some((Bound::Excluded(880u64 << 32), Bound::Excluded(940u64 << 32)))
+        );
+        // A `now(-age)` that underflows clamps at 0 (never wraps).
+        assert_eq!(
+            parse_time_range_ntp64("[now(-2000s)..]", now),
+            Some((Bound::Included(0), Bound::Unbounded))
+        );
+        // Unparseable / exotic forms -> None (= unfiltered over-return):
+        // an absolute RFC3339 bound, the `[t;dur]` form, and a malformed bracket.
+        assert_eq!(
+            parse_time_range_ntp64("[2024-01-01T00:00:00Z..]", now),
+            None
+        );
+        assert_eq!(parse_time_range_ntp64("[now();1h]", now), None);
+        assert_eq!(parse_time_range_ntp64("now(-30s)", now), None);
+    }
+
+    #[test]
+    fn time_filter_includes_and_excludes() {
+        let threshold = 70u64 << 32; // = now(100s) - 30s
+                                     // No range -> all.
+        assert!(sample_matches_time(60u64 << 32, None));
+        // [70s, unbounded): 80s in, 60s out, 70s in (inclusive).
+        let r = Some((Bound::Included(threshold), Bound::Unbounded));
+        assert!(sample_matches_time(80u64 << 32, r));
+        assert!(sample_matches_time(threshold, r));
+        assert!(!sample_matches_time(60u64 << 32, r));
+        // Exclusive lower bound drops the boundary sample.
+        let rex = Some((Bound::Excluded(threshold), Bound::Unbounded));
+        assert!(!sample_matches_time(threshold, rex));
+    }
+
+    /// Integration: `answer_from_ring` actually applies the `_time` filter in
+    /// its reply chain. A ring spanning three wall-clock seconds + a
+    /// `_time=[now(-30s)..]` query (now = 100s) replies only the samples newer
+    /// than 70s, oldest-first.
+    #[test]
+    fn answer_from_ring_applies_time_filter() {
+        use wz_session_core::query_sink::BorrowedQuery;
+
+        let now = 100u64 << 32;
+        let mut ring = VecDeque::new();
+        for (i, secs) in [60u64, 80, 100].into_iter().enumerate() {
+            ring.push_back(CachedSample {
+                keyexpr: "demo/k".to_string(),
+                payload: vec![i as u8],
+                source_info: Some(SourceInfo::new(&[0x07], 9, i as u32)),
+                timestamp: TimestampHint {
+                    time: secs << 32,
+                    zid: vec![1],
+                },
+            });
+        }
+        let q = BorrowedQuery {
+            keyexpr: "demo/k",
+            parameters: Some(b"_time=[now(-30s)..]"),
+            attachment: None,
+            source_info: None,
+            rid: 0,
+            is_local: true,
+        };
+        let mut out = Rec::default();
+        answer_from_ring(&ring, &q, &mut out, now);
+        // threshold = 70s -> the 80s (payload 1) + 100s (payload 2) samples;
+        // the 60s (payload 0) sample is dropped.
+        assert_eq!(
+            out.keyed,
+            vec![
+                ("demo/k".to_string(), vec![1]),
+                ("demo/k".to_string(), vec![2]),
+            ],
+            "the _time filter drops the out-of-range sample"
+        );
     }
 }

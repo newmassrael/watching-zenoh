@@ -338,8 +338,9 @@ impl AdvancedSubscriberOptions {
 
 /// Startup-history configuration ([`AdvancedSubscriberOptions::with_history`]).
 /// Mirror of zenoh-ext `HistoryConfig` (advanced_subscriber.rs:54-89). R311y86
-/// builds the `max_samples` (`_max`) cap; the `max_age` time-range filter +
-/// late-publisher liveliness detection are documented follow-ons.
+/// builds the `max_samples` (`_max`) cap; R311y98 adds the `max_age` age
+/// filter (`_time`). Late-publisher liveliness detection
+/// (`detect_late_publishers`) is the remaining documented follow-on.
 #[cfg(feature = "ext-pubsub-advanced-history")]
 #[derive(Clone, Copy, Debug, Default)]
 #[non_exhaustive]
@@ -348,6 +349,11 @@ pub struct HistoryConfig {
     /// source (the `_max=N` selector); `None` recovers the publishers' whole
     /// caches (zenoh `HistoryConfig::max_samples`).
     pub sample_depth: Option<usize>,
+    /// `Some(secs)` bounds the startup history GET to samples no older than
+    /// `secs` seconds (the `_time=[now(-secs)..]` selector); `None` applies no
+    /// age bound (zenoh `HistoryConfig::max_age`). Composes with `sample_depth`
+    /// — both selectors ride the one GET.
+    pub max_age: Option<f64>,
 }
 
 #[cfg(feature = "ext-pubsub-advanced-history")]
@@ -361,6 +367,13 @@ impl HistoryConfig {
     /// (the `_max` selector).
     pub fn max_samples(mut self, depth: usize) -> Self {
         self.sample_depth = Some(depth);
+        self
+    }
+
+    /// Bound the startup history GET to samples no older than `seconds`
+    /// (the `_time=[now(-seconds)..]` selector; zenoh `HistoryConfig::max_age`).
+    pub fn max_age(mut self, seconds: f64) -> Self {
+        self.max_age = Some(seconds);
         self
     }
 }
@@ -880,9 +893,29 @@ fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<((Vec<u8>, u32),
     Some((key, sn, sample))
 }
 
+/// Build the startup history GET selector from the `_max` cap (`sample_depth`)
+/// and the `_time` age bound (`max_age`). `None` (neither set) means no
+/// parameters; otherwise the `&`-joined selectors ride the one GET. The
+/// `_time` form `[now(-{age}s)..]` is byte-identical to zenoh's
+/// `TimeRange<TimeExpr>` Display of `[Inclusive(Now{offset_secs:-age})..]`
+/// (zenoh-util time_range.rs:128-141/327-339), so a wz cache and a zenoh cache
+/// both filter it exactly.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+fn history_selector(sample_depth: Option<usize>, max_age: Option<f64>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(max) = sample_depth {
+        parts.push(format!("_max={max}"));
+    }
+    if let Some(age) = max_age {
+        parts.push(format!("_time=[now(-{age}s)..]"));
+    }
+    (!parts.is_empty()).then(|| parts.join("&"))
+}
+
 /// R311y86 — issue the startup history GET over `<base>/@adv/**` (capped by
-/// `_max=N` when `sample_depth` is set), feeding the recovered cached samples
-/// from EVERY publisher into the per-source ordering. On the terminal Final,
+/// `_max=N` when `sample_depth` is set + bounded by `_time=[now(-age)..]` when
+/// `max_age` is set, R311y98), feeding the recovered cached samples from EVERY
+/// publisher into the per-source ordering. On the terminal Final,
 /// [`State::finish_history`] clears `history_pending` + flushes the buffered
 /// history oldest-first. MUST be called with the [`State`] lock RELEASED.
 #[cfg(feature = "ext-pubsub-advanced-history")]
@@ -891,6 +924,7 @@ fn issue_history_query<R, T>(
     statesref: &Arc<Mutex<State>>,
     base_keyexpr: &str,
     sample_depth: Option<usize>,
+    max_age: Option<f64>,
     dest: Locality,
     timeout_ms: u32,
 ) where
@@ -907,8 +941,11 @@ fn issue_history_query<R, T>(
     let opts = QueryOptions::get()
         .with_allowed_destination(dest)
         .with_timeout_ms(timeout_ms);
-    let opts = match sample_depth {
-        Some(max) => opts.with_parameters(format!("_max={max}").into_bytes()),
+    // R311y86 `_max=N` (sample_depth) + R311y98 `_time=[now(-age)..]` (max_age)
+    // ride the one GET; the cache filters on whichever it sees. zenoh emits
+    // `now({offset_secs}s)` with offset_secs = -age, i.e. `now(-{age}s)`.
+    let opts = match history_selector(sample_depth, max_age) {
+        Some(params) => opts.with_parameters(params.into_bytes()),
         None => opts,
     };
 
@@ -1290,6 +1327,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 &state,
                 &base_keyexpr,
                 history.sample_depth,
+                history.max_age,
                 dest,
                 timeout_ms,
             );
@@ -2445,6 +2483,86 @@ mod tests {
             *delivered.lock().unwrap(),
             vec![3, 4],
             "_max=2 delivered only the newest 2 cached samples (3,4), oldest-first"
+        );
+    }
+
+    /// R311y98 — the history GET selector: `_max` (sample_depth) + `_time`
+    /// (max_age) ride one selector; the `_time` form is byte-identical to
+    /// zenoh's `[now(-{age}s)..]` Display.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn history_selector_emits_max_and_time() {
+        assert_eq!(history_selector(None, None), None);
+        assert_eq!(history_selector(Some(2), None), Some("_max=2".to_string()));
+        assert_eq!(
+            history_selector(None, Some(30.0)),
+            Some("_time=[now(-30s)..]".to_string())
+        );
+        assert_eq!(
+            history_selector(Some(2), Some(30.0)),
+            Some("_max=2&_time=[now(-30s)..]".to_string())
+        );
+    }
+
+    /// R311y98 composed `_time` age filter: a `max_age(3600s)` history
+    /// subscriber recovers a publisher's cache, but the cache drops the sample
+    /// older than the age bound. The samples carry REAL wall-clock NTP64
+    /// timestamps (the cache resolves `now(-age)` against `wall_clock_ntp64()`);
+    /// a 2-hour-old sample falls outside the 1-hour window while two ~now
+    /// samples pass — deterministic because the 1-hour window dwarfs the test's
+    /// runtime.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn history_max_age_drops_samples_older_than_the_window() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use crate::timestamp_source::wall_clock_ntp64;
+        use wz_session_core::sample::TimestampHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x09u8];
+        let pub_eid = 4u32;
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+        let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
+        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
+            .expect("advanced cache declares");
+
+        let now = wall_clock_ntp64();
+        let two_hours = 2 * (3600u64 << 32);
+        // sn 0 is 2h old (outside a 1h window); sn 1,2 are ~now (inside).
+        let times = [now.saturating_sub(two_hours), now, now];
+        for (sn, &t) in times.iter().enumerate() {
+            cache.cache_sample(CachedSample {
+                keyexpr: "demo/data".to_string(),
+                payload: vec![sn as u8],
+                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                timestamp: TimestampHint {
+                    time: t,
+                    zid: pub_zid.clone(),
+                },
+            });
+        }
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let _sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_history(HistoryConfig::new().max_age(3600.0))
+                .with_get_locality(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            |_miss: Miss| {},
+        )
+        .expect("age-bounded history advanced subscriber declares");
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![1, 2],
+            "max_age=3600s dropped the 2h-old sample, kept the two recent ones"
         );
     }
 }

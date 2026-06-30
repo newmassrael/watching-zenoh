@@ -71,6 +71,10 @@
 //! borrows the shared node HLC instead of building its own. Until then, a
 //! single node HLC would have exactly one consumer.
 
+// `TimestampHint` is used only by the gated `FallbackStamp` stamp seam (the
+// cache `_time` consumer reads only `wall_clock_ntp64`), so the import carries
+// the same consumer gate to stay clean under `ext-pubsub-advanced-cache` alone.
+#[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
 use wz_session_core::sample::TimestampHint;
 
 /// A wall-clock NTP64 timestamp word: `(unix_seconds << 32) | fraction`,
@@ -111,6 +115,14 @@ pub fn wall_clock_ntp64() -> u64 {
 /// thread-safe), the `time-hlc`-off variant holds only the `zid`. Held by
 /// value (single owner — the one capture closure; not shared / cloned, so no
 /// `Arc`).
+///
+/// R311y98 — gated on the auto-stamp CONSUMERS (`storage-backend` /
+/// `ext-pubsub-advanced-publisher`), not on the wider module gate: the advanced
+/// cache's `_time` filter (`ext-pubsub-advanced-cache`) reads only the
+/// [`wall_clock_ntp64`] SSOT above and never constructs the stamp seam, so this
+/// stays with its real consumers. (`time-hlc` implies `storage-backend`, so the
+/// HLC variant + helpers below are always live when compiled.)
+#[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
 pub(crate) struct FallbackStamp {
     /// The storage's identity, attached to every fallback stamp as the `zid`
     /// tie-breaker — identical across both source variants, so the source
@@ -122,6 +134,7 @@ pub(crate) struct FallbackStamp {
     hlc: uhlc::HLC,
 }
 
+#[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
 impl FallbackStamp {
     /// Build the fallback source for a storage whose identity is `zid`. With
     /// `time-hlc` on this also constructs the HLC (id derived from `zid`,
@@ -197,6 +210,7 @@ fn hlc_id_from_zid(zid: &[u8]) -> uhlc::ID {
 mod tests {
     use super::*;
 
+    #[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
     #[test]
     fn fallback_stamp_carries_zid_and_real_wall_clock_magnitude() {
         let zid = vec![0xAB, 0xCD];

@@ -724,9 +724,12 @@ pub mod session_open;
 /// auto-stamp site today — so the module is gated on `storage-backend`.
 // R311y69 — `timestamp_source` (the §5.18 FallbackStamp seam) gained a
 // second consumer: `ext-pubsub-advanced-publisher` stamps every cached
-// put through it. Widen the gate so the module compiles for either
-// consumer (the storage-backend OR the advanced-publisher atom).
-#[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
+// put through it. R311y98 — a third: the `ext-pubsub-advanced-cache`
+// `_time` age filter reads `wall_clock_ntp64()` at query time to resolve
+// `now(-age)`. The gate keys on `ext-pubsub-advanced-cache` (which
+// `ext-pubsub-advanced-publisher` implies), so the module compiles for any
+// of the three consumers (storage-backend OR the advanced cache/publisher).
+#[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-cache"))]
 pub mod timestamp_source;
 
 #[cfg(feature = "storage-backend")]
