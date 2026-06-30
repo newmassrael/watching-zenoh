@@ -1148,6 +1148,30 @@ layer_c1ax_cargo_test_routing_namespace() {
         && cargo build -p wz --features routing-namespace --quiet)
 }
 
+# ─── Layer C1ay — router-hat 1a: dual-net topology STATE unit + clippy ─
+#
+# R311y108: the §5.21 router forwarder (the 4th `impl FaceForwarder`,
+# `router_forward`) is the wz port of zenoh `hat/router`'s DUAL link-state mesh
+# (routers_net + linkstatepeers_net), gated on the off-default
+# `routing-router-hat` feature, so the default Layer C1 does NOT compile it --
+# this lane restores its coverage, the same triad shape C1w/C1x/C1y use for the
+# other routing forwarders:
+#   1. runs the `router_forward` lib units (dual-net register/deregister tier
+#      classification by whatami, the TIER-SCOPED flood proof that the two nets
+#      never cross-inject, OAM tier ingest, tick coalescing per net, and the
+#      count-only Push deferral pin);
+#   2. clippy-gates the `routing-router-hat` cfg (`--all-targets`, incl tests);
+#   3. clippy-gates the LIB under `--no-default-features --features
+#      routing-router-hat` to prove the forwarder composes standalone
+#      (routing-router-hat pulls only routing-peer). Slice 1a is topology STATE;
+#      the dual-tier Declare INGEST + route COMPUTE are later slices.
+layer_c1ay_cargo_test_router_hat() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings)
+}
+
 # ─── Layer C1af — SHM transport (R3a+R3b): provider + live swap + e2e ─
 #
 # R311xn (R3a) + R311xo (R3b): the scoped same-host SHM transport -- the wz mirror
@@ -4382,6 +4406,7 @@ run_layer C1au layer_c1au_cargo_test_ext_pubsub_sample_miss_detection || overall
 run_layer C1av layer_c1av_cargo_test_ext_pubsub_advanced_history || overall=1
 run_layer C1aw layer_c1aw_cargo_test_ext_pubsub_group_membership || overall=1
 run_layer C1ax layer_c1ax_cargo_test_routing_namespace || overall=1
+run_layer C1ay layer_c1ay_cargo_test_router_hat || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

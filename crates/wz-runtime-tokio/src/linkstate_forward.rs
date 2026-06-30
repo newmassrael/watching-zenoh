@@ -2366,7 +2366,7 @@ impl LinkstateForwarder {
 /// exactly like a zid-less face. The conversion lives here (the driver), keeping
 /// `SessionLinkActions` (session-core, `#![no_std]`, routing-agnostic) free of
 /// the routing `Zid` type.
-fn peer_zid_routing(actions: &SessionLinkActions) -> Option<Zid> {
+pub(crate) fn peer_zid_routing(actions: &SessionLinkActions) -> Option<Zid> {
     actions
         .peer_zid()
         .and_then(|bytes| Zid::try_from(bytes).ok())
@@ -2388,7 +2388,7 @@ fn peer_zid_routing(actions: &SessionLinkActions) -> Option<Zid> {
 ///
 /// An all-peer deployment hits neither branch (wire Peer -> Peer), so it is
 /// behaviour-unchanged.
-fn peer_whatami_routing(actions: &SessionLinkActions) -> WhatAmI {
+pub(crate) fn peer_whatami_routing(actions: &SessionLinkActions) -> WhatAmI {
     match actions.peer_whatami_wire() {
         None => WhatAmI::Peer,
         Some(wire) => WhatAmI::from_wire(wire).unwrap_or_else(|| {

@@ -846,6 +846,18 @@ pub mod routing_forward;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_forward;
 
+/// R311y108 — §5.21 router-hat slice 1a: the DUAL-mesh router forwarder. A 4th
+/// [`FaceForwarder`](accept_loop::FaceForwarder) (`RouterForwarder`) that ports
+/// zenoh `hat/router`'s two link-state graphs — `routers_net` (Router-tier
+/// faces) + `linkstatepeers_net` (Peer-tier faces) — distinct from the
+/// single-net [`linkstate_forward`] `LinkstateForwarder` it builds on. Slice 1a
+/// is the topology-STATE half: dual-net register/deregister/OAM-ingest with a
+/// TIER-SCOPED flood (the two graphs never cross-inject). The dual-tier Declare
+/// INGEST, the cross-tier bubble, route-compute, and master-election are later
+/// slices. Gated on `routing-router-hat` (which pulls `routing-peer`).
+#[cfg(feature = "routing-router-hat")]
+pub mod router_forward;
+
 /// R311tt — the §5.16 access-control interceptor SEAM: the composable
 /// message-admission chain ([`interceptor::InterceptorChain`]) the ACL,
 /// downsampling, and low-pass enforcers plug into, plus the ACL enforcer

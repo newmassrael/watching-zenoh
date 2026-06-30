@@ -815,6 +815,25 @@ routing-peer = [
     # so without this the flood is silently dropped at the stream guard.
     "transport-fragmentation",
 ]
+# R311y108 — §5.21 router-hat slice 1a: the DUAL-mesh router forwarder
+# (the 4th `impl FaceForwarder`, `router_forward` module). Ports zenoh
+# `hat/router`'s two link-state graphs (routers_net + linkstatepeers_net)
+# DISTINCT from the single-net `routing-peer` `LinkstateForwarder`. Slice 1a
+# is the TOPOLOGY STATE half: dual-net register/deregister/OAM-ingest with a
+# TIER-SCOPED flood (a routers_net change reaches only router faces, a
+# linkstatepeers_net change only peer faces — the two graphs never cross-inject).
+# Reuses the whole `routing-peer` machinery (the graph crate, the interest
+# tables, the whatami/zid decode), so it forwards `routing-peer`; the dual-tier
+# Declare INGEST + cross-tier bubble + route-compute + master-election are
+# later slices. Off by default; the run-ci Layer C1ay lane selects it.
+# This is a FOUNDATION feature, not the `router-hat-router` inventory atom:
+# slice 1a is topology STATE only (it routes nothing), the exact analogue of
+# `routing-accept` (accept-and-hold without forwarding), so — like
+# routing-accept — it gates code WITHOUT being an inventory atom. The
+# `router-hat-router` atom stays reserved and flips active only once the HAT
+# actually routes (the COMPUTE slice), mirroring how `routing-routes`/
+# `routing-router` flip active on top of the `routing-accept` foundation.
+routing-router-hat = ["routing-peer"]
 # ── §5.16 access-control composition knobs ───────────────────────────
 # Each independently elides ONE interceptor on the routing-peer admission
 # chain (interceptor/{access_control,downsampling,low_pass}.rs). The chain
