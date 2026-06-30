@@ -633,6 +633,23 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             // "Active: any msg refresh last_seen"). The FSM stays Active;
             // the baselines re-store from the fresh advertisement.
             self.peers[idx].last_seen_ms = now_ms;
+            // §5.21 routing-namespace — a re-JOIN from the SAME address but a
+            // DIFFERENT zid is a NEW peer reusing the slot before the old peer's
+            // lease expired: drop the dead peer's per-peer namespace correlation
+            // state so the new peer cannot inherit its blocked-ids (the in-place
+            // twin of the evict() reset, which covers only the lease/Close
+            // recycle). It MUST be conditional on a zid CHANGE: a same-zid JOIN
+            // (the periodic beacon from a live peer) keeps that peer's legitimate
+            // in-flight correlation — an unconditional wipe would itself leak a
+            // phantom undeclare (the inverse bug). Checked BEFORE the zid
+            // overwrite below; `None` lazily re-seeds from the dispatcher
+            // namespace on the next strip, like evict(). (R311y107b session-review
+            // fix: SN state is JOIN-authoritative-reset by seed_from_join, so the
+            // namespace correlation must follow the same identity-reset rule.)
+            #[cfg(feature = "routing-namespace")]
+            if !self.peers[idx].matches_zid(zid) {
+                self.peers[idx].namespace_ingress = None;
+            }
             self.peers[idx].zid = Some(copy_zid(zid));
             self.peers[idx].seed_from_join(baseline);
             return JoinOutcome::Refreshed;
@@ -1252,6 +1269,137 @@ mod tests {
             messages.len(),
             1,
             "recycled slot has no inherited block -> the new peer's undeclare survives"
+        );
+    }
+
+    /// R311y107b — a FramePayload carrying one out-of-namespace DeclareSubscriber
+    /// `id` (blocks `id` in the per-peer ingress when stripped against a
+    /// namespace it does not match).
+    #[cfg(all(feature = "routing-namespace", feature = "codec-declare"))]
+    fn ns_decl_sub_frame(keyexpr: &str, id: u64) -> crate::driver_loop::DriverLoopOutcome {
+        use alloc::boxed::Box;
+        use alloc::vec;
+        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
+        crate::driver_loop::DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![crate::network_message::NetworkMessage::Declare(Box::new(
+                DeclareOwned {
+                    header: 0,
+                    interest_id: None,
+                    extensions: None,
+                    body: DV::CodecZenohDeclSubscriber(
+                        wz_codecs::decl_subscriber::DeclSubscriberOwned {
+                            header: 0,
+                            id,
+                            keyexpr: crate::wireexpr_build::literal_wireexpr(keyexpr).unwrap(),
+                        },
+                    ),
+                },
+            ))],
+            has_ext: false,
+            extensions: vec![],
+        }
+    }
+
+    /// R311y107b — a FramePayload carrying one id-only UndeclareSubscriber `id`
+    /// (dropped iff `id` is still blocked in the per-peer ingress).
+    #[cfg(all(feature = "routing-namespace", feature = "codec-declare"))]
+    fn ns_undecl_sub_frame(id: u64) -> crate::driver_loop::DriverLoopOutcome {
+        use alloc::boxed::Box;
+        use alloc::vec;
+        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
+        crate::driver_loop::DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![crate::network_message::NetworkMessage::Declare(Box::new(
+                DeclareOwned {
+                    header: 0,
+                    interest_id: None,
+                    extensions: None,
+                    body: DV::CodecZenohUndeclSubscriber(
+                        wz_codecs::undecl_subscriber::UndeclSubscriberOwned {
+                            header: 0,
+                            id,
+                            extensions: None,
+                        },
+                    ),
+                },
+            ))],
+            has_ext: false,
+            extensions: vec![],
+        }
+    }
+
+    /// R311y107b §5.21 routing-namespace — a re-JOIN to a KNOWN address with a
+    /// DIFFERENT zid (a new peer reusing the slot before the old peer's lease
+    /// expired) clears the per-peer namespace correlation, so the new peer does
+    /// not inherit the dead peer's blocked-ids — the IN-PLACE twin of the
+    /// evict()-recycle reset (the lifecycle gap the R311y107 session review
+    /// found: SN state is JOIN-reset by seed_from_join, the namespace correlation
+    /// was not). Without it the new peer's same-id undeclare is wrongly dropped.
+    #[cfg(all(feature = "routing-namespace", feature = "codec-declare"))]
+    #[test]
+    fn namespace_ingress_reset_on_rejoin_with_new_zid() {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
+
+        let mut d = running_dispatcher::<4>(5_000);
+        d.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        // Old peer A blocks id=3 (an out-of-namespace declare).
+        let mut a = ns_decl_sub_frame("other/x", 3);
+        d.apply_namespace_ingress(SRC_A, &mut a);
+        // A NEW peer (DIFFERENT zid) re-JOINs the SAME address before A's lease
+        // expired -> the known-address branch must reset namespace_ingress.
+        assert_eq!(
+            d.ingest_join(ZID_B, SRC_A, sn0(), 0),
+            JoinOutcome::Refreshed
+        );
+        // The new peer's UndeclareSubscriber id=3 must SURVIVE (no inherited block).
+        let mut b = ns_undecl_sub_frame(3);
+        d.apply_namespace_ingress(SRC_A, &mut b);
+        let DriverLoopOutcome::FramePayload { messages, .. } = &b else {
+            panic!("framepayload")
+        };
+        assert_eq!(
+            messages.len(),
+            1,
+            "new-zid re-JOIN clears the dead peer's block -> the undeclare survives"
+        );
+    }
+
+    /// R311y107b §5.21 routing-namespace — a SAME-zid re-JOIN (the periodic JOIN
+    /// beacon of a LIVE peer) KEEPS the correlation, so a legitimate in-flight
+    /// block is NOT discarded — the inverse bug an UNCONDITIONAL wipe would cause
+    /// (leaking a phantom undeclare). The reset is conditional on a zid change.
+    #[cfg(all(feature = "routing-namespace", feature = "codec-declare"))]
+    #[test]
+    fn namespace_ingress_kept_on_rejoin_same_zid() {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
+
+        let mut d = running_dispatcher::<4>(5_000);
+        d.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        let mut a = ns_decl_sub_frame("other/x", 3);
+        d.apply_namespace_ingress(SRC_A, &mut a);
+        // The SAME peer (same zid) re-JOINs (periodic beacon) -> correlation kept.
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, sn0(), 0),
+            JoinOutcome::Refreshed
+        );
+        // The live peer's own UndeclareSubscriber id=3 is STILL correlated + dropped
+        // (its block is legitimately in-flight; an unconditional wipe would leak it).
+        let mut a2 = ns_undecl_sub_frame(3);
+        d.apply_namespace_ingress(SRC_A, &mut a2);
+        let DriverLoopOutcome::FramePayload { messages, .. } = &a2 else {
+            panic!("framepayload")
+        };
+        assert_eq!(
+            messages.len(),
+            0,
+            "same-zid re-JOIN keeps the live block -> the undeclare is still dropped"
         );
     }
 

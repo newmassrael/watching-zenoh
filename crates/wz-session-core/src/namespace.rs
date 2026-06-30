@@ -350,6 +350,28 @@ impl NamespaceIngress {
         }
     }
 
+    /// Clear the per-peer CORRELATION state (the `blocked_*` id sets + the
+    /// `incomplete` alias map) while KEEPING the namespace prefix. Called on a
+    /// peer-IDENTITY reset that is NOT a full teardown: a unicast transport
+    /// reopen ([`crate::session_actions`]'s `reset_for_reopen`) or a multicast
+    /// re-JOIN to a known address with a NEW zid. After such a reset the remote
+    /// re-handshakes with EMPTY declaration tables + a RESTARTED id space
+    /// (handshake-scoped, exactly like the RX SN gate), so a stale `blocked_*`
+    /// entry must not survive to swallow a re-declared entity's id-only
+    /// `Undeclare*` (the multicast re-JOIN / unicast reopen twin of the
+    /// `evict()` reset — the lifecycle gap the R311y107 session review found).
+    /// The namespace itself is THIS node's config and is preserved.
+    pub fn reset(&mut self) {
+        #[cfg(feature = "codec-declare")]
+        {
+            self.blocked_subscribers.clear();
+            self.blocked_queryables.clear();
+            self.blocked_tokens.clear();
+        }
+        self.blocked_interests.clear();
+        self.incomplete.clear();
+    }
+
     /// Apply the ingress transform to an INBOUND message destined for this
     /// participant's local registries. Returns `false` when the message must be
     /// DROPPED (its keyexpr is not under the namespace, or it undeclares a
@@ -664,6 +686,57 @@ mod tests {
                                                         // A matching DeclareSubscriber id=4 strips + passes (not blocked).
         assert!(ing.apply(&mut decl_sub(4, "myns/foo")));
         assert!(!ing.blocked_subscribers.contains(&4));
+    }
+
+    /// R311y107b — `reset()` clears the blocked-id / incomplete CORRELATION while
+    /// keeping the namespace: a blocked id is forgotten (so its later undeclare
+    /// SURVIVES rather than being consumed), yet an in-namespace declare still
+    /// strips. The kernel proof behind the unicast `reset_for_reopen` + multicast
+    /// re-JOIN identity-reset paths (the session-review lifecycle-gap fix).
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn reset_clears_blocked_ids_keeps_namespace() {
+        use alloc::boxed::Box;
+        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
+        let mut ing = NamespaceIngress::new(ns("myns"));
+        let decl_sub = |id, ke| {
+            NetworkMessage::Declare(Box::new(DeclareOwned {
+                header: 0,
+                interest_id: None,
+                extensions: None,
+                body: DV::CodecZenohDeclSubscriber(
+                    wz_codecs::decl_subscriber::DeclSubscriberOwned {
+                        header: 0,
+                        id,
+                        keyexpr: literal(ke),
+                    },
+                ),
+            }))
+        };
+        // Block id=3 (out-of-namespace declare dropped + id remembered).
+        assert!(!ing.apply(&mut decl_sub(3, "other/foo")));
+        assert!(ing.blocked_subscribers.contains(&3));
+        // reset() forgets the correlation (identity reset, namespace preserved).
+        ing.reset();
+        assert!(ing.blocked_subscribers.is_empty());
+        assert!(ing.incomplete.is_empty());
+        // The id-3 undeclare now SURVIVES (no stale block to consume it) — the
+        // re-handshaked peer's re-declared id is not swallowed.
+        let mut undecl = NetworkMessage::Declare(Box::new(DeclareOwned {
+            header: 0,
+            interest_id: None,
+            extensions: None,
+            body: DV::CodecZenohUndeclSubscriber(
+                wz_codecs::undecl_subscriber::UndeclSubscriberOwned {
+                    header: 0,
+                    id: 3,
+                    extensions: None,
+                },
+            ),
+        }));
+        assert!(ing.apply(&mut undecl));
+        // The namespace PREFIX survives: an in-namespace declare still strips+passes.
+        assert!(ing.apply(&mut decl_sub(4, "myns/foo")));
     }
 
     #[test]

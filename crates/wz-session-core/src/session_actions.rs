@@ -3981,6 +3981,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R311ke — the RX SN gate is handshake-scoped: the reopen
             // handshake's OpenSyn/OpenAck re-seeds both channels.
             R::with_mutex_mut(&self.rx_sn, |s| *s = crate::sn::RxSn::default());
+            // §5.21 routing-namespace — the per-session INGRESS correlation is
+            // handshake-scoped too: on reopen the remote re-handshakes with EMPTY
+            // declaration tables + a RESTARTED id space, so a stale blocked-id
+            // from before the reopen would swallow a re-declared entity's id-only
+            // Undeclare* after it (the unicast twin of the multicast re-JOIN gap
+            // the R311y107b session review found). Reset the correlation in place;
+            // the namespace PREFIX is preserved (it is this node's config, not
+            // peer state). No-op when no namespace is installed.
+            #[cfg(feature = "routing-namespace")]
+            R::with_mutex_mut(&self.namespace_ingress, |slot| {
+                if let Some(ing) = slot.as_mut() {
+                    ing.reset();
+                }
+            });
             R::with_mutex_mut(&self.tx_mutex, |batch| *batch = BatchTx::default());
             // SeqCst pairs with `next_outbound_frame_sn`'s fetch_add — the
             // reset must not reorder against a straggling in-flight mint.

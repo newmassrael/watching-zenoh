@@ -70,3 +70,100 @@ fn reconnect_replay_re_decorates_the_cached_declare() {
         sends.len(),
     );
 }
+
+/// R311y107b §5.21 routing-namespace — `reset_for_reopen` clears the per-session
+/// INGRESS correlation (the blocked-id sets) but KEEPS the namespace prefix. On
+/// reopen the remote re-handshakes with empty declaration tables + a restarted
+/// id space (handshake-scoped, like the RX SN gate), so a stale block from before
+/// the reopen must not survive to swallow the re-handshaked peer's id-only
+/// undeclare — the unicast twin of the multicast re-JOIN identity-reset gap the
+/// session review found. The namespace itself (this node's config) survives, so
+/// post-reopen stripping still works.
+#[test]
+fn reset_for_reopen_clears_namespace_correlation_keeps_prefix() {
+    use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
+    use wz_session_core::driver_loop::DriverLoopOutcome;
+    use wz_session_core::network_message::NetworkMessage;
+    use wz_session_core::wireexpr_build::literal_wireexpr;
+
+    let actions = new_session_actions(
+        Arc::new(LifecycleRecordingDriver::default()),
+        fixture_params_with_zid(0x01),
+        TokioTime::new(),
+    );
+    actions.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
+
+    let decl_sub = |id, ke: &str| DriverLoopOutcome::FramePayload {
+        reliable: true,
+        sn: 0,
+        has_ext: false,
+        extensions: vec![],
+        messages: vec![NetworkMessage::Declare(Box::new(DeclareOwned {
+            header: 0,
+            interest_id: None,
+            extensions: None,
+            body: DV::CodecZenohDeclSubscriber(wz_codecs::decl_subscriber::DeclSubscriberOwned {
+                header: 0,
+                id,
+                keyexpr: literal_wireexpr(ke).unwrap(),
+            }),
+        }))],
+    };
+    let undecl_sub = |id| DriverLoopOutcome::FramePayload {
+        reliable: true,
+        sn: 0,
+        has_ext: false,
+        extensions: vec![],
+        messages: vec![NetworkMessage::Declare(Box::new(DeclareOwned {
+            header: 0,
+            interest_id: None,
+            extensions: None,
+            body: DV::CodecZenohUndeclSubscriber(
+                wz_codecs::undecl_subscriber::UndeclSubscriberOwned {
+                    header: 0,
+                    id,
+                    extensions: None,
+                },
+            ),
+        }))],
+    };
+
+    // A remote out-of-namespace DeclareSubscriber id=5 -> dropped + blocked.
+    let mut blocked = decl_sub(5, "other/x");
+    actions.apply_namespace_ingress(&mut blocked);
+    let DriverLoopOutcome::FramePayload { messages, .. } = &blocked else {
+        unreachable!()
+    };
+    assert!(
+        messages.is_empty(),
+        "out-of-namespace declare is dropped + blocked"
+    );
+
+    // Reopen: the remote re-handshakes with empty tables + a restarted id space.
+    actions.reset_for_reopen();
+
+    // The re-handshaked peer's UndeclareSubscriber id=5 must now SURVIVE — the
+    // stale block was cleared by reset_for_reopen (without the fix it is dropped).
+    let mut undecl = undecl_sub(5);
+    actions.apply_namespace_ingress(&mut undecl);
+    let DriverLoopOutcome::FramePayload { messages, .. } = &undecl else {
+        unreachable!()
+    };
+    assert_eq!(
+        messages.len(),
+        1,
+        "reopen cleared the stale block -> the re-declared id's undeclare survives"
+    );
+
+    // The namespace PREFIX survived the reopen: an in-namespace declare strips.
+    let mut in_ns = decl_sub(6, "myns/foo");
+    actions.apply_namespace_ingress(&mut in_ns);
+    let DriverLoopOutcome::FramePayload { messages, .. } = &in_ns else {
+        unreachable!()
+    };
+    assert_eq!(
+        messages.len(),
+        1,
+        "namespace preserved across reopen -> in-namespace declare strips + passes"
+    );
+}
