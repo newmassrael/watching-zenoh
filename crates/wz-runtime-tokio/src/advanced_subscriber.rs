@@ -1500,12 +1500,16 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         }
 
         // R311y100 — the late-publisher LIVELINESS subscriber: a publisher whose
-        // `@adv` token appears AFTER this subscriber (a `Put` on `<ke>/@adv/pub/**`)
-        // triggers a per-publisher history GET. Declared with `history = false`
-        // (future-only): the publishers present at declare time were already
-        // recovered by the startup history GET above. The closure is thin glue
-        // over [`on_late_publisher_detected`] (the testable SSOT). `HistoryConfig`
-        // is `Copy`, so `history` is still readable after the move-free `if let`.
+        // `@adv` token appears on `<ke>/@adv/pub/**` (a `Put`) triggers a
+        // per-publisher history GET. R311y101 (review MED) — declared
+        // `history(true)` (matching zenoh advanced_subscriber.rs:1034), NOT
+        // future-only: the startup history GET above is a point-in-time snapshot
+        // fired just before this declare, so a publisher present at declare whose
+        // cache filled in that window (and never re-publishes) would otherwise be
+        // missed; the current-state replay re-triggers its per-publisher GET (a
+        // redundant-but-deduped GET for already-recovered publishers). The closure
+        // is thin glue over [`on_late_publisher_detected`] (the testable SSOT).
+        // `HistoryConfig` is `Copy`, so `history` is readable after the `if let`.
         #[cfg(feature = "ext-pubsub-advanced-history")]
         let liveliness_sub: Option<Box<dyn Send>> =
             if history.is_some_and(|h| h.detect_late_publishers) {
@@ -1518,7 +1522,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                     .unwrap_or((None, None));
                 let sub = session.declare_liveliness_subscriber(
                     lp_keyexpr,
-                    LivelinessSubscriberOptions::new(),
+                    LivelinessSubscriberOptions::new().with_history(true),
                     move |sample: LivelinessSample<'_>| {
                         on_late_publisher_detected(
                             &lp_session,
@@ -2798,13 +2802,19 @@ mod tests {
         assert_eq!(state.sequenced[&(zid, 5)].pending_queries, 1);
     }
 
-    /// R311y100 composed late-publisher recovery: a publisher that appears AFTER
-    /// the subscriber joined has its cache recovered. The cache is EMPTY at
-    /// subscriber-declare (so the startup history GET delivers nothing), then
-    /// filled via `cache_sample` (NOT publish — no live delivery, so the
-    /// subscriber genuinely missed them); driving the detection (the SSOT the
-    /// real liveliness closure is thin glue over — the local liveliness-token
-    /// loopback is omitted in wz) recovers the now-cached history.
+    /// R311y100/y101 composed late-publisher recovery, driving the REAL
+    /// liveliness subscriber closure end-to-end (R311y101 review MED): a
+    /// publisher that appears AFTER the subscriber joined has its cache
+    /// recovered. The cache is EMPTY at subscriber-declare (so the startup
+    /// history GET delivers nothing), then filled via `cache_sample` (NOT
+    /// publish — no live delivery, so the subscriber genuinely missed them).
+    /// An inbound `DeclToken` on the publisher's `@adv` KE is injected through
+    /// the liveliness registry (`dispatch_declare` + `drain_deferred_fires`,
+    /// the wire liveliness path the same-session token loopback omits) so the
+    /// ACTUAL closure (`sample.kind` / `sample.keyexpr` extraction + the
+    /// captured `lp_base` / `lp_depth` / `lp_age` / `dest` / `timeout` args)
+    /// runs — not just the [`on_late_publisher_detected`] SSOT. A subsequent
+    /// `UndeclToken` (a Delete) issues no recovery.
     #[cfg(all(
         feature = "ext-pubsub-advanced-history",
         feature = "ext-pubsub-advanced-publisher",
@@ -2812,8 +2822,42 @@ mod tests {
     ))]
     #[test]
     fn detect_late_publisher_recovers_a_post_join_publisher_cache() {
+        use hashbrown::HashMap;
+
         use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
         use wz_session_core::sample::TimestampHint;
+
+        // Replicas of the session-test liveliness injection helpers (session/
+        // tests.rs:5874): build an inbound Decl/Undecl token wire frame whose
+        // inline-literal keyexpr resolves with no peer table.
+        fn make_decl_token(id: u64, ke: &str) -> wz_codecs::declare::DeclareOwnedVariant {
+            use wz_codecs::decl_token::DeclToken;
+            use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+            use wz_codecs::wireexpr_local::WireexprLocal;
+            let keyexpr = Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(ke.len() as u64),
+                    suffix: Some(ke),
+                }),
+            };
+            wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {
+                id,
+                keyexpr,
+                ..DeclToken::default()
+            })
+            .try_into_owned()
+            .unwrap()
+        }
+        fn make_undecl_token(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
+            use wz_codecs::undecl_token::UndeclToken;
+            wz_codecs::declare::DeclareVariant::CodecZenohUndeclToken(UndeclToken {
+                id,
+                ..UndeclToken::default()
+            })
+            .try_into_owned()
+            .unwrap()
+        }
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
@@ -2832,7 +2876,7 @@ mod tests {
 
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
         let d = Arc::clone(&delivered);
-        let sub = AdvancedSubscriber::declare_with_options(
+        let _sub = AdvancedSubscriber::declare_with_options(
             &session,
             "demo/data",
             AdvancedSubscriberOptions::new()
@@ -2861,39 +2905,34 @@ mod tests {
             });
         }
 
-        // Its `@adv` liveliness token appears -> the per-publisher history GET
-        // recovers the whole cache.
-        on_late_publisher_detected(
-            &session,
-            &sub._statesref,
-            "demo/data",
-            LivelinessSampleKind::Put,
-            &pub_adv_ke,
-            None,
-            None,
-            Locality::SessionLocal,
-            1_000,
-        );
+        // Inject the publisher's `@adv` liveliness token (a Put) -> the REAL
+        // liveliness closure fires -> the per-publisher history GET recovers the
+        // whole cache. The dispatch only STAGES; `drain_deferred_fires` runs it.
+        let token_id = 77u64;
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .liveliness_subscribers
+            .dispatch_declare(&make_decl_token(token_id, &pub_adv_ke), &HashMap::new());
+        session.drain_deferred_fires();
 
         assert_eq!(
             *delivered.lock().unwrap(),
             vec![0, 1, 2],
-            "the late publisher's cached history was recovered via the detection GET"
+            "the late publisher's cached history was recovered via the real liveliness closure"
         );
 
-        // A Delete (the publisher left) triggers no recovery.
+        // The token is retracted (a Delete) -> the closure's kind!=Put guard
+        // issues no recovery (no new deliveries).
         let before = delivered.lock().unwrap().len();
-        on_late_publisher_detected(
-            &session,
-            &sub._statesref,
-            "demo/data",
-            LivelinessSampleKind::Delete,
-            &pub_adv_ke,
-            None,
-            None,
-            Locality::SessionLocal,
-            1_000,
-        );
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .liveliness_subscribers
+            .dispatch_declare(&make_undecl_token(token_id), &HashMap::new());
+        session.drain_deferred_fires();
         assert_eq!(
             delivered.lock().unwrap().len(),
             before,

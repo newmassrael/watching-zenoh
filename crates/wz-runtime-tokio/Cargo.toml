@@ -293,8 +293,12 @@ ext-pubsub-advanced-recovery = [
 # (HistoryConfig::max_age). R311y100 added late-publisher detection
 # (HistoryConfig::detect_late_publishers): a liveliness subscriber on
 # `<ke>/@adv/pub/**` issues a per-publisher history GET when a publisher's token
-# appears after the subscriber joined — hence the `liveliness-subscriber` dep.
-ext-pubsub-advanced-history = ["ext-pubsub-advanced-recovery", "liveliness-subscriber"]
+# appears after the subscriber joined. R311y101 (review MED) — the liveliness
+# sub declares `history=true` (matching zenoh advanced_subscriber.rs:1034) so a
+# publisher already present at declare (incl. one visible only in the window
+# after the startup-history snapshot) also re-triggers its GET; that needs
+# `liveliness-history` (which implies `liveliness-subscriber`).
+ext-pubsub-advanced-history = ["ext-pubsub-advanced-recovery", "liveliness-history"]
 # R311y85 — ext-pubsub-sample-miss-detection (§5.25): the heartbeat PRODUCER
 # beacon. An AdvancedPublisher with sample_miss_detection spawns a background
 # task that periodically publishes its last published sequence number
