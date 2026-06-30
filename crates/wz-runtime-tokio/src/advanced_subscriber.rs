@@ -2336,4 +2336,61 @@ mod tests {
             "history-only (retransmission off) still recovered the cache (0,1,2) on declare"
         );
     }
+
+    /// R311y94 (review V2) — the `_max` history cap composed end-to-end. A cache
+    /// retaining 0..5 answered by a history GET with `HistoryConfig::max_samples(2)`
+    /// (the `_max=2` selector) delivers only the NEWEST 2 (3,4), oldest-first. This
+    /// exercises the R311y94 loopback-selector fix: the SessionLocal GET now carries
+    /// `_max=2` to the cache's `answer_from_ring` (before the fix the loopback Query
+    /// dropped the selector and the cache over-returned 0..5).
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn history_max_samples_caps_to_newest_n() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x09u8];
+        let pub_eid = 4u32;
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+        let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
+        // A cache deep enough to retain all 5 samples (so the cap, not eviction,
+        // bounds the result).
+        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
+            .expect("advanced cache declares");
+        for sn in 0u8..5 {
+            cache.cache_sample(CachedSample {
+                keyexpr: "demo/data".to_string(),
+                payload: vec![sn],
+                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                timestamp: TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: pub_zid.clone(),
+                },
+            });
+        }
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let _sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_history(HistoryConfig::new().max_samples(2))
+                .with_allowed_destination(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            |_miss: Miss| {},
+        )
+        .expect("capped-history advanced subscriber declares");
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![3, 4],
+            "_max=2 delivered only the newest 2 cached samples (3,4), oldest-first"
+        );
+    }
 }

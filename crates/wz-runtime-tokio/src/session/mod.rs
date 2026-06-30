@@ -103,6 +103,33 @@ use crate::sync::Mutex;
 // query-queryable)` — its sole call site.
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 use wz_codecs::query::Query;
+
+/// R311y94 (review V2) — build the loopback Query carrying the GET's selector
+/// parameters (`_sn` / `_max`) so a `SessionLocal` queryable's handler observes the
+/// same selector the wire path delivers. Before this the loopback fan built
+/// `Query::default()` with empty params, so a queryable's `answer_from_ring` never
+/// filtered on loopback: `_max` over-returned and `_sn` only "worked" because the
+/// advanced subscriber's reorder buffer masked the cache's over-return. Mirrors the
+/// wire `query_metadata().parameters` threading. An oversize selector (beyond the
+/// owned `SceBytes` bound) degrades to the no-selector query rather than panicking.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+fn build_loopback_query(opts: &QueryOptions) -> wz_codecs::query::QueryOwned {
+    #[cfg_attr(not(feature = "query-selector-parameters"), allow(unused_mut))]
+    let mut q = Query::default();
+    #[cfg(feature = "query-selector-parameters")]
+    if let Some(params) = opts.parameters.as_deref() {
+        q.parameters = Some(params);
+        q.parameters_len = Some(params.len() as u64);
+        q.set_p(true);
+    }
+    #[cfg(not(feature = "query-selector-parameters"))]
+    let _ = opts;
+    q.try_into_owned().unwrap_or_else(|_| {
+        Query::default()
+            .try_into_owned()
+            .expect("empty Query is trivially within codec bounds")
+    })
+}
 // R311s — `TimeSource` is the generic-parameter bound on the
 // type-ungated `Session::query` + `Querier::get` + `QuerierAliased::get`
 // surfaces; the import stays unconditional alongside those methods.
@@ -1759,12 +1786,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 {
                     R::with_mutex_mut(&self.observer, |observer| {
                         let mut replies: Vec<QueryReply> = Vec::new();
-                        // `QueryOwned` has no `Default`; build the borrowed
-                        // default and deep-copy into the owned form the
-                        // loopback dispatch path (`local_query`) now takes.
-                        let query = Query::default().try_into_owned().expect(
-                            "Query::default has empty fields, trivially within codec bounds",
-                        );
+                        // R311y94 (review V2) — carry the GET's selector params
+                        // (`_sn` / `_max`) into the loopback Query so a SessionLocal
+                        // queryable filters identically to the wire path.
+                        let query = build_loopback_query(&opts);
                         observer
                             .queryables
                             .local_query(rid, keyexpr, &query, &mut replies);
@@ -1966,12 +1991,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 {
                     R::with_mutex_mut(&self.observer, |observer| {
                         let mut replies: Vec<QueryReply> = Vec::new();
-                        // `QueryOwned` has no `Default`; build the borrowed
-                        // default and deep-copy into the owned form the
-                        // loopback dispatch path (`local_query`) now takes.
-                        let query = Query::default().try_into_owned().expect(
-                            "Query::default has empty fields, trivially within codec bounds",
-                        );
+                        // R311y94 (review V2) — carry the GET's selector params
+                        // (`_sn` / `_max`) into the loopback Query so a SessionLocal
+                        // queryable filters identically to the wire path.
+                        let query = build_loopback_query(&opts);
                         observer.queryables.local_query(
                             rid,
                             loopback_keyexpr,
