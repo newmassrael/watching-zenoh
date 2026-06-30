@@ -106,6 +106,12 @@ use wz_session_core::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use crate::session::QueryOptions;
 
+// R311y100 — detect_late_publishers: the liveliness subscriber + its sample.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+use crate::declare::{LivelinessSample, LivelinessSampleKind};
+#[cfg(feature = "ext-pubsub-advanced-history")]
+use crate::session::{LivelinessSubscriberAliasError, LivelinessSubscriberOptions};
+
 /// A detected gap in a sequenced source's stream: `nb` samples between the
 /// last in-order delivery and the just-received `sn` were missed. Mirror
 /// of zenoh-ext `Miss` (advanced_subscriber.rs:1409-1427); `source` is
@@ -161,12 +167,25 @@ pub enum AdvancedSubscribeError {
     /// from within a tokio runtime context. Fail-clear instead of the
     /// `tokio::spawn` panic.
     NoRuntime,
+    /// R311y100 — the late-publisher-detection liveliness subscriber
+    /// declaration was rejected (only reachable with
+    /// `HistoryConfig::detect_late_publishers`). Additive + gated, safe on the
+    /// `#[non_exhaustive]` enum.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    Liveliness(LivelinessSubscriberAliasError),
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl From<SubscribeError> for AdvancedSubscribeError {
     fn from(e: SubscribeError) -> Self {
         AdvancedSubscribeError::Subscribe(e)
+    }
+}
+
+#[cfg(feature = "ext-pubsub-advanced-history")]
+impl From<LivelinessSubscriberAliasError> for AdvancedSubscribeError {
+    fn from(e: LivelinessSubscriberAliasError) -> Self {
+        AdvancedSubscribeError::Liveliness(e)
     }
 }
 
@@ -338,9 +357,9 @@ impl AdvancedSubscriberOptions {
 
 /// Startup-history configuration ([`AdvancedSubscriberOptions::with_history`]).
 /// Mirror of zenoh-ext `HistoryConfig` (advanced_subscriber.rs:54-89). R311y86
-/// builds the `max_samples` (`_max`) cap; R311y98 adds the `max_age` age
-/// filter (`_time`). Late-publisher liveliness detection
-/// (`detect_late_publishers`) is the remaining documented follow-on.
+/// builds the `max_samples` (`_max`) cap; R311y98 the `max_age` age filter
+/// (`_time`); R311y100 the `detect_late_publishers` liveliness trigger — the
+/// full zenoh `HistoryConfig` surface.
 #[cfg(feature = "ext-pubsub-advanced-history")]
 #[derive(Clone, Copy, Debug, Default)]
 #[non_exhaustive]
@@ -354,6 +373,13 @@ pub struct HistoryConfig {
     /// age bound (zenoh `HistoryConfig::max_age`). Composes with `sample_depth`
     /// — both selectors ride the one GET.
     pub max_age: Option<f64>,
+    /// `true` declares a liveliness subscriber on `<ke>/@adv/pub/**` so a
+    /// publisher appearing AFTER this subscriber joined (its `@adv` liveliness
+    /// token Put) triggers a per-publisher history GET — recovering its cache
+    /// the way the startup GET recovered the publishers present at declare time
+    /// (zenoh `HistoryConfig::detect_late_publishers`). The `_max` / `_time`
+    /// bounds above ride the per-publisher GET too.
+    pub detect_late_publishers: bool,
 }
 
 #[cfg(feature = "ext-pubsub-advanced-history")]
@@ -381,6 +407,14 @@ impl HistoryConfig {
             "HistoryConfig::max_age must be non-negative, got {seconds}"
         );
         self.max_age = Some(seconds);
+        self
+    }
+
+    /// Enable late-publisher detection (zenoh
+    /// `HistoryConfig::detect_late_publishers`): recover the history of a
+    /// publisher that appears AFTER this subscriber joined.
+    pub fn detect_late_publishers(mut self) -> Self {
+        self.detect_late_publishers = true;
         self
     }
 }
@@ -691,6 +725,27 @@ impl State {
             None
         }
     }
+
+    /// R311y100 — the late-publisher trigger: a publisher `(zid, eid)` appeared
+    /// (its `@adv` liveliness token Put was detected). Open a recovery slot
+    /// (`pending_queries += 1`) so the per-publisher history GET's replies flush
+    /// in order, UNLESS a GET for this source is already in flight (the
+    /// `pending_queries == 0` gate avoids piling up concurrent GETs — zenoh's
+    /// own TODO at advanced_subscriber.rs:824 notes the un-deduped re-query;
+    /// gating on no-in-flight is the wz refinement). Returns whether to issue
+    /// the GET. NOT gated on `retransmission`: late-publisher detection is a
+    /// HISTORY trigger, independent of the sample-driven recovery flag (zenoh
+    /// gates it on `historyconf.liveliness`, not retransmission).
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    fn handle_late_publisher(&mut self, zid: Vec<u8>, eid: u32) -> bool {
+        let state = self.sequenced.entry((zid, eid)).or_default();
+        if state.pending_queries == 0 {
+            state.pending_queries += 1;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Deliver `sample` (sn = `sn`), advance `last_delivered`, then drain every
@@ -964,6 +1019,98 @@ fn issue_history_query<R, T>(
     });
 }
 
+/// R311y100 — issue a per-publisher HISTORY GET against a single detected late
+/// publisher `(zid, eid)`'s `@adv` cache (zenoh advanced_subscriber.rs:847-870).
+/// Unlike [`issue_history_query`] (which fans `<base>/@adv/**` over EVERY
+/// publisher), this targets the one source via [`recovery_get_ke`] and carries
+/// the same `_max` / `_time` history selector. Recovered replies feed the
+/// per-source ordering; the terminal Final runs [`State::finish_recovery`] for
+/// THIS source (decrement its `pending_queries`, flush when 0 + history idle).
+/// MUST be called with the [`State`] lock RELEASED.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+#[allow(clippy::too_many_arguments)]
+fn issue_late_publisher_query<R, T>(
+    session: &Session<R, T, Unicast>,
+    statesref: &Arc<Mutex<State>>,
+    base_keyexpr: &str,
+    zid: Vec<u8>,
+    eid: u32,
+    sample_depth: Option<usize>,
+    max_age: Option<f64>,
+    dest: Locality,
+    timeout_ms: u32,
+) where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let zid_hex = zid_to_zenoh_hex(&zid);
+    let recovery_ke = crate::advanced_ke::recovery_get_ke(base_keyexpr, &zid_hex, eid);
+    let mut opts = QueryOptions::get()
+        .with_allowed_destination(dest)
+        .with_timeout_ms(timeout_ms);
+    if let Some(params) = history_selector(sample_depth, max_age) {
+        opts = opts.with_parameters(params.into_bytes());
+    }
+    let key = (zid, eid);
+    issue_recovery_get(session, statesref, &recovery_ke, opts, move |state| {
+        state.finish_recovery(&key)
+    });
+}
+
+/// R311y100 — the late-publisher liveliness callback body, factored out so it is
+/// a single source of truth the real liveliness subscriber closure is thin glue
+/// over (and a test drives directly — the local liveliness-token loopback is
+/// omitted in wz, so the closure cannot be triggered end-to-end via a
+/// same-session declare). On a `Put` for a sequenced publisher (a `uhlc`
+/// discriminator fails [`parse_heartbeat_source`]'s `eid` parse and is skipped —
+/// the documented timestamped-publisher faithful-subset deferral), open a
+/// recovery slot and issue the per-publisher history GET (OUTSIDE the lock).
+#[cfg(feature = "ext-pubsub-advanced-history")]
+#[allow(clippy::too_many_arguments)]
+fn on_late_publisher_detected<R, T>(
+    session: &Session<R, T, Unicast>,
+    statesref: &Arc<Mutex<State>>,
+    base_keyexpr: &str,
+    sample_kind: LivelinessSampleKind,
+    sample_keyexpr: &str,
+    sample_depth: Option<usize>,
+    max_age: Option<f64>,
+    dest: Locality,
+    timeout_ms: u32,
+) where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    // A Delete (the token's publisher left) needs no recovery.
+    if sample_kind != LivelinessSampleKind::Put {
+        return;
+    }
+    let Some((zid, eid)) = parse_heartbeat_source(sample_keyexpr) else {
+        return;
+    };
+    let issue = statesref
+        .lock()
+        .expect("advanced subscriber state mutex poisoned")
+        .handle_late_publisher(zid.clone(), eid);
+    if issue {
+        issue_late_publisher_query(
+            session,
+            statesref,
+            base_keyexpr,
+            zid,
+            eid,
+            sample_depth,
+            max_age,
+            dest,
+            timeout_ms,
+        );
+    }
+}
+
 /// R311y83 — run ONE periodic recovery tick: collect each source's
 /// `_sn=last+1..` request under the state lock, then issue the GETs OUTSIDE the
 /// lock (same re-entrancy discipline as the sample-driven path). The background
@@ -1050,6 +1197,14 @@ pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRunt
     /// undeclare-on-drop), `Some` only when `RecoveryConfig::heartbeat` was set.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     _heartbeat_sub: Option<Subscriber<R>>,
+    /// R311y100 — the late-publisher-detection LIVELINESS subscriber on
+    /// `<ke>/@adv/pub/**` (RAII undeclare-on-drop), `Some` only when
+    /// `HistoryConfig::detect_late_publishers` was set. Type-erased to
+    /// `Box<dyn Send>` because [`LivelinessSubscriber`](crate::session::LivelinessSubscriber)
+    /// is generic over `(R, T)` while this struct is `R`-only — the box keeps the
+    /// handle alive (its Drop undeclares) without threading `T` through the type.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    _liveliness_sub: Option<Box<dyn Send>>,
 }
 
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
@@ -1147,6 +1302,10 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             _statesref: state,
             _periodic: None,
             _heartbeat_sub: None,
+            // The plain miss-form `declare()` never sets history, so no
+            // late-publisher liveliness subscriber.
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            _liveliness_sub: None,
         })
     }
 
@@ -1340,12 +1499,53 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             );
         }
 
+        // R311y100 — the late-publisher LIVELINESS subscriber: a publisher whose
+        // `@adv` token appears AFTER this subscriber (a `Put` on `<ke>/@adv/pub/**`)
+        // triggers a per-publisher history GET. Declared with `history = false`
+        // (future-only): the publishers present at declare time were already
+        // recovered by the startup history GET above. The closure is thin glue
+        // over [`on_late_publisher_detected`] (the testable SSOT). `HistoryConfig`
+        // is `Copy`, so `history` is still readable after the move-free `if let`.
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        let liveliness_sub: Option<Box<dyn Send>> =
+            if history.is_some_and(|h| h.detect_late_publishers) {
+                let lp_state = Arc::clone(&state);
+                let lp_session = session.clone();
+                let lp_base = base_keyexpr.clone();
+                let lp_keyexpr = crate::advanced_ke::heartbeat_sub_ke(&base_keyexpr);
+                let (lp_depth, lp_age) = history
+                    .map(|h| (h.sample_depth, h.max_age))
+                    .unwrap_or((None, None));
+                let sub = session.declare_liveliness_subscriber(
+                    lp_keyexpr,
+                    LivelinessSubscriberOptions::new(),
+                    move |sample: LivelinessSample<'_>| {
+                        on_late_publisher_detected(
+                            &lp_session,
+                            &lp_state,
+                            &lp_base,
+                            sample.kind,
+                            sample.keyexpr,
+                            lp_depth,
+                            lp_age,
+                            dest,
+                            timeout_ms,
+                        );
+                    },
+                )?;
+                Some(Box::new(sub))
+            } else {
+                None
+            };
+
         Ok(Self {
             _subscriber: subscriber,
             #[cfg(test)]
             _statesref: state,
             _periodic: periodic_task,
             _heartbeat_sub: heartbeat_sub,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            _liveliness_sub: liveliness_sub,
         })
     }
 }
@@ -2570,6 +2770,134 @@ mod tests {
             *delivered.lock().unwrap(),
             vec![1, 2],
             "max_age=3600s dropped the 2h-old sample, kept the two recent ones"
+        );
+    }
+
+    /// R311y100 — handle_late_publisher opens exactly one recovery slot per
+    /// source and no-ops while a GET is in flight (avoids piling up concurrent
+    /// per-publisher GETs); independent of `retransmission` (a history trigger).
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn handle_late_publisher_opens_one_slot_per_source() {
+        let mut state = State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(|_| {}),
+            on_miss: Box::new(|_| {}),
+            retransmission: false, // late-pub detection is NOT a retransmission concern
+            history_pending: false,
+        };
+        let zid = vec![0x09u8];
+        // First detection opens a slot.
+        assert!(state.handle_late_publisher(zid.clone(), 4));
+        assert_eq!(state.sequenced[&(zid.clone(), 4)].pending_queries, 1);
+        // A second detection while the GET is in flight is a no-op.
+        assert!(!state.handle_late_publisher(zid.clone(), 4));
+        assert_eq!(state.sequenced[&(zid.clone(), 4)].pending_queries, 1);
+        // A distinct publisher gets its own slot.
+        assert!(state.handle_late_publisher(zid.clone(), 5));
+        assert_eq!(state.sequenced[&(zid, 5)].pending_queries, 1);
+    }
+
+    /// R311y100 composed late-publisher recovery: a publisher that appears AFTER
+    /// the subscriber joined has its cache recovered. The cache is EMPTY at
+    /// subscriber-declare (so the startup history GET delivers nothing), then
+    /// filled via `cache_sample` (NOT publish — no live delivery, so the
+    /// subscriber genuinely missed them); driving the detection (the SSOT the
+    /// real liveliness closure is thin glue over — the local liveliness-token
+    /// loopback is omitted in wz) recovers the now-cached history.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn detect_late_publisher_recovers_a_post_join_publisher_cache() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x09u8];
+        let pub_eid = 4u32;
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+        let pub_adv_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
+
+        // The publisher's cache queryable exists but is EMPTY at declare time.
+        let cache =
+            AdvancedCache::declare(&session, pub_adv_ke.clone(), CacheConfig { max_samples: 8 })
+                .expect("advanced cache declares");
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_history(HistoryConfig::new().detect_late_publishers())
+                .with_get_locality(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            |_miss: Miss| {},
+        )
+        .expect("late-publisher-detecting subscriber declares");
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "empty cache at declare -> the startup history GET recovers nothing"
+        );
+
+        // The LATE publisher caches samples (cache_sample, not publish -> the
+        // subscriber's live subscription never sees them).
+        for sn in 0u8..3 {
+            cache.cache_sample(CachedSample {
+                keyexpr: "demo/data".to_string(),
+                payload: vec![sn],
+                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                timestamp: TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: pub_zid.clone(),
+                },
+            });
+        }
+
+        // Its `@adv` liveliness token appears -> the per-publisher history GET
+        // recovers the whole cache.
+        on_late_publisher_detected(
+            &session,
+            &sub._statesref,
+            "demo/data",
+            LivelinessSampleKind::Put,
+            &pub_adv_ke,
+            None,
+            None,
+            Locality::SessionLocal,
+            1_000,
+        );
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0, 1, 2],
+            "the late publisher's cached history was recovered via the detection GET"
+        );
+
+        // A Delete (the publisher left) triggers no recovery.
+        let before = delivered.lock().unwrap().len();
+        on_late_publisher_detected(
+            &session,
+            &sub._statesref,
+            "demo/data",
+            LivelinessSampleKind::Delete,
+            &pub_adv_ke,
+            None,
+            None,
+            Locality::SessionLocal,
+            1_000,
+        );
+        assert_eq!(
+            delivered.lock().unwrap().len(),
+            before,
+            "a Delete liveliness sample issues no recovery GET"
         );
     }
 }

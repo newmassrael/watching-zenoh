@@ -1547,10 +1547,11 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
 # 0,1,2 -> a history-enabled subscriber's declare GETs them -> the `history_pending`
 # gate buffers, the terminal Final flushes oldest-first), plus the gating unit.
 # Then clippy-gates the history surface + validates the facade forward target.
-# R311y98 built the `_time` age filter: the subscriber-side history_selector +
-# max_age tests run here (--lib advanced_subscriber); the cache-side _time
-# parser + filter tests run under C1aq (--lib advanced_ matches advanced_cache).
-# Deferred (documented follow-on): detect_late_publishers (the liveliness path).
+# R311y98 built the `_time` age filter + R311y100 detect_late_publishers (the
+# liveliness path), so the full zenoh HistoryConfig surface runs here: the
+# subscriber-side history_selector + max_age + late-publisher tests
+# (--lib advanced_subscriber, which now also pulls liveliness-subscriber); the
+# cache-side _time parser + filter tests run under C1aq (--lib advanced_).
 layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     (cd crates \
         && cargo test -p wz-runtime-tokio \
