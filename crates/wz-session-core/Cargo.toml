@@ -94,6 +94,18 @@ adminspace-metrics = ["adminspace-core"]
 # `serde_codec` module; wz-runtime-tokio + the wz facade forward it.
 ext-pubsub-serde-codec = ["alloc"]
 
+# ext-pubsub-group-membership (§5.25) — the no_std data model + the
+# bincode-1.3 wire codec for zenoh-ext's group-membership protocol
+# (JoinEvent / LeaveEvent / KeepAliveEvent on the group event KE +
+# the per-member Member reply on the query KE). The `group_membership`
+# module hand-rolls the bincode wire on the shared `wire_bincode`
+# cursor (so it pulls that module in via the gate widening in lib.rs)
+# and pins it byte-for-byte to the real `bincode` 1.3 dev-dep. Needs
+# only `alloc`; the live `Group` + its tasks are the AP-only tokio half
+# in wz-runtime-tokio. INDEPENDENT of the advanced-pubsub family (its
+# own wire, not the @adv namespace).
+ext-pubsub-group-membership = ["alloc"]
+
 # Transport reassembly subsystem (Tier B). Gates the SCE-generated
 # reassembly slot statechart module (build.rs codegens
 # sources/network/reassembly_slot.scxml only under this feature) and the

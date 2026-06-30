@@ -761,6 +761,15 @@ pub mod advanced_publisher;
 #[cfg(feature = "ext-pubsub-advanced-subscriber")]
 pub mod advanced_subscriber;
 
+/// R311y97 — `ext-pubsub-group-membership` (§5.25): the live [`group::Group`]
+/// + its membership tasks (keep-alive beacon, watchdog lease-sweep) over the
+/// no_std data + bincode wire codec in
+/// [`wz_session_core::group_membership`]. The wz mirror of zenoh-ext
+/// `group.rs`; INDEPENDENT of the advanced-pubsub `@adv` family (its own wire
+/// + the `zenoh/ext/net/group/...` KE namespace).
+#[cfg(feature = "ext-pubsub-group-membership")]
+pub mod group;
+
 /// Round 311vm — the storage-replication DRIVER, digest publisher half
 /// (§5.11 storage, replication 6/N): the tokio binding that periodically
 /// publishes this storage's replication

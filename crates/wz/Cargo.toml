@@ -862,7 +862,11 @@ ext-pubsub-advanced-recovery = ["wz-runtime-tokio?/ext-pubsub-advanced-recovery"
 # per-source ordering/dedup subscriber in wz-runtime-tokio); forward it.
 ext-pubsub-advanced-subscriber = ["wz-runtime-tokio?/ext-pubsub-advanced-subscriber"]
 ext-pubsub-fetching-subscriber = []
-ext-pubsub-group-membership = []
+# R311y97 — ext-pubsub-group-membership is now a real cfg gate (the live Group +
+# its keep-alive/watchdog tasks over the no_std bincode group wire in
+# wz-runtime-tokio's `group` module); forward it. INDEPENDENT of the
+# advanced-pubsub atoms (its own wire + the zenoh/ext/net/group KE namespace).
+ext-pubsub-group-membership = ["wz-runtime-tokio?/ext-pubsub-group-membership"]
 ext-pubsub-querying-subscriber = []
 # R311y85 — ext-pubsub-sample-miss-detection is now a real cfg gate (the
 # heartbeat PRODUCER beacon in wz-runtime-tokio's AdvancedPublisher); forward it.

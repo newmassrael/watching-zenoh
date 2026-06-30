@@ -924,9 +924,28 @@ pub mod storage_replication;
 /// Round 311wa — the shared no_std bincode-1.3 wire primitives (the single
 /// LE-fixint cursor + length helpers) both the replication Digest codec and the
 /// aligner codec build on, so the bincode-1.3 framing contract lives in one
-/// place. Gated on `storage-replication` (the aligner feature implies it).
-#[cfg(feature = "storage-replication")]
+/// place. Gated on `storage-replication` (the aligner feature implies it) OR
+/// `ext-pubsub-group-membership` (R311y97 — the group-membership wire codec is
+/// the third consumer of the same bincode-1.3 cursor; it is independent of the
+/// storage codecs but reuses the framing SSOT).
+#[cfg(any(
+    feature = "storage-replication",
+    feature = "ext-pubsub-group-membership"
+))]
 pub(crate) mod wire_bincode;
+
+/// R311y97 — `ext-pubsub-group-membership` (§5.25): the no_std data model
+/// ([`group_membership::Member`] / [`group_membership::MemberLiveliness`] /
+/// [`group_membership::GroupNetEvent`]) + the bincode-1.3 wire codec for
+/// zenoh-ext's group-membership protocol. A faithful, byte-exact mirror of
+/// zenoh-ext `group.rs`'s `bincode::serialize` wire (the group event +
+/// per-member reply messages), hand-rolled on the shared
+/// [`wire_bincode`] cursor and pinned to the real `bincode` 1.3 by a
+/// `#[cfg(test)]` oracle. The live [`Group`](../wz_runtime_tokio/group) +
+/// its background tasks are the AP-only tokio half. INDEPENDENT of the
+/// advanced-pubsub `@adv` family (its own wire + KE namespace).
+#[cfg(feature = "ext-pubsub-group-membership")]
+pub mod group_membership;
 
 /// Round 311vr — the storage-aligner *event metadata* atom (§5.11 storage,
 /// aligner 1/N): the [`storage_aligner::Action`] + [`storage_aligner::EventMetadata`]

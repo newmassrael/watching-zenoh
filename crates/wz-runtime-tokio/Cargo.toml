@@ -306,6 +306,25 @@ ext-pubsub-sample-miss-detection = [
     "ext-pubsub-advanced-publisher",
     "ext-pubsub-serde-codec",
 ]
+# ext-pubsub-group-membership (§5.25) — the live Group + its membership tasks.
+# The AP-only tokio half over the no_std data + bincode wire codec in
+# wz-session-core/ext-pubsub-group-membership. Needs the event subscriber
+# (declare-subscriber) + the per-member queryable (query-queryable) which
+# replies COMPLETE answers and so must terminate them with a ResponseFinal
+# (codec-response-final, same rationale as ext-pubsub-advanced-cache) + the
+# unknown-member recovery GET (query-get) bounded by a deadline so a no-answerer
+# query cannot wedge the reply registry (query-timeout, the advanced-recovery C3
+# lesson) + the join/keepalive event publish (pubsub-put). INDEPENDENT of the
+# advanced-pubsub @adv family (its own wire + KE namespace).
+ext-pubsub-group-membership = [
+    "wz-session-core/ext-pubsub-group-membership",
+    "declare-subscriber",
+    "query-queryable",
+    "codec-response-final",
+    "query-get",
+    "query-timeout",
+    "pubsub-put",
+]
 # adminspace-read (§5.23) — the permissions.read GET gate: declare_adminspace's
 # handler answers nothing when AdminSpacePermissions.read=false (the querier gets
 # only the terminating Final), the wz mirror of zenoh's read-permission check
