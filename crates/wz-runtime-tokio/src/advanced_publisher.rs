@@ -201,12 +201,10 @@ where
         // R311y90 (review C5) — fail fast & clear if off-runtime: the heartbeat
         // beacon (below) is a tokio::spawn task, which PANICS without a runtime.
         // Check the spawn precondition BEFORE declaring the cache / token so no
-        // half-declared publisher needs rollback. The condition mirrors the
-        // heartbeat-task spawn arm exactly (state_publisher set + SequenceNumber).
+        // half-declared publisher needs rollback. `heartbeat_spawn_params` is the
+        // SSOT for "will spawn the beacon" — the spawn arm below gates on the same.
         #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-        if options.sample_miss_detection.state_publisher.is_some()
-            && matches!(options.sequencing, Sequencing::SequenceNumber)
-        {
+        if heartbeat_spawn_params(&options).is_some() {
             tokio::runtime::Handle::try_current().map_err(|_| AdvancedPublisherError::NoRuntime)?;
         }
         let keyexpr = keyexpr.into();
@@ -260,11 +258,13 @@ where
         // advanced. Spawned here (the caller is in a tokio runtime), aborted on
         // drop; the loop is thin glue over the deterministic `emit_heartbeat`.
         #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-        let heartbeat_task = match (
-            options.sample_miss_detection.state_publisher,
-            seqnum.as_ref(),
-        ) {
-            (Some((period, sporadic)), Some(seqnum)) => {
+        let heartbeat_task = heartbeat_spawn_params(&options)
+            // `zip(seqnum.as_ref())`: `heartbeat_spawn_params` already requires
+            // `SequenceNumber`, so `seqnum` is `Some` whenever it returns `Some` —
+            // the zip never drops a configured beacon, it just pairs the params with
+            // the counter without an unwrap.
+            .zip(seqnum.as_ref())
+            .map(|((period, sporadic), seqnum)| {
                 let hb_session = session.clone();
                 let hb_keyexpr = adv_keyexpr.clone();
                 let hb_seqnum = Arc::clone(seqnum);
@@ -272,7 +272,7 @@ where
                 // R311y87 (review C4) — clamp to >=1ms: a sub-ms Duration
                 // truncates to 0, turning the beacon loop into a busy spin.
                 let period_ms = (period.as_millis() as u64).max(1);
-                Some(HeartbeatTask {
+                HeartbeatTask {
                     handle: tokio::spawn(async move {
                         let mut last_emitted = 0u32;
                         loop {
@@ -287,10 +287,8 @@ where
                             }
                         }
                     }),
-                })
-            }
-            _ => None,
-        };
+                }
+            });
 
         // adv_keyexpr is consumed by the cache / token clones + (feature-on) the
         // struct; explicitly drop it on the feature-off path so the cache-None +
@@ -386,6 +384,23 @@ where
             ),
             None => false,
         }
+    }
+}
+
+/// R311y96 (review-arbiter LOW) — the heartbeat-beacon SPAWN decision SSOT:
+/// `Some((period, sporadic))` iff a `state_publisher` is configured AND sequencing
+/// is `SequenceNumber` (so a seqnum counter for the beacon exists). Both the
+/// off-runtime fail-fast guard (`.is_some()`) and the actual spawn
+/// (`.zip(seqnum).map(...)`) gate on this ONE predicate, so the precondition cannot
+/// drift between the guard and the spawn arm (previously hand-mirrored twice).
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+fn heartbeat_spawn_params(options: &AdvancedPublisherOptions) -> Option<(Duration, bool)> {
+    match (
+        options.sample_miss_detection.state_publisher,
+        options.sequencing,
+    ) {
+        (Some(period_sporadic), Sequencing::SequenceNumber) => Some(period_sporadic),
+        _ => None,
     }
 }
 
@@ -654,7 +669,7 @@ mod tests {
             "demo/data",
             AdvancedSubscriberOptions::new()
                 .with_recovery(RecoveryConfig::new().with_heartbeat())
-                .with_allowed_destination(Locality::SessionLocal),
+                .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             move |_miss: Miss| *m.lock().unwrap() += 1,
         )

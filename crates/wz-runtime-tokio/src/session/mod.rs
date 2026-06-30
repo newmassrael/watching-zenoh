@@ -110,8 +110,15 @@ use wz_codecs::query::Query;
 /// `Query::default()` with empty params, so a queryable's `answer_from_ring` never
 /// filtered on loopback: `_max` over-returned and `_sn` only "worked" because the
 /// advanced subscriber's reorder buffer masked the cache's over-return. Mirrors the
-/// wire `query_metadata().parameters` threading. An oversize selector (beyond the
-/// owned `SceBytes` bound) degrades to the no-selector query rather than panicking.
+/// wire `query_metadata().parameters` threading.
+///
+/// R311y96 (review-arbiter MED) — `try_into_owned` is INFALLIBLE on this `alloc`
+/// runtime profile: the owned `parameters` is `SceBytes<256>` whose `from_slice` is
+/// an unbounded heap copy under `alloc` (`N` advisory), so the conversion never
+/// rejects. The prior `unwrap_or_else` degrade-to-no-selector branch was dead code
+/// documenting an impossible case (and, had this fn ever compiled on a no-alloc
+/// profile, silently dropping the selector would over-return, not "gracefully
+/// degrade"). Resolved to a named `.expect` of the real invariant.
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 fn build_loopback_query(opts: &QueryOptions) -> wz_codecs::query::QueryOwned {
     #[cfg_attr(not(feature = "query-selector-parameters"), allow(unused_mut))]
@@ -124,11 +131,8 @@ fn build_loopback_query(opts: &QueryOptions) -> wz_codecs::query::QueryOwned {
     }
     #[cfg(not(feature = "query-selector-parameters"))]
     let _ = opts;
-    q.try_into_owned().unwrap_or_else(|_| {
-        Query::default()
-            .try_into_owned()
-            .expect("empty Query is trivially within codec bounds")
-    })
+    q.try_into_owned()
+        .expect("loopback Query owns its selector by the infallible alloc SceBytes copy")
 }
 // R311s — `TimeSource` is the generic-parameter bound on the
 // type-ungated `Session::query` + `Querier::get` + `QuerierAliased::get`

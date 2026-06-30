@@ -249,13 +249,23 @@ pub struct AdvancedSubscriberOptions {
     /// separate builder method): history-without-retransmission is valid.
     #[cfg(feature = "ext-pubsub-advanced-history")]
     pub history: Option<HistoryConfig>,
-    /// Locality scoping the whole advanced subscriber: the live subscription's
-    /// origin AND the recovery / history GETs (R311y95 wired the live + heartbeat
-    /// subscriptions, not only the GETs). `Any` (default) reaches a remote
-    /// publisher's `@adv` cache AND the local loopback; `SessionLocal` pins
-    /// everything to loopback (single-host composition tests). wz folds zenoh's
-    /// separate `allowed_origin` (sub) + GET target into one locality knob.
-    pub allowed_destination: Locality,
+    /// The live (+ heartbeat) subscription's origin: which publishers' samples this
+    /// subscriber accepts. `Any` (default) accepts wire + loopback; `SessionLocal`
+    /// loopback only; `Remote` wire only. Faithful to zenoh's `conf.origin` /
+    /// `AdvancedSubscriberBuilder::allowed_origin` (advanced_subscriber.rs:141/249).
+    /// INDEPENDENT of [`Self::get_locality`] — zenoh keeps the sub origin and the GET
+    /// axis separate (R311y96 split them after the review found the prior single
+    /// `allowed_destination` knob conflated the two orthogonal concepts).
+    pub allowed_origin: Locality,
+    /// The recovery / history GET destination locality. `Any` (default) fans the GET
+    /// to a remote publisher's `@adv` cache AND the local loopback; `SessionLocal`
+    /// pins it to loopback (single-host composition — a loopback-only GET completes
+    /// synchronously without the deadline sweep). wz models the GET reach as a
+    /// `Locality`; zenoh hardwires the GET destination to `Any` (the GET axis it
+    /// exposes is `query_target: QueryTarget`, advanced_subscriber.rs:143/638 — a
+    /// DIFFERENT axis wz does not model here). `Any` is the zenoh-faithful default;
+    /// the `SessionLocal` pin is a wz single-host superset.
+    pub get_locality: Locality,
     /// Timeout applied to BOTH the recovery + history GETs (zenoh's builder
     /// `query_timeout`, shared by history + retransmission; default 10s). A
     /// no-answerer GET (no `@adv` cache replies) would otherwise wait on a peer
@@ -273,7 +283,8 @@ impl Default for AdvancedSubscriberOptions {
             recovery: None,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history: None,
-            allowed_destination: Locality::Any,
+            allowed_origin: Locality::Any,
+            get_locality: Locality::Any,
             query_timeout: Duration::from_secs(10),
         }
     }
@@ -281,7 +292,8 @@ impl Default for AdvancedSubscriberOptions {
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl AdvancedSubscriberOptions {
-    /// Default options: no recovery, no history, `Locality::Any`, 10s GET timeout.
+    /// Default options: no recovery, no history, `Any` sub origin + GET locality,
+    /// 10s GET timeout.
     pub fn new() -> Self {
         Self::default()
     }
@@ -301,10 +313,17 @@ impl AdvancedSubscriberOptions {
         self
     }
 
-    /// Pin the recovery + history GET locality (e.g. `SessionLocal` for a loopback
-    /// composition).
-    pub fn with_allowed_destination(mut self, locality: Locality) -> Self {
-        self.allowed_destination = locality;
+    /// Pin the live (+ heartbeat) subscription's origin (zenoh `allowed_origin`;
+    /// e.g. `Remote` to ignore loopback echoes).
+    pub fn with_allowed_origin(mut self, origin: Locality) -> Self {
+        self.allowed_origin = origin;
+        self
+    }
+
+    /// Pin the recovery + history GET destination locality (e.g. `SessionLocal` for
+    /// a single-host loopback composition; `Any` is the zenoh-faithful default).
+    pub fn with_get_locality(mut self, locality: Locality) -> Self {
+        self.get_locality = locality;
         self
     }
 
@@ -1137,7 +1156,11 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         // history-only subscriber (recovery None) is now representable.
         let recovery = options.recovery;
         let retransmission = recovery.is_some();
-        let dest = options.allowed_destination;
+        // R311y96 (review-arbiter MED) — the GET destination and the sub origin are
+        // now INDEPENDENT (zenoh keeps them on separate axes). `dest` = the
+        // recovery/history GET locality; `sub_origin` = the live/heartbeat sub origin.
+        let dest = options.get_locality;
+        let sub_origin = options.allowed_origin;
         let periodic = recovery.and_then(|c| c.periodic_queries);
         // R311y90 (review C5) — fail fast & clear if off-runtime: the periodic
         // task (below) is a tokio::spawn, which PANICS without a runtime. Check
@@ -1168,10 +1191,10 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         let q_base = base_keyexpr.clone();
         let subscriber = session.declare_subscriber(
             base_keyexpr.clone(),
-            // R311y95 (review L5) — honor the configured locality on the live
-            // subscription too (not just the recovery / history GETs), so a
-            // `SessionLocal` advanced subscriber is loopback-only end-to-end.
-            SubscribeOptions::default().with_allowed_origin(dest),
+            // R311y96 (review-arbiter MED) — the live subscription honors its OWN
+            // origin knob (`options.allowed_origin`), independent of the GET
+            // locality (zenoh's `conf.origin`, faithful; default `Any`).
+            SubscribeOptions::default().with_allowed_origin(sub_origin),
             move |view: &dyn SampleView| {
                 let request = cb_state
                     .lock()
@@ -1223,8 +1246,8 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             let hb_keyexpr = crate::advanced_ke::heartbeat_sub_ke(&base_keyexpr);
             Some(session.declare_subscriber(
                 hb_keyexpr,
-                // R311y95 (review L5) — same locality as the live subscription.
-                SubscribeOptions::default().with_allowed_origin(dest),
+                // R311y96 — the heartbeat sub shares the live sub's origin knob.
+                SubscribeOptions::default().with_allowed_origin(sub_origin),
                 move |hb_view: &dyn SampleView| {
                     if hb_view.kind() != SampleKind::Put {
                         return;
@@ -1652,7 +1675,7 @@ mod tests {
             "demo/data",
             AdvancedSubscriberOptions::new()
                 .with_recovery(RecoveryConfig::new())
-                .with_allowed_destination(Locality::SessionLocal),
+                .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             move |_miss: Miss| *m.lock().unwrap() += 1,
         )
@@ -1809,7 +1832,7 @@ mod tests {
             "demo/data",
             AdvancedSubscriberOptions::new()
                 .with_recovery(RecoveryConfig::new())
-                .with_allowed_destination(Locality::SessionLocal),
+                .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             move |_miss: Miss| *m.lock().unwrap() += 1,
         )
@@ -1998,7 +2021,7 @@ mod tests {
             "demo/data",
             AdvancedSubscriberOptions::new()
                 .with_recovery(RecoveryConfig::new().with_heartbeat())
-                .with_allowed_destination(Locality::SessionLocal),
+                .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             move |_miss: Miss| *m.lock().unwrap() += 1,
         )
@@ -2126,7 +2149,7 @@ mod tests {
             AdvancedSubscriberOptions::new()
                 .with_recovery(RecoveryConfig::new())
                 .with_history(HistoryConfig::new())
-                .with_allowed_destination(Locality::SessionLocal),
+                .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             |_miss: Miss| {},
         )
@@ -2240,7 +2263,7 @@ mod tests {
             AdvancedSubscriberOptions::new()
                 .with_recovery(RecoveryConfig::new())
                 .with_history(HistoryConfig::new())
-                .with_allowed_destination(Locality::Any)
+                .with_get_locality(Locality::Any)
                 .with_query_timeout(timeout),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             |_miss: Miss| {},
@@ -2355,7 +2378,7 @@ mod tests {
             "demo/data",
             AdvancedSubscriberOptions::new()
                 .with_history(HistoryConfig::new())
-                .with_allowed_destination(Locality::SessionLocal),
+                .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             |_miss: Miss| {},
         )
@@ -2412,7 +2435,7 @@ mod tests {
             "demo/data",
             AdvancedSubscriberOptions::new()
                 .with_history(HistoryConfig::new().max_samples(2))
-                .with_allowed_destination(Locality::SessionLocal),
+                .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
             |_miss: Miss| {},
         )
