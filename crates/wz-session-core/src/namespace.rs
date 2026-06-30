@@ -58,6 +58,7 @@ use alloc::string::{String, ToString as _};
 use hashbrown::{HashMap, HashSet};
 use sce_forge_runtime::codec::CodecError;
 
+use crate::driver_loop::DriverLoopOutcome;
 use crate::keyexpr_prefix::{strip_nonwild_prefix, OwnedNonWildKeyExpr};
 use crate::network_message::NetworkMessage;
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
@@ -125,23 +126,50 @@ pub fn apply_egress(ns: &OwnedNonWildKeyExpr, msg: &mut NetworkMessage) -> Resul
             }
         }
         #[cfg(feature = "codec-response")]
-        NetworkMessage::Response(r) => {
-            if let Some(new) = literal_prefix(ns, &r.keyexpr) {
-                crate::response_build::set_response_keyexpr_literal(r, &new)?;
-            }
-        }
-        NetworkMessage::Interest(i) => {
-            if let Some(we) = i.body.as_mut().and_then(|b| b.keyexpr.as_mut()) {
-                if let Some(new) = literal_prefix(ns, we) {
-                    set_literal_suffix(we, new)?;
-                }
-            }
-        }
+        NetworkMessage::Response(r) => apply_egress_response(ns, r)?,
+        NetworkMessage::Interest(i) => apply_egress_interest(ns, i)?,
         #[cfg(feature = "codec-declare")]
-        NetworkMessage::Declare(d) => apply_declare_egress(ns, d)?,
+        NetworkMessage::Declare(d) => apply_egress_declare(ns, d)?,
         // ResponseFinal / Oam / Unknown carry no keyexpr (and any non-compiled
         // codec variant) — nothing to namespace.
         _ => {}
+    }
+    Ok(())
+}
+
+/// The Response (query-reply) egress rule — the single SSOT for the
+/// `NetworkMessage::Response` arm of [`apply_egress`] AND the dedicated reply
+/// emit path ([`crate::session_actions`]'s `send_response`). Query replies do
+/// NOT traverse the `send_network_message` floor (they flush through a separate
+/// `dispatch_response` seam), so the decorator must hook there too; factoring
+/// the rule here keeps both call sites byte-identical. zenoh decorates
+/// `send_response` (`net/routing/namespace.rs:106-109`).
+#[cfg(feature = "codec-response")]
+pub fn apply_egress_response(
+    ns: &OwnedNonWildKeyExpr,
+    r: &mut wz_codecs::response::ResponseOwned,
+) -> Result<(), CodecError> {
+    if let Some(new) = literal_prefix(ns, &r.keyexpr) {
+        crate::response_build::set_response_keyexpr_literal(r, &new)?;
+    }
+    Ok(())
+}
+
+/// The Interest egress rule — the SSOT for the `NetworkMessage::Interest` arm of
+/// [`apply_egress`] AND the reconnect declaration replay
+/// ([`crate::session_actions`]'s `replay_*`), which re-emits cached liveliness
+/// interests via a direct `dispatch_interest` that bypasses the
+/// `send_network_message` egress arm. Prefixes a LITERAL interest keyexpr; an
+/// aliased one (already namespaced at its declaration) or a keyexpr-less
+/// interest is left untouched.
+pub fn apply_egress_interest(
+    ns: &OwnedNonWildKeyExpr,
+    i: &mut wz_codecs::interest::InterestOwned,
+) -> Result<(), CodecError> {
+    if let Some(we) = i.body.as_mut().and_then(|b| b.keyexpr.as_mut()) {
+        if let Some(new) = literal_prefix(ns, we) {
+            set_literal_suffix(we, new)?;
+        }
     }
     Ok(())
 }
@@ -158,8 +186,14 @@ fn literal_prefix(ns: &OwnedNonWildKeyExpr, we: &WireexprOwned) -> Option<String
     }
 }
 
+/// The Declare egress rule — the SSOT for the `NetworkMessage::Declare` arm of
+/// [`apply_egress`] AND the reconnect declaration replay
+/// ([`crate::session_actions`]'s `replay_*`), which re-emits cached declares via
+/// a direct `dispatch_declare` that bypasses the `send_network_message` egress
+/// arm (the cache holds the BARE keyexpr, so the replayed declare must be
+/// re-decorated here). zenoh `handle_declare_egress`.
 #[cfg(feature = "codec-declare")]
-fn apply_declare_egress(
+pub fn apply_egress_declare(
     ns: &OwnedNonWildKeyExpr,
     d: &mut wz_codecs::declare::DeclareOwned,
 ) -> Result<(), CodecError> {
@@ -403,6 +437,22 @@ impl NamespaceIngress {
             }
             None => true,
         }
+    }
+}
+
+/// Apply the stateful ingress decorator to one driver-loop outcome in place.
+/// For a `FramePayload` batch, strip + drop each decoded message BEFORE the
+/// observer fan-out; `retain_mut` preserves batch order, which the stateful
+/// blocked-id / incomplete-alias correlation in [`NamespaceIngress::apply`]
+/// depends on. Non-`FramePayload` outcomes (FSM advance, KeepAlive, parse
+/// error, link-lost, an un-reassembled fragment) carry no application keyexpr
+/// and pass through untouched. The single integration seam between the
+/// decorator and the driver loop: the AP `drive_session_until_terminal` calls
+/// it on the direct outcome, `report_outcome_reassembling` on the reassembled
+/// completion (the two distinct owned-outcome mint points).
+pub fn strip_outcome(ing: &mut NamespaceIngress, outcome: &mut DriverLoopOutcome) {
+    if let DriverLoopOutcome::FramePayload { messages, .. } = outcome {
+        messages.retain_mut(|m| ing.apply(m));
     }
 }
 

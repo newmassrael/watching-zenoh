@@ -647,6 +647,16 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
         )
     });
     if let Some(o) = completed {
+        // §5.21 routing-namespace — strip the REASSEMBLED FramePayload (the
+        // second owned-outcome mint point) before its observer fan-out, the
+        // counterpart of the direct-outcome strip in
+        // `drive_session_until_terminal`. A whole-frame FramePayload is stripped
+        // by the caller; a fragment chain completes here, so its synthesized
+        // FramePayload would otherwise reach the app un-stripped.
+        #[cfg(feature = "routing-namespace")]
+        let mut o = o;
+        #[cfg(feature = "routing-namespace")]
+        actions.apply_namespace_ingress(&mut o);
         on_event(IterationEvent::Poll(&o));
     }
     // A terminal non-completion ingest — an out-of-order / capacity-overflow

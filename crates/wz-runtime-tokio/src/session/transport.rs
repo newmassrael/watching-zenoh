@@ -152,6 +152,25 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
             feature = "declare-interest"
         ))]
         {
+            // §5.21 routing-namespace — LOCAL-ORIGIN egress seam. This unicast
+            // `Tp` arm sits ABOVE the shared
+            // `SessionLinkActions::send_network_message` floor (the
+            // `payload.send_network_message` call below) that the peer/linkstate
+            // forwarders invoke DIRECTLY, so decorating here namespaces only
+            // THIS participant's own sends — a relay is never re-namespaced.
+            // (Query replies take the separate `send_response` seam; a multicast
+            // session is handshake-free and carries no namespace by construction.)
+            #[cfg(feature = "routing-namespace")]
+            let mut msg = msg;
+            #[cfg(feature = "routing-namespace")]
+            R::with_mutex_mut(&payload.namespace_egress, |slot| {
+                if let Some(ns) = slot.as_ref() {
+                    wz_session_core::namespace::apply_egress(ns, &mut msg)
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(SendWireError::Codec)?;
             payload.send_network_message(msg, reliable, express)
         }
         // No wire codec: the transport IS unicast and matches — the cause is

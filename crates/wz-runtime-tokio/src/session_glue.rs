@@ -803,6 +803,18 @@ where
                 let remaining_ms = deadline_ms.saturating_sub(now_ms);
                 tokio::select! {
                     outcome = poll_and_dispatch_one(driver, actions, engine) => {
+                        // §5.21 routing-namespace — strip the DIRECT decoded
+                        // FramePayload before dispatch. Covers BOTH the
+                        // reassembly-on path (where `report_outcome_reassembling`
+                        // re-forwards this same `&outcome` for a whole frame) and
+                        // the reassembly-off direct `on_event`; a fragment is not
+                        // a FramePayload, so this is a no-op for it and its
+                        // reassembled completion is stripped inside
+                        // `report_outcome_reassembling` instead.
+                        #[cfg(feature = "routing-namespace")]
+                        let mut outcome = outcome;
+                        #[cfg(feature = "routing-namespace")]
+                        actions.apply_namespace_ingress(&mut outcome);
                         #[cfg(feature = "reassembly")]
                         report_outcome_reassembling(
                             &outcome,
@@ -849,6 +861,13 @@ where
             }
             None => {
                 let outcome = poll_and_dispatch_one(driver, actions, engine).await;
+                // §5.21 routing-namespace — strip the DIRECT decoded FramePayload
+                // before dispatch (the no-deadline arm; same rationale as the
+                // `tokio::select!` poll arm above).
+                #[cfg(feature = "routing-namespace")]
+                let mut outcome = outcome;
+                #[cfg(feature = "routing-namespace")]
+                actions.apply_namespace_ingress(&mut outcome);
                 #[cfg(feature = "reassembly")]
                 report_outcome_reassembling(
                     &outcome,

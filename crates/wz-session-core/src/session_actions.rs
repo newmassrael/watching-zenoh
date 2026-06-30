@@ -67,6 +67,10 @@ use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError};
 // longer holds), OR the keepalive emitter (`transport-keepalive`,
 // R311kx). `send_wire` itself carries the same cfg union; the two move
 // together.
+#[cfg(feature = "routing-namespace")]
+use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
+#[cfg(feature = "routing-namespace")]
+use crate::namespace::NamespaceIngress;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -489,6 +493,33 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// feature-elided prunes nothing.
     #[cfg(feature = "session-reconnect")]
     pub declaration_cache: R::Mutex<Vec<CachedDeclaration>>,
+    /// §5.21 routing-namespace — the per-participant EGRESS prefix (the wz
+    /// mirror of zenoh's `Namespace` decorator value). `None` until the AP
+    /// layer installs it at session bring-up via [`Self::set_namespace`] (the
+    /// `is_lowlatency` config-set-at-bringup pattern). A non-`None` value makes
+    /// every LOCAL-ORIGIN send under this link relative to the namespace.
+    /// Applied at the THREE local-origin emit paths: the unicast
+    /// `Tp::send_network_message` arm (Push/Request/Declare/Interest) and the
+    /// `send_response` reply seam — both ABOVE the shared `send_network_message`
+    /// forwarder floor, so a router relay (which calls the floor directly) is
+    /// never re-namespaced — plus the reconnect declaration replay
+    /// ([`Self::replay_one`]), which re-decorates explicitly because it
+    /// dispatches BELOW the floor (it cannot share the floor's decoration without
+    /// also re-namespacing relays). Set once, but behind the runtime mutex
+    /// because the bundle is shared `Arc` by install time.
+    #[cfg(feature = "routing-namespace")]
+    pub namespace_egress: R::Mutex<Option<OwnedNonWildKeyExpr>>,
+    /// §5.21 routing-namespace — the stateful per-session INGRESS decorator
+    /// (the `ENamespace` mirror): strips the namespace from inbound keyexprs,
+    /// drops out-of-namespace messages, and correlates id-only undeclares
+    /// against the declares it dropped. Its blocked-id / incomplete-alias state
+    /// persists ACROSS frames for the session lifetime, so it lives in this
+    /// per-unicast-link bundle (not a per-iteration local). `None` until
+    /// [`Self::set_namespace`] installs it; driven by
+    /// [`Self::apply_namespace_ingress`] from both owned-outcome mint points of
+    /// the drive loop.
+    #[cfg(feature = "routing-namespace")]
+    pub namespace_ingress: R::Mutex<Option<NamespaceIngress>>,
     /// F2 — is the transport currently accepting data sends? `true` at
     /// construction (the bundle is built over a live link sink; the
     /// pre-handshake window keeps today's emit semantics), `false` when
@@ -788,6 +819,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
             #[cfg(feature = "session-reconnect")]
             declaration_cache: R::new_mutex(Vec::<CachedDeclaration>::new()),
+            // §5.21 routing-namespace — `None` until the AP layer installs the
+            // namespace via `set_namespace` at bring-up (the `is_lowlatency`
+            // config-default pattern). Zero footprint when the feature is off.
+            #[cfg(feature = "routing-namespace")]
+            namespace_egress: R::new_mutex(None::<OwnedNonWildKeyExpr>),
+            #[cfg(feature = "routing-namespace")]
+            namespace_ingress: R::new_mutex(None::<NamespaceIngress>),
             next_outbound_request_id: AtomicU64::new(0),
             next_outbound_token_id: AtomicU64::new(0),
             next_outbound_interest_id: AtomicU64::new(0),
@@ -1180,6 +1218,89 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "transport-lowlatency")]
     pub fn is_lowlatency(&self) -> bool {
         R::with_mutex_mut(&self.is_lowlatency, |s| *s)
+    }
+
+    /// §5.21 routing-namespace — install the per-participant namespace on this
+    /// session bundle at AP bring-up, BEFORE the drive loop spins or any send
+    /// fires (the `set_lowlatency_offer` config-at-bringup discipline). Seeds
+    /// the EGRESS prefix and builds the stateful INGRESS [`NamespaceIngress`]
+    /// from the SAME validated [`OwnedNonWildKeyExpr`], so the two decorator
+    /// halves can never disagree on the prefix. zenoh installs the
+    /// `Namespace`/`ENamespace` pair on the session's own face at open
+    /// (`api/session.rs`).
+    #[cfg(feature = "routing-namespace")]
+    pub fn set_namespace(&self, namespace: OwnedNonWildKeyExpr) {
+        R::with_mutex_mut(&self.namespace_ingress, |s| {
+            *s = Some(NamespaceIngress::new(namespace.clone()));
+        });
+        R::with_mutex_mut(&self.namespace_egress, |s| *s = Some(namespace));
+    }
+
+    /// §5.21 routing-namespace — apply the stateful INGRESS decorator to one
+    /// owned driver-loop outcome IN PLACE (strip + drop a `FramePayload`
+    /// batch's messages before the observer fan-out). No-op when no namespace
+    /// is installed, or for a non-`FramePayload` outcome. The drive loop calls
+    /// this on the direct outcome (`drive_session_until_terminal`) AND on the
+    /// reassembled completion (`report_outcome_reassembling`) — the two
+    /// distinct owned-outcome mint points — BEFORE `on_event`, because the
+    /// observer fans the same `&outcome` into every consumer registry.
+    #[cfg(feature = "routing-namespace")]
+    pub fn apply_namespace_ingress(&self, outcome: &mut crate::driver_loop::DriverLoopOutcome) {
+        R::with_mutex_mut(&self.namespace_ingress, |slot| {
+            if let Some(ing) = slot.as_mut() {
+                crate::namespace::strip_outcome(ing, outcome);
+            }
+        });
+    }
+
+    /// §5.21 routing-namespace — re-apply the EGRESS decorator to a declare
+    /// re-emitted by the reconnect declaration replay ([`Self::replay_one`]).
+    /// The LIVE declare path is decorated at the unicast `Tp::send_network_message`
+    /// arm, but replay rebuilds from the BARE cached keyexpr and dispatches
+    /// DIRECTLY via `dispatch_declare` (which sits below the floor, on the
+    /// forwarder's shared path, so it cannot itself decorate without
+    /// re-namespacing relays). Without this a reconnected namespaced session
+    /// re-declares UN-namespaced and the peer's ingress drops it — its remote
+    /// subscriptions/queryables/tokens silently stop being honored. No-op when no
+    /// namespace is installed.
+    #[cfg(all(
+        feature = "routing-namespace",
+        feature = "session-reconnect",
+        any(
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token"
+        )
+    ))]
+    fn replay_namespace_declare(
+        &self,
+        mut d: wz_codecs::declare::DeclareOwned,
+    ) -> Result<wz_codecs::declare::DeclareOwned, sce_forge_runtime::codec::CodecError> {
+        R::with_mutex_mut(&self.namespace_egress, |slot| match slot.as_ref() {
+            Some(ns) => crate::namespace::apply_egress_declare(ns, &mut d),
+            None => Ok(()),
+        })?;
+        Ok(d)
+    }
+
+    /// §5.21 routing-namespace — the interest counterpart of
+    /// [`Self::replay_namespace_declare`] (the replayed cached liveliness
+    /// subscriber / get interests, also dispatched directly past the egress arm).
+    #[cfg(all(
+        feature = "routing-namespace",
+        feature = "session-reconnect",
+        feature = "declare-interest"
+    ))]
+    fn replay_namespace_interest(
+        &self,
+        mut i: wz_codecs::interest::InterestOwned,
+    ) -> Result<wz_codecs::interest::InterestOwned, sce_forge_runtime::codec::CodecError> {
+        R::with_mutex_mut(&self.namespace_egress, |slot| match slot.as_ref() {
+            Some(ns) => crate::namespace::apply_egress_interest(ns, &mut i),
+            None => Ok(()),
+        })?;
+        Ok(i)
     }
 
     /// R311xr — stage (or clear) a UNIT capability offer in `role`'s ext chain,
@@ -3611,6 +3732,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R267 Session<R,T> reparam-adjacent architectural cascade).
     #[cfg(feature = "codec-response")]
     pub fn send_response(&self, response: ResponseOwned) {
+        // §5.21 routing-namespace — the reply EGRESS seam. Query replies flush
+        // through this dedicated `dispatch_response` path, which bypasses BOTH
+        // the `send_network_message` floor AND the unicast `Tp` send arm, so the
+        // `Namespace` decorator must hook the local-origin reply HERE too (above
+        // the forwarder floor) — otherwise a namespaced query's reply ships
+        // un-prefixed and the querier's ingress strip drops it. zenoh decorates
+        // `send_response` likewise (`net/routing/namespace.rs:106-109`).
+        #[cfg(feature = "routing-namespace")]
+        let mut response = response;
+        #[cfg(feature = "routing-namespace")]
+        R::with_mutex_mut(&self.namespace_egress, |slot| {
+            if let Some(ns) = slot.as_ref() {
+                let _ = crate::namespace::apply_egress_response(ns, &mut response);
+            }
+        });
         // F2 — this surface has no error channel; a transport-down
         // reject drops the emit exactly as the dead link would.
         let _ = self.dispatch_response(response, /*reliable=*/ true);
@@ -3888,6 +4024,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 {
                     let declare = build_declare_kexpr(mapping_id, &suffix)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
+                    #[cfg(feature = "routing-namespace")]
+                    let declare = self
+                        .replay_namespace_declare(declare)
+                        .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     self.dispatch_declare(declare, /*reliable=*/ true)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                 }
@@ -3904,6 +4044,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let declare =
                         build_declare_subscriber(subscriber_id, mapping_id, suffix.as_deref())
                             .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
+                    #[cfg(feature = "routing-namespace")]
+                    let declare = self
+                        .replay_namespace_declare(declare)
+                        .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     self.dispatch_declare(declare, /*reliable=*/ true)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                 }
@@ -3927,6 +4071,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         &mut declare,
                         crate::queryable_info::QueryableInfo::local(complete),
                     );
+                    #[cfg(feature = "routing-namespace")]
+                    let declare = self
+                        .replay_namespace_declare(declare)
+                        .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     self.dispatch_declare(declare, /*reliable=*/ true)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                 }
@@ -3941,6 +4089,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "declare-token")]
                 {
                     let declare = build_declare_token(token_id, mapping_id, suffix.as_deref())
+                        .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
+                    #[cfg(feature = "routing-namespace")]
+                    let declare = self
+                        .replay_namespace_declare(declare)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     self.dispatch_declare(declare, /*reliable=*/ true)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
@@ -3963,6 +4115,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         suffix.as_deref(),
                     )
                     .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
+                    #[cfg(feature = "routing-namespace")]
+                    let interest = self
+                        .replay_namespace_interest(interest)
+                        .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
                     self.dispatch_interest(interest, /*reliable=*/ true)
                         .map_err(ReplayDeclarationsError::Interest)?;
                 }
@@ -3979,6 +4135,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let interest =
                         build_interest_liveliness_get(interest_id, mapping_id, suffix.as_deref())
                             .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
+                    #[cfg(feature = "routing-namespace")]
+                    let interest = self
+                        .replay_namespace_interest(interest)
+                        .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
                     self.dispatch_interest(interest, /*reliable=*/ true)
                         .map_err(ReplayDeclarationsError::Interest)?;
                 }

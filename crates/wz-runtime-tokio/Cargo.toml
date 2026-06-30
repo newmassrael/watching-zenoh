@@ -446,6 +446,11 @@ storage-mgr-multi-storage-host = [
 ]
 # R311y58 — forward the wz-session-core strip_prefix/restore key-transform logic.
 storage-mgr-strip-prefix = ["wz-session-core/storage-mgr-strip-prefix"]
+# R311y106 — §5.21 routing-namespace active flip: forward the per-participant
+# keyexpr namespace decorator. The egress seam lives in this crate's unicast
+# `Tp::send_network_message` arm; the ingress + reply-egress + decorator state
+# live in wz-session-core. Opt-in only (never in `default`).
+routing-namespace = ["wz-session-core/routing-namespace"]
 # R311y59 — storage-mgr-complete-flag (§5.24): the storage queryable's COMPLETE bit
 # becomes config-driven (storage_service `storage_queryable_complete` gate) instead
 # of hardcoded true; composes storage-backend (the storage service driver lives

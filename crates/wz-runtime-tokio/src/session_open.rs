@@ -31,6 +31,8 @@ use sce_rust_runtime::Engine;
 use tokio::net::{TcpListener, TcpStream};
 
 use wz_runtime_core::TimeSource;
+#[cfg(feature = "routing-namespace")]
+use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
 use wz_session_core::locator::{
     parse_any_locator, AnyLocator, AnyLocatorError, LocatorParseError, Proto,
 };
@@ -1433,6 +1435,33 @@ pub async fn connect_and_open_session_with_shm(
     initiate_and_open_session_with_shm(dialed, params, clock, max_iters, tick_interval_ms).await
 }
 
+/// §5.21 routing-namespace — [`connect_and_open_session`] that installs a
+/// namespace: dials the locator then opens with the decorator seeded. Every
+/// application keyexpr on the resulting session is relative to `namespace`
+/// (the public deploy seam for a namespaced peer, the
+/// `connect_and_open_session_with_compression` sibling).
+#[cfg(feature = "routing-namespace")]
+pub async fn connect_and_open_session_with_namespace(
+    locator: AnyLocator,
+    params: SessionInitParams,
+    namespace: OwnedNonWildKeyExpr,
+    cfg: &DialConfig,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
+    initiate_and_open_session_with_namespace(
+        dialed,
+        params,
+        namespace,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
 /// Bring up a session in the Initiator role from an already-connected
 /// transport — the dialed-link half of [`connect_and_open_session`], split out
 /// so a caller that already holds a connected stream (e.g. wz-ap-demo's
@@ -1567,6 +1596,35 @@ pub async fn initiate_and_open_session_with_shm(
     let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
     let actions = new_session_actions(outbound, params, clock);
     actions.set_shm_offer(true);
+    initiator_open(
+        inbound,
+        actions,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// §5.21 routing-namespace — [`initiate_and_open_session`] with the
+/// per-participant namespace installed on the session actions before the drive
+/// loop spins. Namespace is NOT handshake-negotiated (unlike lowlatency /
+/// compression / shm); it is a unilateral LOCAL decorator that acts only on the
+/// post-Established data plane, so it is simply seeded here. Initiator side; the
+/// acceptor installs its own via [`accept_and_open_session_with_namespace`].
+#[cfg(feature = "routing-namespace")]
+pub async fn initiate_and_open_session_with_namespace(
+    connected: DialedLink,
+    params: SessionInitParams,
+    namespace: OwnedNonWildKeyExpr,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let actions = new_session_actions(outbound, params, clock);
+    actions.set_namespace(namespace);
     initiator_open(
         inbound,
         actions,
@@ -1755,6 +1813,36 @@ pub async fn accept_and_open_session_with_compression(
     let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.set_compression_offer(true);
+
+    engine.process_event(E::InboundStart);
+    drive_open_loop(
+        inbound,
+        actions,
+        engine,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// §5.21 routing-namespace — [`accept_and_open_session`] that installs a
+/// namespace on the ACCEPT side. The accept-side counterpart of
+/// [`connect_and_open_session_with_namespace`]; the namespace is LOCAL (each
+/// participant configures its own), never reflected from the peer.
+#[cfg(feature = "routing-namespace")]
+pub async fn accept_and_open_session_with_namespace(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    namespace: OwnedNonWildKeyExpr,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    actions.set_namespace(namespace);
 
     engine.process_event(E::InboundStart);
     drive_open_loop(

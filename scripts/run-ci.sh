@@ -1091,6 +1091,46 @@ layer_c1ae_cargo_test_compression() {
         && cargo clippy -p wz-session-core --no-default-features --features transport-compression --quiet -- -D warnings)
 }
 
+# ─── Layer C1ax — §5.21 routing-namespace active flip (R311y106) ─
+#
+# The per-participant keyexpr namespace decorator (the wz mirror of zenoh's
+# Namespace/ENamespace Primitives pair). Its egress (the unicast
+# Tp::send_network_message arm + the send_response reply seam) and ingress (the
+# drive-loop FramePayload strip, BOTH the direct and the reassembled mint
+# points) are routing-namespace-gated and OFF by default, so Layer C1 (default
+# features) never reaches them. This lane:
+#   1. runs the kernel + actions lib tests (the apply_egress / stateful
+#      NamespaceIngress unit suite, incl the strip_nonwild_prefix oracle);
+#   2. runs the composed pub/sub + query/reply e2e over a real loopback link
+#      (same-ns delivery, cross-ns isolation, un-namespaced drop, off-path no-op,
+#      and the query REPLY round-trip that proves the send_response egress seam);
+#   3. runs the fragmented/reassembled e2e (transport-fragmentation forces a tiny
+#      MTU so an oversize namespaced Put exercises the report_outcome_reassembling
+#      strip mint-point);
+#   4. clippy-gates the cfg-active surface (incl the test files) across the full
+#      codec combo and a narrow no-default combo (the decorator composes
+#      standalone), and builds the wz facade under the forwarded feature;
+#   5. covers the reconnect declaration-replay egress seam (the
+#      session-reconnect + declare-* clippy combo compiles `replay_namespace_*`,
+#      and `namespace_reconnect_e2e` proves a replayed declare ships namespaced —
+#      the R311y106 implementation-panel finding) and the remote-declare
+#      `matching_status` e2e (the relative-remote-table DROP decision: ingress
+#      strips inbound declares, so no namespace-qualify is needed).
+layer_c1ax_cargo_test_routing_namespace() {
+    (cd crates \
+        && cargo test -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --lib namespace --quiet \
+        && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features routing-namespace,session-unicast,codec-push --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,session-reconnect,declare-keyexpr,declare-subscriber,declare-queryable,declare-token,declare-interest --all-targets --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_e2e --test namespace_query_e2e --test namespace_matching_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features routing-namespace,transport-fragmentation --test namespace_reassembly_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features routing-namespace,session-reconnect --test namespace_reconnect_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-namespace --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-namespace,transport-fragmentation --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-namespace,session-reconnect --quiet -- -D warnings \
+        && cargo build -p wz --features routing-namespace --quiet)
+}
+
 # ─── Layer C1af — SHM transport (R3a+R3b): provider + live swap + e2e ─
 #
 # R311xn (R3a) + R311xo (R3b): the scoped same-host SHM transport -- the wz mirror
@@ -4324,6 +4364,7 @@ run_layer C1at layer_c1at_cargo_test_ext_pubsub_advanced_recovery || overall=1
 run_layer C1au layer_c1au_cargo_test_ext_pubsub_sample_miss_detection || overall=1
 run_layer C1av layer_c1av_cargo_test_ext_pubsub_advanced_history || overall=1
 run_layer C1aw layer_c1aw_cargo_test_ext_pubsub_group_membership || overall=1
+run_layer C1ax layer_c1ax_cargo_test_routing_namespace || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1
