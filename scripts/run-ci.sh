@@ -1547,7 +1547,10 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
 # 0,1,2 -> a history-enabled subscriber's declare GETs them -> the `history_pending`
 # gate buffers, the terminal Final flushes oldest-first), plus the gating unit.
 # Then clippy-gates the history surface + validates the facade forward target.
-# Deferred (documented follow-on): the `_time` age filter + detect_late_publishers.
+# R311y98 built the `_time` age filter: the subscriber-side history_selector +
+# max_age tests run here (--lib advanced_subscriber); the cache-side _time
+# parser + filter tests run under C1aq (--lib advanced_ matches advanced_cache).
+# Deferred (documented follow-on): detect_late_publishers (the liveliness path).
 layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     (cd crates \
         && cargo test -p wz-runtime-tokio \
@@ -1557,6 +1560,35 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
             --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
             --quiet -- -D warnings \
         && cargo build -p wz --features ext-pubsub-advanced-history --quiet)
+}
+
+# ─── Layer C1aw — ext-pubsub-group-membership §5.25: group view + lease ─────
+#
+# R311y97: ext-pubsub-group-membership is the LAST §5.25 atom (zenoh-ext's group
+# membership: a bincode-wire group view + per-member queryable, INDEPENDENT of
+# the advanced-pubsub @adv family). Off-default + spanning two crates, so no
+# default / C1aq..C1av lane compiles `group_membership` (core wire) or `group`
+# (the live Group). This is their ONLY run-site (R311y99, 20th-trigger review:
+# the atom shipped without a lane — its real-`bincode` faithfulness ORACLE was
+# never run in CI). It runs: (1) the core bincode-1.3 wire oracle + decode-reject
+# tests (the wire is pinned byte-for-byte to the real bincode crate); (2) the
+# runtime Group tests incl. the two composed loopback e2e (Join propagation +
+# the keepalive -> unknown-member-GET recovery, needing pubsub-allow-loop); then
+# clippy-gates both crates' surface + validates the wz facade forward target.
+layer_c1aw_cargo_test_ext_pubsub_group_membership() {
+    (cd crates \
+        && cargo test -p wz-session-core \
+            --features ext-pubsub-group-membership \
+            --lib group_membership --quiet \
+        && cargo test -p wz-runtime-tokio \
+            --features ext-pubsub-group-membership,pubsub-allow-loop \
+            --lib group --quiet \
+        && cargo clippy -p wz-session-core \
+            --features ext-pubsub-group-membership --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets \
+            --features ext-pubsub-group-membership,pubsub-allow-loop \
+            --quiet -- -D warnings \
+        && cargo build -p wz --features ext-pubsub-group-membership --quiet)
 }
 
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
@@ -4290,6 +4322,7 @@ run_layer C1as layer_c1as_cargo_test_reply_source_info || overall=1
 run_layer C1at layer_c1at_cargo_test_ext_pubsub_advanced_recovery || overall=1
 run_layer C1au layer_c1au_cargo_test_ext_pubsub_sample_miss_detection || overall=1
 run_layer C1av layer_c1av_cargo_test_ext_pubsub_advanced_history || overall=1
+run_layer C1aw layer_c1aw_cargo_test_ext_pubsub_group_membership || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

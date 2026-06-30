@@ -372,7 +372,14 @@ impl HistoryConfig {
 
     /// Bound the startup history GET to samples no older than `seconds`
     /// (the `_time=[now(-seconds)..]` selector; zenoh `HistoryConfig::max_age`).
+    /// `seconds` must be non-negative — a negative age has no meaning for a
+    /// "no older than" window and would render the malformed `now(--Ns)` form
+    /// (the lower-bound emit negates it). Asserted in debug builds.
     pub fn max_age(mut self, seconds: f64) -> Self {
+        debug_assert!(
+            seconds >= 0.0,
+            "HistoryConfig::max_age must be non-negative, got {seconds}"
+        );
         self.max_age = Some(seconds);
         self
     }

@@ -359,15 +359,23 @@ fn parse_now_expr_ntp64(s: &str, now_ntp64: u64) -> Option<u64> {
     if inner.is_empty() {
         return Some(now_ntp64);
     }
-    let (sign, dur) = match inner.strip_prefix('-') {
-        Some(rest) => (-1.0_f64, rest),
-        None => (1.0_f64, inner),
+    let (negative, dur) = match inner.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, inner),
     };
     let secs = parse_duration_secs(dur)?;
-    // Resolve in signed NTP64 space so a `now(-age)` underflow clamps at 0
-    // rather than wrapping. `now_ntp64` (~1.8e18 today) fits in i64.
-    let offset = (sign * secs * NTP64_SECOND) as i64;
-    Some((now_ntp64 as i64).saturating_add(offset).max(0) as u64)
+    // Resolve the offset in UNSIGNED NTP64 space (saturating). An `i64` cast of
+    // `now_ntp64` would wrap NEGATIVE once unix seconds reach 2^31 (year 2038,
+    // `secs << 32 >= 2^63`): an upper `now()` bound would then collapse to 0 and
+    // WRONGLY DROP every sample. `now_ntp64` is `(unix_secs << 32) | frac`
+    // (~7.6e18 today, not the ~9.2e18 i64 ceiling); the offset is `secs * 2^32`
+    // (f64-exact for realistic durations, `as u64` saturating beyond that).
+    let offset = (secs * NTP64_SECOND) as u64;
+    Some(if negative {
+        now_ntp64.saturating_sub(offset)
+    } else {
+        now_ntp64.saturating_add(offset)
+    })
 }
 
 /// Parse a zenoh duration literal to seconds, mirroring zenoh-util
@@ -578,6 +586,27 @@ mod tests {
         );
         assert_eq!(parse_time_range_ntp64("[now();1h]", now), None);
         assert_eq!(parse_time_range_ntp64("now(-30s)", now), None);
+    }
+
+    /// R311y99 (20th-trigger review MED) regression: resolving the `now(±dur)`
+    /// offset must not cast `now_ntp64` through `i64`. Once unix seconds reach
+    /// 2^31 (year 2038) the NTP64 word is `>= 2^63`, so an `i64` cast wraps
+    /// NEGATIVE — an UPPER `now()` bound would then collapse to `Included(0)`
+    /// and the filter would WRONGLY DROP every sample. Unsigned saturating
+    /// resolution keeps the bound a large positive value.
+    #[test]
+    fn parse_time_range_survives_post_2038_now_word() {
+        let now = 1u64 << 63; // unix_secs = 2^31 (year 2038); now word >= 2^63
+        let one_hour = 3600u64 << 32;
+        // `[..now(-1h)]`: an upper-bounded "older than 1h" window. The end must
+        // stay just below `now`, NOT collapse to 0 (the pre-fix i64-wrap bug).
+        let r = parse_time_range_ntp64("[..now(-1h)]", now).expect("parses");
+        assert_eq!(r, (Bound::Unbounded, Bound::Included(now - one_hour)));
+        // A 2h-old sample is inside `[.., now-1h]` — pre-fix (end==0) it was
+        // wrongly dropped; post-fix it passes.
+        assert!(sample_matches_time(now - 2 * one_hour, Some(r)));
+        // A 1-minute-old sample is NEWER than the now-1h cutoff -> excluded.
+        assert!(!sample_matches_time(now - (60u64 << 32), Some(r)));
     }
 
     #[test]
