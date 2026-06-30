@@ -507,10 +507,16 @@ pub mod wire {
     // import rides that re-export. The Discovery arm is one consumer.
     use crate::storage_replication::{zenoh_hex_to_zid, zid_to_zenoh_hex};
     use crate::zid_hex::zid_to_le_array;
-    // The genuinely-shared bincode-1.3 cursor core + length guard (the digest
-    // codec uses these too); the aligner-only widths (u8/u32 reads, String,
-    // push_u32) layer on top here since the digest never had them.
-    use crate::wire_bincode::{check_len, push_u64, Reader, WireError};
+    // The shared bincode-1.3 cursor core + length guard + the multi-consumer
+    // widths (`u32` tags, `String` / `Option<String>`, the length-guarded byte
+    // read) live in `wire_bincode` as the one SSOT this codec and the group
+    // codec build on; the aligner-only shapes (the zenoh `Timestamp`, the
+    // domain enums) layer on top here. `read_u8` / `read_u32` are reached by
+    // fully-qualified delegation in the thin inherent reads below.
+    use crate::wire_bincode::{
+        check_len, push_option_string, push_string, push_u32, push_u64, read_len_prefixed_bytes,
+        Reader, WireError,
+    };
 
     /// Failure decoding an aligner wire structure from bytes.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -562,18 +568,6 @@ pub mod wire {
     /// events would be wrongly rejected.
     const MIN_EVENT_BYTES: usize = 1 + 24 + 1 + 4;
 
-    /// Append a `u32` as 4 little-endian bytes (a bincode enum-variant index /
-    /// `Action` tag — an aligner-only width the digest codec never emits).
-    fn push_u32(out: &mut Vec<u8>, v: u32) {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-
-    /// Append a bincode `String`: a `u64` length then the UTF-8 bytes.
-    fn push_string(out: &mut Vec<u8>, s: &str) {
-        push_u64(out, s.len() as u64);
-        out.extend_from_slice(s.as_bytes());
-    }
-
     /// A [`TimestampHint`] as zenoh's bincode `Timestamp`: the NTP64 time word
     /// (u64 LE), then the 16-byte zero-padded id ([`zid_to_le_array`], the SSOT
     /// shared with the newer-wins comparator and the event fingerprint).
@@ -583,16 +577,11 @@ pub mod wire {
     }
 
     fn push_event_metadata(out: &mut Vec<u8>, e: &EventMetadata) {
-        // stripped_key: Option<OwnedKeyExpr> — a `0`/`1` Option tag, then the
-        // String only for Some. `None` (a strip-configured mount-root value) is
-        // the single `0` byte, mirroring zenoh's bincode `Option` (R311y64).
-        match e.key() {
-            Some(k) => {
-                out.push(1);
-                push_string(out, k);
-            }
-            None => out.push(0),
-        }
+        // stripped_key: Option<OwnedKeyExpr> — the shared bincode `Option<String>`
+        // width: a `0`/`1` tag then the String only for Some. `None` (a
+        // strip-configured mount-root value) is the single `0` byte, mirroring
+        // zenoh's bincode `Option` (R311y64).
+        push_option_string(out, e.key());
         push_timestamp(out, e.timestamp());
         out.push(1); // timestamp_last_non_wildcard_update: Some(timestamp)
         push_timestamp(out, e.timestamp());
@@ -613,35 +602,34 @@ pub mod wire {
     }
 
     /// The aligner's domain decoders, layered on the shared bincode cursor
-    /// ([`crate::wire_bincode::Reader`]): the structural reads (u8 / u32 / u64 /
-    /// bytes / string + the length guards) are shared with the digest codec;
-    /// these add the aligner's typed shapes. A shared [`WireError`] lifts into
-    /// [`AlignmentDecodeError`] via `?` (the `From` impl above).
+    /// ([`crate::wire_bincode::Reader`]): the cursor primitives it shares with
+    /// the digest codec are `read_u64` / `read_bytes` + the `check_len` guard,
+    /// and the wider widths (`read_u8` / `read_u32` / the length-prefixed
+    /// `String` read) are the shared `wire_bincode` widths (with the group
+    /// codec). The `read_u8` / `read_u32` inherent methods below are thin
+    /// delegations to those; the rest add the aligner's typed shapes. A shared
+    /// [`WireError`] lifts into [`AlignmentDecodeError`] via `?` (the `From`
+    /// impl above).
     impl Reader<'_> {
-        /// Read a single byte (a bincode `u8` / Option-or-bool tag).
+        /// Read a single byte (a bincode `u8` / Option-or-bool tag) — a thin
+        /// delegation to the shared width, lifting [`WireError`] into the
+        /// aligner's typed error.
         fn read_u8(&mut self) -> Result<u8, AlignmentDecodeError> {
-            Ok(self.read_bytes(1)?[0])
+            Ok(crate::wire_bincode::read_u8(self)?)
         }
 
-        /// Read a `u32` as 4 little-endian bytes (a bincode enum-variant index).
+        /// Read a `u32` as 4 little-endian bytes (a bincode enum-variant index)
+        /// — a thin delegation to the shared width.
         fn read_u32(&mut self) -> Result<u32, AlignmentDecodeError> {
-            let mut bytes = [0u8; 4];
-            bytes.copy_from_slice(self.read_bytes(4)?);
-            Ok(u32::from_le_bytes(bytes))
+            Ok(crate::wire_bincode::read_u32(self)?)
         }
 
-        /// Read a bincode `String`: a u64 length then that many UTF-8 bytes (the
-        /// length guarded against the remaining buffer before slicing, so a
-        /// hostile length fails fast).
+        /// Read a bincode `String`: a u64 length then that many UTF-8 bytes. The
+        /// length guard is the shared [`read_len_prefixed_bytes`] SSOT (the
+        /// guard that had drifted from the group codec's copy); the aligner
+        /// layers UTF-8 validation on the returned slice.
         fn read_string(&mut self) -> Result<String, AlignmentDecodeError> {
-            let len = self.read_u64()?;
-            let len: usize = len
-                .try_into()
-                .map_err(|_| AlignmentDecodeError::LengthOverflow)?;
-            if len > self.remaining() {
-                return Err(AlignmentDecodeError::LengthOverflow);
-            }
-            core::str::from_utf8(self.read_bytes(len)?)
+            core::str::from_utf8(read_len_prefixed_bytes(self)?)
                 .map(String::from)
                 .map_err(|_| AlignmentDecodeError::BadUtf8)
         }

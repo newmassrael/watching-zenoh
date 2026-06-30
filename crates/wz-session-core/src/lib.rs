@@ -922,9 +922,9 @@ pub mod storage_history;
 pub mod storage_replication;
 
 /// Round 311wa — the shared no_std bincode-1.3 wire primitives (the single
-/// LE-fixint cursor + length helpers) both the replication Digest codec and the
-/// aligner codec build on, so the bincode-1.3 framing contract lives in one
-/// place. Gated on `storage-replication` (the aligner feature implies it) OR
+/// LE-fixint cursor + length helpers + the multi-consumer widths) the wire
+/// codecs build on, so the bincode-1.3 framing contract lives in one place.
+/// Gated on `storage-replication` (the aligner feature implies it) OR
 /// `ext-pubsub-group-membership` (R311y97 — the group-membership wire codec is
 /// the third consumer of the same bincode-1.3 cursor; it is independent of the
 /// storage codecs but reuses the framing SSOT).

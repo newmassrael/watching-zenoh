@@ -38,9 +38,10 @@
 //!   `u32` LE sub-second nanos.
 //! - **`f32`** (the refresh ratio): 4 IEEE-754 little-endian bytes.
 //!
-//! The hand-rolled codec layers these widths on the shared bincode-1.3
-//! cursor ([`crate::wire_bincode`]) and is pinned to the real `bincode` 1.3
-//! by the `#[cfg(test)]` oracle below (a serde mirror of zenoh-ext's structs
+//! The codec reuses the shared multi-consumer bincode-1.3 widths
+//! ([`crate::wire_bincode`]) and layers its group-only shapes (`f32`, the std
+//! `Duration` struct) on them; it is pinned to the real `bincode` 1.3 by the
+//! `#[cfg(test)]` oracle below (a serde mirror of zenoh-ext's structs
 //! serialized with the exact default config, asserted byte-for-byte).
 //!
 //! ## Faithful omissions
@@ -57,7 +58,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use crate::wire_bincode::{check_len, push_u64, Reader, WireError};
+use crate::wire_bincode::{
+    push_option_string, push_string, push_u32, push_u64, read_len_prefixed_bytes, read_u32,
+    read_u8, Reader, WireError,
+};
 
 /// The default member lease before it is considered expired without a
 /// refreshing keep-alive (zenoh-ext `DEFAULT_LEASE`, group.rs:40).
@@ -198,29 +202,10 @@ impl From<WireError> for GroupDecodeError {
 const NANOS_PER_SEC: u32 = 1_000_000_000;
 
 // ---- encode (the push side, layered on the shared bincode-1.3 cursor) ----
-
-/// Append a `u32` as 4 little-endian bytes (a bincode enum-variant index).
-fn push_u32(out: &mut Vec<u8>, v: u32) {
-    out.extend_from_slice(&v.to_le_bytes());
-}
-
-/// Append a bincode `String`: a `u64` length then the UTF-8 bytes.
-fn push_string(out: &mut Vec<u8>, s: &str) {
-    push_u64(out, s.len() as u64);
-    out.extend_from_slice(s.as_bytes());
-}
-
-/// Append a bincode `Option<String>`: a `0` / `1` tag, then the `String`
-/// only for `Some`.
-fn push_option_string(out: &mut Vec<u8>, s: &Option<String>) {
-    match s {
-        Some(v) => {
-            out.push(1);
-            push_string(out, v);
-        }
-        None => out.push(0),
-    }
-}
+//
+// `push_u32` / `push_string` / `push_option_string` are the shared
+// multi-consumer widths ([`crate::wire_bincode`]); the group-only composite
+// shapes (`f32`, the std `Duration` struct) layer on them here.
 
 /// Append a bincode `f32`: 4 IEEE-754 little-endian bytes.
 fn push_f32(out: &mut Vec<u8>, v: f32) {
@@ -236,7 +221,7 @@ fn push_duration(out: &mut Vec<u8>, d: Duration) {
 
 fn push_member(out: &mut Vec<u8>, m: &Member) {
     push_string(out, &m.mid);
-    push_option_string(out, &m.info);
+    push_option_string(out, m.info.as_deref());
     push_u32(
         out,
         match m.liveliness {
@@ -278,22 +263,16 @@ pub fn encode_net_event(e: &GroupNetEvent) -> Vec<u8> {
     out
 }
 
-// ---- decode (free functions over the shared `Reader`) ----
+// ---- decode (the group's domain reads over the shared `Reader`) ----
 //
-// These are free functions, NOT inherent `Reader` methods: the storage
-// aligner codec ([`crate::storage_aligner::wire`]) already defines inherent
-// `read_u8` / `read_u32` / `read_string` on `Reader`, and a second inherent
-// impl with the same method names would collide whenever both features
-// compile together (the full-workspace build / CI lane). Free functions over
-// the shared `pub(crate)` cursor reads keep the two codecs independent while
-// reusing the one framing SSOT — the same "widths layer per-codec on the
-// shared cursor" split the aligner doc describes.
-
-fn read_u32(r: &mut Reader) -> Result<u32, GroupDecodeError> {
-    let mut bytes = [0u8; 4];
-    bytes.copy_from_slice(r.read_bytes(4)?);
-    Ok(u32::from_le_bytes(bytes))
-}
+// The structural widths (`read_u8` / `read_u32` / the length-guarded
+// `read_len_prefixed_bytes`) are the shared bincode-1.3 SSOT
+// ([`crate::wire_bincode`]); these add the group's domain shapes (an `f32`, a
+// std `Duration`, the `Member` / event structs) and map a domain failure (bad
+// UTF-8, an out-of-range `Option` tag, illegal `Duration` nanos) to
+// [`GroupDecodeError`]. They are free fns, not inherent `Reader` methods,
+// because the aligner codec already adds inherent reads to the shared `Reader`
+// and same-named inherent methods would collide when both features compile.
 
 fn read_f32(r: &mut Reader) -> Result<f32, GroupDecodeError> {
     let mut bytes = [0u8; 4];
@@ -302,20 +281,16 @@ fn read_f32(r: &mut Reader) -> Result<f32, GroupDecodeError> {
 }
 
 fn read_string(r: &mut Reader) -> Result<String, GroupDecodeError> {
-    let len = r.read_u64()?;
-    // A `String` is a length-prefixed byte collection (1 byte per element);
-    // the shared `check_len` is the SSOT length guard — it fast-rejects a
-    // hostile `len` (overflow or `len > remaining`) before the read, and a
-    // passing check means `len` fits the remaining buffer (so the `as usize`
-    // cannot truncate-then-over-read).
-    check_len(len, 1, r)?;
-    core::str::from_utf8(r.read_bytes(len as usize)?)
+    // The shared `read_len_prefixed_bytes` is the SSOT length guard (the guard
+    // that had drifted from the aligner's copy); the group layers UTF-8
+    // validation on the returned slice.
+    core::str::from_utf8(read_len_prefixed_bytes(r)?)
         .map(String::from)
         .map_err(|_| GroupDecodeError::BadUtf8)
 }
 
 fn read_option_string(r: &mut Reader) -> Result<Option<String>, GroupDecodeError> {
-    match r.read_bytes(1)?[0] {
+    match read_u8(r)? {
         0 => Ok(None),
         1 => Ok(Some(read_string(r)?)),
         other => Err(GroupDecodeError::BadOptionTag(other)),
@@ -517,7 +492,7 @@ mod tests {
         // Hand-build a member with nanos == 1e9 (never emitted by std serde).
         let mut bytes = Vec::new();
         push_string(&mut bytes, "m");
-        push_option_string(&mut bytes, &None);
+        push_option_string(&mut bytes, None);
         push_u32(&mut bytes, 0); // Auto
         push_u64(&mut bytes, 1); // secs
         push_u32(&mut bytes, NANOS_PER_SEC); // illegal nanos
