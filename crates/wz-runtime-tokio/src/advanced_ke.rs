@@ -51,8 +51,11 @@ pub(crate) fn history_get_ke(base: &str) -> String {
     format!("{base}/{KE_ADV_PREFIX}/**")
 }
 
-/// The heartbeat-beacon subscriber KE: `<base>/@adv/pub/**` (every publisher's
-/// last-sn beacon on the `@adv/pub` namespace).
+/// The publisher-detection subscriber KE: `<base>/@adv/pub/**` (the `@adv/pub`
+/// namespace covering every publisher). The single SSOT for this KE across its
+/// TWO consumers (R311y102 review): the heartbeat-beacon DATA subscriber (which
+/// decodes each publisher's last-sn beacon) and the late-publisher LIVELINESS
+/// subscriber (which fires on each publisher's `@adv` token Put/Delete).
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 pub(crate) fn heartbeat_sub_ke(base: &str) -> String {
     format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_PUB}/**")

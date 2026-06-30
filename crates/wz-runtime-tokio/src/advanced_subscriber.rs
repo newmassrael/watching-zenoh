@@ -1059,14 +1059,16 @@ fn issue_late_publisher_query<R, T>(
     });
 }
 
-/// R311y100 — the late-publisher liveliness callback body, factored out so it is
-/// a single source of truth the real liveliness subscriber closure is thin glue
-/// over (and a test drives directly — the local liveliness-token loopback is
-/// omitted in wz, so the closure cannot be triggered end-to-end via a
-/// same-session declare). On a `Put` for a sequenced publisher (a `uhlc`
-/// discriminator fails [`parse_heartbeat_source`]'s `eid` parse and is skipped —
-/// the documented timestamped-publisher faithful-subset deferral), open a
-/// recovery slot and issue the per-publisher history GET (OUTSIDE the lock).
+/// R311y100 — the late-publisher liveliness callback body, factored out as a
+/// single source of truth the real liveliness subscriber closure is thin glue
+/// over: a plain readability extraction (the closure at the declare site calls
+/// only this fn). R311y101 drives it end-to-end through the real closure via an
+/// injected inbound `DeclToken` (`dispatch_declare`, see the composed test), so
+/// the closure's field extraction + captured args ARE exercised. On a `Put` for
+/// a sequenced publisher (a `uhlc` discriminator fails [`parse_heartbeat_source`]'s
+/// `eid` parse and is skipped — the documented timestamped-publisher
+/// faithful-subset deferral), open a recovery slot and issue the per-publisher
+/// history GET (OUTSIDE the lock).
 #[cfg(feature = "ext-pubsub-advanced-history")]
 #[allow(clippy::too_many_arguments)]
 fn on_late_publisher_detected<R, T>(
@@ -1199,13 +1201,20 @@ pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRunt
     _heartbeat_sub: Option<Subscriber<R>>,
     /// R311y100 — the late-publisher-detection LIVELINESS subscriber on
     /// `<ke>/@adv/pub/**` (RAII undeclare-on-drop), `Some` only when
-    /// `HistoryConfig::detect_late_publishers` was set. Type-erased to
-    /// `Box<dyn Send>` because [`LivelinessSubscriber`](crate::session::LivelinessSubscriber)
-    /// is generic over `(R, T)` while this struct is `R`-only — the box keeps the
-    /// handle alive (its Drop undeclares) without threading `T` through the type.
+    /// `HistoryConfig::detect_late_publishers` was set. See [`LivelinessSubGuard`].
     #[cfg(feature = "ext-pubsub-advanced-history")]
-    _liveliness_sub: Option<Box<dyn Send>>,
+    _liveliness_sub: Option<LivelinessSubGuard>,
 }
+
+/// R311y102 (review LOW) — a named RAII keep-alive for the late-publisher
+/// liveliness subscriber. [`LivelinessSubscriber`](crate::session::LivelinessSubscriber)
+/// is generic over `(R, T)` while [`AdvancedSubscriber`] is `R`-only, so the
+/// handle is type-erased to `Box<dyn Send>` to drop the `T` parameter; this
+/// newtype names the intent (its only job is to undeclare on drop, via the
+/// boxed handle's `Drop` through the vtable) so the field is not an opaque
+/// `Box<dyn Send>` a maintainer must reverse-engineer.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+struct LivelinessSubGuard(#[allow(dead_code)] Box<dyn Send>);
 
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
 impl<R: SessionRuntime> AdvancedSubscriber<R> {
@@ -1505,13 +1514,19 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         // `history(true)` (matching zenoh advanced_subscriber.rs:1034), NOT
         // future-only: the startup history GET above is a point-in-time snapshot
         // fired just before this declare, so a publisher present at declare whose
-        // cache filled in that window (and never re-publishes) would otherwise be
-        // missed; the current-state replay re-triggers its per-publisher GET (a
-        // redundant-but-deduped GET for already-recovered publishers). The closure
-        // is thin glue over [`on_late_publisher_detected`] (the testable SSOT).
-        // `HistoryConfig` is `Copy`, so `history` is readable after the `if let`.
+        // cache filled in that window would otherwise be missed; `history(true)`
+        // sets the CURRENT bit on the outbound interest so the answerer replays
+        // its current tokens, INTENDING to re-trigger that publisher's GET.
+        // FIDELITY CAVEAT (R311y102 review): the current-replay path is wired
+        // (observer.rs responder) but has NO end-to-end test, and same-session
+        // liveliness loopback is omitted in wz, so this races-window closure is
+        // verified only by the future-token path (the composed test injects a
+        // post-declare DeclToken); the present-at-declare replay is untested. The
+        // fix is benign regardless — a replay GET is dedup/reorder-idempotent. The
+        // closure is thin glue over [`on_late_publisher_detected`]. `HistoryConfig`
+        // is `Copy`, so `history` is readable after the `if let`.
         #[cfg(feature = "ext-pubsub-advanced-history")]
-        let liveliness_sub: Option<Box<dyn Send>> =
+        let liveliness_sub: Option<LivelinessSubGuard> =
             if history.is_some_and(|h| h.detect_late_publishers) {
                 let lp_state = Arc::clone(&state);
                 let lp_session = session.clone();
@@ -1537,7 +1552,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                         );
                     },
                 )?;
-                Some(Box::new(sub))
+                Some(LivelinessSubGuard(Box::new(sub)))
             } else {
                 None
             };

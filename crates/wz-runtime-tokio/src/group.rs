@@ -109,10 +109,11 @@ fn is_wild(ke: &str) -> bool {
 
 /// The keep-alive beacon period: `lease * refresh_ratio`, so a refresh always
 /// precedes the lease elapsing (zenoh-ext group.rs:190-193). Clamped to
-/// `>= 1ms` so a degenerate zero period cannot spin the beacon task (the
-/// advanced-publisher C4 lesson).
+/// `>= 1ms` BY CONSTRUCTION so a degenerate zero period cannot spin the beacon
+/// task (the advanced-publisher C4 lesson) — the floor lives here, not at the
+/// call site, so any future caller is spin-safe too (R311y102 review).
 fn keepalive_period_ms(lease: Duration, refresh_ratio: f32) -> u64 {
-    ((lease.as_millis() as f64) * (refresh_ratio as f64)) as u64
+    (((lease.as_millis() as f64) * (refresh_ratio as f64)) as u64).max(1)
 }
 
 /// Construction options for a [`Group`]. `#[non_exhaustive]` for additive
@@ -157,7 +158,11 @@ pub enum GroupEvent {
     Leave(String),
     /// A member's lease elapsed without a refreshing keep-alive.
     LeaseExpired(String),
-    /// The group leader changed (reserved — see [`Group::leader`]).
+    /// The group leader changed. RESERVED + never emitted — a faithful mirror
+    /// of zenoh-ext, which likewise DECLARES `GroupEvent::NewLeader`
+    /// (group.rs:89) but never sends it (no construction site upstream); the
+    /// leader is a pull query ([`Group::leader`]), not a push event. Kept for
+    /// wire/API parity, not a wz-specific dead stub (R311y102 review arbitration).
     NewLeader(String),
 }
 
@@ -353,10 +358,14 @@ where
             let ka_clock = Arc::clone(session.clock());
             let ka_keyexpr = event_keyexpr.clone();
             let ka_buf = encode_net_event(&GroupNetEvent::KeepAlive(member.mid.clone()));
-            let period_ms = keepalive_period_ms(member.lease, member.refresh_ratio).max(1);
+            let period_ms = keepalive_period_ms(member.lease, member.refresh_ratio);
             AbortOnDrop(tokio::spawn(async move {
                 loop {
                     ka_clock.sleep(period_ms).await;
+                    // Fire-and-forget: a beacon publish error (e.g. a torn-down
+                    // link) is transient — the next tick re-beacons, and the
+                    // peer's lease has not yet elapsed. Dropping it is the
+                    // zenoh-ext behavior (group.rs:197 `let _ = ...put()`).
                     let _ = ka_session.publish(&ka_keyexpr, &ka_buf, PublishOptions::put());
                 }
             }))
@@ -613,7 +622,8 @@ mod tests {
     }
 
     /// keepalive_period_ms = lease * refresh_ratio (the beacon must precede the
-    /// lease elapsing), and the join clamps it to >= 1ms.
+    /// lease elapsing), clamped to >= 1ms BY CONSTRUCTION (the spin guard lives
+    /// in the function, not the call site).
     #[test]
     fn keepalive_period_is_lease_times_ratio() {
         assert_eq!(
@@ -621,8 +631,12 @@ mod tests {
             13_500,
             "18s * 0.75 = 13.5s"
         );
-        // Degenerate zero period would spin the beacon; join clamps to >= 1.
-        assert_eq!(keepalive_period_ms(Duration::from_millis(0), 0.75), 0);
+        // A degenerate zero period would spin the beacon; the function floors it.
+        assert_eq!(
+            keepalive_period_ms(Duration::from_millis(0), 0.75),
+            1,
+            "clamped to >= 1ms by construction, not at the call site"
+        );
     }
 
     #[test]
