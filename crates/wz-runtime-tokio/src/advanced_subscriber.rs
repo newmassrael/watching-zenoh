@@ -249,10 +249,12 @@ pub struct AdvancedSubscriberOptions {
     /// separate builder method): history-without-retransmission is valid.
     #[cfg(feature = "ext-pubsub-advanced-history")]
     pub history: Option<HistoryConfig>,
-    /// Locality for the recovery + history GETs. `Any` (default) reaches a remote
-    /// publisher's `@adv` cache AND the local loopback; `SessionLocal` pins it to
-    /// loopback (single-host composition tests). Mirror of zenoh's GET target /
-    /// `allowed_origin`.
+    /// Locality scoping the whole advanced subscriber: the live subscription's
+    /// origin AND the recovery / history GETs (R311y95 wired the live + heartbeat
+    /// subscriptions, not only the GETs). `Any` (default) reaches a remote
+    /// publisher's `@adv` cache AND the local loopback; `SessionLocal` pins
+    /// everything to loopback (single-host composition tests). wz folds zenoh's
+    /// separate `allowed_origin` (sub) + GET target into one locality knob.
     pub allowed_destination: Locality,
     /// Timeout applied to BOTH the recovery + history GETs (zenoh's builder
     /// `query_timeout`, shared by history + retransmission; default 10s). A
@@ -361,6 +363,15 @@ struct RecoveryRequest {
 /// Per-source last-in-order-delivered tracking + the user callbacks.
 /// Behind an `Arc<Mutex>` because the session may fire the subscriber
 /// callback from different worker threads (the storage-service idiom).
+///
+/// R311y95 (review L1) — the `on_sample` / `on_miss` callbacks are invoked
+/// WHILE this `State` mutex is held (`deliver_and_flush` / `flush_sequenced` /
+/// the ingest path all call them under the guard). This matches zenoh holding
+/// the `zlock` across `callback.call` (advanced_subscriber.rs): a callback that
+/// re-enters this same subscriber's `State` (e.g. by inspecting it) would
+/// deadlock, so callbacks must stay self-contained. Issuing a recovery / history
+/// GET is deliberately deferred OUTSIDE the lock (the `RecoveryRequest` return +
+/// [`issue_recovery_get`]) for exactly this reason.
 struct State {
     /// `(zid, eid)` -> per-source ordering state.
     sequenced: HashMap<(Vec<u8>, u32), SourceState>,
@@ -717,6 +728,57 @@ fn recovery_query_timeout_ms(query_timeout: Duration) -> u32 {
     query_timeout.as_millis().clamp(1, u32::MAX as u128) as u32
 }
 
+/// R311y95 (review L3) — the shared recovery / history GET scaffolding: issue the
+/// GET on `keyexpr` with `opts`, feed each Put reply back into the per-source
+/// ordering via [`recovered_sample_from_reply`] + [`State::handle_recovered`], and
+/// run `finish` on the terminal Final OR (R311y89 review C3) on a GET that failed to
+/// issue (the deadline sweep can never release it). The recovery and history issuers
+/// differ ONLY in the KE, the selector `opts`, and the `finish` action
+/// (`finish_recovery(key)` vs `finish_history()`), so both delegate here. MUST be
+/// called with the [`State`] lock RELEASED — `Session::query` re-enters the session
+/// (and re-locks the state from the reply callback).
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+fn issue_recovery_get<R, T>(
+    session: &Session<R, T, Unicast>,
+    statesref: &Arc<Mutex<State>>,
+    keyexpr: &str,
+    opts: QueryOptions,
+    finish: impl Fn(&mut State) + Clone + Send + 'static,
+) where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let reply_states = Arc::clone(statesref);
+    let final_states = Arc::clone(statesref);
+    let final_finish = finish.clone();
+    let issued = session.query(
+        keyexpr,
+        opts,
+        move |reply: &dyn ReplyView| {
+            if let Some((rkey, rsn, sample)) = recovered_sample_from_reply(reply) {
+                reply_states
+                    .lock()
+                    .expect("advanced subscriber state mutex poisoned")
+                    .handle_recovered(rkey, rsn, sample);
+            }
+        },
+        move |_rid| {
+            let mut guard = final_states
+                .lock()
+                .expect("advanced subscriber state mutex poisoned");
+            final_finish(&mut guard);
+        },
+    );
+    if issued.is_err() {
+        let mut guard = statesref
+            .lock()
+            .expect("advanced subscriber state mutex poisoned");
+        finish(&mut guard);
+    }
+}
+
 /// Issue a sample-driven `_sn={from_sn}..` recovery GET against the gapped
 /// source's `@adv` cache and feed the recovered replies back into the
 /// per-source ordering. The recovery KE mirrors zenoh's
@@ -755,39 +817,13 @@ fn issue_recovery_query<R, T>(
         .with_parameters(params)
         .with_timeout_ms(timeout_ms);
 
+    // The finish action decrements the source's in-flight count + flushes
+    // (`finish_recovery` also handles the C3 failed-to-issue rollback via the
+    // shared [`issue_recovery_get`]).
     let key = (req.zid, req.eid);
-    let reply_states = Arc::clone(statesref);
-    let final_states = Arc::clone(statesref);
-    let final_key = key.clone();
-    let issued = session.query(
-        &recovery_ke,
-        opts,
-        move |reply: &dyn ReplyView| {
-            if let Some((rkey, rsn, sample)) = recovered_sample_from_reply(reply) {
-                reply_states
-                    .lock()
-                    .expect("advanced subscriber state mutex poisoned")
-                    .handle_recovered(rkey, rsn, sample);
-            }
-        },
-        move |_rid| {
-            final_states
-                .lock()
-                .expect("advanced subscriber state mutex poisoned")
-                .finish_recovery(&final_key);
-        },
-    );
-    // R311y89 (review C3) — a GET that failed to issue never registered a pending
-    // reply entry (`Session::query` rolls it back on a wire-emit error), so neither
-    // its `on_final` nor the deadline sweep can ever fire `finish_recovery`. Roll
-    // back here so the `pending_queries` the caller bumped before this GET does not
-    // wedge the source's buffer behind a phantom in-flight query.
-    if issued.is_err() {
-        statesref
-            .lock()
-            .expect("advanced subscriber state mutex poisoned")
-            .finish_recovery(&key);
-    }
+    issue_recovery_get(session, statesref, &recovery_ke, opts, move |state| {
+        state.finish_recovery(&key)
+    });
 }
 
 /// Re-key a recovery / history reply into a `(source-key, sn, Sample)` for the
@@ -795,6 +831,16 @@ fn issue_recovery_query<R, T>(
 /// (the `reply-source-info` seam) + rebuild the Put sample. `None` for a
 /// non-Put reply or one with no source identity (it cannot be re-keyed — the
 /// answerer needs `reply-source-info` on). Shared by the recovery + history GETs.
+///
+/// R311y95 (review L4) — documented fidelity gap of a RECOVERED sample vs the
+/// original live one. The encoding + attachment ARE re-applied from the reply
+/// when present, but the `@adv` cache stores only `(keyexpr, payload, source_info,
+/// timestamp)` ([`crate::advanced_cache::CachedSample`]), so it never carries the
+/// original encoding / attachment back — those are lost on recovery. The cached
+/// `timestamp` is also dropped: the `ReplyView` exposes no reply-timestamp
+/// accessor, so a recovered sample arrives timestamp-less. A recovered sample is
+/// therefore faithful in `(source_info, sn, payload)` but lossy on
+/// encoding / attachment / timestamp.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<((Vec<u8>, u32), u32, Sample)> {
     if reply.kind() != ReplyKind::Put {
@@ -847,35 +893,12 @@ fn issue_history_query<R, T>(
         None => opts,
     };
 
-    let reply_states = Arc::clone(statesref);
-    let final_states = Arc::clone(statesref);
-    let issued = session.query(
-        &history_ke,
-        opts,
-        move |reply: &dyn ReplyView| {
-            if let Some((rkey, rsn, sample)) = recovered_sample_from_reply(reply) {
-                reply_states
-                    .lock()
-                    .expect("advanced subscriber state mutex poisoned")
-                    .handle_recovered(rkey, rsn, sample);
-            }
-        },
-        move |_rid| {
-            final_states
-                .lock()
-                .expect("advanced subscriber state mutex poisoned")
-                .finish_history();
-        },
-    );
-    // R311y89 (review C3) — a history GET that failed to issue never registered, so
-    // `finish_history` (which clears `history_pending` + flushes the buffer) would
-    // never run and the subscriber would buffer live samples forever. Clear it here.
-    if issued.is_err() {
-        statesref
-            .lock()
-            .expect("advanced subscriber state mutex poisoned")
-            .finish_history();
-    }
+    // `finish_history` clears `history_pending` + flushes the buffer oldest-first
+    // (the shared [`issue_recovery_get`] also runs it on the C3 failed-to-issue
+    // path so the subscriber does not buffer live samples forever).
+    issue_recovery_get(session, statesref, &history_ke, opts, |state| {
+        state.finish_history()
+    });
 }
 
 /// R311y83 — run ONE periodic recovery tick: collect each source's
@@ -948,11 +971,13 @@ fn parse_heartbeat_source(keyexpr: &str) -> Option<(Vec<u8>, u32)> {
 /// the per-source ordering / de-duplication state machine.
 pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRuntime> {
     _subscriber: Subscriber<R>,
-    /// R311y83 — the shared ordering state; retained so a test can drive a
+    /// R311y83 — the shared ordering state; retained ONLY so a test can drive a
     /// recovery tick over the live source map ([`run_periodic_tick`]). The
-    /// background task captures its own clone, so prod never reads this field
-    /// (underscore-prefixed like `_subscriber` / `_periodic`).
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    /// background task + the callback capture their own clones (which keep the
+    /// `State` alive), so prod never reads this field. R311y95 (review L2) —
+    /// gated `cfg(test)` (was `cfg(advanced-recovery)`): the test-only retention
+    /// no longer occupies a field in production builds.
+    #[cfg(all(test, feature = "ext-pubsub-advanced-recovery"))]
     _statesref: Arc<Mutex<State>>,
     /// R311y83 — the periodic recovery task (RAII abort-on-drop), `Some` only
     /// when `RecoveryConfig::periodic_queries` was set.
@@ -1055,6 +1080,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         )?;
         Ok(Self {
             _subscriber: subscriber,
+            #[cfg(test)]
             _statesref: state,
             _periodic: None,
             _heartbeat_sub: None,
@@ -1142,7 +1168,10 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         let q_base = base_keyexpr.clone();
         let subscriber = session.declare_subscriber(
             base_keyexpr.clone(),
-            SubscribeOptions::default(),
+            // R311y95 (review L5) — honor the configured locality on the live
+            // subscription too (not just the recovery / history GETs), so a
+            // `SessionLocal` advanced subscriber is loopback-only end-to-end.
+            SubscribeOptions::default().with_allowed_origin(dest),
             move |view: &dyn SampleView| {
                 let request = cb_state
                     .lock()
@@ -1194,7 +1223,8 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             let hb_keyexpr = crate::advanced_ke::heartbeat_sub_ke(&base_keyexpr);
             Some(session.declare_subscriber(
                 hb_keyexpr,
-                SubscribeOptions::default(),
+                // R311y95 (review L5) — same locality as the live subscription.
+                SubscribeOptions::default().with_allowed_origin(dest),
                 move |hb_view: &dyn SampleView| {
                     if hb_view.kind() != SampleKind::Put {
                         return;
@@ -1244,6 +1274,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
 
         Ok(Self {
             _subscriber: subscriber,
+            #[cfg(test)]
             _statesref: state,
             _periodic: periodic_task,
             _heartbeat_sub: heartbeat_sub,
