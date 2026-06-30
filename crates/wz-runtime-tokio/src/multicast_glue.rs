@@ -327,7 +327,27 @@ where
                     feature = "codec-response-final",
                     feature = "liveliness-token"
                 ))]
-                Some(item) => {
+                #[cfg_attr(not(feature = "routing-namespace"), allow(unused_mut))]
+                Some(mut item) => {
+                    // §5.21 routing-namespace — namespace this LOCAL-ORIGIN item
+                    // at the SINGLE multicast egress chokepoint (the outbound
+                    // dequeue): publish Push + the reply-plane Response /
+                    // ResponseFinal / DeclareReply all funnel here, and there is
+                    // NO relay path onto this channel (handshake-free multicast,
+                    // no multihat forwarder TODAY), so decorating here re-namespaces
+                    // nothing forwarded — unlike unicast, which decorates ABOVE the
+                    // shared send floor. A decorate failure (namespaced keyexpr over
+                    // codec capacity) DROPS the item rather than leaking the bare
+                    // keyexpr (the y106b live-vs-bare lesson); send is best-effort
+                    // anyway. No-op when no namespace is installed / feature off.
+                    #[cfg(feature = "routing-namespace")]
+                    if let Some(ns) = dispatcher.namespace() {
+                        if wz_session_core::namespace::apply_egress_multicast_item(ns, &mut item)
+                            .is_err()
+                        {
+                            continue;
+                        }
+                    }
                     let frames = multicast_tx_emit(item, &mut tx_sn, params);
                     let reliability = if frames.reliable {
                         Reliability::Reliable
@@ -776,6 +796,86 @@ mod tests {
         );
     }
 
+    /// R311y107 §5.21 routing-namespace — the MULTICAST ingress strip end to end
+    /// inside the loop: a NAMESPACED session admits a peer, then the peer's Frame
+    /// carrying a Push on the ABSOLUTE keyexpr `myns/demo/mc` is delivered to a
+    /// subscriber registered on the RELATIVE `demo/mc` (namespace stripped at
+    /// ingress), while a Push on the OUT-OF-namespace `other/demo/mc` is DROPPED
+    /// (never reaches the subscriber). The composed proof of the per-peer ingress
+    /// seam driven through the real `drive_multicast_session` fan — the multicast
+    /// twin of the unicast `namespace_e2e` loopback proofs.
+    #[cfg(all(
+        feature = "routing-namespace",
+        feature = "codec-push",
+        feature = "pubsub-put"
+    ))]
+    #[tokio::test]
+    async fn drive_loop_namespaced_strips_inbound_and_drops_out_of_namespace() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wz_session_core::frame_encode::encode_frame_with_push;
+        use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
+        use wz_session_core::observer::ApplicationLayerObserver;
+        use wz_session_core::push_build::build_push_literal;
+
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let join = join0(&params(&peer_b)); // next_sn_reliable = 0
+                                            // Frame 1 (SN 0): in-namespace "myns/demo/mc" -> strips to "demo/mc".
+        let in_ns = encode_frame_with_push(
+            0,
+            build_push_literal("myns/demo/mc", b"in-ns").expect("push fixture"),
+            true,
+        );
+        // Frame 2 (SN 1, the next reliable SN so the gate admits it): out of
+        // namespace "other/demo/mc" -> dropped at the namespace ingress.
+        let out_ns = encode_frame_with_push(
+            1,
+            build_push_literal("other/demo/mc", b"out-ns").expect("push fixture"),
+            true,
+        );
+
+        let mut driver = FakeDriver::with([(join, src(2)), (in_ns, src(2)), (out_ns, src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        // The session's per-participant namespace, installed at bring-up.
+        dispatcher.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
+        let clock = TokioTime::new();
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let mut observer = ApplicationLayerObserver::new();
+        {
+            let fired = fired.clone();
+            // The app names the RELATIVE keyexpr; the namespace is transparent.
+            observer.subscribers.register("demo/mc", move |sample| {
+                assert_eq!(sample.keyexpr(), "demo/mc");
+                assert_eq!(sample.payload(), b"in-ns");
+                fired.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
+            &mut driver,
+            &clock,
+            |event| observer.dispatch_event(event),
+            &mut idle_outbound(),
+        )
+        .await;
+
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 1);
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "only the in-namespace Push (stripped to demo/mc) reaches the subscriber; \
+             the out-of-namespace Push is dropped at ingress"
+        );
+    }
+
     /// R311lq — the queryable REPLY plane end-to-end inside the loop: a peer
     /// JOINs, then sends a Query Frame (at the JOIN-advertised next SN)
     /// matching a registered queryable. The observer dispatches the Query to
@@ -868,6 +968,106 @@ mod tests {
         assert_eq!(
             finals, 1,
             "exactly one ResponseFinal terminated the reply chain"
+        );
+    }
+
+    /// R311y107 §5.21 routing-namespace — the multicast REPLY-plane egress
+    /// round-trip: a NAMESPACED session receives an in-namespace Query
+    /// `myns/demo/mc`, the ingress strips it to the relative `demo/mc` so the
+    /// queryable (registered on `demo/mc`) matches, the staged `Response` is built
+    /// relative, and the EGRESS dequeue decorator re-prefixes it back to
+    /// `myns/demo/mc` on the wire. The egress twin of the ingress-strip e2e — the
+    /// composed proof that the reply seam (the `Response` variant) is namespaced
+    /// through the real `drive_multicast_session` dequeue, closing the
+    /// implementation-panel egress-composition gap. A reply that shipped BARE
+    /// (`demo/mc`) would be dropped by a namespaced querier's ingress and hang its
+    /// `z_get` — the silent failure this proof guards.
+    #[cfg(all(
+        feature = "routing-namespace",
+        feature = "query-queryable",
+        feature = "codec-response-final"
+    ))]
+    #[tokio::test]
+    async fn drive_loop_namespaced_reply_is_reprefixed_on_egress() {
+        use wz_codecs::wireexpr::WireexprOwnedVariant;
+        use wz_session_core::frame_encode::encode_frame_with_request;
+        use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
+        use wz_session_core::network_message::NetworkMessage;
+        use wz_session_core::observer::ApplicationLayerObserver;
+        use wz_session_core::request_build::build_request_query;
+
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let join = join0(&params(&peer_b));
+        // A remote NAMESPACED querier puts the ABSOLUTE keyexpr myns/demo/mc on
+        // the wire (request id 7, reliable, at the JOIN-advertised next SN).
+        let query = encode_frame_with_request(
+            0,
+            build_request_query(7, 0, Some("myns/demo/mc")).expect("query fixture"),
+            true,
+        );
+
+        let mut driver = FakeDriver::with([(join, src(2)), (query, src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        dispatcher.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
+        let clock = TokioTime::new();
+
+        let mut observer = ApplicationLayerObserver::new();
+        // Registered on the RELATIVE keyexpr — it only matches if the inbound
+        // Query was stripped from myns/demo/mc to demo/mc at ingress.
+        observer
+            .queryables
+            .register("demo/mc", |_query, responder| {
+                responder.reply(b"reply-over-multicast");
+            });
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = MulticastReplySink::new(TokioReplyBacking::new(tx));
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
+            &mut driver,
+            &clock,
+            |event| {
+                observer.dispatch_event(event);
+                observer.flush_query_replies(&sink);
+            },
+            &mut rx,
+        )
+        .await;
+
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+
+        // The emitted Response carries the ABSOLUTE myns/demo/mc (the relative
+        // reply re-prefixed at the egress dequeue).
+        let mut responses = 0usize;
+        for dg in &driver.sent {
+            if let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(dg) {
+                if let Ok(messages) = parse_frame_payload(&payload) {
+                    for m in &messages {
+                        if let NetworkMessage::Response(r) = m {
+                            let suffix = match &r.keyexpr.body {
+                                WireexprOwnedVariant::WireexprLocal(a) => a.suffix.as_deref(),
+                                WireexprOwnedVariant::WireexprNonlocal(a) => a.suffix.as_deref(),
+                            };
+                            assert_eq!(
+                                suffix,
+                                Some("myns/demo/mc"),
+                                "the reply is re-prefixed to the namespace on egress"
+                            );
+                            responses += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            responses, 1,
+            "exactly one namespaced Response reached the group"
         );
     }
 
@@ -1108,6 +1308,75 @@ mod tests {
         let join = decode_join(last_join).expect("JOIN decodes");
         assert_eq!(join.next_sn_reliable, 1, "publish advanced the ring");
         assert_eq!(join.next_sn_best_effort, 0, "best-effort channel untouched");
+    }
+
+    /// R311y107 §5.21 routing-namespace — the multicast PUBLISH egress
+    /// (same-namespace delivery, egress half): a NAMESPACED session's queued Put
+    /// on the RELATIVE `demo/mc` leaves the loop's dequeue decorator framed as the
+    /// ABSOLUTE `myns/demo/mc` on the wire, so a namespaced peer on the group
+    /// strips it back to `demo/mc`. The egress twin of the ingress-strip e2e —
+    /// proves the Push egress arm fires through the real `drive_multicast_session`
+    /// dequeue (the design's "same-ns delivery" plan item).
+    #[cfg(all(
+        feature = "routing-namespace",
+        feature = "codec-push",
+        feature = "pubsub-put"
+    ))]
+    #[tokio::test]
+    async fn drive_loop_namespaced_publish_is_prefixed_on_egress() {
+        use wz_codecs::wireexpr::WireexprOwnedVariant;
+        use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
+        use wz_session_core::network_message::NetworkMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // The app publishes the RELATIVE keyexpr; the namespace is transparent.
+        tx.send(multicast_put_literal("demo/mc", b"ns-tx").expect("put item"))
+            .expect("queue publish");
+        drop(tx);
+
+        let mut driver = FakeDriver::with([]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        dispatcher.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
+        let clock = TokioTime::new();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut rx,
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+
+        let frames: Vec<&Vec<u8>> = driver
+            .sent
+            .iter()
+            .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAME)
+            .collect();
+        assert_eq!(frames.len(), 1, "one queued publish = one data frame");
+        let InboundFrame::Frame { payload, .. } = parse_inbound(frames[0]).expect("frame parses")
+        else {
+            panic!("expected Frame");
+        };
+        let messages = parse_frame_payload(&payload).expect("payload parses");
+        let NetworkMessage::Push(p) = &messages[0] else {
+            panic!("payload is a Push")
+        };
+        let suffix = match &p.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(a) => a.suffix.as_deref(),
+            WireexprOwnedVariant::WireexprNonlocal(a) => a.suffix.as_deref(),
+        };
+        assert_eq!(
+            suffix,
+            Some("myns/demo/mc"),
+            "the published keyexpr is namespaced on egress"
+        );
     }
 
     // ── R311kn — multicast fragment RX: per-peer chains through the

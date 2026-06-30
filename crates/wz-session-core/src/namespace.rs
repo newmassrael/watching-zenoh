@@ -120,11 +120,7 @@ fn set_literal_suffix(we: &mut WireexprOwned, suffix: String) -> Result<(), Code
 pub fn apply_egress(ns: &OwnedNonWildKeyExpr, msg: &mut NetworkMessage) -> Result<(), CodecError> {
     match msg {
         #[cfg(feature = "codec-push")]
-        NetworkMessage::Push(p) => {
-            if let Some(new) = literal_prefix(ns, &p.keyexpr) {
-                crate::push_build::set_push_keyexpr_literal(p, &new)?;
-            }
-        }
+        NetworkMessage::Push(p) => apply_egress_push(ns, p)?,
         #[cfg(feature = "codec-request")]
         NetworkMessage::Request(r) => {
             if let Some(new) = literal_prefix(ns, &r.keyexpr) {
@@ -139,6 +135,24 @@ pub fn apply_egress(ns: &OwnedNonWildKeyExpr, msg: &mut NetworkMessage) -> Resul
         // ResponseFinal / Oam / Unknown carry no keyexpr (and any non-compiled
         // codec variant) — nothing to namespace.
         _ => {}
+    }
+    Ok(())
+}
+
+/// The Push (`z_put` / `z_del`) egress rule — the SSOT for the
+/// `NetworkMessage::Push` arm of [`apply_egress`] AND the multicast TX-item
+/// dispatcher ([`apply_egress_multicast_item`]), which decorates the boxed
+/// `Push` of a [`MulticastTxItem`](crate::multicast_tx::MulticastTxItem) at the
+/// AP multicast drive loop's outbound chokepoint. Prefixes a LITERAL push
+/// keyexpr; an aliased one (already namespaced at its declaration) passes
+/// through. zenoh decorates `send_push` (`net/routing/namespace.rs:96`).
+#[cfg(feature = "codec-push")]
+pub fn apply_egress_push(
+    ns: &OwnedNonWildKeyExpr,
+    p: &mut wz_codecs::push::PushOwned,
+) -> Result<(), CodecError> {
+    if let Some(new) = literal_prefix(ns, &p.keyexpr) {
+        crate::push_build::set_push_keyexpr_literal(p, &new)?;
     }
     Ok(())
 }
@@ -233,6 +247,59 @@ pub fn apply_egress_declare(
         // Undeclares carry only an id (no keyexpr); DeclareFinal / Default carry
         // none — untouched, exactly as zenoh's handle_declare_egress.
         _ => {}
+    }
+    Ok(())
+}
+
+/// §5.21 routing-namespace — the MULTICAST egress decorator: apply the
+/// namespace to one queued [`MulticastTxItem`](crate::multicast_tx::MulticastTxItem)
+/// at the AP multicast drive loop's SINGLE outbound chokepoint (the
+/// `outbound`-channel dequeue). Every multicast TX item is LOCAL-ORIGIN — the
+/// publish `Push` and the reply-plane `Response` / `ResponseFinal` /
+/// `DeclareReply` all funnel through the one outbound channel, and there is NO
+/// relay path onto it (multicast is handshake-free with no multihat forwarder
+/// TODAY) — so decorating at the dequeue is safe, UNLIKE unicast which must
+/// decorate ABOVE the shared `send_network_message` floor to avoid
+/// re-namespacing a router relay ([`apply_egress`] doc; the floor-below relay
+/// is the unicast invariant). INVARIANT for the future `router-hat-multihat`
+/// atom: when a multicast forwarder is added, a relayed (non-local-origin) item
+/// must NOT be re-namespaced here — re-examine this seam (decorate-above, or tag
+/// relays) before relaying through the decorated dequeue. The `match` below is
+/// EXHAUSTIVE (no `_ =>`) so a new relay/alias-carrying `MulticastTxItem` variant
+/// forces that review at compile time.
+///
+/// Dispatches each variant to the EXISTING per-message egress rule SSOT (zero
+/// rule duplication): Push -> [`apply_egress_push`], Response ->
+/// [`apply_egress_response`], DeclareReply -> [`apply_egress_declare`]
+/// (`liveliness-token` implies `codec-declare`, so the declare egress is always
+/// available here). `ResponseFinal` carries no keyexpr — left untouched, exactly
+/// as zenoh leaves `send_response_final` undecorated (`namespace.rs:111-113`).
+#[cfg(all(
+    feature = "session-multicast",
+    feature = "codec-frame",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+pub fn apply_egress_multicast_item(
+    ns: &OwnedNonWildKeyExpr,
+    item: &mut crate::multicast_tx::MulticastTxItem,
+) -> Result<(), CodecError> {
+    use crate::multicast_tx::MulticastTxItem as Item;
+    match item {
+        #[cfg(feature = "codec-push")]
+        Item::Push { push, .. } => apply_egress_push(ns, push)?,
+        #[cfg(feature = "codec-response")]
+        Item::Response { response } => apply_egress_response(ns, response)?,
+        // ResponseFinal is a bare request-id with no keyexpr — nothing to
+        // namespace (zenoh leaves send_response_final undecorated).
+        #[cfg(feature = "codec-response-final")]
+        Item::ResponseFinal { .. } => {}
+        #[cfg(feature = "liveliness-token")]
+        Item::DeclareReply { declare } => apply_egress_declare(ns, declare)?,
     }
     Ok(())
 }
@@ -672,6 +739,35 @@ mod tests {
             panic!("not a push")
         };
         assert_eq!(suffix_of(&p.keyexpr), Some("myns/foo/bar".to_string()));
+    }
+
+    // ─── multicast egress item dispatch ───
+
+    /// R311y107 — the MULTICAST egress item dispatcher prefixes a `Push`'s
+    /// literal keyexpr (via the extracted [`apply_egress_push`] SSOT, shared
+    /// with the `NetworkMessage::Push` arm of [`apply_egress`]). The reply-plane
+    /// variants route through the same `apply_egress_response`/`_declare` SSOTs
+    /// already covered above; `ResponseFinal` carries no keyexpr.
+    #[cfg(all(
+        feature = "session-multicast",
+        feature = "codec-frame",
+        feature = "codec-push"
+    ))]
+    #[test]
+    fn egress_multicast_item_prefixes_push() {
+        use crate::multicast_tx::MulticastTxItem;
+        let n = ns("myns");
+        let mut item = MulticastTxItem::Push {
+            push: alloc::boxed::Box::new(
+                crate::push_build::build_push_literal("foo/bar", b"v").unwrap(),
+            ),
+            reliable: true,
+        };
+        apply_egress_multicast_item(&n, &mut item).unwrap();
+        let MulticastTxItem::Push { push, .. } = &item else {
+            panic!("not a push")
+        };
+        assert_eq!(suffix_of(&push.keyexpr), Some("myns/foo/bar".to_string()));
     }
 
     #[cfg(feature = "codec-declare")]

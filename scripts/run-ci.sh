@@ -1091,7 +1091,7 @@ layer_c1ae_cargo_test_compression() {
         && cargo clippy -p wz-session-core --no-default-features --features transport-compression --quiet -- -D warnings)
 }
 
-# ─── Layer C1ax — §5.21 routing-namespace active flip (R311y106) ─
+# ─── Layer C1ax — §5.21 routing-namespace (R311y106 unicast + R311y107 multicast) ─
 #
 # The per-participant keyexpr namespace decorator (the wz mirror of zenoh's
 # Namespace/ENamespace Primitives pair). Its egress (the unicast
@@ -1116,6 +1116,17 @@ layer_c1ae_cargo_test_compression() {
 #      the R311y106 implementation-panel finding) and the remote-declare
 #      `matching_status` e2e (the relative-remote-table DROP decision: ingress
 #      strips inbound declares, so no namespace-qualify is needed).
+#   6. (R311y107) the MULTICAST facet: the egress decorator at the single
+#      outbound chokepoint (apply_egress_multicast_item) + the PER-PEER ingress
+#      strip on the dispatcher (the `namespace_ingress_is_per_peer` proof — wz
+#      applies the strip on raw per-sender ids with no router to de-collide, so
+#      the blocked-id correlation is per-PeerSlot, not one per session) + the
+#      in-loop `drive_loop_namespaced_strips_inbound_and_drops_out_of_namespace`
+#      composed e2e. Runs the session-core unit suite (namespace + the
+#      multicast_dispatch per-peer/no-op tests, caught by the `namespace` filter)
+#      and the wz-runtime-tokio multicast_glue lib e2e under transport-multicast,
+#      plus the ON-path and OFF-path (session-multicast WITHOUT routing-namespace)
+#      clippy gates proving the seam composes and the off path is dead-code clean.
 layer_c1ax_cargo_test_routing_namespace() {
     (cd crates \
         && cargo test -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --lib namespace --quiet \
@@ -1129,6 +1140,11 @@ layer_c1ax_cargo_test_routing_namespace() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-namespace --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-namespace,transport-fragmentation --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-namespace,session-reconnect --quiet -- -D warnings \
+        && cargo test -p wz-session-core --no-default-features --features routing-namespace,session-multicast,codec-join,codec-frame,codec-close,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,query-queryable,reassembly,pubsub-put --lib namespace --quiet \
+        && cargo clippy -p wz-session-core --no-default-features --features routing-namespace,session-multicast,codec-join,codec-frame,codec-close,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,query-queryable,reassembly,pubsub-put --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features alloc,session-multicast,codec-join,codec-frame,codec-close,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,query-queryable,reassembly,pubsub-put --all-targets --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-multicast,routing-namespace --quiet -- -D warnings \
         && cargo build -p wz --features routing-namespace --quiet)
 }
 

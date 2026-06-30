@@ -119,13 +119,25 @@ where
                 match dispatcher.ingest_frame_by_src(src, reliable, sn, now_ms) {
                     FrameIngest::Admitted => {
                         if let Ok(messages) = parse_frame_payload(&payload) {
-                            let outcome = DriverLoopOutcome::FramePayload {
+                            // The `ingest_frame_by_src` `&mut dispatcher` borrow
+                            // ended at the match scrutinee (`FrameIngest` is a
+                            // fieldless enum), so the dispatcher is free to
+                            // re-borrow here for the §5.21 routing-namespace
+                            // ingress strip.
+                            #[cfg_attr(not(feature = "routing-namespace"), allow(unused_mut))]
+                            let mut outcome = DriverLoopOutcome::FramePayload {
                                 reliable,
                                 sn,
                                 messages,
                                 has_ext,
                                 extensions,
                             };
+                            // §5.21 routing-namespace — strip this peer's inbound
+                            // batch (per-peer via `src`) BEFORE the observer fan,
+                            // the multicast INGRESS seam (the `ENamespace` mirror).
+                            // No-op when no namespace is installed / feature off.
+                            #[cfg(feature = "routing-namespace")]
+                            dispatcher.apply_namespace_ingress(src, &mut outcome);
                             on_event(IterationEvent::Poll(&outcome));
                         }
                         MulticastRxNext::Done

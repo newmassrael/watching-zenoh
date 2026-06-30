@@ -96,6 +96,17 @@ use crate::session_fsm_multicast::{
 use crate::sn;
 use core::net::SocketAddr;
 use sce_rust_runtime::Engine;
+// §5.21 routing-namespace — the per-session egress prefix + the per-PEER stateful
+// ingress decorator live ON the dispatcher (the only always-`&mut` per-session
+// multicast handle, the multicast mirror of the unicast `SessionLinkActions`
+// holder). `routing-namespace` implies `alloc`, so the `DriverLoopOutcome` the
+// strip mutates (alloc-gated, FramePayload carries a `Vec`) is always available
+// inside the gated method body; it is named by full path there to avoid a
+// duplicate `use` against the `reassembly`-gated import above.
+#[cfg(feature = "routing-namespace")]
+use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
+#[cfg(feature = "routing-namespace")]
+use crate::namespace::NamespaceIngress;
 
 /// Maximum ZID byte length (zenoh ZID is up to 16 bytes; the wire form is
 /// length-prefixed). The peer key copies the ZID into a fixed buffer so the
@@ -319,6 +330,23 @@ struct PeerSlot {
     /// advanced by each admitted frame. Valid iff `src.is_some()`.
     rx_sn_reliable: u64,
     rx_sn_best_effort: u64,
+    /// §5.21 routing-namespace — this peer's stateful ingress decorator (the
+    /// `ENamespace` mirror): strips the namespace from inbound keyexprs and
+    /// correlates id-only undeclares against the declares it dropped. PER-PEER
+    /// (not one per session) because the dispatcher applies the decorator at the
+    /// RAW multicast mint point with NO router id-renormalization above it: the
+    /// `blocked_{sub,qry,tok,interest}` + `incomplete` sets are keyed on the
+    /// SENDER's wire ids, which collide across peers (interest/token ids are
+    /// per-sender counters). zenoh's single per-session `ENamespace` is
+    /// collision-safe ONLY because its router de-aliases per-peer ids first
+    /// (`api/session.rs:688`); wz multicast has no such router, so the faithful
+    /// adaptation keys the correlation per peer — the same `src`/slot key every
+    /// other multicast correlation already uses (SN gate, lease, reassembly
+    /// chains). Lazily seeded from [`MulticastDispatcher::namespace`] at the
+    /// first strip for this peer and CLEARED on [`Self::evict`] so a recycled
+    /// slot never inherits a dead peer's blocked-id state.
+    #[cfg(feature = "routing-namespace")]
+    namespace_ingress: Option<NamespaceIngress>,
 }
 
 impl PeerSlot {
@@ -335,6 +363,8 @@ impl PeerSlot {
             sn_mask: 0,
             rx_sn_reliable: 0,
             rx_sn_best_effort: 0,
+            #[cfg(feature = "routing-namespace")]
+            namespace_ingress: None,
         }
     }
 
@@ -385,6 +415,14 @@ impl PeerSlot {
         self.sn_mask = 0;
         self.rx_sn_reliable = 0;
         self.rx_sn_best_effort = 0;
+        // §5.21 routing-namespace — drop this peer's blocked-id / incomplete-alias
+        // correlation state with the slot so a recycled index can never inherit a
+        // dead peer's namespace ingress state (the same recycle-safety the SN /
+        // reassembly-chain reset above gives).
+        #[cfg(feature = "routing-namespace")]
+        {
+            self.namespace_ingress = None;
+        }
     }
 }
 
@@ -395,6 +433,16 @@ pub struct MulticastDispatcher<const MAX_PEERS: usize> {
     session: Engine<SessionFsmMulticastPolicy<SessionBinding>>,
     peers: [PeerSlot; MAX_PEERS],
     config: MulticastConfig,
+    /// §5.21 routing-namespace — the per-session EGRESS prefix (the master
+    /// namespace value). `None` until [`Self::set_namespace`] installs it at
+    /// bring-up (mirrors the unicast `SessionLinkActions::set_namespace`
+    /// config-at-bringup pattern). Read by the AP drive loop at its outbound
+    /// chokepoint to namespace local-origin sends, and cloned to seed each
+    /// peer's [`PeerSlot::namespace_ingress`] on its first inbound strip. The
+    /// egress value + every per-peer ingress derive from THIS one value, so the
+    /// egress/ingress prefix can never diverge.
+    #[cfg(feature = "routing-namespace")]
+    namespace: Option<OwnedNonWildKeyExpr>,
 }
 
 impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
@@ -408,6 +456,66 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             session,
             peers: core::array::from_fn(|_| PeerSlot::new()),
             config,
+            #[cfg(feature = "routing-namespace")]
+            namespace: None,
+        }
+    }
+
+    /// §5.21 routing-namespace — install this session's per-participant keyexpr
+    /// namespace at bring-up (call ONCE on the owned dispatcher BEFORE the drive
+    /// loop spins; the multicast mirror of the unicast
+    /// `SessionLinkActions::set_namespace`). Seeds the EGRESS master value; each
+    /// peer's stateful ingress decorator is lazily derived from it on the peer's
+    /// first inbound strip, so egress + every per-peer ingress share one prefix
+    /// and cannot diverge. Not a post-spawn shared-cell setter — the dispatcher
+    /// is single-owned by the loop, so no lock is needed (unlike the unicast
+    /// bundle, which is `Arc`-shared at install and thus mutex-guarded).
+    #[cfg(feature = "routing-namespace")]
+    pub fn set_namespace(&mut self, namespace: OwnedNonWildKeyExpr) {
+        self.namespace = Some(namespace);
+    }
+
+    /// §5.21 routing-namespace — the per-session egress prefix, read by the AP
+    /// drive loop's outbound chokepoint to namespace local-origin sends. `None`
+    /// when no namespace is installed (the off path: egress is a no-op).
+    #[cfg(feature = "routing-namespace")]
+    pub fn namespace(&self) -> Option<&OwnedNonWildKeyExpr> {
+        self.namespace.as_ref()
+    }
+
+    /// §5.21 routing-namespace — apply the PER-PEER stateful ingress strip to one
+    /// owned drive-loop outcome in place, BEFORE it is fanned to the observer.
+    /// The multicast mirror of the unicast
+    /// `SessionLinkActions::apply_namespace_ingress` (`drive.rs:649-660`), but
+    /// keyed per peer: the inbound batch came from ONE peer (`src`), so it strips
+    /// with THAT peer's decorator (lazily seeded from the session namespace),
+    /// keeping each sender's blocked-id / incomplete-alias correlation isolated.
+    /// This method AND both call sites — the whole-Frame seam (`multicast_rx.rs`)
+    /// and the reassembled-Fragment seam (`ingest_multicast_fragment`) — are
+    /// `#[cfg(routing-namespace)]`, so a non-namespace build (INCLUDING the MCU
+    /// `multicast_drive.rs` loop, which never enables the feature) compiles
+    /// neither this method nor its calls: no namespace state, no call cost (full
+    /// cfg-gating, matching the unicast twin `SessionLinkActions::apply_namespace_ingress`
+    /// at `session_actions.rs`). The `Some(ns) else return` early-out is the
+    /// RUNTIME no-op for a feature-compiled session with NO namespace installed
+    /// (`set_namespace` never called) — distinct from the feature-off case the
+    /// cfg-gate handles. Only an `Admitted` Frame (or a completed fragment chain)
+    /// reaches here, so a live peer slot matches `src`; a `src` with no matching
+    /// slot passes through unstripped.
+    #[cfg(feature = "routing-namespace")]
+    pub fn apply_namespace_ingress(
+        &mut self,
+        src: SocketAddr,
+        outcome: &mut crate::driver_loop::DriverLoopOutcome,
+    ) {
+        let Some(ns) = self.namespace.as_ref() else {
+            return;
+        };
+        if let Some(slot) = self.peers.iter_mut().find(|p| p.matches_src(src)) {
+            let ingress = slot
+                .namespace_ingress
+                .get_or_insert_with(|| NamespaceIngress::new(ns.clone()));
+            crate::namespace::strip_outcome(ingress, outcome);
         }
     }
 
@@ -808,6 +916,17 @@ pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, con
         },
     );
     if let Some(o) = completed {
+        // §5.21 routing-namespace — strip the REASSEMBLED batch (per-peer via
+        // `src`) BEFORE the observer fan, symmetric with the whole-Frame seam in
+        // `multicast_rx::dispatch_multicast_inbound`. The shadow keeps `o`
+        // immutable on the off path (no `unused_mut`); the `ingest_fragment_by_src`
+        // borrow already ended at the match above, so `dispatcher` re-borrows free.
+        #[cfg(feature = "routing-namespace")]
+        let o = {
+            let mut o = o;
+            dispatcher.apply_namespace_ingress(src, &mut o);
+            o
+        };
         on_event(IterationEvent::Poll(&o));
     }
     if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {
@@ -936,6 +1055,204 @@ mod tests {
         assert_eq!(d.peer_state_by_src(SRC_A), Some(MulticastPeerState::Active));
         assert_eq!(d.peer_state(ZID_B), None);
         assert_eq!(d.peer_state_by_src(SRC_B), None);
+    }
+
+    /// R311y107 §5.21 routing-namespace — the per-PEER ingress proof: the
+    /// stateful blocked-id correlation is isolated per sender, so one peer's
+    /// out-of-namespace declare cannot eat another peer's same-id undeclare.
+    /// This is WHY the decorator is per peer (in the `PeerSlot`), not one per
+    /// session: wz applies the strip on RAW per-sender wire ids with no router
+    /// to de-collide them, so a single per-session ingress would mis-correlate
+    /// (the faithfulness gap the design panel surfaced — zenoh's per-session
+    /// `ENamespace` is safe only because its router de-aliases peer ids first).
+    /// Concrete: peer A multicasts an out-of-namespace `DeclareSubscriber id=3`
+    /// (dropped + blocked in A's ingress); peer B multicasts an
+    /// `UndeclareSubscriber id=3` (B's own id-space, no namespace) — per-peer
+    /// state keeps B's undeclare; a single per-session ingress would consume A's
+    /// block and wrongly drop it.
+    #[cfg(all(feature = "routing-namespace", feature = "codec-declare"))]
+    #[test]
+    fn namespace_ingress_is_per_peer() {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
+        use crate::network_message::NetworkMessage;
+        use crate::wireexpr_build::literal_wireexpr;
+        use alloc::boxed::Box;
+        use alloc::vec;
+        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
+
+        let mut d = running_dispatcher::<4>(5_000);
+        d.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_B, SRC_B, sn0(), 0), JoinOutcome::Admitted);
+
+        let frame = |msg| DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![msg],
+            has_ext: false,
+            extensions: vec![],
+        };
+        let decl_sub_other = NetworkMessage::Declare(Box::new(DeclareOwned {
+            header: 0,
+            interest_id: None,
+            extensions: None,
+            body: DV::CodecZenohDeclSubscriber(wz_codecs::decl_subscriber::DeclSubscriberOwned {
+                header: 0,
+                id: 3,
+                keyexpr: literal_wireexpr("other/x").unwrap(),
+            }),
+        }));
+        let undecl_sub = NetworkMessage::Declare(Box::new(DeclareOwned {
+            header: 0,
+            interest_id: None,
+            extensions: None,
+            body: DV::CodecZenohUndeclSubscriber(
+                wz_codecs::undecl_subscriber::UndeclSubscriberOwned {
+                    header: 0,
+                    id: 3,
+                    extensions: None,
+                },
+            ),
+        }));
+
+        // Peer A's out-of-namespace DeclareSubscriber id=3 -> dropped + blocked
+        // in A's per-peer ingress.
+        let mut a = frame(decl_sub_other);
+        d.apply_namespace_ingress(SRC_A, &mut a);
+        let DriverLoopOutcome::FramePayload { messages, .. } = &a else {
+            panic!("framepayload")
+        };
+        assert!(
+            messages.is_empty(),
+            "A's out-of-namespace declare is dropped"
+        );
+
+        // Peer B's UndeclareSubscriber id=3 -> KEPT (B's per-peer ingress has no
+        // block for id 3). A single per-session ingress would wrongly drop it.
+        let mut b = frame(undecl_sub);
+        d.apply_namespace_ingress(SRC_B, &mut b);
+        let DriverLoopOutcome::FramePayload { messages, .. } = &b else {
+            panic!("framepayload")
+        };
+        assert_eq!(
+            messages.len(),
+            1,
+            "B's undeclare survives — per-peer ingress isolation"
+        );
+    }
+
+    /// R311y107 §5.21 routing-namespace — `apply_namespace_ingress` is a
+    /// pass-through when no namespace is installed (the off path): even an
+    /// out-of-namespace keyexpr survives unstripped, so a non-namespaced
+    /// multicast session is byte-for-byte the pre-R311y107 behaviour.
+    #[cfg(all(feature = "routing-namespace", feature = "codec-push"))]
+    #[test]
+    fn namespace_ingress_noop_when_unset() {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::network_message::NetworkMessage;
+        use alloc::boxed::Box;
+        use alloc::vec;
+
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        let mut o = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(
+                crate::push_build::build_push_literal("other/x", b"v").unwrap(),
+            ))],
+            has_ext: false,
+            extensions: vec![],
+        };
+        d.apply_namespace_ingress(SRC_A, &mut o);
+        let DriverLoopOutcome::FramePayload { messages, .. } = &o else {
+            panic!("framepayload")
+        };
+        assert_eq!(
+            messages.len(),
+            1,
+            "no namespace installed -> no strip, no drop"
+        );
+    }
+
+    /// R311y107 §5.21 routing-namespace — the per-peer ingress state is CLEARED
+    /// when a slot recycles (`evict()` resets `namespace_ingress` to `None`), so a
+    /// new peer admitted into a recycled slot starts with empty blocked-id state.
+    /// This GUARDS the load-bearing reset the per-peer design depends on: drop the
+    /// reset and a recycled slot index inherits a dead peer's `blocked_*` set,
+    /// silently dropping a fresh peer's valid same-id undeclare.
+    #[cfg(all(feature = "routing-namespace", feature = "codec-declare"))]
+    #[test]
+    fn namespace_ingress_cleared_on_slot_recycle() {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
+        use crate::network_message::NetworkMessage;
+        use crate::wireexpr_build::literal_wireexpr;
+        use alloc::boxed::Box;
+        use alloc::vec;
+        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
+
+        let mut d = running_dispatcher::<4>(5_000);
+        d.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+
+        // Peer A blocks id=3 (an out-of-namespace DeclareSubscriber) in its ingress.
+        let mut a = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(DeclareOwned {
+                header: 0,
+                interest_id: None,
+                extensions: None,
+                body: DV::CodecZenohDeclSubscriber(
+                    wz_codecs::decl_subscriber::DeclSubscriberOwned {
+                        header: 0,
+                        id: 3,
+                        keyexpr: literal_wireexpr("other/x").unwrap(),
+                    },
+                ),
+            }))],
+            has_ext: false,
+            extensions: vec![],
+        };
+        d.apply_namespace_ingress(SRC_A, &mut a);
+
+        // Evict A (Close) -> the slot recycles, namespace_ingress reset to None.
+        assert!(d.close_by_src(SRC_A));
+        // A NEW peer reuses the recycled (lowest-free) slot — peer A's old slot.
+        assert_eq!(d.ingest_join(ZID_C, SRC_C, sn0(), 0), JoinOutcome::Admitted);
+
+        // The new peer's UndeclareSubscriber id=3 must SURVIVE: the recycled slot
+        // carries no inherited block from the dead peer A. (A stale, un-reset
+        // ingress would consume A's block and wrongly drop this -> len 0.)
+        let mut c = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(DeclareOwned {
+                header: 0,
+                interest_id: None,
+                extensions: None,
+                body: DV::CodecZenohUndeclSubscriber(
+                    wz_codecs::undecl_subscriber::UndeclSubscriberOwned {
+                        header: 0,
+                        id: 3,
+                        extensions: None,
+                    },
+                ),
+            }))],
+            has_ext: false,
+            extensions: vec![],
+        };
+        d.apply_namespace_ingress(SRC_C, &mut c);
+        let DriverLoopOutcome::FramePayload { messages, .. } = &c else {
+            panic!("framepayload")
+        };
+        assert_eq!(
+            messages.len(),
+            1,
+            "recycled slot has no inherited block -> the new peer's undeclare survives"
+        );
     }
 
     /// A Join before the session is Running is refused (no peer admitted).
