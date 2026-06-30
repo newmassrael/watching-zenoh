@@ -1122,7 +1122,8 @@ layer_c1ax_cargo_test_routing_namespace() {
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features routing-namespace,session-unicast,codec-push --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,session-reconnect,declare-keyexpr,declare-subscriber,declare-queryable,declare-token,declare-interest --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_e2e --test namespace_query_e2e --test namespace_matching_e2e --quiet \
+        && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,declare-keyexpr --all-targets --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_e2e --test namespace_query_e2e --test namespace_matching_e2e --test namespace_alias_e2e --quiet \
         && cargo test -p wz-runtime-tokio --features routing-namespace,transport-fragmentation --test namespace_reassembly_e2e --quiet \
         && cargo test -p wz-runtime-tokio --features routing-namespace,session-reconnect --test namespace_reconnect_e2e --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-namespace --quiet -- -D warnings \

@@ -1253,27 +1253,34 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
-    /// §5.21 routing-namespace — re-apply the EGRESS decorator to a declare
-    /// re-emitted by the reconnect declaration replay ([`Self::replay_one`]).
-    /// The LIVE declare path is decorated at the unicast `Tp::send_network_message`
-    /// arm, but replay rebuilds from the BARE cached keyexpr and dispatches
-    /// DIRECTLY via `dispatch_declare` (which sits below the floor, on the
-    /// forwarder's shared path, so it cannot itself decorate without
-    /// re-namespacing relays). Without this a reconnected namespaced session
-    /// re-declares UN-namespaced and the peer's ingress drops it — its remote
-    /// subscriptions/queryables/tokens silently stop being honored. No-op when no
-    /// namespace is installed.
+    /// §5.21 routing-namespace — re-apply the EGRESS decorator to a `Declare`
+    /// that is dispatched DIRECTLY, past the unicast `Tp::send_network_message`
+    /// egress arm (`dispatch_declare` sits BELOW the shared floor, on the
+    /// forwarder's relay path, so it cannot itself decorate without
+    /// re-namespacing relays). Two direct-dispatch paths need it: the LIVE
+    /// `DeclareKeyExpr` alias DEFINITION ([`Self::send_declare_keyexpr`]), where
+    /// the alias must be baked WITH the namespace so a later aliased Push/Request
+    /// (passed through unchanged by the decorator, id != 0) resolves under the
+    /// namespace at the peer instead of leaking to the bare keyexpr; and the
+    /// reconnect declaration replay ([`Self::replay_one`]). The cache and the
+    /// local `outbound_mappings` keep the BARE keyexpr — transparent namespace
+    /// (bare to the app + local loopback, namespaced on the wire, the zenoh
+    /// model). No-op when no namespace is installed.
     #[cfg(all(
         feature = "routing-namespace",
-        feature = "session-reconnect",
         any(
             feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token"
+            all(
+                feature = "session-reconnect",
+                any(
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token"
+                )
+            )
         )
     ))]
-    fn replay_namespace_declare(
+    fn namespace_egress_declare(
         &self,
         mut d: wz_codecs::declare::DeclareOwned,
     ) -> Result<wz_codecs::declare::DeclareOwned, sce_forge_runtime::codec::CodecError> {
@@ -1285,14 +1292,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// §5.21 routing-namespace — the interest counterpart of
-    /// [`Self::replay_namespace_declare`] (the replayed cached liveliness
-    /// subscriber / get interests, also dispatched directly past the egress arm).
+    /// [`Self::namespace_egress_declare`]. Only the reconnect replay
+    /// ([`Self::replay_one`]) dispatches interests directly past the egress arm
+    /// (the live liveliness interests route through the decorated send seam), so
+    /// this is reconnect-gated.
     #[cfg(all(
         feature = "routing-namespace",
         feature = "session-reconnect",
         feature = "declare-interest"
     ))]
-    fn replay_namespace_interest(
+    fn namespace_egress_interest(
         &self,
         mut i: wz_codecs::interest::InterestOwned,
     ) -> Result<wz_codecs::interest::InterestOwned, sce_forge_runtime::codec::CodecError> {
@@ -2450,6 +2459,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             check_outbound_keyexpr_pico_safe(suffix)?;
             let declare = build_declare_kexpr(mapping_id, suffix)?;
+            // §5.21 routing-namespace — bake the namespace into the wire alias
+            // DEFINITION (this is a direct `dispatch_declare`, below the egress
+            // arm). The peer registers `id -> <ns>/<suffix>`, so a later aliased
+            // Push/Request (which the decorator passes through unchanged, id != 0)
+            // resolves UNDER the namespace at the peer instead of leaking to the
+            // bare keyexpr; the local `outbound_mappings` below keeps the BARE
+            // suffix for loopback resolution (transparent namespace, the zenoh
+            // model). The reconnect replay re-applies the same via `replay_one`.
+            #[cfg(feature = "routing-namespace")]
+            let declare = self.namespace_egress_declare(declare)?;
             self.dispatch_declare(declare, /*reliable=*/ true)
                 .map_err(SendDeclareError::from)?;
             // R234 — record the (mapping_id, suffix) pair in the
@@ -4026,7 +4045,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     #[cfg(feature = "routing-namespace")]
                     let declare = self
-                        .replay_namespace_declare(declare)
+                        .namespace_egress_declare(declare)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     self.dispatch_declare(declare, /*reliable=*/ true)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
@@ -4046,7 +4065,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     #[cfg(feature = "routing-namespace")]
                     let declare = self
-                        .replay_namespace_declare(declare)
+                        .namespace_egress_declare(declare)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     self.dispatch_declare(declare, /*reliable=*/ true)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
@@ -4073,7 +4092,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     );
                     #[cfg(feature = "routing-namespace")]
                     let declare = self
-                        .replay_namespace_declare(declare)
+                        .namespace_egress_declare(declare)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     self.dispatch_declare(declare, /*reliable=*/ true)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
@@ -4092,7 +4111,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     #[cfg(feature = "routing-namespace")]
                     let declare = self
-                        .replay_namespace_declare(declare)
+                        .namespace_egress_declare(declare)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                     self.dispatch_declare(declare, /*reliable=*/ true)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
@@ -4117,7 +4136,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
                     #[cfg(feature = "routing-namespace")]
                     let interest = self
-                        .replay_namespace_interest(interest)
+                        .namespace_egress_interest(interest)
                         .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
                     self.dispatch_interest(interest, /*reliable=*/ true)
                         .map_err(ReplayDeclarationsError::Interest)?;
@@ -4137,7 +4156,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
                     #[cfg(feature = "routing-namespace")]
                     let interest = self
-                        .replay_namespace_interest(interest)
+                        .namespace_egress_interest(interest)
                         .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
                     self.dispatch_interest(interest, /*reliable=*/ true)
                         .map_err(ReplayDeclarationsError::Interest)?;

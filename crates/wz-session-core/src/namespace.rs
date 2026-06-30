@@ -12,11 +12,17 @@
 //! decorator on the SESSION's own face at open (`api/session.rs:689-696`); wz
 //! has no single `Primitives` trait, so the two halves are applied at the
 //! participant's local-origin / local-delivery boundaries instead (see
-//! [`apply_egress`] / [`NamespaceIngress`]). Because those boundaries are
-//! distinct from the router forwarder's relay path, namespace + forwarder on
-//! the same node is correct by construction (the forwarder relays already-
-//! namespaced wire keyexprs, untouched) — there is no shared-chokepoint
-//! conflation to defer.
+//! [`apply_egress`] / [`NamespaceIngress`]). EGRESS is structurally safe against
+//! the router forwarder: a relay is emitted through the shared
+//! `SessionLinkActions::send_network_message` floor DIRECTLY, below the
+//! per-participant egress seams, so it is never re-namespaced. INGRESS, however,
+//! strips BEFORE the drive loop's `on_event` (which feeds the forwarder), so a
+//! namespaced FORWARDING face would relay the already-stripped (relative)
+//! keyexpr — i.e. the real safety invariant is that a namespaced face is NEVER a
+//! forwarder face: `set_namespace` is reachable only from the client-open
+//! helpers, and the router/peer face path never installs a namespace. Wiring the
+//! multihat router (a future atom) must re-examine this strip-vs-forward ordering
+//! before that invariant can be lifted.
 //!
 //! ## Egress ([`apply_egress`], the `Namespace` mirror)
 //! Prepend the namespace to a LITERAL (`id == 0`) keyexpr, and to a
