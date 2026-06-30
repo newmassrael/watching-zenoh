@@ -18,6 +18,7 @@
 //! strip/restore capability the future storage service applies; [`strip_prefix`]
 //! returning `Ok(None)` is exactly the case that backend change must carry.
 
+use crate::keyexpr_prefix::{strip_nonwild_prefix, NonWildError, NonWildKeyExpr};
 use alloc::string::String;
 
 /// Why [`strip_prefix`] rejected a key.
@@ -50,20 +51,41 @@ impl core::fmt::Display for StripError {
 ///
 /// The match is at a CHUNK boundary (`<prefix>/`), not a bare string prefix:
 /// `home2/x` is NOT under `home`.
+///
+/// R311y105 — a thin adapter over the shared [`keyexpr_prefix`] SSOT
+/// ([`crate::keyexpr_prefix`]): the non-wild validation and the chunk-boundary
+/// strip both come from there (a concrete stored key is the wildcard-free
+/// special case of the namespace wild-target strip). This module keeps only the
+/// storage-specific Option semantics: the exact-mount-point `Ok(None)` and the
+/// [`StripError`] classification.
 pub fn strip_prefix(prefix: Option<&str>, key: &str) -> Result<Option<String>, StripError> {
     match prefix {
         None => Ok(Some(String::from(key))),
         Some(prefix) => {
-            if prefix.contains('*') {
-                return Err(StripError::WildPrefix);
-            }
+            // Non-wildness is now the typed `NonWildKeyExpr` gate (one SSOT,
+            // replacing the open-coded `.contains('*')`). For every WELL-FORMED
+            // keyexpr (non-empty, no leading/trailing slash, no empty `//`
+            // chunk) this adapter is byte-identical to the prior open-coded
+            // strip. The only divergences are on DEGENERATE config / keys an
+            // empty prefix or a trailing-slash prefix produced under the old
+            // code — all unreachable via the sole caller
+            // (`storage_state::with_strip_prefix`, whose prefix defaults to
+            // `None` and whose key is a real keyexpr, `.ok()`-collapsed). An
+            // empty prefix is mapped to `NotPrefixed` (it has no chunk to be
+            // under), the closest of the two `StripError` arms.
+            let nonwild = match NonWildKeyExpr::new(prefix) {
+                Ok(nonwild) => nonwild,
+                Err(NonWildError::Wild) => return Err(StripError::WildPrefix),
+                Err(NonWildError::Empty) => return Err(StripError::NotPrefixed),
+            };
+            // The value AT the mount point is stored under the "none"/empty key
+            // (zenoh `Ok(None)`). The shared strip returns `None` for an empty
+            // suffix (a keyexpr cannot be empty), so the exact-match mount point
+            // is the storage-specific case handled here, ahead of the core call.
             if key == prefix {
                 return Ok(None);
             }
-            match key
-                .strip_prefix(prefix)
-                .and_then(|rest| rest.strip_prefix('/'))
-            {
+            match strip_nonwild_prefix(key, nonwild) {
                 Some(rest) if !rest.is_empty() => Ok(Some(String::from(rest))),
                 _ => Err(StripError::NotPrefixed),
             }

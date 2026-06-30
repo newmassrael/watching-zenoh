@@ -446,6 +446,18 @@ switchboard = ["codec-push"]
 # `keyexpr_match` SSOTs already shipped for the subscriber data plane.
 routing-routes = ["codec-push", "declare-subscriber", "session-unicast"]
 
+# R311y105 — routing-namespace (§5.21): the per-participant keyexpr namespace
+# prefix/strip decorator (the `namespace` module), the wz mirror of zenoh's
+# `net/routing/namespace.rs` `Namespace` (egress) + `ENamespace` (ingress) pair.
+# Pulls `alloc` (the owned `OwnedNonWildKeyExpr` + the per-session blocked-id /
+# incomplete-alias HashMaps; `network_message::NetworkMessage` is itself
+# alloc-gated) and `keyexpr-prefix` (the shared non-wild strip SSOT). NO codec
+# is forced: `apply_egress` / `NamespaceIngress::apply` gate each message-kind
+# arm on its own `codec-*` feature (signature-stable — a build composes the
+# decorator with exactly the data/declare planes it already carries), so this is
+# the AP/router-side decorator capability, not a data-plane selector.
+routing-namespace = ["alloc", "keyexpr-prefix"]
+
 # R311dx — query-side dispatch gates for the migrated QueryableRegistry
 # (`wz-session-core::query`). `query-queryable` forwards to the
 # codec-request (Request/Query dispatch) + codec-response (reply-build)
@@ -532,6 +544,18 @@ keyexpr-wildcard-single = []
 keyexpr-wildcard-double = []
 keyexpr-dollar-star = []
 keyexpr-includes = []
+# R311y105 — keyexpr-prefix: the ungated non-wild-prefix SSOT (`keyexpr_prefix`
+# module: the `NonWildKeyExpr` newtype + `strip_nonwild_prefix`, the wz port of
+# zenoh `keyexpr::strip_nonwild_prefix`). A SELECTED primitive (the
+# `attachment-bytes` precedent), NOT a user-facing toggle: the consumer
+# features `storage-mgr-strip-prefix` (§5.24) and `routing-namespace` (§5.21)
+# both list it, so the chunk-walk core compiles exactly where a consumer needs
+# it and a build that wires neither elides the module. The borrowed core
+# (`NonWildKeyExpr` + `strip_nonwild_prefix`) is no-alloc; only the owned
+# `OwnedNonWildKeyExpr` is `alloc`-gated inside the module, so a FUTURE no-alloc
+# consumer could compose the borrowed core allocator-free (both current
+# consumers — storage strip + namespace — are themselves `alloc`).
+keyexpr-prefix = []
 # chunk-5 (SessionLinkActions struct move) — the finer declare-action
 # gates the migrated `send_declare_*` / `send_undeclare_*` /
 # `send_declare_final` / interest action methods carry. Each mirrors the
@@ -671,7 +695,12 @@ storage-mgr-multi-storage-host = ["storage-backend"]
 # strip_prefix/prefix. cfg-ACTIVE (a slim storage build omits strip support). The
 # logic is pure key-string work, so it composes only `alloc` (not storage-backend);
 # the future manager/service that APPLIES it composes the manager feature.
-storage-mgr-strip-prefix = ["alloc"]
+# R311y105 — now selects `keyexpr-prefix`: the chunk-boundary strip + the
+# non-wild validation moved to the shared `keyexpr_prefix` SSOT (the concrete-key
+# strip is the wildcard-free special case of the namespace wild-target strip), so
+# `storage_strip_prefix` is a thin adapter over that core rather than open-coding
+# the chunk boundary + `.contains('*')` a second time.
+storage-mgr-strip-prefix = ["alloc", "keyexpr-prefix"]
 
 # R311y22b — no [build-dependencies]: the statechart codegen moved to the
 # committed out/wz-session-core/*_sm.rs via the `xtask` codegen SSOT, so this

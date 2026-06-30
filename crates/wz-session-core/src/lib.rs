@@ -68,6 +68,24 @@ pub mod keyexpr_canon;
 /// alloc-gated callers (`pubsub` / `query` / `declare`) are unaffected.
 pub mod keyexpr_match;
 
+/// Ungated keyexpr non-wild-prefix SSOT (the `NonWildKeyExpr` newtype +
+/// [`strip_nonwild_prefix`](keyexpr_prefix::strip_nonwild_prefix), the wz port
+/// of zenoh `keyexpr::strip_nonwild_prefix`). The shared chunk-walk core behind
+/// §5.24 storage strip-prefix ([`storage_strip_prefix`]) and §5.21
+/// routing-namespace ([`namespace`]); both consumer features select
+/// `keyexpr-prefix` so the core compiles exactly where a consumer needs it.
+/// The borrowed core (`NonWildKeyExpr` + `strip_nonwild_prefix`) is no-alloc;
+/// the owned `OwnedNonWildKeyExpr` namespace value is `alloc`-gated.
+#[cfg(feature = "keyexpr-prefix")]
+pub mod keyexpr_prefix;
+
+/// §5.21 routing-namespace — the per-participant keyexpr namespace prefix/strip
+/// decorator ([`namespace::apply_egress`] + the stateful
+/// [`namespace::NamespaceIngress`]), the wz mirror of zenoh's
+/// `net/routing/namespace.rs` `Namespace` / `ENamespace` `Primitives` pair.
+#[cfg(feature = "routing-namespace")]
+pub mod namespace;
+
 /// Capacity-generic backing store (`BoundedVec<T, N>`) for the
 /// application-layer registries: `alloc::Vec` on the AP profile,
 /// `heapless::Vec<T, N>` on the MCU no-heap profile (§2.3 / §2.4).
