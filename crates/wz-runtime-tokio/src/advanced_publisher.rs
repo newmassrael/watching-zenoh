@@ -86,7 +86,14 @@ impl MissDetectionConfig {
 }
 
 /// Construction options for an [`AdvancedPublisher`].
+///
+/// R311y93 (review S3) — `#[non_exhaustive]` for additive-field stability (the
+/// sibling [`crate::advanced_subscriber::AdvancedSubscriberOptions`] and
+/// [`AdvancedPublisherError`] carry it too): a future option field cannot break a
+/// downstream struct-literal construction. External callers build from [`Default`]
+/// plus the public fields; in-crate construction is unaffected.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct AdvancedPublisherOptions {
     /// Per-sample tagging mode.
     pub sequencing: Sequencing,
@@ -273,7 +280,7 @@ where
                             let sn = hb_seqnum.load(Ordering::Relaxed);
                             // Non-sporadic emits every tick (emit_heartbeat skips
                             // sn==0); sporadic only when the sn advanced.
-                            if (!sporadic || sn > last_emitted)
+                            if should_emit_heartbeat(sporadic, sn, last_emitted)
                                 && emit_heartbeat(&hb_session, &hb_keyexpr, sn)
                             {
                                 last_emitted = sn;
@@ -380,6 +387,19 @@ where
             None => false,
         }
     }
+}
+
+/// R311y93 (review V1) — the sporadic-heartbeat emit gate, a pure deterministic
+/// seam so the spawn loop's decision is unit-testable (previously the
+/// `!sporadic || sn > last_emitted` check was only compiled inside the background
+/// task, never asserted). A non-sporadic beacon emits every tick (always `true`);
+/// a sporadic beacon emits only when the put-count `sn` ADVANCED past
+/// `last_emitted` (zenoh `sporadic_heartbeat`, advanced_publisher.rs:385-419).
+/// The `sn == 0` "nothing published" case is filtered separately by
+/// [`emit_heartbeat`].
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+fn should_emit_heartbeat(sporadic: bool, sn: u32, last_emitted: u32) -> bool {
+    !sporadic || sn > last_emitted
 }
 
 /// R311y85 — publish ONE heartbeat beacon: the last published sn
@@ -734,6 +754,28 @@ mod tests {
         assert!(
             matches!(result, Err(AdvancedPublisherError::NoRuntime)),
             "heartbeat beacon off-runtime must fail clear with NoRuntime, not panic"
+        );
+    }
+
+    /// R311y93 (review V1) — the sporadic-heartbeat emit gate. Non-sporadic emits
+    /// every tick regardless of sn movement; sporadic emits only when the put-count
+    /// advanced past `last_emitted`, so a stalled publisher (sn unchanged) stops
+    /// re-beaconing. Previously this decision was only compiled inside the spawn
+    /// loop, never asserted.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    #[test]
+    fn should_emit_heartbeat_gates_sporadic_on_advance() {
+        // Non-sporadic: always emit (every period), even at an unchanged sn.
+        assert!(should_emit_heartbeat(false, 0, 0));
+        assert!(should_emit_heartbeat(false, 5, 5));
+        assert!(should_emit_heartbeat(false, 3, 7));
+        // Sporadic: emit only when sn advanced past last_emitted.
+        assert!(should_emit_heartbeat(true, 5, 3), "advanced -> emit");
+        assert!(!should_emit_heartbeat(true, 3, 3), "unchanged -> skip");
+        assert!(!should_emit_heartbeat(true, 2, 3), "behind -> skip");
+        assert!(
+            !should_emit_heartbeat(true, 0, 0),
+            "nothing published -> skip"
         );
     }
 }
