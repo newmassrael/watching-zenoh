@@ -171,12 +171,22 @@
 //!   per-peer filter + `router_peers_failover_brokering` (off by default in zenoh)
 //!   land with the interceptor slice. The source-dimensioned route cache is a
 //!   data-path optimization (wz computes routes inline today) deferred with it.
-//! - **Native-other-tier cross bubble** — wz derives the cross-tier self-bubble
-//!   from `client_subs` only (C2); zenoh also advertises a peer-native sub into
-//!   `router_subs` (and vice-versa). Verified non-black-holing in a valid
-//!   federated topology (the elected master, present in both meshes, reaches a
-//!   cross-tier subscriber directly), so it is a convergence/optimization
-//!   contributor; revisit with the C5 qabl bubble (same structure).
+//! - **Native-other-tier cross bubble (federation obligation, NOT a mere
+//!   optimization)** — wz derives the cross-tier self-bubble from `client_subs`
+//!   ONLY (C2); zenoh ALSO cross-registers a router-native (or client) sub into the
+//!   peer tier (`register_router_subscription`, pubsub.rs:248-250, on `face.whatami
+//!   != Peer`) and floods it over the peer mesh. This BLACK-HOLES a specific valid
+//!   federated case (session-review R311y120 REFUTED the earlier "non-black-holing"
+//!   label): a peer-source Push into a NON-MASTER router whose only subscriber is a
+//!   ROUTER-NATIVE sub behind the elected master, with no same-tier native relay —
+//!   the non-master's bridge is master-gated off AND it never cross-registered the
+//!   router-native interest, so it cannot route toward the master. (The
+//!   client-behind-a-router variant IS rescued by C2's client cross-advertise.)
+//!   LATENT today (single-router `router_subs` is empty), cannot manifest before
+//!   real federation. The fix is ADDITIVE (derive the bubble from the OTHER tier's
+//!   natives too, per zenoh's cross-registration + PRECISION req #1) but MUST land
+//!   WITH the federation/ACTIVATION slice (which provides the 2-node harness to test
+//!   it), not merely "revisit with C5".
 //! - **The client QABL store + `compute_query_route`** (`Request` / `Response`) —
 //!   the query-plane twin of C2 (a client `DeclareQueryable` + its cross-tier
 //!   advertisement carrying the merged `QueryableInfo`) plus the query route.
@@ -1026,22 +1036,9 @@ impl RouterForwarder {
             FaceTier::Routers => FaceTier::LinkstatePeers,
             FaceTier::Client => return, // a client's mesh path is C3b, not a bridge
         };
-        let Some((net, _)) = self.plane(target_tier) else {
-            return;
-        };
-        let Some(subs) = self.subs_table(target_tier) else {
-            return;
-        };
-        let carrier_children =
-            compute_self_publish_forward(net, subs, keyexpr, || reliteralize_push(push, keyexpr));
-        let Ok(Some((carrier, children))) = carrier_children else {
-            return; // no interested sub in the other mesh / no tree direction / build err
-        };
-        let _ = self.fan_out_tier(target_tier, reliable, |_id, zid| {
-            Ok(zid
-                .filter(|z| children.contains(z))
-                .map(|_| NetworkMessage::Push(Box::new(carrier.clone()))))
-        });
+        // The cross leg is a SELF-origination into the target mesh (self tree root,
+        // node_id 0) via the shared self-publish-into-tier seam.
+        self.self_publish_into_tier(target_tier, reliable, push, keyexpr);
     }
 
     /// Route a data `Push` WITHIN its inbound tier's mesh (C1) — the router twin
@@ -1050,9 +1047,12 @@ impl RouterForwarder {
     /// fanning the result out tier-scoped. This is the WITHIN-TIER half only: it
     /// maps to zenoh's non-cross-tier route blocks — a peer-sourced Push to
     /// peer-mesh subs, a router-sourced Push to router-mesh subs, both
-    /// master-gate-free in `compute_data_route`. The CROSS-tier bridge (the
-    /// derived self-bubble), local-client delivery, and master-election are later
-    /// slices (C2/C3/C4). A [`FaceTier::Client`] Push has no mesh to route within,
+    /// master-gate-free in `compute_data_route`. The CROSS-tier bridge
+    /// ([`bridge_push_cross_mesh`](Self::bridge_push_cross_mesh), C4), local-client
+    /// delivery ([`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers),
+    /// C3a), and master-election ([`is_master`](Self::is_master), C4) are the OTHER
+    /// [`route_push`](Self::route_push) legs, now landed. A [`FaceTier::Client`] Push
+    /// has no mesh to route within,
     /// so it is only counted (the reception witness in [`forward`]). A drop
     /// (unresolvable source / no interested subscriber / hop-exhausted) is silent,
     /// as in the single-net path.
@@ -1200,24 +1200,46 @@ impl RouterForwarder {
             if tier == FaceTier::Routers && !master {
                 continue;
             }
-            let Some((net, _)) = self.plane(tier) else {
-                continue; // unreachable for the two mesh tiers.
-            };
-            let Some(subs) = self.subs_table(tier) else {
-                continue;
-            };
-            let carrier_children = compute_self_publish_forward(net, subs, keyexpr, || {
-                reliteralize_push(push, keyexpr)
-            });
-            let Ok(Some((carrier, children))) = carrier_children else {
-                continue; // no interested mesh sub / no tree direction / build err.
-            };
-            let _ = self.fan_out_tier(tier, reliable, |_id, zid| {
-                Ok(zid
-                    .filter(|z| children.contains(z))
-                    .map(|_| NetworkMessage::Push(Box::new(carrier.clone()))))
-            });
+            self.self_publish_into_tier(tier, reliable, push, keyexpr);
         }
+    }
+
+    /// Self-originate a data `Push` into ONE mesh tier — the shared seam for both
+    /// self-sourced re-injections: the C4 cross-mesh
+    /// [`bridge_push_cross_mesh`](Self::bridge_push_cross_mesh) (a mesh-source Push
+    /// re-injected into the OTHER tier) and the C3b
+    /// [`publish_client_push_into_meshes`](Self::publish_client_push_into_meshes) (a
+    /// client-source Push into both tiers). Runs the shared
+    /// [`compute_self_publish_forward`] core (self tree root, node_id 0) on the
+    /// tier's `(net, subs)` and fans the result out through the
+    /// [`fan_out_tier`](Self::fan_out_tier) egress SSOT. The CALLER owns the
+    /// master-gating + tier selection (bridge = the one opposite tier when master;
+    /// publish = both tiers, router leg master-gated); this seam is the gate-free
+    /// plumbing they shared verbatim. A drop (no interested sub / no tree child /
+    /// build err) is silent.
+    fn self_publish_into_tier(
+        &self,
+        tier: FaceTier,
+        reliable: bool,
+        push: &PushOwned,
+        keyexpr: &str,
+    ) {
+        let Some((net, _)) = self.plane(tier) else {
+            return;
+        };
+        let Some(subs) = self.subs_table(tier) else {
+            return;
+        };
+        let carrier_children =
+            compute_self_publish_forward(net, subs, keyexpr, || reliteralize_push(push, keyexpr));
+        let Ok(Some((carrier, children))) = carrier_children else {
+            return; // no interested mesh sub / no tree direction / build err
+        };
+        let _ = self.fan_out_tier(tier, reliable, |_id, zid| {
+            Ok(zid
+                .filter(|z| children.contains(z))
+                .map(|_| NetworkMessage::Push(Box::new(carrier.clone()))))
+        });
     }
 
     /// Recompute `tier`'s spanning trees and re-advertise its NATIVE subscription
