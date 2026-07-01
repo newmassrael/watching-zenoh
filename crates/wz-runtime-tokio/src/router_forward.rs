@@ -851,8 +851,10 @@ impl RouterForwarder {
     /// client->client. A client-sourced Push reaching the MESH (client->peer, a
     /// self-sourced re-injection) is a later slice; LOCAL self-hosted delivery is
     /// deferred (a pure router hosts no subscribers — that is the combined-node
-    /// seam). The egress-ACL parity obligation (y113) applies here too: this direct
-    /// send does not yet consult the interceptor plane.
+    /// seam). Routes through the [`fan_out_tier`](Self::fan_out_tier) egress SSOT
+    /// (`FaceTier::Client`) like every other router send, so it inherits the
+    /// interceptor / egress-ACL gate once that plane lands on the seam (the y113
+    /// obligation) rather than being a separate retrofit site.
     fn deliver_to_client_subscribers(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
         if self.client_subs.borrow().is_empty() {
             return;
@@ -869,43 +871,29 @@ impl RouterForwarder {
                 None => return,
             }
         };
-        // The client faces subscribing a keyexpr that INTERSECTS the published K,
-        // excluding the inbound face (never echo a client's own Push back to it).
-        // Wildcard-aware via the SAME `keyexpr_intersects_target` SSOT the mesh
-        // route uses (`LinkstatepeerInterest::matching_entries`) — a client
+        // Re-literalize once (payload / encoding / attachment preserved, literal
+        // keyexpr for the client leaf); the fan-out clones it per matching client.
+        let Ok(carrier) = reliteralize_push(push, &keyexpr) else {
+            return;
+        };
+        // Deliver to each Client-tier face subscribing a keyexpr that INTERSECTS
+        // the published K, excluding the inbound face (never echo a client's own
+        // Push back to it). Wildcard-aware via the SAME `keyexpr_intersects_target`
+        // SSOT the mesh data route reads through `interested_remote` — a client
         // subscribing `demo/**` must receive a `demo/data` Push, NOT just an exact
         // `demo/data` sub (exact `HashSet::contains` would silently blackhole every
         // wildcard client sub, re-opening the very gap C3 closes).
         let target_chunks: Vec<&str> = keyexpr.split('/').collect();
-        let targets: Vec<FaceId> = self
-            .client_subs
-            .borrow()
-            .iter()
-            .filter(|(_, keys)| {
+        let _ = self.fan_out_tier(FaceTier::Client, reliable, |id, _zid| {
+            if id == inbound {
+                return Ok(None);
+            }
+            let deliver = self.client_subs.borrow().get(&id).is_some_and(|keys| {
                 keys.iter()
                     .any(|sub| keyexpr_intersects_target(sub, &target_chunks))
-            })
-            .map(|(fid, _)| *fid)
-            .filter(|fid| *fid != inbound)
-            .collect();
-        if targets.is_empty() {
-            return;
-        }
-        // Re-literalize once (payload / encoding / attachment preserved, literal
-        // keyexpr for the client leaf), then deliver over each client's send seam.
-        let Ok(carrier) = reliteralize_push(push, &keyexpr) else {
-            return;
-        };
-        let faces = self.faces.borrow();
-        for fid in targets {
-            if let Some(s) = faces.get(&fid) {
-                let _ = s.actions.send_network_message(
-                    NetworkMessage::Push(Box::new(carrier.clone())),
-                    reliable,
-                    false,
-                );
-            }
-        }
+            });
+            Ok(deliver.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
+        });
     }
 
     /// Recompute `tier`'s spanning trees and re-advertise its NATIVE subscription
@@ -1015,11 +1003,20 @@ impl RouterForwarder {
                 None => return,
             }
         };
-        let removed = self
-            .client_subs
-            .borrow_mut()
-            .get_mut(&inbound)
-            .is_some_and(|set| set.remove(&keyexpr));
+        let removed = {
+            let mut store = self.client_subs.borrow_mut();
+            let removed = store
+                .get_mut(&inbound)
+                .is_some_and(|set| set.remove(&keyexpr));
+            // Prune an emptied set (the same prune discipline
+            // [`LinkstatepeerInterest::withdraw`] uses), so a client that
+            // unsubscribes everything does not defeat the `is_empty()` delivery
+            // fast-path with a lingering empty entry.
+            if store.get(&inbound).is_some_and(|set| set.is_empty()) {
+                store.remove(&inbound);
+            }
+            removed
+        };
         if removed && !self.any_client_subscribes(&keyexpr) {
             self.withdraw_self_cross_tier_sub(&keyexpr);
         }

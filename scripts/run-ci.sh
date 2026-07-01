@@ -1148,7 +1148,7 @@ layer_c1ax_cargo_test_routing_namespace() {
         && cargo build -p wz --features routing-namespace --quiet)
 }
 
-# ─── Layer C1ay — router-hat 1a-1c: dual-net STATE + declare INGEST unit + clippy ─
+# ─── Layer C1ay — router-hat: STATE + INGEST + COMPUTE C1-C3a unit + clippy ─
 #
 # R311y108 + R311y109 + R311y110: the §5.21 router forwarder (the 4th
 # `impl FaceForwarder`, `router_forward`) is the wz port of zenoh `hat/router`'s
@@ -1169,9 +1169,13 @@ layer_c1ax_cargo_test_routing_namespace() {
 #   2. clippy-gates the `routing-router-hat` cfg (`--all-targets`, incl tests);
 #   3. clippy-gates the LIB under `--no-default-features --features
 #      routing-router-hat` to prove the forwarder composes standalone
-#      (routing-router-hat pulls only routing-peer). 1a=topology STATE, 1b=subs
-#      INGEST, 1c=qabls INGEST (all landed); client store=1d, the cross-tier
-#      bubble DERIVATION + route COMPUTE + master-election are later slices.
+#      (routing-router-hat pulls only routing-peer). The `--lib router_forward`
+#      filter runs the WHOLE router suite: 1a-1c = dual-net STATE + declare INGEST;
+#      C0 (y112) extracted the shared route/re-advertise cores; C1 (y113) =
+#      within-tier data route + tick re-advertise + self-zid guard; C2 (y114) =
+#      client cross-tier subscription advertisement; C3a (y115) = client data
+#      delivery. The client->mesh publish + router federation + master-election +
+#      query route are later slices.
 layer_c1ay_cargo_test_router_hat() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet \
