@@ -114,30 +114,46 @@
 //! early-return (OBLIGATION 1) and withdraws any advertisement it was the last
 //! client of.
 //!
-//! ## Slice C3 (cross-tier client data delivery) — landed
+//! ## Slice C3a (cross-tier client data delivery) — landed
 //!
-//! A data `Push` is now DELIVERED to the CLIENT faces subscribing its keyexpr
+//! A data `Push` is DELIVERED to the CLIENT faces subscribing its keyexpr
 //! ([`deliver_to_client_subscribers`](RouterForwarder::deliver_to_client_subscribers)),
 //! re-literalized to the resolved keyexpr — CLOSING the advertise-then-blackhole:
 //! a Push attracted toward this router by C2's client advertisement now reaches
 //! the subscribing client. It runs for a Push from ANY source (excluding the
-//! inbound face), so it covers mesh→client AND client→client. A client-sourced
-//! Push reaching the MESH (client→peer, a self-sourced re-injection) and LOCAL
-//! self-hosted delivery (a pure router hosts none) remain deferred.
+//! inbound face), so it covers mesh→client AND client→client.
+//!
+//! ## Slice C3b (client→mesh publish) — landed
+//!
+//! A CLIENT-sourced `Push` is RE-INJECTED into BOTH meshes as a SELF-sourced
+//! publish ([`publish_client_push_into_meshes`](RouterForwarder::publish_client_push_into_meshes)),
+//! so it reaches subscribing MESH peers (the client→peer direction, not just
+//! other clients). A client is a leaf below exactly one router, so self is the
+//! unique origin node in each net; this mirrors [`LinkstateForwarder::publish`]
+//! via the shared [`compute_self_publish_forward`] core (self tree-root, node_id
+//! 0, fresh per-net hop budget) — self-origination, NOT the transit re-forward
+//! (a client zid is no mesh node, so `resolve_source_in` would drop it). Faithful
+//! to zenoh's `route_data`: the peer-net publish leg is NOT master-gated for a
+//! non-router source; the router-net leg delivers to a directly-attached
+//! subscribing router and is faithful while `shared_nodes <= 1` (self is the sole
+//! master), carrying a C4 master-gate obligation for federation (below). LOCAL
+//! self-hosted delivery (a pure router hosts no subscribers) stays deferred.
 //!
 //! ## Deferred to later slices (named, not silently dropped)
 //!
-//! - **The client→mesh publish + router↔router federation + master-election** —
-//!   C3 delivers mesh→client and client→client; a CLIENT-sourced Push reaching the
-//!   MESH subs (client→peer, a self-sourced re-injection / publish) is the
-//!   remaining client direction. The router↔router cross-tier DATA bridge (a Push
-//!   from one tier delivered to the OTHER tier's subs) is MULTI-ROUTER, so it
-//!   couples with `elect_router` (`shared_nodes` for the route master vs
-//!   `get_router_links` per-peer — a real asymmetry) + the source-dimensioned
-//!   route cache. A cross-tier data bridge MUST fail-fast fence `shared_nodes <= 1`
-//!   until the election lands, else a 2nd router double-delivers. (The C2
-//!   advertisement is NOT master-gated — every router advertises its own clients'
-//!   interest.)
+//! - **The router↔router federation + master-election (C4)** — the router↔router
+//!   cross-tier DATA bridge (a Push from ONE mesh delivered to the OTHER mesh's
+//!   subs) is MULTI-ROUTER, so it couples with `elect_router` (`shared_nodes` for
+//!   the route master vs `get_router_links` per-peer — a real asymmetry) + the
+//!   source-dimensioned route cache. A cross-tier data bridge MUST fail-fast fence
+//!   `shared_nodes <= 1` until the election lands, else a 2nd router
+//!   double-delivers. C4 MUST ALSO master-gate C3b's ROUTER-net publish leg for
+//!   all non-router sources (zenoh `route_data` block 1, `hat/router/pubsub.rs:1291`):
+//!   once routers federate (`shared_nodes > 1`), an ungated non-master router would
+//!   double-inject a local client's Put a router-net subscriber reaches via two
+//!   masters. (C2's advertisement + C3b's PEER-net publish are NOT master-gated —
+//!   every router advertises + publishes its own clients' interest/data; only the
+//!   router-net insertion + the mesh→other-mesh transit need the master.)
 //! - **The client QABL store + `compute_query_route`** (`Request` / `Response`) —
 //!   the query-plane twin of C2 (a client `DeclareQueryable` + its cross-tier
 //!   advertisement carrying the merged `QueryableInfo`) plus the query route.
@@ -182,8 +198,9 @@ use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 use crate::accept_loop::{FaceForwarder, FaceId};
 use crate::linkstate_forward::{
     absorb_keyexpr_into, build_declare_queryable_with_info, compute_push_forward,
-    declare_queryable_wireexpr, declare_subscriber_wireexpr, is_tree_forward_target,
-    peer_whatami_routing, peer_zid_routing, re_advertise_interest_into, resolve_source_in,
+    compute_self_publish_forward, declare_queryable_wireexpr, declare_subscriber_wireexpr,
+    is_tree_forward_target, peer_whatami_routing, peer_zid_routing, re_advertise_interest_into,
+    resolve_source_in,
 };
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -281,18 +298,22 @@ pub struct RouterForwarder {
     /// self NOT stored in the tier tables — derive-not-store), so a mesh publisher
     /// routes `K` toward this router. FaceId-keyed leaf state, so
     /// [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE its linkless
-    /// early-return (OBLIGATION 1). The cross-tier DATA delivery to these clients
-    /// is a later slice; C2 is the ADVERTISEMENT half.
+    /// early-return (OBLIGATION 1). C2 is the ADVERTISEMENT half; the cross-tier
+    /// DATA delivery TO these clients is C3a
+    /// ([`deliver_to_client_subscribers`](RouterForwarder::deliver_to_client_subscribers)).
     client_subs: RefCell<HashMap<FaceId, HashSet<String>>>,
     /// Running total of link-state lists ingested across both nets — the
     /// control-plane work witness (the router twin of
     /// `LinkstateForwarder::ingested`).
     ingested: Cell<usize>,
     /// Running total of data `Push` messages received — the data-plane
-    /// reception witness, raised on EVERY inbound Push (including a Client-tier
-    /// one that routes nowhere within-tier). The WITHIN-tier fan-out that also
-    /// consumes it is [`forward_push_tier`](RouterForwarder::forward_push_tier)
-    /// (C1); the cross-tier bridge is a later slice (C2).
+    /// reception witness, raised ONCE on EVERY inbound Push before it is routed.
+    /// The WITHIN-tier mesh fan-out that consumes it is
+    /// [`forward_push_tier`](RouterForwarder::forward_push_tier) (C1); a Client-tier
+    /// Push (no within-tier mesh) instead reaches subscribing clients (C3a) and is
+    /// re-injected into the meshes (C3b,
+    /// [`publish_client_push_into_meshes`](RouterForwarder::publish_client_push_into_meshes)).
+    /// The mesh->other-mesh federation bridge is a later slice (C4).
     data_seen: Cell<usize>,
     /// A `routers_net` spanning-tree recompute is pending (D2c coalescing flag).
     /// zenoh runs a SEPARATE `TreesComputationWorker` per net; wz coalesces both
@@ -849,9 +870,11 @@ impl RouterForwarder {
     /// client leaf shares no alias table). Runs for a Push from ANY source (a mesh
     /// peer OR a client), excluding the inbound face, so it covers mesh->client AND
     /// client->client. A client-sourced Push reaching the MESH (client->peer, a
-    /// self-sourced re-injection) is a later slice; LOCAL self-hosted delivery is
-    /// deferred (a pure router hosts no subscribers — that is the combined-node
-    /// seam). Routes through the [`fan_out_tier`](Self::fan_out_tier) egress SSOT
+    /// self-sourced re-injection) is the SIBLING C3b path
+    /// ([`publish_client_push_into_meshes`](Self::publish_client_push_into_meshes));
+    /// LOCAL self-hosted delivery stays deferred (a pure router hosts no
+    /// subscribers — that is the combined-node seam). Routes through the
+    /// [`fan_out_tier`](Self::fan_out_tier) egress SSOT
     /// (`FaceTier::Client`) like every other router send, so it inherits the
     /// interceptor / egress-ACL gate once that plane lands on the seam (the y113
     /// obligation) rather than being a separate retrofit site.
@@ -894,6 +917,77 @@ impl RouterForwarder {
             });
             Ok(deliver.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
         });
+    }
+
+    /// Re-inject a CLIENT-sourced data `Push` into BOTH meshes as a SELF-sourced
+    /// publish (C3b) — the remaining client data direction, CLOSING the
+    /// client->peer blackhole: a client's Put now reaches subscribing MESH peers,
+    /// not just other clients ([`deliver_to_client_subscribers`], C3a). A client
+    /// is a leaf below exactly ONE router, so SELF is the unique origin node in
+    /// each net; this mirrors [`LinkstateForwarder::publish`] via the shared
+    /// [`compute_self_publish_forward`] core (self as tree root, node_id 0, fresh
+    /// per-net hop budget) — NOT the transit [`compute_push_forward`], which
+    /// would DROP a client source (the client zid is not a mesh node, so
+    /// `resolve_source_in` finds no psid for it). `reliteralize_push` preserves
+    /// the client sample's encoding/attachment/timestamp/qos (a RE-injected
+    /// sample, unlike `publish`'s fresh `build_push_literal`). Precondition: the
+    /// dispatch calls this ONLY for a [`FaceTier::Client`] inbound Push — a
+    /// mesh-sourced Push is routed within-tier by [`forward_push_tier`] and its
+    /// cross-tier (mesh->other-mesh) bridge is the master-gated C4 slice, NOT this
+    /// self-origination (calling it for a mesh source would self-source re-inject
+    /// = a loop). Routes through the [`fan_out_tier`](Self::fan_out_tier) egress
+    /// SSOT so it inherits the future interceptor/egress-ACL gate (the y113
+    /// obligation) rather than being a separate retrofit site. `reliable` follows
+    /// the inbound frame (per-message data reliability), unlike `publish`'s
+    /// hard-coded `true` (a fresh local produce).
+    fn publish_client_push_into_meshes(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
+        // Resolve the keyexpr against the INBOUND (client) face's alias table: a
+        // client leaf may publish an aliased id it declared, and a downstream mesh
+        // peer shares no alias table, so the re-injection must carry the literal.
+        // Scoped so the `faces` borrow drops before the per-tier fan-out.
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) {
+                Some(k) => k,
+                None => return,
+            }
+        };
+        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            let Some((net, _)) = self.plane(tier) else {
+                continue; // unreachable for the two mesh tiers.
+            };
+            let Some(subs) = self.subs_table(tier) else {
+                continue;
+            };
+            // DEFERRED (C4 master-gate): zenoh master-gates the ROUTER-net
+            // insertion of a NON-router source (a client here, and the peer-transit
+            // bridge) -- `route_data` block 1 requires `master`
+            // (hat/router/pubsub.rs:1291), unlike the peer-net leg which is UNgated
+            // for a non-router source (pubsub.rs:1307). The router-net leg IS live
+            // for a directly-attached subscribing router (`router_subs` is populated
+            // by router-tier declares) and delivers correctly while
+            // `shared_nodes <= 1` -- self is then the sole route master (zenoh
+            // `elect_router` returns self). When C4 federates routers so
+            // `shared_nodes > 1`, THIS leg MUST master-gate (fence on `elect_router`
+            // / `shared_nodes`) for ALL non-router sources, else a non-master router
+            // double-injects a local client's Put a router-net subscriber reaches
+            // via two masters. (zenoh also inserts `mcast_groups` faces at
+            // pubsub.rs:1334 -- an unbuilt wz plane, deferred with multicast.)
+            let carrier_children = compute_self_publish_forward(net, subs, &keyexpr, || {
+                reliteralize_push(push, &keyexpr)
+            });
+            let Ok(Some((carrier, children))) = carrier_children else {
+                continue; // no interested mesh sub / no tree direction / build err.
+            };
+            let _ = self.fan_out_tier(tier, reliable, |_id, zid| {
+                Ok(zid
+                    .filter(|z| children.contains(z))
+                    .map(|_| NetworkMessage::Push(Box::new(carrier.clone()))))
+            });
+        }
     }
 
     /// Recompute `tier`'s spanning trees and re-advertise its NATIVE subscription
@@ -1291,15 +1385,23 @@ impl FaceForwarder for RouterForwarder {
                     }
                 }
                 // A data Push: count the reception (the data-plane witness), then
-                // route it WITHIN the inbound tier's mesh (C1, `forward_push_tier`
+                // route it. WITHIN the inbound tier's mesh (C1, `forward_push_tier`
                 // — a peer-sourced Push to peer-mesh subs, a router-sourced one to
-                // router-mesh subs). The CROSS-tier bridge + local-client delivery
-                // + master-election are later slices (C2/C3/C4); a Client-tier
-                // Push has no mesh to route within, so it stays count-only.
+                // router-mesh subs); to the subscribing CLIENT faces (C3a,
+                // `deliver_to_client_subscribers` — mesh->client + client->client);
+                // and, for a CLIENT-sourced Push ONLY, RE-INJECTED into both meshes
+                // as a self-sourced publish toward subscribing peers (C3b,
+                // `publish_client_push_into_meshes` — the client->peer direction).
+                // A Client-tier Push has no mesh to route WITHIN (forward_push_tier
+                // no-ops), so C3b is its mesh path. The mesh->other-mesh federation
+                // bridge + master-election remain a later slice (C4).
                 NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
                     self.forward_push_tier(id, tier, *reliable, push);
                     self.deliver_to_client_subscribers(id, *reliable, push);
+                    if tier == FaceTier::Client {
+                        self.publish_client_push_into_meshes(id, *reliable, push);
+                    }
                 }
                 // A declaration: ingest a DeclareSubscriber (1b) / DeclareQueryable
                 // (1c) into the inbound tier's subs/qabls table + re-flood within
@@ -1351,6 +1453,7 @@ mod tests {
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_runtime_core::runtime::Runtime;
+    use wz_session_core::push_routing_context::{read_push_hoplimit, read_push_source};
 
     fn zid(b: u8) -> Zid {
         Zid::from_slice(&[b, b, b, b])
@@ -1405,10 +1508,23 @@ mod tests {
         }
     }
 
-    /// Drive `forward` with a single inbound message on `face`.
+    /// Drive `forward` with a single inbound message on `face` (reliable).
     fn forward_one(fwd: &RouterForwarder, face: FaceId, message: NetworkMessage) {
+        forward_one_reliability(fwd, face, message, true);
+    }
+
+    /// [`forward_one`] with an explicit reliability channel — so a test can drive
+    /// a BEST-EFFORT (reliable=false) inbound frame and assert the router
+    /// propagates the channel onward (C3b threads the inbound `reliable` into the
+    /// mesh fan, unlike `publish`'s hard-coded reliable).
+    fn forward_one_reliability(
+        fwd: &RouterForwarder,
+        face: FaceId,
+        message: NetworkMessage,
+        reliable: bool,
+    ) {
         let outcome = DriverLoopOutcome::FramePayload {
-            reliable: true,
+            reliable,
             sn: 0,
             messages: vec![message],
             has_ext: false,
@@ -2201,6 +2317,267 @@ mod tests {
             sink_client.frame_count(),
             1,
             "the client subscriber got it (client delivery)"
+        );
+    }
+
+    /// Decode the first forwarded `Push` in a recorded wire frame (the C3b twin
+    /// of the linkstate `forwarded_hoplimit`), so a test can assert the
+    /// re-injected carrier's self-source node_id + hop budget landed ON THE WIRE.
+    fn forwarded_push(frame: &[u8]) -> PushOwned {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Push(p)) => (**p).clone(),
+            other => panic!("expected a forwarded Push, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_client_push_reaches_a_subscribing_mesh_peer() {
+        // C3b: a CLIENT publishes K; a peer-mesh subscriber of K receives it via
+        // the self-sourced re-injection (the client->peer direction, blackholed
+        // pre-C3b -- forward_push_tier no-ops for a Client inbound).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT); // publishing client
+        let (peer_sub, sink_peer) = face(zid(0xBB), WIRE_PEER); // peer subscriber (tree child)
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &peer_sub);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // peer subscribes (mesh)
+        sink_peer.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push))); // client publishes
+        assert_eq!(
+            sink_peer.frame_count(),
+            1,
+            "the peer-mesh subscriber received the client's re-injected Push (C3b)"
+        );
+    }
+
+    #[test]
+    fn a_client_push_is_re_injected_self_sourced_with_a_fresh_hop_budget() {
+        // The re-injected carrier is SELF-sourced (node_id 0, ext removed) and
+        // carries a FRESH hop budget = the tier net's node_count (self + peer = 2)
+        // -- the `publish` shape, NOT a transit re-forward. Proven ON THE WIRE.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
+        let (peer_sub, sink_peer) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &peer_sub);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        sink_peer.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        let p = forwarded_push(&sink_peer.frame_bytes(0));
+        assert_eq!(
+            read_push_source(&p),
+            0,
+            "self-sourced: node_id 0 (the ext is removed, zenoh omit-on-DEFAULT)"
+        );
+        assert_eq!(
+            read_push_hoplimit(&p),
+            Some(2),
+            "fresh hop budget = linkstatepeers_net node_count (self + the peer)"
+        );
+    }
+
+    #[test]
+    fn a_client_push_reaches_a_mesh_peer_and_another_client_but_not_the_publisher() {
+        // C3b (mesh) + C3a (client) COMPOSE for a CLIENT source, disjoint fan: the
+        // peer via publish_client_push_into_meshes, client c2 via
+        // deliver_to_client_subscribers, and c1 (the source) excluded from BOTH --
+        // no echo to the publisher.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c1, sink_c1) = face(zid(0xAA), WIRE_CLIENT); // publishing client
+        let (c2, sink_c2) = face(zid(0xCC), WIRE_CLIENT); // client subscriber
+        let (peer_sub, sink_peer) = face(zid(0xBB), WIRE_PEER); // peer subscriber
+        fwd.register(FaceId(0), &c1);
+        fwd.register(FaceId(1), &c2);
+        fwd.register(FaceId(2), &peer_sub);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // c2 subscribes (client)
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data")); // peer subscribes (mesh)
+        sink_c1.reset();
+        sink_c2.reset();
+        sink_peer.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push))); // c1 publishes
+        assert_eq!(sink_peer.frame_count(), 1, "the mesh peer got it (C3b)");
+        assert_eq!(sink_c2.frame_count(), 1, "the other client got it (C3a)");
+        assert_eq!(
+            sink_c1.frame_count(),
+            0,
+            "the publishing client is NOT echoed its own Push"
+        );
+    }
+
+    #[test]
+    fn a_client_push_with_no_mesh_subscriber_is_not_re_injected() {
+        // interested_remote empty on both meshes -> compute_self_publish_forward
+        // returns None -> nothing floods (mirrors publish's Ok(0)).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
+        let (peer, sink_peer) = face(zid(0xBB), WIRE_PEER); // a peer, NOT subscribing
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &peer);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        sink_peer.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            sink_peer.frame_count(),
+            0,
+            "no mesh subscriber -> the client Push is not re-injected into the mesh"
+        );
+    }
+
+    #[test]
+    fn a_wildcard_mesh_peer_sub_receives_a_client_concrete_push() {
+        // C3b's mesh injection is wildcard-aware via the interested_remote SSOT
+        // (the same match the mesh data route uses): a peer subscribing `demo/**`
+        // receives a CLIENT's `demo/data` push, not just an exact `demo/data` sub.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
+        let (peer_sub, sink_peer) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &peer_sub);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/**")); // wildcard mesh sub
+        sink_peer.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            sink_peer.frame_count(),
+            1,
+            "the wildcard mesh peer sub received the intersecting concrete client Push"
+        );
+    }
+
+    #[test]
+    fn a_client_push_reaches_subscribers_on_both_meshes() {
+        // C3b floods BOTH nets: a directly-attached subscribing ROUTER (routers_net
+        // leg) AND a subscribing PEER (linkstatepeers_net leg) both receive a
+        // CLIENT's push, while a non-subscribing router gets nothing. The only test
+        // that drives the Routers leg to a NON-empty result (single-master,
+        // shared_nodes <= 1) -- a wrong subs_table/net in the Routers iteration
+        // would slip past every peer-only C3b test. (router_subs is NOT empty here:
+        // a directly-attached subscribing router populates it.)
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT); // publishing client
+        let (peer_sub, sink_peer) = face(zid(0xCC), WIRE_PEER); // peer subscriber
+        let (router_sub, sink_router) = face(zid(0xDD), WIRE_ROUTER); // router subscriber
+        let (router_bare, sink_bare) = face(zid(0xEE), WIRE_ROUTER); // NON-subscribing router
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &peer_sub);
+        fwd.register(FaceId(2), &router_sub);
+        fwd.register(FaceId(3), &router_bare);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5); // peer edge self<->CC
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xDD, 5); // router edge self<->DD
+        advertise_link_back(&fwd, FaceId(3), 0x01, 0xEE, 5); // router edge self<->EE
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // peer subscribes (peers_net)
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data")); // router subscribes (routers_net)
+        sink_peer.reset();
+        sink_router.reset();
+        sink_bare.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push))); // client publishes
+        assert_eq!(
+            sink_peer.frame_count(),
+            1,
+            "the peers_net leg delivered to the subscribing peer"
+        );
+        assert_eq!(
+            sink_router.frame_count(),
+            1,
+            "the routers_net leg delivered to the directly-attached subscribing router"
+        );
+        assert_eq!(
+            sink_bare.frame_count(),
+            0,
+            "the non-subscribing router got nothing (route filtered by interest)"
+        );
+    }
+
+    #[test]
+    fn a_client_push_relays_to_a_distant_mesh_subscriber_via_an_intermediate() {
+        // The self-source route to a 2-HOP subscriber flows to the INTERMEDIATE
+        // tree child, not the destination directly: directions_toward(self,
+        // {distant}) returns the neighbour. Exercises the relay class no 1-hop fan
+        // covers -- the router's wiring of directions_toward into the mesh fan.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT); // publishing client
+        let (peer, sink_peer) = face(zid(0xBB), WIRE_PEER); // the INTERMEDIATE neighbour
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &peer);
+        // Discover a distant node 0xDD reachable self <-> 0xBB <-> 0xDD (psid 7 =
+        // 0xDD on the peer link); the flood also carries 0xBB -> self, so the tree
+        // computes without a separate advertise_link_back.
+        discover_via(&fwd, FaceId(1), 0x01, 0xBB, 0xDD, 7, 5);
+        fwd.tick();
+        // The distant node 0xDD subscribes demo/data (a sourced DeclareSubscriber
+        // whose node_id 7 resolves via the inbound link's psid map to 0xDD).
+        let mut decl = build_declare_subscriber(0, 0, Some("demo/data")).expect("build");
+        set_declare_source(&mut decl, 7);
+        forward_one(&fwd, FaceId(1), NetworkMessage::Declare(Box::new(decl)));
+        assert_eq!(
+            fwd.linkstatepeer_subs.borrow().interested("demo/data"),
+            vec![zid(0xDD)],
+            "the distant node 0xDD's interest is registered (2 hops away)"
+        );
+        sink_peer.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push))); // client publishes
+        assert_eq!(
+            sink_peer.frame_count(),
+            1,
+            "relayed to the INTERMEDIATE peer 0xBB (0xDD has no local face) -- \
+             directions_toward returned the neighbour, not the destination"
+        );
+    }
+
+    #[test]
+    fn a_best_effort_client_push_is_re_injected_best_effort() {
+        // C3b threads the INBOUND frame's `reliable` into the mesh fan (unlike
+        // publish's hard-coded reliable): a best-effort client Push re-injects
+        // best-effort. The one behaviour where C3b diverges from `publish`.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
+        let (peer_sub, sink_peer) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &peer_sub);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        sink_peer.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        // Drive the client Push on the BEST-EFFORT channel.
+        forward_one_reliability(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)), false);
+        assert_eq!(sink_peer.frame_count(), 1, "delivered to the mesh peer");
+        assert_eq!(
+            sink_peer.frame_reliability(0),
+            crate::Reliability::BestEffort,
+            "the re-injected Push carries the inbound best-effort channel, not a \
+             hard-coded reliable"
         );
     }
 

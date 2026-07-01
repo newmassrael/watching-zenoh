@@ -1443,24 +1443,18 @@ impl LinkstateForwarder {
     /// `forward_push` (which re-forwards a RECEIVED Push). Returns the number of
     /// interested-child faces the Put reached.
     pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<usize, CodecError> {
-        let self_zid = *self.net.borrow().self_zid();
-        // interested_remote excludes self: a key only self subscribes to has no
-        // remote forward target (self is the local sink), so publish sends nowhere.
-        let interested = self.subs.borrow().interested_remote(keyexpr, &self_zid);
-        if interested.is_empty() {
-            return Ok(0); // no remote subscriber for this keyexpr -> nothing to send
-        }
-        let mut push = build_push_literal(keyexpr, payload)?;
-        // Stamp the hop-limit budget = node_count (c3c-3 D1, the transient-loop
-        // bound): a Push descends an acyclic tree path of at most node_count-1
-        // edges, so the budget is generous enough never to false-drop a legitimate
-        // forward yet finite, so any copy that outlives node_count hops is provably
-        // looping (pigeonhole) and is dropped at the exhausting hop's `forward_push`.
-        set_push_hoplimit(&mut push, self.net.borrow().node_count() as u16);
-        let children = self.net.borrow().directions_toward(&self_zid, &interested);
-        if children.is_empty() {
-            return Ok(0);
-        }
+        // The self-originate route CORE (shared with the router's client->mesh
+        // re-injection, R311y112 core-extract discipline): self is the tree root,
+        // the returned carrier is self-sourced (node_id 0) + fresh-budget stamped
+        // (node_count). `build_push_literal` originates a FRESH sample from
+        // keyexpr+payload (this node IS the producer, so no metadata to preserve).
+        let Some((push, children)) =
+            compute_self_publish_forward(&self.net, &self.subs, keyexpr, || {
+                build_push_literal(keyexpr, payload)
+            })?
+        else {
+            return Ok(0); // no remote subscriber / no tree direction -> nothing to send
+        };
         self.fan_out(true, None, |_id, zid| {
             Ok(zid
                 .is_some_and(|z| is_child(&children, z))
@@ -2403,6 +2397,60 @@ pub(crate) fn compute_push_forward(
     set_push_hoplimit(&mut carrier, hop - 1);
     set_push_keyexpr_literal(&mut carrier, keyexpr).ok()?;
     Some((carrier, children))
+}
+
+/// Compute the self-ORIGINATED data-`Push` forward for ONE link-state mesh:
+/// treat SELF as the tree root (a node PUBLISHING its own data — or, for the
+/// router, a leaf CLIENT's data re-injected as self-sourced) and return the
+/// self-sourced carrier + the interested tree children to fan it out to, or
+/// `Ok(None)` to send nowhere. The ORIGINATE twin of [`compute_push_forward`]
+/// (the transit RE-forward core): there the source is a resolved REMOTE node and
+/// the hop budget is DECREMENTED; here the source is SELF (`node_id 0` —
+/// [`set_push_source`]`(_, 0)` REMOVES the ext, zenoh's omit-on-DEFAULT) with a
+/// FRESH budget (`node_count`). Genuinely distinct route semantics (originate vs
+/// re-forward), kept as TWO cores exactly as the codebase keeps
+/// [`LinkstateForwarder::publish`] separate from
+/// [`forward_push`](LinkstateForwarder::forward_push).
+///
+/// Shared by [`LinkstateForwarder::publish`] (`build = build_push_literal`, a
+/// FRESH local sample) and [`RouterForwarder`](crate::router_forward)'s
+/// client->mesh re-injection (`build = reliteralize_push`, a RECEIVED client
+/// sample whose encoding/attachment/timestamp/qos MUST survive) — so the two
+/// drift-prone invariants (the `node_count` loop budget + the `node_id 0`
+/// self-stamp) live in ONE place, not a per-caller copy (R311y112 core-extract
+/// discipline). Reads ONLY `net` + `subs` (no faces, no fan-out): the caller
+/// fans the returned `(carrier, children)` through its own tier-appropriate
+/// egress seam. Drops (→ `Ok(None)`) on a keyexpr no remote peer subscribes to
+/// (the self-excluded [`LinkstatepeerInterest::interested_remote`] view — the
+/// self-bubble is the local sink, never a data forward target) or an empty tree
+/// direction; a `build` codec failure propagates as `Err`.
+pub(crate) fn compute_self_publish_forward(
+    net: &RefCell<LinkstateNetwork>,
+    subs: &RefCell<LinkstatepeerInterest<()>>,
+    keyexpr: &str,
+    build: impl FnOnce() -> Result<PushOwned, CodecError>,
+) -> Result<Option<(PushOwned, Vec<Zid>)>, CodecError> {
+    // Borrow the net once for the whole route compute (the `compute_push_forward`
+    // idiom); `subs` is a distinct cell borrowed as a temp, and `build` touches
+    // neither, so the single held borrow is safe.
+    let net = net.borrow();
+    let self_zid = *net.self_zid();
+    let interested = subs.borrow().interested_remote(keyexpr, &self_zid);
+    if interested.is_empty() {
+        return Ok(None);
+    }
+    let children = net.directions_toward(&self_zid, &interested);
+    if children.is_empty() {
+        return Ok(None);
+    }
+    let mut carrier = build()?;
+    // Self-originated: node_id 0 removes the ext_nodeid, so a downstream hop
+    // resolves the source to THIS node (its inbound neighbour) and floods along
+    // self's tree. Fresh hop budget = node_count (the by-construction
+    // transient-loop bound), the same stamp `compute_push_forward` decrements.
+    set_push_source(&mut carrier, 0);
+    set_push_hoplimit(&mut carrier, net.node_count() as u16);
+    Ok(Some((carrier, children)))
 }
 
 /// Re-advertise the interest in `table` to the NEW tree children a recompute
