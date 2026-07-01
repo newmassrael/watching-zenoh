@@ -1172,29 +1172,20 @@ impl LinkstateForwarder {
         else {
             return;
         };
-        // The query-route, dispatched on the Request's carried QueryTarget (zenoh
-        // compute_final_route, dispatcher/queries.rs:214-266). The wire DEFAULT —
-        // an ABSENT ext_target — is BestMatching (read_request_target -> None);
-        // All / AllComplete arrive as the explicit ext.
-        let self_zid = *self.net.borrow().self_zid();
-        let children = match read_request_target(request) {
-            // BestMatching (wire default): the SINGLE nearest COMPLETE queryable,
-            // else fall back to QueryTarget::All (fan out to every matching one).
-            None => {
-                match self.select_best_matching(&keyexpr, &source_zid, &self_zid, inbound_zid) {
-                    Some(hop) => vec![hop],
-                    None => self.all_query_directions(&keyexpr, &source_zid, &self_zid),
-                }
-            }
-            // QueryTarget::All: every matching queryable's subtree direction.
-            Some(QueryTarget::All) => self.all_query_directions(&keyexpr, &source_zid, &self_zid),
-            // QueryTarget::AllComplete: every COMPLETE matching queryable's subtree
-            // direction (the complete-for-query filter, FANNED OUT — not narrowed
-            // to the nearest, unlike BestMatching).
-            Some(QueryTarget::AllComplete) => {
-                self.complete_query_directions(&keyexpr, &source_zid, &self_zid)
-            }
-        };
+        // The query-route directions, dispatched on the Request's carried
+        // QueryTarget (zenoh compute_final_route, dispatcher/queries.rs:214-266) —
+        // the shared [`compute_query_directions`] core (the query twin of
+        // [`compute_push_forward`]) so the router forwarder reuses the SAME
+        // BestMatching / All / AllComplete logic per tier. The wire DEFAULT (an
+        // ABSENT ext_target) is BestMatching (read_request_target -> None).
+        let children = compute_query_directions(
+            &self.net,
+            &self.qabls,
+            &keyexpr,
+            read_request_target(request),
+            &source_zid,
+            inbound_zid,
+        );
         // zenoh route_query EMPTY route (dispatcher/queries.rs:518-530): a keyexpr
         // no (complete, under AllComplete) queryable matches routes nowhere — but
         // rather than drop silently, send a PROMPT ResponseFinal back to the
@@ -1264,98 +1255,6 @@ impl LinkstateForwarder {
             carrier.rid = qid;
             Ok(Some(NetworkMessage::Request(Box::new(carrier))))
         });
-    }
-
-    /// zenoh `QueryTarget::BestMatching` (`dispatcher/queries.rs:243-266`): pick
-    /// the SINGLE nearest COMPLETE queryable for `keyexpr` and return the tree
-    /// direction (the next-hop neighbour toward it in the SOURCE's tree), or
-    /// `None` when no complete queryable matches — in which case
-    /// [`forward_request`](Self::forward_request) falls back to `QueryTarget::All`.
-    ///
-    /// "Complete for this query" mirrors zenoh's `complete && qabl_info.complete`
-    /// (`hat/linkstate_peer/queries.rs:723`): the queryable declared itself
-    /// complete AND its declaration keyexpr INCLUDES the full query keyexpr (a
-    /// `demo/*` queryable is not complete for a `demo/**` query, even with the
-    /// flag set). "Nearest" is the GRAPH distance from THIS node to the queryable
-    /// peer — zenoh's `insert_target_for_qabls` reads `net.distances[qabl_idx]`
-    /// (`queries.rs:724`), NOT the carried declaration distance, so there is no
-    /// per-hop distance arithmetic. The inbound direction is excluded (zenoh's
-    /// `qabl.direction.0.id != src_face.id` in the BestMatching `find`), and an
-    /// unreachable peer contributes nothing.
-    fn select_best_matching(
-        &self,
-        keyexpr: &str,
-        source_zid: &Zid,
-        self_zid: &Zid,
-        inbound_zid: Option<Zid>,
-    ) -> Option<Zid> {
-        let net = self.net.borrow();
-        self.complete_for_query_peers(keyexpr, self_zid)
-            .into_iter()
-            .filter_map(|peer| {
-                // The tree direction toward the peer + its graph distance. Skip the
-                // inbound direction (no routing a Query back at its source) and any
-                // unreachable peer.
-                let hop = net.next_hop(source_zid, &peer)?;
-                if inbound_zid == Some(hop) {
-                    return None;
-                }
-                Some((net.distance_to(&peer)?, hop))
-            })
-            // Nearest in graph-distance order — zenoh's `route.sort_by_key(|q|
-            // q.info.distance)` (`queries.rs:1050`) followed by the first-complete
-            // `find`. A distance TIE is broken by the candidate scan order, which
-            // derives from `HashMap` iteration and is therefore unspecified — same
-            // as zenoh (its `sort_by_key` is stable over a `HashMap`-ordered
-            // route, so equal-distance ties are likewise unspecified). Harmless:
-            // every equal-distance complete queryable fully answers the query, so
-            // either is an equally-valid BestMatching target.
-            .min_by(|(a, _), (b, _)| a.total_cmp(b))
-            .map(|(_distance, hop)| hop)
-    }
-
-    /// The peers offering a queryable COMPLETE for `keyexpr` — declared complete
-    /// AND whose declaration keyexpr INCLUDES the full query keyexpr (zenoh's
-    /// `complete && qabl_info.complete`, `hat/linkstate_peer/queries.rs:723`),
-    /// excluding self. The shared candidate set for BestMatching (pick the
-    /// nearest) AND AllComplete (route to every one). A peer matching via several
-    /// declarations may appear more than once — harmless: BestMatching's
-    /// min-distance and AllComplete's `directions_toward` both dedup downstream.
-    fn complete_for_query_peers(&self, keyexpr: &str, self_zid: &Zid) -> Vec<Zid> {
-        let query_chunks: Vec<&str> = keyexpr.split('/').collect();
-        self.qabls
-            .borrow()
-            .matching_entries(keyexpr, Some(self_zid))
-            .into_iter()
-            .filter_map(|(decl, peer, info)| {
-                (info.complete && keyexpr_includes_target(decl, &query_chunks)).then_some(peer)
-            })
-            .collect()
-    }
-
-    /// The tree directions (next-hop neighbours) toward EVERY queryable matching
-    /// `keyexpr` in the SOURCE's tree — `QueryTarget::All`
-    /// (`dispatcher/queries.rs:215`), and the BestMatching fallback when no
-    /// queryable is complete. `directions_toward` dedups to one hop per subtree;
-    /// the inbound-face exclusion is the fan_out's `is_tree_forward_target`.
-    fn all_query_directions(&self, keyexpr: &str, source_zid: &Zid, self_zid: &Zid) -> Vec<Zid> {
-        let interested = self.qabls.borrow().interested_remote(keyexpr, self_zid);
-        self.net.borrow().directions_toward(source_zid, &interested)
-    }
-
-    /// The tree directions toward every COMPLETE-for-`keyexpr` queryable —
-    /// `QueryTarget::AllComplete` (`dispatcher/queries.rs:228`): the
-    /// complete-for-query filter FANNED OUT (every complete one), not narrowed to
-    /// the nearest as BestMatching does. `directions_toward` dedups to one hop per
-    /// subtree; the inbound-face exclusion is the fan_out's predicate.
-    fn complete_query_directions(
-        &self,
-        keyexpr: &str,
-        source_zid: &Zid,
-        self_zid: &Zid,
-    ) -> Vec<Zid> {
-        let peers = self.complete_for_query_peers(keyexpr, self_zid);
-        self.net.borrow().directions_toward(source_zid, &peers)
     }
 
     /// A `Response` (a queryable's reply to a routed Query) arrived on `inbound`:
@@ -1512,7 +1411,7 @@ impl LinkstateForwarder {
     /// [`set_declare_queryable_info`] OMITS (no ext, byte-identical to the no-info
     /// wire — zenoh's omit-on-DEFAULT); only a `complete` queryable adds the ext
     /// that drives a downstream relay's BestMatching select
-    /// ([`select_best_matching`](Self::select_best_matching)).
+    /// (the BestMatching arm of [`compute_query_directions`]).
     pub fn declare_queryable(&self, keyexpr: &str, complete: bool) -> Result<usize, CodecError> {
         let self_zid = *self.net.borrow().self_zid();
         // The local QueryableInfo (distance 0 — the SSOT local-declaration
@@ -2451,6 +2350,138 @@ pub(crate) fn compute_self_publish_forward(
     set_push_source(&mut carrier, 0);
     set_push_hoplimit(&mut carrier, net.node_count() as u16);
     Ok(Some((carrier, children)))
+}
+
+/// Compute the query-route DIRECTIONS (the queryable-ward tree children) for a
+/// Request in ONE link-state mesh — the shared query-route CORE, the query twin
+/// of [`compute_push_forward`], so [`LinkstateForwarder::forward_request`] (its
+/// ONE net) and the pending router query slice (C5b, each of its TWO tier nets)
+/// reuse the SAME BestMatching / All / AllComplete logic, not a per-forwarder
+/// copy. Reads
+/// ONLY `net` + `qabls` (borrowing `net` ONCE for the whole compute); the caller
+/// owns the faces, the pending-query allocation, and the fan-out. `target` is the
+/// Request's carried `QueryTarget` (the wire DEFAULT, an absent ext, is `None` =
+/// BestMatching). Returns the tree hops to forward toward — empty = route nowhere
+/// (no matching queryable, or only a self-hosted / inbound-ward one the caller
+/// handles).
+pub(crate) fn compute_query_directions(
+    net: &RefCell<LinkstateNetwork>,
+    qabls: &RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    keyexpr: &str,
+    target: Option<QueryTarget>,
+    source_zid: &Zid,
+    inbound_zid: Option<Zid>,
+) -> Vec<Zid> {
+    let net = net.borrow();
+    let self_zid = *net.self_zid();
+    match target {
+        // BestMatching (wire default): the SINGLE nearest COMPLETE queryable, else
+        // fall back to QueryTarget::All (fan out to every matching one).
+        None => {
+            match select_best_matching(&net, qabls, keyexpr, source_zid, &self_zid, inbound_zid) {
+                Some(hop) => vec![hop],
+                None => all_query_directions(&net, qabls, keyexpr, source_zid, &self_zid),
+            }
+        }
+        // QueryTarget::All: every matching queryable's subtree direction.
+        Some(QueryTarget::All) => all_query_directions(&net, qabls, keyexpr, source_zid, &self_zid),
+        // QueryTarget::AllComplete: every COMPLETE matching queryable's subtree
+        // direction (the complete-for-query filter, FANNED OUT — not narrowed to
+        // the nearest, unlike BestMatching).
+        Some(QueryTarget::AllComplete) => {
+            complete_query_directions(&net, qabls, keyexpr, source_zid, &self_zid)
+        }
+    }
+}
+
+/// zenoh `QueryTarget::BestMatching` (`dispatcher/queries.rs:243-266`): pick the
+/// SINGLE nearest COMPLETE queryable for `keyexpr` and return the tree direction
+/// (the next-hop neighbour toward it in the SOURCE's tree), or `None` when no
+/// complete queryable matches — in which case [`compute_query_directions`] falls
+/// back to `QueryTarget::All`. "Nearest" is the GRAPH distance from THIS node to
+/// the queryable peer (zenoh's `insert_target_for_qabls` reads
+/// `net.distances[qabl_idx]`, `queries.rs:724`, NOT the carried declaration
+/// distance). The inbound direction is excluded, and an unreachable peer
+/// contributes nothing. A distance TIE breaks by the candidate scan order
+/// (`HashMap` iteration, unspecified — same as zenoh); harmless, every
+/// equal-distance complete queryable fully answers the query.
+fn select_best_matching(
+    net: &LinkstateNetwork,
+    qabls: &RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    keyexpr: &str,
+    source_zid: &Zid,
+    self_zid: &Zid,
+    inbound_zid: Option<Zid>,
+) -> Option<Zid> {
+    complete_for_query_peers(qabls, keyexpr, self_zid)
+        .into_iter()
+        .filter_map(|peer| {
+            // The tree direction toward the peer + its graph distance. Skip the
+            // inbound direction (no routing a Query back at its source) and any
+            // unreachable peer.
+            let hop = net.next_hop(source_zid, &peer)?;
+            if inbound_zid == Some(hop) {
+                return None;
+            }
+            Some((net.distance_to(&peer)?, hop))
+        })
+        .min_by(|(a, _), (b, _)| a.total_cmp(b))
+        .map(|(_distance, hop)| hop)
+}
+
+/// The peers offering a queryable COMPLETE for `keyexpr` — declared complete AND
+/// whose declaration keyexpr INCLUDES the full query keyexpr (zenoh's `complete
+/// && qabl_info.complete`, `hat/linkstate_peer/queries.rs:723`), excluding self.
+/// The shared candidate set for BestMatching (pick the nearest) AND AllComplete
+/// (route to every one). A peer matching via several declarations may appear more
+/// than once — harmless: BestMatching's min-distance and AllComplete's
+/// `directions_toward` both dedup downstream.
+fn complete_for_query_peers(
+    qabls: &RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    keyexpr: &str,
+    self_zid: &Zid,
+) -> Vec<Zid> {
+    let query_chunks: Vec<&str> = keyexpr.split('/').collect();
+    qabls
+        .borrow()
+        .matching_entries(keyexpr, Some(self_zid))
+        .into_iter()
+        .filter_map(|(decl, peer, info)| {
+            (info.complete && keyexpr_includes_target(decl, &query_chunks)).then_some(peer)
+        })
+        .collect()
+}
+
+/// The tree directions (next-hop neighbours) toward EVERY queryable matching
+/// `keyexpr` in the SOURCE's tree — `QueryTarget::All` (`dispatcher/queries.rs:215`),
+/// and the BestMatching fallback when no queryable is complete.
+/// `directions_toward` dedups to one hop per subtree; the inbound-face exclusion
+/// is the fan_out's `is_tree_forward_target`.
+fn all_query_directions(
+    net: &LinkstateNetwork,
+    qabls: &RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    keyexpr: &str,
+    source_zid: &Zid,
+    self_zid: &Zid,
+) -> Vec<Zid> {
+    let interested = qabls.borrow().interested_remote(keyexpr, self_zid);
+    net.directions_toward(source_zid, &interested)
+}
+
+/// The tree directions toward every COMPLETE-for-`keyexpr` queryable —
+/// `QueryTarget::AllComplete` (`dispatcher/queries.rs:228`): the complete-for-query
+/// filter FANNED OUT (every complete one), not narrowed to the nearest as
+/// BestMatching does. `directions_toward` dedups to one hop per subtree; the
+/// inbound-face exclusion is the fan_out's predicate.
+fn complete_query_directions(
+    net: &LinkstateNetwork,
+    qabls: &RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    keyexpr: &str,
+    source_zid: &Zid,
+    self_zid: &Zid,
+) -> Vec<Zid> {
+    let peers = complete_for_query_peers(qabls, keyexpr, self_zid);
+    net.directions_toward(source_zid, &peers)
 }
 
 /// Re-advertise the interest in `table` to the NEW tree children a recompute
