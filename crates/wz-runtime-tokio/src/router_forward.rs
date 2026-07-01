@@ -160,6 +160,37 @@
 //! (block 1). Cross-mesh loop-freedom rests on the election agreement (the
 //! self-origination resets the per-net hop budget), NOT the hop budget.
 //!
+//! ## Slice C5b (query-route FORWARD half — the Request) — landed
+//!
+//! An inbound `Request` (a Query) is ROUTED
+//! ([`route_request`](RouterForwarder::route_request)) through the router's full
+//! zenoh `compute_query_route` (`hat/router/queries.rs:1426`) +
+//! `compute_final_route` (`dispatcher/queries.rs:205`) — the query-plane twin of
+//! [`route_push`](RouterForwarder::route_push). The SAME 3-block master-gated
+//! structure (routers_net qabls / linkstatepeers_net qabls / client queryables),
+//! reusing C4's [`is_master`](RouterForwarder::is_master), with the within-tier +
+//! cross-mesh + client legs split exactly as the data plane's `forward_push_tier`
+//! / `bridge_push_cross_mesh` / `deliver_to_client_subscribers` /
+//! `publish_client_push_into_meshes`. A CLIENT-face `DeclareQueryable` lands in the
+//! per-face [`client_qabls`](RouterForwarder#structfield.client_qabls) store
+//! ([`ingest_client_queryable`](RouterForwarder::ingest_client_queryable)); the
+//! query route reads its `complete` / `distance`.
+//!
+//! The one query-specific twist over the data plane is the `QueryTarget` dispatch,
+//! whose **BestMatching is GLOBAL** (zenoh `compute_final_route` picks the FIRST
+//! complete queryable in the union route sorted by SELF-relative distance,
+//! `queries.rs:1520`): the C5a per-net `compute_query_directions` does NOT compose
+//! for it, so the router picks the min over each net's per-net nearest complete
+//! (`select_best_matching`, min-of-mins == global-min) and the client candidates at
+//! distance 1 ([`best_query_winner`](RouterForwarder::best_query_winner)). `All` /
+//! `AllComplete` DO compose per tier (union of per-tier `all_query_directions` /
+//! `complete_query_directions` + client faces). Each forwarded Request ALLOCATES a
+//! [`PendingQueries`](crate::linkstate_pending::PendingQueries) return entry (the
+//! reverse Response route is C5c); an EMPTY route prompts a `ResponseFinal` to the
+//! querier. [`deregister`](FaceForwarder::deregister) purges `client_qabls` + the
+//! pending entries keyed by the departed face BEFORE its linkless early-return
+//! (OBLIGATION 1).
+//!
 //! ## Deferred to later slices (named, not silently dropped)
 //!
 //! - **Per-peer ingress/egress master filter + source-dimensioned route cache
@@ -187,9 +218,21 @@
 //!   natives too, per zenoh's cross-registration + PRECISION req #1) but MUST land
 //!   WITH the federation/ACTIVATION slice (which provides the 2-node harness to test
 //!   it), not merely "revisit with C5".
-//! - **The client QABL store + `compute_query_route`** (`Request` / `Response`) —
-//!   the query-plane twin of C2 (a client `DeclareQueryable` + its cross-tier
-//!   advertisement carrying the merged `QueryableInfo`) plus the query route.
+//! - **The query-route RESPONSE half (C5c)** — `forward_response` /
+//!   `forward_response_final` route a queryable's reply BACK to the querier via the
+//!   [`pending`](RouterForwarder#structfield.pending) table (peek / take, the
+//!   reverse of C5b's allocate) + the tick timeout sweep
+//!   (`PendingQueries::expired`) that abandons a reply that never arrives. C5b
+//!   lands the forward half + the pending allocation; the reverse route + GC is
+//!   C5c.
+//! - **The client-queryable cross-tier ADVERTISEMENT** — the query-plane twin of
+//!   C2's `advertise_self_cross_tier_sub`: a client `DeclareQueryable` should make
+//!   this router flood a self-sourced `DeclareQueryable` (carrying the MERGED
+//!   `QueryableInfo`, `complete = OR` / `distance = min`) into the meshes so a
+//!   REMOTE mesh querier routes toward it. C5b STORES the client queryable + routes
+//!   an inbound Request to it (single-router unit-testable), but does not yet
+//!   advertise it; the E2E steer of a remote querier lands with this + the
+//!   ACTIVATION 2-node harness.
 //! - **Gossip / autoconnect / interceptors / pending-query GC** — the
 //!   per-net policy knobs the `LinkstateForwarder` carries; added as the
 //!   router gains the corresponding plane. NOTE (impl-panel R311y113): the
@@ -207,7 +250,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sce_forge_runtime::codec::CodecError;
 
@@ -222,7 +265,7 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
-use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_target};
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
@@ -232,14 +275,22 @@ use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use crate::accept_loop::{FaceForwarder, FaceId};
 use crate::linkstate_forward::{
-    absorb_keyexpr_into, build_declare_queryable_with_info, compute_push_forward,
-    compute_self_publish_forward, declare_queryable_wireexpr, declare_subscriber_wireexpr,
-    is_tree_forward_target, peer_whatami_routing, peer_zid_routing, re_advertise_interest_into,
-    resolve_source_in,
+    absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info,
+    complete_query_directions, compute_push_forward, compute_self_publish_forward,
+    declare_queryable_wireexpr, declare_subscriber_wireexpr, is_tree_forward_target,
+    peer_whatami_routing, peer_zid_routing, re_advertise_interest_into, resolve_source_in,
+    select_best_matching,
 };
 use crate::linkstate_interest::LinkstatepeerInterest;
+use crate::linkstate_pending::PendingQueries;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
+use wz_codecs::request::RequestOwned;
+use wz_session_core::query_mode::QueryTarget;
 use wz_session_core::queryable_info::{read_queryable_info, QueryableInfo};
+use wz_session_core::request_build::set_request_keyexpr_literal;
+use wz_session_core::request_routing_context::{
+    read_request_source, read_request_target, set_request_source,
+};
 
 /// Which of a router's two link-state meshes a face belongs to — the routing
 /// classification of its handshake [`WhatAmI`] role. zenoh partitions faces by
@@ -313,6 +364,40 @@ fn elect_router<'a>(
     best.map_or(*self_zid, |(_, z)| z)
 }
 
+/// One mesh tier's query-route parameters, resolved by
+/// [`RouterForwarder::mesh_query_block`] — zenoh `compute_query_route`'s block-1
+/// (routers_net) / block-2 (linkstatepeers_net) AFTER the master gate + source
+/// selection (`hat/router/queries.rs:1465-1497`). Carries the tree ROOT to route
+/// the Query along, the `node_id` to stamp on the outbound Request, and the inbound
+/// neighbour to exclude in THIS net.
+struct MeshQueryBlock {
+    /// Which mesh this block routes into (its faces + qabls table).
+    tier: FaceTier,
+    /// The tree root: the QUERIER's zid for the within-tier leg (route along the
+    /// querier's tree), or SELF for a cross-tier self-originated leg.
+    source_zid: Zid,
+    /// The `ext_nodeid` to stamp on the outbound Request: the querier's psid
+    /// (`out_node_id`) for the within-tier leg, or `0` (self-origination,
+    /// omit-on-DEFAULT) for a cross leg — the query twin of the data plane's
+    /// within-tier vs [`compute_self_publish_forward`] cross stamp.
+    source_psid: u16,
+    /// The inbound neighbour to exclude in this net — the querier's own neighbour
+    /// on the within leg (never route a Query back at its source), or `None` for a
+    /// cross leg (the inbound face is no node of this net).
+    inbound_for_net: Option<Zid>,
+}
+
+/// The GLOBAL-BestMatching winner — the single globally-nearest COMPLETE queryable
+/// across BOTH meshes + clients (zenoh `compute_final_route`'s first complete in
+/// the distance-sorted union route, `dispatcher/queries.rs:243`).
+enum BestQueryWinner {
+    /// A mesh queryable: the index into the router's live `MeshQueryBlock`s + the
+    /// tree hop toward it.
+    Mesh(usize, Zid),
+    /// A client-hosted queryable: the client face to forward the Query to.
+    Client(FaceId),
+}
+
 /// Per-face state the router keeps for each held face: the send seam to flood
 /// TO it, the tier (which net it joined) it was classified into at register,
 /// and — once its routing zid surfaced — the graph link in that net. The tier
@@ -381,6 +466,41 @@ pub struct RouterForwarder {
     /// DATA delivery TO these clients is C3a
     /// ([`deliver_to_client_subscribers`](RouterForwarder::deliver_to_client_subscribers)).
     client_subs: RefCell<HashMap<FaceId, HashSet<String>>>,
+    /// Per-CLIENT-face QUERYABLE store (C5b) — the query-plane twin of
+    /// [`client_subs`](Self#structfield.client_subs): zenoh's per-`Resource`
+    /// `session_ctxs[..].qabl` leaf input, keyed by the client's [`FaceId`] and, per
+    /// hosted keyexpr, the declared [`QueryableInfo`] (`complete` / `distance`) the
+    /// query route reads. A Client face is HELD with no mesh, so a client-hosted
+    /// queryable cannot live in a Zid-keyed tier table (`router_qabls` /
+    /// `linkstatepeer_qabls`); it lands here instead. [`route_request`](Self::route_request)
+    /// routes a Request TOWARD these client queryables (zenoh `compute_query_route`
+    /// block 3, `hat/router/queries.rs:1499`, gated `master || source == Router`);
+    /// their completeness feeds the GLOBAL BestMatching at distance 1. FaceId-keyed
+    /// leaf state, so [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE
+    /// its linkless early-return (OBLIGATION 1), like `client_subs`. The cross-tier
+    /// ADVERTISEMENT of these queryables into the meshes (the query-plane twin of
+    /// C2's `advertise_self_cross_tier_sub`, so a REMOTE mesh querier routes toward
+    /// this router) is a NAMED deferral landing with the ACTIVATION slice — see the
+    /// module docs.
+    client_qabls: RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>,
+    /// The pending-query return table (C5b) — one entry per outbound Request,
+    /// keyed by the out face + a per-face local qid, recording where the matching
+    /// `Response` / `ResponseFinal` routes back (the querier's inbound face + rid).
+    /// [`route_request`](Self::route_request) ALLOCATES an entry per forwarded
+    /// Request; the reverse Response route (peek/take) + the timeout sweep are C5c.
+    /// The standalone [`PendingQueries`] struct is reused verbatim (the same one the
+    /// single-net [`LinkstateForwarder`](crate::linkstate_forward) holds).
+    pending: RefCell<PendingQueries>,
+    /// Running total of `Request` (Query) messages received — the query-plane
+    /// reception witness, the query twin of
+    /// [`data_seen`](Self#structfield.data_seen).
+    queries_seen: Cell<usize>,
+    /// The per-query timeout (zenoh `queries_default_timeout`, 10s) — how long a
+    /// forwarded Query's pending return entry lives before the C5c tick sweep
+    /// abandons it. [`route_request`](Self::route_request) stamps each allocated
+    /// entry with [`now`](Self::now)` + this`. `Cell` (it is `Copy`, set through a
+    /// `&self` config seam), the same knob the single-net forwarder carries.
+    query_timeout: Cell<Duration>,
     /// Running total of link-state lists ingested across both nets — the
     /// control-plane work witness (the router twin of
     /// `LinkstateForwarder::ingested`).
@@ -410,6 +530,12 @@ pub struct RouterForwarder {
     /// reports — zenoh's `TREES_COMPUTATION_DELAY_MS`, shared with the
     /// linkstate forwarder's default.
     trees_delay: Duration,
+    /// The monotonic clock the pending-query deadlines are stamped from (C5b) and
+    /// reaped against (C5c) — [`Box`]ed so a deterministic test injects a
+    /// controllable `base + offset` closure via [`with_clock`](Self::with_clock),
+    /// exactly as the single-net [`LinkstateForwarder`](crate::linkstate_forward)
+    /// does. Production is `Instant::now`.
+    clock: Box<dyn Fn() -> Instant>,
 }
 
 impl RouterForwarder {
@@ -420,10 +546,26 @@ impl RouterForwarder {
     pub const DEFAULT_TREES_DELAY: Duration =
         crate::linkstate_forward::LinkstateForwarder::DEFAULT_TREES_DELAY;
 
-    /// A router driver seeded with the local node (`self_zid`). Self is a
-    /// `WhatAmI::Router` in BOTH meshes, so both nets are constructed with
-    /// [`WhatAmI::Router`].
+    /// The default per-query timeout — zenoh's `queries_default_timeout` (10s),
+    /// referenced from the single-net forwarder so the two share ONE source of the
+    /// value. A forwarded Query's pending return entry is abandoned this long after
+    /// it is recorded if no `ResponseFinal` routes back (the C5c tick sweep). A
+    /// deploy overrides via [`set_query_timeout`](Self::set_query_timeout).
+    pub const DEFAULT_QUERY_TIMEOUT: Duration =
+        crate::linkstate_forward::LinkstateForwarder::DEFAULT_QUERY_TIMEOUT;
+
+    /// A router driver seeded with the local node (`self_zid`), using the
+    /// production `Instant::now` clock. Self is a `WhatAmI::Router` in BOTH meshes,
+    /// so both nets are constructed with [`WhatAmI::Router`].
     pub fn new(self_zid: Zid) -> Self {
+        Self::with_clock(self_zid, Box::new(Instant::now))
+    }
+
+    /// As [`new`](Self::new), but with an INJECTED monotonic clock — the dependency
+    /// injection a deterministic pending-query-timeout test uses to advance "now"
+    /// across a deadline (the router twin of
+    /// [`LinkstateForwarder::with_clock`](crate::linkstate_forward::LinkstateForwarder::with_clock)).
+    pub fn with_clock(self_zid: Zid, clock: Box<dyn Fn() -> Instant>) -> Self {
         Self {
             routers_net: Rc::new(RefCell::new(LinkstateNetwork::new(
                 self_zid,
@@ -439,13 +581,33 @@ impl RouterForwarder {
             router_qabls: RefCell::new(LinkstatepeerInterest::new()),
             linkstatepeer_qabls: RefCell::new(LinkstatepeerInterest::new()),
             client_subs: RefCell::new(HashMap::new()),
+            client_qabls: RefCell::new(HashMap::new()),
+            pending: RefCell::new(PendingQueries::new()),
+            queries_seen: Cell::new(0),
+            query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
             trees_dirty_routers: Cell::new(false),
             trees_dirty_peers: Cell::new(false),
             recomputes: Cell::new(0),
             trees_delay: Self::DEFAULT_TREES_DELAY,
+            clock,
         }
+    }
+
+    /// Override the per-query timeout (zenoh's `queries_default_timeout`) — the
+    /// same `&self` config seam the single-net forwarder exposes. Takes effect on
+    /// the NEXT [`route_request`](Self::route_request); already-recorded deadlines
+    /// are not retroactively changed.
+    pub fn set_query_timeout(&self, timeout: Duration) {
+        self.query_timeout.set(timeout);
+    }
+
+    /// The current instant from the injected clock — the single read site the
+    /// pending-query deadline stamp ([`route_request`](Self::route_request)) and
+    /// the C5c timeout sweep will share, so an injected test clock governs both.
+    fn now(&self) -> Instant {
+        (self.clock)()
     }
 
     /// The graph + coalescing flag for a tier, or `None` for
@@ -1465,6 +1627,572 @@ impl RouterForwarder {
             self.flood_delta_tier(tier, self_delta, &declare);
         }
     }
+
+    /// Ingest a CLIENT-face `DeclareQueryable` (C5b) into the per-face
+    /// [`client_qabls`](Self#structfield.client_qabls) store — the query-plane twin
+    /// of [`ingest_client_subscription`](Self::ingest_client_subscription). The
+    /// mesh-face declare path ([`ingest_queryable`](Self::ingest_queryable)) drops a
+    /// Client-tier declare (no Zid-keyed tier table); a client-hosted queryable
+    /// lands here instead, keyed by the client face + its declared
+    /// [`QueryableInfo`] (the query route reads `complete` / `distance`). The
+    /// cross-tier ADVERTISEMENT of this queryable into the meshes (the query-plane
+    /// twin of C2's [`advertise_self_cross_tier_sub`](Self::advertise_self_cross_tier_sub),
+    /// so a REMOTE mesh querier routes toward this router) is a NAMED deferral
+    /// (module docs): C5b stores WITHOUT flooding, so THIS router routes an inbound
+    /// Request to the client queryable, but a remote querier is not yet steered
+    /// here (single-router unit-testable; the E2E steer lands with ACTIVATION).
+    fn ingest_client_queryable(&self, inbound: FaceId, declare: &DeclareOwned) {
+        let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
+            return;
+        };
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) {
+                Some(k) => k,
+                None => return,
+            }
+        };
+        // The declared QueryableInfo rides the DeclQueryable ext chain; absent =
+        // zenoh DEFAULT (incomplete), the same read `ingest_queryable` does.
+        let info = match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => {
+                read_queryable_info(dq.extensions.as_ref())
+            }
+            _ => QueryableInfo::DEFAULT,
+        };
+        self.client_qabls
+            .borrow_mut()
+            .entry(inbound)
+            .or_default()
+            .insert(keyexpr, info);
+    }
+
+    /// Route an inbound `Request` (a Query) through the router's full zenoh
+    /// `compute_query_route` (`hat/router/queries.rs:1426`) + `compute_final_route`
+    /// (`dispatcher/queries.rs:205`) — the FORWARD (Request) half of the query
+    /// route (C5b), the query-plane twin of [`route_push`](Self::route_push).
+    ///
+    /// Structure (mirroring the data plane's `route_push` legs, but the Query flows
+    /// TOWARD queryables and the three blocks are UNIFIED by a GLOBAL BestMatching):
+    /// - Blocks 1 & 2 — the two meshes' qabls: a WITHIN-tier leg (the inbound
+    ///   tier's own net, master-gate-free, stamped with the querier's psid) and a
+    ///   master-gated CROSS-mesh leg (self-originated, node_id 0), exactly the
+    ///   `forward_push_tier` + `bridge_push_cross_mesh` split
+    ///   ([`mesh_query_block`](Self::mesh_query_block) computes each).
+    /// - Block 3 — the local CLIENT queryables
+    ///   ([`forward_request_to_clients`](Self::forward_request_to_clients) /
+    ///   [`first_complete_client`](Self::first_complete_client)), gated
+    ///   `master || source == Router`.
+    /// - A CLIENT-sourced Query self-injects into BOTH meshes (both legs cross;
+    ///   peer ungated, router master-gated), the query twin of C3b — falls out of
+    ///   the same block gates (a client inbound has no within leg).
+    ///
+    /// The `QueryTarget` dispatch (the wire DEFAULT — an absent ext_target — is
+    /// BestMatching): `All` fans to every matching queryable, `AllComplete` to every
+    /// COMPLETE one, BestMatching to the SINGLE globally-nearest complete one
+    /// ([`best_query_winner`](Self::best_query_winner)) with an All fallback. Each
+    /// forwarded Request ALLOCATES a pending-return entry so the reverse Response
+    /// route (C5c) finds its way back. An EMPTY route prompts a `ResponseFinal` to
+    /// the querier so its `get()` terminates at once (a pure router hosts no local
+    /// self-queryable to dispatch — a deferred combined-node seam). Single-router
+    /// topologies elect self, so every master gate is a no-op.
+    fn route_request(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        request: &RequestOwned,
+    ) {
+        // Resolve the query keyexpr + the inbound face's zid/link in one scoped
+        // borrow (released before any send re-borrows `faces`).
+        let resolved = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return; // the inbound face is gone: nothing to reply to
+            };
+            resolve_wireexpr(&request.keyexpr.body, &s.keyexpr_table)
+                .map(|keyexpr| (peer_zid_routing(&s.actions), s.link, keyexpr))
+        };
+        let (inbound_zid, inbound_link, keyexpr) = match resolved {
+            Some(t) => t,
+            None => {
+                // An unresolvable keyexpr alias cannot be routed, but the querier
+                // must still TERMINATE — zenoh route_query sends a ResponseFinal on
+                // an unknown scope (dispatcher/queries.rs:575), not a silent drop
+                // that would hang the get() until its own timeout.
+                let final_msg =
+                    wz_session_core::response_final_build::build_response_final(request.rid);
+                self.send_to_face(inbound, reliable, || {
+                    NetworkMessage::ResponseFinal(final_msg.clone())
+                });
+                return;
+            }
+        };
+        // A mesh-tier inbound resolves its querier source in the inbound net. An
+        // UNRESOLVABLE source (a transit Query naming a psid this node has not
+        // learned yet) drops ONLY the within-tier leg — like `route_push`, whose
+        // `compute_push_forward` returns `None` for the within leg while
+        // `bridge_push_cross_mesh` + the client delivery still run — NOT the whole
+        // route: the cross-mesh + client legs are self-originated (they route along
+        // self's tree, not the querier's) so they still fire, and an empty TOTAL
+        // route prompts the final below (zenoh's other blocks use `net.idx`, not the
+        // querier source, so they are unaffected by an unmapped source). A Client
+        // inbound has no mesh source (both mesh legs are self-originated cross legs).
+        let within = match self.plane(tier) {
+            Some((net, _)) => resolve_source_in(
+                &net.borrow(),
+                inbound_zid,
+                inbound_link,
+                read_request_source(request),
+            ),
+            None => None,
+        };
+        let self_zid = *self.routers_net.borrow().self_zid();
+        let master = self.is_master(&keyexpr);
+        // The two mesh blocks, gated + source-selected per compute_query_route; a
+        // gated-off block is omitted. Block 3 (clients) gate is `master || src ==
+        // Router`, the same as block 1's.
+        let blocks: Vec<MeshQueryBlock> = [FaceTier::Routers, FaceTier::LinkstatePeers]
+            .into_iter()
+            .filter_map(|bt| self.mesh_query_block(bt, tier, master, within, inbound_zid, self_zid))
+            .collect();
+        let client_gate = master || tier == FaceTier::Routers;
+        let src_rid = request.rid;
+        let deadline = self.now() + self.query_timeout.get();
+
+        let forwarded = match read_request_target(request) {
+            // BestMatching (wire default): the SINGLE globally-nearest COMPLETE
+            // queryable; fall back to All (every matching one) when none is
+            // complete.
+            None => match self.best_query_winner(&blocks, client_gate, inbound, &keyexpr, self_zid)
+            {
+                Some(BestQueryWinner::Mesh(bi, hop)) => self.forward_request_to_tier(
+                    &blocks[bi],
+                    reliable,
+                    inbound,
+                    &[hop],
+                    request,
+                    &keyexpr,
+                    src_rid,
+                    deadline,
+                ),
+                Some(BestQueryWinner::Client(face)) => self.forward_request_to_face(
+                    face, 0, reliable, inbound, request, &keyexpr, src_rid, deadline,
+                ),
+                None => self.forward_request_all(
+                    &blocks,
+                    client_gate,
+                    false,
+                    reliable,
+                    inbound,
+                    request,
+                    &keyexpr,
+                    src_rid,
+                    deadline,
+                    self_zid,
+                ),
+            },
+            Some(QueryTarget::All) => self.forward_request_all(
+                &blocks,
+                client_gate,
+                false,
+                reliable,
+                inbound,
+                request,
+                &keyexpr,
+                src_rid,
+                deadline,
+                self_zid,
+            ),
+            Some(QueryTarget::AllComplete) => self.forward_request_all(
+                &blocks,
+                client_gate,
+                true,
+                reliable,
+                inbound,
+                request,
+                &keyexpr,
+                src_rid,
+                deadline,
+                self_zid,
+            ),
+        };
+
+        if forwarded == 0 {
+            // zenoh route_query EMPTY route: no queryable matched, so PROMPT a
+            // ResponseFinal back to the querier (its get() terminates at once). No
+            // pending entry (nothing is awaited).
+            let final_msg =
+                wz_session_core::response_final_build::build_response_final(request.rid);
+            self.send_to_face(inbound, reliable, || {
+                NetworkMessage::ResponseFinal(final_msg.clone())
+            });
+        }
+    }
+
+    /// The per-mesh-tier query-route parameters for a Request whose inbound source
+    /// role is `src_tier` — zenoh `compute_query_route`'s block-1 / block-2 gate +
+    /// source selection (`hat/router/queries.rs:1465-1497`). `None` when the block
+    /// is master-gated OFF; else a [`MeshQueryBlock`]:
+    /// - the block's OWN tier is the source's tier (within-tier leg): route along
+    ///   the QUERIER's tree, stamp its psid, exclude the real inbound neighbour —
+    ///   always allowed (the gate reduces to true), zenoh `router_source = source`.
+    /// - a CROSS tier: route along SELF's tree (self-origination, node_id 0), no
+    ///   inbound exclusion (the inbound face is no node of this net) — zenoh's
+    ///   `router_source = net.idx`; master-GATED (only the elected master bridges a
+    ///   Query across meshes, the query twin of `bridge_push_cross_mesh`).
+    fn mesh_query_block(
+        &self,
+        block_tier: FaceTier,
+        src_tier: FaceTier,
+        master: bool,
+        within: Option<(Zid, u16)>,
+        inbound_zid: Option<Zid>,
+        self_zid: Zid,
+    ) -> Option<MeshQueryBlock> {
+        // The block gates: block 1 (routers_net) `master || src == Router`; block 2
+        // (linkstatepeers_net) `master || src != Router`.
+        let gated_on = match block_tier {
+            FaceTier::Routers => master || src_tier == FaceTier::Routers,
+            FaceTier::LinkstatePeers => master || src_tier != FaceTier::Routers,
+            FaceTier::Client => return None,
+        };
+        if !gated_on {
+            return None;
+        }
+        if src_tier == block_tier {
+            // Within-tier: route along the querier's tree (its resolved source +
+            // psid), excluding its own inbound neighbour. `within` is `Some` here —
+            // a mesh inbound resolved it before this call (else the whole route was
+            // dropped) — so `?` never short-circuits in practice.
+            let (source_zid, out_node_id) = within?;
+            Some(MeshQueryBlock {
+                tier: block_tier,
+                source_zid,
+                source_psid: out_node_id,
+                inbound_for_net: inbound_zid,
+            })
+        } else {
+            // Cross-tier: self-origination into this mesh (self tree root, node_id
+            // 0), no inbound exclusion.
+            Some(MeshQueryBlock {
+                tier: block_tier,
+                source_zid: self_zid,
+                source_psid: 0,
+                inbound_for_net: None,
+            })
+        }
+    }
+
+    /// The GLOBAL BestMatching winner (zenoh `compute_final_route`'s BestMatching,
+    /// `dispatcher/queries.rs:243`): the globally-nearest COMPLETE queryable across
+    /// both meshes + clients, or `None` when none is complete (the caller then
+    /// falls back to All). zenoh sorts the union route by SELF-relative distance and
+    /// takes the first complete; wz picks the min over each net's per-net nearest
+    /// complete ([`select_best_matching`], min-of-mins == global-min) and the client
+    /// candidates at distance 1. A distance TIE keeps the EARLIER block (routers
+    /// before peers before clients), matching zenoh's stable-sorted B1/B2/B3 order.
+    fn best_query_winner(
+        &self,
+        blocks: &[MeshQueryBlock],
+        client_gate: bool,
+        inbound: FaceId,
+        keyexpr: &str,
+        self_zid: Zid,
+    ) -> Option<BestQueryWinner> {
+        let mut best: Option<(u16, BestQueryWinner)> = None;
+        for (bi, block) in blocks.iter().enumerate() {
+            let Some((net, _)) = self.plane(block.tier) else {
+                continue;
+            };
+            let Some(qabls) = self.qabls_table(block.tier) else {
+                continue;
+            };
+            if let Some((dist, hop)) = select_best_matching(
+                &net.borrow(),
+                qabls,
+                keyexpr,
+                &block.source_zid,
+                &self_zid,
+                block.inbound_for_net,
+            ) {
+                // Truncate the jittered graph distance to u16, exactly as zenoh
+                // stamps `distance: net.distances[qabl_idx] as u16`
+                // (`hat/router/queries.rs:1107`): the per-net `select_best_matching`
+                // picks the truly-nearest by the full f64 (jitter breaks a same-cost
+                // tie deterministically WITHIN a net), but the CROSS-block compare
+                // must be on the same integer scale zenoh sorts by. The default link
+                // weight is 100 (matching zenoh's `DEFAULT_LINK_WEIGHT`), so a 1-hop
+                // mesh queryable is ~100 and a client is 1 — a client always wins by
+                // distance (never a tie). The truncation's real load-bearing role is
+                // cross-net MESH-vs-MESH ties: a router-net 100.6 and a peer-net
+                // 100.3 both → u16 100, and the strict `<` + routers-first order then
+                // breaks that tie exactly as zenoh's stable B1/B2/B3 sort does.
+                Self::consider_best(&mut best, dist as u16, BestQueryWinner::Mesh(bi, hop));
+            }
+        }
+        if client_gate {
+            if let Some(face) = self.first_complete_client(inbound, keyexpr) {
+                // A client-hosted queryable is a directly-attached leaf: distance 1
+                // (zenoh `compute_query_route` block 3's `distance: 1`).
+                Self::consider_best(&mut best, 1, BestQueryWinner::Client(face));
+            }
+        }
+        best.map(|(_, winner)| winner)
+    }
+
+    /// Keep `winner` as the running best IFF it is strictly NEARER (fewer hops) than
+    /// the current best — strict `<` so an equal-distance later candidate does NOT
+    /// displace the earlier one (the router/peer/client block order is the zenoh
+    /// stable-sort tie break, so the caller must feed candidates in that order).
+    fn consider_best(
+        best: &mut Option<(u16, BestQueryWinner)>,
+        dist: u16,
+        winner: BestQueryWinner,
+    ) {
+        if best.as_ref().map_or(true, |(bd, _)| dist < *bd) {
+            *best = Some((dist, winner));
+        }
+    }
+
+    /// The first client face (other than `inbound`) hosting a queryable COMPLETE
+    /// for `keyexpr` — the client candidate for the GLOBAL BestMatching (distance 1,
+    /// zenoh `compute_query_route` block 3's `distance: 1`,
+    /// `hat/router/queries.rs:1512`). "Complete for the query" is the declared
+    /// `complete` AND the declaration keyexpr INCLUDING the full query keyexpr — the
+    /// same test [`complete_for_query_peers`] applies to a mesh queryable.
+    fn first_complete_client(&self, inbound: FaceId, keyexpr: &str) -> Option<FaceId> {
+        let query_chunks: Vec<&str> = keyexpr.split('/').collect();
+        self.client_qabls
+            .borrow()
+            .iter()
+            .filter(|(id, _)| **id != inbound)
+            .find(|(_, qabls)| {
+                qabls.iter().any(|(decl, info)| {
+                    info.complete && keyexpr_includes_target(decl, &query_chunks)
+                })
+            })
+            .map(|(id, _)| *id)
+    }
+
+    /// Route the Query to EVERY matching queryable (`QueryTarget::All`, and the
+    /// BestMatching fallback) or every COMPLETE one (`QueryTarget::AllComplete`,
+    /// `complete_only`) — zenoh `compute_final_route`'s All / AllComplete
+    /// (`dispatcher/queries.rs:215`/`:228`) fanned across the gated mesh blocks + the
+    /// client block. Returns the total faces forwarded to (the empty-route witness
+    /// [`route_request`](Self::route_request) sums to decide the prompt final).
+    #[allow(clippy::too_many_arguments)]
+    fn forward_request_all(
+        &self,
+        blocks: &[MeshQueryBlock],
+        client_gate: bool,
+        complete_only: bool,
+        reliable: bool,
+        inbound: FaceId,
+        request: &RequestOwned,
+        keyexpr: &str,
+        src_rid: u64,
+        deadline: Instant,
+        self_zid: Zid,
+    ) -> usize {
+        let mut forwarded = 0;
+        for block in blocks {
+            let Some((net, _)) = self.plane(block.tier) else {
+                continue;
+            };
+            let Some(qabls) = self.qabls_table(block.tier) else {
+                continue;
+            };
+            // Compute the tree hops under the net borrow, then release it before the
+            // fan-out (which re-borrows `faces` + allocates pending).
+            let hops = {
+                let n = net.borrow();
+                if complete_only {
+                    complete_query_directions(&n, qabls, keyexpr, &block.source_zid, &self_zid)
+                } else {
+                    all_query_directions(&n, qabls, keyexpr, &block.source_zid, &self_zid)
+                }
+            };
+            forwarded += self.forward_request_to_tier(
+                block, reliable, inbound, &hops, request, keyexpr, src_rid, deadline,
+            );
+        }
+        if client_gate {
+            forwarded += self.forward_request_to_clients(
+                complete_only,
+                reliable,
+                inbound,
+                request,
+                keyexpr,
+                src_rid,
+                deadline,
+            );
+        }
+        forwarded
+    }
+
+    /// Forward the Query to every face of `block.tier` that
+    /// [`is_tree_forward_target`] selects for `hops`, ALLOCATING a fresh
+    /// pending-return qid per outbound face (so the reverse Response route, C5c,
+    /// finds its way back) stamped as that Request's rid. The Request is re-stamped
+    /// with the block's `source_psid` (the querier tree for the within leg, `0`
+    /// self-origination for a cross leg) and B1-normalized to a literal keyexpr (a
+    /// downstream child shares no inbound alias table). Returns the faces forwarded
+    /// to; the per-face qid is why each face gets its OWN carrier.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_request_to_tier(
+        &self,
+        block: &MeshQueryBlock,
+        reliable: bool,
+        inbound: FaceId,
+        hops: &[Zid],
+        request: &RequestOwned,
+        keyexpr: &str,
+        src_rid: u64,
+        deadline: Instant,
+    ) -> usize {
+        if hops.is_empty() {
+            return 0;
+        }
+        let mut template = request.clone();
+        set_request_source(&mut template, block.source_psid);
+        if set_request_keyexpr_literal(&mut template, keyexpr).is_err() {
+            return 0;
+        }
+        let mut forwarded = 0;
+        let _ = self.fan_out_tier(block.tier, reliable, |id, zid| {
+            if !is_tree_forward_target(id, zid, inbound, block.inbound_for_net, hops) {
+                return Ok(None);
+            }
+            let qid = self
+                .pending
+                .borrow_mut()
+                .allocate(id, inbound, src_rid, deadline);
+            let mut carrier = template.clone();
+            carrier.rid = qid;
+            forwarded += 1;
+            Ok(Some(NetworkMessage::Request(Box::new(carrier))))
+        });
+        forwarded
+    }
+
+    /// Forward the Query to CLIENT faces hosting a matching queryable — zenoh
+    /// `compute_query_route` block 3 fanned (`hat/router/queries.rs:1499`): every
+    /// client (other than `inbound`) whose stored queryable INTERSECTS the query
+    /// (`complete_only == false`, `QueryTarget::All`) or is COMPLETE-for-the-query
+    /// (`complete_only == true`, `QueryTarget::AllComplete`), allocating a
+    /// pending-return qid per client face. Self-origination stamp (`source_psid ==
+    /// 0`, zenoh `NodeId::default()` for a client leaf). Returns the client faces
+    /// forwarded to.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_request_to_clients(
+        &self,
+        complete_only: bool,
+        reliable: bool,
+        inbound: FaceId,
+        request: &RequestOwned,
+        keyexpr: &str,
+        src_rid: u64,
+        deadline: Instant,
+    ) -> usize {
+        let mut template = request.clone();
+        set_request_source(&mut template, 0);
+        if set_request_keyexpr_literal(&mut template, keyexpr).is_err() {
+            return 0;
+        }
+        let query_chunks: Vec<&str> = keyexpr.split('/').collect();
+        let mut forwarded = 0;
+        let _ = self.fan_out_tier(FaceTier::Client, reliable, |id, _zid| {
+            if id == inbound {
+                return Ok(None);
+            }
+            let qualifies = self.client_qabls.borrow().get(&id).is_some_and(|qabls| {
+                qabls.iter().any(|(decl, info)| {
+                    if complete_only {
+                        info.complete && keyexpr_includes_target(decl, &query_chunks)
+                    } else {
+                        keyexpr_intersects_target(decl, &query_chunks)
+                    }
+                })
+            });
+            if !qualifies {
+                return Ok(None);
+            }
+            let qid = self
+                .pending
+                .borrow_mut()
+                .allocate(id, inbound, src_rid, deadline);
+            let mut carrier = template.clone();
+            carrier.rid = qid;
+            forwarded += 1;
+            Ok(Some(NetworkMessage::Request(Box::new(carrier))))
+        });
+        forwarded
+    }
+
+    /// Forward the Query to ONE specific face — the single-target send the GLOBAL
+    /// BestMatching CLIENT winner uses (a client-hosted queryable is a leaf, not a
+    /// tree hop toward which [`forward_request_to_tier`](Self::forward_request_to_tier)
+    /// fans). Allocates the pending-return qid keyed by that face + stamps it as the
+    /// Request's rid; re-stamps `source_psid` (0 for a client) + a literal keyexpr.
+    /// Returns 1 when the face is live (a route was taken), else 0 (a vanished
+    /// winner is no route — the caller prompts the empty-route final).
+    #[allow(clippy::too_many_arguments)]
+    fn forward_request_to_face(
+        &self,
+        out_face: FaceId,
+        source_psid: u16,
+        reliable: bool,
+        inbound: FaceId,
+        request: &RequestOwned,
+        keyexpr: &str,
+        src_rid: u64,
+        deadline: Instant,
+    ) -> usize {
+        if !self.faces.borrow().contains_key(&out_face) {
+            return 0;
+        }
+        let mut carrier = request.clone();
+        set_request_source(&mut carrier, source_psid);
+        if set_request_keyexpr_literal(&mut carrier, keyexpr).is_err() {
+            return 0;
+        }
+        let qid = self
+            .pending
+            .borrow_mut()
+            .allocate(out_face, inbound, src_rid, deadline);
+        carrier.rid = qid;
+        self.send_to_face(out_face, reliable, || {
+            NetworkMessage::Request(Box::new(carrier.clone()))
+        });
+        1
+    }
+
+    /// Send ONE built message to a specific face, ANY tier — the router's
+    /// single-target egress (the prompt empty-route ResponseFinal + the GLOBAL
+    /// BestMatching client winner + the C5c Response return). Tier-agnostic (unlike
+    /// the tier-scoped [`fan_out_tier`](Self::fan_out_tier)): a return / prompt
+    /// target may be a mesh face OR a client face. Returns whether the face existed
+    /// and accepted the message. (Egress access control is deferred with the
+    /// interceptor plane, like `fan_out_tier` — the y113 obligation.)
+    fn send_to_face(
+        &self,
+        target: FaceId,
+        reliable: bool,
+        mut build: impl FnMut() -> NetworkMessage,
+    ) -> bool {
+        let faces = self.faces.borrow();
+        let Some(state) = faces.get(&target) else {
+            return false;
+        };
+        state
+            .actions
+            .send_network_message(build(), reliable, false)
+            .is_ok()
+    }
 }
 
 impl FaceForwarder for RouterForwarder {
@@ -1526,10 +2254,19 @@ impl FaceForwarder for RouterForwarder {
     }
 
     fn deregister(&self, id: FaceId) {
-        // OBLIGATION-1: purge the FaceId-keyed client sub store BEFORE the linkless
-        // early-return below (a Client face is `link == None`), withdrawing self's
-        // cross-tier advertisement for any keyexpr this was the LAST client of.
-        // Mirrors the sibling's `pending.remove_face`-first ordering; a Client face
+        // OBLIGATION-1: purge ALL FaceId-keyed leaf state BEFORE the linkless
+        // early-return below (a Client face is `link == None`, so it never reaches
+        // the graph teardown). (a) the pending-query return table entries keyed by
+        // this face as their OUT face (C5b) — mirrors the sibling forwarder's
+        // `pending.remove_face`-first deregister; entries on OTHER faces that point
+        // back to this one as their inbound target self-heal at send / timeout. (b)
+        // this face's hosted client queryables (C5b); its cross-tier advertisement
+        // is a NAMED deferral so there is no advertisement to withdraw (unlike the
+        // client sub store below).
+        self.pending.borrow_mut().remove_face(&id);
+        self.client_qabls.borrow_mut().remove(&id);
+        // Purge the FaceId-keyed client sub store, withdrawing self's cross-tier
+        // advertisement for any keyexpr this was the LAST client of. A Client face
         // is skipped by the peer/router fan-out (its tier), so flooding before its
         // `faces` entry is dropped is harmless.
         let departed = self.client_subs.borrow_mut().remove(&id);
@@ -1674,7 +2411,11 @@ impl FaceForwarder for RouterForwarder {
                         }
                     }
                     DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
-                        self.ingest_queryable(id, tier, *reliable, declare);
+                        if tier == FaceTier::Client {
+                            self.ingest_client_queryable(id, declare);
+                        } else {
+                            self.ingest_queryable(id, tier, *reliable, declare);
+                        }
                     }
                     // UndeclareQueryable: deferred (the wz-codecs body carries no
                     // keyexpr ext -> per-keyexpr retraction needs a codec atom
@@ -1683,6 +2424,15 @@ impl FaceForwarder for RouterForwarder {
                     DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {}
                     _ => {}
                 },
+                // A Query Request: count the reception (the query-plane witness),
+                // then route it through [`route_request`](Self::route_request) — the
+                // router's full zenoh compute_query_route (3-block master-gated +
+                // GLOBAL BestMatching over both meshes + clients, C5b). The reverse
+                // Response return + the pending-timeout sweep are C5c.
+                NetworkMessage::Request(request) => {
+                    self.queries_seen.set(self.queries_seen.get() + 1);
+                    self.route_request(id, tier, *reliable, request);
+                }
                 _ => {}
             }
         }
@@ -3361,19 +4111,37 @@ mod tests {
     }
 
     #[test]
-    fn client_face_queryable_is_not_ingested() {
-        // A Client face has no tier table (slice 1d): its queryable declare
-        // registers nothing in either mesh tier.
+    fn client_face_queryable_lands_in_the_client_store_not_a_mesh_tier() {
+        // C5b: a Client face's DeclareQueryable is NOT registered in either mesh
+        // tier (a Client is no mesh node) — it lands in the per-face `client_qabls`
+        // leaf store instead, keyed by the client face + its declared QueryableInfo.
         let fwd = RouterForwarder::new(zid(0x01));
         let (c, _sink) = face(zid(0xCC), WIRE_CLIENT);
         fwd.register(FaceId(0), &c);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
-        assert!(fwd.router_qabls.borrow().interested("demo/q").is_empty());
-        assert!(fwd
-            .linkstatepeer_qabls
-            .borrow()
-            .interested("demo/q")
-            .is_empty());
+        assert!(
+            fwd.router_qabls.borrow().interested("demo/q").is_empty(),
+            "not in the router tier"
+        );
+        assert!(
+            fwd.linkstatepeer_qabls
+                .borrow()
+                .interested("demo/q")
+                .is_empty(),
+            "not in the peer tier"
+        );
+        let store = fwd.client_qabls.borrow();
+        let hosted = store
+            .get(&FaceId(0))
+            .expect("the client's queryable is stored");
+        assert_eq!(
+            hosted.get("demo/q"),
+            Some(&QueryableInfo {
+                complete: true,
+                distance: 0,
+            }),
+            "with its declared completeness"
+        );
     }
 
     /// The `QueryableInfo` carried on the single forwarded DeclareQueryable in a
@@ -3660,6 +4428,603 @@ mod tests {
                 .interested("demo/aliased")
                 .is_empty(),
             "the alias was removed, so the aliased declare did not resolve"
+        );
+    }
+
+    // ── C5b: router query-route FORWARD half (the Request) ──
+
+    /// The single forwarded Request decoded from a recorded wire frame — so a test
+    /// can assert its re-stamped routing source landed ON THE WIRE (the router twin
+    /// of the sibling forwarder's `forwarded_request`).
+    fn forwarded_request(frame: &[u8]) -> RequestOwned {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.into_iter().next() {
+            Some(NetworkMessage::Request(r)) => *r,
+            other => panic!("expected a forwarded Request, got {other:?}"),
+        }
+    }
+
+    /// The `request_id` of the single ResponseFinal recorded on a sink — the
+    /// empty-route prompt final routed back to the querier.
+    fn forwarded_response_final_rid(frame: &[u8]) -> u64 {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } = parse_inbound(frame).expect("parse frame") else {
+            panic!("not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse payload");
+        match msgs.into_iter().next() {
+            Some(NetworkMessage::ResponseFinal(rf)) => rf.request_id,
+            other => panic!("expected a ResponseFinal, got {other:?}"),
+        }
+    }
+
+    /// A BestMatching (wire-default) Request for `keyexpr`, self-sourced (no
+    /// ext_nodeid — the inbound neighbour is the querier), rid `rid`.
+    fn request_best(rid: u64, keyexpr: &str) -> NetworkMessage {
+        NetworkMessage::Request(Box::new(
+            wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
+                .expect("build request"),
+        ))
+    }
+
+    /// A Request for `keyexpr` with an explicit [`QueryTarget`], self-sourced.
+    fn request_with_target(rid: u64, keyexpr: &str, target: QueryTarget) -> NetworkMessage {
+        NetworkMessage::Request(Box::new(
+            wz_session_core::request_build::build_request_query_with_target(
+                rid,
+                0,
+                Some(keyexpr),
+                target,
+            )
+            .expect("build request"),
+        ))
+    }
+
+    #[test]
+    fn a_peer_request_routes_within_tier_to_a_peer_queryable() {
+        // The query twin of push_peer_source_routes_within_tier: a peer-sourced
+        // Query for demo/q routes along the querier's tree to the peer-tier
+        // queryable C (the WITHIN-tier query route), not back to the inbound A, and
+        // ALLOCATES a pending-return entry with a remapped qid.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // queryable
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true)); // C hosts the queryable
+        sink_a.reset();
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), request_best(42, "demo/q"));
+        assert_eq!(fwd.queries_seen.get(), 1, "the Request is counted");
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "routed to the peer-tier queryable C"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound querier A");
+        assert_eq!(
+            fwd.pending.borrow().len(),
+            1,
+            "a pending-return entry was allocated for the forwarded Request"
+        );
+        let fwd_req = forwarded_request(&sink_c.frame_bytes(0));
+        assert_ne!(fwd_req.rid, 42, "rid REMAPPED to a per-face local qid");
+    }
+
+    #[test]
+    fn a_peer_request_bridges_cross_mesh_to_a_router_queryable_as_master() {
+        // A peer-sourced Query with NO peer-tier queryable but a ROUTER-tier one is
+        // bridged across meshes (block 1, master-gated) as a SELF-origination
+        // (node_id 0). Single-router => self is master => the bridge fires.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // peer querier
+        let (r, sink_r) = face(zid(0xDD), WIRE_ROUTER); // router-tier queryable
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &r);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xDD, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true)); // R hosts the queryable
+        sink_a.reset();
+        sink_r.reset();
+        forward_one(&fwd, FaceId(0), request_best(7, "demo/q"));
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "bridged to the router-tier queryable (self is master in single-router)"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the peer querier");
+        let fwd_req = forwarded_request(&sink_r.frame_bytes(0));
+        assert_eq!(
+            read_request_source(&fwd_req),
+            0,
+            "the cross-mesh bridge is a self-origination (node_id 0)"
+        );
+    }
+
+    #[test]
+    fn a_peer_request_reaches_a_client_hosted_queryable() {
+        // The query twin of a_peer_push_is_delivered_to_a_subscribing_client: a
+        // peer's Query reaches the CLIENT hosting the queryable (block 3,
+        // master || src == Router — single-router master).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // client hosts it
+        sink_client.reset();
+        sink_p.reset();
+        forward_one(&fwd, FaceId(1), request_best(9, "demo/q")); // peer queries
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the peer Query reached the client-hosted queryable"
+        );
+        assert_eq!(
+            fwd.pending.borrow().len(),
+            1,
+            "a pending entry keyed by the client face"
+        );
+    }
+
+    #[test]
+    fn a_client_request_reaches_a_mesh_queryable() {
+        // The query twin of a_client_push_reaches_a_subscribing_mesh_peer: a
+        // CLIENT's Query self-injects into the peer mesh toward a peer queryable
+        // (the peer leg is ungated for a client source), stamped self-originated.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // peer queryable
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true)); // peer hosts it
+        sink_client.reset();
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), request_best(3, "demo/q")); // client queries
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the client Query self-injected to the peer queryable"
+        );
+        let fwd_req = forwarded_request(&sink_p.frame_bytes(0));
+        assert_eq!(
+            read_request_source(&fwd_req),
+            0,
+            "self-originated into the mesh (node_id 0)"
+        );
+    }
+
+    #[test]
+    fn best_matching_prefers_a_local_client_over_a_mesh_queryable() {
+        // GLOBAL BestMatching (the query-specific twist): with a COMPLETE peer
+        // queryable AND a COMPLETE client queryable BOTH matching demo/q,
+        // BestMatching routes to EXACTLY ONE — the LOCAL CLIENT, whose distance is
+        // 1 versus the mesh queryable's per-hop link weight (~100, zenoh's default),
+        // exactly as zenoh prefers a directly-attached session queryable
+        // (`compute_query_route` block 3 stamps `distance: 1`, mesh qabls stamp
+        // `net.distances[..] as u16`). This proves the cross-block global min (a
+        // client can beat a mesh candidate) AND single-winner (not the All fan-out).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // complete peer queryable (~100)
+        let (client, sink_client) = face(zid(0xEE), WIRE_CLIENT); // complete client (distance 1)
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true)); // peer C complete
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/q", true)); // client complete
+        sink_a.reset();
+        sink_c.reset();
+        sink_client.reset();
+        forward_one(&fwd, FaceId(0), request_best(11, "demo/q"));
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the nearer LOCAL client queryable (distance 1) wins over the mesh (~100)"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "BestMatching routes to ONE, not the mesh queryable too"
+        );
+        assert_eq!(
+            fwd.pending.borrow().len(),
+            1,
+            "one pending entry for the single winner"
+        );
+    }
+
+    #[test]
+    fn best_matching_falls_back_to_all_when_no_queryable_is_complete() {
+        // BestMatching with only INCOMPLETE matching queryables finds no complete
+        // one and falls back to QueryTarget::All — fan out to BOTH.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (b, sink_b) = face(zid(0xBB), WIRE_PEER); // incomplete queryable
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // incomplete queryable
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", false));
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/q", false));
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), request_best(13, "demo/q"));
+        assert_eq!(sink_b.frame_count(), 1, "fell back to All: B reached");
+        assert_eq!(sink_c.frame_count(), 1, "fell back to All: C reached");
+        assert_eq!(sink_a.frame_count(), 0, "never the inbound querier");
+    }
+
+    #[test]
+    fn all_complete_skips_an_incomplete_queryable() {
+        // QueryTarget::AllComplete fans out to EVERY complete queryable only — the
+        // incomplete one is skipped even though it matches.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (b, sink_b) = face(zid(0xBB), WIRE_PEER); // COMPLETE
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // incomplete
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true)); // complete
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/q", false)); // incomplete
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            request_with_target(15, "demo/q", QueryTarget::AllComplete),
+        );
+        assert_eq!(sink_b.frame_count(), 1, "the complete queryable is reached");
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "the incomplete queryable is skipped"
+        );
+    }
+
+    #[test]
+    fn all_target_fans_out_even_to_incomplete_queryables() {
+        // QueryTarget::All fans out to EVERY matching queryable regardless of
+        // completeness (unlike AllComplete + BestMatching).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER);
+        let (b, sink_b) = face(zid(0xBB), WIRE_PEER);
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true)); // complete
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/q", false)); // incomplete
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            request_with_target(17, "demo/q", QueryTarget::All),
+        );
+        assert_eq!(sink_b.frame_count(), 1, "the complete queryable is reached");
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the incomplete one is ALSO reached (All)"
+        );
+    }
+
+    #[test]
+    fn an_unmatched_request_prompts_a_response_final_to_the_querier() {
+        // zenoh route_query EMPTY route: a Query no queryable matches PROMPTS a
+        // ResponseFinal back to the querier (its get() terminates at once) — no
+        // pending entry is recorded.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        sink_a.reset();
+        forward_one(&fwd, FaceId(0), request_best(21, "demo/unmatched"));
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "a single frame back to the querier"
+        );
+        assert_eq!(
+            forwarded_response_final_rid(&sink_a.frame_bytes(0)),
+            21,
+            "the prompt ResponseFinal carries the querier's rid"
+        );
+        assert!(
+            fwd.pending.borrow().is_empty(),
+            "no pending entry for an empty route (nothing is awaited)"
+        );
+    }
+
+    #[test]
+    fn deregister_purges_client_qabls_and_pending_before_the_linkless_early_return() {
+        // OBLIGATION-1: a Client face is linkless, so its FaceId-keyed leaf state
+        // (its hosted queryables + the pending-return entries keyed by it) MUST be
+        // purged BEFORE deregister's linkless early-return. A peer Query routed to
+        // the client's queryable leaves a pending entry keyed by the client face;
+        // deregistering the client drops both.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, _sp) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // client hosts it
+        forward_one(&fwd, FaceId(1), request_best(31, "demo/q")); // peer queries -> routed to client
+        assert_eq!(
+            fwd.pending.borrow().len(),
+            1,
+            "a pending entry keyed by the client face"
+        );
+        assert!(
+            fwd.client_qabls.borrow().contains_key(&FaceId(0)),
+            "the client's queryable is stored"
+        );
+        fwd.deregister(FaceId(0)); // the client face goes down (linkless)
+        assert!(
+            !fwd.client_qabls.borrow().contains_key(&FaceId(0)),
+            "client_qabls purged on face-down (OBLIGATION 1)"
+        );
+        assert!(
+            fwd.pending.borrow().is_empty(),
+            "the pending entry keyed by the departed client face is purged (OBLIGATION 1)"
+        );
+    }
+
+    #[test]
+    fn a_peer_request_bridges_cross_mesh_to_a_router_queryable_only_when_master() {
+        // The query twin of push_bridges_cross_mesh_only_when_master: a peer-source
+        // Query is bridged into the ROUTER mesh toward a router-tier queryable ONLY
+        // when self is the elected route master (block-1 gate). With two shared
+        // routers, self bridges only the keyexprs it wins the HRW election for, so
+        // exactly one router bridges each Query (no double-query).
+        let self_z = zid(0x01);
+        let r2 = zid(0x02);
+        let shared = [self_z, r2];
+        let ke_master = (0..256)
+            .map(|i| format!("demo/m{i}"))
+            .find(|k| elect_router(&self_z, k, shared.iter()) == self_z)
+            .expect("some ke elects self");
+        let ke_other = (0..256)
+            .map(|i| format!("demo/o{i}"))
+            .find(|k| elect_router(&self_z, k, shared.iter()) == r2)
+            .expect("some ke elects R2");
+        let run = |ke: &str| -> (usize, usize) {
+            let fwd = RouterForwarder::new(self_z);
+            let (a, _sa) = face(zid(0xAA), WIRE_PEER); // peer querier + R2 discovery neighbour
+            let (r, sink_r) = face(r2, WIRE_ROUTER); // the other router R2 (hosts a queryable)
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &r);
+            advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5); // R2 -> routers_net
+            discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5); // R2 -> linkstatepeers_net
+            fwd.tick();
+            forward_one(&fwd, FaceId(1), declare_qabl(ke, true)); // R2 hosts a complete queryable
+            sink_r.reset();
+            forward_one(&fwd, FaceId(0), request_best(50, ke)); // peer queries
+            (sink_r.frame_count(), fwd.shared_nodes().len())
+        };
+        let (master_hits, shared_len) = run(&ke_master);
+        assert_eq!(shared_len, 2, "self + R2 are shared across both meshes");
+        assert_eq!(
+            master_hits, 1,
+            "master bridges the peer-source Query to the router queryable"
+        );
+        let (other_hits, _) = run(&ke_other);
+        assert_eq!(
+            other_hits, 0,
+            "a non-master suppresses the cross-mesh query bridge"
+        );
+    }
+
+    #[test]
+    fn client_query_delivery_deferred_on_a_non_master() {
+        // The query twin of local_client_delivery_deferred_on_non_master (zenoh
+        // block-3 gate): a peer-source Query for a keyexpr this router is NOT master
+        // for must NOT reach the local client queryable — it defers to the master's
+        // router-source query (else the client is queried twice). A ROUTER-source
+        // Query (the bridged-back copy) IS delivered (src == Router, ungated).
+        let self_z = zid(0x01);
+        let r2 = zid(0x02);
+        let shared = [self_z, r2];
+        let ke_other = (0..256)
+            .map(|i| format!("demo/o{i}"))
+            .find(|k| elect_router(&self_z, k, shared.iter()) == r2)
+            .expect("some ke elects R2 (self non-master)");
+        let fwd = RouterForwarder::new(self_z);
+        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // peer querier + R2 discovery neighbour
+        let (r, _sr) = face(r2, WIRE_ROUTER); // the shared router
+        let (client, sink_client) = face(zid(0xCC), WIRE_CLIENT); // local client queryable
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &r);
+        fwd.register(FaceId(2), &client);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5); // R2 -> routers_net
+        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5); // R2 -> linkstatepeers_net
+        fwd.tick();
+        forward_one(&fwd, FaceId(2), declare_qabl(&ke_other, true)); // client hosts a queryable
+        assert_eq!(fwd.shared_nodes().len(), 2, "federated: self + R2 shared");
+        assert!(
+            !fwd.is_master(&ke_other),
+            "self is NOT the elected master for this ke"
+        );
+        sink_client.reset();
+        // Peer-source Query: a non-master DEFERS its local client query.
+        forward_one(&fwd, FaceId(0), request_best(60, &ke_other));
+        assert_eq!(
+            sink_client.frame_count(),
+            0,
+            "non-master defers the peer-source client query (no double query)"
+        );
+        // Router-source Query (the bridged-back copy): delivered (src == Router).
+        forward_one(&fwd, FaceId(1), request_best(61, &ke_other));
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the router-source Query reaches the client queryable exactly once"
+        );
+    }
+
+    #[test]
+    fn all_target_routes_to_a_matching_wildcard_client_queryable() {
+        // forward_request_to_clients (block-3 client fan) under QueryTarget::All:
+        // a client hosting a `demo/**` queryable is queried by a `demo/data` Query
+        // via the INTERSECTS predicate (wildcard-aware, the same SSOT the C3a client
+        // data delivery uses) — the client-fan path BestMatching's single-winner
+        // route never exercises.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (client, sink_client) = face(zid(0xCC), WIRE_CLIENT); // wildcard queryable host
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/**", false)); // wildcard, incomplete
+        sink_a.reset();
+        sink_client.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            request_with_target(70, "demo/data", QueryTarget::All),
+        );
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the demo/** client queryable is queried by a demo/data All-target query"
+        );
+    }
+
+    #[test]
+    fn all_complete_routes_to_a_complete_wildcard_client_queryable() {
+        // forward_request_to_clients under QueryTarget::AllComplete: a COMPLETE
+        // `demo/**` client queryable is queried by a `demo/data` Query (the
+        // `complete && includes` branch); an INCOMPLETE one is skipped.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (cc, sink_cc) = face(zid(0xCC), WIRE_CLIENT); // complete wildcard queryable
+        let (cd, sink_cd) = face(zid(0xDD), WIRE_CLIENT); // incomplete wildcard queryable
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &cc);
+        fwd.register(FaceId(2), &cd);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/**", true)); // complete
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/**", false)); // incomplete
+        sink_a.reset();
+        sink_cc.reset();
+        sink_cd.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            request_with_target(72, "demo/data", QueryTarget::AllComplete),
+        );
+        assert_eq!(
+            sink_cc.frame_count(),
+            1,
+            "the complete client queryable is queried"
+        );
+        assert_eq!(sink_cd.frame_count(), 0, "the incomplete one is skipped");
+    }
+
+    #[test]
+    fn an_unresolvable_keyexpr_alias_prompts_a_response_final() {
+        // A Query whose aliased keyexpr id is unknown on the inbound face cannot be
+        // routed, but the querier is TERMINATED with a prompt ResponseFinal (zenoh
+        // route_query "unknown scope") rather than black-holed until its own timeout.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        sink_a.reset();
+        // An aliased wireexpr (mapping id 9, no suffix) with no prior DeclKexpr for 9.
+        let request = NetworkMessage::Request(Box::new(
+            wz_session_core::request_build::build_request_query(80, 9, None)
+                .expect("build request"),
+        ));
+        forward_one(&fwd, FaceId(0), request);
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "the querier is terminated with a final"
+        );
+        assert_eq!(
+            forwarded_response_final_rid(&sink_a.frame_bytes(0)),
+            80,
+            "the prompt ResponseFinal carries the querier's rid"
+        );
+        assert!(
+            fwd.pending.borrow().is_empty(),
+            "no pending entry (nothing routed)"
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_source_still_routes_the_client_and_cross_legs() {
+        // The SMELL-1 fix: an unresolvable mesh SOURCE (a transit Query naming a psid
+        // this node has not learned) drops ONLY the within-tier leg — the client
+        // block (self-originated, master-gated) STILL routes, exactly as route_push
+        // keeps its cross-mesh + client legs when the within-tier compute drops. So a
+        // local client queryable is reached and the querier is NOT black-holed.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // peer querier
+        let (client, sink_client) = face(zid(0xCC), WIRE_CLIENT); // local client queryable
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true)); // client hosts it
+        sink_a.reset();
+        sink_client.reset();
+        // A Request whose ext_nodeid psid (99) is NOT mapped on A's link -> the
+        // source resolves to None -> the within-tier peer leg is dropped.
+        let mut req = wz_session_core::request_build::build_request_query(90, 0, Some("demo/q"))
+            .expect("build request");
+        set_request_source(&mut req, 99);
+        forward_one(&fwd, FaceId(0), NetworkMessage::Request(Box::new(req)));
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the client queryable is still reached despite the unresolvable source"
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            0,
+            "not black-holed with a spurious final: the route was non-empty"
         );
     }
 }

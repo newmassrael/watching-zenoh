@@ -2379,7 +2379,9 @@ pub(crate) fn compute_query_directions(
         // fall back to QueryTarget::All (fan out to every matching one).
         None => {
             match select_best_matching(&net, qabls, keyexpr, source_zid, &self_zid, inbound_zid) {
-                Some(hop) => vec![hop],
+                // The single net discards the distance (the router keeps it to
+                // rank the global-nearest across both meshes, C5b).
+                Some((_distance, hop)) => vec![hop],
                 None => all_query_directions(&net, qabls, keyexpr, source_zid, &self_zid),
             }
         }
@@ -2395,24 +2397,33 @@ pub(crate) fn compute_query_directions(
 }
 
 /// zenoh `QueryTarget::BestMatching` (`dispatcher/queries.rs:243-266`): pick the
-/// SINGLE nearest COMPLETE queryable for `keyexpr` and return the tree direction
-/// (the next-hop neighbour toward it in the SOURCE's tree), or `None` when no
-/// complete queryable matches — in which case [`compute_query_directions`] falls
-/// back to `QueryTarget::All`. "Nearest" is the GRAPH distance from THIS node to
-/// the queryable peer (zenoh's `insert_target_for_qabls` reads
-/// `net.distances[qabl_idx]`, `queries.rs:724`, NOT the carried declaration
-/// distance). The inbound direction is excluded, and an unreachable peer
-/// contributes nothing. A distance TIE breaks by the candidate scan order
-/// (`HashMap` iteration, unspecified — same as zenoh); harmless, every
-/// equal-distance complete queryable fully answers the query.
-fn select_best_matching(
+/// SINGLE nearest COMPLETE queryable for `keyexpr` and return `(graph distance,
+/// tree direction)` — the next-hop neighbour toward it in the SOURCE's tree PLUS
+/// the self-relative graph distance used to rank it — or `None` when no complete
+/// queryable matches (the single-net [`compute_query_directions`] then falls back
+/// to `QueryTarget::All`). "Nearest" is the GRAPH distance from THIS node to the
+/// queryable peer (zenoh's `insert_target_for_qabls` reads `net.distances[qabl_idx]`,
+/// `queries.rs:1107`, NOT the carried declaration distance). The inbound direction
+/// is excluded, and an unreachable peer contributes nothing. A distance TIE breaks
+/// by the candidate scan order (`HashMap` iteration, unspecified — same as zenoh);
+/// harmless, every equal-distance complete queryable fully answers the query.
+///
+/// The distance is RETURNED (not discarded) because it is SELF-relative — the hop
+/// count from THIS node to the queryable, comparable ACROSS the router's two
+/// meshes. The router's GLOBAL BestMatching (`RouterForwarder::route_request`,
+/// C5b) picks the global-nearest complete queryable as the min over each net's
+/// per-net nearest (min-of-mins == global-min), and per-net client candidates at
+/// distance 1 (zenoh `compute_final_route` finds the FIRST complete in the
+/// distance-sorted union route, `queries.rs:1520`). The single-net peer caller
+/// discards the distance.
+pub(crate) fn select_best_matching(
     net: &LinkstateNetwork,
     qabls: &RefCell<LinkstatepeerInterest<QueryableInfo>>,
     keyexpr: &str,
     source_zid: &Zid,
     self_zid: &Zid,
     inbound_zid: Option<Zid>,
-) -> Option<Zid> {
+) -> Option<(f64, Zid)> {
     complete_for_query_peers(qabls, keyexpr, self_zid)
         .into_iter()
         .filter_map(|peer| {
@@ -2426,7 +2437,6 @@ fn select_best_matching(
             Some((net.distance_to(&peer)?, hop))
         })
         .min_by(|(a, _), (b, _)| a.total_cmp(b))
-        .map(|(_distance, hop)| hop)
 }
 
 /// The peers offering a queryable COMPLETE for `keyexpr` — declared complete AND
@@ -2456,8 +2466,9 @@ fn complete_for_query_peers(
 /// `keyexpr` in the SOURCE's tree — `QueryTarget::All` (`dispatcher/queries.rs:215`),
 /// and the BestMatching fallback when no queryable is complete.
 /// `directions_toward` dedups to one hop per subtree; the inbound-face exclusion
-/// is the fan_out's `is_tree_forward_target`.
-fn all_query_directions(
+/// is the fan_out's `is_tree_forward_target`. `pub(crate)` so the router composes
+/// it per-tier for its `QueryTarget::All` route (C5b).
+pub(crate) fn all_query_directions(
     net: &LinkstateNetwork,
     qabls: &RefCell<LinkstatepeerInterest<QueryableInfo>>,
     keyexpr: &str,
@@ -2472,8 +2483,9 @@ fn all_query_directions(
 /// `QueryTarget::AllComplete` (`dispatcher/queries.rs:228`): the complete-for-query
 /// filter FANNED OUT (every complete one), not narrowed to the nearest as
 /// BestMatching does. `directions_toward` dedups to one hop per subtree; the
-/// inbound-face exclusion is the fan_out's predicate.
-fn complete_query_directions(
+/// inbound-face exclusion is the fan_out's predicate. `pub(crate)` so the router
+/// composes it per-tier for its `QueryTarget::AllComplete` route (C5b).
+pub(crate) fn complete_query_directions(
     net: &LinkstateNetwork,
     qabls: &RefCell<LinkstatepeerInterest<QueryableInfo>>,
     keyexpr: &str,
