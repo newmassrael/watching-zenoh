@@ -83,41 +83,57 @@
 //! (the wz-codecs body carries no keyexpr ext — the face-down purge is the safety
 //! net until a codec atom adds it, as the sibling documents).
 //!
-//! ## Deferred to later slices (named, not silently dropped)
-//!
-//! - **The simple/client sub + qabl store** (zenoh's per-`Resource`
-//!   `session_ctxs`, the leaf input) — slice 1d. A Client face is held with no
-//!   net (1a), and a Client `DeclareSubscriber` / `DeclareQueryable` is NOT
-//!   ingested in 1b/1c; the client store + its derived cross-tier representation
-//!   land in 1d. NOTE (session-review R311y111): the 1d/COMPUTE fold MUST purge
-//!   FaceId-keyed leaf state BEFORE `deregister`'s linkless early-return (a
-//!   Client face is `link == None`), else a client face-down leaks its interest.
 //! ## Slice C1 (within-tier data route + tick re-advertise) — landed
 //!
-//! `forward` now ROUTES a data `Push` WITHIN its inbound tier's mesh
+//! `forward` ROUTES a data `Push` WITHIN its inbound tier's mesh
 //! ([`forward_push_tier`](RouterForwarder::forward_push_tier), the shared
 //! [`compute_push_forward`] core on the tier's `(net, subs)` fanned out
 //! tier-scoped) — a peer-sourced Push to peer-mesh subs, a router-sourced one to
 //! router-mesh subs (zenoh's master-gate-free route blocks). The
-//! [`tick`](FaceForwarder::tick) now RE-ADVERTISES each tier's NATIVE subs +
-//! qabls to the new tree children a recompute adds (the shared
-//! [`re_advertise_interest_into`] per net), fixing the prior slice's
-//! discard-the-delta tick. A `Push` is still COUNTED (the reception witness); a
-//! Client-tier Push (no mesh) stays count-only.
+//! [`tick`](FaceForwarder::tick) RE-ADVERTISES each tier's NATIVE subs + qabls to
+//! the new tree children a recompute adds (the shared
+//! [`re_advertise_interest_into`] per net). A `Push` is still COUNTED (the
+//! reception witness); a Client-tier Push (no mesh) stays count-only.
 //!
-//! ## Deferred to the cross-tier COMPUTE slices (named, not silently dropped)
+//! ## Slice C2 (client cross-tier subscription advertisement) — landed
 //!
-//! - **The cross-tier bubble DERIVATION + route COMPUTE + master-election** —
-//!   `cross_tier_self_source` (fed to BOTH route-compute AND the re-advertise
-//!   path — else self's aggregated interest never reaches a new tree child, and
-//!   it drives the re-advertise ONLY, never the self-excluded data forward), the
-//!   cross-tier data bridge, the source-dimensioned route cache, `elect_router`
-//!   consistent-hash ingress/egress filtering (`shared_nodes` for the route
-//!   master vs `get_router_links` per-peer — a real asymmetry), and
-//!   `compute_query_route` (`Request` / `Response`) — slices C2-C5. Local-client
-//!   delivery rides C2/C3. A single-router cross-tier bridge (C2) MUST fail-fast
-//!   fence `shared_nodes <= 1` until master-election (C4) lands, else a 2nd
-//!   router double-delivers.
+//! A CLIENT-face `DeclareSubscriber` lands in the per-face
+//! [`client_subs`](RouterForwarder#structfield.client_subs) leaf store, and the
+//! router ADVERTISES self's now-derived cross-tier interest into BOTH meshes — a
+//! self-sourced `DeclareSubscriber` (node_id 0) flooded to self's tree children
+//! ([`advertise_self_cross_tier_sub`](RouterForwarder::advertise_self_cross_tier_sub)),
+//! re-derived on the tick for late-joining children
+//! ([`re_advertise_self_cross_tier`](RouterForwarder::re_advertise_self_cross_tier))
+//! — so a mesh publisher routes the keyexpr toward this router. This is
+//! `cross_tier_self_source` in its client form (the single-router-meaningful
+//! contributor; a router's `router_subs` is empty until routers federate).
+//! DERIVE-not-STORE: `client_subs` is the SSOT, self is NOT registered in the tier
+//! tables, and the derived self-source drives the ADVERTISEMENT / re-advertise
+//! path ONLY — never a data forward-target set (which stays self-excluded). A
+//! client face-down purges `client_subs` BEFORE `deregister`'s linkless
+//! early-return (OBLIGATION 1) and withdraws any advertisement it was the last
+//! client of.
+//!
+//! ## Deferred to later slices (named, not silently dropped)
+//!
+//! - **The cross-tier DATA delivery + router↔router federation + master-election**
+//!   — the client SUB advertisement lands the CONTROL half (C2). Until the DATA
+//!   half lands, a client's advertised interest is WRITE-ONLY: C2 now ATTRACTS a
+//!   Push for the keyexpr toward this router, which then drops it at
+//!   [`forward_push_tier`](RouterForwarder::forward_push_tier) (no client
+//!   delivery) — a benign advertise-then-blackhole interval (pub/sub carries no
+//!   delivery guarantee, and pre-C2 the client got nothing either), but C3 MUST
+//!   land client delivery before any real multi-node deployment. The cross-tier
+//!   DATA bridge (a Push from one tier delivered to the OTHER tier's subs + local
+//!   clients) is the router↔router federation — MULTI-ROUTER, so it couples with
+//!   `elect_router` (`shared_nodes` for the route master vs `get_router_links`
+//!   per-peer — a real asymmetry) + the source-dimensioned route cache. A
+//!   cross-tier data bridge MUST fail-fast fence `shared_nodes <= 1` until the
+//!   election lands, else a 2nd router double-delivers. (The advertisement is NOT
+//!   master-gated — every router advertises its own clients' interest.)
+//! - **The client QABL store + `compute_query_route`** (`Request` / `Response`) —
+//!   the query-plane twin of C2 (a client `DeclareQueryable` + its cross-tier
+//!   advertisement carrying the merged `QueryableInfo`) plus the query route.
 //! - **Gossip / autoconnect / interceptors / pending-query GC** — the
 //!   per-net policy knobs the `LinkstateForwarder` carries; added as the
 //!   router gains the corresponding plane. NOTE (impl-panel R311y113): the
@@ -130,7 +146,7 @@
 //!   slice — the ONE place the router route is not yet at single-net parity.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -247,6 +263,18 @@ pub struct RouterForwarder {
     /// Peer-tier queryable interest (zenoh `HatTables.linkstatepeer_qabls`).
     /// Populated by slice 1c (native Peer queryable sources keyed by zid).
     linkstatepeer_qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    /// Per-CLIENT-face subscription store (C2) — zenoh's per-`Resource`
+    /// `session_ctxs` leaf input, keyed by the client's [`FaceId`] (a Client face
+    /// is HELD with no mesh, so its interest cannot live in a Zid-keyed tier
+    /// table). This is the SSOT contributor to `cross_tier_self_source`: a client
+    /// subscribing `K` makes SELF a virtual sub-source that is ADVERTISED into the
+    /// meshes (a self-sourced `DeclareSubscriber` flooded to self's tree children,
+    /// self NOT stored in the tier tables — derive-not-store), so a mesh publisher
+    /// routes `K` toward this router. FaceId-keyed leaf state, so
+    /// [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE its linkless
+    /// early-return (OBLIGATION 1). The cross-tier DATA delivery to these clients
+    /// is a later slice; C2 is the ADVERTISEMENT half.
+    client_subs: RefCell<HashMap<FaceId, HashSet<String>>>,
     /// Running total of link-state lists ingested across both nets — the
     /// control-plane work witness (the router twin of
     /// `LinkstateForwarder::ingested`).
@@ -300,6 +328,7 @@ impl RouterForwarder {
             linkstatepeer_subs: RefCell::new(LinkstatepeerInterest::new()),
             router_qabls: RefCell::new(LinkstatepeerInterest::new()),
             linkstatepeer_qabls: RefCell::new(LinkstatepeerInterest::new()),
+            client_subs: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
             trees_dirty_routers: Cell::new(false),
@@ -840,6 +869,11 @@ impl RouterForwarder {
                 |children, declare| self.flood_delta_tier(tier, children, declare),
             );
         }
+        // C2: also re-advertise self's DERIVED cross-tier subs (from client_subs)
+        // to self's NEW tree children — the derive's OBLIGATION-2 re-advertise feed
+        // (a distinct self-sourced declaration), so a late-joining mesh node learns
+        // to route toward this router for a keyexpr a local client subscribes.
+        self.re_advertise_self_cross_tier(tier, &new_children);
     }
 
     /// Flood a re-advertised declaration to a tree-recompute's NEW children within
@@ -852,6 +886,166 @@ impl RouterForwarder {
                 .filter(|z| children.contains(z))
                 .map(|_| NetworkMessage::Declare(Box::new(declare.clone()))))
         });
+    }
+
+    /// Ingest a CLIENT-face `DeclareSubscriber` (C2) into the per-face
+    /// [`client_subs`](Self#structfield.client_subs) store and — when it is the
+    /// FIRST client interested in the keyexpr — ADVERTISE self's now-derived
+    /// cross-tier interest into the meshes. The mesh-face declare path
+    /// ([`ingest_subscription`](Self::ingest_subscription)) drops a Client-tier
+    /// declare (no tier table); this is where the leaf input lands instead.
+    fn ingest_client_subscription(&self, inbound: FaceId, declare: &DeclareOwned) {
+        let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
+            return;
+        };
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) {
+                Some(k) => k,
+                None => return,
+            }
+        };
+        // The derive-level change gate: ADVERTISE only when this is the FIRST
+        // client interested in `keyexpr` (the derive flips false -> true).
+        let already = self.any_client_subscribes(&keyexpr);
+        let inserted = self
+            .client_subs
+            .borrow_mut()
+            .entry(inbound)
+            .or_default()
+            .insert(keyexpr.clone());
+        if inserted && !already {
+            self.advertise_self_cross_tier_sub(&keyexpr);
+        }
+    }
+
+    /// Withdraw a CLIENT-face `UndeclareSubscriber` (C2) from
+    /// [`client_subs`](Self#structfield.client_subs); when it removed the LAST
+    /// client interested in the keyexpr, withdraw self's cross-tier advertisement.
+    fn withdraw_client_subscription(&self, inbound: FaceId, declare: &DeclareOwned) {
+        let exts = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
+            _ => return,
+        };
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_ext_keyexpr(exts, &s.keyexpr_table) {
+                Some(k) => k,
+                None => return,
+            }
+        };
+        let removed = self
+            .client_subs
+            .borrow_mut()
+            .get_mut(&inbound)
+            .is_some_and(|set| set.remove(&keyexpr));
+        if removed && !self.any_client_subscribes(&keyexpr) {
+            self.withdraw_self_cross_tier_sub(&keyexpr);
+        }
+    }
+
+    /// Whether ANY client face currently subscribes `keyexpr` — the C2 derive read
+    /// (`cross_tier_self_source` for the subscription plane). Self is a virtual
+    /// sub-source in the meshes IFF this is true (or, once federation lands, the
+    /// OTHER tier holds a native — always empty in a single router).
+    fn any_client_subscribes(&self, keyexpr: &str) -> bool {
+        self.client_subs
+            .borrow()
+            .values()
+            .any(|set| set.contains(keyexpr))
+    }
+
+    /// The deduped set of keyexprs some client subscribes — self's DERIVED
+    /// cross-tier sub-sources, re-advertised to a tier's NEW tree children on the
+    /// tick ([`re_advertise_self_cross_tier`](Self::re_advertise_self_cross_tier)).
+    fn derived_cross_tier_subs(&self) -> Vec<String> {
+        let mut set: HashSet<String> = HashSet::new();
+        for keys in self.client_subs.borrow().values() {
+            set.extend(keys.iter().cloned());
+        }
+        set.into_iter().collect()
+    }
+
+    /// Flood self's cross-tier subscription ADVERTISEMENT for `keyexpr` into BOTH
+    /// meshes — a self-sourced `DeclareSubscriber` (node_id 0) to self's tree
+    /// children in each net, so a mesh publisher routes `keyexpr` toward this
+    /// router. DERIVE-not-STORE: self is NOT registered in the tier tables; the
+    /// [`client_subs`](Self#structfield.client_subs) store is the SSOT and the
+    /// advertisement is re-derived on the tick for late-joining children. The
+    /// router-mesh flood is a no-op in a single router (no router tree children)
+    /// but keeps the two tiers symmetric for when routers federate.
+    fn advertise_self_cross_tier_sub(&self, keyexpr: &str) {
+        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            self.flood_self_sourced(tier, keyexpr, |ke| build_declare_subscriber(0, 0, Some(ke)));
+        }
+    }
+
+    /// Flood self's cross-tier WITHDRAWAL for `keyexpr` into BOTH meshes — the
+    /// undeclare twin of
+    /// [`advertise_self_cross_tier_sub`](Self::advertise_self_cross_tier_sub).
+    fn withdraw_self_cross_tier_sub(&self, keyexpr: &str) {
+        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            self.flood_self_sourced(tier, keyexpr, build_undeclare_subscriber_with_keyexpr);
+        }
+    }
+
+    /// Flood a self-sourced declaration for `keyexpr` (node_id 0) to self's tree
+    /// children in `tier`'s net — the immediate advertisement/withdrawal seam.
+    /// Mirrors [`LinkstateForwarder`]'s `declare_subscription` flood, but keyed on
+    /// the DERIVED client interest, not a stored self-native.
+    fn flood_self_sourced(
+        &self,
+        tier: FaceTier,
+        keyexpr: &str,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) {
+        let Some((net, _dirty)) = self.plane(tier) else {
+            return;
+        };
+        let children = {
+            let n = net.borrow();
+            let self_zid = *n.self_zid();
+            n.tree_children_of(&self_zid)
+        };
+        if children.is_empty() {
+            return;
+        }
+        let Ok(declare) = build(keyexpr) else {
+            return;
+        };
+        self.flood_delta_tier(tier, &children, &declare);
+    }
+
+    /// Re-advertise self's DERIVED cross-tier subscriptions to the tier's NEW tree
+    /// children a recompute added (C2) — self is the source, so the flood targets
+    /// the delta children of SELF's tree in this net. The tick counterpart of the
+    /// immediate [`advertise_self_cross_tier_sub`](Self::advertise_self_cross_tier_sub),
+    /// the OBLIGATION-2 feed of the re-advertise path with the DERIVED (not stored)
+    /// self-source — distinct from the native re-advertise (native = real peer
+    /// source; derived = self, node_id 0).
+    fn re_advertise_self_cross_tier(&self, tier: FaceTier, new_children: &[(Zid, Vec<Zid>)]) {
+        let Some((net, _dirty)) = self.plane(tier) else {
+            return;
+        };
+        let self_zid = *net.borrow().self_zid();
+        let Some((_, self_delta)) = new_children.iter().find(|(src, _)| *src == self_zid) else {
+            return;
+        };
+        if self_delta.is_empty() {
+            return;
+        }
+        for keyexpr in self.derived_cross_tier_subs() {
+            let Ok(declare) = build_declare_subscriber(0, 0, Some(&keyexpr)) else {
+                continue;
+            };
+            self.flood_delta_tier(tier, self_delta, &declare);
+        }
     }
 }
 
@@ -914,6 +1108,20 @@ impl FaceForwarder for RouterForwarder {
     }
 
     fn deregister(&self, id: FaceId) {
+        // OBLIGATION-1: purge the FaceId-keyed client sub store BEFORE the linkless
+        // early-return below (a Client face is `link == None`), withdrawing self's
+        // cross-tier advertisement for any keyexpr this was the LAST client of.
+        // Mirrors the sibling's `pending.remove_face`-first ordering; a Client face
+        // is skipped by the peer/router fan-out (its tier), so flooding before its
+        // `faces` entry is dropped is harmless.
+        let departed = self.client_subs.borrow_mut().remove(&id);
+        if let Some(keys) = departed {
+            for keyexpr in keys {
+                if !self.any_client_subscribes(&keyexpr) {
+                    self.withdraw_self_cross_tier_sub(&keyexpr);
+                }
+            }
+        }
         let Some(state) = self.faces.borrow_mut().remove(&id) else {
             return;
         };
@@ -1032,10 +1240,18 @@ impl FaceForwarder for RouterForwarder {
                         self.absorb_keyexpr_declaration(id, declare);
                     }
                     DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => {
-                        self.ingest_subscription(id, tier, *reliable, declare);
+                        if tier == FaceTier::Client {
+                            self.ingest_client_subscription(id, declare);
+                        } else {
+                            self.ingest_subscription(id, tier, *reliable, declare);
+                        }
                     }
                     DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
-                        self.withdraw_subscription(id, tier, *reliable, declare);
+                        if tier == FaceTier::Client {
+                            self.withdraw_client_subscription(id, declare);
+                        } else {
+                            self.withdraw_subscription(id, tier, *reliable, declare);
+                        }
                     }
                     DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
                         self.ingest_queryable(id, tier, *reliable, declare);
@@ -1550,6 +1766,218 @@ mod tests {
             fwd.linkstatepeers_net.borrow().node_count(),
             1,
             "peers_net untouched (only self)"
+        );
+    }
+
+    /// A literal `UndeclareSubscriber` carrying `keyexpr` in its ext_keyexpr.
+    fn undeclare_sub(keyexpr: &str) -> NetworkMessage {
+        NetworkMessage::Declare(Box::new(
+            build_undeclare_subscriber_with_keyexpr(keyexpr).expect("build undeclare"),
+        ))
+    }
+
+    #[test]
+    fn client_sub_advertises_self_interest_to_the_peer_mesh() {
+        // A CLIENT subscribing K makes the router ADVERTISE self's cross-tier
+        // interest into the peer mesh (a self-sourced DeclareSubscriber to a peer
+        // tree child), so a peer publisher routes K toward this router (C2). Self
+        // is NOT stored in the tier table (derive-not-store).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // a peer tree child
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5); // peer edge self<->P
+        fwd.tick(); // compute the peer tree (P is self's child)
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // client subscribes
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "self advertised its cross-tier interest to the peer child P"
+        );
+        assert!(
+            fwd.linkstatepeer_subs
+                .borrow()
+                .interested("demo/data")
+                .is_empty(),
+            "derive-not-store: self is NOT registered in the peer subs table"
+        );
+    }
+
+    #[test]
+    fn a_second_client_for_the_same_keyexpr_does_not_re_advertise() {
+        // The derive change-gate: self advertises only on the FIRST client for K.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c1, _) = face(zid(0xAA), WIRE_CLIENT);
+        let (c2, _) = face(zid(0xCC), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &c1);
+        fwd.register(FaceId(1), &c2);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // first client -> advertise
+        sink_p.reset();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // second client -> gated
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "a second client for the same keyexpr does not re-advertise (derive gate)"
+        );
+    }
+
+    #[test]
+    fn last_client_undeclare_withdraws_the_advertisement() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), undeclare_sub("demo/data")); // last client withdraws
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "self withdrew its cross-tier advertisement from the peer mesh"
+        );
+    }
+
+    #[test]
+    fn client_face_down_purges_and_withdraws_before_the_linkless_early_return() {
+        // OBLIGATION-1: a Client face-down (link == None) purges its FaceId-keyed
+        // client sub store BEFORE the linkless early-return AND withdraws the
+        // advertisement it was the last client of.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        sink_p.reset();
+        fwd.deregister(FaceId(0)); // client down -> purge + withdraw
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the client face-down withdrew its advertisement"
+        );
+        assert!(
+            fwd.client_subs.borrow().get(&FaceId(0)).is_none(),
+            "the client sub store was purged"
+        );
+    }
+
+    #[test]
+    fn tick_re_advertises_the_derived_self_sub_to_a_late_joining_peer() {
+        // The DERIVED self cross-tier sub (not a stored native) converges onto a
+        // peer that joins AFTER the client declared — OBLIGATION-2's re-advertise
+        // feed of the derived self-source.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // client subscribes; no peer yet
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // joins LATER
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 6);
+        sink_p.reset();
+        fwd.tick(); // recompute -> P is a new self-child -> re-advertise the derived sub
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the derived self cross-tier sub re-advertised to the late-joining peer"
+        );
+    }
+
+    #[test]
+    fn partial_client_deregister_keeps_the_advertisement() {
+        // Two clients subscribe the SAME keyexpr; one leaving does NOT withdraw
+        // (the other still holds K) — only the LAST client's departure withdraws.
+        // The derive gate on the withdraw side, distinct from a naive per-face
+        // withdraw (the composition case the single-client tests skip).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c1, _) = face(zid(0xAA), WIRE_CLIENT);
+        let (c2, _) = face(zid(0xCC), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &c1);
+        fwd.register(FaceId(1), &c2);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // c1 -> advertise
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // c2 (same K) -> gated
+        sink_p.reset();
+        fwd.deregister(FaceId(0)); // c1 down -> c2 still holds K -> NO withdraw
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "no withdraw while another client still subscribes K"
+        );
+        fwd.deregister(FaceId(1)); // c2 down -> last client for K -> withdraw
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "withdrawn once the last client for K departs"
+        );
+    }
+
+    #[test]
+    fn aliased_client_sub_advertises_via_the_face_table() {
+        // A client's ALIASED DeclareSubscriber (via a prior DeclKexpr) resolves to
+        // the literal in client_subs and advertises it cross-tier; a literal
+        // undeclare of the resolved keyexpr withdraws — the alias round-trip on the
+        // client path (the class y106b/y107b asymmetries lived in).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        let kexpr = NetworkMessage::Declare(Box::new(
+            wz_session_core::declare_build::build_declare_kexpr(7, "demo/aliased").expect("kexpr"),
+        ));
+        forward_one(&fwd, FaceId(0), kexpr);
+        sink_p.reset();
+        let aliased = NetworkMessage::Declare(Box::new(
+            build_declare_subscriber(0, 7, None).expect("aliased sub"),
+        ));
+        forward_one(&fwd, FaceId(0), aliased);
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the aliased client sub resolved via the face table + advertised to the peer"
+        );
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), undeclare_sub("demo/aliased")); // literal undeclare of the resolved ke
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "withdrawn when the (aliased) client sub is undeclared"
+        );
+    }
+
+    #[test]
+    fn client_undeclare_without_prior_sub_is_silent() {
+        // A client UndeclareSubscriber for a keyexpr it never subscribed floods no
+        // withdrawal (the derive gate: nothing was removed, so nothing withdraws).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), undeclare_sub("never/subscribed"));
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "an undeclare with no prior client sub floods no withdrawal"
         );
     }
 
