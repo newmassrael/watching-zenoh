@@ -2440,7 +2440,7 @@ fn is_child(children: &[Zid], zid: Zid) -> bool {
 /// `QueryableInfo` VERBATIM — NO per-hop distance increment (BestMatching reads
 /// `net.distances`, not the carried distance). DEFAULT / incomplete omits the
 /// ext (byte-identical to the prior clean re-flood).
-fn build_declare_queryable_with_info(
+pub(crate) fn build_declare_queryable_with_info(
     keyexpr: &str,
     info: QueryableInfo,
 ) -> Result<DeclareOwned, CodecError> {
@@ -2491,7 +2491,7 @@ pub(crate) fn declare_subscriber_wireexpr(declare: &DeclareOwned) -> Option<&Wir
 /// [`declare_subscriber_wireexpr`]; returns the raw `Wireexpr` (literal OR
 /// aliased) so the caller resolves it against the inbound face's alias table
 /// (B1b), exactly as the subscriber side.
-fn declare_queryable_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
+pub(crate) fn declare_queryable_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
     match &declare.body {
         DeclareOwnedVariant::CodecZenohDeclQueryable(q) => Some(&q.keyexpr),
         _ => None,

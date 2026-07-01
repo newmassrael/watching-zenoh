@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Router-hat forwarder (P4 §5.21, slices 1a+1b — DUAL-mesh STATE + sub INGEST).
+//! Router-hat forwarder (P4 §5.21, slices 1a-1c — DUAL-mesh STATE + declare INGEST).
 //!
 //! [`RouterForwarder`] is the 4th [`FaceForwarder`](crate::accept_loop::FaceForwarder),
 //! the wz port of zenoh's `hat/router` routing strategy. Where the
@@ -49,7 +49,7 @@
 //!   (`send_on_links`); wz keeps one `faces` map, so the flood filters on the
 //!   per-face tier it records here.
 //!
-//! ## Slice 1b (subscription INGEST) — landed
+//! ## Slices 1b + 1c (declare INGEST) — landed
 //!
 //! `forward` ingests a sourced `DeclareSubscriber` into the INBOUND face's tier
 //! subs table (`router_subs` for a Router face, `linkstatepeer_subs` for a Peer
@@ -68,18 +68,22 @@
 //! Storing it is behaviorally equivalent (a stored set == natives ∪ {self}
 //! whenever the other tier has a native) but would force zenoh's four
 //! reverse-forget teardown sites; deriving makes that drift
-//! unrepresentable-by-construction (R311y109 design panel). So 1b stores ONLY
-//! natives, which 1b's own readers (`purge_detached_interest_tier`, future
+//! unrepresentable-by-construction (R311y109 design panel). So the ingest stores
+//! ONLY natives, which its own readers (`purge_detached_interest_tier`, future
 //! interest-broker) want anyway.
+//!
+//! Slice 1c adds the QUERYABLE twin (`DeclareQueryable` → `router_qabls` /
+//! `linkstatepeer_qabls`), keyed by source with VALUE = the declared
+//! [`QueryableInfo`] (a NEW peer OR a changed info re-floods — the value-diff
+//! gate), the re-flood carrying that info downstream. Its cross-tier bubble is a
+//! MERGED info in zenoh (`local_router_qabl_info` / `local_peer_qabl_info`,
+//! `complete = OR`, `distance = min`); like the sub bubble it is DERIVED at
+//! compute from the NATIVE qabls, not stored. `UndeclareQueryable` stays deferred
+//! (the wz-codecs body carries no keyexpr ext — the face-down purge is the safety
+//! net until a codec atom adds it, as the sibling documents).
 //!
 //! ## Deferred to later slices (named, not silently dropped)
 //!
-//! - **Queryable dual-tier INGEST** (`DeclareQueryable` → `router_qabls` /
-//!   `linkstatepeer_qabls`) — slice 1c. Distinct from subs because the bubble
-//!   self entry carries a MERGED `QueryableInfo` (zenoh `local_router_qabl_info`
-//!   / `local_peer_qabl_info`, `complete = OR`, `distance = min`), which (like
-//!   the sub bubble) the COMPUTE slice derives. The qabls tables exist here (so
-//!   the `deregister` purge is stable) but are populated by 1c.
 //! - **The simple/client subscription store** (zenoh's per-`Resource`
 //!   `session_ctxs`, the leaf-subscriber input) — slice 1d. A Client face is
 //!   held with no net (1a), and a Client `DeclareSubscriber` is NOT ingested in
@@ -120,12 +124,12 @@ use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use crate::accept_loop::{FaceForwarder, FaceId};
 use crate::linkstate_forward::{
-    declare_subscriber_wireexpr, is_tree_forward_target, peer_whatami_routing, peer_zid_routing,
-    resolve_source_in,
+    build_declare_queryable_with_info, declare_queryable_wireexpr, declare_subscriber_wireexpr,
+    is_tree_forward_target, peer_whatami_routing, peer_zid_routing, resolve_source_in,
 };
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
-use wz_session_core::queryable_info::QueryableInfo;
+use wz_session_core::queryable_info::{read_queryable_info, QueryableInfo};
 
 /// Which of a router's two link-state meshes a face belongs to — the routing
 /// classification of its handshake [`WhatAmI`] role. zenoh partitions faces by
@@ -203,11 +207,12 @@ pub struct RouterForwarder {
     /// Populated by slice 1b (native Peer sources keyed by zid).
     linkstatepeer_subs: RefCell<LinkstatepeerInterest<()>>,
     /// Router-tier queryable interest (zenoh `HatTables.router_qabls`).
-    /// Present-but-empty; populated by the queryable-INGEST slice (1c) — the
-    /// `deregister` purge is wired here so 1c needs no lifecycle re-touch.
+    /// POPULATED by the queryable-INGEST slice (1c, this round): NATIVE Router
+    /// queryable sources keyed by zid, VALUE = their declared `QueryableInfo`.
+    /// The cross-tier self-bubble (a MERGED info in zenoh) is DERIVED at compute.
     router_qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
     /// Peer-tier queryable interest (zenoh `HatTables.linkstatepeer_qabls`).
-    /// Present-but-empty; populated by the queryable-INGEST slice (1c).
+    /// Populated by slice 1c (native Peer queryable sources keyed by zid).
     linkstatepeer_qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
     /// Running total of link-state lists ingested across both nets — the
     /// control-plane work witness (the router twin of
@@ -467,6 +472,19 @@ impl RouterForwarder {
         }
     }
 
+    /// The queryable interest table for `tier` (the query-plane twin of
+    /// [`subs_table`](Self::subs_table)), or `None` for [`FaceTier::Client`].
+    fn qabls_table(
+        &self,
+        tier: FaceTier,
+    ) -> Option<&RefCell<LinkstatepeerInterest<QueryableInfo>>> {
+        match tier {
+            FaceTier::Routers => Some(&self.router_qabls),
+            FaceTier::LinkstatePeers => Some(&self.linkstatepeer_qabls),
+            FaceTier::Client => None,
+        }
+    }
+
     /// Record (or drop) a link-local keyexpr alias from a sourced `DeclKexpr` /
     /// `UndeclKexpr` on `face` (1b) — the per-face mirror of
     /// [`LinkstateForwarder`]'s `absorb_keyexpr_declaration`. Link-local (NOT
@@ -607,6 +625,79 @@ impl RouterForwarder {
             reliable,
             &keyexpr,
             build_undeclare_subscriber_with_keyexpr,
+        );
+    }
+
+    /// Ingest a sourced `DeclareQueryable` (1c) — the query-plane twin of
+    /// [`ingest_subscription`](Self::ingest_subscription). Register the SOURCE's
+    /// queryable interest (VALUE = its declared [`QueryableInfo`], read off the
+    /// DeclQueryable ext chain) in the INBOUND tier's qabls table, and — only on
+    /// a real change (a NEW peer OR a CHANGED `QueryableInfo`, the value-diff
+    /// gate) — re-flood a clean declaration CARRYING that info within the tier so
+    /// a multi-hop relay learns the queryable's completeness. Like the sub
+    /// bubble, the cross-tier bubble (a MERGED `local_*_qabl_info` in zenoh) is
+    /// DERIVED at compute, not stored. `UndeclareQueryable` is deferred: the
+    /// wz-codecs body carries no keyexpr ext (id only), so per-keyexpr retraction
+    /// needs a codec extension first — the whole-peer face-down purge is the
+    /// safety net until then (the same gap the sibling documents).
+    fn ingest_queryable(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
+            return;
+        };
+        let Some((net, _dirty)) = self.plane(tier) else {
+            return; // Client tier: no net / no tier table -> slice 1d.
+        };
+        let Some(qabls) = self.qabls_table(tier) else {
+            return;
+        };
+        // The declared QueryableInfo (complete / distance) rides the DeclQueryable
+        // body's ext chain; absent ext = zenoh DEFAULT (incomplete).
+        let info = match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => {
+                read_queryable_info(dq.extensions.as_ref())
+            }
+            _ => QueryableInfo::DEFAULT,
+        };
+        let (inbound_zid, inbound_link, keyexpr) = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(keyexpr) = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) else {
+                return;
+            };
+            (peer_zid_routing(&s.actions), s.link, keyexpr)
+        };
+        let Some((source_zid, out_node_id)) = resolve_source_in(
+            &net.borrow(),
+            inbound_zid,
+            inbound_link,
+            read_declare_source(declare),
+        ) else {
+            return;
+        };
+        // The VALUE-DIFF gate: a new peer OR a changed QueryableInfo re-floods
+        // (so a queryable flipping complete:false->true re-propagates).
+        if !qabls.borrow_mut().register(&keyexpr, source_zid, info) {
+            return;
+        }
+        self.reflood_declaration(
+            inbound,
+            tier,
+            net,
+            source_zid,
+            inbound_zid,
+            out_node_id,
+            reliable,
+            &keyexpr,
+            // CARRY the source's QueryableInfo downstream (info is Copy).
+            move |ke| build_declare_queryable_with_info(ke, info),
         );
     }
 
@@ -797,12 +888,12 @@ impl FaceForwarder for RouterForwarder {
                 NetworkMessage::Push(_) => {
                     self.data_seen.set(self.data_seen.get() + 1);
                 }
-                // A subscription declaration (slice 1b): ingest into the inbound
-                // tier's subs table + re-flood within that tier; a keyexpr-alias
-                // declaration records the link-local alias for resolution. The
-                // queryable plane is slice 1c, a Client-face declare is slice 1d,
-                // the cross-tier bubble is derived at compute, and the
-                // Request/Response query plane is the COMPUTE slice.
+                // A declaration: ingest a DeclareSubscriber (1b) / DeclareQueryable
+                // (1c) into the inbound tier's subs/qabls table + re-flood within
+                // that tier; a keyexpr-alias declaration records the link-local
+                // alias for resolution. A Client-face declare is slice 1d, the
+                // cross-tier bubble is derived at compute, and the Request/Response
+                // query plane is the COMPUTE slice.
                 NetworkMessage::Declare(declare) => match &declare.body {
                     DeclareOwnedVariant::CodecZenohDeclKexpr(_)
                     | DeclareOwnedVariant::CodecZenohUndeclKexpr(_) => {
@@ -814,7 +905,14 @@ impl FaceForwarder for RouterForwarder {
                     DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
                         self.withdraw_subscription(id, tier, *reliable, declare);
                     }
-                    // DeclareQueryable -> 1c; UndeclareQueryable + the rest deferred.
+                    DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
+                        self.ingest_queryable(id, tier, *reliable, declare);
+                    }
+                    // UndeclareQueryable: deferred (the wz-codecs body carries no
+                    // keyexpr ext -> per-keyexpr retraction needs a codec atom
+                    // first; the face-down purge is the safety net, as the sibling
+                    // documents). Dropped explicitly so it is NOT mis-routed.
+                    DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {}
                     _ => {}
                 },
                 _ => {}
@@ -1315,25 +1413,204 @@ mod tests {
         );
     }
 
+    // ── slice 1c: queryable dual-tier INGEST ─────────────────────────────
+
+    /// A `DeclareQueryable` for `keyexpr` carrying a `QueryableInfo` (id 0, no
+    /// ext_nodeid — the inbound neighbour is the source).
+    fn declare_qabl(keyexpr: &str, complete: bool) -> NetworkMessage {
+        NetworkMessage::Declare(Box::new(
+            build_declare_queryable_with_info(
+                keyexpr,
+                QueryableInfo {
+                    complete,
+                    distance: 0,
+                },
+            )
+            .expect("build queryable"),
+        ))
+    }
+
     #[test]
-    fn queryable_declare_is_deferred_to_1c() {
-        // A DeclareQueryable ingests nothing in 1b (the qabls tables + the info
-        // merge are slice 1c) — the named deferral, pinned.
+    fn router_face_queryable_lands_in_router_qabls_only() {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
-        let q = NetworkMessage::Declare(Box::new(
-            wz_session_core::declare_build::build_declare_queryable(0, 0, Some("demo/q"))
-                .expect("build queryable"),
-        ));
-        forward_one(&fwd, FaceId(0), q);
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
+        assert_eq!(
+            fwd.router_qabls.borrow().interested("demo/q"),
+            vec![zid(0xAA)],
+            "the router-face source is registered in router_qabls"
+        );
+        assert!(
+            fwd.linkstatepeer_qabls
+                .borrow()
+                .interested("demo/q")
+                .is_empty(),
+            "no native peer entry, and the cross-tier bubble is NOT stored"
+        );
+        // The subscription plane is untouched by a queryable declare.
+        assert!(fwd.router_subs.borrow().interested("demo/q").is_empty());
+    }
+
+    #[test]
+    fn peer_face_queryable_lands_in_linkstatepeer_qabls_only() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (b, _sink) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &b);
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", false));
+        assert_eq!(
+            fwd.linkstatepeer_qabls.borrow().interested("demo/q"),
+            vec![zid(0xBB)]
+        );
+        assert!(fwd.router_qabls.borrow().interested("demo/q").is_empty());
+    }
+
+    #[test]
+    fn queryable_value_diff_gate_re_floods_on_complete_flip() {
+        // The queryable-specific VALUE-DIFF gate: a new queryable re-floods, a
+        // redundant re-declare does not, but a completeness flip DOES (so a
+        // storage finishing its load re-propagates). Tier-scoped (peer untouched).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_ROUTER);
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        sink_c.reset();
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", false)); // new -> re-flood
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "a new queryable re-floods to the child"
+        );
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", false)); // same -> gated
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "the same QueryableInfo does not re-flood"
+        );
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // complete flip
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "a complete:false->true flip re-floods (the value-diff gate)"
+        );
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "the peer tier is never reached by a routers-tier queryable re-flood"
+        );
+    }
+
+    #[test]
+    fn face_down_purges_the_declared_queryable() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
+        assert_eq!(
+            fwd.router_qabls.borrow().interested("demo/q"),
+            vec![zid(0xAA)]
+        );
+        fwd.deregister(FaceId(0));
+        assert!(
+            fwd.router_qabls.borrow().interested("demo/q").is_empty(),
+            "the departed queryable source is purged (the 1a purge covers qabls)"
+        );
+    }
+
+    #[test]
+    fn client_face_queryable_is_not_ingested() {
+        // A Client face has no tier table (slice 1d): its queryable declare
+        // registers nothing in either mesh tier.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c, _sink) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &c);
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert!(fwd.router_qabls.borrow().interested("demo/q").is_empty());
         assert!(fwd
             .linkstatepeer_qabls
             .borrow()
             .interested("demo/q")
             .is_empty());
-        assert!(fwd.router_subs.borrow().interested("demo/q").is_empty());
+    }
+
+    /// The `QueryableInfo` carried on the single forwarded DeclareQueryable in a
+    /// re-flooded frame — decoded through the production `read_queryable_info`
+    /// SSOT (mirror of the sibling's `forwarded_declare_queryable_info`).
+    fn forwarded_qabl_info(frame: &[u8]) -> QueryableInfo {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Declare(d)) => match &d.body {
+                DeclareOwnedVariant::CodecZenohDeclQueryable(q) => {
+                    read_queryable_info(q.extensions.as_ref())
+                }
+                _ => panic!("forwarded Declare is not a DeclareQueryable"),
+            },
+            other => panic!("expected a forwarded Declare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queryable_re_flood_carries_the_source_completeness() {
+        // The 1c-distinctive behavior: the re-flooded DeclareQueryable CARRIES the
+        // source's QueryableInfo (not DEFAULT, not the subscriber carrier) — so a
+        // multi-hop relay learns the queryable's completeness. Content-checked,
+        // not just frame-counted.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_ROUTER);
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
+        assert_eq!(sink_c.frame_count(), 1, "re-flooded to the tree child");
+        assert!(
+            forwarded_qabl_info(&sink_c.frame_bytes(0)).complete,
+            "the re-flood carries the source's complete=true QueryableInfo"
+        );
+    }
+
+    #[test]
+    fn undeclare_queryable_is_inert() {
+        // UndeclareQueryable is deferred (the wz-codecs body carries no keyexpr
+        // ext): a declared queryable SURVIVES an UndeclareQueryable (unlike an
+        // UndeclareSubscriber, which withdraws). Pins the no-op arm.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
+        assert_eq!(
+            fwd.router_qabls.borrow().interested("demo/q"),
+            vec![zid(0xAA)]
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_undeclare_queryable(0),
+            )),
+        );
+        assert_eq!(
+            fwd.router_qabls.borrow().interested("demo/q"),
+            vec![zid(0xAA)],
+            "UndeclareQueryable is inert (deferred codec gap) — the queryable survives"
+        );
     }
 
     #[test]

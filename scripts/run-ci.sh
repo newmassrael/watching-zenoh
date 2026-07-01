@@ -1148,11 +1148,11 @@ layer_c1ax_cargo_test_routing_namespace() {
         && cargo build -p wz --features routing-namespace --quiet)
 }
 
-# ─── Layer C1ay — router-hat 1a+1b: dual-net STATE + subs INGEST unit + clippy ─
+# ─── Layer C1ay — router-hat 1a-1c: dual-net STATE + declare INGEST unit + clippy ─
 #
-# R311y108 + R311y109: the §5.21 router forwarder (the 4th `impl FaceForwarder`,
-# `router_forward`) is the wz port of zenoh `hat/router`'s DUAL link-state mesh
-# (routers_net + linkstatepeers_net), gated on the off-default
+# R311y108 + R311y109 + R311y110: the §5.21 router forwarder (the 4th
+# `impl FaceForwarder`, `router_forward`) is the wz port of zenoh `hat/router`'s
+# DUAL link-state mesh (routers_net + linkstatepeers_net), gated on the off-default
 # `routing-router-hat` feature, so the default Layer C1 does NOT compile it --
 # this lane restores its coverage, the same triad shape C1w/C1x/C1y use for the
 # other routing forwarders:
@@ -1162,12 +1162,15 @@ layer_c1ax_cargo_test_routing_namespace() {
 #      count-only Push deferral pin; (1b) subscription dual-tier INGEST --
 #      DeclareSubscriber -> inbound-tier subs table + within-tier re-flood,
 #      UndeclareSubscriber withdraw, DeclKexpr alias absorb, the duplicate-declare
-#      change-gate, client-face-not-ingested + queryable-deferred-to-1c pins;
+#      change-gate; (1c) queryable dual-tier INGEST -- DeclareQueryable ->
+#      inbound-tier qabls table (VALUE = QueryableInfo, the value-diff gate incl
+#      the complete-flip re-flood) + within-tier re-flood carrying the info;
+#      client-face-not-ingested pins for both planes;
 #   2. clippy-gates the `routing-router-hat` cfg (`--all-targets`, incl tests);
 #   3. clippy-gates the LIB under `--no-default-features --features
 #      routing-router-hat` to prove the forwarder composes standalone
 #      (routing-router-hat pulls only routing-peer). 1a=topology STATE, 1b=subs
-#      INGEST (both landed); queryable INGEST=1c, client store=1d, the cross-tier
+#      INGEST, 1c=qabls INGEST (all landed); client store=1d, the cross-tier
 #      bubble DERIVATION + route COMPUTE + master-election are later slices.
 layer_c1ay_cargo_test_router_hat() {
     (cd crates \
