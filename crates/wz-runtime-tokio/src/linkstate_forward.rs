@@ -1103,71 +1103,21 @@ impl LinkstateForwarder {
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
 
-        // Resolve the source (tree root) + this node's psid for it via the
-        // shared seam (forward_subscription resolves a sourced Declare the same
-        // way; both flood along the source's tree).
-        let Some((source_zid, out_node_id)) =
-            self.resolve_source(inbound_zid, inbound_link, read_push_source(push))
-        else {
+        // The route CORE (source-resolve → self-excluded interest → tree
+        // directions → hop-limit → literal-normalize) is the shared free
+        // [`compute_push_forward`] RouterForwarder also calls per tier-net
+        // (R311y112). The fan-out stays here — this forwarder's gossip-gated +
+        // egress-ACL `fan_out` — over the returned (carrier, children).
+        let Some((carrier, children)) = compute_push_forward(
+            &self.net,
+            &self.subs,
+            inbound_zid,
+            inbound_link,
+            push,
+            &keyexpr,
+        ) else {
             return;
         };
-        // The data-route filter (c3c-3 atom4): forward only toward subtrees
-        // that hold an interested subscriber — `directions_toward` over the
-        // keyexpr's interested-peer set — not every tree child (the pre-atom4
-        // broadcast). A keyexpr no peer subscribes to forwards nowhere. (The
-        // keyexpr was resolved alias-aware in the scoped borrow above, B1.)
-        // The filter excludes self (interested_remote): self is the local sink
-        // (delivered by the session layer), not a mesh forward target.
-        let self_zid = *self.net.borrow().self_zid();
-        let interested = self.subs.borrow().interested_remote(&keyexpr, &self_zid);
-        if interested.is_empty() {
-            return;
-        }
-        let children = self
-            .net
-            .borrow()
-            .directions_toward(&source_zid, &interested);
-        if children.is_empty() {
-            return;
-        }
-        // Hop-limit (c3c-3 D1): a Push that has exhausted its forward budget is
-        // NOT re-forwarded — the by-construction transient-convergence loop bound.
-        // Absent = an un-stamped Push entering the mesh from a non-stamping origin;
-        // treat it as a fresh budget (this node's node_count) so it is bounded from
-        // this hop on. `hop <= 1` means the last unit of budget arrived here: this
-        // node still received + locally delivered the data (counted in `forward`),
-        // it just stops the onward flood — so a loop is cut after a bounded count.
-        // NOTE the budget is each node's LOCAL `node_count`, not a global value:
-        // the originator stamps ITS count and each transit only decrements, so a
-        // stamped Push keeps its budget; an unstamped one is bounded by whatever
-        // the FIRST stamping hop knows. Mid-convergence these counts can differ,
-        // but any positive bound still cuts the loop — an under-count only cuts
-        // earlier (safe: at worst a transient missed delivery, self-healed by the
-        // 250ms re-publish), never under-bounds.
-        let budget = self.net.borrow().node_count() as u16;
-        let hop = read_push_hoplimit(push).unwrap_or(budget);
-        if hop <= 1 {
-            return;
-        }
-        // `out_node_id` is the same for every face, so build the re-stamped
-        // carrier once; fan_out clones it to each interested child. The hop budget
-        // is decremented on the outbound copy (the next hop sees `hop - 1`).
-        let mut carrier = push.clone();
-        set_push_source(&mut carrier, out_node_id);
-        set_push_hoplimit(&mut carrier, hop - 1);
-        // c3c-3 B1 — NORMALIZE the forwarded keyexpr to a literal: a downstream
-        // child does not share THIS inbound link's alias table, so an aliased id
-        // would be unresolvable there. zenoh instead RE-ALIASES per outbound face
-        // (`Resource::decl_key`, reusing or declaring that face's mapping); wz
-        // strips to a literal — a deliberate SIMPLIFICATION of zenoh's two-table
-        // (`local_mappings`/`remote_mappings`) scheme, valid because wz keeps NO
-        // outbound alias table (it never emits a `DeclKexpr`), so it always emits
-        // id == 0. The cost is wire verbosity, not correctness. This also sets the
-        // header N bit a literal keyexpr requires, so a pure-aliased inbound
-        // (N clear) becomes a valid literal.
-        if set_push_keyexpr_literal(&mut carrier, &keyexpr).is_err() {
-            return;
-        }
 
         // Forward to the interested children in the source's tree — never to the
         // inbound face, nor back toward the source's own neighbour (the shared
@@ -2117,38 +2067,21 @@ impl LinkstateForwarder {
         table: &RefCell<LinkstatepeerInterest<V>>,
         build: impl Fn(&str, &V) -> Result<DeclareOwned, CodecError>,
     ) {
-        if new_children.is_empty() {
-            return;
-        }
-        // Snapshot the (keyexpr, source, value) entries so the table borrow is
-        // released before the per-source graph borrow + fan_out below.
-        let pairs = table.borrow().entries();
-        for (source_zid, delta_children) in new_children {
-            // this node's psid for the source (the re-stamp value; 0 for a
-            // self-sourced declaration, leaving it self-originated). Scoped graph
-            // borrow released before flood_to_children (which re-borrows).
-            let out_node_id = match self
-                .net
-                .borrow()
-                .local_psid_of(source_zid)
-                .and_then(|p| u16::try_from(p).ok())
-            {
-                Some(n) => n,
-                None => continue,
-            };
-            for (keyexpr, decl_source, value) in &pairs {
-                if decl_source != source_zid {
-                    continue;
-                }
-                let Ok(mut declare) = build(keyexpr, value) else {
-                    continue;
-                };
-                set_declare_source(&mut declare, out_node_id);
-                let _ = self.flood_to_children(delta_children, || {
+        // The delta walk + per-source re-stamp is the shared free
+        // [`re_advertise_interest_into`] RouterForwarder also calls per tier-net
+        // (R311y112); one net here, so pass `self.net`. This forwarder floods via
+        // `flood_to_children` (its gossip-gated + egress-ACL `fan_out`).
+        re_advertise_interest_into(
+            &self.net,
+            table,
+            new_children,
+            build,
+            |children, declare| {
+                let _ = self.flood_to_children(children, || {
                     NetworkMessage::Declare(Box::new(declare.clone()))
                 });
-            }
-        }
+            },
+        );
     }
 
     /// The single spanning-tree recompute path (D2c SSOT): recompute the trees
@@ -2406,6 +2339,122 @@ pub(crate) fn resolve_source_in(
     }
     let out_node_id = u16::try_from(net.local_psid_of(&source_zid)?).ok()?;
     Some((source_zid, out_node_id))
+}
+
+/// Compute the data-`Push` re-forward for ONE link-state mesh: given the tier's
+/// `net` + subscription `subs` and a Push already resolved against the inbound
+/// link's alias table (`keyexpr`), return the re-stamped carrier + the
+/// interested tree children to fan it out to — or `None` to DROP. The pure route
+/// CORE shared by [`LinkstateForwarder::forward_push`] (its ONE net) and
+/// [`RouterForwarder`](crate::router_forward)'s per-tier data route (each of its
+/// TWO nets), so the loop-freedom bound (the hop-limit) + the literal normalize
+/// live in ONE place, not a per-forwarder copy that could drift (R311y112).
+///
+/// Reads ONLY `net` + `subs` — no faces, no fan-out: the caller resolves the
+/// inbound face in its own borrow (it owns a `RouterFaceState` vs a `FaceState`)
+/// and fans the returned `(carrier, children)` out through its tier-appropriate
+/// seam, exactly as [`resolve_source_in`] splits the net-only resolution from
+/// the face-owning caller. Drops (→ `None`) on an unresolvable source, a keyexpr
+/// no remote peer subscribes to (the self-excluded [`LinkstatepeerInterest::interested_remote`]
+/// view — the self-bubble is the local sink, never a data forward target), an
+/// empty tree direction, an exhausted hop budget (`hop <= 1`), or a carrier the
+/// literal-normalize rejects.
+pub(crate) fn compute_push_forward(
+    net: &RefCell<LinkstateNetwork>,
+    subs: &RefCell<LinkstatepeerInterest<()>>,
+    inbound_zid: Option<Zid>,
+    inbound_link: Option<LinkId>,
+    push: &PushOwned,
+    keyexpr: &str,
+) -> Option<(PushOwned, Vec<Zid>)> {
+    let net = net.borrow();
+    // Resolve the source (tree root) + this node's psid for it — the same seam a
+    // sourced Declare uses; both flood along the source's tree.
+    let (source_zid, out_node_id) =
+        resolve_source_in(&net, inbound_zid, inbound_link, read_push_source(push))?;
+    // The data-route filter: forward only toward subtrees that hold an
+    // interested subscriber, excluding self (interested_remote) — self is the
+    // local sink, delivered by the session layer, not a mesh forward target.
+    let self_zid = *net.self_zid();
+    let interested = subs.borrow().interested_remote(keyexpr, &self_zid);
+    if interested.is_empty() {
+        return None;
+    }
+    let children = net.directions_toward(&source_zid, &interested);
+    if children.is_empty() {
+        return None;
+    }
+    // Hop-limit (c3c-3 D1): a Push that has exhausted its forward budget is NOT
+    // re-forwarded — the by-construction transient-convergence loop bound. Absent
+    // = an un-stamped Push from a non-stamping origin; treat it as a fresh budget
+    // (this node's node_count). `hop <= 1` = the last unit arrived here: the node
+    // still received + locally delivered the data, it just stops the onward flood.
+    let budget = net.node_count() as u16;
+    let hop = read_push_hoplimit(push).unwrap_or(budget);
+    if hop <= 1 {
+        return None;
+    }
+    // Re-stamp the source psid + decrement the budget, and NORMALIZE the keyexpr
+    // to a literal (a downstream child does not share this inbound link's alias
+    // table, so an aliased id would be unresolvable there; wz keeps no outbound
+    // alias table, so it always emits id == 0) — the same B1 normalize inline.
+    let mut carrier = push.clone();
+    set_push_source(&mut carrier, out_node_id);
+    set_push_hoplimit(&mut carrier, hop - 1);
+    set_push_keyexpr_literal(&mut carrier, keyexpr).ok()?;
+    Some((carrier, children))
+}
+
+/// Re-advertise the interest in `table` to the NEW tree children a recompute
+/// added, for ONE mesh — the tree-change re-flood CORE shared by
+/// [`LinkstateForwarder::re_advertise_interest`] (its ONE net) and
+/// [`RouterForwarder`](crate::router_forward)'s per-tier tick (each of its TWO
+/// nets). The single-net caller hard-bound the net + the flood; here BOTH are
+/// parameters, so the router stamps `out_node_id` in the CORRECT tier's psid
+/// space (routers_net for `router_subs`, linkstatepeers_net for
+/// `linkstatepeer_subs`) rather than injecting a wrong-net psid, and floods via
+/// its tier-scoped fan-out (R311y112). `build` mints the per-entry carrier from
+/// the literal keyexpr + value (`V = ()` subs / `QueryableInfo` qabls);
+/// `flood(children, declare)` sends it to the delta children. Structure is
+/// unchanged from the single-net original: outer over the new-children delta,
+/// inner over the declarations sourced at that tree (`*src == tree_id`), each
+/// re-stamped for the source (`local_psid_of(self) == 0` leaves a self-sourced
+/// declaration self-originated).
+pub(crate) fn re_advertise_interest_into<V: Clone>(
+    net: &RefCell<LinkstateNetwork>,
+    table: &RefCell<LinkstatepeerInterest<V>>,
+    new_children: &[(Zid, Vec<Zid>)],
+    build: impl Fn(&str, &V) -> Result<DeclareOwned, CodecError>,
+    mut flood: impl FnMut(&[Zid], &DeclareOwned),
+) {
+    if new_children.is_empty() {
+        return;
+    }
+    // Snapshot the (keyexpr, source, value) entries so the table borrow is
+    // released before the per-source net borrow + flood below.
+    let pairs = table.borrow().entries();
+    for (source_zid, delta_children) in new_children {
+        // this node's psid for the source (the re-stamp value). Scoped net
+        // borrow released before flood (which re-borrows via the caller's seam).
+        let out_node_id = match net
+            .borrow()
+            .local_psid_of(source_zid)
+            .and_then(|p| u16::try_from(p).ok())
+        {
+            Some(n) => n,
+            None => continue,
+        };
+        for (keyexpr, decl_source, value) in &pairs {
+            if decl_source != source_zid {
+                continue;
+            }
+            let Ok(mut declare) = build(keyexpr, value) else {
+                continue;
+            };
+            set_declare_source(&mut declare, out_node_id);
+            flood(delta_children, &declare);
+        }
+    }
 }
 
 /// Record (or drop) a link-local keyexpr alias from a `DeclKexpr` / `UndeclKexpr`
