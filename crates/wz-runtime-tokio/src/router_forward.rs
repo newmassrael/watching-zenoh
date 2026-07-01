@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Router-hat forwarder (P4 §5.21, slice 1a — DUAL-mesh TOPOLOGY STATE).
+//! Router-hat forwarder (P4 §5.21, slices 1a+1b — DUAL-mesh STATE + sub INGEST).
 //!
 //! [`RouterForwarder`] is the 4th [`FaceForwarder`](crate::accept_loop::FaceForwarder),
 //! the wz port of zenoh's `hat/router` routing strategy. Where the
@@ -25,9 +25,9 @@
 //! the fourth such type alongside `NoOpForwarder`, `RoutingForwarder`, and
 //! `LinkstateForwarder`.
 //!
-//! ## Slice boundary (1a = topology STATE)
+//! ## Slice 1a (topology STATE)
 //!
-//! This slice is the CONTROL-PLANE TOPOLOGY half, mirroring how the peer
+//! This is the CONTROL-PLANE TOPOLOGY half, mirroring how the peer
 //! lineage shipped graph state (register/deregister + OAM ingest) before the
 //! data plane, and how `routing-router` (accept-and-hold) shipped before
 //! `routing-routes` (forwarding):
@@ -49,23 +49,48 @@
 //!   (`send_on_links`); wz keeps one `faces` map, so the flood filters on the
 //!   per-face tier it records here.
 //!
+//! ## Slice 1b (subscription INGEST) — landed
+//!
+//! `forward` ingests a sourced `DeclareSubscriber` into the INBOUND face's tier
+//! subs table (`router_subs` for a Router face, `linkstatepeer_subs` for a Peer
+//! face), keyed by the resolve-source-resolved SOURCE zid, and — only on a real
+//! change — re-floods a clean literal declaration WITHIN THAT TIER to the
+//! source's spanning-tree children (the per-tier analogue of
+//! [`LinkstateForwarder`]'s `forward_subscription`). `UndeclareSubscriber`
+//! withdraws + re-floods the retraction the same way; a `DeclKexpr` / `UndeclKexpr`
+//! records the link-local keyexpr alias so an aliased declaration resolves.
+//!
+//! The **cross-tier bubble** is NOT stored here. zenoh STORES the local zid into
+//! the other tier's set when a cross-tier source exists; wz instead DERIVES that
+//! at route-compute time from the native tier tables (the COMPUTE slice's
+//! `cross_tier_self_source(ke, tier)`), the same "filter / project on read"
+//! normalization [`LinkstatepeerInterest`] already uses for the self-exclusion.
+//! Storing it is behaviorally equivalent (a stored set == natives ∪ {self}
+//! whenever the other tier has a native) but would force zenoh's four
+//! reverse-forget teardown sites; deriving makes that drift
+//! unrepresentable-by-construction (R311y109 design panel). So 1b stores ONLY
+//! natives, which 1b's own readers (`purge_detached_interest_tier`, future
+//! interest-broker) want anyway.
+//!
 //! ## Deferred to later slices (named, not silently dropped)
 //!
-//! - **Dual-tier Declare INGEST** — populating `router_subs` / `linkstatepeer_subs`
-//!   (and the queryable twins) from sourced `DeclareSubscriber` /
-//!   `DeclareQueryable`, plus zenoh's **cross-tier bubble** (a peer/client
-//!   declaration re-injected into the router tier under the local zid, and the
-//!   reverse) — slice 1b. The tier tables exist here (so the struct + the
-//!   `deregister` purge are stable) but are populated by 1b.
+//! - **Queryable dual-tier INGEST** (`DeclareQueryable` → `router_qabls` /
+//!   `linkstatepeer_qabls`) — slice 1c. Distinct from subs because the bubble
+//!   self entry carries a MERGED `QueryableInfo` (zenoh `local_router_qabl_info`
+//!   / `local_peer_qabl_info`, `complete = OR`, `distance = min`), which (like
+//!   the sub bubble) the COMPUTE slice derives. The qabls tables exist here (so
+//!   the `deregister` purge is stable) but are populated by 1c.
 //! - **The simple/client subscription store** (zenoh's per-`Resource`
-//!   `session_ctxs`, the leaf-subscriber input) — folded into 1b with the
-//!   bubble.
-//! - **Route COMPUTE + master-election** — `compute_data_route` /
-//!   `compute_query_route`, the source-dimensioned route cache, `elect_router`
-//!   consistent-hash ingress/egress filtering, and `shared_nodes`
-//!   maintenance — the COMPUTE slice. A data `Push` is COUNTED here (the
-//!   reception witness) but not yet routed; a `Request` / `Response` is
-//!   left alone.
+//!   `session_ctxs`, the leaf-subscriber input) — slice 1d. A Client face is
+//!   held with no net (1a), and a Client `DeclareSubscriber` is NOT ingested in
+//!   1b; the client store + its derived cross-tier representation land in 1d.
+//! - **The cross-tier bubble DERIVATION + route COMPUTE + master-election** —
+//!   `compute_data_route` / `compute_query_route`, `cross_tier_self_source`, the
+//!   source-dimensioned route cache, `elect_router` consistent-hash
+//!   ingress/egress filtering, `shared_nodes` maintenance, AND the tree-change
+//!   re-advertise (`re_advertise_subscriptions` to new tree children) — the
+//!   COMPUTE slice. A data `Push` is COUNTED here (the reception witness) but
+//!   not yet routed; a `Request` / `Response` is left alone.
 //! - **Gossip / autoconnect / interceptors / pending-query GC** — the
 //!   per-net policy knobs the `LinkstateForwarder` carries; added as the
 //!   router gains the corresponding plane.
@@ -78,16 +103,26 @@ use std::time::Duration;
 
 use sce_forge_runtime::codec::CodecError;
 
+use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
+use wz_session_core::declare_build::{
+    build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
+};
+use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
+use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use crate::accept_loop::{FaceForwarder, FaceId};
-use crate::linkstate_forward::{peer_whatami_routing, peer_zid_routing};
+use crate::linkstate_forward::{
+    declare_subscriber_wireexpr, is_tree_forward_target, peer_whatami_routing, peer_zid_routing,
+    resolve_source_in,
+};
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 use wz_session_core::queryable_info::QueryableInfo;
@@ -132,6 +167,12 @@ struct RouterFaceState {
     /// The graph link in the face's tier-net, or `None` for a held face (a
     /// Client, or a Router/Peer whose routing zid never surfaced).
     link: Option<LinkId>,
+    /// Per-face keyexpr-alias table (1b): a `DeclKexpr` maps `id -> resolved
+    /// keyexpr` here so a later aliased `DeclareSubscriber` on this link resolves
+    /// to a literal. Link-local (each link negotiates its own aliases), the same
+    /// shape as [`LinkstateForwarder`]'s `FaceState.keyexpr_table`
+    /// (`hashbrown` to match `resolve_wireexpr`'s table type).
+    keyexpr_table: hashbrown::HashMap<u64, String>,
 }
 
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
@@ -154,17 +195,19 @@ pub struct RouterForwarder {
     /// single net by filtering this map.
     faces: RefCell<HashMap<FaceId, RouterFaceState>>,
     /// Router-tier subscription interest (zenoh `HatTables.router_subs`).
-    /// Present so the struct + the `deregister` purge are stable; POPULATED by
-    /// the Declare-INGEST slice (1b).
+    /// POPULATED by the subscription-INGEST slice (1b, this round): NATIVE
+    /// Router sources keyed by their zid. The cross-tier self-bubble is NOT
+    /// stored — it is DERIVED at route-compute from the native tables.
     router_subs: RefCell<LinkstatepeerInterest<()>>,
     /// Peer-tier subscription interest (zenoh `HatTables.linkstatepeer_subs`).
-    /// Populated by slice 1b.
+    /// Populated by slice 1b (native Peer sources keyed by zid).
     linkstatepeer_subs: RefCell<LinkstatepeerInterest<()>>,
     /// Router-tier queryable interest (zenoh `HatTables.router_qabls`).
-    /// Populated by slice 1b.
+    /// Present-but-empty; populated by the queryable-INGEST slice (1c) — the
+    /// `deregister` purge is wired here so 1c needs no lifecycle re-touch.
     router_qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
     /// Peer-tier queryable interest (zenoh `HatTables.linkstatepeer_qabls`).
-    /// Populated by slice 1b.
+    /// Present-but-empty; populated by the queryable-INGEST slice (1c).
     linkstatepeer_qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
     /// Running total of link-state lists ingested across both nets — the
     /// control-plane work witness (the router twin of
@@ -391,10 +434,12 @@ impl RouterForwarder {
     /// Purge every node in `removed` from BOTH interest tables OF `tier` — the
     /// per-tier mirror of `purge_detached_interest`, called on a link-down (the
     /// `remove_link` detached set) and on an ingest that detached nodes. A gone
-    /// node's interest must not keep a route gate spuriously armed. The tables
-    /// are empty until slice 1b populates them, so this is a structural no-op
-    /// now; it is wired here so 1b adds INGEST without re-touching `deregister`
-    /// / `forward`. No-op for [`FaceTier::Client`] (no tier tables).
+    /// node's interest must not keep a route gate spuriously armed. The subs
+    /// tables are populated by 1b (this round) and the qabls tables by 1c; the
+    /// purge covers BOTH so neither slice re-touches `deregister` / `forward`.
+    /// No bubble teardown is needed: the cross-tier self-bubble is never stored
+    /// (derived at compute), so a departed node leaves only its native entries —
+    /// which this removes. No-op for [`FaceTier::Client`] (no tier tables).
     fn purge_detached_interest_tier(&self, tier: FaceTier, removed: &[Zid]) {
         if removed.is_empty() {
             return;
@@ -410,6 +455,196 @@ impl RouterForwarder {
             subs.remove_peer(zid);
             qabls.remove_peer(zid);
         }
+    }
+
+    /// The subscription interest table for `tier`, or `None` for
+    /// [`FaceTier::Client`] (the leaf/simple store is slice 1d).
+    fn subs_table(&self, tier: FaceTier) -> Option<&RefCell<LinkstatepeerInterest<()>>> {
+        match tier {
+            FaceTier::Routers => Some(&self.router_subs),
+            FaceTier::LinkstatePeers => Some(&self.linkstatepeer_subs),
+            FaceTier::Client => None,
+        }
+    }
+
+    /// Record (or drop) a link-local keyexpr alias from a sourced `DeclKexpr` /
+    /// `UndeclKexpr` on `face` (1b) — the per-face mirror of
+    /// [`LinkstateForwarder`]'s `absorb_keyexpr_declaration`. Link-local (NOT
+    /// re-flooded): each link negotiates its own aliases, so the forwarder
+    /// records the alias for RESOLUTION and re-expresses keyexprs to literals
+    /// when it re-floods. The declared base may itself reference an earlier alias
+    /// on the same link, so it is resolved against the table before recording.
+    fn absorb_keyexpr_declaration(&self, face: FaceId, declare: &DeclareOwned) {
+        let mut faces = self.faces.borrow_mut();
+        let Some(state) = faces.get_mut(&face) else {
+            return;
+        };
+        match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
+                if let Some(literal) = resolve_wireexpr(&d.keyexpr.body, &state.keyexpr_table) {
+                    state.keyexpr_table.insert(d.id, literal);
+                }
+            }
+            DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
+                state.keyexpr_table.remove(&u.id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Ingest a sourced `DeclareSubscriber` (1b): register the SOURCE peer's
+    /// interest in the INBOUND tier's subs table (Router face -> `router_subs`,
+    /// Peer face -> `linkstatepeer_subs`), keyed by the resolved source zid, and
+    /// — only on a real change — re-flood a clean literal declaration WITHIN that
+    /// tier to the source's spanning-tree children. The per-tier analogue of
+    /// [`LinkstateForwarder`]'s `forward_subscription`; the cross-tier bubble is
+    /// NOT stored (derived at compute). A Client face (no tier table) is 1d.
+    fn ingest_subscription(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
+            return;
+        };
+        let Some((net, _dirty)) = self.plane(tier) else {
+            return; // Client tier: no net / no tier table -> slice 1d.
+        };
+        let Some(subs) = self.subs_table(tier) else {
+            return;
+        };
+        // Resolve the keyexpr against the inbound face's alias table + read its
+        // zid / link, in one scoped borrow (an unresolvable alias drops it).
+        let (inbound_zid, inbound_link, keyexpr) = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(keyexpr) = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) else {
+                return;
+            };
+            (peer_zid_routing(&s.actions), s.link, keyexpr)
+        };
+        let Some((source_zid, out_node_id)) = resolve_source_in(
+            &net.borrow(),
+            inbound_zid,
+            inbound_link,
+            read_declare_source(declare),
+        ) else {
+            return;
+        };
+        // Register the SOURCE's native interest; re-flood ONLY on a real change
+        // (the loop-bounding new-peer gate).
+        if !subs.borrow_mut().register(&keyexpr, source_zid, ()) {
+            return;
+        }
+        self.reflood_declaration(
+            inbound,
+            tier,
+            net,
+            source_zid,
+            inbound_zid,
+            out_node_id,
+            reliable,
+            &keyexpr,
+            |ke| build_declare_subscriber(0, 0, Some(ke)),
+        );
+    }
+
+    /// A sourced `UndeclareSubscriber` (1b): withdraw the SOURCE peer's interest
+    /// from the INBOUND tier's subs table (the keyexpr rides the `ext_keyexpr`
+    /// extension) and — only on a real removal — re-flood the retraction WITHIN
+    /// that tier. The mirror of [`LinkstateForwarder`]'s `forward_unsubscription`;
+    /// no bubble teardown (none is stored). A face-down purge is already covered
+    /// by [`purge_detached_interest_tier`](Self::purge_detached_interest_tier).
+    fn withdraw_subscription(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let exts = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
+            _ => return,
+        };
+        let Some((net, _dirty)) = self.plane(tier) else {
+            return;
+        };
+        let Some(subs) = self.subs_table(tier) else {
+            return;
+        };
+        let (inbound_zid, inbound_link, keyexpr) = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(keyexpr) = resolve_ext_keyexpr(exts, &s.keyexpr_table) else {
+                return;
+            };
+            (peer_zid_routing(&s.actions), s.link, keyexpr)
+        };
+        let Some((source_zid, out_node_id)) = resolve_source_in(
+            &net.borrow(),
+            inbound_zid,
+            inbound_link,
+            read_declare_source(declare),
+        ) else {
+            return;
+        };
+        if !subs.borrow_mut().withdraw(&keyexpr, &source_zid) {
+            return;
+        }
+        self.reflood_declaration(
+            inbound,
+            tier,
+            net,
+            source_zid,
+            inbound_zid,
+            out_node_id,
+            reliable,
+            &keyexpr,
+            build_undeclare_subscriber_with_keyexpr,
+        );
+    }
+
+    /// Re-flood a clean sourced declaration WITHIN `tier` to the source's
+    /// spanning-tree children (excluding the inbound face + the source's own
+    /// neighbour) — the per-tier re-forward shared by the subscribe + unsubscribe
+    /// paths (only the `build` carrier differs). This is the within-net
+    /// control-plane spread (the per-tier mirror of `forward_interest_declaration`'s
+    /// re-flood tail); the CROSS-tier spread is derived at compute, not done here.
+    /// `out_node_id` re-stamps the source's psid; the carrier is rebuilt as a
+    /// LITERAL (id 0), the same B1b normalize the topology + data planes use.
+    #[allow(clippy::too_many_arguments)]
+    fn reflood_declaration(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        net: &Rc<RefCell<LinkstateNetwork>>,
+        source_zid: Zid,
+        inbound_zid: Option<Zid>,
+        out_node_id: u16,
+        reliable: bool,
+        keyexpr: &str,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) {
+        let children = net.borrow().tree_children_of(&source_zid);
+        if children.is_empty() {
+            return;
+        }
+        let Ok(mut carrier) = build(keyexpr) else {
+            return;
+        };
+        set_declare_source(&mut carrier, out_node_id);
+        let _ = self.fan_out_tier(tier, reliable, |id, zid| {
+            Ok(
+                is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
+                    .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
+            )
+        });
     }
 }
 
@@ -441,6 +676,7 @@ impl FaceForwarder for RouterForwarder {
                 actions: actions.clone(),
                 tier,
                 link: added.map(|(link, _, _)| link),
+                keyexpr_table: hashbrown::HashMap::new(),
             },
         );
         // Self gained a routing link in this tier's net (its link-state changed):
@@ -493,10 +729,10 @@ impl FaceForwarder for RouterForwarder {
     fn tick(&self) {
         // Flush each net's coalesced recompute, if one accumulated. zenoh runs
         // two independent debounce workers; wz coalesces both onto this one tick
-        // (two dirty flags, one flush pass) — functionally equivalent. Slice 1a
-        // recomputes the trees but does NOT re-advertise interest to new tree
-        // children (the re-advertise + cross-tier bubble is slice 1b), so the
-        // new-children delta is discarded here.
+        // (two dirty flags, one flush pass) — functionally equivalent. This
+        // recomputes the trees but does NOT re-advertise known interest to new
+        // tree children (`re_advertise_subscriptions`) — that, like the route
+        // compute, is the COMPUTE slice — so the new-children delta is discarded.
         if self.trees_dirty_routers.replace(false) {
             let _ = self.routers_net.borrow_mut().compute_trees();
             self.recomputes.set(self.recomputes.get() + 1);
@@ -519,7 +755,10 @@ impl FaceForwarder for RouterForwarder {
     }
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
-        let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
+        let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+            messages, reliable, ..
+        }) = event
+        else {
             return;
         };
         // The inbound face's tier selects which net topology ingests into and
@@ -558,9 +797,26 @@ impl FaceForwarder for RouterForwarder {
                 NetworkMessage::Push(_) => {
                     self.data_seen.set(self.data_seen.get() + 1);
                 }
-                // Declare INGEST (dual-tier interest + cross-tier bubble) is
-                // slice 1b; the Request/Response query plane is the COMPUTE
-                // slice. Left alone here.
+                // A subscription declaration (slice 1b): ingest into the inbound
+                // tier's subs table + re-flood within that tier; a keyexpr-alias
+                // declaration records the link-local alias for resolution. The
+                // queryable plane is slice 1c, a Client-face declare is slice 1d,
+                // the cross-tier bubble is derived at compute, and the
+                // Request/Response query plane is the COMPUTE slice.
+                NetworkMessage::Declare(declare) => match &declare.body {
+                    DeclareOwnedVariant::CodecZenohDeclKexpr(_)
+                    | DeclareOwnedVariant::CodecZenohUndeclKexpr(_) => {
+                        self.absorb_keyexpr_declaration(id, declare);
+                    }
+                    DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => {
+                        self.ingest_subscription(id, tier, *reliable, declare);
+                    }
+                    DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
+                        self.withdraw_subscription(id, tier, *reliable, declare);
+                    }
+                    // DeclareQueryable -> 1c; UndeclareQueryable + the rest deferred.
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -661,6 +917,32 @@ mod tests {
         ]))
         .expect("build oam");
         forward_one(fwd, face, NetworkMessage::Oam(oam));
+    }
+
+    /// Make `neighbour` (on `face`) advertise a link back to self, forming the
+    /// mutual graph edge (mirror of the linkstate `advertise_link_back`). Fed
+    /// through `forward`; the caller `tick()`s to flush the coalesced recompute.
+    fn advertise_link_back(
+        fwd: &RouterForwarder,
+        face: FaceId,
+        self_z: u8,
+        neighbour: u8,
+        sn: u64,
+    ) {
+        let oam = build_linkstate_oam_owned(&list(vec![
+            entry(0, 1, self_z, &[]),      // self mapping (stale-gated)
+            entry(1, sn, neighbour, &[0]), // neighbour -> self
+        ]))
+        .expect("build oam");
+        forward_one(fwd, face, NetworkMessage::Oam(oam));
+    }
+
+    /// A literal `DeclareSubscriber` for `keyexpr` (id 0, no ext_nodeid — the
+    /// inbound neighbour is the source).
+    fn declare_sub(keyexpr: &str) -> NetworkMessage {
+        NetworkMessage::Declare(Box::new(
+            build_declare_subscriber(0, 0, Some(keyexpr)).expect("build declare"),
+        ))
     }
 
     #[test]
@@ -942,6 +1224,330 @@ mod tests {
         assert!(
             sink_d.frame_count() > 0,
             "the new direct face is bootstrapped with the routers topology"
+        );
+    }
+
+    // ── slice 1b: subscription dual-tier INGEST ──────────────────────────
+
+    #[test]
+    fn router_face_declare_lands_in_router_subs_only() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        assert_eq!(
+            fwd.router_subs.borrow().interested("demo/data"),
+            vec![zid(0xAA)],
+            "the router-face source is registered in router_subs"
+        );
+        assert!(
+            fwd.linkstatepeer_subs
+                .borrow()
+                .interested("demo/data")
+                .is_empty(),
+            "no native peer entry, and the cross-tier bubble is NOT stored"
+        );
+    }
+
+    #[test]
+    fn peer_face_declare_lands_in_linkstatepeer_subs_only() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (b, _sink) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &b);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        assert_eq!(
+            fwd.linkstatepeer_subs.borrow().interested("demo/data"),
+            vec![zid(0xBB)],
+        );
+        assert!(fwd.router_subs.borrow().interested("demo/data").is_empty());
+    }
+
+    #[test]
+    fn client_face_declare_is_not_ingested() {
+        // A Client face has no tier table (the leaf/simple store is slice 1d):
+        // its declare registers nothing in either mesh tier.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c, _sink) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &c);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        assert!(fwd.router_subs.borrow().interested("demo/data").is_empty());
+        assert!(fwd
+            .linkstatepeer_subs
+            .borrow()
+            .interested("demo/data")
+            .is_empty());
+    }
+
+    #[test]
+    fn undeclare_withdraws_from_the_inbound_tier() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        assert_eq!(
+            fwd.router_subs.borrow().interested("demo/data"),
+            vec![zid(0xAA)]
+        );
+        let undecl = NetworkMessage::Declare(Box::new(
+            build_undeclare_subscriber_with_keyexpr("demo/data").expect("undecl"),
+        ));
+        forward_one(&fwd, FaceId(0), undecl);
+        assert!(
+            fwd.router_subs.borrow().interested("demo/data").is_empty(),
+            "the source's interest is withdrawn"
+        );
+    }
+
+    #[test]
+    fn face_down_purges_the_declared_interest() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        assert_eq!(
+            fwd.router_subs.borrow().interested("demo/data"),
+            vec![zid(0xAA)]
+        );
+        fwd.deregister(FaceId(0));
+        assert!(
+            fwd.router_subs.borrow().interested("demo/data").is_empty(),
+            "the departed source's interest is purged (no bubble to leak)"
+        );
+    }
+
+    #[test]
+    fn queryable_declare_is_deferred_to_1c() {
+        // A DeclareQueryable ingests nothing in 1b (the qabls tables + the info
+        // merge are slice 1c) — the named deferral, pinned.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        let q = NetworkMessage::Declare(Box::new(
+            wz_session_core::declare_build::build_declare_queryable(0, 0, Some("demo/q"))
+                .expect("build queryable"),
+        ));
+        forward_one(&fwd, FaceId(0), q);
+        assert!(fwd.router_qabls.borrow().interested("demo/q").is_empty());
+        assert!(fwd
+            .linkstatepeer_qabls
+            .borrow()
+            .interested("demo/q")
+            .is_empty());
+        assert!(fwd.router_subs.borrow().interested("demo/q").is_empty());
+    }
+
+    #[test]
+    fn declare_re_floods_within_the_tier_only() {
+        // A sourced DeclareSubscriber floods along the SOURCE's tree WITHIN its
+        // tier: register the source + re-flood to the tree child, never back to
+        // the inbound source, never to the other tier.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // same-tier tree child
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // other tier
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5); // edge self<->A
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5); // edge self<->C
+        fwd.tick(); // compute the spanning trees
+        sink_a.reset();
+        sink_c.reset();
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/sub"));
+        assert_eq!(
+            fwd.router_subs.borrow().interested("demo/sub"),
+            vec![zid(0xAA)],
+            "self learned A is interested"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "re-flooded to the same-tier tree child C"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
+        assert_eq!(sink_p.frame_count(), 0, "not to the peer tier");
+    }
+
+    #[test]
+    fn duplicate_declare_does_not_re_flood() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_ROUTER);
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/sub")); // first: re-floods
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/sub")); // duplicate: gated
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a re-declare of a known interest does not re-flood (the change-gate)"
+        );
+    }
+
+    #[test]
+    fn aliased_declare_resolves_via_the_face_table() {
+        // A DeclKexpr maps an alias id on the link; a later aliased
+        // DeclareSubscriber resolves through the face's keyexpr_table to the
+        // literal (the alias-absorb path).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        let kexpr = NetworkMessage::Declare(Box::new(
+            wz_session_core::declare_build::build_declare_kexpr(7, "demo/aliased").expect("kexpr"),
+        ));
+        forward_one(&fwd, FaceId(0), kexpr);
+        let aliased = NetworkMessage::Declare(Box::new(
+            build_declare_subscriber(0, 7, None).expect("aliased sub"),
+        ));
+        forward_one(&fwd, FaceId(0), aliased);
+        assert_eq!(
+            fwd.router_subs.borrow().interested("demo/aliased"),
+            vec![zid(0xAA)],
+            "the aliased declare resolved to the literal via the face table"
+        );
+    }
+
+    #[test]
+    fn transit_source_declare_keys_on_the_resolved_zid() {
+        // A declare with a NON-zero node_id resolves via the inbound link's psid
+        // map to the TRANSIT source (0xBB), not the inbound neighbour (0xAA) — the
+        // resolve_source_in non-zero branch on the declare path.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xBB, 7, 5); // psid 7 = 0xBB on A's link
+        let mut decl = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build");
+        set_declare_source(&mut decl, 7); // node_id 7 = A's psid for B
+        forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(decl)));
+        assert_eq!(
+            fwd.router_subs.borrow().interested("demo/sub"),
+            vec![zid(0xBB)],
+            "keyed on the resolved transit source B, not the inbound neighbour A"
+        );
+    }
+
+    #[test]
+    fn undeclare_re_floods_within_the_tier() {
+        // The retraction re-flood: after a declare re-floods to the tree child,
+        // an UndeclareSubscriber withdraws AND re-floods the retraction to the
+        // same child, never back to the inbound source.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER);
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/sub")); // register + re-flood
+        sink_a.reset();
+        sink_c.reset();
+        let undecl = NetworkMessage::Declare(Box::new(
+            build_undeclare_subscriber_with_keyexpr("demo/sub").expect("undecl"),
+        ));
+        forward_one(&fwd, FaceId(0), undecl);
+        assert!(
+            fwd.router_subs.borrow().interested("demo/sub").is_empty(),
+            "the source's interest is withdrawn"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the retraction re-flooded to the tree child C"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
+    }
+
+    #[test]
+    fn peer_declare_re_floods_within_the_peers_tier() {
+        // The peer-tier twin of `declare_re_floods_within_the_tier_only`: the
+        // re-flood machinery is tier-generic (a peer declare floods the peers
+        // tree, never the router tier).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // source (peer)
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // same-tier tree child
+        let (r, sink_r) = face(zid(0xBB), WIRE_ROUTER); // other tier
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &r);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        sink_a.reset();
+        sink_c.reset();
+        sink_r.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/sub"));
+        assert_eq!(
+            fwd.linkstatepeer_subs.borrow().interested("demo/sub"),
+            vec![zid(0xAA)]
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "re-flooded to the peer-tier tree child"
+        );
+        assert_eq!(sink_r.frame_count(), 0, "not to the router tier");
+    }
+
+    #[test]
+    fn unknown_keyexpr_undeclare_is_a_noop() {
+        // An UndeclareSubscriber for a never-declared keyexpr: withdraw returns
+        // false -> no re-flood, no panic (the change-gate).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        sink_a.reset();
+        let undecl = NetworkMessage::Declare(Box::new(
+            build_undeclare_subscriber_with_keyexpr("never/declared").expect("undecl"),
+        ));
+        forward_one(&fwd, FaceId(0), undecl);
+        assert!(fwd
+            .router_subs
+            .borrow()
+            .interested("never/declared")
+            .is_empty());
+    }
+
+    #[test]
+    fn undeclkexpr_removes_the_alias() {
+        // After an UndeclKexpr removes the alias, a later aliased declare
+        // referencing that id no longer resolves and is not registered.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(7, "demo/aliased")
+                    .expect("kexpr"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_undeclare_kexpr(7),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(0, 7, None).expect("aliased"),
+            )),
+        );
+        assert!(
+            fwd.router_subs
+                .borrow()
+                .interested("demo/aliased")
+                .is_empty(),
+            "the alias was removed, so the aliased declare did not resolve"
         );
     }
 }

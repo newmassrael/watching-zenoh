@@ -1039,32 +1039,10 @@ impl LinkstateForwarder {
         inbound_link: Option<LinkId>,
         node_id: u16,
     ) -> Option<(Zid, u16)> {
-        let net = self.net.borrow();
-        let source_zid: Zid = match node_id {
-            0 => inbound_zid?,
-            nid => match inbound_link
-                .and_then(|l| net.get_link(l))
-                .and_then(|l| l.get_zid(nid as u64))
-            {
-                Some(zid) => *zid,
-                // The message names a source psid the inbound link never mapped
-                // (an out-of-order flood, or a link that dropped the mapping):
-                // the message is dropped. Surface it (E2) so a non-forwarding
-                // route is diagnosable.
-                None => {
-                    log::debug!(
-                        "dropping a sourced message: unresolvable source psid {nid} \
-                         on the inbound link"
-                    );
-                    return None;
-                }
-            },
-        };
-        if source_zid == *net.self_zid() {
-            return None;
-        }
-        let out_node_id = u16::try_from(net.local_psid_of(&source_zid)?).ok()?;
-        Some((source_zid, out_node_id))
+        // R311y109 — the resolution reads ONLY the net, so the body lives as the
+        // free `resolve_source_in` (SSOT) that RouterForwarder also calls per
+        // tier-net; this method is the LinkstateForwarder-side thin delegate.
+        resolve_source_in(&self.net.borrow(), inbound_zid, inbound_link, node_id)
     }
 
     /// Flood a data `Push` onward along the SOURCE's spanning tree (c3c-2) —
@@ -2398,6 +2376,50 @@ pub(crate) fn peer_whatami_routing(actions: &SessionLinkActions) -> WhatAmI {
     }
 }
 
+/// Resolve a sourced message's routing-context `node_id` against `net` to the
+/// (source zid, this node's out-psid for it) pair — the SSOT for both
+/// [`LinkstateForwarder::resolve_source`] AND
+/// [`RouterForwarder`](crate::router_forward)'s per-tier resolution (R311y109).
+/// The resolution reads ONLY the net (no faces / interest tables), so it is a
+/// free fn over `&LinkstateNetwork` both forwarders share rather than a method.
+/// `node_id == 0` means the inbound neighbour itself originated it; a non-zero id
+/// is the source's psid in the inbound link's space. Returns `None` to DROP: an
+/// unknown source (no inbound zid / no link / unmapped psid), the source
+/// resolving to SELF (a looped-back message — self's local psid 0 is the
+/// self-originated sentinel), or a local psid past the u16 routing-context range.
+pub(crate) fn resolve_source_in(
+    net: &LinkstateNetwork,
+    inbound_zid: Option<Zid>,
+    inbound_link: Option<LinkId>,
+    node_id: u16,
+) -> Option<(Zid, u16)> {
+    let source_zid: Zid = match node_id {
+        0 => inbound_zid?,
+        nid => match inbound_link
+            .and_then(|l| net.get_link(l))
+            .and_then(|l| l.get_zid(nid as u64))
+        {
+            Some(zid) => *zid,
+            // The message names a source psid the inbound link never mapped
+            // (an out-of-order flood, or a link that dropped the mapping): the
+            // message is dropped. Surface it (E2) so a non-forwarding route is
+            // diagnosable.
+            None => {
+                log::debug!(
+                    "dropping a sourced message: unresolvable source psid {nid} \
+                     on the inbound link"
+                );
+                return None;
+            }
+        },
+    };
+    if source_zid == *net.self_zid() {
+        return None;
+    }
+    let out_node_id = u16::try_from(net.local_psid_of(&source_zid)?).ok()?;
+    Some((source_zid, out_node_id))
+}
+
 /// Whether `zid` is one of `children` — the tree next hops a fan-out targets.
 /// The shared membership check the originate paths ([`publish`](LinkstateForwarder::publish)
 /// / [`declare_subscription`](LinkstateForwarder::declare_subscription)) and
@@ -2440,7 +2462,7 @@ fn build_declare_queryable_with_info(
 /// [`forward_request`](LinkstateForwarder::forward_request) (the query route) —
 /// only the carrier each wraps differs, so the loop-exclusion mechanics live
 /// here once.
-fn is_tree_forward_target(
+pub(crate) fn is_tree_forward_target(
     id: FaceId,
     zid: Option<Zid>,
     inbound: FaceId,
@@ -2457,7 +2479,7 @@ fn is_tree_forward_target(
 /// a non-subscriber Declare body. Returns the raw `Wireexpr` (literal OR aliased)
 /// so the caller resolves it against the inbound face's alias table (B1b), rather
 /// than a pre-resolved literal string.
-fn declare_subscriber_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
+pub(crate) fn declare_subscriber_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
     match &declare.body {
         DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => Some(&sub.keyexpr),
         _ => None,
