@@ -114,23 +114,30 @@
 //! early-return (OBLIGATION 1) and withdraws any advertisement it was the last
 //! client of.
 //!
+//! ## Slice C3 (cross-tier client data delivery) — landed
+//!
+//! A data `Push` is now DELIVERED to the CLIENT faces subscribing its keyexpr
+//! ([`deliver_to_client_subscribers`](RouterForwarder::deliver_to_client_subscribers)),
+//! re-literalized to the resolved keyexpr — CLOSING the advertise-then-blackhole:
+//! a Push attracted toward this router by C2's client advertisement now reaches
+//! the subscribing client. It runs for a Push from ANY source (excluding the
+//! inbound face), so it covers mesh→client AND client→client. A client-sourced
+//! Push reaching the MESH (client→peer, a self-sourced re-injection) and LOCAL
+//! self-hosted delivery (a pure router hosts none) remain deferred.
+//!
 //! ## Deferred to later slices (named, not silently dropped)
 //!
-//! - **The cross-tier DATA delivery + router↔router federation + master-election**
-//!   — the client SUB advertisement lands the CONTROL half (C2). Until the DATA
-//!   half lands, a client's advertised interest is WRITE-ONLY: C2 now ATTRACTS a
-//!   Push for the keyexpr toward this router, which then drops it at
-//!   [`forward_push_tier`](RouterForwarder::forward_push_tier) (no client
-//!   delivery) — a benign advertise-then-blackhole interval (pub/sub carries no
-//!   delivery guarantee, and pre-C2 the client got nothing either), but C3 MUST
-//!   land client delivery before any real multi-node deployment. The cross-tier
-//!   DATA bridge (a Push from one tier delivered to the OTHER tier's subs + local
-//!   clients) is the router↔router federation — MULTI-ROUTER, so it couples with
-//!   `elect_router` (`shared_nodes` for the route master vs `get_router_links`
-//!   per-peer — a real asymmetry) + the source-dimensioned route cache. A
-//!   cross-tier data bridge MUST fail-fast fence `shared_nodes <= 1` until the
-//!   election lands, else a 2nd router double-delivers. (The advertisement is NOT
-//!   master-gated — every router advertises its own clients' interest.)
+//! - **The client→mesh publish + router↔router federation + master-election** —
+//!   C3 delivers mesh→client and client→client; a CLIENT-sourced Push reaching the
+//!   MESH subs (client→peer, a self-sourced re-injection / publish) is the
+//!   remaining client direction. The router↔router cross-tier DATA bridge (a Push
+//!   from one tier delivered to the OTHER tier's subs) is MULTI-ROUTER, so it
+//!   couples with `elect_router` (`shared_nodes` for the route master vs
+//!   `get_router_links` per-peer — a real asymmetry) + the source-dimensioned
+//!   route cache. A cross-tier data bridge MUST fail-fast fence `shared_nodes <= 1`
+//!   until the election lands, else a 2nd router double-delivers. (The C2
+//!   advertisement is NOT master-gated — every router advertises its own clients'
+//!   interest.)
 //! - **The client QABL store + `compute_query_route`** (`Request` / `Response`) —
 //!   the query-plane twin of C2 (a client `DeclareQueryable` + its cross-tier
 //!   advertisement carrying the merged `QueryableInfo`) plus the query route.
@@ -164,10 +171,12 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
+use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use crate::accept_loop::{FaceForwarder, FaceId};
@@ -833,6 +842,72 @@ impl RouterForwarder {
         });
     }
 
+    /// Deliver a data `Push` to the CLIENT faces subscribing its keyexpr (C3) —
+    /// the cross-tier data half that CLOSES the advertise-then-blackhole: a Push
+    /// attracted toward this router by C2's client advertisement is now DELIVERED
+    /// to the subscribing client(s), re-literalized to the resolved keyexpr (a
+    /// client leaf shares no alias table). Runs for a Push from ANY source (a mesh
+    /// peer OR a client), excluding the inbound face, so it covers mesh->client AND
+    /// client->client. A client-sourced Push reaching the MESH (client->peer, a
+    /// self-sourced re-injection) is a later slice; LOCAL self-hosted delivery is
+    /// deferred (a pure router hosts no subscribers — that is the combined-node
+    /// seam). The egress-ACL parity obligation (y113) applies here too: this direct
+    /// send does not yet consult the interceptor plane.
+    fn deliver_to_client_subscribers(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
+        if self.client_subs.borrow().is_empty() {
+            return;
+        }
+        // Resolve the keyexpr against the INBOUND face's alias table (a client leaf
+        // stores the literal, so an aliased inbound must resolve to compare).
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) {
+                Some(k) => k,
+                None => return,
+            }
+        };
+        // The client faces subscribing a keyexpr that INTERSECTS the published K,
+        // excluding the inbound face (never echo a client's own Push back to it).
+        // Wildcard-aware via the SAME `keyexpr_intersects_target` SSOT the mesh
+        // route uses (`LinkstatepeerInterest::matching_entries`) — a client
+        // subscribing `demo/**` must receive a `demo/data` Push, NOT just an exact
+        // `demo/data` sub (exact `HashSet::contains` would silently blackhole every
+        // wildcard client sub, re-opening the very gap C3 closes).
+        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+        let targets: Vec<FaceId> = self
+            .client_subs
+            .borrow()
+            .iter()
+            .filter(|(_, keys)| {
+                keys.iter()
+                    .any(|sub| keyexpr_intersects_target(sub, &target_chunks))
+            })
+            .map(|(fid, _)| *fid)
+            .filter(|fid| *fid != inbound)
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        // Re-literalize once (payload / encoding / attachment preserved, literal
+        // keyexpr for the client leaf), then deliver over each client's send seam.
+        let Ok(carrier) = reliteralize_push(push, &keyexpr) else {
+            return;
+        };
+        let faces = self.faces.borrow();
+        for fid in targets {
+            if let Some(s) = faces.get(&fid) {
+                let _ = s.actions.send_network_message(
+                    NetworkMessage::Push(Box::new(carrier.clone())),
+                    reliable,
+                    false,
+                );
+            }
+        }
+    }
+
     /// Recompute `tier`'s spanning trees and re-advertise its NATIVE subscription
     /// and queryable interest to whatever NEW children the recompute produced
     /// (C1) — the per-tier mirror of [`LinkstateForwarder`]'s
@@ -1227,6 +1302,7 @@ impl FaceForwarder for RouterForwarder {
                 NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
                     self.forward_push_tier(id, tier, *reliable, push);
+                    self.deliver_to_client_subscribers(id, *reliable, push);
                 }
                 // A declaration: ingest a DeclareSubscriber (1b) / DeclareQueryable
                 // (1c) into the inbound tier's subs/qabls table + re-flood within
@@ -1978,6 +2054,156 @@ mod tests {
             sink_p.frame_count(),
             0,
             "an undeclare with no prior client sub floods no withdrawal"
+        );
+    }
+
+    #[test]
+    fn a_peer_push_is_delivered_to_a_subscribing_client() {
+        // C3 CLOSES the advertise-then-blackhole: a peer's Push for K reaches the
+        // CLIENT subscribing K (the delivery C2's advertisement attracted).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, _sp) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // client subscribes K
+        sink_client.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push))); // peer publishes K
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the peer Push was delivered to the subscribing client"
+        );
+    }
+
+    #[test]
+    fn a_client_push_reaches_another_client_but_not_the_sender() {
+        // client -> client delivery, with the inbound (publishing) client excluded.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c1, sink_c1) = face(zid(0xAA), WIRE_CLIENT); // publisher
+        let (c2, sink_c2) = face(zid(0xCC), WIRE_CLIENT); // subscriber
+        fwd.register(FaceId(0), &c1);
+        fwd.register(FaceId(1), &c2);
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // c2 subscribes
+        sink_c1.reset();
+        sink_c2.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push))); // c1 publishes
+        assert_eq!(
+            sink_c2.frame_count(),
+            1,
+            "delivered to the subscribing client c2"
+        );
+        assert_eq!(
+            sink_c1.frame_count(),
+            0,
+            "not echoed back to the publishing client c1"
+        );
+    }
+
+    #[test]
+    fn a_push_is_not_delivered_to_a_client_that_did_not_subscribe_the_keyexpr() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, _sp) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/subscribed"));
+        sink_client.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/other", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push))); // a different keyexpr
+        assert_eq!(
+            sink_client.frame_count(),
+            0,
+            "a client is not delivered a keyexpr it did not subscribe"
+        );
+    }
+
+    #[test]
+    fn a_wildcard_client_sub_receives_an_intersecting_concrete_push() {
+        // A client subscribing `demo/**` MUST receive a `demo/data` Push — the
+        // wildcard-intersection match (exact string equality would blackhole every
+        // wildcard client sub, re-opening the gap C3 closes).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, _sp) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**")); // wildcard sub
+        sink_client.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the wildcard client sub received the intersecting concrete Push"
+        );
+    }
+
+    #[test]
+    fn a_push_reaches_all_clients_subscribing_the_keyexpr() {
+        // The multi-target delivery loop: two clients subscribing K both receive.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c1, sink_c1) = face(zid(0xAA), WIRE_CLIENT);
+        let (c2, sink_c2) = face(zid(0xCC), WIRE_CLIENT);
+        let (p, _sp) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &c1);
+        fwd.register(FaceId(1), &c2);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        sink_c1.reset();
+        sink_c2.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(2), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(sink_c1.frame_count(), 1, "delivered to client c1");
+        assert_eq!(sink_c2.frame_count(), 1, "delivered to client c2");
+    }
+
+    #[test]
+    fn a_peer_push_reaches_both_a_peer_subscriber_and_a_client_subscriber() {
+        // forward_push_tier (mesh) and deliver_to_client_subscribers (client)
+        // COMPOSE: a peer's Push reaches BOTH a peer-mesh subscriber and a client.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // source peer
+        let (peer_sub, sink_peer) = face(zid(0xCC), WIRE_PEER); // peer subscriber (tree child)
+        let (client, sink_client) = face(zid(0xDD), WIRE_CLIENT); // client subscriber
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &peer_sub);
+        fwd.register(FaceId(2), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // peer_sub subscribes (mesh)
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data")); // client subscribes
+        sink_peer.reset();
+        sink_client.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push))); // peer A publishes
+        assert_eq!(
+            sink_peer.frame_count(),
+            1,
+            "the peer-mesh subscriber got it (within-tier route)"
+        );
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the client subscriber got it (client delivery)"
         );
     }
 
