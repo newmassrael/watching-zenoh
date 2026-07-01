@@ -128,7 +128,7 @@ use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
 use crate::interceptor::{InterceptorChain, InterceptorContext, InterceptorFlow};
 use crate::linkstate_interest::LinkstatepeerInterest;
-use crate::linkstate_pending::PendingQueries;
+use crate::linkstate_pending::{PendingQueries, QueryFan};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
 /// Re-export `Zid`, the typed [`WhatAmI`] role, and the gossip
@@ -1229,9 +1229,11 @@ impl LinkstateForwarder {
         if set_request_keyexpr_literal(&mut template, &keyexpr).is_err() {
             return;
         }
-        // The inbound rid (this hop's upstream qid, or the querier's own rid for
-        // the first hop) — the value a Reply must be rewritten back to.
-        let src_rid = request.rid;
+        // ONE shared fan target for this logical Query — the return mapping
+        // (inbound face + the upstream rid a Reply is rewritten back to) every
+        // branch's pending entry Rc-shares, so the fan's closing final aggregates
+        // last-out (zenoh's one `Arc<Query>` cloned per branch).
+        let fan = QueryFan::new(inbound, request.rid);
         // The deadline each pending entry is abandoned at if no ResponseFinal
         // routes back (zenoh `QueryCleanup`'s `sleep(timeout)`) — computed ONCE
         // for every child forwarded in this call; the tick sweep reaps it.
@@ -1239,18 +1241,15 @@ impl LinkstateForwarder {
         // Forward to the queryable-ward children in the source's tree (never to
         // the inbound face nor back toward the source's neighbour — the shared
         // predicate). atom 3: ALLOCATE a fresh local qid PER outbound face and
-        // record the return mapping (out qid -> (inbound, src_rid)), then stamp
-        // that qid as the outbound Request's rid — so a Response/ResponseFinal
-        // carrying it routes back via forward_response/_final. The per-face qid is
-        // why each child gets its OWN carrier (not one cloned template).
+        // record the shared return mapping, then stamp that qid as the outbound
+        // Request's rid — so a Response/ResponseFinal carrying it routes back via
+        // forward_response/_final. The per-face qid is why each child gets its
+        // OWN carrier (not one cloned template).
         let _ = self.fan_out(reliable, None, |id, zid| {
             if !is_tree_forward_target(id, zid, inbound, inbound_zid, &children) {
                 return Ok(None);
             }
-            let qid = self
-                .pending
-                .borrow_mut()
-                .allocate(id, inbound, src_rid, deadline);
+            let qid = self.pending.borrow_mut().allocate(id, &fan, deadline);
             let mut carrier = template.clone();
             carrier.rid = qid;
             Ok(Some(NetworkMessage::Request(Box::new(carrier))))
@@ -1300,27 +1299,36 @@ impl LinkstateForwarder {
     }
 
     /// A `ResponseFinal` (a queryable's end-of-replies marker) arrived on
-    /// `inbound`: route it BACK toward the querier and FREE the pending-query
-    /// entry — the [`take`](PendingQueries::take) twin of
-    /// [`forward_response`](Self::forward_response)'s peek. Rewrite the
-    /// `request_id` to the recorded upstream rid and unicast to the recorded
-    /// inbound face (a ResponseFinal carries no keyexpr, so no B1 normalize).
-    /// zenoh `route_send_response_final`: remove the pending entry, forward the
-    /// final to `query.src_face`. An unknown qid drops silently.
+    /// `inbound`: FREE this branch's pending entry and — only when it was the
+    /// fan's LAST live branch — route the closing final BACK toward the querier,
+    /// the [`take`](PendingQueries::take) twin of
+    /// [`forward_response`](Self::forward_response)'s peek. A Query fanned to
+    /// several queryables (`QueryTarget::All` / the BestMatching fall-back) must
+    /// close upstream exactly ONCE, after ALL branches finalize — a NON-last
+    /// final is ABSORBED (the querier still awaits the other branches' replies),
+    /// exactly zenoh's `Arc::into_inner` gate in `finalize_pending_query`
+    /// (`dispatcher/queries.rs:670`): only the removal that drops the last
+    /// `Arc<Query>` reference sends `ResponseFinal { rid: query.src_qid }` to
+    /// `query.src_face`. The forwarded final is rewritten to the recorded
+    /// upstream rid and unicast to the recorded inbound face (a ResponseFinal
+    /// carries no keyexpr, so no B1 normalize). An unknown qid drops silently.
     fn forward_response_final(
         &self,
         inbound: FaceId,
         reliable: bool,
         response_final: &ResponseFinalOwned,
     ) {
-        // TAKE the return target — the final closes the query and frees the entry.
-        let Some((orig_face, orig_rid)) = self
+        // TAKE the branch — frees the entry; `last` is the fan's last-out gate.
+        let Some((orig_face, orig_rid, last)) = self
             .pending
             .borrow_mut()
             .take(inbound, response_final.request_id)
         else {
             return;
         };
+        if !last {
+            return; // other branches of the fan still answering: absorb
+        }
         let mut carrier = response_final.clone();
         carrier.request_id = orig_rid;
         self.send_to_face(orig_face, reliable, || {
@@ -2041,7 +2049,8 @@ impl LinkstateForwarder {
             // 1) The Err("Timeout") reply, empty keyexpr (zenoh WireExpr::empty()),
             //    rid rewritten to the recorded upstream rid (the SSOT builder; the
             //    tiny payload copy cannot overflow, so a build error just skips the
-            //    Err — the closing final below is the load-bearing part).
+            //    Err — the closing final below is the load-bearing part). Per
+            //    BRANCH, as zenoh runs one QueryCleanup per branch.
             if let Ok(err_msg) = wz_session_core::response_build::build_response_err_empty(
                 eq.inbound_rid,
                 b"Timeout",
@@ -2052,7 +2061,13 @@ impl LinkstateForwarder {
             }
             // 2) The closing final via the SSOT builder (the same
             //    `ResponseFinalOwned` an inbound final would forward), rewritten to
-            //    the recorded upstream rid, unicast back to the inbound face.
+            //    the recorded upstream rid, unicast back to the inbound face —
+            //    ONLY when this branch was the fan's LAST (the last-out gate,
+            //    zenoh finalize_pending_query's Arc::into_inner): a fan with a
+            //    still-answering branch must not be closed by a sibling's timeout.
+            if !eq.last {
+                continue;
+            }
             let final_msg =
                 wz_session_core::response_final_build::build_response_final(eq.inbound_rid);
             self.send_to_face(eq.inbound, true, || {
@@ -2729,8 +2744,22 @@ impl FaceForwarder for LinkstateForwarder {
         // FaceId, not the graph link, so EVERY face-down purges it, whether or not
         // the face had a routing identity): a Response can never be routed toward
         // (or expected back from) a dead face. zenoh tears down a face's
-        // `pending_queries` on close the same way.
-        self.pending.borrow_mut().remove_face(&id);
+        // `pending_queries` on close the same way (`finalize_pending_queries`),
+        // and — through the same last-out gate — sends the closing ResponseFinal
+        // to each querier whose fan this face-down DRAINED (its last answering
+        // branch died), so the querier's get() terminates instead of waiting out
+        // its own timeout. A drained fan whose querier IS the departed face has
+        // nobody left to notify (skipped).
+        let drained = self.pending.borrow_mut().remove_face(&id);
+        for (querier, rid) in drained {
+            if querier == id {
+                continue;
+            }
+            let final_msg = wz_session_core::response_final_build::build_response_final(rid);
+            self.send_to_face(querier, true, || {
+                NetworkMessage::ResponseFinal(final_msg.clone())
+            });
+        }
         let dropped_link = if let Some(state) = self.faces.borrow_mut().remove(&id) {
             if let Some(link) = state.link {
                 // remove_link drops the self<->neighbour edge and GC-prunes every
@@ -7758,6 +7787,71 @@ mod tests {
         fwd.forward_response(FaceId(1), true, &response);
         assert_eq!(sink_a.frame_count(), 0, "an unknown qid routes nowhere");
         assert_eq!(fwd.pending_len(), 0, "and records nothing");
+    }
+
+    #[test]
+    fn a_fanned_query_closes_upstream_only_after_the_last_branch_finalizes() {
+        // The fan-aggregation last-out gate (zenoh's one Arc<Query> per fan +
+        // Arc::into_inner in finalize_pending_query): a Query fanned to TWO
+        // queryables (B and C, both DEFAULT/incomplete -> BestMatching falls back
+        // to All) closes upstream exactly ONCE, after BOTH branches finalize. The
+        // first final is ABSORBED, a reply from the still-open branch STILL
+        // routes, the last final propagates.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // querier
+        let (face_b, sink_b) = peer_face(zid(0x0B)); // queryable 1
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // queryable 2
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05);
+        declare_queryable_interest(&fwd, FaceId(1), "demo/q");
+        declare_queryable_interest(&fwd, FaceId(2), "demo/q");
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+
+        let request = wz_session_core::request_build::build_request_query(91, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(fwd.pending_len(), 2, "two branches pending (B and C)");
+        let qid_b = forwarded_request(&sink_b.frame_bytes(0)).rid;
+        let qid_c = forwarded_request(&sink_c.frame_bytes(0)).rid;
+
+        // B finalizes FIRST: absorbed — no upstream final while C still answers.
+        let rf_b = wz_session_core::response_final_build::build_response_final(qid_b);
+        fwd.forward_response_final(FaceId(1), true, &rf_b);
+        assert_eq!(
+            sink_a.frame_count(),
+            0,
+            "the first branch's final is absorbed (the fan is still open)"
+        );
+        assert_eq!(fwd.pending_len(), 1, "B's branch freed, C's remains");
+
+        // C's reply AFTER B's final still routes back.
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(qid_c, "demo/q", b"hi")
+                .expect("build response");
+        fwd.forward_response(FaceId(2), true, &response);
+        assert_eq!(sink_a.frame_count(), 1, "C's reply routed back to A");
+        assert_eq!(forwarded_response(&sink_a.frame_bytes(0)).request_id, 91);
+
+        // C finalizes LAST: exactly one upstream final closes the fan.
+        let rf_c = wz_session_core::response_final_build::build_response_final(qid_c);
+        fwd.forward_response_final(FaceId(2), true, &rf_c);
+        assert_eq!(
+            sink_a.frame_count(),
+            2,
+            "exactly one upstream final, after the LAST branch"
+        );
+        assert_eq!(
+            forwarded_response_final(&sink_a.frame_bytes(1)).request_id,
+            91,
+            "carrying the querier's rid"
+        );
+        assert_eq!(fwd.pending_len(), 0, "the fan is fully freed");
     }
 
     #[test]

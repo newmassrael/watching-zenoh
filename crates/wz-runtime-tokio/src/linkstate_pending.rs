@@ -11,12 +11,33 @@
 //! relay forwards a Query out a face it ALLOCATES a fresh local query id on THAT
 //! face ([`allocate`](PendingQueries::allocate), bumping a per-face `next_qid`,
 //! zenoh `insert_pending_query`) and records the RETURN mapping `out qid ->
-//! (inbound face, inbound rid)`. A `Response` arriving on that face carrying that
-//! qid is then routed back: the relay rewrites the response's `request_id` to the
-//! recorded inbound rid and forwards it to the recorded inbound face — the
+//! the query's shared` [`QueryFan`]. A `Response` arriving on that face carrying
+//! that qid is then routed back: the relay rewrites the response's `request_id`
+//! to the recorded inbound rid and forwards it to the recorded inbound face — the
 //! reverse of the forward hop, reconstructed hop-by-hop from this table (NOT from
 //! the topology tree; the forward path is the spanning tree, the return path is
 //! this pending state).
+//!
+//! ## Fan aggregation (the last-out final gate)
+//!
+//! One logical Query may fan to SEVERAL queryables (`QueryTarget::All` /
+//! `AllComplete`, or BestMatching's fall-back-to-All): each outbound branch gets
+//! its OWN per-face qid + pending entry, but the querier must receive exactly ONE
+//! closing `ResponseFinal` — after the LAST branch finalizes, else the fastest
+//! branch's final would terminate the querier's `get()` while the other branches'
+//! replies are still in flight. zenoh expresses this with ONE `Arc<Query>` cloned
+//! into every branch's pending entry (`compute_final_route`,
+//! `dispatcher/queries.rs:221/236`) and an `Arc::into_inner` gate in
+//! `finalize_pending_query` (`queries.rs:667-681`): only the branch whose removal
+//! drops the LAST strong reference propagates the upstream final. wz mirrors that
+//! exactly with an [`Rc<QueryFan>`] shared by every branch of the fan (the
+//! single-task `Rc` analog of the `Arc`): [`take`](PendingQueries::take) /
+//! [`expired`](PendingQueries::expired) report `last == true` only when the
+//! removed entry held the fan's final reference, and
+//! [`remove_face`](PendingQueries::remove_face) returns the fans a face-down
+//! DRAINED (zenoh `finalize_pending_queries`) so the caller can synthesize their
+//! closing finals. The caller forwards every `Response` unconditionally and the
+//! `ResponseFinal` only on `last`.
 //!
 //! Why remap the qid per hop (not carry the querier's rid verbatim): the qid is
 //! LOCAL to a (relay, face) pair. Two queriers can pick the same rid; without a
@@ -27,19 +48,50 @@
 //! Lifecycle: [`allocate`](PendingQueries::allocate) on forward (the Query out a
 //! face, recording a per-entry `deadline`) -> [`peek`](PendingQueries::peek) on
 //! each `Response` (the entry stays alive for further replies) ->
-//! [`take`](PendingQueries::take) on the `ResponseFinal` (which closes the query
-//! and frees the entry). Two GC paths reclaim an entry whose `ResponseFinal`
-//! never arrives: [`remove_face`](PendingQueries::remove_face) drops a departed
-//! face's entries whole (the forwarder's `deregister`), and
+//! [`take`](PendingQueries::take) on the `ResponseFinal` (which closes the BRANCH
+//! and frees the entry; the QUERY closes when the last branch does). Two GC paths
+//! reclaim an entry whose `ResponseFinal` never arrives:
+//! [`remove_face`](PendingQueries::remove_face) drops a departed face's entries
+//! whole (the forwarder's `deregister`), and
 //! [`expired`](PendingQueries::expired) sweeps entries past their `deadline` (the
 //! forwarder's `tick`, the wz form of zenoh's per-query `QueryCleanup` timeout,
 //! `dispatcher/queries.rs:271-349`) so a queryable that crashes without a final
 //! on a STILL-UP face cannot leak the entry forever.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Instant;
 
 use crate::accept_loop::FaceId;
+
+/// One logical query's shared RETURN TARGET — the querier's inbound face + the
+/// upstream rid every branch of the fan rewrites its replies back to. The wz
+/// analogue of zenoh's `Query { src_face, src_qid }` (`dispatcher/queries.rs:50`),
+/// shared across the fan's pending entries via `Rc` exactly as zenoh clones one
+/// `Arc<Query>` per branch: the `Rc` strong count IS the live-branch count, and
+/// the entry whose removal drops it to zero is the fan's LAST branch (the
+/// `Arc::into_inner` last-out gate, `queries.rs:670`). Construct one per routed
+/// Query ([`QueryFan::new`]) and pass it to every
+/// [`allocate`](PendingQueries::allocate) of that Query's fan.
+#[derive(Debug)]
+pub struct QueryFan {
+    /// The inbound face the forward Query arrived on — where replies route back.
+    inbound: FaceId,
+    /// The upstream rid to rewrite each reply's `request_id` back to.
+    inbound_rid: u64,
+}
+
+impl QueryFan {
+    /// A new fan target for one routed Query — `Rc`-wrapped so each branch's
+    /// [`allocate`](PendingQueries::allocate) shares it (the strong count is the
+    /// live-branch count).
+    pub fn new(inbound: FaceId, inbound_rid: u64) -> Rc<Self> {
+        Rc::new(Self {
+            inbound,
+            inbound_rid,
+        })
+    }
+}
 
 /// The pending-query return table — one [`FacePending`] per outbound face.
 #[derive(Debug, Default)]
@@ -59,40 +111,46 @@ struct FacePending {
     /// Monotonic per face; the first allocation is `1` (the pre-increment leaves
     /// `0` unused, a harmless reserved-looking sentinel).
     next_qid: u64,
-    /// local qid -> the return target + expiry to rewrite a Response /
+    /// local qid -> the return mapping + expiry to rewrite a Response /
     /// ResponseFinal carrying that qid back toward (and to time out if no final
     /// ever arrives).
     returns: HashMap<u64, PendingReturn>,
 }
 
-/// One live return mapping: where a Response carrying this qid routes back, plus
-/// the deadline past which the query is abandoned ([`expired`](PendingQueries::expired)).
-#[derive(Debug, Clone, Copy)]
+/// One live return mapping: the fan's shared return target (the `Rc` clone whose
+/// drop-count gates the last-out final), plus the deadline past which this branch
+/// is abandoned ([`expired`](PendingQueries::expired)).
+#[derive(Debug)]
 struct PendingReturn {
-    /// The inbound face the forward Query arrived on — where the reply routes back.
-    inbound: FaceId,
-    /// The upstream rid to rewrite the reply's `request_id` back to.
-    inbound_rid: u64,
-    /// When this pending query is abandoned if no `ResponseFinal` has arrived —
+    /// The fan this branch belongs to — shared across the logical query's
+    /// branches (zenoh's per-branch `Arc<Query>` clone).
+    fan: Rc<QueryFan>,
+    /// When this pending branch is abandoned if no `ResponseFinal` has arrived —
     /// `allocate`-time + the forwarder's query timeout (zenoh `QueryCleanup`'s
     /// `tokio::time::sleep(timeout)`).
     deadline: Instant,
 }
 
-/// A pending query that has passed its deadline, returned by
+/// A pending branch that has passed its deadline, returned by
 /// [`expired`](PendingQueries::expired) so the forwarder can synthesize the
-/// querier-ward `ResponseFinal` that closes it (zenoh `QueryCleanup::run`'s
-/// `finalize_pending_query`). The entry is already removed from the table.
+/// querier-ward timeout messages (zenoh `QueryCleanup::run`): the `Err` reply per
+/// reaped branch, and — when `last` — the closing `ResponseFinal` that closes the
+/// whole fan. The entry is already removed from the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExpiredQuery {
-    /// The out face the timed-out query had been forwarded on (its local key).
+    /// The out face the timed-out branch had been forwarded on (its local key).
     pub out_face: FaceId,
     /// The local qid that timed out on `out_face`.
     pub qid: u64,
-    /// The inbound face to route the closing `ResponseFinal` back to.
+    /// The inbound face to route the timeout messages back to.
     pub inbound: FaceId,
-    /// The upstream rid to stamp on that `ResponseFinal`.
+    /// The upstream rid to stamp on them.
     pub inbound_rid: u64,
+    /// Whether this branch was the LAST of its fan (the `Rc::into_inner` gate) —
+    /// only then does the caller send the closing `ResponseFinal`; the `Err`
+    /// reply goes per branch (zenoh runs one `QueryCleanup` per branch, each
+    /// sending an Err, while `finalize_pending_query` gates the final last-out).
+    pub last: bool,
 }
 
 impl PendingQueries {
@@ -101,28 +159,22 @@ impl PendingQueries {
         Self::default()
     }
 
-    /// Allocate a fresh local query id on `out_face` for a Query being forwarded
-    /// there, recording the return mapping back to `(src_face, src_rid)` (the
-    /// face the Query arrived on + its inbound rid) and the `deadline` past which
-    /// the query times out if no `ResponseFinal` arrives. Returns the new qid to
-    /// stamp on the outbound Request. Mirrors zenoh `insert_pending_query`'s
-    /// `next_qid.wrapping_add(1)` + `pending_queries.insert(qid, ..)` followed by
-    /// `QueryCleanup::spawn_query_clean_up_task` arming the timeout.
-    pub fn allocate(
-        &mut self,
-        out_face: FaceId,
-        src_face: FaceId,
-        src_rid: u64,
-        deadline: Instant,
-    ) -> u64 {
+    /// Allocate a fresh local query id on `out_face` for one BRANCH of `fan`'s
+    /// Query being forwarded there, recording the shared return mapping and the
+    /// `deadline` past which the branch times out if no `ResponseFinal` arrives.
+    /// Returns the new qid to stamp on the outbound Request. Mirrors zenoh
+    /// `insert_pending_query`'s `next_qid.wrapping_add(1)` +
+    /// `pending_queries.insert(qid, (query.clone(), ..))` followed by
+    /// `QueryCleanup::spawn_query_clean_up_task` arming the timeout — the `Rc`
+    /// clone here IS zenoh's per-branch `Arc<Query>` clone.
+    pub fn allocate(&mut self, out_face: FaceId, fan: &Rc<QueryFan>, deadline: Instant) -> u64 {
         let fp = self.by_face.entry(out_face).or_default();
         fp.next_qid = fp.next_qid.wrapping_add(1);
         let qid = fp.next_qid;
         fp.returns.insert(
             qid,
             PendingReturn {
-                inbound: src_face,
-                inbound_rid: src_rid,
+                fan: fan.clone(),
                 deadline,
             },
         );
@@ -138,71 +190,105 @@ impl PendingQueries {
         self.by_face
             .get(&out_face)
             .and_then(|fp| fp.returns.get(&qid))
-            .map(|r| (r.inbound, r.inbound_rid))
+            .map(|r| (r.fan.inbound, r.fan.inbound_rid))
     }
 
-    /// Take (remove) the return target for a `ResponseFinal` carrying `qid` on
-    /// `out_face` — the final closes the query and frees the entry (zenoh
-    /// `route_send_response_final` removes the pending entry). An emptied face is
-    /// pruned. `None` for an unknown qid (already closed / never sent).
-    pub fn take(&mut self, out_face: FaceId, qid: u64) -> Option<(FaceId, u64)> {
+    /// Take (remove) the return mapping for a `ResponseFinal` carrying `qid` on
+    /// `out_face` — the final closes this BRANCH and frees the entry (zenoh
+    /// `route_send_response_final` removes the pending entry). Returns `(inbound
+    /// face, inbound rid, last)`: `last` is `true` IFF this was the fan's FINAL
+    /// live branch (the removed entry held the last `Rc` reference — zenoh's
+    /// `Arc::into_inner` gate in `finalize_pending_query`), and only then must
+    /// the caller forward the closing `ResponseFinal` upstream; a non-last final
+    /// is ABSORBED (the querier still awaits the other branches). An emptied face
+    /// is pruned. `None` for an unknown qid (already closed / never sent).
+    pub fn take(&mut self, out_face: FaceId, qid: u64) -> Option<(FaceId, u64, bool)> {
         let fp = self.by_face.get_mut(&out_face)?;
         let entry = fp.returns.remove(&qid);
         if fp.returns.is_empty() {
             self.by_face.remove(&out_face);
         }
-        entry.map(|r| (r.inbound, r.inbound_rid))
+        entry.map(|r| {
+            let inbound = r.fan.inbound;
+            let inbound_rid = r.fan.inbound_rid;
+            let last = Rc::into_inner(r.fan).is_some();
+            (inbound, inbound_rid, last)
+        })
     }
 
-    /// Drop ALL pending queries on a departed `face` — the forwarder's
-    /// `deregister` calls this when a face goes down, so a Response can never be
-    /// routed toward (or expected back from) a dead face. Mirrors the face-down
-    /// teardown of zenoh's per-face `pending_queries`. (Entries on OTHER faces
-    /// that pointed back to this one as their inbound target are left to
-    /// self-heal — a Response toward the dead face simply drops at send — and to
-    /// the per-query timeout [`expired`](Self::expired); only the entries keyed
-    /// by this out face are dropped here.)
-    pub fn remove_face(&mut self, face: &FaceId) {
-        self.by_face.remove(face);
+    /// Drop ALL pending branches on a departed `face`, returning the fans this
+    /// DRAINED — the `(inbound face, inbound rid)` of each fan whose LAST live
+    /// branch died with this face, so the forwarder's `deregister` can synthesize
+    /// the closing `ResponseFinal` that terminates the querier (zenoh
+    /// `finalize_pending_queries` on face teardown drains the face's
+    /// `pending_queries` through the same `finalize_pending_query` last-out gate,
+    /// final only — no Err). A fan with surviving branches on OTHER faces is NOT
+    /// drained (those branches still answer). Entries on OTHER faces that pointed
+    /// back to this one as their inbound target are left to self-heal — a reply
+    /// toward the dead face simply drops at send — and to the per-branch timeout
+    /// [`expired`](Self::expired).
+    pub fn remove_face(&mut self, face: &FaceId) -> Vec<(FaceId, u64)> {
+        let Some(fp) = self.by_face.remove(face) else {
+            return Vec::new();
+        };
+        let mut drained = Vec::new();
+        for (_qid, ret) in fp.returns {
+            let inbound = ret.fan.inbound;
+            let inbound_rid = ret.fan.inbound_rid;
+            if Rc::into_inner(ret.fan).is_some() {
+                drained.push((inbound, inbound_rid));
+            }
+        }
+        drained
     }
 
-    /// Reap every pending query whose `deadline` is at or before `now`, removing
+    /// Reap every pending branch whose `deadline` is at or before `now`, removing
     /// it and returning the [`ExpiredQuery`] descriptors so the caller can route
-    /// the closing `ResponseFinal` back to each querier. The forwarder's `tick`
+    /// the timeout messages back to each querier (the `Err` per branch, the
+    /// closing `ResponseFinal` only for a `last` branch). The forwarder's `tick`
     /// drives this on its coalescing cadence — the wz form of zenoh's per-query
     /// `QueryCleanup` timer (`dispatcher/queries.rs`): where zenoh arms one
-    /// `tokio::time::sleep(timeout)` task per query, wz sweeps the whole table
-    /// each tick, so a query is reaped within one tick window of its deadline
+    /// `tokio::time::sleep(timeout)` task per branch, wz sweeps the whole table
+    /// each tick, so a branch is reaped within one tick window of its deadline
     /// rather than exactly at it (a coarser but allocation-free GC). A face left
-    /// empty by the sweep is pruned, like [`take`](Self::take).
+    /// empty by the sweep is pruned, like [`take`](Self::take). When SEVERAL
+    /// branches of one fan expire in the same sweep, exactly ONE of them reports
+    /// `last` (whichever removal drops the fan's final reference).
     pub fn expired(&mut self, now: Instant) -> Vec<ExpiredQuery> {
-        let mut reaped = Vec::new();
-        self.by_face.retain(|&out_face, fp| {
-            fp.returns.retain(|&qid, ret| {
+        // Phase 1: collect the victims under a shared borrow (the `Rc::into_inner`
+        // last-out accounting needs owned removal, which `retain` cannot express).
+        let mut victims: Vec<(FaceId, u64)> = Vec::new();
+        for (&out_face, fp) in &self.by_face {
+            for (&qid, ret) in &fp.returns {
                 if ret.deadline <= now {
-                    reaped.push(ExpiredQuery {
-                        out_face,
-                        qid,
-                        inbound: ret.inbound,
-                        inbound_rid: ret.inbound_rid,
-                    });
-                    false // drop the timed-out entry
-                } else {
-                    true // keep the still-pending entry
+                    victims.push((out_face, qid));
                 }
-            });
-            !fp.returns.is_empty() // prune a face the sweep emptied
-        });
+            }
+        }
+        // Phase 2: remove each through the take path, which prunes emptied faces
+        // and computes the per-branch `last` flag.
+        let mut reaped = Vec::with_capacity(victims.len());
+        for (out_face, qid) in victims {
+            if let Some((inbound, inbound_rid, last)) = self.take(out_face, qid) {
+                reaped.push(ExpiredQuery {
+                    out_face,
+                    qid,
+                    inbound,
+                    inbound_rid,
+                    last,
+                });
+            }
+        }
         reaped
     }
 
-    /// Total live pending queries across every face — the work witness a test (or
-    /// the [`expired`](Self::expired) timeout sweep) reads.
+    /// Total live pending branches across every face — the work witness a test
+    /// (or the [`expired`](Self::expired) timeout sweep) reads.
     pub fn len(&self) -> usize {
         self.by_face.values().map(|fp| fp.returns.len()).sum()
     }
 
-    /// Whether the table holds no pending queries.
+    /// Whether the table holds no pending branches.
     pub fn is_empty(&self) -> bool {
         self.by_face.is_empty()
     }
@@ -228,10 +314,10 @@ mod tests {
         let mut pq = PendingQueries::new();
         let t = never(Instant::now());
         // First allocation on a face is qid 1 (pre-increment leaves 0 unused).
-        assert_eq!(pq.allocate(face(10), face(0), 100, t), 1);
-        assert_eq!(pq.allocate(face(10), face(0), 101, t), 2);
+        assert_eq!(pq.allocate(face(10), &QueryFan::new(face(0), 100), t), 1);
+        assert_eq!(pq.allocate(face(10), &QueryFan::new(face(0), 101), t), 2);
         // A DIFFERENT out face has its own independent counter.
-        assert_eq!(pq.allocate(face(11), face(0), 200, t), 1);
+        assert_eq!(pq.allocate(face(11), &QueryFan::new(face(0), 200), t), 1);
         assert_eq!(pq.len(), 3);
     }
 
@@ -239,7 +325,7 @@ mod tests {
     fn peek_returns_the_mapping_without_removing() {
         let mut pq = PendingQueries::new();
         let t = never(Instant::now());
-        let qid = pq.allocate(face(10), face(3), 99, t);
+        let qid = pq.allocate(face(10), &QueryFan::new(face(3), 99), t);
         // Peek twice: the entry survives (a query may yield several Responses).
         assert_eq!(pq.peek(face(10), qid), Some((face(3), 99)));
         assert_eq!(pq.peek(face(10), qid), Some((face(3), 99)));
@@ -253,27 +339,70 @@ mod tests {
     fn take_removes_the_mapping_and_prunes_the_emptied_face() {
         let mut pq = PendingQueries::new();
         let t = never(Instant::now());
-        let q1 = pq.allocate(face(10), face(3), 99, t);
-        let q2 = pq.allocate(face(10), face(4), 77, t);
-        // Take q1: returns its mapping, leaves q2.
-        assert_eq!(pq.take(face(10), q1), Some((face(3), 99)));
+        // Two INDEPENDENT single-branch queries on one out face.
+        let q1 = pq.allocate(face(10), &QueryFan::new(face(3), 99), t);
+        let q2 = pq.allocate(face(10), &QueryFan::new(face(4), 77), t);
+        // Take q1: returns its mapping (last — a single-branch fan), leaves q2.
+        assert_eq!(pq.take(face(10), q1), Some((face(3), 99, true)));
         assert_eq!(pq.peek(face(10), q1), None, "taken entry is gone");
         assert_eq!(pq.peek(face(10), q2), Some((face(4), 77)), "q2 survives");
         // A second take of the same qid is a no-op.
         assert_eq!(pq.take(face(10), q1), None);
         // Taking the last entry prunes the face.
-        assert_eq!(pq.take(face(10), q2), Some((face(4), 77)));
+        assert_eq!(pq.take(face(10), q2), Some((face(4), 77, true)));
         assert!(pq.is_empty(), "the emptied face is pruned");
+    }
+
+    #[test]
+    fn a_fan_take_reports_last_only_on_the_final_branch() {
+        // The last-out final gate (zenoh Arc::into_inner): a Query fanned to TWO
+        // out faces closes only when BOTH branches finalize — the first take is
+        // NOT last (the final is absorbed), the second IS (the final propagates).
+        let mut pq = PendingQueries::new();
+        let t = never(Instant::now());
+        let fan = QueryFan::new(face(3), 99);
+        let qa = pq.allocate(face(10), &fan, t);
+        let qb = pq.allocate(face(11), &fan, t);
+        drop(fan); // the caller's handle drops; only the entries keep it alive
+        assert_eq!(
+            pq.take(face(10), qa),
+            Some((face(3), 99, false)),
+            "first branch's final is absorbed (the other branch is still live)"
+        );
+        assert_eq!(
+            pq.take(face(11), qb),
+            Some((face(3), 99, true)),
+            "the LAST branch's final closes the fan"
+        );
+        assert!(pq.is_empty());
+    }
+
+    #[test]
+    fn a_live_caller_handle_does_not_defeat_the_last_out_gate() {
+        // The gate counts LIVE ENTRIES, so the caller must drop its fan handle
+        // before the last take can report `last` — this pins the contract that
+        // `allocate` clones and the caller's Rc is released after the fan-out
+        // (both forwarders bind the fan in a scope that ends before any reply).
+        let mut pq = PendingQueries::new();
+        let t = never(Instant::now());
+        let fan = QueryFan::new(face(3), 99);
+        let qa = pq.allocate(face(10), &fan, t);
+        drop(fan);
+        assert_eq!(
+            pq.take(face(10), qa),
+            Some((face(3), 99, true)),
+            "a single-branch fan is last at its only take"
+        );
     }
 
     #[test]
     fn remove_face_drops_every_pending_on_that_face_only() {
         let mut pq = PendingQueries::new();
         let t = never(Instant::now());
-        pq.allocate(face(10), face(3), 1, t);
-        pq.allocate(face(10), face(3), 2, t);
-        pq.allocate(face(11), face(4), 1, t);
-        pq.remove_face(&face(10));
+        pq.allocate(face(10), &QueryFan::new(face(3), 1), t);
+        pq.allocate(face(10), &QueryFan::new(face(3), 2), t);
+        pq.allocate(face(11), &QueryFan::new(face(4), 1), t);
+        let drained = pq.remove_face(&face(10));
         assert_eq!(pq.peek(face(10), 1), None, "face 10's entries dropped");
         assert_eq!(pq.peek(face(10), 2), None);
         assert_eq!(
@@ -281,9 +410,37 @@ mod tests {
             Some((face(4), 1)),
             "face 11 untouched"
         );
+        // Both dropped entries were single-branch fans -> both drained (their
+        // queriers are owed a closing final).
+        let mut drained = drained;
+        drained.sort();
+        assert_eq!(drained, vec![(face(3), 1), (face(3), 2)]);
         // Removing an absent face is a no-op.
-        pq.remove_face(&face(99));
+        assert!(pq.remove_face(&face(99)).is_empty());
         assert_eq!(pq.len(), 1);
+    }
+
+    #[test]
+    fn remove_face_drains_only_fans_whose_last_branch_died() {
+        // A fan spanning faces 10 and 11: face 10's departure leaves the branch
+        // on face 11 answering (NOT drained); face 11's later departure drains
+        // it (the querier is owed the closing final exactly once).
+        let mut pq = PendingQueries::new();
+        let t = never(Instant::now());
+        let fan = QueryFan::new(face(3), 99);
+        pq.allocate(face(10), &fan, t);
+        pq.allocate(face(11), &fan, t);
+        drop(fan);
+        assert!(
+            pq.remove_face(&face(10)).is_empty(),
+            "the fan survives on face 11 -> not drained"
+        );
+        assert_eq!(
+            pq.remove_face(&face(11)),
+            vec![(face(3), 99)],
+            "the last branch's face-down drains the fan"
+        );
+        assert!(pq.is_empty());
     }
 
     #[test]
@@ -292,10 +449,11 @@ mod tests {
         let base = Instant::now();
         let soon = base + Duration::from_millis(10);
         let late = base + Duration::from_secs(60);
-        // Two entries on the same face with DIFFERENT deadlines, one on another.
-        let q_soon = pq.allocate(face(10), face(3), 99, soon);
-        let q_late = pq.allocate(face(10), face(4), 88, late);
-        let q_other = pq.allocate(face(11), face(5), 77, soon);
+        // Two independent single-branch queries on the same face with DIFFERENT
+        // deadlines, one on another face.
+        let q_soon = pq.allocate(face(10), &QueryFan::new(face(3), 99), soon);
+        let q_late = pq.allocate(face(10), &QueryFan::new(face(4), 88), late);
+        let q_other = pq.allocate(face(11), &QueryFan::new(face(5), 77), soon);
         assert_eq!(pq.len(), 3);
 
         // A sweep BEFORE any deadline reaps nothing.
@@ -314,12 +472,14 @@ mod tests {
                     qid: q_soon,
                     inbound: face(3),
                     inbound_rid: 99,
+                    last: true, // single-branch fan
                 },
                 ExpiredQuery {
                     out_face: face(11),
                     qid: q_other,
                     inbound: face(5),
                     inbound_rid: 77,
+                    last: true,
                 },
             ],
         );
@@ -340,5 +500,27 @@ mod tests {
             "the late entry reaps at its exact deadline"
         );
         assert!(pq.is_empty(), "the table drains to empty");
+    }
+
+    #[test]
+    fn expired_marks_exactly_one_branch_of_a_fan_last() {
+        // Two branches of ONE fan expiring in the SAME sweep: the querier is owed
+        // one Err per branch but exactly ONE closing final — precisely one of the
+        // reaped descriptors reports `last`.
+        let mut pq = PendingQueries::new();
+        let base = Instant::now();
+        let soon = base + Duration::from_millis(10);
+        let fan = QueryFan::new(face(3), 99);
+        pq.allocate(face(10), &fan, soon);
+        pq.allocate(face(11), &fan, soon);
+        drop(fan);
+        let reaped = pq.expired(base + Duration::from_millis(20));
+        assert_eq!(reaped.len(), 2, "both branches reaped");
+        assert_eq!(
+            reaped.iter().filter(|e| e.last).count(),
+            1,
+            "exactly one branch closes the fan"
+        );
+        assert!(pq.is_empty());
     }
 }

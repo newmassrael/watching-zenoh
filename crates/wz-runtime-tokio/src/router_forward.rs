@@ -186,10 +186,28 @@
 //! `AllComplete` DO compose per tier (union of per-tier `all_query_directions` /
 //! `complete_query_directions` + client faces). Each forwarded Request ALLOCATES a
 //! [`PendingQueries`](crate::linkstate_pending::PendingQueries) return entry (the
-//! reverse Response route is C5c); an EMPTY route prompts a `ResponseFinal` to the
-//! querier. [`deregister`](FaceForwarder::deregister) purges `client_qabls` + the
-//! pending entries keyed by the departed face BEFORE its linkless early-return
-//! (OBLIGATION 1).
+//! reverse Response route is C5c, below); an EMPTY route prompts a `ResponseFinal`
+//! to the querier. [`deregister`](FaceForwarder::deregister) purges `client_qabls`
+//! + the pending entries keyed by the departed face BEFORE its linkless
+//! early-return (OBLIGATION 1).
+//!
+//! ## Slice C5c (query-route RESPONSE half — the reply return) — landed
+//!
+//! A queryable's `Response` / `ResponseFinal` is routed BACK toward the querier
+//! via the pending table — the reverse of C5b's per-face allocate, mirroring the
+//! single-net [`LinkstateForwarder`]'s proven return path:
+//! [`forward_response`](RouterForwarder::forward_response) peeks (more replies may
+//! follow) and [`forward_response_final`](RouterForwarder::forward_response_final)
+//! takes (the final closes the query and frees the entry), each rewriting the
+//! `request_id` back to the recorded upstream rid and unicasting to the recorded
+//! inbound face — a MESH face (transit) or a CLIENT face (a local querier), the
+//! tier-agnostic [`send_to_face`](RouterForwarder::send_to_face). The
+//! [`tick`](FaceForwarder::tick) additionally sweeps the pending table for entries
+//! past their deadline
+//! ([`reap_timed_out_queries`](RouterForwarder::reap_timed_out_queries), zenoh's
+//! `QueryCleanup`): each reaped query gets a synthesized `Err("Timeout")` reply +
+//! the closing `ResponseFinal` back to its querier, so a queryable that crashes
+//! without a final on a still-up face cannot hang a `get()` forever.
 //!
 //! ## Deferred to later slices (named, not silently dropped)
 //!
@@ -218,13 +236,6 @@
 //!   natives too, per zenoh's cross-registration + PRECISION req #1) but MUST land
 //!   WITH the federation/ACTIVATION slice (which provides the 2-node harness to test
 //!   it), not merely "revisit with C5".
-//! - **The query-route RESPONSE half (C5c)** — `forward_response` /
-//!   `forward_response_final` route a queryable's reply BACK to the querier via the
-//!   [`pending`](RouterForwarder#structfield.pending) table (peek / take, the
-//!   reverse of C5b's allocate) + the tick timeout sweep
-//!   (`PendingQueries::expired`) that abandons a reply that never arrives. C5b
-//!   lands the forward half + the pending allocation; the reverse route + GC is
-//!   C5c.
 //! - **The client-queryable cross-tier ADVERTISEMENT** — the query-plane twin of
 //!   C2's `advertise_self_cross_tier_sub`: a client `DeclareQueryable` should make
 //!   this router flood a self-sourced `DeclareQueryable` (carrying the MERGED
@@ -233,16 +244,18 @@
 //!   an inbound Request to it (single-router unit-testable), but does not yet
 //!   advertise it; the E2E steer of a remote querier lands with this + the
 //!   ACTIVATION 2-node harness.
-//! - **Gossip / autoconnect / interceptors / pending-query GC** — the
-//!   per-net policy knobs the `LinkstateForwarder` carries; added as the
-//!   router gains the corresponding plane. NOTE (impl-panel R311y113): the
-//!   tier-scoped [`fan_out_tier`](RouterForwarder::fan_out_tier) applies NEITHER
-//!   the egress-ACL `admit_outbound` gate NOR the `interceptor_dropped` witness
-//!   the single-net `fan_out` applies, so a within-tier Push forward + the tick
-//!   re-advertise reach a tree child a §5.16 egress-deny would drop. Silent in
-//!   any config with no ACL wired (the router has no interceptor plane yet); this
-//!   is the router↔single-net data-path parity obligation for the interceptor
-//!   slice — the ONE place the router route is not yet at single-net parity.
+//! - **Gossip / autoconnect / interceptors** — the per-net policy knobs the
+//!   `LinkstateForwarder` carries; added as the router gains the corresponding
+//!   plane. (The pending-query GC — the timeout sweep — landed with C5c above.)
+//!   NOTE (impl-panel R311y113): NEITHER the tier-scoped
+//!   [`fan_out_tier`](RouterForwarder::fan_out_tier) NOR the single-target
+//!   [`send_to_face`](RouterForwarder::send_to_face) applies the egress-ACL
+//!   `admit_outbound` gate or the `interceptor_dropped` witness the single-net
+//!   `fan_out` applies, so a within-tier Push forward, the tick re-advertise, and
+//!   the query Request/Response sends reach a face a §5.16 egress-deny would
+//!   drop. Silent in any config with no ACL wired (the router has no interceptor
+//!   plane yet); these two egress helpers are the router↔single-net data-path
+//!   parity obligation for the interceptor slice.
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
@@ -282,15 +295,18 @@ use crate::linkstate_forward::{
     select_best_matching,
 };
 use crate::linkstate_interest::LinkstatepeerInterest;
-use crate::linkstate_pending::PendingQueries;
+use crate::linkstate_pending::{PendingQueries, QueryFan};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 use wz_codecs::request::RequestOwned;
+use wz_codecs::response::ResponseOwned;
+use wz_codecs::response_final::ResponseFinalOwned;
 use wz_session_core::query_mode::QueryTarget;
 use wz_session_core::queryable_info::{read_queryable_info, QueryableInfo};
 use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{
     read_request_source, read_request_target, set_request_source,
 };
+use wz_session_core::response_build::set_response_keyexpr_literal;
 
 /// Which of a router's two link-state meshes a face belongs to — the routing
 /// classification of its handshake [`WhatAmI`] role. zenoh partitions faces by
@@ -501,6 +517,11 @@ pub struct RouterForwarder {
     /// entry with [`now`](Self::now)` + this`. `Cell` (it is `Copy`, set through a
     /// `&self` config seam), the same knob the single-net forwarder carries.
     query_timeout: Cell<Duration>,
+    /// Count of pending queries reaped by the timeout sweep (C5c) — the GC
+    /// witness, the router twin of the single-net forwarder's `timed_out`. Rises
+    /// once per abandoned query (a queryable that never sent its `ResponseFinal`
+    /// on a still-up face); `0` on a healthy mesh where every query finalizes.
+    timed_out: Cell<usize>,
     /// Running total of link-state lists ingested across both nets — the
     /// control-plane work witness (the router twin of
     /// `LinkstateForwarder::ingested`).
@@ -585,6 +606,7 @@ impl RouterForwarder {
             pending: RefCell::new(PendingQueries::new()),
             queries_seen: Cell::new(0),
             query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
+            timed_out: Cell::new(0),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
             trees_dirty_routers: Cell::new(false),
@@ -1760,7 +1782,11 @@ impl RouterForwarder {
             .filter_map(|bt| self.mesh_query_block(bt, tier, master, within, inbound_zid, self_zid))
             .collect();
         let client_gate = master || tier == FaceTier::Routers;
-        let src_rid = request.rid;
+        // ONE shared fan target for this logical Query — every branch's pending
+        // entry Rc-shares it, so the closing final aggregates LAST-OUT across all
+        // the legs below (mesh tiers + clients): zenoh's one `Arc<Query>` cloned
+        // per branch of `compute_final_route`.
+        let fan = QueryFan::new(inbound, request.rid);
         let deadline = self.now() + self.query_timeout.get();
 
         let forwarded = match read_request_target(request) {
@@ -1776,12 +1802,11 @@ impl RouterForwarder {
                     &[hop],
                     request,
                     &keyexpr,
-                    src_rid,
+                    &fan,
                     deadline,
                 ),
-                Some(BestQueryWinner::Client(face)) => self.forward_request_to_face(
-                    face, 0, reliable, inbound, request, &keyexpr, src_rid, deadline,
-                ),
+                Some(BestQueryWinner::Client(face)) => self
+                    .forward_request_to_face(face, 0, reliable, request, &keyexpr, &fan, deadline),
                 None => self.forward_request_all(
                     &blocks,
                     client_gate,
@@ -1790,7 +1815,7 @@ impl RouterForwarder {
                     inbound,
                     request,
                     &keyexpr,
-                    src_rid,
+                    &fan,
                     deadline,
                     self_zid,
                 ),
@@ -1803,7 +1828,7 @@ impl RouterForwarder {
                 inbound,
                 request,
                 &keyexpr,
-                src_rid,
+                &fan,
                 deadline,
                 self_zid,
             ),
@@ -1815,7 +1840,7 @@ impl RouterForwarder {
                 inbound,
                 request,
                 &keyexpr,
-                src_rid,
+                &fan,
                 deadline,
                 self_zid,
             ),
@@ -1994,7 +2019,7 @@ impl RouterForwarder {
         inbound: FaceId,
         request: &RequestOwned,
         keyexpr: &str,
-        src_rid: u64,
+        fan: &Rc<QueryFan>,
         deadline: Instant,
         self_zid: Zid,
     ) -> usize {
@@ -2017,7 +2042,7 @@ impl RouterForwarder {
                 }
             };
             forwarded += self.forward_request_to_tier(
-                block, reliable, inbound, &hops, request, keyexpr, src_rid, deadline,
+                block, reliable, inbound, &hops, request, keyexpr, fan, deadline,
             );
         }
         if client_gate {
@@ -2027,7 +2052,7 @@ impl RouterForwarder {
                 inbound,
                 request,
                 keyexpr,
-                src_rid,
+                fan,
                 deadline,
             );
         }
@@ -2051,7 +2076,7 @@ impl RouterForwarder {
         hops: &[Zid],
         request: &RequestOwned,
         keyexpr: &str,
-        src_rid: u64,
+        fan: &Rc<QueryFan>,
         deadline: Instant,
     ) -> usize {
         if hops.is_empty() {
@@ -2067,10 +2092,7 @@ impl RouterForwarder {
             if !is_tree_forward_target(id, zid, inbound, block.inbound_for_net, hops) {
                 return Ok(None);
             }
-            let qid = self
-                .pending
-                .borrow_mut()
-                .allocate(id, inbound, src_rid, deadline);
+            let qid = self.pending.borrow_mut().allocate(id, fan, deadline);
             let mut carrier = template.clone();
             carrier.rid = qid;
             forwarded += 1;
@@ -2095,7 +2117,7 @@ impl RouterForwarder {
         inbound: FaceId,
         request: &RequestOwned,
         keyexpr: &str,
-        src_rid: u64,
+        fan: &Rc<QueryFan>,
         deadline: Instant,
     ) -> usize {
         let mut template = request.clone();
@@ -2121,10 +2143,7 @@ impl RouterForwarder {
             if !qualifies {
                 return Ok(None);
             }
-            let qid = self
-                .pending
-                .borrow_mut()
-                .allocate(id, inbound, src_rid, deadline);
+            let qid = self.pending.borrow_mut().allocate(id, fan, deadline);
             let mut carrier = template.clone();
             carrier.rid = qid;
             forwarded += 1;
@@ -2146,10 +2165,9 @@ impl RouterForwarder {
         out_face: FaceId,
         source_psid: u16,
         reliable: bool,
-        inbound: FaceId,
         request: &RequestOwned,
         keyexpr: &str,
-        src_rid: u64,
+        fan: &Rc<QueryFan>,
         deadline: Instant,
     ) -> usize {
         if !self.faces.borrow().contains_key(&out_face) {
@@ -2160,15 +2178,160 @@ impl RouterForwarder {
         if set_request_keyexpr_literal(&mut carrier, keyexpr).is_err() {
             return 0;
         }
-        let qid = self
-            .pending
-            .borrow_mut()
-            .allocate(out_face, inbound, src_rid, deadline);
+        let qid = self.pending.borrow_mut().allocate(out_face, fan, deadline);
         carrier.rid = qid;
         self.send_to_face(out_face, reliable, || {
             NetworkMessage::Request(Box::new(carrier.clone()))
         });
         1
+    }
+
+    /// A `Response` (a queryable's reply to a routed Query) arrived on `inbound`:
+    /// route it BACK toward the querier via the pending-query table (C5c) — the
+    /// reverse of [`route_request`](Self::route_request)'s allocate, the router
+    /// twin of [`LinkstateForwarder::forward_response`]. The response's
+    /// `request_id` is the local qid THIS router stamped on the Request it
+    /// forwarded out `inbound`; look it up ([`PendingQueries::peek`], NOT taking —
+    /// more replies may follow), rewrite the `request_id` back to the recorded
+    /// upstream rid, B1-normalize the reply keyexpr to a literal, and unicast it to
+    /// the recorded inbound face. The return face may be a MESH face (a transit
+    /// reply) or a CLIENT face (the querier is a local client) — the tier-agnostic
+    /// [`send_to_face`](Self::send_to_face) covers both. zenoh
+    /// `route_send_response` (`dispatcher/queries.rs`): look up
+    /// `face.pending_queries`, rewrite `rid = query.src_qid`, send to
+    /// `query.src_face`. An unknown qid (finalized / timed out / never sent) drops
+    /// silently.
+    fn forward_response(&self, inbound: FaceId, reliable: bool, response: &ResponseOwned) {
+        // Resolve the reply keyexpr against the inbound (forward-outbound) face's
+        // alias table — scoped borrow (an unresolvable alias drops the Response;
+        // the closing final still terminates the querier).
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_wireexpr(&response.keyexpr.body, &s.keyexpr_table) {
+                Some(k) => k,
+                None => return,
+            }
+        };
+        let Some((orig_face, orig_rid)) = self.pending.borrow().peek(inbound, response.request_id)
+        else {
+            return;
+        };
+        let mut carrier = response.clone();
+        carrier.request_id = orig_rid;
+        if set_response_keyexpr_literal(&mut carrier, &keyexpr).is_err() {
+            return;
+        }
+        self.send_to_face(orig_face, reliable, || {
+            NetworkMessage::Response(Box::new(carrier.clone()))
+        });
+    }
+
+    /// A `ResponseFinal` (a queryable's end-of-replies marker) arrived on
+    /// `inbound`: FREE this branch's pending entry and — only when it was the
+    /// fan's LAST live branch — route the closing final BACK toward the querier
+    /// (C5c), the [`PendingQueries::take`] twin of
+    /// [`forward_response`](Self::forward_response)'s peek, the router twin of
+    /// [`LinkstateForwarder::forward_response_final`]. A Query the router fanned
+    /// to several queryables (`QueryTarget::All` / `AllComplete` / BestMatching's
+    /// fall-back — across BOTH mesh tiers and clients) must close upstream exactly
+    /// ONCE, after ALL branches finalize: a NON-last final is ABSORBED (the
+    /// querier still awaits the other branches' replies) — zenoh's
+    /// `Arc::into_inner` gate in `finalize_pending_query`
+    /// (`dispatcher/queries.rs:670`), which propagates `ResponseFinal { rid:
+    /// query.src_qid }` to `query.src_face` only on the LAST branch's removal.
+    /// The forwarded final is rewritten to the recorded upstream rid and unicast
+    /// to the recorded inbound face (a ResponseFinal carries no keyexpr, so no B1
+    /// normalize). An unknown qid drops silently.
+    fn forward_response_final(
+        &self,
+        inbound: FaceId,
+        reliable: bool,
+        response_final: &ResponseFinalOwned,
+    ) {
+        // TAKE the branch — frees the entry; `last` is the fan's last-out gate.
+        let Some((orig_face, orig_rid, last)) = self
+            .pending
+            .borrow_mut()
+            .take(inbound, response_final.request_id)
+        else {
+            return;
+        };
+        if !last {
+            return; // other branches of the fan still answering: absorb
+        }
+        let mut carrier = response_final.clone();
+        carrier.request_id = orig_rid;
+        self.send_to_face(orig_face, reliable, || {
+            NetworkMessage::ResponseFinal(carrier.clone())
+        });
+    }
+
+    /// Reap pending queries past their deadline (C5c) — the router twin of
+    /// [`LinkstateForwarder::reap_timed_out_queries`], the wz form of zenoh's
+    /// per-query `QueryCleanup::run` (`dispatcher/queries.rs:305-349`). The
+    /// [`tick`](FaceForwarder::tick) calls this each coalescing window: sweep the
+    /// pending table ([`PendingQueries::expired`]) for branches whose
+    /// `ResponseFinal` never arrived on a still-up face and route the synthesized
+    /// timeout messages back to the querier — an `Err("Timeout")` reply per reaped
+    /// BRANCH (zenoh runs one `QueryCleanup` per branch, each sending an Err) and
+    /// the closing `ResponseFinal` only for a `last` branch (the fan's last-out
+    /// gate — a sibling branch still answering must not have its query closed by
+    /// this branch's timeout). The final is the load-bearing part (it terminates
+    /// the querier's `get()`); the Err gives an explicit timeout error rather than
+    /// a silent empty result. Both carry the recorded upstream rid, unicast to the
+    /// recorded inbound face (mesh OR client), reliable — a synthesized
+    /// control-plane close, matching the sibling forwarder. Multi-hop note (peer
+    /// parity): a relaying hop's `forward_response` drops the empty-keyexpr Err at
+    /// its keyexpr resolution — the query still terminates (the final always
+    /// propagates); the multi-hop Err is graceful-degrade, as the sibling
+    /// documents. The `expired` borrow is released before the per-entry send
+    /// re-borrows the faces table.
+    fn reap_timed_out_queries(&self) {
+        let reaped = self.pending.borrow_mut().expired(self.now());
+        if reaped.is_empty() {
+            return;
+        }
+        self.timed_out.set(self.timed_out.get() + reaped.len());
+        for eq in reaped {
+            // 1) The Err("Timeout") reply, empty keyexpr (zenoh WireExpr::empty()),
+            //    rid rewritten to the recorded upstream rid (a build error just
+            //    skips the Err — the closing final below is the load-bearing part).
+            //    Per BRANCH, as zenoh runs one QueryCleanup per branch.
+            if let Ok(err_msg) = wz_session_core::response_build::build_response_err_empty(
+                eq.inbound_rid,
+                b"Timeout",
+            ) {
+                self.send_to_face(eq.inbound, true, || {
+                    NetworkMessage::Response(Box::new(err_msg.clone()))
+                });
+            }
+            // 2) The closing final, rewritten to the recorded upstream rid — ONLY
+            //    when this branch was the fan's LAST (the last-out gate).
+            if !eq.last {
+                continue;
+            }
+            let final_msg =
+                wz_session_core::response_final_build::build_response_final(eq.inbound_rid);
+            self.send_to_face(eq.inbound, true, || {
+                NetworkMessage::ResponseFinal(final_msg.clone())
+            });
+        }
+    }
+
+    /// Total live pending query branches — the pending-table witness the shutdown
+    /// summary (and a test) reads; the router twin of
+    /// [`LinkstateForwarder::pending_len`].
+    pub fn pending_len(&self) -> usize {
+        self.pending.borrow().len()
+    }
+
+    /// Total pending queries reaped by the timeout sweep — the GC witness; the
+    /// router twin of [`LinkstateForwarder::pending_timed_out`].
+    pub fn pending_timed_out(&self) -> usize {
+        self.timed_out.get()
     }
 
     /// Send ONE built message to a specific face, ANY tier — the router's
@@ -2263,7 +2426,22 @@ impl FaceForwarder for RouterForwarder {
         // this face's hosted client queryables (C5b); its cross-tier advertisement
         // is a NAMED deferral so there is no advertisement to withdraw (unlike the
         // client sub store below).
-        self.pending.borrow_mut().remove_face(&id);
+        //
+        // A fan whose LAST answering branch died with this face is DRAINED: its
+        // querier is owed the closing ResponseFinal NOW (zenoh
+        // `finalize_pending_queries` on face teardown, final only — no Err), else
+        // its get() waits out its own timeout. A drained fan whose querier IS the
+        // departed face has nobody left to notify (skipped).
+        let drained = self.pending.borrow_mut().remove_face(&id);
+        for (querier, rid) in drained {
+            if querier == id {
+                continue;
+            }
+            let final_msg = wz_session_core::response_final_build::build_response_final(rid);
+            self.send_to_face(querier, true, || {
+                NetworkMessage::ResponseFinal(final_msg.clone())
+            });
+        }
         self.client_qabls.borrow_mut().remove(&id);
         // Purge the FaceId-keyed client sub store, withdrawing self's cross-tier
         // advertisement for any keyexpr this was the LAST client of. A Client face
@@ -2324,6 +2502,11 @@ impl FaceForwarder for RouterForwarder {
         if self.trees_dirty_peers.replace(false) {
             self.recompute_and_advertise_tier(FaceTier::LinkstatePeers);
         }
+        // Reap pending queries whose ResponseFinal never arrived on a still-up
+        // face (zenoh's per-query QueryCleanup timeout) on the same coalescing
+        // cadence (C5c) — a cheap empty sweep when nothing timed out, exactly as
+        // the sibling forwarder's tick.
+        self.reap_timed_out_queries();
     }
 
     /// `true`: both meshes key the self-edge on the peer zid (a
@@ -2427,11 +2610,19 @@ impl FaceForwarder for RouterForwarder {
                 // A Query Request: count the reception (the query-plane witness),
                 // then route it through [`route_request`](Self::route_request) — the
                 // router's full zenoh compute_query_route (3-block master-gated +
-                // GLOBAL BestMatching over both meshes + clients, C5b). The reverse
-                // Response return + the pending-timeout sweep are C5c.
+                // GLOBAL BestMatching over both meshes + clients, C5b).
                 NetworkMessage::Request(request) => {
                     self.queries_seen.set(self.queries_seen.get() + 1);
                     self.route_request(id, tier, *reliable, request);
+                }
+                // A queryable's reply: route it BACK toward the querier via the
+                // pending table (C5c) — peek on a Response (more replies may
+                // follow), take on the ResponseFinal (closes the query).
+                NetworkMessage::Response(response) => {
+                    self.forward_response(id, *reliable, response);
+                }
+                NetworkMessage::ResponseFinal(response_final) => {
+                    self.forward_response_final(id, *reliable, response_final);
                 }
                 _ => {}
             }
@@ -4780,7 +4971,7 @@ mod tests {
         // deregistering the client drops both.
         let fwd = RouterForwarder::new(zid(0x01));
         let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
-        let (p, _sp) = face(zid(0xBB), WIRE_PEER);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
         fwd.register(FaceId(0), &client);
         fwd.register(FaceId(1), &p);
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
@@ -4796,6 +4987,7 @@ mod tests {
             fwd.client_qabls.borrow().contains_key(&FaceId(0)),
             "the client's queryable is stored"
         );
+        sink_p.reset();
         fwd.deregister(FaceId(0)); // the client face goes down (linkless)
         assert!(
             !fwd.client_qabls.borrow().contains_key(&FaceId(0)),
@@ -4804,6 +4996,18 @@ mod tests {
         assert!(
             fwd.pending.borrow().is_empty(),
             "the pending entry keyed by the departed client face is purged (OBLIGATION 1)"
+        );
+        // The face-down DRAINED the fan (its only answering branch died): the
+        // querier is owed the closing final NOW (zenoh finalize_pending_queries).
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the drained fan's querier received a closing final"
+        );
+        assert_eq!(
+            forwarded_response_final_rid(&sink_p.frame_bytes(0)),
+            31,
+            "carrying the querier's original rid"
         );
     }
 
@@ -5025,6 +5229,385 @@ mod tests {
             sink_a.frame_count(),
             0,
             "not black-holed with a spurious final: the route was non-empty"
+        );
+    }
+
+    // ── C5c: router query-route RESPONSE half (the reply return) ──
+
+    /// The single forwarded Response decoded from a recorded wire frame — so a
+    /// test can assert the rewritten `request_id` landed ON THE WIRE.
+    fn forwarded_response(frame: &[u8]) -> wz_codecs::response::ResponseOwned {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } = parse_inbound(frame).expect("parse frame") else {
+            panic!("not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse payload");
+        match msgs.into_iter().next() {
+            Some(NetworkMessage::Response(r)) => *r,
+            other => panic!("expected a forwarded Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reply_routes_back_to_the_querier_and_the_final_frees_the_entry() {
+        // The full within-tier query lifecycle through the router (the twin of the
+        // sibling's a_query_routes_to_a_queryable_and_the_reply_routes_back): a
+        // peer querier A's Query routes to the peer queryable C with a REMAPPED
+        // qid; C's Response + ResponseFinal route BACK to A with the request_id
+        // rewritten to A's original rid; the final frees the entry; a straggler
+        // Response after the final drops (the entry is gone). All through the
+        // `forward` dispatch, so the new Response/ResponseFinal arms are covered.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // queryable
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+        sink_a.reset();
+        sink_c.reset();
+
+        forward_one(&fwd, FaceId(0), request_best(99, "demo/q"));
+        let qid = forwarded_request(&sink_c.frame_bytes(0)).rid;
+        assert_eq!(fwd.pending.borrow().len(), 1, "one pending entry recorded");
+
+        // C replies: the Response routes back to A, rid rewritten, entry kept.
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
+                .expect("build response");
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Response(Box::new(response)),
+        );
+        assert_eq!(sink_a.frame_count(), 1, "the Reply routed back to A");
+        assert_eq!(
+            forwarded_response(&sink_a.frame_bytes(0)).request_id,
+            99,
+            "request_id rewritten back to the querier's rid"
+        );
+        assert_eq!(
+            fwd.pending.borrow().len(),
+            1,
+            "a Response (not final) keeps the entry"
+        );
+
+        // C finalizes: the final routes back AND frees the entry.
+        let rf = wz_session_core::response_final_build::build_response_final(qid);
+        forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf));
+        assert_eq!(sink_a.frame_count(), 2, "the final routed back to A too");
+        assert_eq!(
+            forwarded_response_final_rid(&sink_a.frame_bytes(1)),
+            99,
+            "the final's request_id rewritten back to the querier's rid"
+        );
+        assert!(fwd.pending.borrow().is_empty(), "the final freed the entry");
+
+        // A straggler Response after the final: the entry is gone, drops silently.
+        let straggler =
+            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"late")
+                .expect("build response");
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Response(Box::new(straggler)),
+        );
+        assert_eq!(sink_a.frame_count(), 2, "a post-final Response drops");
+    }
+
+    #[test]
+    fn a_client_queryable_reply_routes_back_to_a_mesh_querier() {
+        // The CROSS-TIER return path (router-distinctive): a peer querier's Query
+        // routed to a CLIENT-hosted queryable (C5b block 3); the client's Response
+        // + ResponseFinal route back to the PEER querier — the return face and the
+        // reply face are in DIFFERENT tiers, the tier-agnostic send_to_face.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // mesh querier
+        let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT); // queryable host
+        fwd.register(FaceId(0), &p);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+        sink_p.reset();
+        sink_client.reset();
+
+        forward_one(&fwd, FaceId(0), request_best(33, "demo/q"));
+        assert_eq!(sink_client.frame_count(), 1, "the Query reached the client");
+        let qid = forwarded_request(&sink_client.frame_bytes(0)).rid;
+
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"v")
+                .expect("build response");
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Response(Box::new(response)),
+        );
+        let rf = wz_session_core::response_final_build::build_response_final(qid);
+        forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf));
+        assert_eq!(
+            sink_p.frame_count(),
+            2,
+            "the client's Reply + final routed back to the mesh querier"
+        );
+        assert_eq!(
+            forwarded_response(&sink_p.frame_bytes(0)).request_id,
+            33,
+            "the reply carries the querier's original rid"
+        );
+        assert_eq!(
+            forwarded_response_final_rid(&sink_p.frame_bytes(1)),
+            33,
+            "so does the closing final"
+        );
+        assert!(fwd.pending.borrow().is_empty(), "the final freed the entry");
+    }
+
+    #[test]
+    fn an_unknown_response_qid_drops_without_routing() {
+        // A Response carrying a qid this router never allocated has no pending
+        // entry — it drops silently (no panic, nothing routed).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER);
+        let (c, _sc) = face(zid(0xCC), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        sink_a.reset();
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(42, "demo/q", b"x")
+                .expect("build response");
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Response(Box::new(response)),
+        );
+        let rf = wz_session_core::response_final_build::build_response_final(42);
+        forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf));
+        assert_eq!(sink_a.frame_count(), 0, "an unknown qid routes nowhere");
+        assert!(fwd.pending.borrow().is_empty(), "and records nothing");
+    }
+
+    #[test]
+    fn a_timed_out_query_synthesizes_err_and_final_to_the_querier() {
+        // The C5c timeout sweep (zenoh QueryCleanup): a routed Query whose
+        // ResponseFinal never arrives is reaped at — not before — its deadline by
+        // the tick, which synthesizes an Err("Timeout") Response + the closing
+        // ResponseFinal back to the querier (rid rewritten), freeing the entry.
+        // Deterministic via the injected clock (base + controllable offset).
+        let base = Instant::now();
+        let offset = Rc::new(Cell::new(Duration::ZERO));
+        let offset_clock = offset.clone();
+        let fwd =
+            RouterForwarder::with_clock(zid(0x01), Box::new(move || base + offset_clock.get()));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // queryable (never replies)
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick(); // flush the topology recomputes so later ticks only reap
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+        sink_a.reset();
+        sink_c.reset();
+
+        forward_one(&fwd, FaceId(0), request_best(77, "demo/q"));
+        assert_eq!(fwd.pending.borrow().len(), 1, "the query is pending");
+
+        // BEFORE the deadline: the sweep reaps nothing.
+        offset.set(RouterForwarder::DEFAULT_QUERY_TIMEOUT - Duration::from_millis(1));
+        fwd.tick();
+        assert_eq!(fwd.timed_out.get(), 0, "not reaped before the deadline");
+        assert_eq!(fwd.pending.borrow().len(), 1, "still pending");
+        assert_eq!(sink_a.frame_count(), 0, "nothing synthesized yet");
+
+        // AT/PAST the deadline: reaped — the querier gets the Err + the final.
+        offset.set(RouterForwarder::DEFAULT_QUERY_TIMEOUT);
+        fwd.tick();
+        assert_eq!(fwd.timed_out.get(), 1, "one query reaped at its deadline");
+        assert!(fwd.pending.borrow().is_empty(), "the entry is freed");
+        assert_eq!(
+            sink_a.frame_count(),
+            2,
+            "the querier received the Err reply + the closing final"
+        );
+        assert_eq!(
+            forwarded_response(&sink_a.frame_bytes(0)).request_id,
+            77,
+            "the Err reply carries the querier's rid"
+        );
+        assert_eq!(
+            forwarded_response_final_rid(&sink_a.frame_bytes(1)),
+            77,
+            "the closing final carries the querier's rid"
+        );
+    }
+
+    #[test]
+    fn a_fanned_query_closes_upstream_only_after_the_last_branch_finalizes() {
+        // The fan-aggregation last-out gate (zenoh Arc::into_inner in
+        // finalize_pending_query): a Query fanned to TWO queryables (BestMatching
+        // falls back to All — both incomplete) must close upstream exactly ONCE,
+        // after BOTH branches finalize. The first branch's final is ABSORBED; a
+        // reply from the still-open second branch STILL routes; the second final
+        // closes the fan with a single upstream final.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (b, sink_b) = face(zid(0xBB), WIRE_PEER); // queryable 1 (incomplete)
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // queryable 2 (incomplete)
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", false));
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/q", false));
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+
+        forward_one(&fwd, FaceId(0), request_best(91, "demo/q"));
+        assert_eq!(fwd.pending_len(), 2, "two branches pending (B and C)");
+        let qid_b = forwarded_request(&sink_b.frame_bytes(0)).rid;
+        let qid_c = forwarded_request(&sink_c.frame_bytes(0)).rid;
+
+        // B finalizes FIRST: absorbed (C is still answering) — no upstream final.
+        let rf_b = wz_session_core::response_final_build::build_response_final(qid_b);
+        forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf_b));
+        assert_eq!(
+            sink_a.frame_count(),
+            0,
+            "the FIRST branch's final is absorbed (the fan is still open)"
+        );
+        assert_eq!(fwd.pending_len(), 1, "B's branch freed, C's remains");
+
+        // C's reply AFTER B's final still routes (the fan is open).
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(qid_c, "demo/q", b"hi")
+                .expect("build response");
+        forward_one(
+            &fwd,
+            FaceId(2),
+            NetworkMessage::Response(Box::new(response)),
+        );
+        assert_eq!(sink_a.frame_count(), 1, "C's reply routed back to A");
+        assert_eq!(forwarded_response(&sink_a.frame_bytes(0)).request_id, 91);
+
+        // C finalizes LAST: the fan closes with exactly ONE upstream final.
+        let rf_c = wz_session_core::response_final_build::build_response_final(qid_c);
+        forward_one(&fwd, FaceId(2), NetworkMessage::ResponseFinal(rf_c));
+        assert_eq!(
+            sink_a.frame_count(),
+            2,
+            "exactly one upstream final, after the LAST branch"
+        );
+        assert_eq!(
+            forwarded_response_final_rid(&sink_a.frame_bytes(1)),
+            91,
+            "carrying the querier's rid"
+        );
+        assert!(fwd.pending.borrow().is_empty(), "the fan is fully freed");
+    }
+
+    #[test]
+    fn a_branch_face_down_drains_the_fan_and_finalizes_the_querier() {
+        // The face-down half of the last-out gate (zenoh finalize_pending_queries):
+        // a fan of two branches loses ONE queryable face — the fan stays open (the
+        // other branch still answers); losing the OTHER closes it with the drained
+        // final. The querier is a CLIENT face, so the mesh link-state floods the
+        // deregisters trigger never pollute its sink.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (cq, sink_cq) = face(zid(0xEE), WIRE_CLIENT); // client querier
+        let (b, _sb) = face(zid(0xBB), WIRE_PEER); // queryable 1 (incomplete)
+        let (c, _sc) = face(zid(0xCC), WIRE_PEER); // queryable 2 (incomplete)
+        fwd.register(FaceId(0), &cq);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &c);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", false));
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/q", false));
+        sink_cq.reset();
+
+        forward_one(&fwd, FaceId(0), request_best(41, "demo/q")); // client queries
+        assert_eq!(fwd.pending_len(), 2, "fanned to both mesh queryables");
+
+        fwd.deregister(FaceId(1)); // B dies: the fan survives on C
+        assert_eq!(
+            sink_cq.frame_count(),
+            0,
+            "no final while the other branch still answers"
+        );
+        assert_eq!(fwd.pending_len(), 1, "B's branch dropped, C's remains");
+
+        fwd.deregister(FaceId(2)); // C dies: the fan is DRAINED
+        assert_eq!(
+            sink_cq.frame_count(),
+            1,
+            "the drained fan's querier received the closing final"
+        );
+        assert_eq!(
+            forwarded_response_final_rid(&sink_cq.frame_bytes(0)),
+            41,
+            "carrying the querier's original rid"
+        );
+        assert!(fwd.pending.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_mesh_queryable_reply_routes_back_to_a_client_querier() {
+        // The CLIENT-querier return face (the other direction of the cross-tier
+        // return): a CLIENT's Query routed to a COMPLETE peer queryable
+        // (BestMatching); the peer's Response + final route back to the CLIENT
+        // face, rid-rewritten — the return face is a client leaf, the reply face a
+        // mesh face.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (cq, sink_cq) = face(zid(0xEE), WIRE_CLIENT); // client querier
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // complete peer queryable
+        fwd.register(FaceId(0), &cq);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+        sink_cq.reset();
+        sink_p.reset();
+
+        forward_one(&fwd, FaceId(0), request_best(51, "demo/q")); // client queries
+        assert_eq!(sink_p.frame_count(), 1, "routed to the peer queryable");
+        let qid = forwarded_request(&sink_p.frame_bytes(0)).rid;
+
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"v")
+                .expect("build response");
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Response(Box::new(response)),
+        );
+        let rf = wz_session_core::response_final_build::build_response_final(qid);
+        forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf));
+        assert_eq!(
+            sink_cq.frame_count(),
+            2,
+            "the reply + final reached the CLIENT querier"
+        );
+        assert_eq!(
+            forwarded_response(&sink_cq.frame_bytes(0)).request_id,
+            51,
+            "the reply carries the client's original rid"
+        );
+        assert_eq!(
+            forwarded_response_final_rid(&sink_cq.frame_bytes(1)),
+            51,
+            "so does the closing final"
         );
     }
 }
