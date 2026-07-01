@@ -684,6 +684,18 @@ impl LinkstateNetwork {
         self.graph.node_count()
     }
 
+    /// Iterate the zids of every node currently in the graph — self (seeded at
+    /// construction) plus every node discovered via link-state. This is the
+    /// membership set zenoh's `shared_nodes` intersects across the two router
+    /// meshes (`network.rs:1197`, `node_references()`), used by the router
+    /// master election. Reads the `idx_by_zid` secondary index, which
+    /// `insert_node` / `remove_detached_nodes` keep in lockstep with the graph,
+    /// so a pruned node is absent here exactly as it is in the graph (no stale
+    /// membership).
+    pub fn node_zids(&self) -> impl Iterator<Item = Zid> + '_ {
+        self.idx_by_zid.keys().copied()
+    }
+
     /// The number of edges (mutual links) in the topology graph.
     pub fn edge_count(&self) -> usize {
         self.graph.edge_count()

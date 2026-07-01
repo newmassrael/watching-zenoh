@@ -1148,7 +1148,7 @@ layer_c1ax_cargo_test_routing_namespace() {
         && cargo build -p wz --features routing-namespace --quiet)
 }
 
-# ─── Layer C1ay — router-hat: STATE + INGEST + COMPUTE C1-C3a unit + clippy ─
+# ─── Layer C1ay — router-hat: STATE + INGEST + COMPUTE C1-C4 unit + clippy ─
 #
 # R311y108 + R311y109 + R311y110: the §5.21 router forwarder (the 4th
 # `impl FaceForwarder`, `router_forward`) is the wz port of zenoh `hat/router`'s
@@ -1174,8 +1174,10 @@ layer_c1ax_cargo_test_routing_namespace() {
 #      C0 (y112) extracted the shared route/re-advertise cores; C1 (y113) =
 #      within-tier data route + tick re-advertise + self-zid guard; C2 (y114) =
 #      client cross-tier subscription advertisement; C3a (y115) = client data
-#      delivery. The client->mesh publish + router federation + master-election +
-#      query route are later slices.
+#      delivery; C3b (y117) = client->mesh publish; C4 (y118) = router↔router
+#      mesh federation bridge + master-election (HRW elect_router over shared_nodes,
+#      re-gating C3a local delivery + C3b's router leg). The query route (Request/
+#      Response) + source-dimensioned route cache are the later C5 slice.
 layer_c1ay_cargo_test_router_hat() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet \
