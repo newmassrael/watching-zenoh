@@ -84,17 +84,22 @@
 //!
 //! ## Deferred to later slices (named, not silently dropped)
 //!
-//! - **The simple/client subscription store** (zenoh's per-`Resource`
-//!   `session_ctxs`, the leaf-subscriber input) — slice 1d. A Client face is
-//!   held with no net (1a), and a Client `DeclareSubscriber` is NOT ingested in
-//!   1b; the client store + its derived cross-tier representation land in 1d.
+//! - **The simple/client sub + qabl store** (zenoh's per-`Resource`
+//!   `session_ctxs`, the leaf input) — slice 1d. A Client face is held with no
+//!   net (1a), and a Client `DeclareSubscriber` / `DeclareQueryable` is NOT
+//!   ingested in 1b/1c; the client store + its derived cross-tier representation
+//!   land in 1d. NOTE (session-review R311y111): the 1d/COMPUTE fold MUST purge
+//!   FaceId-keyed leaf state BEFORE `deregister`'s linkless early-return (a
+//!   Client face is `link == None`), else a client face-down leaks its interest.
 //! - **The cross-tier bubble DERIVATION + route COMPUTE + master-election** —
-//!   `compute_data_route` / `compute_query_route`, `cross_tier_self_source`, the
-//!   source-dimensioned route cache, `elect_router` consistent-hash
-//!   ingress/egress filtering, `shared_nodes` maintenance, AND the tree-change
-//!   re-advertise (`re_advertise_subscriptions` to new tree children) — the
-//!   COMPUTE slice. A data `Push` is COUNTED here (the reception witness) but
-//!   not yet routed; a `Request` / `Response` is left alone.
+//!   `compute_data_route` / `compute_query_route`, `cross_tier_self_source` (fed
+//!   to BOTH route-compute AND the flood/re-advertise path — else self's
+//!   aggregated interest never reaches a new tree child), the source-dimensioned
+//!   route cache, `elect_router` consistent-hash ingress/egress filtering,
+//!   `shared_nodes` maintenance, AND the tree-change re-advertise
+//!   (`re_advertise_subscriptions` / `re_advertise_queryables` to new tree
+//!   children) — the COMPUTE slice. A data `Push` is COUNTED here (the reception
+//!   witness) but not yet routed; a `Request` / `Response` is left alone.
 //! - **Gossip / autoconnect / interceptors / pending-query GC** — the
 //!   per-net policy knobs the `LinkstateForwarder` carries; added as the
 //!   router gains the corresponding plane.
@@ -109,6 +114,7 @@ use sce_forge_runtime::codec::CodecError;
 
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::linkstate_list::LinkstateListOwned;
+use wz_codecs::wireexpr::WireexprOwned;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
 use wz_session_core::declare_build::{
     build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
@@ -124,8 +130,9 @@ use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use crate::accept_loop::{FaceForwarder, FaceId};
 use crate::linkstate_forward::{
-    build_declare_queryable_with_info, declare_queryable_wireexpr, declare_subscriber_wireexpr,
-    is_tree_forward_target, peer_whatami_routing, peer_zid_routing, resolve_source_in,
+    absorb_keyexpr_into, build_declare_queryable_with_info, declare_queryable_wireexpr,
+    declare_subscriber_wireexpr, is_tree_forward_target, peer_whatami_routing, peer_zid_routing,
+    resolve_source_in,
 };
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -486,52 +493,43 @@ impl RouterForwarder {
     }
 
     /// Record (or drop) a link-local keyexpr alias from a sourced `DeclKexpr` /
-    /// `UndeclKexpr` on `face` (1b) — the per-face mirror of
-    /// [`LinkstateForwarder`]'s `absorb_keyexpr_declaration`. Link-local (NOT
-    /// re-flooded): each link negotiates its own aliases, so the forwarder
-    /// records the alias for RESOLUTION and re-expresses keyexprs to literals
-    /// when it re-floods. The declared base may itself reference an earlier alias
-    /// on the same link, so it is resolved against the table before recording.
+    /// `UndeclKexpr` on `face` (1b) — a thin `&self.faces`-borrow around the
+    /// shared [`absorb_keyexpr_into`] SSOT (R311y111), which both forwarders use.
+    /// Link-local: each link negotiates its own aliases (not re-flooded).
     fn absorb_keyexpr_declaration(&self, face: FaceId, declare: &DeclareOwned) {
         let mut faces = self.faces.borrow_mut();
         let Some(state) = faces.get_mut(&face) else {
             return;
         };
-        match &declare.body {
-            DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
-                if let Some(literal) = resolve_wireexpr(&d.keyexpr.body, &state.keyexpr_table) {
-                    state.keyexpr_table.insert(d.id, literal);
-                }
-            }
-            DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
-                state.keyexpr_table.remove(&u.id);
-            }
-            _ => {}
-        }
+        absorb_keyexpr_into(&mut state.keyexpr_table, declare);
     }
 
-    /// Ingest a sourced `DeclareSubscriber` (1b): register the SOURCE peer's
-    /// interest in the INBOUND tier's subs table (Router face -> `router_subs`,
-    /// Peer face -> `linkstatepeer_subs`), keyed by the resolved source zid, and
-    /// — only on a real change — re-flood a clean literal declaration WITHIN that
-    /// tier to the source's spanning-tree children. The per-tier analogue of
-    /// [`LinkstateForwarder`]'s `forward_subscription`; the cross-tier bubble is
-    /// NOT stored (derived at compute). A Client face (no tier table) is 1d.
-    fn ingest_subscription(
+    /// The SSOT for a sourced interest declaration (subscriber `V = ()` /
+    /// queryable `V = QueryableInfo`) — the router twin of
+    /// [`LinkstateForwarder`]'s `forward_interest_declaration`. Register the
+    /// resolved SOURCE's interest (value `V`) in the inbound tier's `table`, and
+    /// — only on a real change (the value-diff gate: a NEW peer OR a CHANGED
+    /// value) — re-flood a clean declaration WITHIN that tier via `build`
+    /// (re-stamped with this node's psid for the source). The cross-tier bubble
+    /// is NOT stored (derived at compute). Only the wireexpr extractor, the
+    /// `table`, the `value`, and the carrier `build` differ between the two
+    /// planes; this holds everything they share (the alias-resolve +
+    /// source-resolve + change-gate + re-flood), so neither plane re-hand-rolls
+    /// it (the sibling factored the identical `V`-generic).
+    #[allow(clippy::too_many_arguments)]
+    fn ingest_interest<V: PartialEq>(
         &self,
         inbound: FaceId,
         tier: FaceTier,
         reliable: bool,
         declare: &DeclareOwned,
+        wireexpr: &WireexprOwned,
+        table: &RefCell<LinkstatepeerInterest<V>>,
+        value: V,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) {
-        let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
-            return;
-        };
         let Some((net, _dirty)) = self.plane(tier) else {
-            return; // Client tier: no net / no tier table -> slice 1d.
-        };
-        let Some(subs) = self.subs_table(tier) else {
-            return;
+            return; // Client tier: no net -> slice 1d (caller also guards on the table).
         };
         // Resolve the keyexpr against the inbound face's alias table + read its
         // zid / link, in one scoped borrow (an unresolvable alias drops it).
@@ -554,8 +552,8 @@ impl RouterForwarder {
             return;
         };
         // Register the SOURCE's native interest; re-flood ONLY on a real change
-        // (the loop-bounding new-peer gate).
-        if !subs.borrow_mut().register(&keyexpr, source_zid, ()) {
+        // (the value-diff gate -- a new peer OR a changed value).
+        if !table.borrow_mut().register(&keyexpr, source_zid, value) {
             return;
         }
         self.reflood_declaration(
@@ -567,8 +565,31 @@ impl RouterForwarder {
             out_node_id,
             reliable,
             &keyexpr,
-            |ke| build_declare_subscriber(0, 0, Some(ke)),
+            build,
         );
+    }
+
+    /// Ingest a sourced `DeclareSubscriber` (1b) — the `V = ()` case of
+    /// [`ingest_interest`](Self::ingest_interest): register the SOURCE in the
+    /// inbound tier's `subs` table (Router face -> `router_subs`, Peer face ->
+    /// `linkstatepeer_subs`) + within-tier re-flood. A Client face (no tier
+    /// table) is slice 1d.
+    fn ingest_subscription(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
+            return;
+        };
+        let Some(subs) = self.subs_table(tier) else {
+            return; // Client tier -> slice 1d.
+        };
+        self.ingest_interest(inbound, tier, reliable, declare, wireexpr, subs, (), |ke| {
+            build_declare_subscriber(0, 0, Some(ke))
+        });
     }
 
     /// A sourced `UndeclareSubscriber` (1b): withdraw the SOURCE peer's interest
@@ -650,11 +671,8 @@ impl RouterForwarder {
         let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
             return;
         };
-        let Some((net, _dirty)) = self.plane(tier) else {
-            return; // Client tier: no net / no tier table -> slice 1d.
-        };
         let Some(qabls) = self.qabls_table(tier) else {
-            return;
+            return; // Client tier -> slice 1d.
         };
         // The declared QueryableInfo (complete / distance) rides the DeclQueryable
         // body's ext chain; absent ext = zenoh DEFAULT (incomplete).
@@ -664,39 +682,15 @@ impl RouterForwarder {
             }
             _ => QueryableInfo::DEFAULT,
         };
-        let (inbound_zid, inbound_link, keyexpr) = {
-            let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
-            };
-            let Some(keyexpr) = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) else {
-                return;
-            };
-            (peer_zid_routing(&s.actions), s.link, keyexpr)
-        };
-        let Some((source_zid, out_node_id)) = resolve_source_in(
-            &net.borrow(),
-            inbound_zid,
-            inbound_link,
-            read_declare_source(declare),
-        ) else {
-            return;
-        };
-        // The VALUE-DIFF gate: a new peer OR a changed QueryableInfo re-floods
-        // (so a queryable flipping complete:false->true re-propagates).
-        if !qabls.borrow_mut().register(&keyexpr, source_zid, info) {
-            return;
-        }
-        self.reflood_declaration(
+        // CARRY the source's QueryableInfo downstream on the re-flood (info is Copy).
+        self.ingest_interest(
             inbound,
             tier,
-            net,
-            source_zid,
-            inbound_zid,
-            out_node_id,
             reliable,
-            &keyexpr,
-            // CARRY the source's QueryableInfo downstream (info is Copy).
+            declare,
+            wireexpr,
+            qabls,
+            info,
             move |ke| build_declare_queryable_with_info(ke, info),
         );
     }

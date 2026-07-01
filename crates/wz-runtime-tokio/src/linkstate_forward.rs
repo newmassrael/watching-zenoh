@@ -2261,19 +2261,7 @@ impl LinkstateForwarder {
         let Some(state) = faces.get_mut(&face) else {
             return;
         };
-        match &declare.body {
-            DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
-                if let Some(literal) = resolve_wireexpr(&d.keyexpr.body, &state.keyexpr_table) {
-                    state.keyexpr_table.insert(d.id, literal);
-                }
-            }
-            DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
-                state.keyexpr_table.remove(&u.id);
-            }
-            // Only the two keyexpr-declaration bodies reach here (the forward()
-            // dispatch routes everything else); a defensive no-op otherwise.
-            _ => {}
-        }
+        absorb_keyexpr_into(&mut state.keyexpr_table, declare);
     }
 
     /// The peers interested in `keyexpr` — the subscription-filter input the
@@ -2418,6 +2406,29 @@ pub(crate) fn resolve_source_in(
     }
     let out_node_id = u16::try_from(net.local_psid_of(&source_zid)?).ok()?;
     Some((source_zid, out_node_id))
+}
+
+/// Record (or drop) a link-local keyexpr alias from a `DeclKexpr` / `UndeclKexpr`
+/// into `table` — the SSOT shared by BOTH forwarders' `absorb_keyexpr_declaration`
+/// (R311y111). The declared base may reference an earlier alias on the same link,
+/// so it is resolved against `table` before recording; an unknown-alias declare
+/// is dropped. Link-local: each link negotiates its own aliases (not re-flooded).
+/// Only the two keyexpr-declaration bodies reach here; a defensive no-op otherwise.
+pub(crate) fn absorb_keyexpr_into(
+    table: &mut hashbrown::HashMap<u64, String>,
+    declare: &DeclareOwned,
+) {
+    match &declare.body {
+        DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
+            if let Some(literal) = resolve_wireexpr(&d.keyexpr.body, table) {
+                table.insert(d.id, literal);
+            }
+        }
+        DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
+            table.remove(&u.id);
+        }
+        _ => {}
+    }
 }
 
 /// Whether `zid` is one of `children` — the tree next hops a fan-out targets.
