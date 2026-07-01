@@ -2571,17 +2571,30 @@ impl FaceForwarder for LinkstateForwarder {
         // whatami-agnostic, so this is behaviour-neutral for an all-peer mesh; it
         // is the gossip-policy / autoconnect prerequisite (those gate per the
         // target's true role).
-        let added = peer_zid_routing(actions).map(|neighbour| {
-            let neighbour_whatami = peer_whatami_routing(actions);
-            let mut net = self.net.borrow_mut();
-            // Whether this neighbour is NEW to the GRAPH (not merely a new face):
-            // a second link to an already-known peer re-advertises only self's
-            // links, not the neighbour again — zenoh add_link's `new` flag
-            // (`network.rs:826`). Queried before add_link, under the one borrow.
-            let neighbour_was_new = net.get_node(&neighbour).is_none();
-            let link_id = net.add_link(neighbour, neighbour_whatami);
-            (link_id, neighbour, neighbour_was_new)
-        });
+        // OBLIGATION-3 self-zid parity: a face whose routing zid IS self's own
+        // zid (a self-connect) is HELD without a link — adding it would insert a
+        // self entry into `node.links` that `make_link_state` then emits as a
+        // spurious self-loop link (psid 0) onto the wire, plus an sn bump real
+        // peers ingest — `rebuild_edges`'s `idx2 != idx1` guard skips the petgraph
+        // self-EDGE but does NOT scrub that `node.links` entry, so the self-loop
+        // still floods. zenoh relies on its transport manager never handing
+        // `add_link` a self-transport; wz guards it here (mirror in
+        // `RouterForwarder::register`).
+        let self_zid = *self.net.borrow().self_zid();
+        let added = peer_zid_routing(actions)
+            .filter(|neighbour| *neighbour != self_zid)
+            .map(|neighbour| {
+                let neighbour_whatami = peer_whatami_routing(actions);
+                let mut net = self.net.borrow_mut();
+                // Whether this neighbour is NEW to the GRAPH (not merely a new
+                // face): a second link to an already-known peer re-advertises only
+                // self's links, not the neighbour again — zenoh add_link's `new`
+                // flag (`network.rs:826`). Queried before add_link, under the one
+                // borrow.
+                let neighbour_was_new = net.get_node(&neighbour).is_none();
+                let link_id = net.add_link(neighbour, neighbour_whatami);
+                (link_id, neighbour, neighbour_was_new)
+            });
         self.faces.borrow_mut().insert(
             id,
             FaceState {
@@ -3540,6 +3553,27 @@ mod tests {
             sink.frame_count(),
             0,
             "a zid-less held face is not bootstrapped"
+        );
+    }
+
+    #[test]
+    fn register_self_zid_face_is_held_without_a_link() {
+        // OBLIGATION-3 self-zid parity (mirrors RouterForwarder): a face whose
+        // routing zid IS self's own zid is HELD without a graph link — adding it
+        // would flood a spurious self-loop (psid 0) + sn bump; the guard drops it
+        // to the held-without-link branch, so no self-loop is advertised.
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
+        let (face, sink) = peer_face(zid(0x01)); // routing zid == self
+        fwd.register(FaceId(1), &face);
+        assert_eq!(
+            sink.frame_count(),
+            0,
+            "a self-connect face is not bootstrapped (held without a link)"
+        );
+        assert_eq!(
+            fwd.net.borrow().node_count(),
+            1,
+            "no self-loop neighbour added to the net (only self)"
         );
     }
 

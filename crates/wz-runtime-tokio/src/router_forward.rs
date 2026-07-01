@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Router-hat forwarder (P4 §5.21, slices 1a-1c — DUAL-mesh STATE + declare INGEST).
+//! Router-hat forwarder (P4 §5.21 — DUAL-mesh STATE + declare INGEST (1a-1c) +
+//! within-tier data route + tick re-advertise (C1)).
 //!
 //! [`RouterForwarder`] is the 4th [`FaceForwarder`](crate::accept_loop::FaceForwarder),
 //! the wz port of zenoh's `hat/router` routing strategy. Where the
@@ -91,18 +92,42 @@
 //!   land in 1d. NOTE (session-review R311y111): the 1d/COMPUTE fold MUST purge
 //!   FaceId-keyed leaf state BEFORE `deregister`'s linkless early-return (a
 //!   Client face is `link == None`), else a client face-down leaks its interest.
+//! ## Slice C1 (within-tier data route + tick re-advertise) — landed
+//!
+//! `forward` now ROUTES a data `Push` WITHIN its inbound tier's mesh
+//! ([`forward_push_tier`](RouterForwarder::forward_push_tier), the shared
+//! [`compute_push_forward`] core on the tier's `(net, subs)` fanned out
+//! tier-scoped) — a peer-sourced Push to peer-mesh subs, a router-sourced one to
+//! router-mesh subs (zenoh's master-gate-free route blocks). The
+//! [`tick`](FaceForwarder::tick) now RE-ADVERTISES each tier's NATIVE subs +
+//! qabls to the new tree children a recompute adds (the shared
+//! [`re_advertise_interest_into`] per net), fixing the prior slice's
+//! discard-the-delta tick. A `Push` is still COUNTED (the reception witness); a
+//! Client-tier Push (no mesh) stays count-only.
+//!
+//! ## Deferred to the cross-tier COMPUTE slices (named, not silently dropped)
+//!
 //! - **The cross-tier bubble DERIVATION + route COMPUTE + master-election** —
-//!   `compute_data_route` / `compute_query_route`, `cross_tier_self_source` (fed
-//!   to BOTH route-compute AND the flood/re-advertise path — else self's
-//!   aggregated interest never reaches a new tree child), the source-dimensioned
-//!   route cache, `elect_router` consistent-hash ingress/egress filtering,
-//!   `shared_nodes` maintenance, AND the tree-change re-advertise
-//!   (`re_advertise_subscriptions` / `re_advertise_queryables` to new tree
-//!   children) — the COMPUTE slice. A data `Push` is COUNTED here (the reception
-//!   witness) but not yet routed; a `Request` / `Response` is left alone.
+//!   `cross_tier_self_source` (fed to BOTH route-compute AND the re-advertise
+//!   path — else self's aggregated interest never reaches a new tree child, and
+//!   it drives the re-advertise ONLY, never the self-excluded data forward), the
+//!   cross-tier data bridge, the source-dimensioned route cache, `elect_router`
+//!   consistent-hash ingress/egress filtering (`shared_nodes` for the route
+//!   master vs `get_router_links` per-peer — a real asymmetry), and
+//!   `compute_query_route` (`Request` / `Response`) — slices C2-C5. Local-client
+//!   delivery rides C2/C3. A single-router cross-tier bridge (C2) MUST fail-fast
+//!   fence `shared_nodes <= 1` until master-election (C4) lands, else a 2nd
+//!   router double-delivers.
 //! - **Gossip / autoconnect / interceptors / pending-query GC** — the
 //!   per-net policy knobs the `LinkstateForwarder` carries; added as the
-//!   router gains the corresponding plane.
+//!   router gains the corresponding plane. NOTE (impl-panel R311y113): the
+//!   tier-scoped [`fan_out_tier`](RouterForwarder::fan_out_tier) applies NEITHER
+//!   the egress-ACL `admit_outbound` gate NOR the `interceptor_dropped` witness
+//!   the single-net `fan_out` applies, so a within-tier Push forward + the tick
+//!   re-advertise reach a tree child a §5.16 egress-deny would drop. Silent in
+//!   any config with no ACL wired (the router has no interceptor plane yet); this
+//!   is the router↔single-net data-path parity obligation for the interceptor
+//!   slice — the ONE place the router route is not yet at single-net parity.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -114,6 +139,7 @@ use sce_forge_runtime::codec::CodecError;
 
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::linkstate_list::LinkstateListOwned;
+use wz_codecs::push::PushOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
 use wz_session_core::declare_build::{
@@ -130,9 +156,9 @@ use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use crate::accept_loop::{FaceForwarder, FaceId};
 use crate::linkstate_forward::{
-    absorb_keyexpr_into, build_declare_queryable_with_info, declare_queryable_wireexpr,
-    declare_subscriber_wireexpr, is_tree_forward_target, peer_whatami_routing, peer_zid_routing,
-    resolve_source_in,
+    absorb_keyexpr_into, build_declare_queryable_with_info, compute_push_forward,
+    declare_queryable_wireexpr, declare_subscriber_wireexpr, is_tree_forward_target,
+    peer_whatami_routing, peer_zid_routing, re_advertise_interest_into, resolve_source_in,
 };
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -226,8 +252,10 @@ pub struct RouterForwarder {
     /// `LinkstateForwarder::ingested`).
     ingested: Cell<usize>,
     /// Running total of data `Push` messages received — the data-plane
-    /// reception witness. The route fan-out that consumes it is the COMPUTE
-    /// slice; this slice only counts.
+    /// reception witness, raised on EVERY inbound Push (including a Client-tier
+    /// one that routes nowhere within-tier). The WITHIN-tier fan-out that also
+    /// consumes it is [`forward_push_tier`](RouterForwarder::forward_push_tier)
+    /// (C1); the cross-tier bridge is a later slice (C2).
     data_seen: Cell<usize>,
     /// A `routers_net` spanning-tree recompute is pending (D2c coalescing flag).
     /// zenoh runs a SEPARATE `TreesComputationWorker` per net; wz coalesces both
@@ -731,6 +759,100 @@ impl RouterForwarder {
             )
         });
     }
+
+    /// Route a data `Push` WITHIN its inbound tier's mesh (C1) — the router twin
+    /// of [`LinkstateForwarder::forward_push`], calling the shared
+    /// [`compute_push_forward`] core on the INBOUND tier's `(net, subs)` and
+    /// fanning the result out tier-scoped. This is the WITHIN-TIER half only: it
+    /// maps to zenoh's non-cross-tier route blocks — a peer-sourced Push to
+    /// peer-mesh subs, a router-sourced Push to router-mesh subs, both
+    /// master-gate-free in `compute_data_route`. The CROSS-tier bridge (the
+    /// derived self-bubble), local-client delivery, and master-election are later
+    /// slices (C2/C3/C4). A [`FaceTier::Client`] Push has no mesh to route within,
+    /// so it is only counted (the reception witness in [`forward`]). A drop
+    /// (unresolvable source / no interested subscriber / hop-exhausted) is silent,
+    /// as in the single-net path.
+    fn forward_push_tier(&self, inbound: FaceId, tier: FaceTier, reliable: bool, push: &PushOwned) {
+        let Some((net, _dirty)) = self.plane(tier) else {
+            return; // Client tier: no mesh -> within-tier routes nowhere (C2/C3).
+        };
+        let Some(subs) = self.subs_table(tier) else {
+            return;
+        };
+        // Resolve the keyexpr against the inbound face's alias table + read its
+        // zid / link in one scoped borrow (an unresolvable alias drops the Push).
+        let (inbound_zid, inbound_link, keyexpr) = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(keyexpr) = resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) else {
+                return;
+            };
+            (peer_zid_routing(&s.actions), s.link, keyexpr)
+        };
+        let Some((carrier, children)) =
+            compute_push_forward(net, subs, inbound_zid, inbound_link, push, &keyexpr)
+        else {
+            return;
+        };
+        let _ = self.fan_out_tier(tier, reliable, |id, zid| {
+            Ok(
+                is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
+                    .then(|| NetworkMessage::Push(Box::new(carrier.clone()))),
+            )
+        });
+    }
+
+    /// Recompute `tier`'s spanning trees and re-advertise its NATIVE subscription
+    /// and queryable interest to whatever NEW children the recompute produced
+    /// (C1) — the per-tier mirror of [`LinkstateForwarder`]'s
+    /// `recompute_and_advertise`, so a declaration made before a peer joined
+    /// converges onto the new branch. Both tables re-advertise through the shared
+    /// [`re_advertise_interest_into`] core bound to THIS tier's net (its psid
+    /// space) and flooded tier-scoped. NATIVES ONLY: the cross-tier self-bubble
+    /// is DERIVED at compute (C2), a distinct self-sourced declaration, so it
+    /// re-advertises on its own path.
+    fn recompute_and_advertise_tier(&self, tier: FaceTier) {
+        let Some((net, _dirty)) = self.plane(tier) else {
+            return;
+        };
+        let new_children = net.borrow_mut().compute_trees();
+        self.recomputes.set(self.recomputes.get() + 1);
+        if new_children.is_empty() {
+            return;
+        }
+        if let Some(subs) = self.subs_table(tier) {
+            re_advertise_interest_into(
+                net,
+                subs,
+                &new_children,
+                |ke, _: &()| build_declare_subscriber(0, 0, Some(ke)),
+                |children, declare| self.flood_delta_tier(tier, children, declare),
+            );
+        }
+        if let Some(qabls) = self.qabls_table(tier) {
+            re_advertise_interest_into(
+                net,
+                qabls,
+                &new_children,
+                |ke, info: &QueryableInfo| build_declare_queryable_with_info(ke, *info),
+                |children, declare| self.flood_delta_tier(tier, children, declare),
+            );
+        }
+    }
+
+    /// Flood a re-advertised declaration to a tree-recompute's NEW children within
+    /// `tier` — the per-tier analogue of [`LinkstateForwarder`]'s
+    /// `flood_to_children`. No inbound face to exclude: self is the re-advertise
+    /// source, and the delta already names exactly the newly-gained children.
+    fn flood_delta_tier(&self, tier: FaceTier, children: &[Zid], declare: &DeclareOwned) {
+        let _ = self.fan_out_tier(tier, true, |_id, zid| {
+            Ok(zid
+                .filter(|z| children.contains(z))
+                .map(|_| NetworkMessage::Declare(Box::new(declare.clone()))))
+        });
+    }
 }
 
 impl FaceForwarder for RouterForwarder {
@@ -742,16 +864,30 @@ impl FaceForwarder for RouterForwarder {
         let whatami = peer_whatami_routing(actions);
         let tier = tier_of(whatami);
         let added = match self.plane(tier) {
-            Some((net, _dirty)) => peer_zid_routing(actions).map(|neighbour| {
-                let mut net = net.borrow_mut();
-                // Whether this neighbour is NEW to the GRAPH (not merely a new
-                // face): a second link to a known peer re-advertises only self's
-                // links — zenoh add_link's `new` flag. Queried before add_link,
-                // under the one borrow.
-                let neighbour_was_new = net.get_node(&neighbour).is_none();
-                let link = net.add_link(neighbour, whatami);
-                (link, neighbour, neighbour_was_new)
-            }),
+            Some((net, _dirty)) => {
+                // OBLIGATION-3 self-zid parity: a face whose routing zid IS self's
+                // own zid (a self-connect) is HELD without a link. Adding it would
+                // insert a self entry into `node.links` that `make_link_state` then
+                // emits as a spurious self-loop link (psid 0) onto the wire, plus
+                // an sn bump real peers ingest — `rebuild_edges`'s `idx2 != idx1`
+                // guard skips the petgraph self-EDGE but does NOT scrub that
+                // `node.links` entry, so the self-loop still floods. zenoh relies
+                // on its transport manager never handing `add_link` a
+                // self-transport; wz guards it here (mirror in `LinkstateForwarder`).
+                let self_zid = *net.borrow().self_zid();
+                peer_zid_routing(actions)
+                    .filter(|neighbour| *neighbour != self_zid)
+                    .map(|neighbour| {
+                        let mut net = net.borrow_mut();
+                        // Whether this neighbour is NEW to the GRAPH (not merely a
+                        // new face): a second link to a known peer re-advertises
+                        // only self's links — zenoh add_link's `new` flag. Queried
+                        // before add_link, under the one borrow.
+                        let neighbour_was_new = net.get_node(&neighbour).is_none();
+                        let link = net.add_link(neighbour, whatami);
+                        (link, neighbour, neighbour_was_new)
+                    })
+            }
             // Client tier: held with no net (a leaf, not a transit node).
             None => None,
         };
@@ -812,19 +948,18 @@ impl FaceForwarder for RouterForwarder {
     }
 
     fn tick(&self) {
-        // Flush each net's coalesced recompute, if one accumulated. zenoh runs
-        // two independent debounce workers; wz coalesces both onto this one tick
-        // (two dirty flags, one flush pass) — functionally equivalent. This
-        // recomputes the trees but does NOT re-advertise known interest to new
-        // tree children (`re_advertise_subscriptions`) — that, like the route
-        // compute, is the COMPUTE slice — so the new-children delta is discarded.
+        // Flush each net's coalesced recompute, if one accumulated, and
+        // re-advertise that tier's NATIVE interest to whatever new tree children
+        // the recompute produced (C1) — zenoh runs two independent debounce
+        // workers; wz coalesces both onto this one tick (two dirty flags), each
+        // flushing its OWN net. This fixes the prior slice's discard-the-delta
+        // tick. The cross-tier self-bubble re-advertise is C2 (a distinct
+        // self-sourced declaration on its own path).
         if self.trees_dirty_routers.replace(false) {
-            let _ = self.routers_net.borrow_mut().compute_trees();
-            self.recomputes.set(self.recomputes.get() + 1);
+            self.recompute_and_advertise_tier(FaceTier::Routers);
         }
         if self.trees_dirty_peers.replace(false) {
-            let _ = self.linkstatepeers_net.borrow_mut().compute_trees();
-            self.recomputes.set(self.recomputes.get() + 1);
+            self.recompute_and_advertise_tier(FaceTier::LinkstatePeers);
         }
     }
 
@@ -875,12 +1010,15 @@ impl FaceForwarder for RouterForwarder {
                         }
                     }
                 }
-                // A data Push: count the reception (the data-plane witness). The
-                // tree fan-out + cross-net data route is the COMPUTE slice; this
-                // slice routes nothing (the count-only deferral, pinned by a
-                // test asserting no face received it).
-                NetworkMessage::Push(_) => {
+                // A data Push: count the reception (the data-plane witness), then
+                // route it WITHIN the inbound tier's mesh (C1, `forward_push_tier`
+                // — a peer-sourced Push to peer-mesh subs, a router-sourced one to
+                // router-mesh subs). The CROSS-tier bridge + local-client delivery
+                // + master-election are later slices (C2/C3/C4); a Client-tier
+                // Push has no mesh to route within, so it stays count-only.
+                NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
+                    self.forward_push_tier(id, tier, *reliable, push);
                 }
                 // A declaration: ingest a DeclareSubscriber (1b) / DeclareQueryable
                 // (1c) into the inbound tier's subs/qabls table + re-flood within
@@ -1170,9 +1308,10 @@ mod tests {
     }
 
     #[test]
-    fn push_is_counted_not_routed() {
-        // The count-only deferral: a Push raises the reception witness but is
-        // routed NOWHERE this slice (pinned: no other face receives it).
+    fn push_to_an_unsubscribed_keyexpr_is_counted_but_not_routed() {
+        // A Push on a keyexpr no in-tier peer subscribes to raises the reception
+        // witness but forwards NOWHERE — `compute_push_forward` drops on the empty
+        // interested set (the same drop the single-net path takes).
         let fwd = RouterForwarder::new(zid(0x01));
         let (a_r, sink_r) = face(zid(0xAA), WIRE_ROUTER);
         let (a_p, sink_p) = face(zid(0xBB), WIRE_PEER);
@@ -1192,7 +1331,225 @@ mod tests {
         assert_eq!(
             sink_p.frame_count(),
             0,
-            "not routed to any other face (no route compute yet)"
+            "not routed to any face (no subscriber for the keyexpr)"
+        );
+    }
+
+    #[test]
+    fn push_routes_within_the_inbound_tier_only() {
+        // A peer-sourced Push routes to peer-tier subscribers along the SOURCE's
+        // tree (the within-tier data route, C1) — and NOT to a router-tier
+        // subscriber of the SAME keyexpr (the cross-tier bridge is C2).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // peer source
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // peer subscriber (tree child)
+        let (r, sink_r) = face(zid(0xDD), WIRE_ROUTER); // router-tier subscriber
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &r);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5); // peer edge self<->A
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5); // peer edge self<->C
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xDD, 5); // router edge self<->R
+        fwd.tick(); // compute both nets' spanning trees
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // C (peer) subscribes
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data")); // R (router) subscribes
+        sink_a.reset();
+        sink_c.reset();
+        sink_r.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(fwd.data_seen.get(), 1, "the Push is counted");
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "routed to the peer-tier subscriber C along A's tree"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "NOT to the router-tier subscriber (cross-tier bridge is C2)"
+        );
+    }
+
+    #[test]
+    fn tick_re_advertises_a_native_sub_to_a_late_joining_child() {
+        // A subscription learned before a peer joined converges onto the new tree
+        // child when the tick recompute adds it — the per-tier re-advertise (C1),
+        // fixing the prior slice's discard-the-new-children tick.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // the sub's source
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // joins AFTER the declare
+        fwd.register(FaceId(0), &a);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/late")); // A subscribes; no C yet
+        assert_eq!(
+            fwd.linkstatepeer_subs.borrow().interested("demo/late"),
+            vec![zid(0xAA)],
+            "self learned A's interest before C joined"
+        );
+        // C joins + forms its edge, becoming a NEW child of A's tree.
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 6);
+        sink_c.reset();
+        fwd.tick(); // recompute peers_net -> C is a new child -> re-advertise to it
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "A's subscription re-advertised to the late-joining child C"
+        );
+    }
+
+    #[test]
+    fn tick_re_advertises_a_native_queryable_to_a_late_joining_child() {
+        // The queryable twin of the subscription re-advertise (C1): a queryable
+        // learned before a peer joined converges onto the new tree child — the
+        // SECOND table `recompute_and_advertise_tier` walks, pinned so the qabls
+        // half of the tick re-advertise is not left composed-untested.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // the queryable's source
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // joins AFTER the declare
+        fwd.register(FaceId(0), &a);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // A declares; no C
+        assert_eq!(
+            fwd.linkstatepeer_qabls.borrow().interested("demo/q"),
+            vec![zid(0xAA)],
+            "self learned A's queryable before C joined"
+        );
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 6);
+        sink_c.reset();
+        fwd.tick(); // recompute peers_net -> C new child -> re-advertise the qabl
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "A's queryable re-advertised to the late-joining child C"
+        );
+    }
+
+    #[test]
+    fn register_self_zid_face_is_held_without_a_link() {
+        // OBLIGATION-3 self-zid parity: a face whose routing zid IS self's own zid
+        // is HELD without a graph link — no self-loop is added to the net and no
+        // spurious self-loop link-state is flooded.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0x01), WIRE_PEER); // routing zid == self
+        fwd.register(FaceId(0), &a);
+        let faces = fwd.faces.borrow();
+        let st = faces.get(&FaceId(0)).expect("the face is still held");
+        assert_eq!(
+            st.link, None,
+            "but with no graph link (self-connect guarded)"
+        );
+        assert_eq!(
+            fwd.linkstatepeers_net.borrow().node_count(),
+            1,
+            "no self-loop neighbour added to the peer net (only self)"
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            0,
+            "no self-loop link-state flooded to the face"
+        );
+    }
+
+    #[test]
+    fn push_routes_within_the_router_tier() {
+        // The router-tier twin of the peer-tier data route (C1): a router-sourced
+        // Push routes to router-mesh subscribers along the SOURCE's tree — and NOT
+        // to a peer-tier subscriber of the same keyexpr (cross-tier isolation, the
+        // router->peer direction).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // router source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // router subscriber (tree child)
+        let (p, sink_p) = face(zid(0xDD), WIRE_PEER); // peer-tier subscriber
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5); // router edge self<->A
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5); // router edge self<->C
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xDD, 5); // peer edge self<->P
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // C (router) subscribes
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data")); // P (peer) subscribes
+        sink_a.reset();
+        sink_c.reset();
+        sink_p.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(fwd.data_seen.get(), 1, "the Push is counted");
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "routed to the router-tier subscriber C along A's tree"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "NOT to the peer-tier subscriber (cross-tier bridge is C2)"
+        );
+    }
+
+    #[test]
+    fn client_face_push_is_counted_but_not_routed() {
+        // A Push on a Client face (no mesh) is COUNTED (the reception witness) but
+        // routes nowhere within-tier — `forward_push_tier`'s no-plane early-return.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        sink_client.reset();
+        sink_p.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(fwd.data_seen.get(), 1, "the Client Push is counted");
+        assert_eq!(
+            sink_client.frame_count(),
+            0,
+            "not routed back to the inbound face"
+        );
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "a Client-tier Push has no mesh to route within"
+        );
+    }
+
+    #[test]
+    fn deregister_of_a_linkless_face_is_clean() {
+        // A held-without-link face (a Client here) deregisters cleanly: removed
+        // from `faces`, neither net touched, no panic — it hits the linkless
+        // early-return with its FaceId-keyed state already dropped by the top
+        // `faces.remove` (OBLIGATION-1's ordering, pinned for the linkless arm).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        assert!(
+            fwd.faces.borrow().contains_key(&FaceId(0)),
+            "held before deregister"
+        );
+        fwd.deregister(FaceId(0));
+        assert!(
+            !fwd.faces.borrow().contains_key(&FaceId(0)),
+            "removed on deregister"
+        );
+        assert_eq!(
+            fwd.routers_net.borrow().node_count(),
+            1,
+            "routers_net untouched (only self)"
+        );
+        assert_eq!(
+            fwd.linkstatepeers_net.borrow().node_count(),
+            1,
+            "peers_net untouched (only self)"
         );
     }
 
