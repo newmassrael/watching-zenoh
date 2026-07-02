@@ -859,18 +859,18 @@ mod tests {
 
     #[tokio::test]
     async fn tokio_time_timeout_budget_elapsed_returns_timeout_elapsed() {
-        // R311ac — slow inner future past the budget resolves to
-        // Err(TimeoutElapsed). The 500ms inner vs 50ms budget gap
-        // is the inverse of the success test so the same scheduler
-        // jitter that masks a success-arm regression also masks an
-        // error-arm regression here.
+        // R311ac — an inner future that never completes within the budget
+        // resolves to Err(TimeoutElapsed). The inner is `pending()` (never
+        // ready) rather than a finite sleep, so the elapsed path is
+        // DETERMINISTIC: `tokio::time::timeout` polls the inner FIRST, so a
+        // finite-sleep inner could WIN under a full-CI process freeze that
+        // leaves both the budget timer and the sleep due — returning Ok
+        // instead of the elapsed error (the R311y132 Layer C1j load-flake).
+        // A never-ready inner can never win that race, so only the 50ms
+        // budget can resolve the timeout — Err every run, no wall-clock gap.
         let clock = TokioTime::new();
-        let result: Result<u32, TimeoutElapsed> = clock
-            .timeout(50, async {
-                tokio::time::sleep(TokioDuration::from_millis(500)).await;
-                123_u32
-            })
-            .await;
+        let result: Result<u32, TimeoutElapsed> =
+            clock.timeout(50, std::future::pending::<u32>()).await;
         assert_eq!(result, Err(TimeoutElapsed));
     }
 }
