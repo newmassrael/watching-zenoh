@@ -240,6 +240,23 @@ impl<V> LinkstatepeerInterest<V> {
     pub fn source_count(&self, keyexpr: &str) -> usize {
         self.by_key.get(keyexpr).map_or(0, |peers| peers.len())
     }
+
+    /// The declared VALUES of every source under the EXACT `keyexpr` — the
+    /// value-bearing twin of [`source_count`](Self::source_count). The router
+    /// forwarder folds these (with [`QueryableInfo::merge`]) into the MERGED
+    /// `QueryableInfo` it advertises cross-tier for `keyexpr` — zenoh's
+    /// `local_*_qabl_info` fold over the opposite-tier table (`queries.rs:67-133`).
+    /// Exact (per-`Resource`), self-excluding by construction (self is never a
+    /// source — derive-not-store). Owned clones so the caller folds without holding
+    /// the table borrow.
+    pub fn values_for(&self, keyexpr: &str) -> Vec<V>
+    where
+        V: Clone,
+    {
+        self.by_key
+            .get(keyexpr)
+            .map_or_else(Vec::new, |peers| peers.values().cloned().collect())
+    }
 }
 
 impl<V: PartialEq> LinkstatepeerInterest<V> {

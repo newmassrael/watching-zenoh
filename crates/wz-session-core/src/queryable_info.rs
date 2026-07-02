@@ -77,6 +77,23 @@ impl QueryableInfo {
             distance: 0,
         }
     }
+
+    /// Merge two `QueryableInfo`s into the aggregate a node advertises when it
+    /// covers a keyexpr via MORE THAN ONE queryable — zenoh's `merge_qabl_infos`
+    /// (`hat/router/queries.rs:61-65`): `complete = self.complete || other.complete`
+    /// (the aggregate can serve the whole query if ANY contributor can) and
+    /// `distance = min` (the nearest contributor). Associative + commutative, so a
+    /// fold over the contributor set is order-independent. NOTE: fold from the
+    /// FIRST contributor (`Option`-seed), NEVER from [`DEFAULT`](Self::DEFAULT) —
+    /// `DEFAULT.distance == 0` would collapse the `min` to 0 (zenoh seeds its fold
+    /// with the first element for the same reason).
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            complete: self.complete || other.complete,
+            distance: self.distance.min(other.distance),
+        }
+    }
 }
 
 impl Default for QueryableInfo {
@@ -126,6 +143,31 @@ pub fn set_queryable_info(exts: &mut Option<Vec<ExtEntryOwned>>, info: Queryable
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn merge_is_or_complete_and_min_distance() {
+        let a = QueryableInfo {
+            complete: false,
+            distance: 3,
+        };
+        let b = QueryableInfo {
+            complete: true,
+            distance: 7,
+        };
+        // complete = OR, distance = min; commutative.
+        let ab = a.merge(b);
+        assert!(ab.complete, "either-complete makes the aggregate complete");
+        assert_eq!(ab.distance, 3, "distance is the nearest contributor");
+        assert_eq!(a.merge(b), b.merge(a), "merge is commutative");
+        // Merging with a distance-0 peer must NOT be seeded from DEFAULT (which
+        // would collapse min to 0 spuriously) — a genuine distance-0 contributor
+        // still wins the min, but a real min is preserved when no 0 is present.
+        let far = QueryableInfo {
+            complete: false,
+            distance: 100,
+        };
+        assert_eq!(a.merge(far).distance, 3, "min keeps the nearer 3, not 100");
+    }
 
     #[test]
     fn pack_unpack_round_trips_every_field_combination() {

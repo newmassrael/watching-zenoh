@@ -211,7 +211,7 @@
 //! closing `ResponseFinal` for a `last` branch, so a queryable that crashes
 //! without a final on a still-up face cannot hang a `get()` forever.
 //!
-//! ## Slice A2a (FEDERATION cross-tier-native subscription bubble) — landed
+//! ## Slices A2a + A2b (FEDERATION cross-tier-native bubble, both planes) — landed
 //!
 //! The cross-tier self-advertisement now derives from the OTHER tier's NATIVES,
 //! not just from `client_subs` (C2). A ROUTER-native sub advertises self's
@@ -231,8 +231,13 @@
 //! single router (`router_subs` empty, the router-mesh flood no-op) and
 //! unit-tested by injecting a native directly; the E2E black-hole proof (a peer
 //! publisher actually routing toward the router-native's interest) needs the
-//! 2-router ACTIVATION harness (below). The QUERYABLE twin (a native qabl's
-//! cross-tier merged-`QueryableInfo` advertisement) is the next slice.
+//! 2-router ACTIVATION harness (below). The QUERYABLE twin landed in A2b: a
+//! native qabl advertises its MERGED [`QueryableInfo`] (`complete = OR` /
+//! `distance = min`, [`derived_cross_tier_qabl_info`](RouterForwarder::derived_cross_tier_qabl_info))
+//! into the opposite mesh; a partial removal DOWNGRADES via a re-advertised
+//! `DeclareQueryable`, while the full retraction (last contributor) is codec-
+//! deferred (`UndeclareQueryable` carries no keyexpr ext — the native qabl plane's
+//! documented gap).
 //!
 //! ## Deferred to later slices (named, not silently dropped)
 //!
@@ -245,20 +250,19 @@
 //!   per-peer filter + `router_peers_failover_brokering` (off by default in zenoh)
 //!   land with the interceptor slice. The source-dimensioned route cache is a
 //!   data-path optimization (wz computes routes inline today) deferred with it.
-//! - **Native-other-tier cross bubble — E2E proof (the SUBS derive landed in
-//!   A2a above; the QABL twin is next)** — the R311y120 black-hole was: a
-//!   peer-source Push into a NON-MASTER router whose only subscriber is a
-//!   ROUTER-NATIVE sub behind the elected master, with no same-tier native relay —
-//!   without the cross-tier-native advertisement the non-master never attracts the
-//!   Push toward a router that can bridge it. A2a CLOSED the subscription-plane
-//!   mechanism (self now advertises a router-native's interest into the peer mesh,
-//!   and vice versa), unit-tested by direct native injection. What REMAINS: (a) the
-//!   QUERYABLE-plane twin (a native qabl's cross-tier merged-`QueryableInfo`
-//!   advertisement — the next slice); (b) the E2E black-hole PROOF, which needs the
-//!   2-router ACTIVATION harness (a peer publisher on one router, a router-native
-//!   subscriber behind the elected master on the other) to exercise the attract +
-//!   master-gated bridge end to end — LATENT until then (single-router `router_subs`
-//!   is empty). (The client-behind-a-router variant was already rescued by C2.)
+//! - **Native-other-tier cross bubble — E2E proof (both planes' MECHANISM landed
+//!   in A2a/A2b above)** — the R311y120 black-hole was: a peer-source Push into a
+//!   NON-MASTER router whose only subscriber is a ROUTER-NATIVE sub behind the
+//!   elected master, with no same-tier native relay — without the
+//!   cross-tier-native advertisement the non-master never attracts the Push toward
+//!   a router that can bridge it. A2a closed the subscription-plane mechanism and
+//!   A2b the queryable-plane twin (self advertises a router-native's interest into
+//!   the peer mesh, and vice versa), unit-tested by direct native injection. What
+//!   REMAINS is the E2E black-hole PROOF, which needs the 2-router ACTIVATION
+//!   harness (a peer publisher on one router, a router-native subscriber behind the
+//!   elected master on the other) to exercise the attract + master-gated bridge end
+//!   to end — LATENT until then (single-router `router_subs` is empty). (The
+//!   client-behind-a-router variant was already rescued by C2.)
 //! - **The client-queryable cross-tier ADVERTISEMENT** — the query-plane twin of
 //!   C2's `advertise_client_cross_tier_sub`: a client `DeclareQueryable` should make
 //!   this router flood a self-sourced `DeclareQueryable` (carrying the MERGED
@@ -886,21 +890,31 @@ impl RouterForwarder {
             FaceTier::LinkstatePeers => (&self.linkstatepeer_subs, &self.linkstatepeer_qabls),
             FaceTier::Client => return,
         };
-        // Collect the sub keyexprs the departed natives held, so the cross-tier
-        // advertisement they may have been the last contributor of is re-evaluated
-        // AFTER the removal (the borrows must be dropped before
-        // `withdraw_native_cross_tier_sub`, which re-reads the table).
+        // Collect the sub + qabl keyexprs the departed natives held, so the
+        // cross-tier advertisement they contributed to is re-evaluated AFTER the
+        // removal (the borrows must be dropped before the withdraw/re-advertise,
+        // which re-read the tables).
         let mut affected_sub_keys: HashSet<String> = HashSet::new();
+        let mut affected_qabl_keys: HashSet<String> = HashSet::new();
         {
             let mut subs = subs.borrow_mut();
             let mut qabls = qabls.borrow_mut();
             for zid in removed {
                 affected_sub_keys.extend(subs.remove_peer_keys(zid));
-                qabls.remove_peer(zid);
+                affected_qabl_keys.extend(qabls.remove_peer_keys(zid));
             }
         }
         for keyexpr in affected_sub_keys {
             self.withdraw_native_cross_tier_sub(tier, &keyexpr);
+        }
+        // The qabl plane RE-ADVERTISES the recomputed merged info per affected
+        // keyexpr (A2b): a partial removal that leaves a contributor DOWNGRADES via
+        // a re-declared DeclareQueryable; a full removal (no contributor) is a
+        // no-op (the codec-deferred UndeclareQueryable gap — the topology purge is
+        // the safety net). `advertise_native_cross_tier_qabl` handles both (it
+        // early-returns when the merge is now `None`).
+        for keyexpr in affected_qabl_keys {
+            self.advertise_native_cross_tier_qabl(tier, &keyexpr);
         }
     }
 
@@ -1107,7 +1121,7 @@ impl RouterForwarder {
     /// gate) — re-flood a clean declaration CARRYING that info within the tier so
     /// a multi-hop relay learns the queryable's completeness. Like the sub
     /// bubble, the cross-tier bubble (a MERGED `local_*_qabl_info` in zenoh) is
-    /// DERIVED at compute, not stored. `UndeclareQueryable` is deferred: the
+    /// DERIVED at compute (A2b), not stored. `UndeclareQueryable` is deferred: the
     /// wz-codecs body carries no keyexpr ext (id only), so per-keyexpr retraction
     /// needs a codec extension first — the whole-peer face-down purge is the
     /// safety net until then (the same gap the sibling documents).
@@ -1133,7 +1147,7 @@ impl RouterForwarder {
             _ => QueryableInfo::DEFAULT,
         };
         // CARRY the source's QueryableInfo downstream on the re-flood (info is Copy).
-        self.ingest_interest(
+        let changed = self.ingest_interest(
             inbound,
             tier,
             reliable,
@@ -1143,6 +1157,16 @@ impl RouterForwarder {
             info,
             move |ke| build_declare_queryable_with_info(ke, info),
         );
+        // FEDERATION cross-tier bubble (A2b): a NATIVE qabl makes self ADVERTISE
+        // its MERGED QueryableInfo into the OPPOSITE mesh (the query twin of the
+        // sub advertise) so a REMOTE querier routes toward self. The advertise is
+        // done AFTER `ingest_interest` registered the native (so the merge INCLUDES
+        // the triggering native — the register-before-merge fidelity order), and
+        // fires on any real change (a new native OR a changed info re-declares the
+        // recomputed merge — an upgrade or downgrade).
+        if let Some(ke) = changed {
+            self.advertise_native_cross_tier_qabl(tier, &ke);
+        }
     }
 
     /// Re-flood a clean sourced declaration WITHIN `tier` to the source's
@@ -1808,6 +1832,79 @@ impl RouterForwarder {
         }
     }
 
+    /// The MERGED [`QueryableInfo`] self advertises for `keyexpr` into `target`
+    /// mesh, or `None` if NO contributor — the value-bearing qabl twin of
+    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into) (A2b). Folds the
+    /// contributors: the OPPOSITE-mesh NATIVE qabls for the exact `keyexpr` ∪ the
+    /// CLIENT qabls for it, via [`QueryableInfo::merge`] (`complete = OR`,
+    /// `distance = min`) — zenoh's `local_*_qabl_info` (`queries.rs:67-133`).
+    /// `Option`-seeded from the first contributor (NEVER `DEFAULT` — its distance 0
+    /// would collapse the `min`). Self is never a source (derive-not-store), so no
+    /// self-exclusion is needed. The advertised `distance` is DISTINCT from the
+    /// query-ROUTE distance (`net.distances`, `best_query_winner`) — this rides the
+    /// DeclareQueryable ext for UPSTREAM propagation only. (The client-qabl fold is
+    /// already wired so ACTIVATION-3 adds only the client-declare TRIGGER, not a
+    /// derive change.)
+    fn derived_cross_tier_qabl_info(
+        &self,
+        target: FaceTier,
+        keyexpr: &str,
+    ) -> Option<QueryableInfo> {
+        let mut acc: Option<QueryableInfo> = None;
+        if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.qabls_table(src)) {
+            for info in table.borrow().values_for(keyexpr) {
+                acc = Some(acc.map_or(info, |a| a.merge(info)));
+            }
+        }
+        for qabls in self.client_qabls.borrow().values() {
+            if let Some(info) = qabls.get(keyexpr) {
+                acc = Some(acc.map_or(*info, |a| a.merge(*info)));
+            }
+        }
+        acc
+    }
+
+    /// The keyexprs self should advertise a merged queryable for into `target`
+    /// mesh — the OPPOSITE mesh's native qabls ∪ the client qabls, deduped. The set
+    /// form of [`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info)
+    /// (a `K` is in this set IFF that returns `Some`), fed to the tick re-advertise
+    /// for late-joining children (the qabl twin of `derived_cross_tier_subs_into`).
+    fn derived_cross_tier_qabls_into(&self, target: FaceTier) -> Vec<String> {
+        let mut set: HashSet<String> = HashSet::new();
+        if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.qabls_table(src)) {
+            for (keyexpr, _peer, _info) in table.borrow().entries() {
+                set.insert(keyexpr);
+            }
+        }
+        for qabls in self.client_qabls.borrow().values() {
+            set.extend(qabls.keys().cloned());
+        }
+        set.into_iter().collect()
+    }
+
+    /// A NATIVE qabl for `keyexpr` in `native_tier` just registered, or its merged
+    /// value changed (A2b): (re-)advertise self's MERGED cross-tier `QueryableInfo`
+    /// into the OPPOSITE mesh — a self-sourced `DeclareQueryable` (node_id 0)
+    /// carrying the fold. Fires on any real change (upgrade OR downgrade): zenoh
+    /// re-declares `local_*_qabl_info` whenever it changes, and the downstream
+    /// value-diff gate absorbs a re-declare of the SAME value. NOT master-gated.
+    /// The FULL retraction (last contributor leaves ⇒ merged `None`) is codec-
+    /// deferred — `UndeclareQueryable` carries no keyexpr ext — so this is a no-op
+    /// then (the face-down / self-down topology purge is the safety net, the same
+    /// gap the native qabl plane documents). A partial removal that leaves a
+    /// contributor DOWNGRADES via a re-advertised `DeclareQueryable`, no undeclare.
+    fn advertise_native_cross_tier_qabl(&self, native_tier: FaceTier, keyexpr: &str) {
+        let Some(target) = Self::opposite_mesh(native_tier) else {
+            return;
+        };
+        let Some(info) = self.derived_cross_tier_qabl_info(target, keyexpr) else {
+            return; // no contributor: full retraction is codec-deferred (see doc)
+        };
+        self.flood_self_sourced(target, keyexpr, move |ke| {
+            build_declare_queryable_with_info(ke, info)
+        });
+    }
+
     /// Flood a self-sourced declaration for `keyexpr` (node_id 0) to self's tree
     /// children in `tier`'s net — the immediate advertisement/withdrawal seam.
     /// Mirrors [`LinkstateForwarder`]'s `declare_subscription` flood, but keyed on
@@ -1835,13 +1932,17 @@ impl RouterForwarder {
         self.flood_delta_tier(tier, &children, &declare);
     }
 
-    /// Re-advertise self's DERIVED cross-tier subscriptions to the tier's NEW tree
-    /// children a recompute added (C2) — self is the source, so the flood targets
-    /// the delta children of SELF's tree in this net. The tick counterpart of the
-    /// immediate [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub),
+    /// Re-advertise self's DERIVED cross-tier subscriptions AND queryables to the
+    /// tier's NEW tree children a recompute added — self is the source, so the
+    /// flood targets the delta children of SELF's tree in this net. The tick
+    /// counterpart of the immediate
+    /// [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub) /
+    /// [`advertise_native_cross_tier_qabl`](Self::advertise_native_cross_tier_qabl),
     /// the OBLIGATION-2 feed of the re-advertise path with the DERIVED (not stored)
-    /// self-source — distinct from the native re-advertise (native = real peer
-    /// source; derived = self, node_id 0).
+    /// self-source (node_id 0) — so a late-joining child converges on self's full
+    /// cross-tier bubble (both planes). The qabl re-advertise carries the MERGED
+    /// info (`derived_cross_tier_qabl_info`), the same value the immediate advertise
+    /// floods.
     fn re_advertise_self_cross_tier(&self, tier: FaceTier, new_children: &[(Zid, Vec<Zid>)]) {
         let Some((net, _dirty)) = self.plane(tier) else {
             return;
@@ -1855,6 +1956,15 @@ impl RouterForwarder {
         }
         for keyexpr in self.derived_cross_tier_subs_into(tier) {
             let Ok(declare) = build_declare_subscriber(0, 0, Some(&keyexpr)) else {
+                continue;
+            };
+            self.flood_delta_tier(tier, self_delta, &declare);
+        }
+        for keyexpr in self.derived_cross_tier_qabls_into(tier) {
+            let Some(info) = self.derived_cross_tier_qabl_info(tier, &keyexpr) else {
+                continue;
+            };
+            let Ok(declare) = build_declare_queryable_with_info(&keyexpr, info) else {
                 continue;
             };
             self.flood_delta_tier(tier, self_delta, &declare);
@@ -4617,6 +4727,95 @@ mod tests {
             vec![zid(0xBB)]
         );
         assert!(fwd.router_qabls.borrow().interested("demo/q").is_empty());
+    }
+
+    #[test]
+    fn router_native_qabl_advertises_merged_info_into_the_peer_mesh() {
+        // FEDERATION query plane (A2b): a ROUTER-native queryable makes self
+        // ADVERTISE its MERGED QueryableInfo into the PEER mesh (a self-sourced
+        // DeclareQueryable carrying the info), so a REMOTE mesh querier routes
+        // toward self. Content-checked: the advertised complete flag is the
+        // native's.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (r, _rs) = face(zid(0xAA), WIRE_ROUTER); // the router-native qabl source
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // a peer tree child
+        fwd.register(FaceId(0), &r);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "a router-native queryable advertised its merged info into the peer mesh"
+        );
+        assert!(
+            forwarded_qabl_info(&sink_p.frame_bytes(0)).complete,
+            "the cross-tier advertisement carries the native's complete=true"
+        );
+        assert!(
+            fwd.linkstatepeer_qabls
+                .borrow()
+                .interested("demo/q")
+                .is_empty(),
+            "derive-not-store: self is NOT stored in the peer qabls table"
+        );
+    }
+
+    #[test]
+    fn native_qabl_advertise_merges_completeness_across_sources() {
+        // Two router-native queryables for the same K — one incomplete, one
+        // complete — merge to complete=true (QueryableInfo::merge OR), and the
+        // second declare re-advertises the upgraded merged info into the peer mesh.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _as) = face(zid(0xAA), WIRE_ROUTER);
+        let (b, _bs) = face(zid(0xCC), WIRE_ROUTER);
+        let (p, sink_p) = face(zid(0xEE), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xEE, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", false)); // A: incomplete
+        sink_p.reset();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true)); // B: complete
+        assert_eq!(sink_p.frame_count(), 1, "the merge upgrade re-advertised");
+        assert!(
+            forwarded_qabl_info(&sink_p.frame_bytes(0)).complete,
+            "the merged info is complete (A incomplete OR B complete)"
+        );
+    }
+
+    #[test]
+    fn native_qabl_partial_removal_re_advertises_the_downgraded_info() {
+        // Panel-flagged (A2b): a face-down that removes ONE of several native
+        // queryables must RE-ADVERTISE the DOWNGRADED merged info (a Declare
+        // update), not withdraw — the qabl-specific complication over subs. A
+        // (complete) + B (incomplete) merge to complete=true; when A goes down, the
+        // merge downgrades to complete=false and self re-advertises it.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _as) = face(zid(0xAA), WIRE_ROUTER); // complete
+        let (b, _bs) = face(zid(0xCC), WIRE_ROUTER); // incomplete
+        let (p, sink_p) = face(zid(0xEE), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xEE, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // A complete
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", false)); // B incomplete
+        sink_p.reset();
+        fwd.deregister(FaceId(0)); // the COMPLETE queryable's face goes down
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the partial removal re-advertised the downgraded merged info"
+        );
+        assert!(
+            !forwarded_qabl_info(&sink_p.frame_bytes(0)).complete,
+            "the merged info downgraded to incomplete (only B remains)"
+        );
     }
 
     #[test]
