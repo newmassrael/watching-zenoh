@@ -665,6 +665,21 @@ fn main() -> ExitCode {
         query: query_spec,
         liveliness_get: liveliness_get_opt,
     };
+    // Optional `--zid <hex>`: override the single-session node's demo zid. The
+    // mesh routing graph keys nodes by zid, so two session nodes behind routers
+    // sharing the hardcoded 0x01020304 would collide; a distinct --zid per node
+    // lets a query ISSUER + a QUERYABLE coexist in one router mesh (the P4 §5.21
+    // query-plane E2E). No-op for the default direct wz<->wz tests.
+    let zid_override: Option<Vec<u8>> = match parse_pair(rest, "--zid") {
+        Some(h) => match parse_zid_hex(&h) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                eprintln!("wz-ap-demo: --zid {e}");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
     let outcome = runtime.block_on(async move {
         run_demo(
             role,
@@ -674,6 +689,7 @@ fn main() -> ExitCode {
             declare_spec,
             remote_log_spec,
             reply_log_spec,
+            zid_override,
         )
         .await
     });
@@ -684,6 +700,21 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Decode a `--zid <hex>` value into raw zid bytes — non-empty, even-length hex
+/// (`"0a0b0c0d"` -> `[0x0a,0x0b,0x0c,0x0d]`). The demo zid override for a session
+/// node that must carry a distinct identity inside a router mesh (the query-plane
+/// E2E). Rejects odd-length / non-hex loudly so a mistyped flag fails fast.
+fn parse_zid_hex(h: &str) -> Result<Vec<u8>, String> {
+    let h = h.trim();
+    if h.is_empty() || h.len() % 2 != 0 {
+        return Err(format!("must be non-empty even-length hex (got {h:?})"));
+    }
+    (0..h.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&h[i..i + 2], 16).map_err(|_| format!("invalid hex in {h:?}")))
+        .collect()
 }
 
 /// The demo's multi-thread tokio runtime (2 workers + io + time) — the SSOT for

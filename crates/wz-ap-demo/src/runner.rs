@@ -637,6 +637,7 @@ async fn race_against_shutdown<O>(
 /// `wz_liveliness_subscriber_round_trip_against_wz_acceptor` (peer
 /// terminates on Close before processing the trailing UndeclToken);
 /// the typestate signature makes that reorder a type error.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_demo(
     role: Role,
     key: Option<String>,
@@ -645,6 +646,7 @@ pub(crate) async fn run_demo(
     declare_spec: DeclareEmitSpec,
     remote_log_spec: RemoteLogSpec,
     reply_log_spec: ReplyConsumerSpec,
+    zid_override: Option<Vec<u8>>,
 ) -> io::Result<()> {
     let QueryRoleSpec {
         queryable: queryable_spec,
@@ -671,7 +673,13 @@ pub(crate) async fn run_demo(
     // into the open helper, install_observer_callbacks, Session::new, the drive
     // loop, and sweep_task (TokioTime is Copy, so every copy is the same epoch).
     let session_clock = TokioTime::new();
-    let params = demo_session_init_params(role.node_kind());
+    let mut params = demo_session_init_params(role.node_kind());
+    // `--zid <hex>` override: give this session node a DISTINCT identity so it can
+    // coexist with another session node inside a router mesh (the mesh graph keys
+    // on zid; the hardcoded demo zid would collide). No override -> the default.
+    if let Some(zid) = zid_override {
+        params.zid = zid;
+    }
     // R311q1 — the long-lived (reconnect) lifecycle drives a PERIODIC publisher
     // that re-arms emission across reconnects (data-plane continuity past a
     // sever), vs the default one-shot finite burst. Derived from the role so

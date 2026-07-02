@@ -132,6 +132,36 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
     spawn_node(label, "peer: listening on 127.0.0.1:", args)
 }
 
+/// Spawn a single-session node that DIALS a router (`--connect <router>`) — a
+/// client behind the router. Unlike [`spawn_node`] it binds no listener, so it
+/// waits for the `connected to` log (dial succeeded) rather than a listen marker.
+/// The caller uses that gate to order the queryable's declaration ahead of the
+/// issuer's one-shot query.
+fn spawn_session(label: &str, args: &[&str]) -> (ChildGuard, File) {
+    let stderr = tempfile::tempfile().expect("tempfile for session stderr");
+    let writer = stderr.try_clone().expect("dup session stderr handle");
+    let mut reader = stderr;
+    let mut guard = ChildGuard::wrap(
+        label.to_string(),
+        Command::new(wz_ap_demo_binary())
+            .args(args)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(writer))
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {label}: {e}")),
+    );
+    wait_for_substring(&mut reader, "connected to", Duration::from_secs(10)).unwrap_or_else(|c| {
+        let _ = guard.child_mut().kill();
+        let _ = guard.child_mut().wait();
+        panic!(
+            "{label} did not connect within 10s (is the binary built with \
+             --features router-hat-router?)\n--- {label} stderr ---\n{c}"
+        );
+    });
+    (guard, reader)
+}
+
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
 fn wz_router_hat_converges_with_a_peer() {
@@ -505,5 +535,97 @@ fn wz_router_hat_federates_data_across_two_routers() {
         "peer-pub (behind R1) never learned the subscriber's interest — the \
          cross-tier-native subscription advertise did not federate across the \
          router mesh to R1\n--- peer-pub stderr ---\n{pub_captured}"
+    );
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
+fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
+    // P4 §5.21 QUERY-plane E2E — the router's `route_request` + `forward_response`
+    // composed over real transport for the FIRST time (the query twin of the
+    // data-forward E2E above). A queryable CLIENT and a query-issuer CLIENT each
+    // dial ONLY the router R, with DISTINCT `--zid`s so they do not collide in R's
+    // mesh graph (the P4 §5.21 query-plane blocker the run-mode flip exposed). R
+    // routes the issuer's `Request(Query)` to the queryable's `client_qabls` entry
+    // and returns the `Reply` + `ResponseFinal` back down the querier's face. The
+    // query ROUTE was UNIT-proven (route_request / forward_response, incl 2-router
+    // HRW); this is the E2E composition. The queryable is spawned FIRST and its
+    // `DeclareQueryable` reaches R before the issuer's one-shot query fires (the
+    // spawn order + the `connected to` gate), so the query finds the queryable.
+    let (mut r_guard, mut r_reader, p_r) =
+        spawn_router_hat("router-hat", &["--router-hat", "127.0.0.1:0"]);
+    let addr_r = format!("127.0.0.1:{p_r}");
+    // The queryable client behind R (distinct zid), UP FIRST so R learns it.
+    let (mut qbl_guard, mut qbl_reader) = spawn_session(
+        "queryable",
+        &[
+            "--connect",
+            &addr_r,
+            "--queryable",
+            "demo/**",
+            "--reply",
+            "value-from-router-mesh",
+            "--zid",
+            "0b0b0b0b",
+        ],
+    );
+    // The query issuer behind R (distinct zid): its one-shot query fires on
+    // Established and must route THROUGH R to the queryable.
+    let (mut iss_guard, mut iss_reader) = spawn_session(
+        "issuer",
+        &[
+            "--connect",
+            &addr_r,
+            "--query",
+            "demo/test",
+            "--on-query-reply-log",
+            "--on-query-final-log",
+            "--zid",
+            "0a0a0a0a",
+        ],
+    );
+
+    let reply = wait_for_substring(&mut iss_reader, "REPLY RECEIVED", Duration::from_secs(15));
+    let final_recv = wait_for_substring(&mut iss_reader, "FINAL RECEIVED", Duration::from_secs(10));
+
+    graceful_terminate(iss_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(qbl_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r_guard.child_mut(), Duration::from_secs(5));
+    let r_captured = read_captured(&mut r_reader);
+    let qbl_captured = read_captured(&mut qbl_reader);
+    let iss_captured = read_captured(&mut iss_reader);
+    eprintln!("--- router-hat stderr ---\n{r_captured}");
+    eprintln!("--- queryable stderr ---\n{qbl_captured}");
+    eprintln!("--- issuer stderr ---\n{iss_captured}");
+
+    let reply_line = reply.unwrap_or_else(|c| {
+        panic!(
+            "issuer never received a reply within 15s — the query did not route \
+             through the router to the queryable (route_request / forward_response \
+             did not compose over the wire)\n--- issuer stderr ---\n{c}\n--- \
+             queryable stderr ---\n{qbl_captured}\n--- router stderr ---\n{r_captured}"
+        )
+    });
+    assert!(
+        reply_line.contains("rid=1"),
+        "the routed reply must echo the query's rid=1\n--- issuer ---\n{reply_line}"
+    );
+    assert!(
+        reply_line.contains("payload=\"value-from-router-mesh\""),
+        "the queryable's configured reply payload must route back through R\n--- \
+         issuer ---\n{reply_line}"
+    );
+    final_recv.unwrap_or_else(|c| {
+        panic!(
+            "issuer never received the ResponseFinal within 10s — the query \
+             termination did not route back through the router\n--- issuer ---\n{c}"
+        )
+    });
+    // Backstop: the queryable actually ANSWERED (the query reached it via R), so a
+    // green reply cannot be a stale/other-run artifact.
+    assert!(
+        qbl_captured.contains("QUERYABLE FIRED"),
+        "the queryable never fired — the routed query did not reach it through \
+         R\n--- queryable stderr ---\n{qbl_captured}"
     );
 }
