@@ -239,23 +239,23 @@ fn main() -> ExitCode {
     // present a true wire WhatAmI::Router and drive the dual-mesh RouterForwarder
     // over real transport (bind `<listen>`, dial the `--connect` router set for
     // federation, hold both directions). Handled before the single-session role
-    // parse. Opt-in behind `routing-router-hat`: a build without it rejects the
-    // flag (the --router / --peer feature-gate discipline) so the catalog claim
-    // and the binary stay in lockstep.
+    // parse. Opt-in behind `router-hat-router` (the active run-mode atom): a build
+    // without it rejects the flag (the --router / --peer feature-gate discipline)
+    // so the catalog claim and the binary stay in lockstep.
     if let Some(router_hat_listen) = parse_pair(rest, "--router-hat") {
-        #[cfg(feature = "routing-router-hat")]
+        #[cfg(feature = "router-hat-router")]
         {
             let dial_targets: Vec<String> = parse_pair(rest, "--connect")
                 .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
                 .unwrap_or_default();
             return run_router_hat_mode(router_hat_listen, dial_targets);
         }
-        #[cfg(not(feature = "routing-router-hat"))]
+        #[cfg(not(feature = "router-hat-router"))]
         {
             let _ = router_hat_listen;
             eprintln!(
-                "wz-ap-demo: --router-hat requires the `routing-router-hat` feature \
-                 (build: cargo build -p wz-ap-demo --features routing-router-hat)"
+                "wz-ap-demo: --router-hat requires the `router-hat-router` feature \
+                 (build: cargo build -p wz-ap-demo --features router-hat-router)"
             );
             return ExitCode::from(2);
         }
@@ -770,7 +770,7 @@ fn run_peer_mode(
 /// transport ([`runner::run_router_hat`](crate::runner::run_router_hat)). Mirrors
 /// [`run_peer_mode`] — bind + dial the `--connect` router set + hold faces — but
 /// the node announces Router and hosts no application I/O (a pure router).
-#[cfg(feature = "routing-router-hat")]
+#[cfg(feature = "router-hat-router")]
 fn run_router_hat_mode(listen: String, dial_targets: Vec<String>) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {

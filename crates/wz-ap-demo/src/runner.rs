@@ -1902,7 +1902,7 @@ pub(crate) async fn run_peer(
 /// crossed this router), and the deterministic shutdown counterparts (so a test
 /// asserts on teardown output without racing the 250 ms tick). Runs until the
 /// graceful-shutdown signal (SIGTERM / SIGINT).
-#[cfg(feature = "routing-router-hat")]
+#[cfg(feature = "router-hat-router")]
 pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io::Result<()> {
     use crate::args::NodeKind;
     use std::time::Duration;

@@ -461,9 +461,9 @@ routing-static-routes = ["routing-router"]
 # atom (the dual-mesh RouterForwarder, the zenoh hat/router port) on top of the
 # `routing-peer` mesh-node foundation it reuses (peer_loop, the shared
 # link-state graph, per-port zid derivation). `?/` activates only on the AP path
-# (runtime-tokio profile pulls wz-runtime-tokio). This is the ACTIVATION build
-# feature — it makes the RouterForwarder reachable through a real run-mode; the
-# `router-hat-router` inventory atom stays reserved until a run-mode active flip.
+# (runtime-tokio profile pulls wz-runtime-tokio). This is the FOUNDATION build
+# feature (the routing-accept precedent) — it compiles the RouterForwarder library
+# module; the `router-hat-router` atom (below) is the run-mode toggle layered on it.
 routing-router-hat = ["routing-peer", "wz-runtime-tokio?/routing-router-hat"]
 
 # ----- domain: runtime (6 atomic, 2 active / 4 reserved) -----
@@ -773,11 +773,16 @@ transport-unicast = ["wz-runtime-tokio?/transport-unicast"]
 # forwarding gate when its atom is built.
 # ============================================================
 
-# ----- §5.21 router (16 atomic, all reserved) -----
+# ----- §5.21 router (16 atomic; router-hat-router active, rest reserved) -----
 router-connect-reconcile = []
 router-face-management = []
 router-hat-multihat = []
-router-hat-router = []
+# R311y132 — the router-hat run-mode active flip: the atom toggle layered on the
+# `routing-router-hat` FOUNDATION (routing-routes-on-routing-accept pattern). It
+# forwards the foundation (which pulls the library RouterForwarder + routing-peer);
+# the demo `--router-hat` run-mode gates on `cfg(feature="router-hat-router")`, the
+# A3 active site. Was `= []` (reserved marker) until the ACTIVATION harness landed.
+router-hat-router = ["routing-router-hat"]
 router-master-election = []
 router-multicast-faces = []
 router-orchestration = []

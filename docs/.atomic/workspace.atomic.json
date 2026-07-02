@@ -52583,6 +52583,56 @@
         "LOCAL: R311y131 atop R311y130 (c927292) atop origin/main=f737429 (R311y129). NOT pushed without explicit consent; full run-ci at the batch pre-push."
       ]
     },
+    "Round 311y132": {
+      "decision_summary": "R311y132 -- router-hat run-mode ACTIVE FLIP (follow-up #4; user-decided 승격). router-hat-router reserved -> ACTIVE via the routing-routes-on-routing-accept pattern: routing-router-hat stays the FOUNDATION feature (compiles the library RouterForwarder module + C1ay lane, unchanged), and router-hat-router is the run-mode atom the demo --router-hat gates on (cfg(feature=router-hat-router), the A3 active site; 6 demo cfg sites moved). The wz facade router-hat-router marker  became  (feedback-facade-forward-separate-edit); wz-ap-demo added router-hat-router = [routing-router-hat]. Layer E7 + the router-hat E2E now build the binary with --features router-hat-router. This reverses the deliberate y129 keep-reserved deferral, per explicit user consent. A3 audit: truthfulness OK (atoms=209 active=115; router-hat-router active <=> gated). Both feature arms build (atom = run-mode ON, foundation = library-only). STRUCTURE + inventory only; no library code change.",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: router-hat-router `= []` (reserved marker) -> `= [\"routing-router-hat\"]` (facade forward per feedback-facade-forward-separate-edit); the routing-router-hat comment reframed as the FOUNDATION feature (routing-accept precedent).",
+        "crates/wz-ap-demo/Cargo.toml: added router-hat-router = [\"routing-router-hat\"] (the run-mode ACTIVE atom layered on the foundation); routing-router-hat reframed as the foundation it layers on.",
+        "crates/wz-ap-demo/src/{main.rs,args.rs,runner.rs}: moved the six `--router-hat` run-mode cfg sites from `cfg(feature=\"routing-router-hat\")` to `cfg(feature=\"router-hat-router\")` (the dispatch run/reject arms + reject message, run_router_hat_mode, NodeKind::RouterHat variant + its WhatAmI::Router mapping, run_router_hat). The wz-runtime-tokio library router_forward module + C1ay lane stay on routing-router-hat (the foundation, unchanged).",
+        "scripts/run-ci.sh: Layer E7 builds the demo binary with `--features router-hat-router` (was routing-router-hat); header reframed.",
+        "crates/wz-integration-tests/tests/wz_router_hat_mesh.rs: the 4 #[ignore] strings + the doc + the bind-panic message now name `--features router-hat-router`.",
+        "docs/.atomic/workspace.atomic.json (inventory): router-hat-router reserved -> active (reason: F=full router HatCode; class=cfg; active=demo --router-hat run-mode gates cfg(feature=router-hat-router), routing-router-on-routing-accept pattern, E2E Layer E7)."
+      ],
+      "verification_bullets": [
+        "A3 catalog-status audit (the mechanical verifier for this flip): router-hat-router is now a declared [features] key (wz + wz-ap-demo Cargo.toml) with >=1 cfg(feature=\"router-hat-router\") site (the demo run-mode, 6 sites) AND status=active -> invariant #3 (active <=> gated) satisfied; routing-router-hat stays a FOUNDATION feature (not an inventory atom, exempt) gating the library module. [A3_EXIT recorded below]",
+        "Both feature arms build: `cargo build -p wz-ap-demo --features router-hat-router` (run-mode ON) + `--features routing-router-hat` (foundation only: library compiles, --router-hat rejected) both clean.",
+        "The wz-runtime-tokio library (router_forward) is UNCHANGED, so the C1ay lane (routing-router-hat + access-acl) is unaffected; the demo run-mode is the only thing that moved to the atom feature.",
+        "cargo fmt -p wz-ap-demo clean. All remaining routing-router-hat refs are the foundation (library gates + feature defs), verified by grep.",
+        "full run-ci deferred to the batch push (Layer E7 will build+run the router-hat E2E with the new --features router-hat-router)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "R311y132 = router-hat run-mode ACTIVE FLIP (follow-up #4; user-decided \"승격\" 2026-07-02). router-hat-router reserved -> ACTIVE via the routing-routes-on-routing-accept pattern: routing-router-hat stays the FOUNDATION feature (compiles the library RouterForwarder), and router-hat-router is the atom toggle the demo --router-hat run-mode gates on (cfg(feature=\"router-hat-router\"), the A3 active site). The wz facade router-hat-router `= []` marker became `= [\"routing-router-hat\"]` (feedback-facade-forward-separate-edit). Reverses the y129 \"keep reserved\" deferral, per explicit user consent.",
+        "SESSION follow-up status: #1 codec ext_wire_expr DONE (R311y130, c927292); #2 router-native/non-master E2E DESCOPED (false-proof risk); #3 QUERY-plane E2E DEFERRED (feature-build); #5 interceptor egress-ACL DONE (R311y131, 627e7b3); #4 run-mode flip DONE (R311y132); #6 P4 breadth remains.",
+        "LOCAL: R311y132 atop R311y131 (627e7b3) atop R311y130 (c927292) atop origin/main=f737429. 3 commits ahead. NOT pushed without explicit consent; full run-ci at the batch pre-push (esp Layer E7 + A3)."
+      ],
+      "publishable_decision_summary": "R311y132 -- router-hat run-mode ACTIVE FLIP (follow-up #4; user-decided 승격). router-hat-router reserved -> ACTIVE via the routing-routes-on-routing-accept pattern: routing-router-hat stays the FOUNDATION feature (compiles the library RouterForwarder module + C1ay lane, unchanged), and router-hat-router is the run-mode atom the demo --router-hat gates on (cfg(feature=router-hat-router), the A3 active site; 6 demo cfg sites moved). The wz facade router-hat-router marker  became  (feedback-facade-forward-separate-edit); wz-ap-demo added router-hat-router = [routing-router-hat]. Layer E7 + the router-hat E2E now build the binary with --features router-hat-router. This reverses the deliberate y129 keep-reserved deferral, per explicit user consent. A3 audit: truthfulness OK (atoms=209 active=115; router-hat-router active <=> gated). Both feature arms build (atom = run-mode ON, foundation = library-only). STRUCTURE + inventory only; no library code change.",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: router-hat-router `= []` (reserved marker) -> `= [\"routing-router-hat\"]` (facade forward per feedback-facade-forward-separate-edit); the routing-router-hat comment reframed as the FOUNDATION feature (routing-accept precedent).",
+        "crates/wz-ap-demo/Cargo.toml: added router-hat-router = [\"routing-router-hat\"] (the run-mode ACTIVE atom layered on the foundation); routing-router-hat reframed as the foundation it layers on.",
+        "crates/wz-ap-demo/src/{main.rs,args.rs,runner.rs}: moved the six `--router-hat` run-mode cfg sites from `cfg(feature=\"routing-router-hat\")` to `cfg(feature=\"router-hat-router\")` (the dispatch run/reject arms + reject message, run_router_hat_mode, NodeKind::RouterHat variant + its WhatAmI::Router mapping, run_router_hat). The wz-runtime-tokio library router_forward module + C1ay lane stay on routing-router-hat (the foundation, unchanged).",
+        "scripts/run-ci.sh: Layer E7 builds the demo binary with `--features router-hat-router` (was routing-router-hat); header reframed.",
+        "crates/wz-integration-tests/tests/wz_router_hat_mesh.rs: the 4 #[ignore] strings + the doc + the bind-panic message now name `--features router-hat-router`.",
+        "docs/.atomic/workspace.atomic.json (inventory): router-hat-router reserved -> active (reason: F=full router HatCode; class=cfg; active=demo --router-hat run-mode gates cfg(feature=router-hat-router), routing-router-on-routing-accept pattern, E2E Layer E7)."
+      ],
+      "publishable_verification_bullets": [
+        "A3 catalog-status audit (the mechanical verifier for this flip): router-hat-router is now a declared [features] key (wz + wz-ap-demo Cargo.toml) with >=1 cfg(feature=\"router-hat-router\") site (the demo run-mode, 6 sites) AND status=active -> invariant #3 (active <=> gated) satisfied; routing-router-hat stays a FOUNDATION feature (not an inventory atom, exempt) gating the library module. [A3_EXIT recorded below]",
+        "Both feature arms build: `cargo build -p wz-ap-demo --features router-hat-router` (run-mode ON) + `--features routing-router-hat` (foundation only: library compiles, --router-hat rejected) both clean.",
+        "The wz-runtime-tokio library (router_forward) is UNCHANGED, so the C1ay lane (routing-router-hat + access-acl) is unaffected; the demo run-mode is the only thing that moved to the atom feature.",
+        "cargo fmt -p wz-ap-demo clean. All remaining routing-router-hat refs are the foundation (library gates + feature defs), verified by grep.",
+        "full run-ci deferred to the batch push (Layer E7 will build+run the router-hat E2E with the new --features router-hat-router)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y132 = router-hat run-mode ACTIVE FLIP (follow-up #4; user-decided \"승격\" 2026-07-02). router-hat-router reserved -> ACTIVE via the routing-routes-on-routing-accept pattern: routing-router-hat stays the FOUNDATION feature (compiles the library RouterForwarder), and router-hat-router is the atom toggle the demo --router-hat run-mode gates on (cfg(feature=\"router-hat-router\"), the A3 active site). The wz facade router-hat-router `= []` marker became `= [\"routing-router-hat\"]` (feedback-facade-forward-separate-edit). Reverses the y129 \"keep reserved\" deferral, per explicit user consent.",
+        "SESSION follow-up status: #1 codec ext_wire_expr DONE (R311y130, c927292); #2 router-native/non-master E2E DESCOPED (false-proof risk); #3 QUERY-plane E2E DEFERRED (feature-build); #5 interceptor egress-ACL DONE (R311y131, 627e7b3); #4 run-mode flip DONE (R311y132); #6 P4 breadth remains.",
+        "LOCAL: R311y132 atop R311y131 (627e7b3) atop R311y130 (c927292) atop origin/main=f737429. 3 commits ahead. NOT pushed without explicit consent; full run-ci at the batch pre-push (esp Layer E7 + A3)."
+      ]
+    },
     "Round 311y14": {
       "decision_summary": "R311y14 -- root-cause fix for the Layer Q qemu-load-flake that blocked the R311y12+y13 push (NOT a --no-verify bypass). The Q qemu runs are wall-clock-bounded by run_qemu_case's `timeout`; 10s was too tight -- under full-CI concurrent load (parallel cargo builds + several qemu instances) a ~2s-standalone MCU e2e slowed past 10s and Q.2.mps2-an500 flaked exit=124, aborting the pre-push hook. DIAGNOSED per [[feedback-layer-q-qemu-load-flake]] + [[feedback-no-flaky-ever]]: Layer Q PASSES standalone (Q_EXIT=0, every Q.0/Q.1/Q.2/Q.4 x mps2-an385/an500 lane incl the one that flaked), the R311y12/y13 changes are AP-only (quic/facade/unixpipe-doc/CI + inventory -- NOT in the MCU/mcu-qemu-demo build), and the R311y13 full run-ci had already passed Q -- so it is the documented load-flake, not a regression. Root-caused: raised the run_qemu_case wall-clock timeout 10s -> 30s (~15x the standalone runtime; absorbs CI-load slowdown while still bounding a genuine runaway loop -- a real hang runs the full 30s vs ~2s, distinguishable in the captured log). run-ci.sh only (the Q.0/Q.2/Q.4 shared helper); no code/inventory change.",
       "changes_bullets": [
@@ -63418,10 +63468,10 @@
       "reason": "F=HatTrait multi-hat polymorphism seam (per-face/resource/tables Box<dyn Any>); P=zenoh hat/mod.rs:78,272; C=prereq for all router atoms; class=foundational"
     },
     "router-hat-router": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=full router HatCode (routers_net+linkstatepeers_net dual mesh); P=zenoh hat/router/mod.rs:167,320; C=needs hat-multihat; promotes routing-router; class=cfg"
+      "reason": "F=full router HatCode (routers_net+linkstatepeers_net dual mesh; COMPUTE C0-C5c + interceptor plane); P=zenoh hat/router/mod.rs:167,320; C=on routing-router-hat foundation; class=cfg; active=demo --router-hat run-mode gates cfg(feature=router-hat-router) (routing-router-on-routing-accept pattern), E2E Layer E7 (R311y132)"
     },
     "router-master-election": {
       "status": "reserved",

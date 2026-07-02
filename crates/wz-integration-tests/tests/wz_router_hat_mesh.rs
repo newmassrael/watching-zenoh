@@ -58,8 +58,9 @@
 //!    nodes collide on the hardcoded zid; the query ROUTE itself is unit-proven
 //!    (route_request / forward_response, incl. 2-router HRW).
 //!
-//! Requires the binary built with `--features routing-router-hat` (which pulls
-//! `routing-peer` transitively, so ONE binary serves both the `--router-hat` node
+//! Requires the binary built with `--features router-hat-router` (the run-mode
+//! ACTIVE atom, which pulls the routing-router-hat foundation -> `routing-peer`
+//! transitively, so ONE binary serves both the `--router-hat` node
 //! and the `--peer` nodes). run-ci's Layer E7 builds it and runs all four tests on
 //! the `--ignored` lane, like the other binary-dep e2es. The test fn names carry the
 //! `wz_router_hat_` prefix so the default Layer E sweep's `--skip wz_router`
@@ -114,7 +115,7 @@ fn spawn_node(label: &str, listen_marker: &str, args: &[&str]) -> (ChildGuard, F
             let _ = guard.child_mut().wait();
             panic!(
                 "{label} did not bind within 5s (is the binary built with \
-                 --features routing-router-hat?)\n--- {label} stderr ---\n{c}"
+                 --features router-hat-router?)\n--- {label} stderr ---\n{c}"
             );
         });
     let port = listen_port(&captured);
@@ -132,7 +133,7 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-router-hat); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
 fn wz_router_hat_converges_with_a_peer() {
     // The topology floor: a router-hat R + one peer P dialing it. R binds first so
     // P can dial its ephemeral port.
@@ -198,7 +199,7 @@ fn wz_router_hat_converges_with_a_peer() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-router-hat); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
 fn wz_router_hat_forwards_between_peers() {
     // The 3-node STAR: a subscriber P1 and a publisher P2, each dialing ONLY the
     // router R. With autoconnect off (the default), P1 and P2 never learn each
@@ -295,7 +296,7 @@ fn wz_router_hat_forwards_between_peers() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-router-hat); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
 fn wz_router_hat_two_routers_converge() {
     // The federation topology floor: two router-hat nodes dialing each other. R2
     // binds first; R1 dials it. Both present WhatAmI::Router, so each classifies
@@ -367,7 +368,7 @@ fn wz_router_hat_two_routers_converge() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-router-hat); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
 fn wz_router_hat_federates_data_across_two_routers() {
     // The PEER-NATIVE cross-tier federation E2E over real transport (the
     // load-bearing ACTIVATION obligation): a publisher behind ONE router reaches a

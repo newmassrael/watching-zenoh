@@ -4272,14 +4272,15 @@ layer_e6_peer_mesh() {
 # The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
 # transport for the first time — a `--router-hat` node presenting wire
 # WhatAmI::Router through accept_loop, with `--peer` nodes dialing it. ONE binary
-# built with `--features routing-router-hat` serves both kinds (the feature pulls
-# routing-peer transitively). The four tests are STAGED (topology before
+# built with `--features router-hat-router` (the run-mode ACTIVE atom, R311y132;
+# pulls the routing-router-hat foundation -> routing-peer) serves both kinds. The
+# four tests are STAGED (topology before
 # forwarding, single router before federation): a 2-node floor, a 3-node star
 # data-forward, a 2-router convergence floor, and a 2-router peer-native data
 # federation E2E. The test fns carry the `wz_router_hat_` prefix so the default
 # Layer E sweep's `--skip wz_router` excludes them from the arbitrary-feature run.
 layer_e7_router_hat() {
-    (cd crates && cargo build -p wz-ap-demo --features routing-router-hat --quiet) || return 1
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_mesh -- --ignored --quiet) || return 1
 }
