@@ -40,20 +40,23 @@
 //!    router-hat nodes dialing each other, each classifying the other into
 //!    `routers_net` (WhatAmI::Router both sides), converging the router tier to 2.
 //!
-//! 4. `wz_router_hat_federates_data_across_two_routers` — the R311y120 FEDERATION
-//!    black-hole proof: a publisher behind R1 reaches a subscriber behind R2,
-//!    routed P1 -> R1 -> [router mesh] -> R2 -> P2 (autoconnect off, so the only
+//! 4. `wz_router_hat_federates_data_across_two_routers` — the PEER-NATIVE
+//!    cross-tier federation E2E: a publisher behind R1 reaches a subscriber behind
+//!    R2, routed P1 -> R1 -> [router mesh] -> R2 -> P2 (autoconnect off, so the only
 //!    path is through BOTH routers). Composes over the wire the A2a
-//!    cross-tier-native advertise (R2 floods P2's peer-native sub into the router
-//!    mesh so R1 attracts P1's publish) + the master-gated cross-mesh bridge. Each
-//!    router is the sole master of its own domain (the other router is only in its
-//!    `routers_net`, never its `linkstatepeers_net`), so the bridge direction is
-//!    deterministic — this does NOT exercise master-vs-non-master ELECTION (that
-//!    corner needs 3+ routers and stays unit-proven). SCOPE: this is the DATA-plane
-//!    federation. The QUERY-plane E2E (a remote querier steered across the router
-//!    mesh) is a NAMED follow-up — the demo has no mesh-mode query issuer and
-//!    single-session query nodes collide on the hardcoded zid; the query ROUTE
-//!    itself is unit-proven (route_request / forward_response, incl. 2-router HRW).
+//!    cross-tier-native advertise in its PEER-NATIVE direction (R2 floods P2's
+//!    peer-native sub into the router mesh so R1 attracts P1's publish) + the
+//!    master-gated cross-mesh bridge. SCOPE — this is NOT the canonical R311y120
+//!    black-hole (a ROUTER-NATIVE sub behind a NON-MASTER router): with 2 routers
+//!    each is the sole master of its own domain (`shared_nodes` = {self}, the other
+//!    router only in its `routers_net`), so no non-master / no HRW election is
+//!    exercised, and `router_subs` stays empty (a router-native sub is undrivable
+//!    by the OBSERVE-only demo router). The router-native direction + the
+//!    non-master-attract corner stay UNIT-proven; this adds the peer-native
+//!    federation + sole-master bridge E2E. The QUERY-plane E2E is likewise a NAMED
+//!    follow-up — the demo has no mesh-mode query issuer and single-session query
+//!    nodes collide on the hardcoded zid; the query ROUTE itself is unit-proven
+//!    (route_request / forward_response, incl. 2-router HRW).
 //!
 //! Requires the binary built with `--features routing-router-hat` (which pulls
 //! `routing-peer` transitively, so ONE binary serves both the `--router-hat` node
@@ -366,21 +369,33 @@ fn wz_router_hat_two_routers_converge() {
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-router-hat); Layer E runs via --ignored"]
 fn wz_router_hat_federates_data_across_two_routers() {
-    // The R311y120 FEDERATION black-hole proof over real transport (the load-bearing
-    // ACTIVATION obligation): a publisher behind ONE router reaches a subscriber
-    // behind ANOTHER, routed P1 -> R1 -> [router mesh] -> R2 -> P2. With autoconnect
-    // OFF (the default), P1 knows only R1, P2 only R2, and R1 only dials R2 — so the
-    // ONLY P1->P2 path is through BOTH routers. This composes, over the wire, the
-    // A2a cross-tier-native advertise (R2 floods P2's peer-native subscription into
-    // the router mesh so R1 ATTRACTS P1's publish toward R2) and the master-gated
-    // cross-mesh bridge (each router is the sole master of its own domain, since the
-    // other router is only in its `routers_net`, never its `linkstatepeers_net`).
+    // The PEER-NATIVE cross-tier federation E2E over real transport (the
+    // load-bearing ACTIVATION obligation): a publisher behind ONE router reaches a
+    // subscriber behind ANOTHER, routed P1 -> R1 -> [router mesh] -> R2 -> P2. With
+    // autoconnect OFF (the default), P1 knows only R1, P2 only R2, and R1 only dials
+    // R2 — so the ONLY P1->P2 path is through BOTH routers. This composes, over the
+    // wire, the A2a cross-tier-native advertise in its PEER-NATIVE direction (R2
+    // floods P2's peer-native subscription into the router mesh, zenoh
+    // `declare_linkstatepeer_subscription` -> `register_router_subscription(self)`,
+    // so R1 ATTRACTS P1's publish toward R2) and the master-gated cross-mesh bridge.
     //
-    // NOTE (scope): this proves the DATA-plane federation. The QUERY-plane E2E (a
-    // remote querier steered across the router mesh) is a NAMED follow-up — the demo
-    // has no mesh-mode query issuer, and single-session query nodes collide on the
-    // hardcoded zid so they cannot form a federated query topology; the query ROUTE
-    // itself is unit-proven (route_request / forward_response, incl. 2-router HRW).
+    // SCOPE — this proves the PEER-NATIVE federation half, NOT the canonical
+    // R311y120 black-hole. The R311y120 scenario is a peer-source Push into a
+    // NON-MASTER router whose only subscriber is a ROUTER-NATIVE sub (learned via
+    // the router mesh). This harness reproduces NEITHER: (a) with 2 routers each is
+    // the SOLE master of its own domain (`shared_nodes` = {self}, the other router
+    // being only in its `routers_net`, never its `linkstatepeers_net`), so no
+    // non-master and no HRW election is exercised; (b) `router_subs` stays empty —
+    // a router-native sub is only created by another router ORIGINATING a native
+    // declare, which the OBSERVE-only demo router never does, so the
+    // router-native -> peer-mesh advertise direction is UNDRIVABLE by this demo.
+    // Both the router-native direction and the non-master-attract corner stay
+    // UNIT-proven (advertise_native_cross_tier_sub / push_bridges_cross_mesh_only_
+    // when_master); this E2E adds the peer-native federation + the sole-master
+    // bridge over real transport. The QUERY-plane E2E is likewise a NAMED
+    // follow-up — the demo has no mesh-mode query issuer, and single-session query
+    // nodes collide on the hardcoded zid; the query ROUTE is unit-proven
+    // (route_request / forward_response, incl. 2-router HRW).
     let (mut r2_guard, mut r2_reader, p_r2) =
         spawn_router_hat("router-hat-2", &["--router-hat", "127.0.0.1:0"]);
     let addr_r2 = format!("127.0.0.1:{p_r2}");

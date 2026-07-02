@@ -261,19 +261,28 @@
 //!   per-peer filter + `router_peers_failover_brokering` (off by default in zenoh)
 //!   land with the interceptor slice. The source-dimensioned route cache is a
 //!   data-path optimization (wz computes routes inline today) deferred with it.
-//! - **Native-other-tier cross bubble — E2E proof (both planes' MECHANISM landed
-//!   in A2a/A2b above)** — the R311y120 black-hole was: a peer-source Push into a
+//! - **Native-other-tier cross bubble — the ROUTER-NATIVE / non-master corner
+//!   (mechanism landed A2a/A2b; peer-native E2E landed A4; router-native E2E
+//!   UNIT-only)** — the canonical R311y120 black-hole is: a peer-source Push into a
 //!   NON-MASTER router whose only subscriber is a ROUTER-NATIVE sub behind the
 //!   elected master, with no same-tier native relay — without the
 //!   cross-tier-native advertisement the non-master never attracts the Push toward
 //!   a router that can bridge it. A2a closed the subscription-plane mechanism and
 //!   A2b the queryable-plane twin (self advertises a router-native's interest into
-//!   the peer mesh, and vice versa), unit-tested by direct native injection. What
-//!   REMAINS is the E2E black-hole PROOF, which needs the 2-router ACTIVATION
-//!   harness (a peer publisher on one router, a router-native subscriber behind the
-//!   elected master on the other) to exercise the attract + master-gated bridge end
-//!   to end — LATENT until then (single-router `router_subs` is empty). (The
-//!   client-behind-a-router variant was already rescued by C2.)
+//!   the peer mesh, and vice versa), unit-tested by direct native injection. A4
+//!   (R311y128) then proved the PEER-NATIVE direction E2E over real transport (a
+//!   `--peer` subscriber behind another router; the A2a `linkstatepeer_subs ->
+//!   router-mesh` half + the sole-master bridge). What stays UNIT-only is the
+//!   ROUTER-NATIVE direction (`router_subs -> peer-mesh`) AND the non-master-attract
+//!   corner: both are UNDRIVABLE by the OBSERVE-only demo router — `router_subs` is
+//!   populated only by another router ORIGINATING a native declare (the demo router
+//!   originates nothing), and 2 routers make each the sole master of its own domain
+//!   (`shared_nodes` = {self}), so a non-master needs 3+ routers sharing both
+//!   meshes. Their E2E proof waits on a router that hosts/relays natives (or a
+//!   3-router harness); the DIRECT-injection unit tests
+//!   (`advertise_native_cross_tier_sub` / `push_bridges_cross_mesh_only_when_master`)
+//!   cover the mechanism meanwhile. (The client-behind-a-router variant was already
+//!   rescued by C2.)
 //! - **Gossip / autoconnect / interceptors** — the per-net policy knobs the
 //!   `LinkstateForwarder` carries; added as the router gains the corresponding
 //!   plane. (The pending-query GC — the timeout sweep — landed with C5c above.)
@@ -916,9 +925,11 @@ impl RouterForwarder {
         // The qabl plane RE-ADVERTISES the recomputed merged info per affected
         // keyexpr (A2b): a partial removal that leaves a contributor DOWNGRADES via
         // a re-declared DeclareQueryable; a full removal (no contributor) is a
-        // no-op (the codec-deferred UndeclareQueryable gap — the topology purge is
-        // the safety net). `advertise_native_cross_tier_qabl` handles both (it
-        // early-returns when the merge is now `None`).
+        // no-op (the codec-deferred UndeclareQueryable gap — for the self-sourced
+        // cross-tier advertisement the stale remote copy is cleaned only on
+        // SELF-down, so this leaves a degradation-not-black-hole staleness; see
+        // `advertise_native_cross_tier_qabl`). It handles both (it early-returns
+        // when the merge is now `None`).
         for keyexpr in affected_qabl_keys {
             self.advertise_native_cross_tier_qabl(tier, &keyexpr);
         }
@@ -1895,9 +1906,20 @@ impl RouterForwarder {
     /// re-declares `local_*_qabl_info` whenever it changes, and the downstream
     /// value-diff gate absorbs a re-declare of the SAME value. NOT master-gated.
     /// The FULL retraction (last contributor leaves ⇒ merged `None`) is codec-
-    /// deferred — `UndeclareQueryable` carries no keyexpr ext — so this is a no-op
-    /// then (the face-down / self-down topology purge is the safety net, the same
-    /// gap the native qabl plane documents). A partial removal that leaves a
+    /// deferred — a WZ-CODECS DEBT, not a wire limitation: zenoh's `UndeclareQueryable`
+    /// DOES carry the keyexpr (`ext_wire_expr`, declare.rs:520-522) and wz's
+    /// `UndeclareSubscriber` already implements it (`build_undeclare_subscriber_with_keyexpr`);
+    /// only wz's `UndeclareQueryable` has not built the ext yet, so this becomes a
+    /// no-op when the merge is `None`. Because the advertisement is SELF-sourced
+    /// (node_id 0), the ONLY cleanup of a now-stale remote advertisement is
+    /// SELF-down (a downstream node's topology purge drops self's qabls) — a
+    /// CONTRIBUTOR's face-down re-advertises to `None` = this no-op, it does NOT
+    /// retract the remote copy. Consequence: after the last contributor for a
+    /// keyexpr leaves self's domain, remote queriers keep steering it toward self
+    /// until self-down; self answers with an empty final — a DEGRADATION, not a
+    /// hang/black-hole (the BestMatching union still reaches live queryables). The
+    /// close is a codec follow-up (add `ext_wire_expr` to wz's `UndeclareQueryable`,
+    /// parity with the sub plane + zenoh's wire). A partial removal that leaves a
     /// contributor DOWNGRADES via a re-advertised `DeclareQueryable`, no undeclare.
     fn advertise_native_cross_tier_qabl(&self, native_tier: FaceTier, keyexpr: &str) {
         let Some(target) = Self::opposite_mesh(native_tier) else {
@@ -2790,9 +2812,10 @@ impl FaceForwarder for RouterForwarder {
         // back to this one as their inbound target self-heal at send / timeout. (b)
         // this face's hosted client queryables (C5b) — and, since A3 advertises a
         // client queryable cross-tier, RE-ADVERTISE the recomputed merge per
-        // departed keyexpr (a DOWNGRADE if another contributor remains; a no-op /
-        // codec-deferred full retraction if none — the same UndeclareQueryable gap
-        // the native qabl plane accepts), mirroring the client sub withdraw below.
+        // departed keyexpr (a DOWNGRADE if another contributor remains; a no-op if
+        // none — the codec-deferred full retraction, which for the self-sourced
+        // cross-tier advertise clears only on SELF-down, degradation-not-black-hole;
+        // see advertise_native_cross_tier_qabl), mirroring the client sub withdraw.
         //
         // A fan whose LAST answering branch died with this face is DRAINED: its
         // querier is owed the closing ResponseFinal NOW (zenoh

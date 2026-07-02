@@ -4264,10 +4264,11 @@ layer_e6_peer_mesh() {
 # transport for the first time — a `--router-hat` node presenting wire
 # WhatAmI::Router through accept_loop, with `--peer` nodes dialing it. ONE binary
 # built with `--features routing-router-hat` serves both kinds (the feature pulls
-# routing-peer transitively). The two tests are STAGED: a 2-node topology floor
-# (convergence + tier classification) then a 3-node star data-forward through the
-# router. The test fns carry the `wz_router_hat_` prefix so the default Layer E
-# sweep's `--skip wz_router` excludes them from the arbitrary-feature binary run.
+# routing-peer transitively). The four tests are STAGED (topology before
+# forwarding, single router before federation): a 2-node floor, a 3-node star
+# data-forward, a 2-router convergence floor, and a 2-router peer-native data
+# federation E2E. The test fns carry the `wz_router_hat_` prefix so the default
+# Layer E sweep's `--skip wz_router` excludes them from the arbitrary-feature run.
 layer_e7_router_hat() {
     (cd crates && cargo build -p wz-ap-demo --features routing-router-hat --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
