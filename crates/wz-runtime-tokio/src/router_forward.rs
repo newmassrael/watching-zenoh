@@ -101,7 +101,7 @@
 //! [`client_subs`](RouterForwarder#structfield.client_subs) leaf store, and the
 //! router ADVERTISES self's now-derived cross-tier interest into BOTH meshes — a
 //! self-sourced `DeclareSubscriber` (node_id 0) flooded to self's tree children
-//! ([`advertise_self_cross_tier_sub`](RouterForwarder::advertise_self_cross_tier_sub)),
+//! ([`advertise_client_cross_tier_sub`](RouterForwarder::advertise_client_cross_tier_sub)),
 //! re-derived on the tick for late-joining children
 //! ([`re_advertise_self_cross_tier`](RouterForwarder::re_advertise_self_cross_tier))
 //! — so a mesh publisher routes the keyexpr toward this router. This is
@@ -211,6 +211,29 @@
 //! closing `ResponseFinal` for a `last` branch, so a queryable that crashes
 //! without a final on a still-up face cannot hang a `get()` forever.
 //!
+//! ## Slice A2a (FEDERATION cross-tier-native subscription bubble) — landed
+//!
+//! The cross-tier self-advertisement now derives from the OTHER tier's NATIVES,
+//! not just from `client_subs` (C2). A ROUTER-native sub advertises self's
+//! interest into the PEER mesh, a PEER-native sub into the ROUTER mesh — zenoh's
+//! `register_router_subscription` / `declare_linkstatepeer_subscription`
+//! cross-registration (`pubsub.rs:248-250`/`:296-297`), NOT master-gated (every
+//! router advertises; only the DELIVERY bridge is master-gated). One per-target
+//! derive SSOT ([`self_advertises_sub_into`](RouterForwarder::self_advertises_sub_into)
+//! = client ∪ opposite-mesh native) feeds the immediate advertise (the flip
+//! false->true on ingest), the tick re-advertise
+//! ([`derived_cross_tier_subs_into`](RouterForwarder::derived_cross_tier_subs_into)),
+//! and — as its exact negation — the withdraw. The withdraw is centralized in
+//! [`purge_detached_interest_tier`](RouterForwarder::purge_detached_interest_tier),
+//! the shared choke point for BOTH the local face-down deregister AND the remote
+//! Oam-ingest detach, so a departed native's stale advertisement is retracted on
+//! either path (the R311y107b lifecycle-asymmetry class). This is LATENT in a
+//! single router (`router_subs` empty, the router-mesh flood no-op) and
+//! unit-tested by injecting a native directly; the E2E black-hole proof (a peer
+//! publisher actually routing toward the router-native's interest) needs the
+//! 2-router ACTIVATION harness (below). The QUERYABLE twin (a native qabl's
+//! cross-tier merged-`QueryableInfo` advertisement) is the next slice.
+//!
 //! ## Deferred to later slices (named, not silently dropped)
 //!
 //! - **Per-peer ingress/egress master filter + source-dimensioned route cache
@@ -222,24 +245,22 @@
 //!   per-peer filter + `router_peers_failover_brokering` (off by default in zenoh)
 //!   land with the interceptor slice. The source-dimensioned route cache is a
 //!   data-path optimization (wz computes routes inline today) deferred with it.
-//! - **Native-other-tier cross bubble (federation obligation, NOT a mere
-//!   optimization)** — wz derives the cross-tier self-bubble from `client_subs`
-//!   ONLY (C2); zenoh ALSO cross-registers a router-native (or client) sub into the
-//!   peer tier (`register_router_subscription`, pubsub.rs:248-250, on `face.whatami
-//!   != Peer`) and floods it over the peer mesh. This BLACK-HOLES a specific valid
-//!   federated case (session-review R311y120 REFUTED the earlier "non-black-holing"
-//!   label): a peer-source Push into a NON-MASTER router whose only subscriber is a
+//! - **Native-other-tier cross bubble — E2E proof (the SUBS derive landed in
+//!   A2a above; the QABL twin is next)** — the R311y120 black-hole was: a
+//!   peer-source Push into a NON-MASTER router whose only subscriber is a
 //!   ROUTER-NATIVE sub behind the elected master, with no same-tier native relay —
-//!   the non-master's bridge is master-gated off AND it never cross-registered the
-//!   router-native interest, so it cannot route toward the master. (The
-//!   client-behind-a-router variant IS rescued by C2's client cross-advertise.)
-//!   LATENT today (single-router `router_subs` is empty), cannot manifest before
-//!   real federation. The fix is ADDITIVE (derive the bubble from the OTHER tier's
-//!   natives too, per zenoh's cross-registration + PRECISION req #1) but MUST land
-//!   WITH the federation/ACTIVATION slice (which provides the 2-node harness to test
-//!   it), not merely "revisit with C5".
+//!   without the cross-tier-native advertisement the non-master never attracts the
+//!   Push toward a router that can bridge it. A2a CLOSED the subscription-plane
+//!   mechanism (self now advertises a router-native's interest into the peer mesh,
+//!   and vice versa), unit-tested by direct native injection. What REMAINS: (a) the
+//!   QUERYABLE-plane twin (a native qabl's cross-tier merged-`QueryableInfo`
+//!   advertisement — the next slice); (b) the E2E black-hole PROOF, which needs the
+//!   2-router ACTIVATION harness (a peer publisher on one router, a router-native
+//!   subscriber behind the elected master on the other) to exercise the attract +
+//!   master-gated bridge end to end — LATENT until then (single-router `router_subs`
+//!   is empty). (The client-behind-a-router variant was already rescued by C2.)
 //! - **The client-queryable cross-tier ADVERTISEMENT** — the query-plane twin of
-//!   C2's `advertise_self_cross_tier_sub`: a client `DeclareQueryable` should make
+//!   C2's `advertise_client_cross_tier_sub`: a client `DeclareQueryable` should make
 //!   this router flood a self-sourced `DeclareQueryable` (carrying the MERGED
 //!   `QueryableInfo`, `complete = OR` / `distance = min`) into the meshes so a
 //!   REMOTE mesh querier routes toward it. C5b STORES the client queryable + routes
@@ -497,7 +518,7 @@ pub struct RouterForwarder {
     /// leaf state, so [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE
     /// its linkless early-return (OBLIGATION 1), like `client_subs`. The cross-tier
     /// ADVERTISEMENT of these queryables into the meshes (the query-plane twin of
-    /// C2's `advertise_self_cross_tier_sub`, so a REMOTE mesh querier routes toward
+    /// C2's `advertise_client_cross_tier_sub`, so a REMOTE mesh querier routes toward
     /// this router) is a NAMED deferral landing with the ACTIVATION slice — see the
     /// module docs.
     client_qabls: RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>,
@@ -842,11 +863,20 @@ impl RouterForwarder {
     /// per-tier mirror of `purge_detached_interest`, called on a link-down (the
     /// `remove_link` detached set) and on an ingest that detached nodes. A gone
     /// node's interest must not keep a route gate spuriously armed. The subs
-    /// tables are populated by 1b (this round) and the qabls tables by 1c; the
-    /// purge covers BOTH so neither slice re-touches `deregister` / `forward`.
-    /// No bubble teardown is needed: the cross-tier self-bubble is never stored
-    /// (derived at compute), so a departed node leaves only its native entries —
-    /// which this removes. No-op for [`FaceTier::Client`] (no tier tables).
+    /// tables are populated by 1b and the qabls tables by 1c; the purge covers
+    /// BOTH so neither slice re-touches `deregister` / `forward`.
+    ///
+    /// This is the SHARED CHOKE POINT for a native removal — its two callers are
+    /// `deregister` (a local face-down) AND the `forward` Oam-ingest detach (a
+    /// REMOTE topology node dropping out, `changes.removed`). So the FEDERATION
+    /// cross-tier withdrawal (R311y125) lives HERE, not in `deregister`: if a
+    /// departed native was the LAST source for a keyexpr in this tier, self's
+    /// advertisement of it into the OPPOSITE mesh must be withdrawn (the flip
+    /// true->false), and centralizing it covers BOTH remove paths by construction
+    /// (the y107b lifecycle-asymmetry class — a remote detach is the path most
+    /// likely to be missed). No-op for [`FaceTier::Client`] (no tier tables). The
+    /// self-bubble itself is never stored (derive-not-store); only the WIRE
+    /// advertisement needs the explicit retraction.
     fn purge_detached_interest_tier(&self, tier: FaceTier, removed: &[Zid]) {
         if removed.is_empty() {
             return;
@@ -856,11 +886,21 @@ impl RouterForwarder {
             FaceTier::LinkstatePeers => (&self.linkstatepeer_subs, &self.linkstatepeer_qabls),
             FaceTier::Client => return,
         };
-        let mut subs = subs.borrow_mut();
-        let mut qabls = qabls.borrow_mut();
-        for zid in removed {
-            subs.remove_peer(zid);
-            qabls.remove_peer(zid);
+        // Collect the sub keyexprs the departed natives held, so the cross-tier
+        // advertisement they may have been the last contributor of is re-evaluated
+        // AFTER the removal (the borrows must be dropped before
+        // `withdraw_native_cross_tier_sub`, which re-reads the table).
+        let mut affected_sub_keys: HashSet<String> = HashSet::new();
+        {
+            let mut subs = subs.borrow_mut();
+            let mut qabls = qabls.borrow_mut();
+            for zid in removed {
+                affected_sub_keys.extend(subs.remove_peer_keys(zid));
+                qabls.remove_peer(zid);
+            }
+        }
+        for keyexpr in affected_sub_keys {
+            self.withdraw_native_cross_tier_sub(tier, &keyexpr);
         }
     }
 
@@ -911,6 +951,12 @@ impl RouterForwarder {
     /// planes; this holds everything they share (the alias-resolve +
     /// source-resolve + change-gate + re-flood), so neither plane re-hand-rolls
     /// it (the sibling factored the identical `V`-generic).
+    ///
+    /// Returns `Some(resolved_keyexpr)` IFF it registered a REAL change (and thus
+    /// re-flooded) — the signal the caller uses to decide the CROSS-tier
+    /// advertisement (R311y125): a native that first appears for a keyexpr may
+    /// flip self's cross-tier advertise-into-the-opposite-mesh state. `None` on
+    /// any drop (client tier / unresolvable / no change).
     #[allow(clippy::too_many_arguments)]
     fn ingest_interest<V: PartialEq>(
         &self,
@@ -922,34 +968,26 @@ impl RouterForwarder {
         table: &RefCell<LinkstatepeerInterest<V>>,
         value: V,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
-    ) {
-        let Some((net, _dirty)) = self.plane(tier) else {
-            return; // Client tier: no net -> slice 1d (caller also guards on the table).
-        };
-        // Resolve the keyexpr against the inbound face's alias table + read its
-        // zid / link, in one scoped borrow (an unresolvable alias drops it).
+    ) -> Option<String> {
+        let (net, _dirty) = self.plane(tier)?; // Client tier: no net -> slice 1d.
+                                               // Resolve the keyexpr against the inbound face's alias table + read its
+                                               // zid / link, in one scoped borrow (an unresolvable alias drops it).
         let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
-            };
-            let Some(keyexpr) = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) else {
-                return;
-            };
+            let s = faces.get(&inbound)?;
+            let keyexpr = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table)?;
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
-        let Some((source_zid, out_node_id)) = resolve_source_in(
+        let (source_zid, out_node_id) = resolve_source_in(
             &net.borrow(),
             inbound_zid,
             inbound_link,
             read_declare_source(declare),
-        ) else {
-            return;
-        };
+        )?;
         // Register the SOURCE's native interest; re-flood ONLY on a real change
         // (the value-diff gate -- a new peer OR a changed value).
         if !table.borrow_mut().register(&keyexpr, source_zid, value) {
-            return;
+            return None;
         }
         self.reflood_declaration(
             inbound,
@@ -962,6 +1000,7 @@ impl RouterForwarder {
             &keyexpr,
             build,
         );
+        Some(keyexpr)
     }
 
     /// Ingest a sourced `DeclareSubscriber` (1b) — the `V = ()` case of
@@ -982,9 +1021,21 @@ impl RouterForwarder {
         let Some(subs) = self.subs_table(tier) else {
             return; // Client tier -> slice 1d.
         };
-        self.ingest_interest(inbound, tier, reliable, declare, wireexpr, subs, (), |ke| {
-            build_declare_subscriber(0, 0, Some(ke))
-        });
+        let changed =
+            self.ingest_interest(inbound, tier, reliable, declare, wireexpr, subs, (), |ke| {
+                build_declare_subscriber(0, 0, Some(ke))
+            });
+        // FEDERATION cross-tier bubble (R311y125): a NATIVE sub for `ke` in this
+        // tier makes self ADVERTISE `ke` into the OPPOSITE mesh (a router-native
+        // -> peer mesh; a peer-native -> router mesh) so a publisher on that mesh
+        // routes toward self, which then bridges cross-tier (C4). zenoh's
+        // register_router_subscription / declare_linkstatepeer_subscription
+        // cross-register self into the opposite tier here (pubsub.rs:248-250 /
+        // :296-297) — NOT master-gated (every router advertises; only the delivery
+        // bridge is gated). Fires on the flip false->true only.
+        if let Some(ke) = changed {
+            self.advertise_native_cross_tier_sub(tier, &ke);
+        }
     }
 
     /// A sourced `UndeclareSubscriber` (1b): withdraw the SOURCE peer's interest
@@ -1042,6 +1093,10 @@ impl RouterForwarder {
             &keyexpr,
             build_undeclare_subscriber_with_keyexpr,
         );
+        // FEDERATION cross-tier bubble (R311y125): if that was the LAST native
+        // source for `keyexpr` in this tier (and no client covers it), withdraw
+        // self's advertisement into the opposite mesh — the flip true->false.
+        self.withdraw_native_cross_tier_sub(tier, &keyexpr);
     }
 
     /// Ingest a sourced `DeclareQueryable` (1c) — the query-plane twin of
@@ -1546,7 +1601,9 @@ impl RouterForwarder {
             }
         };
         // The derive-level change gate: ADVERTISE only when this is the FIRST
-        // client interested in `keyexpr` (the derive flips false -> true).
+        // client interested in `keyexpr` (the client half of the derive flips
+        // false -> true). Per-target-tier: a mesh an opposite-tier native already
+        // advertises is skipped (R311y125 — no redundant flood).
         let already = self.any_client_subscribes(&keyexpr);
         let inserted = self
             .client_subs
@@ -1555,7 +1612,7 @@ impl RouterForwarder {
             .or_default()
             .insert(keyexpr.clone());
         if inserted && !already {
-            self.advertise_self_cross_tier_sub(&keyexpr);
+            self.advertise_client_cross_tier_sub(&keyexpr);
         }
     }
 
@@ -1592,14 +1649,16 @@ impl RouterForwarder {
             removed
         };
         if removed && !self.any_client_subscribes(&keyexpr) {
-            self.withdraw_self_cross_tier_sub(&keyexpr);
+            self.withdraw_client_cross_tier_sub(&keyexpr);
         }
     }
 
-    /// Whether ANY client face currently subscribes `keyexpr` — the C2 derive read
-    /// (`cross_tier_self_source` for the subscription plane). Self is a virtual
-    /// sub-source in the meshes IFF this is true (or, once federation lands, the
-    /// OTHER tier holds a native — always empty in a single router).
+    /// Whether ANY client face currently subscribes `keyexpr` — the CLIENT half of
+    /// the cross-tier advertise derive (the C2 contributor). The full predicate is
+    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into): self is a
+    /// virtual sub-source in a mesh IFF this is true OR the OPPOSITE mesh holds a
+    /// native for `keyexpr` (the A2a federation contributor). Client-agnostic to
+    /// tier — a client subscribing feeds BOTH meshes.
     fn any_client_subscribes(&self, keyexpr: &str) -> bool {
         self.client_subs
             .borrow()
@@ -1607,37 +1666,145 @@ impl RouterForwarder {
             .any(|set| set.contains(keyexpr))
     }
 
-    /// The deduped set of keyexprs some client subscribes — self's DERIVED
-    /// cross-tier sub-sources, re-advertised to a tier's NEW tree children on the
-    /// tick ([`re_advertise_self_cross_tier`](Self::re_advertise_self_cross_tier)).
-    fn derived_cross_tier_subs(&self) -> Vec<String> {
+    /// The mesh a NATIVE in `tier` advertises its cross-tier interest INTO — the
+    /// OPPOSITE mesh (a `Routers` native attracts publishers on the `LinkstatePeers`
+    /// mesh and vice versa), or `None` for [`FaceTier::Client`] (a client is in no
+    /// mesh; its advertisement targets BOTH meshes, handled by the caller loop).
+    fn opposite_mesh(tier: FaceTier) -> Option<FaceTier> {
+        match tier {
+            FaceTier::Routers => Some(FaceTier::LinkstatePeers),
+            FaceTier::LinkstatePeers => Some(FaceTier::Routers),
+            FaceTier::Client => None,
+        }
+    }
+
+    /// Whether self SHOULD advertise interest in `keyexpr` into `target` mesh —
+    /// the per-target-tier cross-tier-bubble derive SSOT (R311y125), read by the
+    /// immediate advertise (client + native ingest), the tick re-advertise, and —
+    /// as its exact NEGATION — the withdraw decision. Self attracts INTO a mesh
+    /// when it can DELIVER `keyexpr` to a subscriber that is NOT on that mesh: a
+    /// CLIENT sub (delivered by C3a) OR an OPPOSITE-mesh NATIVE (delivered by the
+    /// master-gated cross-mesh bridge, C4). This is exactly zenoh's contributor
+    /// set for the cross-registration — register_router_subscription cross-registers
+    /// self into the PEER tier for a router-native (or client) sub (pubsub.rs:248-250),
+    /// declare_linkstatepeer_subscription into the ROUTER tier for a peer-native
+    /// (:296-297). DERIVE-not-STORE: the native is read from the OPPOSITE mesh's
+    /// table (`contributor_subs_source_count`), self is never stored. NOT
+    /// master-gated (every router advertises; only the DELIVERY bridge is gated).
+    fn self_advertises_sub_into(&self, target: FaceTier, keyexpr: &str) -> bool {
+        self.any_client_subscribes(keyexpr)
+            || self.contributor_subs_source_count(target, keyexpr) > 0
+    }
+
+    /// The number of OPPOSITE-mesh NATIVE sub sources for the EXACT `keyexpr` that
+    /// make self advertise into `target` — the native half of
+    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into). For
+    /// `target = LinkstatePeers` this reads `router_subs`; for `target = Routers`,
+    /// `linkstatepeer_subs`. `0` for a `Client` target (unused — clients are not a
+    /// mesh) and when the opposite table has no exact-`keyexpr` source.
+    fn contributor_subs_source_count(&self, target: FaceTier, keyexpr: &str) -> usize {
+        Self::opposite_mesh(target)
+            .and_then(|src| self.subs_table(src))
+            .map_or(0, |t| t.borrow().source_count(keyexpr))
+    }
+
+    /// The keyexprs self should advertise into `target` mesh — client subs ∪ the
+    /// OPPOSITE mesh's native subs, deduped. The set form of
+    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into) (a `K` is in
+    /// this set IFF that predicate holds for `(target, K)` — same two sources), fed
+    /// to the tick re-advertise
+    /// ([`re_advertise_self_cross_tier`](Self::re_advertise_self_cross_tier)) for
+    /// late-joining children.
+    fn derived_cross_tier_subs_into(&self, target: FaceTier) -> Vec<String> {
         let mut set: HashSet<String> = HashSet::new();
         for keys in self.client_subs.borrow().values() {
             set.extend(keys.iter().cloned());
         }
+        if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.subs_table(src)) {
+            for (keyexpr, _peer, ()) in table.borrow().entries() {
+                set.insert(keyexpr);
+            }
+        }
         set.into_iter().collect()
     }
 
-    /// Flood self's cross-tier subscription ADVERTISEMENT for `keyexpr` into BOTH
-    /// meshes — a self-sourced `DeclareSubscriber` (node_id 0) to self's tree
-    /// children in each net, so a mesh publisher routes `keyexpr` toward this
-    /// router. DERIVE-not-STORE: self is NOT registered in the tier tables; the
-    /// [`client_subs`](Self#structfield.client_subs) store is the SSOT and the
-    /// advertisement is re-derived on the tick for late-joining children. The
-    /// router-mesh flood is a no-op in a single router (no router tree children)
-    /// but keeps the two tiers symmetric for when routers federate.
-    fn advertise_self_cross_tier_sub(&self, keyexpr: &str) {
-        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
-            self.flood_self_sourced(tier, keyexpr, |ke| build_declare_subscriber(0, 0, Some(ke)));
+    /// A CLIENT sub for `keyexpr` just appeared (the FIRST client for it): flood
+    /// self's cross-tier ADVERTISEMENT into each mesh the client newly flips ON —
+    /// a self-sourced `DeclareSubscriber` (node_id 0) to self's tree children, so
+    /// a publisher on that mesh routes `keyexpr` toward this router. Skips a mesh
+    /// an OPPOSITE-mesh native already advertises (the derive was already true for
+    /// that target — no redundant flood). DERIVE-not-STORE: self is NOT stored;
+    /// the advertisement is re-derived on the tick for late joiners. A single
+    /// router has no router tree children, so the router-mesh flood is a no-op.
+    fn advertise_client_cross_tier_sub(&self, keyexpr: &str) {
+        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            // Flip false->true for this target IFF no native already covers it
+            // (before this client, self_advertises_sub_into(target) == native-only,
+            // since it was the first client).
+            if self.contributor_subs_source_count(target, keyexpr) == 0 {
+                self.flood_self_sourced(target, keyexpr, |ke| {
+                    build_declare_subscriber(0, 0, Some(ke))
+                });
+            }
         }
     }
 
-    /// Flood self's cross-tier WITHDRAWAL for `keyexpr` into BOTH meshes — the
-    /// undeclare twin of
-    /// [`advertise_self_cross_tier_sub`](Self::advertise_self_cross_tier_sub).
-    fn withdraw_self_cross_tier_sub(&self, keyexpr: &str) {
-        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
-            self.flood_self_sourced(tier, keyexpr, build_undeclare_subscriber_with_keyexpr);
+    /// The LAST client for `keyexpr` just left: flood self's cross-tier WITHDRAWAL
+    /// into each mesh no OPPOSITE-mesh native still holds — the exact negation of
+    /// [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub).
+    /// A mesh whose opposite-tier native still holds `keyexpr` keeps the
+    /// advertisement (else a native's interest would be silently retracted — the
+    /// R311y120 black-hole).
+    fn withdraw_client_cross_tier_sub(&self, keyexpr: &str) {
+        // Caller has already removed the client (last-client case ⇒
+        // `any_client_subscribes` false), so withdraw from each mesh self NO
+        // LONGER advertises into — the exact NEGATION of the advertise predicate
+        // (a mesh whose opposite-tier native still holds `keyexpr` keeps it).
+        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            if !self.self_advertises_sub_into(target, keyexpr) {
+                self.flood_self_sourced(target, keyexpr, build_undeclare_subscriber_with_keyexpr);
+            }
+        }
+    }
+
+    /// A NATIVE sub for `keyexpr` in `native_tier` just registered: flood self's
+    /// cross-tier ADVERTISEMENT into the OPPOSITE mesh IFF it flipped that mesh's
+    /// derive false->true — i.e. this is the SOLE native source for the exact
+    /// `keyexpr` (`source_count == 1` after register) AND no client already covers
+    /// it. The federation half of the R311y120 fix: a router-native attracts peer
+    /// publishers toward self (which bridges cross-tier, C4). NOT master-gated.
+    fn advertise_native_cross_tier_sub(&self, native_tier: FaceTier, keyexpr: &str) {
+        let Some(target) = Self::opposite_mesh(native_tier) else {
+            return; // a client native has no mesh (unreachable: client subs != natives)
+        };
+        let sole = self
+            .subs_table(native_tier)
+            .is_some_and(|t| t.borrow().source_count(keyexpr) == 1);
+        if sole && !self.any_client_subscribes(keyexpr) {
+            self.flood_self_sourced(target, keyexpr, |ke| {
+                build_declare_subscriber(0, 0, Some(ke))
+            });
+        }
+    }
+
+    /// A NATIVE sub for `keyexpr` in `native_tier` just left (undeclare or
+    /// face-down purge): flood self's cross-tier WITHDRAWAL into the OPPOSITE mesh
+    /// IFF it flipped that mesh's derive true->false — i.e. NO native source for
+    /// the exact `keyexpr` remains (`source_count == 0` after removal) AND no client
+    /// covers it. The exact negation of
+    /// [`advertise_native_cross_tier_sub`](Self::advertise_native_cross_tier_sub);
+    /// centralized so BOTH the undeclare and the (local + Oam-detach) purge paths
+    /// route through it (R311y125 lifecycle-symmetry).
+    fn withdraw_native_cross_tier_sub(&self, native_tier: FaceTier, keyexpr: &str) {
+        let Some(target) = Self::opposite_mesh(native_tier) else {
+            return;
+        };
+        // The exact negation of the advertise predicate: after this native left,
+        // self no longer advertises `keyexpr` into `target` IFF no native source
+        // remains in `native_tier` (the `target` contributor) AND no client covers
+        // it — `!self_advertises_sub_into(target, keyexpr)`.
+        if !self.self_advertises_sub_into(target, keyexpr) {
+            self.flood_self_sourced(target, keyexpr, build_undeclare_subscriber_with_keyexpr);
         }
     }
 
@@ -1671,7 +1838,7 @@ impl RouterForwarder {
     /// Re-advertise self's DERIVED cross-tier subscriptions to the tier's NEW tree
     /// children a recompute added (C2) — self is the source, so the flood targets
     /// the delta children of SELF's tree in this net. The tick counterpart of the
-    /// immediate [`advertise_self_cross_tier_sub`](Self::advertise_self_cross_tier_sub),
+    /// immediate [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub),
     /// the OBLIGATION-2 feed of the re-advertise path with the DERIVED (not stored)
     /// self-source — distinct from the native re-advertise (native = real peer
     /// source; derived = self, node_id 0).
@@ -1686,7 +1853,7 @@ impl RouterForwarder {
         if self_delta.is_empty() {
             return;
         }
-        for keyexpr in self.derived_cross_tier_subs() {
+        for keyexpr in self.derived_cross_tier_subs_into(tier) {
             let Ok(declare) = build_declare_subscriber(0, 0, Some(&keyexpr)) else {
                 continue;
             };
@@ -1702,7 +1869,7 @@ impl RouterForwarder {
     /// lands here instead, keyed by the client face + its declared
     /// [`QueryableInfo`] (the query route reads `complete` / `distance`). The
     /// cross-tier ADVERTISEMENT of this queryable into the meshes (the query-plane
-    /// twin of C2's [`advertise_self_cross_tier_sub`](Self::advertise_self_cross_tier_sub),
+    /// twin of C2's [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub),
     /// so a REMOTE mesh querier routes toward this router) is a NAMED deferral
     /// (module docs): C5b stores WITHOUT flooding, so THIS router routes an inbound
     /// Request to the client queryable, but a remote querier is not yet steered
@@ -2496,7 +2663,7 @@ impl FaceForwarder for RouterForwarder {
         if let Some(keys) = departed {
             for keyexpr in keys {
                 if !self.any_client_subscribes(&keyexpr) {
-                    self.withdraw_self_cross_tier_sub(&keyexpr);
+                    self.withdraw_client_cross_tier_sub(&keyexpr);
                 }
             }
         }
@@ -4180,6 +4347,171 @@ mod tests {
             vec![zid(0xBB)],
         );
         assert!(fwd.router_subs.borrow().interested("demo/data").is_empty());
+    }
+
+    #[test]
+    fn router_native_sub_advertises_into_the_peer_mesh() {
+        // FEDERATION (R311y125): a ROUTER-native sub makes self ADVERTISE that
+        // keyexpr into the PEER mesh (a self-sourced DeclareSubscriber to a peer
+        // tree child), so a peer publisher routes toward self (which bridges
+        // cross-tier, C4). The within-tier router reflood has no router child, so
+        // only the cross-tier advertise reaches the peer child. Derive-not-store:
+        // self is NOT registered in the peer subs table.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (r, _rs) = face(zid(0xAA), WIRE_ROUTER); // the router-native source
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // a peer tree child
+        fwd.register(FaceId(0), &r);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5); // self<->P peer edge
+        fwd.tick();
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // router-native sub
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "a router-native sub advertised self's cross-tier interest to the peer mesh"
+        );
+        assert!(
+            fwd.linkstatepeer_subs
+                .borrow()
+                .interested("demo/data")
+                .is_empty(),
+            "derive-not-store: self is NOT stored in the peer subs table"
+        );
+    }
+
+    #[test]
+    fn peer_native_sub_advertises_into_the_router_mesh() {
+        // The mirror direction: a PEER-native sub advertises into the ROUTER mesh
+        // (a router tree child observes the self-sourced DeclareSubscriber).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (pn, _ps) = face(zid(0xBB), WIRE_PEER); // the peer-native source
+        let (rc, sink_rc) = face(zid(0xCC), WIRE_ROUTER); // a router tree child
+        fwd.register(FaceId(0), &pn);
+        fwd.register(FaceId(1), &rc);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5); // self<->Rc router edge
+        fwd.tick();
+        sink_rc.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // peer-native sub
+        assert_eq!(
+            sink_rc.frame_count(),
+            1,
+            "a peer-native sub advertised self's cross-tier interest to the router mesh"
+        );
+    }
+
+    #[test]
+    fn native_sub_advertise_is_gated_when_a_client_already_covers_it() {
+        // The per-tier derive gate: a client subscribing K already advertised into
+        // BOTH meshes, so a router-native for the SAME K does NOT re-advertise into
+        // the peer mesh (no redundant flood — the flip was already true).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        let (r, _rs) = face(zid(0xDD), WIRE_ROUTER);
+        fwd.register(FaceId(0), &c);
+        fwd.register(FaceId(1), &p);
+        fwd.register(FaceId(2), &r);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // client -> advertise into peer
+        sink_p.reset();
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data")); // router-native, client covers it
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "a native does not re-advertise a keyexpr a client already covers"
+        );
+    }
+
+    #[test]
+    fn native_sub_face_down_withdraws_the_cross_tier_advertisement() {
+        // Lifecycle-symmetry (R311y125): a peer-native's face going down purges it
+        // (through purge_detached_interest_tier — the SHARED choke point that also
+        // covers the remote Oam-detach path :2597) and, since it was the LAST
+        // source, WITHDRAWS self's advertisement from the router mesh.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (pn, _ps) = face(zid(0xBB), WIRE_PEER); // the peer-native source
+        let (rc, sink_rc) = face(zid(0xCC), WIRE_ROUTER); // a router tree child
+        fwd.register(FaceId(0), &pn);
+        fwd.register(FaceId(1), &rc);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // advertise into router mesh
+        sink_rc.reset();
+        fwd.deregister(FaceId(0)); // the peer-native's face goes down
+        assert_eq!(
+            sink_rc.frame_count(),
+            1,
+            "the departed native's last source withdrew self's cross-tier advertisement"
+        );
+    }
+
+    #[test]
+    fn remote_oam_detach_withdraws_the_cross_tier_advertisement() {
+        // The y107b-class REMOTE path (distinct from the local face-down above): a
+        // router-native sub is sourced from a DISTANT router Rd learned via the
+        // neighbour A. When a topology Oam drops A's link to Rd, Rd becomes
+        // unreachable (`changes.removed`) and `purge_detached_interest_tier` — the
+        // SHARED choke point — withdraws self's peer-mesh advertisement, exactly as
+        // the local face-down does. Directly exercises the Oam-ingest purge call
+        // site (the local path is covered by the test above).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _as) = face(zid(0xAA), WIRE_ROUTER); // router neighbour
+        let (p, sink_p) = face(zid(0xEE), WIRE_PEER); // peer tree child (advertise target)
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xEE, 5); // self<->P peer edge
+        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xBB, 7, 5); // Rd(0xBB) via A, psid 7
+        fwd.tick();
+        // A router-native sub for K sourced from the DISTANT router Rd (node_id 7).
+        let mut decl = build_declare_subscriber(0, 0, Some("demo/data")).expect("build");
+        set_declare_source(&mut decl, 7);
+        forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(decl)));
+        assert_eq!(
+            fwd.router_subs.borrow().interested("demo/data"),
+            vec![zid(0xBB)],
+            "the router-native is sourced from the distant router Rd"
+        );
+        sink_p.reset();
+        // A topology Oam: A now links ONLY to self (drops Rd), higher sn — so Rd
+        // becomes unreachable, the ingest detaches it, and the shared purge choke
+        // point withdraws self's advertisement into the peer mesh.
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 6);
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the remote Oam-detach of the distant router-native withdrew the advertisement"
+        );
+    }
+
+    #[test]
+    fn client_undeclare_keeps_the_advertisement_a_native_still_backs() {
+        // The R311y120 black-hole GUARD: a client and a peer-native both cover K.
+        // The peer-native advertises into the router mesh; the client adds the peer
+        // mesh (router mesh is already covered, so the client does not re-advertise
+        // it). When the client undeclares, the router-mesh advertisement MUST stay
+        // (the native still backs it) — only the client-only peer-mesh advertise is
+        // withdrawn. Withdrawing the native-backed one would black-hole the native.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (pn, _ps) = face(zid(0xBB), WIRE_PEER); // peer-native source + peer child
+        let (rc, sink_rc) = face(zid(0xCC), WIRE_ROUTER); // router child
+        let (c, _cs) = face(zid(0xAA), WIRE_CLIENT); // client
+        fwd.register(FaceId(0), &pn);
+        fwd.register(FaceId(1), &rc);
+        fwd.register(FaceId(2), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xBB, 5); // self<->Pn peer edge
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 6); // self<->Rc router edge
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // peer-native -> router advertise
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data")); // client -> peer advertise (router gated)
+        sink_rc.reset();
+        forward_one(&fwd, FaceId(2), undeclare_sub("demo/data")); // last client leaves
+        assert_eq!(
+            sink_rc.frame_count(),
+            0,
+            "the native-backed router-mesh advertisement is NOT withdrawn when the client leaves"
+        );
     }
 
     #[test]

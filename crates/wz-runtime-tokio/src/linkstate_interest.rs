@@ -114,10 +114,21 @@ impl<V> LinkstatepeerInterest<V> {
     /// pruned. Mirrors zenoh's `pubsub_remove_node` / `queries_remove_node`
     /// link-down purge.
     pub fn remove_peer(&mut self, peer: &Zid) -> usize {
-        let mut dropped = 0;
-        self.by_key.retain(|_key, peers| {
+        self.remove_peer_keys(peer).len()
+    }
+
+    /// Drop ALL of `peer`'s interests, returning the KEYEXPRS it was dropped from
+    /// — the value-carrying twin of [`remove_peer`](Self::remove_peer). The router
+    /// forwarder's cross-tier advertisement is per-keyexpr, so a face-down /
+    /// topology detach that removes a native must know WHICH keyexprs to
+    /// re-evaluate for a stale self-advertisement (a whole-peer count is not
+    /// enough — R311y125 lifecycle-symmetry). Emptied keys are pruned. The
+    /// returned order is unspecified (HashMap iteration).
+    pub fn remove_peer_keys(&mut self, peer: &Zid) -> Vec<String> {
+        let mut dropped = Vec::new();
+        self.by_key.retain(|key, peers| {
             if peers.remove(peer).is_some() {
-                dropped += 1;
+                dropped.push(key.clone());
             }
             !peers.is_empty()
         });
@@ -213,6 +224,21 @@ impl<V> LinkstatepeerInterest<V> {
     /// Mirrors zenoh's `remote_linkstatepeer_subs` (filter self at read time).
     pub fn interested_remote(&self, keyexpr: &str, self_zid: &Zid) -> Vec<Zid> {
         self.matching_peers(keyexpr, Some(self_zid))
+    }
+
+    /// Number of sources registered under the EXACT `keyexpr` (no wildcard
+    /// intersection) — the per-keyexpr contributor count the router forwarder's
+    /// cross-tier advertise/withdraw flip-gate reads: a native for the exact ke
+    /// makes self ADVERTISE that ke into the opposite mesh only when it is the
+    /// FIRST such source (`== 1` after register), and WITHDRAW only when the LAST
+    /// leaves (`== 0` after removal). Exact (not `interested`/`interested_remote`,
+    /// which are wildcard-aware for the DELIVERY route) because the advertisement
+    /// mirrors zenoh's per-`Resource` cross-registration — self advertises the
+    /// exact ke it learned, not a wildcard cover. Self is never a source here
+    /// (derive-not-store: self is not inserted into a tier table), so no
+    /// self-exclusion is needed.
+    pub fn source_count(&self, keyexpr: &str) -> usize {
+        self.by_key.get(keyexpr).map_or(0, |peers| peers.len())
     }
 }
 
