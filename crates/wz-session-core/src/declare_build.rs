@@ -29,7 +29,7 @@ use wz_codecs::decl_subscriber::DeclSubscriberOwned;
 use wz_codecs::decl_token::DeclTokenOwned;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::undecl_kexpr::UndeclKexpr;
-use wz_codecs::undecl_queryable::UndeclQueryable;
+use wz_codecs::undecl_queryable::UndeclQueryableOwned;
 use wz_codecs::undecl_subscriber::UndeclSubscriberOwned;
 use wz_codecs::undecl_token::UndeclToken;
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
@@ -678,11 +678,41 @@ pub fn build_undeclare_queryable(queryable_id: u64) -> DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareOwnedVariant::CodecZenohUndeclQueryable(UndeclQueryable {
+        body: DeclareOwnedVariant::CodecZenohUndeclQueryable(UndeclQueryableOwned {
             header: wire_const::D_MID_UNDECL_QUERYABLE,
             id: queryable_id,
+            // Z=0 id-only retraction: no ext_keyexpr. The keyexpr-carrying
+            // sourced form is build_undeclare_queryable_with_keyexpr (below).
+            extensions: None,
         }),
     }
+}
+
+/// Build a SOURCED `Declare(UndeclareQueryable)` that retracts a queryable
+/// identified by its LITERAL keyexpr — the query-plane twin of
+/// [`build_undeclare_subscriber_with_keyexpr`]. zenoh retracts a sourced
+/// queryable by keyexpr, not id (`id == 0`), carrying the keyexpr in the
+/// `ext_wire_expr` extension (zenoh `UndeclareQueryable { id, ext_wire_expr }`,
+/// `commons/zenoh-protocol/src/network/declare.rs:520-523`). The `id` is 0 and
+/// the inner declaration header sets `Z` (bit 7) to flag the ext chain; the
+/// keyexpr ext is built by the
+/// [`declare_ext_keyexpr`](crate::declare_ext_keyexpr) SSOT (identical wire to
+/// the subscriber retraction, only the inner MID differs — 0x05 vs 0x03).
+/// Fallible only by that SSOT's profile-generic signature (the `alloc` owned
+/// carrier is unbounded, so a literal keyexpr is never length-rejected).
+pub fn build_undeclare_queryable_with_keyexpr(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
+    let ext = crate::declare_ext_keyexpr::build_ext_keyexpr(keyexpr)?;
+    Ok(DeclareOwned {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareOwnedVariant::CodecZenohUndeclQueryable(UndeclQueryableOwned {
+            // Z (bit 7): the inner declaration carries an extension chain.
+            header: wire_const::D_MID_UNDECL_QUERYABLE | 0x80,
+            id: 0, // sourced queryables use no id; the keyexpr is the identity
+            extensions: Some(alloc::vec![ext]),
+        }),
+    })
 }
 
 /// R121i-c — build a `Declare(UndeclToken)` network-message that
@@ -1676,6 +1706,63 @@ mod tests {
                 assert_eq!(d.id, 42);
             }
             _ => panic!("build_undeclare_queryable must produce CodecZenohUndeclQueryable"),
+        }
+    }
+
+    /// `build_undeclare_queryable_with_keyexpr` emits the SOURCED retraction
+    /// wire: `id == 0`, the inner header carries `Z`, and the keyexpr rides the
+    /// `ext_keyexpr` ZBuf extension. Byte-identical to the subscriber retraction
+    /// (`build_undeclare_subscriber_with_keyexpr`) except the inner MID (0x05 vs
+    /// 0x03) — the query-plane twin of the c3c-3 debt A1 wire, verified against
+    /// zenoh `UndeclareQueryable.ext_wire_expr` + zenoh-pico
+    /// `_z_decl_ext_keyexpr_encode` (declarations.c:38-50 + 90-103).
+    #[test]
+    fn build_undeclare_queryable_with_keyexpr_emits_zenoh_pico_compatible_wire_bytes() {
+        let d = build_undeclare_queryable_with_keyexpr("demo/qbl").unwrap();
+        let wire = d.wire();
+        let mut expected = vec![
+            wire_const::N_MID_DECLARE, // 0x1E outer Declare envelope
+            0x85,                      // UndeclQueryable MID 0x05 | Z (ext chain present)
+            0x00,                      // VLE(id 0) — sourced queryables use no id
+            0x5f,                      // ext_keyexpr header: ENC_ZBUF 0x40 | M 0x10 | id 0x0f
+            0x0A,                      // ZBuf len VLE(10) = inner_header(1) + VLE(0)(1) + 8 suffix
+            0x03,                      // inner_header: is_local(2) | has_suffix(1)
+            0x00,                      // VLE(mapping id 0) — literal sentinel
+        ];
+        expected.extend_from_slice(b"demo/qbl");
+        assert_eq!(
+            wire, expected,
+            "sourced UndeclareQueryable + ext_keyexpr wire must match zenoh-pico",
+        );
+    }
+
+    /// The stamped `ext_keyexpr` survives the Declare codec encode -> decode: a
+    /// transit linkstate peer recovers the retracted keyexpr from the decoded
+    /// `UndeclQueryable` body (the wire path the forwarder drives for the
+    /// cross-tier qabl retraction). The query-plane twin of
+    /// [`undeclare_subscriber_keyexpr_round_trips_through_the_wire`].
+    #[test]
+    fn undeclare_queryable_keyexpr_round_trips_through_the_wire() {
+        use crate::declare_ext_keyexpr::read_ext_keyexpr;
+        use sce_forge_runtime::codec::SceCursor;
+        use wz_codecs::declare::Declare;
+
+        let d = build_undeclare_queryable_with_keyexpr("demo/qbl").unwrap();
+        let bytes = d.wire();
+        let mut cursor = SceCursor::new(&bytes);
+        let decoded = Declare::decode(&mut cursor)
+            .and_then(|x| x.try_into_owned())
+            .expect("decode declare");
+        match &decoded.body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
+                assert_eq!(u.id, 0, "sourced retraction carries no id");
+                assert_eq!(
+                    read_ext_keyexpr(u.extensions.as_ref()),
+                    Some("demo/qbl"),
+                    "ext_keyexpr survived the wire round-trip",
+                );
+            }
+            _ => panic!("decoded body must be UndeclQueryable"),
         }
     }
 

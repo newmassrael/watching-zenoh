@@ -998,7 +998,11 @@ mod tests {
         ))));
         assert!(ing.blocked_queryables.contains(&1));
         assert!(!ing.apply(&mut wrap(DV::CodecZenohUndeclQueryable(
-            wz_codecs::undecl_queryable::UndeclQueryable { header: 0, id: 1 },
+            wz_codecs::undecl_queryable::UndeclQueryableOwned {
+                header: 0,
+                id: 1,
+                extensions: None,
+            },
         ))));
         assert!(!ing.blocked_queryables.contains(&1));
         // DeclareToken out-of-namespace -> drop + block; its undeclare -> drop.

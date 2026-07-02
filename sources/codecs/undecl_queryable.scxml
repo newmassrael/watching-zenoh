@@ -11,20 +11,33 @@
      Wire shape (default state):
        byte 0   : header (MID 0x05 + Z@7)
        byte 1+  : id (VLE u32)
-       Z-gated  : ext_keyexpr ZBuf ext (non-default coverage carry)
+       Z-gated  : ext_keyexpr ZBuf ext entry — `_z_decl_ext_keyexpr`
+                  shape (`_Z_MSG_EXT_ENC_ZBUF | _Z_MSG_EXT_FLAG_M |
+                  0x0f` header + inner kelen-flag + id VLE + suffix
+                  bytes). The queryable twin of undecl_subscriber:
+                  a SOURCED retraction identifies the queryable by its
+                  keyexpr (id 0), carried in this ext — zenoh
+                  `UndeclareQueryable.ext_wire_expr`
+                  (`commons/zenoh-protocol/src/network/declare.rs:520-523`).
 
-     R110d first contact: default state only (Z=0, id=0). Wire is
-     `[0x05, 0x00]` (2 bytes).
+     Z=0 first contact (default state): Z=0, id=0. Wire is
+     `[0x05, 0x00]` (2 bytes). The Z=1 keyexpr-carrying form matches
+     the undecl_subscriber ext chain (parity, verified vs pico/zenoh).
 
      Body byte-identical to upstream wire RFC. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="undecl_queryable">
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x05"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   max-depth="4" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>
 </scxml>

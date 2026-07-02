@@ -45,7 +45,7 @@ pub enum DeclareVariant<'a> {
     CodecZenohDeclSubscriber(DeclSubscriber<'a>),
     CodecZenohUndeclSubscriber(UndeclSubscriber<'a>),
     CodecZenohDeclQueryable(DeclQueryable<'a>),
-    CodecZenohUndeclQueryable(UndeclQueryable),
+    CodecZenohUndeclQueryable(UndeclQueryable<'a>),
     CodecZenohDeclToken(DeclToken<'a>),
     CodecZenohUndeclToken(UndeclToken),
     CodecZenohDeclFinal(DeclFinal),
@@ -325,6 +325,8 @@ use super::decl_token::DeclTokenOwned;
 #[cfg(feature = "alloc")]
 use super::undecl_subscriber::UndeclSubscriberOwned;
 #[cfg(feature = "alloc")]
+use super::undecl_queryable::UndeclQueryableOwned;
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclareOwned {
     pub header: u8,
@@ -369,7 +371,7 @@ pub enum DeclareOwnedVariant {
     CodecZenohDeclSubscriber(DeclSubscriberOwned),
     CodecZenohUndeclSubscriber(UndeclSubscriberOwned),
     CodecZenohDeclQueryable(DeclQueryableOwned),
-    CodecZenohUndeclQueryable(UndeclQueryable),
+    CodecZenohUndeclQueryable(UndeclQueryableOwned),
     CodecZenohDeclToken(DeclTokenOwned),
     CodecZenohUndeclToken(UndeclToken),
     CodecZenohDeclFinal(DeclFinal),
@@ -391,7 +393,7 @@ impl<'a> DeclareVariant<'a> {
             DeclareVariant::CodecZenohDeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohDeclSubscriber(_b.try_into_owned()?),
             DeclareVariant::CodecZenohUndeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b.try_into_owned()?),
             DeclareVariant::CodecZenohDeclQueryable(_b) => DeclareOwnedVariant::CodecZenohDeclQueryable(_b.try_into_owned()?),
-            DeclareVariant::CodecZenohUndeclQueryable(_b) => DeclareOwnedVariant::CodecZenohUndeclQueryable(_b),
+            DeclareVariant::CodecZenohUndeclQueryable(_b) => DeclareOwnedVariant::CodecZenohUndeclQueryable(_b.try_into_owned()?),
             DeclareVariant::CodecZenohDeclToken(_b) => DeclareOwnedVariant::CodecZenohDeclToken(_b.try_into_owned()?),
             DeclareVariant::CodecZenohUndeclToken(_b) => DeclareOwnedVariant::CodecZenohUndeclToken(_b),
             DeclareVariant::CodecZenohDeclFinal(_b) => DeclareOwnedVariant::CodecZenohDeclFinal(_b),
@@ -412,7 +414,7 @@ impl DeclareOwnedVariant {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(_b) => DeclareVariant::CodecZenohDeclSubscriber(_b.as_borrowed()),
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b) => DeclareVariant::CodecZenohUndeclSubscriber(_b.try_as_borrowed()?),
             DeclareOwnedVariant::CodecZenohDeclQueryable(_b) => DeclareVariant::CodecZenohDeclQueryable(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohUndeclQueryable(_b) => DeclareVariant::CodecZenohUndeclQueryable(_b.clone()),
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(_b) => DeclareVariant::CodecZenohUndeclQueryable(_b.try_as_borrowed()?),
             DeclareOwnedVariant::CodecZenohDeclToken(_b) => DeclareVariant::CodecZenohDeclToken(_b.as_borrowed()),
             DeclareOwnedVariant::CodecZenohUndeclToken(_b) => DeclareVariant::CodecZenohUndeclToken(_b.clone()),
             DeclareOwnedVariant::CodecZenohDeclFinal(_b) => DeclareVariant::CodecZenohDeclFinal(_b.clone()),

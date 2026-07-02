@@ -79,9 +79,10 @@
 //! gate), the re-flood carrying that info downstream. Its cross-tier bubble is a
 //! MERGED info in zenoh (`local_router_qabl_info` / `local_peer_qabl_info`,
 //! `complete = OR`, `distance = min`); like the sub bubble it is DERIVED at
-//! compute from the NATIVE qabls, not stored. `UndeclareQueryable` stays deferred
-//! (the wz-codecs body carries no keyexpr ext — the face-down purge is the safety
-//! net until a codec atom adds it, as the sibling documents).
+//! compute from the NATIVE qabls, not stored. A per-keyexpr `UndeclareQueryable`
+//! withdraws a queryable interest via its `ext_wire_expr` extension (parity with
+//! the sub plane now that the codec models the ext); the face-down purge remains
+//! the safety net for a departed peer that sends no retraction.
 //!
 //! ## Slice C1 (within-tier data route + tick re-advertise) — landed
 //!
@@ -235,9 +236,10 @@
 //! native qabl advertises its MERGED [`QueryableInfo`] (`complete = OR` /
 //! `distance = min`, [`derived_cross_tier_qabl_info`](RouterForwarder::derived_cross_tier_qabl_info))
 //! into the opposite mesh; a partial removal DOWNGRADES via a re-advertised
-//! `DeclareQueryable`, while the full retraction (last contributor) is codec-
-//! deferred (`UndeclareQueryable` carries no keyexpr ext — the native qabl plane's
-//! documented gap).
+//! `DeclareQueryable`, and the full retraction (last contributor leaves) floods an
+//! `UndeclareQueryable` carrying the keyexpr in its `ext_wire_expr` extension
+//! ([`withdraw_native_cross_tier_qabl`](RouterForwarder::withdraw_native_cross_tier_qabl)) —
+//! parity with the sub plane now that the codec models the ext.
 //!
 //! A3 adds the CLIENT-queryable cross-tier advertisement (the query twin of C2's
 //! [`advertise_client_cross_tier_sub`](RouterForwarder::advertise_client_cross_tier_sub)):
@@ -312,7 +314,8 @@ use wz_codecs::push::PushOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
 use wz_session_core::declare_build::{
-    build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
+    build_declare_subscriber, build_undeclare_queryable_with_keyexpr,
+    build_undeclare_subscriber_with_keyexpr,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
@@ -922,16 +925,14 @@ impl RouterForwarder {
         for keyexpr in affected_sub_keys {
             self.withdraw_native_cross_tier_sub(tier, &keyexpr);
         }
-        // The qabl plane RE-ADVERTISES the recomputed merged info per affected
-        // keyexpr (A2b): a partial removal that leaves a contributor DOWNGRADES via
-        // a re-declared DeclareQueryable; a full removal (no contributor) is a
-        // no-op (the codec-deferred UndeclareQueryable gap — for the self-sourced
-        // cross-tier advertisement the stale remote copy is cleaned only on
-        // SELF-down, so this leaves a degradation-not-black-hole staleness; see
-        // `advertise_native_cross_tier_qabl`). It handles both (it early-returns
-        // when the merge is now `None`).
+        // The qabl plane recomputes self's cross-tier advertisement per affected
+        // keyexpr (A2b) via the SAME withdraw seam the per-keyexpr undeclare uses:
+        // a partial removal that leaves a contributor DOWNGRADES via a re-declared
+        // DeclareQueryable; a full removal (no contributor) floods an explicit
+        // `UndeclareQueryable` retraction (now expressible via the ext_wire_expr
+        // codec — no longer the SELF-down-only staleness the deferral left).
         for keyexpr in affected_qabl_keys {
-            self.advertise_native_cross_tier_qabl(tier, &keyexpr);
+            self.withdraw_native_cross_tier_qabl(tier, &keyexpr);
         }
     }
 
@@ -1138,10 +1139,10 @@ impl RouterForwarder {
     /// gate) — re-flood a clean declaration CARRYING that info within the tier so
     /// a multi-hop relay learns the queryable's completeness. Like the sub
     /// bubble, the cross-tier bubble (a MERGED `local_*_qabl_info` in zenoh) is
-    /// DERIVED at compute (A2b), not stored. `UndeclareQueryable` is deferred: the
-    /// wz-codecs body carries no keyexpr ext (id only), so per-keyexpr retraction
-    /// needs a codec extension first — the whole-peer face-down purge is the
-    /// safety net until then (the same gap the sibling documents).
+    /// DERIVED at compute (A2b), not stored. The removal twin is
+    /// [`withdraw_queryable`](Self::withdraw_queryable): a per-keyexpr
+    /// `UndeclareQueryable` withdraws via its `ext_wire_expr` extension, and the
+    /// whole-peer face-down purge stays the safety net for a departed peer.
     fn ingest_queryable(
         &self,
         inbound: FaceId,
@@ -1183,6 +1184,94 @@ impl RouterForwarder {
         // recomputed merge — an upgrade or downgrade).
         if let Some(ke) = changed {
             self.advertise_native_cross_tier_qabl(tier, &ke);
+        }
+    }
+
+    /// A sourced `UndeclareQueryable` — the query-plane twin of
+    /// [`withdraw_subscription`](Self::withdraw_subscription): withdraw the SOURCE
+    /// peer's interest from the INBOUND tier's qabls table (the keyexpr rides the
+    /// `ext_wire_expr` extension) and — only on a real removal — re-flood the
+    /// retraction WITHIN that tier, then recompute self's cross-tier advertisement.
+    /// Before the `UndeclareQueryable` codec modeled the keyexpr ext this arm was a
+    /// no-op (the face-down purge was the only qabl teardown); it now mirrors the
+    /// sub retraction. A face-down purge is still covered by
+    /// [`purge_detached_interest_tier`](Self::purge_detached_interest_tier).
+    fn withdraw_queryable(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let exts = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
+            _ => return,
+        };
+        let Some((net, _dirty)) = self.plane(tier) else {
+            return;
+        };
+        let Some(qabls) = self.qabls_table(tier) else {
+            return;
+        };
+        let (inbound_zid, inbound_link, keyexpr) = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(keyexpr) = resolve_ext_keyexpr(exts, &s.keyexpr_table) else {
+                return;
+            };
+            (peer_zid_routing(&s.actions), s.link, keyexpr)
+        };
+        let Some((source_zid, out_node_id)) = resolve_source_in(
+            &net.borrow(),
+            inbound_zid,
+            inbound_link,
+            read_declare_source(declare),
+        ) else {
+            return;
+        };
+        if !qabls.borrow_mut().withdraw(&keyexpr, &source_zid) {
+            return;
+        }
+        self.reflood_declaration(
+            inbound,
+            tier,
+            net,
+            source_zid,
+            inbound_zid,
+            out_node_id,
+            reliable,
+            &keyexpr,
+            build_undeclare_queryable_with_keyexpr,
+        );
+        // FEDERATION cross-tier bubble (A2b): recompute self's advertisement into
+        // the opposite mesh now that a native left — a downgrade if a contributor
+        // remains, or a full retraction if the merge is now `None`.
+        self.withdraw_native_cross_tier_qabl(tier, &keyexpr);
+    }
+
+    /// A NATIVE qabl for `keyexpr` in `native_tier` just left (undeclare or
+    /// face-down purge): recompute self's cross-tier advertisement into the
+    /// OPPOSITE mesh — the value-bearing query twin of
+    /// [`withdraw_native_cross_tier_sub`](Self::withdraw_native_cross_tier_sub). If
+    /// a contributor remains (an opposite-mesh native or a client qabl), re-advertise
+    /// the DOWNGRADED merged [`QueryableInfo`]; if NONE remains, flood a full
+    /// `UndeclareQueryable` retraction. The `None` arm is what the `ext_wire_expr`
+    /// codec atom made expressible (previously a no-op ⇒ a stale remote advertisement
+    /// lingering until self-down). Centralized so BOTH the undeclare and the
+    /// (local + Oam-detach) purge paths route through it.
+    fn withdraw_native_cross_tier_qabl(&self, native_tier: FaceTier, keyexpr: &str) {
+        let Some(target) = Self::opposite_mesh(native_tier) else {
+            return;
+        };
+        match self.derived_cross_tier_qabl_info(target, keyexpr) {
+            Some(info) => self.flood_self_sourced(target, keyexpr, move |ke| {
+                build_declare_queryable_with_info(ke, info)
+            }),
+            None => {
+                self.flood_self_sourced(target, keyexpr, build_undeclare_queryable_with_keyexpr)
+            }
         }
     }
 
@@ -1905,28 +1994,21 @@ impl RouterForwarder {
     /// carrying the fold. Fires on any real change (upgrade OR downgrade): zenoh
     /// re-declares `local_*_qabl_info` whenever it changes, and the downstream
     /// value-diff gate absorbs a re-declare of the SAME value. NOT master-gated.
-    /// The FULL retraction (last contributor leaves ⇒ merged `None`) is codec-
-    /// deferred — a WZ-CODECS DEBT, not a wire limitation: zenoh's `UndeclareQueryable`
-    /// DOES carry the keyexpr (`ext_wire_expr`, declare.rs:520-522) and wz's
-    /// `UndeclareSubscriber` already implements it (`build_undeclare_subscriber_with_keyexpr`);
-    /// only wz's `UndeclareQueryable` has not built the ext yet, so this becomes a
-    /// no-op when the merge is `None`. Because the advertisement is SELF-sourced
-    /// (node_id 0), the ONLY cleanup of a now-stale remote advertisement is
-    /// SELF-down (a downstream node's topology purge drops self's qabls) — a
-    /// CONTRIBUTOR's face-down re-advertises to `None` = this no-op, it does NOT
-    /// retract the remote copy. Consequence: after the last contributor for a
-    /// keyexpr leaves self's domain, remote queriers keep steering it toward self
-    /// until self-down; self answers with an empty final — a DEGRADATION, not a
-    /// hang/black-hole (the BestMatching union still reaches live queryables). The
-    /// close is a codec follow-up (add `ext_wire_expr` to wz's `UndeclareQueryable`,
-    /// parity with the sub plane + zenoh's wire). A partial removal that leaves a
-    /// contributor DOWNGRADES via a re-advertised `DeclareQueryable`, no undeclare.
+    /// This is the ADVERTISE (register / value-change) path, where a contributor
+    /// always exists (the triggering native was just registered), so the `None` arm
+    /// below is unreachable from `ingest_queryable` and kept only as a safe guard.
+    /// The FULL retraction (last contributor leaves ⇒ merged `None`) is handled by
+    /// [`withdraw_native_cross_tier_qabl`](Self::withdraw_native_cross_tier_qabl),
+    /// which floods an `UndeclareQueryable` carrying the keyexpr in `ext_wire_expr`
+    /// (declare.rs:520-522, parity with the sub plane) — no longer the self-down-only
+    /// staleness the codec deferral once left. A partial removal that leaves a
+    /// contributor DOWNGRADES via a re-advertised `DeclareQueryable`.
     fn advertise_native_cross_tier_qabl(&self, native_tier: FaceTier, keyexpr: &str) {
         let Some(target) = Self::opposite_mesh(native_tier) else {
             return;
         };
         let Some(info) = self.derived_cross_tier_qabl_info(target, keyexpr) else {
-            return; // no contributor: full retraction is codec-deferred (see doc)
+            return; // no contributor (unreachable from the register path; safe guard)
         };
         self.flood_self_sourced(target, keyexpr, move |ke| {
             build_declare_queryable_with_info(ke, info)
@@ -2056,9 +2138,11 @@ impl RouterForwarder {
     /// MERGED [`QueryableInfo`] ([`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info)),
     /// so a REMOTE querier on either mesh routes `keyexpr` toward this router. The
     /// client-qabl twin of [`advertise_native_cross_tier_qabl`](Self::advertise_native_cross_tier_qabl),
-    /// but into BOTH meshes (a client is in neither). Also the DOWNGRADE seam a
-    /// client face-down calls to re-flood the recomputed merge (or no-op when the
-    /// merge is now `None` — the codec-deferred full retraction). NOT master-gated.
+    /// but into BOTH meshes (a client is in neither). This is the ADVERTISE
+    /// (register / value-change) path; the client face-down / undeclare REMOVAL
+    /// path is [`withdraw_client_cross_tier_qabl`](Self::withdraw_client_cross_tier_qabl)
+    /// (downgrade if a contributor remains, else a full `UndeclareQueryable`
+    /// retraction). NOT master-gated.
     fn advertise_client_cross_tier_qabl(&self, keyexpr: &str) {
         for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
             let Some(info) = self.derived_cross_tier_qabl_info(target, keyexpr) else {
@@ -2067,6 +2151,63 @@ impl RouterForwarder {
             self.flood_self_sourced(target, keyexpr, move |ke| {
                 build_declare_queryable_with_info(ke, info)
             });
+        }
+    }
+
+    /// Withdraw a CLIENT-face `UndeclareQueryable` (the query twin of
+    /// [`withdraw_client_subscription`](Self::withdraw_client_subscription)) from
+    /// [`client_qabls`](Self#structfield.client_qabls); when it removed the client's
+    /// entry, recompute self's cross-tier advertisement into BOTH meshes.
+    fn withdraw_client_queryable(&self, inbound: FaceId, declare: &DeclareOwned) {
+        let exts = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
+            _ => return,
+        };
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_ext_keyexpr(exts, &s.keyexpr_table) {
+                Some(k) => k,
+                None => return,
+            }
+        };
+        let removed = {
+            let mut store = self.client_qabls.borrow_mut();
+            let removed = store
+                .get_mut(&inbound)
+                .is_some_and(|m| m.remove(&keyexpr).is_some());
+            // Prune an emptied map (the same discipline withdraw_client_subscription
+            // uses) so an emptied face does not linger in client_qabls.
+            if store.get(&inbound).is_some_and(|m| m.is_empty()) {
+                store.remove(&inbound);
+            }
+            removed
+        };
+        if removed {
+            self.withdraw_client_cross_tier_qabl(&keyexpr);
+        }
+    }
+
+    /// Recompute self's cross-tier queryable advertisement into BOTH meshes after a
+    /// client qabl left — the query twin of
+    /// [`withdraw_client_cross_tier_sub`](Self::withdraw_client_cross_tier_sub) and
+    /// the removal counterpart of
+    /// [`advertise_client_cross_tier_qabl`](Self::advertise_client_cross_tier_qabl).
+    /// Per mesh: re-advertise the DOWNGRADED merge if a contributor remains, else
+    /// flood a full `UndeclareQueryable` retraction (the `None` arm the ext_wire_expr
+    /// codec atom made expressible).
+    fn withdraw_client_cross_tier_qabl(&self, keyexpr: &str) {
+        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            match self.derived_cross_tier_qabl_info(target, keyexpr) {
+                Some(info) => self.flood_self_sourced(target, keyexpr, move |ke| {
+                    build_declare_queryable_with_info(ke, info)
+                }),
+                None => {
+                    self.flood_self_sourced(target, keyexpr, build_undeclare_queryable_with_keyexpr)
+                }
+            }
         }
     }
 
@@ -2811,11 +2952,10 @@ impl FaceForwarder for RouterForwarder {
         // `pending.remove_face`-first deregister; entries on OTHER faces that point
         // back to this one as their inbound target self-heal at send / timeout. (b)
         // this face's hosted client queryables (C5b) — and, since A3 advertises a
-        // client queryable cross-tier, RE-ADVERTISE the recomputed merge per
-        // departed keyexpr (a DOWNGRADE if another contributor remains; a no-op if
-        // none — the codec-deferred full retraction, which for the self-sourced
-        // cross-tier advertise clears only on SELF-down, degradation-not-black-hole;
-        // see advertise_native_cross_tier_qabl), mirroring the client sub withdraw.
+        // client queryable cross-tier, recompute self's advertisement per departed
+        // keyexpr via the withdraw seam (a DOWNGRADE if another contributor remains;
+        // a full `UndeclareQueryable` retraction if none — now expressible via the
+        // ext_wire_expr codec), mirroring the client sub withdraw.
         //
         // A fan whose LAST answering branch died with this face is DRAINED: its
         // querier is owed the closing ResponseFinal NOW (zenoh
@@ -2827,7 +2967,7 @@ impl FaceForwarder for RouterForwarder {
         let departed_qabls = self.client_qabls.borrow_mut().remove(&id);
         if let Some(qabls) = departed_qabls {
             for keyexpr in qabls.into_keys() {
-                self.advertise_client_cross_tier_qabl(&keyexpr);
+                self.withdraw_client_cross_tier_qabl(&keyexpr);
             }
         }
         // Purge the FaceId-keyed client sub store, withdrawing self's cross-tier
@@ -2987,11 +3127,18 @@ impl FaceForwarder for RouterForwarder {
                             self.ingest_queryable(id, tier, *reliable, declare);
                         }
                     }
-                    // UndeclareQueryable: deferred (the wz-codecs body carries no
-                    // keyexpr ext -> per-keyexpr retraction needs a codec atom
-                    // first; the face-down purge is the safety net, as the sibling
-                    // documents). Dropped explicitly so it is NOT mis-routed.
-                    DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {}
+                    // UndeclareQueryable: the query twin of the UndeclareSubscriber
+                    // arm above. The keyexpr rides the `ext_wire_expr` extension (now
+                    // that the wz-codecs body models the ext chain), so the retraction
+                    // withdraws the source's queryable interest per-keyexpr — the
+                    // face-down purge stays the safety net for a departed peer.
+                    DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
+                        if tier == FaceTier::Client {
+                            self.withdraw_client_queryable(id, declare);
+                        } else {
+                            self.withdraw_queryable(id, tier, *reliable, declare);
+                        }
+                    }
                     _ => {}
                 },
                 // A Query Request: count the reception (the query-plane witness),
@@ -4829,6 +4976,45 @@ mod tests {
     }
 
     #[test]
+    fn native_qabl_undeclare_retracts_the_cross_tier_advertisement() {
+        // The debt-closure witness for the NATIVE path (withdraw_native_cross_tier_qabl
+        // None arm): a router-native queryable advertised into the peer mesh, then
+        // retracted, floods a full UndeclareQueryable into that mesh once the last
+        // contributor leaves — the frame-level proof that the cross-tier advertisement
+        // no longer lingers until self-down (the closed codec gap).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (r, _rs) = face(zid(0xAA), WIRE_ROUTER); // the router-native qabl source
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // a peer tree child
+        fwd.register(FaceId(0), &r);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // advertise into peer mesh
+        sink_p.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_undeclare_queryable_with_keyexpr("demo/q").expect("undecl"),
+            )),
+        );
+        assert!(
+            fwd.router_qabls.borrow().interested("demo/q").is_empty(),
+            "the native queryable interest is withdrawn"
+        );
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the last contributor left ⇒ a single cross-tier retraction into the peer mesh"
+        );
+        assert_eq!(
+            forwarded_undecl_queryable_keyexpr(&sink_p.frame_bytes(0)),
+            "demo/q",
+            "the peer mesh receives the UndeclareQueryable retraction (None arm)"
+        );
+    }
+
+    #[test]
     fn native_qabl_advertise_merges_completeness_across_sources() {
         // Two router-native queryables for the same K — one incomplete, one
         // complete — merge to complete=true (QueryableInfo::merge OR), and the
@@ -5066,6 +5252,29 @@ mod tests {
         }
     }
 
+    /// The keyexpr a forwarded `Declare(UndeclareQueryable)` retracts, read off its
+    /// `ext_wire_expr` extension — the retraction twin of [`forwarded_qabl_info`].
+    fn forwarded_undecl_queryable_keyexpr(frame: &[u8]) -> String {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Declare(d)) => match &d.body {
+                DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
+                    wz_session_core::declare_ext_keyexpr::read_ext_keyexpr(u.extensions.as_ref())
+                        .expect("undecl queryable carries an ext_keyexpr")
+                        .to_string()
+                }
+                _ => panic!("forwarded Declare is not an UndeclareQueryable"),
+            },
+            other => panic!("expected a forwarded Declare, got {other:?}"),
+        }
+    }
+
     #[test]
     fn queryable_re_flood_carries_the_source_completeness() {
         // The 1c-distinctive behavior: the re-flooded DeclareQueryable CARRIES the
@@ -5090,10 +5299,11 @@ mod tests {
     }
 
     #[test]
-    fn undeclare_queryable_is_inert() {
-        // UndeclareQueryable is deferred (the wz-codecs body carries no keyexpr
-        // ext): a declared queryable SURVIVES an UndeclareQueryable (unlike an
-        // UndeclareSubscriber, which withdraws). Pins the no-op arm.
+    fn an_id_only_undeclare_queryable_does_not_withdraw_a_sourced_interest() {
+        // An id-only (no-ext) UndeclareQueryable carries no keyexpr, so it cannot
+        // identify a sourced keyexpr-keyed mesh interest: withdraw_queryable resolves
+        // no keyexpr and no-ops. A declared queryable SURVIVES it (only the
+        // keyexpr-carrying form below, or a face-down purge, withdraws it).
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
@@ -5112,7 +5322,31 @@ mod tests {
         assert_eq!(
             fwd.router_qabls.borrow().interested("demo/q"),
             vec![zid(0xAA)],
-            "UndeclareQueryable is inert (deferred codec gap) — the queryable survives"
+            "an id-only UndeclareQueryable carries no keyexpr — the interest survives"
+        );
+    }
+
+    #[test]
+    fn undeclare_queryable_withdraws_from_the_inbound_tier() {
+        // The query twin of undeclare_withdraws_from_the_inbound_tier: a sourced
+        // keyexpr-carrying UndeclareQueryable withdraws the source's queryable
+        // interest from the inbound tier (now that the ext_wire_expr codec carries
+        // the keyexpr identity).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
+        assert_eq!(
+            fwd.router_qabls.borrow().interested("demo/q"),
+            vec![zid(0xAA)]
+        );
+        let undecl = NetworkMessage::Declare(Box::new(
+            build_undeclare_queryable_with_keyexpr("demo/q").expect("undecl"),
+        ));
+        forward_one(&fwd, FaceId(0), undecl);
+        assert!(
+            fwd.router_qabls.borrow().interested("demo/q").is_empty(),
+            "the source's queryable interest is withdrawn"
         );
     }
 
@@ -5706,17 +5940,26 @@ mod tests {
             fwd.pending.borrow().is_empty(),
             "the pending entry keyed by the departed client face is purged (OBLIGATION 1)"
         );
-        // The face-down DRAINED the fan (its only answering branch died): the
-        // querier is owed the closing final NOW (zenoh finalize_pending_queries).
+        // The face-down produces TWO frames to the peer querier/mesh-child:
+        //  [0] the DRAINED fan's closing final (its only answering branch died —
+        //      zenoh finalize_pending_queries; carries the querier's rid), then
+        //  [1] the cross-tier qabl RETRACTION — self's last client queryable for
+        //      "demo/q" departed, so self floods an UndeclareQueryable to the peer
+        //      mesh (the debt closure: previously a no-op ⇒ staleness until self-down).
         assert_eq!(
             sink_p.frame_count(),
-            1,
-            "the drained fan's querier received a closing final"
+            2,
+            "the closing final + the cross-tier qabl retraction"
         );
         assert_eq!(
             forwarded_response_final_rid(&sink_p.frame_bytes(0)),
             31,
-            "carrying the querier's original rid"
+            "the closing final carries the querier's original rid"
+        );
+        assert_eq!(
+            forwarded_undecl_queryable_keyexpr(&sink_p.frame_bytes(1)),
+            "demo/q",
+            "the cross-tier advertisement for the departed client queryable is retracted"
         );
     }
 

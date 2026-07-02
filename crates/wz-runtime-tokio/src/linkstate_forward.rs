@@ -84,6 +84,7 @@ use std::time::{Duration, Instant};
 
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
+use wz_codecs::ext_entry::ExtEntryOwned;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
 use wz_codecs::push::{PushOwned, PushOwnedVariant};
@@ -92,8 +93,8 @@ use wz_codecs::response::ResponseOwned;
 use wz_codecs::response_final::ResponseFinalOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_build::{
-    build_declare_queryable, build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
-    set_declare_queryable_info,
+    build_declare_queryable, build_declare_subscriber, build_undeclare_queryable_with_keyexpr,
+    build_undeclare_subscriber_with_keyexpr, set_declare_queryable_info,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
@@ -1836,12 +1837,11 @@ impl LinkstateForwarder {
     /// table, so it must see a literal; a sourced re-flood carries no id, id 0,
     /// the keyexpr being the identity).
     ///
-    /// Handles interest DECLARATIONS (new interest) only — withdrawals are NOT
-    /// unified here: the subscriber retraction is the standalone
-    /// [`forward_unsubscription`](Self::forward_unsubscription) (its
-    /// `UndeclareSubscriber` carries an ext_keyexpr), and the queryable retraction
-    /// is deferred (the `UndeclQueryable` codec carries no keyexpr — see the
-    /// `forward()` dispatch's UndeclareQueryable arm).
+    /// Handles interest DECLARATIONS (new interest) only — withdrawals route
+    /// through the symmetric [`forward_interest_withdrawal`](Self::forward_interest_withdrawal)
+    /// SSOT (subscriber retraction via `UndeclareSubscriber`, queryable retraction
+    /// via `UndeclareQueryable`; both carry the retracted keyexpr in the
+    /// `ext_wire_expr` extension).
     fn forward_interest_declaration<V: PartialEq>(
         &self,
         inbound: FaceId,
@@ -1919,14 +1919,73 @@ impl LinkstateForwarder {
     /// through the same shared [`resolve_source`](Self::resolve_source) seam the
     /// declare path uses.
     fn forward_unsubscription(&self, inbound: FaceId, reliable: bool, declare: &DeclareOwned) {
-        // The retracted keyexpr rides the ext_keyexpr extension, which may be
-        // aliased (c3c-3 B1b) — resolved below against the inbound face's table
-        // (the withdrawal twin of the declare side). The forward() dispatch
-        // guarantees an UndeclareSubscriber body here.
+        // The retracted keyexpr rides the ext_keyexpr extension. The forward()
+        // dispatch guarantees an UndeclareSubscriber body here.
         let exts = match &declare.body {
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
             _ => return,
         };
+        self.forward_interest_withdrawal(
+            inbound,
+            reliable,
+            declare,
+            exts,
+            &self.subs,
+            build_undeclare_subscriber_with_keyexpr,
+        );
+    }
+
+    /// A sourced `UndeclareQueryable` arrived on `inbound`: the query-plane twin
+    /// of [`forward_unsubscription`](Self::forward_unsubscription) — same shared
+    /// [`forward_interest_withdrawal`](Self::forward_interest_withdrawal), only the
+    /// body extractor, the interest table ([`qabls`](Self#structfield.qabls)) and
+    /// the `UndeclareQueryable` carrier builder differ. The retracted keyexpr rides
+    /// the `ext_wire_expr` extension (the codec parity with `UndeclareSubscriber`);
+    /// before that codec atom this was a no-op (the id-only body carried no
+    /// keyexpr). zenoh `forget_linkstatepeer_queryable` (`queries.rs`).
+    fn forward_queryable_undeclare(&self, inbound: FaceId, reliable: bool, declare: &DeclareOwned) {
+        let exts = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
+            _ => return,
+        };
+        self.forward_interest_withdrawal(
+            inbound,
+            reliable,
+            declare,
+            exts,
+            &self.qabls,
+            build_undeclare_queryable_with_keyexpr,
+        );
+    }
+
+    /// The shared sourced-interest-WITHDRAWAL re-flood, SSOT for both the
+    /// subscriber ([`forward_unsubscription`](Self::forward_unsubscription)) and
+    /// the queryable ([`forward_queryable_undeclare`](Self::forward_queryable_undeclare))
+    /// planes — the withdrawal twin of
+    /// [`forward_interest_declaration`](Self::forward_interest_declaration).
+    /// Withdraw the SOURCE peer's interest in the retracted keyexpr (carried in the
+    /// message's `ext_wire_expr` extension, which may be aliased [c3c-3 B1b] —
+    /// resolved against the inbound face's table; sourced undeclares use no id, the
+    /// keyexpr is the identity), and — only if this peer HELD that interest —
+    /// re-flood a CLEAN sourced literal retraction onward along the SOURCE's
+    /// spanning tree to self's tree children (excluding the inbound face),
+    /// re-stamped with this node's psid for the source. The "only on held"
+    /// ([`LinkstatepeerInterest::withdraw`](crate::linkstate_interest::LinkstatepeerInterest::withdraw)
+    /// returning `true`) is the change-gate bounding the flood — the exact mirror
+    /// of the declare side's "only on new", so a retraction cannot loop. zenoh
+    /// `forget_linkstatepeer_{subscription,queryable}`. `exts` is the body's
+    /// extension chain (extracted by the caller from its body-specific variant);
+    /// `table` selects the subscriber/queryable interest instance; `build` mints
+    /// the per-flow `Undeclare*` carrier from the resolved LITERAL keyexpr (id 0).
+    fn forward_interest_withdrawal<V>(
+        &self,
+        inbound: FaceId,
+        reliable: bool,
+        declare: &DeclareOwned,
+        exts: Option<&Vec<ExtEntryOwned>>,
+        table: &RefCell<LinkstatepeerInterest<V>>,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) {
         let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
             let Some(s) = faces.get(&inbound) else {
@@ -1944,25 +2003,24 @@ impl LinkstateForwarder {
         };
         // Withdraw the resolved interest; re-flood ONLY on a real removal (the
         // loop-bounding change-gate).
-        if !self.subs.borrow_mut().withdraw(&keyexpr, &source_zid) {
+        if !table.borrow_mut().withdraw(&keyexpr, &source_zid) {
             return;
         }
         let children = self.net.borrow().tree_children_of(&source_zid);
         if children.is_empty() {
             return;
         }
-        // Re-flood a CLEAN sourced literal UndeclareSubscriber built from the
-        // resolved keyexpr (B1b normalize — uniform with the declare side and the
-        // data plane): the downstream link withdraws by the resolved literal, and
-        // a sourced retraction carries no id. Always rebuild, no aliased-vs-literal
+        // Re-flood a CLEAN sourced literal retraction built from the resolved
+        // keyexpr (B1b normalize — uniform with the declare side and the data
+        // plane): the downstream link withdraws by the resolved literal, and a
+        // sourced retraction carries no id. Always rebuild, no aliased-vs-literal
         // branch.
-        let Ok(mut carrier) = build_undeclare_subscriber_with_keyexpr(&keyexpr) else {
+        let Ok(mut carrier) = build(keyexpr.as_str()) else {
             return;
         };
         set_declare_source(&mut carrier, out_node_id);
         // Re-flood to self's children in the source's tree — the same shared
-        // re-forward predicate forward_subscription uses; only the carrier (an
-        // UndeclareSubscriber) differs.
+        // re-forward predicate the declare path uses; only the carrier differs.
         let _ = self.fan_out(reliable, None, |id, zid| {
             Ok(
                 is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
@@ -3019,25 +3077,22 @@ impl FaceForwarder for LinkstateForwarder {
                     DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
                         self.forward_queryable(id, *reliable, declare);
                     }
-                    // UndeclareQueryable: deferred (a CODEC limitation, not a
-                    // routing one). A sourced mesh retraction identifies the
-                    // declaration by its keyexpr (id == 0, as forward_unsubscription
-                    // does), but the wz-codecs `UndeclQueryable` body THIS arm
-                    // matches is `{ header: u8, id: u64 }` — id only, no keyexpr
-                    // extension (the generated type, not the fuller schema the SCE
-                    // forge fixture shows SCE *can* emit). Its subscriber twin
-                    // `UndeclSubscriber` instead carries `extensions`, which is
-                    // exactly why `forward_unsubscription` CAN read an ext_keyexpr
-                    // and this cannot — zenoh's `UndeclareQueryable` has
-                    // `ext_wire_expr` (`commons/zenoh-protocol/src/network/declare.rs:520-523`),
-                    // so faithfully wiring queryable undeclare needs a wz-codecs
-                    // SCHEMA extension first (a separate codec atom). Until then the
-                    // whole-peer face-down purge (`purge_detached_interest`) is the
-                    // safety net for a departed queryable; per-keyexpr
-                    // undeclare-while-connected is the tracked deferral. Dropped
-                    // here EXPLICITLY so it is NOT mis-routed to the subscriber
-                    // catch-all below (a regression the no-op-arm test guards).
-                    DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {}
+                    // UndeclareQueryable: the query-plane twin of the
+                    // UndeclareSubscriber arm above. A sourced mesh retraction
+                    // identifies the queryable by its keyexpr (id == 0), carried in
+                    // the `ext_wire_expr` extension — now that the wz-codecs
+                    // `UndeclQueryable` body models the ext chain (parity with
+                    // `UndeclSubscriber` + zenoh
+                    // `commons/zenoh-protocol/src/network/declare.rs:520-523`),
+                    // `forward_queryable_undeclare` reads the keyexpr and withdraws
+                    // the source's queryable interest (the whole-peer face-down
+                    // purge stays the safety net for a departed peer). An id-only
+                    // (no-ext) body carries no keyexpr and is a no-op inside the
+                    // shared withdrawal — matched EXPLICITLY so it is not mis-routed
+                    // to the subscriber catch-all below (its body is not a sub).
+                    DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
+                        self.forward_queryable_undeclare(id, *reliable, declare);
+                    }
                     _ => self.forward_subscription(id, *reliable, declare),
                 },
                 // A routed Query: relay it toward the matching queryables along
@@ -3960,6 +4015,30 @@ mod tests {
         }
     }
 
+    /// The LITERAL keyexpr of the single forwarded `UndeclareQueryable`'s
+    /// `ext_wire_expr` in a frame — the query-plane twin of
+    /// [`forwarded_undeclare_keyexpr`], proving the B1b retraction normalize
+    /// landed on the wire for the queryable plane.
+    fn forwarded_undeclare_queryable_keyexpr(frame: &[u8]) -> Option<String> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Declare(d)) => match &d.body {
+                DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
+                    wz_session_core::declare_ext_keyexpr::read_ext_keyexpr(u.extensions.as_ref())
+                        .map(str::to_string)
+                }
+                _ => None,
+            },
+            other => panic!("expected a forwarded Declare, got {other:?}"),
+        }
+    }
+
     /// Decode the `LinkStateList` entries of a propagated OAM frame — the D4
     /// witness that the per-face re-flood carried the right `Details` split on
     /// the wire (a `new` node full, an `updated` node links-only).
@@ -3995,6 +4074,30 @@ mod tests {
         };
         // ext_keyexpr ZBuf body [inner_header 0x02 (local, no suffix), VLE(id)] ->
         // resolves to table[id] (B1b). ext header 0x5f = id 0x0f | M 0x10 | ZBuf 0x40.
+        let body: Vec<u8> = vec![0x02u8, id];
+        u.extensions = Some(vec![ExtEntryOwned {
+            header: 0x5f,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: body.len() as u64,
+                value: SceBytes::from_slice(&body).unwrap(),
+            }),
+        }]);
+        declare
+    }
+
+    /// The query-plane twin of [`aliased_undeclare`]: a PURE-ALIASED sourced
+    /// `UndeclareQueryable` whose `ext_wire_expr` references mapping `id` (no
+    /// per-message suffix), hand-built by swapping an aliased ZBuf body into a
+    /// literal scaffold (wz originates only literals).
+    fn aliased_undeclare_queryable(id: u8) -> DeclareOwned {
+        use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+        use wz_codecs::ext_zbuf::ExtZbufOwned;
+        let mut declare =
+            wz_session_core::declare_build::build_undeclare_queryable_with_keyexpr("x")
+                .expect("build undeclare scaffold");
+        let DeclareOwnedVariant::CodecZenohUndeclQueryable(u) = &mut declare.body else {
+            unreachable!("scaffold is an UndeclareQueryable");
+        };
         let body: Vec<u8> = vec![0x02u8, id];
         u.extensions = Some(vec![ExtEntryOwned {
             header: 0x5f,
@@ -4221,6 +4324,51 @@ mod tests {
             forwarded_undeclare_keyexpr(&sink_b.frame_bytes(0)),
             Some("demo/sub".to_string()),
             "the re-flooded UndeclareSubscriber ext_keyexpr is normalized to a literal",
+        );
+    }
+
+    #[test]
+    fn an_aliased_queryable_undeclare_resolves_and_withdraws_the_interest() {
+        // Query-plane parity with an_aliased_unsubscription_...: an aliased queryable
+        // declare must be cleanly undoable by an aliased UndeclareQueryable. A aliases
+        // 7 -> "demo/q", declares (aliased), then sends a PURE-ALIASED
+        // UndeclareQueryable (ext_keyexpr id 7). self resolves the ext alias via A's
+        // table (the SAME resolve seam the sub twin uses, exercised for the qabl
+        // plane) and withdraws the resolved literal interest, re-flooding a literal.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        let decl = wz_session_core::declare_build::build_declare_kexpr(7, "demo/q")
+            .expect("build decl kexpr");
+        fwd.absorb_keyexpr_declaration(FaceId(0), &decl);
+        let aliased_qabl = wz_session_core::declare_build::build_declare_queryable(0, 7, None)
+            .expect("build aliased declare queryable");
+        fwd.forward_queryable(FaceId(0), true, &aliased_qabl);
+        assert_eq!(
+            fwd.interested_queryables("demo/q"),
+            vec![zid(0x0A)],
+            "queryable interest registered before the undeclare"
+        );
+        sink_b.reset(); // ignore the declare re-flood
+
+        fwd.forward_queryable_undeclare(FaceId(0), true, &aliased_undeclare_queryable(7));
+        assert!(
+            fwd.interested_queryables("demo/q").is_empty(),
+            "the aliased UndeclareQueryable resolved the ext alias and withdrew the interest",
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the retraction re-flooded to the child B"
+        );
+        assert_eq!(
+            forwarded_undeclare_queryable_keyexpr(&sink_b.frame_bytes(0)),
+            Some("demo/q".to_string()),
+            "the re-flooded UndeclareQueryable ext_keyexpr is normalized to a literal",
         );
     }
 
@@ -6833,10 +6981,9 @@ mod tests {
         // The query-plane twin of deregister_purges_the_departed_peers_interest:
         // a queryable's interest must not outlive its face (zenoh
         // queries_remove_node on link-down). This face-down purge is the safety
-        // net that covers a departed queryable while per-keyexpr
-        // UndeclareQueryable stays deferred (the wz UndeclQueryable wire body
-        // carries no ext_keyexpr, so a sourced keyexpr-identified retraction
-        // cannot be expressed).
+        // net for a DEPARTED peer (which sends no retraction) — it complements the
+        // per-keyexpr UndeclareQueryable withdrawal (now live via the ext_wire_expr
+        // codec) that handles an undeclare-while-connected.
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
@@ -6884,15 +7031,13 @@ mod tests {
     }
 
     #[test]
-    fn an_undeclare_queryable_is_inert_until_a_codec_extension_lands() {
-        // Pins the deferral's behavioral consequence: an UndeclareQueryable
-        // arriving on a LIVE face hits the explicit no-op dispatch arm — it is
-        // NOT mis-routed to the subscriber catch-all, and it CANNOT withdraw the
-        // queryable interest (the wz `UndeclQueryable` body carries no keyexpr, so
-        // a per-keyexpr retraction is unexpressible; only a face-down purge
-        // removes it). So A's queryable interest SURVIVES the UndeclareQueryable —
-        // a regression that re-routed this body to a withdraw/registration path
-        // would change this and fail the test.
+    fn an_id_only_undeclare_queryable_does_not_withdraw_a_sourced_interest() {
+        // An id-only (no-ext) UndeclareQueryable — the LOCAL-registry retraction
+        // form (build_undeclare_queryable(id)) — carries no keyexpr, so it cannot
+        // identify a sourced keyexpr-keyed mesh interest: forward_queryable_undeclare
+        // resolves no keyexpr and no-ops. So A's mesh queryable interest SURVIVES an
+        // id-only body (only the keyexpr-carrying form below, or a face-down purge,
+        // withdraws it), and the body is NOT mis-routed to the subscriber catch-all.
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
@@ -6904,7 +7049,7 @@ mod tests {
             "A's queryable interest registered",
         );
 
-        // Feed an UndeclareQueryable through the forward() dispatch.
+        // Feed an id-only (no-ext) UndeclareQueryable through the forward() dispatch.
         let undecl = wz_session_core::declare_build::build_undeclare_queryable(7);
         let outcome = DriverLoopOutcome::FramePayload {
             reliable: true,
@@ -6918,12 +7063,51 @@ mod tests {
         assert_eq!(
             fwd.interested_queryables("demo/q"),
             vec![zid(0x0A)],
-            "UndeclareQueryable is inert — the queryable interest survives (withdrawal deferred)",
+            "an id-only UndeclareQueryable carries no keyexpr — the interest survives",
         );
         assert!(
             fwd.interested("demo/q").is_empty(),
             "and it was NOT mis-routed into the subscriber table",
         );
+    }
+
+    #[test]
+    fn forward_queryable_undeclare_withdraws_source_and_re_floods_along_the_tree() {
+        // The query-plane twin of
+        // forward_unsubscription_withdraws_source_and_re_floods_along_the_tree:
+        // Line A - S(self) - C. A declares a queryable then retracts it via a
+        // sourced keyexpr-carrying UndeclareQueryable (node_id 0) — self withdraws
+        // A's queryable interest, then re-floods the retraction to its tree child
+        // C, never back to the inbound source A.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S<->C
+        declare_queryable_interest(&fwd, FaceId(0), "demo/q"); // A has a queryable
+        assert_eq!(
+            fwd.interested_queryables("demo/q"),
+            vec![zid(0x0A)],
+            "A registered"
+        );
+        sink_a.reset();
+        sink_c.reset();
+
+        let undeclare = build_undeclare_queryable_with_keyexpr("demo/q").expect("build undeclare");
+        fwd.forward_queryable_undeclare(FaceId(0), true, &undeclare);
+
+        assert!(
+            fwd.interested_queryables("demo/q").is_empty(),
+            "self withdrew A's queryable interest"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "re-flooded the retraction to the tree child C"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
     }
 
     // ── §5.15 query routing atom 2b: Request routing toward queryables ──
