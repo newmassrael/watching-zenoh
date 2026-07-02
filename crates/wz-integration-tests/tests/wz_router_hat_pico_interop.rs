@@ -12,24 +12,29 @@
 //! leg 2 (which routed wz -> zenohd -> pico through the REFERENCE router): here wz's
 //! OWN `--router-hat` replaces zenohd as the mediating router, so a wz publisher's
 //! `Put` routes wz-client -> [wz router-hat] -> pico `z_sub`. This is the router
-//! daemon's FIRST cross-impl (non-wz) proof — ONE direction of ONE plane. It does NOT
-//! close cross-impl: the reverse data direction (pico-pub -> wz-sub), the query /
-//! reply plane, liveliness, router-native (non-`client_subs`) subscribers, and
-//! multi-router federation to pico all stay wz<->wz-only and are NOT exercised here
-//! (each is a separate leg, as `wz_to_zenohd_router.rs`'s nine legs are for zenohd).
+//! daemon's FIRST cross-impl (non-wz) proof — but a NARROW one, and the framing must
+//! stay honest: the asserted route is `deliver_to_client_subscribers` (client-tier
+//! EGRESS), which is NOT router-DISTINCTIVE — a peer-mode node runs the same client
+//! fan-out, and with a single router the master gate is a no-op. What makes the router
+//! "zenohd-equivalent" is its ROUTER TIER (routers_net / linkstatepeers_net linkstate
+//! federation + HRW election), and NO cross-impl test yet puts a foreign impl on THAT
+//! wire. The highest-value missing leg is a foreign ROUTER (zenohd in router mode)
+//! dialing the wz `--router-hat` to federate linkstate + a router<->router routed Put.
+//! Also NOT exercised (each a separate leg, as `wz_to_zenohd_router.rs`'s 9 legs are
+//! for zenohd): the reverse data direction (pico-pub -> wz-sub), query/reply,
+//! liveliness, router-native subscribers, and multi-router federation to pico.
 //!
 //! Topology (a STAR through the wz router, no autoconnect): the pico `z_sub` dials
 //! the router as a `-m client`, landing in the router's `client_subs`; the wz
 //! `--connect --publish` node dials the router as a `WhatAmI::Client` too. The
 //! router's `route_push` block 3 (`deliver_to_client_subscribers`) is what carries
 //! the wz Put to the pico client subscriber — the only path (neither client knows
-//! the other's address). The pico subscriber's *client-side* declare is confirmed
-//! before the wz publisher starts; delivery is then carried NOT by a strict
-//! router-confirmed barrier (the router emits no "learned a client sub" witness) but
-//! by BURST TOLERANCE — the publisher's TCP connect + handshake gap plus a 5x200ms
-//! Put burst span far more than the localhost declare-propagation window, so a Put
-//! lands after the router installs the subscription (the same race-covered-by-burst
-//! mechanism the zenohd sibling relies on).
+//! the other's address). Delivery is a router-CONFIRMED BARRIER, not a race: the wz
+//! publisher is spawned only after the ROUTER logs `learned a client sub` — its
+//! `client_subs_seen()` readiness witness (R311y139), the data-plane twin of the
+//! query tests' `learned a queryable` barrier — so the pico subscription is provably
+//! installed in `client_subs` before the first Put (a strictly stronger gate than the
+//! zenohd sibling's burst tolerance).
 //!
 //! Requires: wz-ap-demo built with `--features router-hat-router` (the router
 //! binary — one binary also serves the `--connect --publish` wz client) AND the
@@ -73,15 +78,34 @@ fn wz_router_hat_routes_wz_publish_to_pico_zsub() {
     let endpoint = format!("tcp/127.0.0.1:{port}");
 
     // pico z_sub: a CLIENT of the wz router, subscribed and ready (retried past any
-    // transient one-shot open). Its CLIENT-SIDE declare precedes the publisher spawn;
-    // that alone does not prove the router installed the sub in client_subs, so
-    // delivery rests on BURST TOLERANCE — the publisher's connect+handshake gap plus
-    // the 5x200ms Put burst outlast the localhost declare propagation (the same
-    // mechanism the zenohd sibling leg 2 relies on), not on a strict barrier.
+    // transient one-shot open).
     let (mut z_sub_child, mut z_sub_reader) =
         spawn_subscribed_zsub(&z_sub, sub_key, &endpoint, "the wz router-hat", || {
             tempfile::tempfile().expect("tempfile for z_sub stdout")
         });
+
+    // BARRIER (not a race): wait until the ROUTER logs it installed the pico's
+    // DeclareSubscriber in client_subs before spawning the publisher, so the Put burst
+    // cannot outrun declare-propagation. The router polls client_subs_seen() on its
+    // ~250 ms app tick; the pico's client-side declare above only proves pico EMITTED
+    // it, so this gates on the router-side install (the data-plane twin of the query
+    // tests' "learned a queryable" barrier).
+    wait_for_substring(
+        &mut r_reader,
+        "router-hat: learned a client sub",
+        Duration::from_secs(10),
+    )
+    .unwrap_or_else(|c| {
+        let _ = z_sub_child.child_mut().kill();
+        let _ = z_sub_child.child_mut().wait();
+        let _ = r_guard.child_mut().kill();
+        let _ = r_guard.child_mut().wait();
+        panic!(
+            "router-hat never logged it learned the pico client subscription within \
+             10s — the pico DeclareSubscriber did not reach the router's \
+             client_subs\n--- router-hat stderr ---\n{c}"
+        )
+    });
 
     // wz-ap-demo: a WhatAmI::Client of the same wz router that emits a Put burst on
     // `demo/pico`. The router's route_push delivers it to the pico client subscriber

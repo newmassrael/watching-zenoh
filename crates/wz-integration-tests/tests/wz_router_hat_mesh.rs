@@ -605,7 +605,7 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
     eprintln!("--- queryable stderr ---\n{qbl_captured}");
     eprintln!("--- issuer stderr ---\n{iss_captured}");
 
-    let reply_line = reply.unwrap_or_else(|c| {
+    let iss_capture = reply.unwrap_or_else(|c| {
         panic!(
             "issuer never received a reply within 15s — the query did not route \
              through the router to the queryable (route_request / forward_response \
@@ -613,6 +613,13 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
              queryable stderr ---\n{qbl_captured}\n--- router stderr ---\n{r_captured}"
         )
     });
+    // Isolate the actual `REPLY RECEIVED` line so the rid/payload asserts pin the
+    // REPLY, not the whole issuer capture (which also holds the issuer's own
+    // `QUERY EMITTED rid=1` line — a whole-buffer `contains("rid=1")` would match it).
+    let reply_line = iss_capture
+        .lines()
+        .find(|l| l.contains("REPLY RECEIVED"))
+        .unwrap_or_else(|| panic!("no 'REPLY RECEIVED' line in issuer capture:\n{iss_capture}"));
     assert!(
         reply_line.contains("rid=1"),
         "the routed reply must echo the query's rid=1\n--- issuer ---\n{reply_line}"
@@ -778,7 +785,7 @@ fn wz_router_hat_federates_a_query_across_two_routers() {
     eprintln!("--- queryable stderr ---\n{qbl_captured}");
     eprintln!("--- issuer stderr ---\n{iss_captured}");
 
-    let reply_line = reply.unwrap_or_else(|c| {
+    let iss_capture = reply.unwrap_or_else(|c| {
         panic!(
             "issuer (behind R1) never received a reply within 15s — the query did \
              not route across the two routers to the queryable behind R2 \
@@ -788,6 +795,13 @@ fn wz_router_hat_federates_a_query_across_two_routers() {
              router-hat-2 stderr ---\n{r2_captured}"
         )
     });
+    // Isolate the actual `REPLY RECEIVED` line so the rid/payload asserts pin the
+    // REPLY, not the whole issuer capture (which also holds the issuer's own
+    // `QUERY EMITTED rid=1` line — a whole-buffer `contains("rid=1")` would match it).
+    let reply_line = iss_capture
+        .lines()
+        .find(|l| l.contains("REPLY RECEIVED"))
+        .unwrap_or_else(|| panic!("no 'REPLY RECEIVED' line in issuer capture:\n{iss_capture}"));
     assert!(
         reply_line.contains("rid=1"),
         "the routed reply must echo the query's rid=1\n--- issuer ---\n{reply_line}"

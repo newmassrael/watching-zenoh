@@ -760,6 +760,16 @@ impl RouterForwarder {
         client + router + peer
     }
 
+    /// Total distinct client-hosted subscriptions this router currently holds
+    /// ([`client_subs`](Self#structfield.client_subs)). The data-plane READINESS
+    /// witness — the twin of [`queryables_seen`](Self::queryables_seen): a `>0` value
+    /// proves R installed a client's `DeclareSubscriber` in `client_subs`, letting a
+    /// data e2e gate a publisher spawn on a router-CONFIRMED subscription rather than
+    /// racing declare-propagation with a Put burst.
+    pub fn client_subs_seen(&self) -> usize {
+        self.client_subs.borrow().values().map(|s| s.len()).sum()
+    }
+
     /// Install the full §5.16 interceptor configuration — the router twin of
     /// [`LinkstateForwarder::set_interceptors`](crate::linkstate_forward::LinkstateForwarder::set_interceptors).
     /// Builds BOTH the ingress and egress chains from ONE [`InterceptorConfig`] in

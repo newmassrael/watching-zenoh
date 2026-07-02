@@ -2016,6 +2016,7 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     let mut last_data_seen = 0usize;
     let mut last_queries_seen = 0usize;
     let mut announced_queryable = false;
+    let mut announced_client_sub = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -2058,6 +2059,16 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
                 if !announced_queryable && forwarder.queryables_seen() > 0 {
                     announced_queryable = true;
                     log::info!("wz-ap-demo router-hat: learned a queryable");
+                }
+                // Data-plane READINESS witness (barrier for the pico cross-impl e2e):
+                // fires ONCE when this router has installed a client's DeclareSubscriber
+                // in client_subs, so a test can gate a PUBLISHER's spawn on R provably
+                // holding the subscription — a router-confirmed barrier instead of
+                // covering the declare-propagation race with a Put burst (the data-plane
+                // twin of the "learned a queryable" query-readiness witness above).
+                if !announced_client_sub && forwarder.client_subs_seen() > 0 {
+                    announced_client_sub = true;
+                    log::info!("wz-ap-demo router-hat: learned a client sub");
                 }
             }
         }
