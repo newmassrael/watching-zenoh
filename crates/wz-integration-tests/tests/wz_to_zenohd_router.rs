@@ -87,8 +87,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wait_for_tcp_accept, wz_ap_demo_binary,
-    zenoh_pico_cli_binary, zenohd_binary, ChildGuard, PortReservation,
+    read_captured, spawn_subscribed_zsub, wait_for_substring, wait_for_tcp_accept,
+    wz_ap_demo_binary, zenoh_pico_cli_binary, zenohd_binary, ChildGuard, PortReservation,
 };
 
 /// Spawn a zenohd router on the given `-l` listener locators and block until it
@@ -236,69 +236,6 @@ fn wait_for_zenohd_handshake_ready(connect: &str) {
     }
 }
 
-/// Spawn a zenoh-pico `z_sub` against zenohd and return it once its session is
-/// OPEN and the subscriber DECLARED (stdout line "Declaring Subscriber on ...").
-/// pico's `z_sub` is a one-shot that prints "Unable to open session!" and exits
-/// if its session open transiently fails — and it does NOT self-retry. Under
-/// full-run-ci load that open occasionally fails, so the orchestrator retries
-/// the spawn here. This is robustness for a FOREIGN one-shot binary, not a wz
-/// workaround: the wz side is deterministic (the handshake test + 20x standalone
-/// pass), and a transiently-failed `z_sub` open is not a wz defect — retrying it
-/// keeps the data-plane assertion zero-flake. Returns the subscribed child + its
-/// stdout reader for the `Received` wait.
-///
-/// R311pf/R311pi — why the retry, honestly. The pico open occasionally fails
-/// under full-run-ci load and was NOT reproduced synthetically (~200+ opens under
-/// up to 5x CPU oversubscription, including 3 zenohd starting under load, produced
-/// zero failures), so the exact mechanism is a HYPOTHESIS, not a verified fact:
-/// scheduler starvation of the handshake window under the specific full-run-ci
-/// profile (concurrent rustc memory/IO + multiple zenohd) is the most likely
-/// candidate, but a zenohd handshake STALL is not excludable — the symptom is
-/// reported on the pico side (`z_open() < 0`), where a clean zenohd log plus a
-/// pico-side client timeout would look identical. R311pi closes the most
-/// actionable part STRUCTURALLY: `spawn_zenohd` now drives a real wz handshake to
-/// `Established` before returning, so the zenohd cold-start window is gated out,
-/// and this retry is left as the client-side-starvation safety net for a foreign
-/// one-shot that cannot self-retry. `spawn_publishing_zpub` shares this exact
-/// open-transient retry. (The `z_get` / `z_get_liveliness` / `wz --query` retries
-/// below are a DIFFERENT, well-understood concern — the route/declaration
-/// propagation window — NOT this open transient; they are not the same phenomenon
-/// and do not share this root-cause story.)
-fn spawn_subscribed_zsub(z_sub: &Path, sub_key: &str, endpoint: &str) -> (ChildGuard, File) {
-    const ATTEMPTS: usize = 6;
-    for attempt in 1..=ATTEMPTS {
-        let out = tempfile::tempfile().expect("tempfile for z_sub stdout");
-        let out_writer = out.try_clone().expect("dup z_sub stdout handle");
-        let mut out_reader = out;
-        let mut child = ChildGuard::wrap(
-            "z_sub client (zenoh-pico)",
-            Command::new("stdbuf")
-                .args(["-oL", "-eL"])
-                .arg(z_sub)
-                .args(["-k", sub_key, "-e", endpoint, "-m", "client"])
-                .stdout(Stdio::from(out_writer))
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("spawn z_sub via stdbuf"),
-        );
-        let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
-            let cap = read_captured(&mut out_reader);
-            if cap.contains("Declaring Subscriber on") {
-                return (child, out_reader); // session open + subscriber declared
-            }
-            if cap.contains("Unable to open session") || Instant::now() >= deadline {
-                break; // transient open failure / timeout -> respawn
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        let _ = child.child_mut().kill();
-        let _ = child.child_mut().wait();
-        eprintln!("z_sub open attempt {attempt}/{ATTEMPTS} did not subscribe; retrying");
-    }
-    panic!("pico z_sub failed to open a session to zenohd after {ATTEMPTS} attempts");
-}
-
 /// wz dials zenohd as a client and reaches Established — the handshake
 /// interoperates with the reference router. Deterministic (no peer-timing race).
 #[test]
@@ -373,7 +310,9 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub() {
     //    transient one-shot open failure). Its declared subscription is the
     //    route zenohd uses to forward wz's Put.
     let (mut z_sub_child, mut z_sub_stdout_reader) =
-        spawn_subscribed_zsub(&z_sub, sub_key, &endpoint);
+        spawn_subscribed_zsub(&z_sub, sub_key, &endpoint, "zenohd", || {
+            tempfile::tempfile().expect("tempfile for z_sub stdout")
+        });
 
     // ── wz-ap-demo: a client of zenohd that emits a Put burst. The burst
     //    (publisher_task) covers the window for z_sub's subscription to reach
@@ -438,7 +377,7 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub() {
 
 /// Spawn a zenoh-pico `z_pub` against zenohd and return it once it has opened a
 /// session, declared its publisher, and begun putting (stdout "Putting Data").
-/// Like [`spawn_subscribed_zsub`], the pico one-shot occasionally fails its
+/// Like `spawn_subscribed_zsub`, the pico one-shot occasionally fails its
 /// session open under full-run-ci load and does NOT self-retry, so the
 /// orchestrator retries the spawn — robustness for a FOREIGN binary, not a wz
 /// workaround (the wz routed-subscriber side is deterministic: the
@@ -989,7 +928,7 @@ fn wz_query_routed_to_pico_queryable_via_zenohd() {
 }
 
 /// Spawn a zenoh-pico `z_liveliness` (long-lived liveliness-token declarer)
-/// against zenohd, retrying the open like [`spawn_subscribed_zsub`] /
+/// against zenohd, retrying the open like `spawn_subscribed_zsub` /
 /// [`spawn_publishing_zpub`] until the token is declared (stdout
 /// "Declaring liveliness token"). z_liveliness does the same non-self-retrying
 /// `z_open` as z_sub / z_pub (R311pf open-transient class), so the same
@@ -1275,7 +1214,9 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_ws() {
     //    any transient one-shot open). Its declared subscription is the route
     //    zenohd uses to forward wz's WS Put.
     let (mut z_sub_child, mut z_sub_stdout_reader) =
-        spawn_subscribed_zsub(&z_sub, sub_key, &endpoint);
+        spawn_subscribed_zsub(&z_sub, sub_key, &endpoint, "zenohd", || {
+            tempfile::tempfile().expect("tempfile for z_sub stdout")
+        });
 
     // ── wz-ap-demo: a WEBSOCKET client of zenohd that emits a Put burst. The
     //    burst (publisher_task) covers the window for z_sub's subscription to

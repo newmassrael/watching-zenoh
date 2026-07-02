@@ -39,114 +39,13 @@
 //! the `wz_router_hat_` prefix so the default Layer E sweep's `--skip wz_router`
 //! excludes it from the arbitrary-feature binary run.
 
-use std::fs::File;
-use std::path::Path;
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, wait_for_substring, wz_ap_demo_binary,
-    zenoh_pico_cli_binary, ChildGuard,
+    graceful_terminate, read_captured, spawn_on_ephemeral_port, spawn_subscribed_zsub,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
-
-/// Parse the bound port from the router-hat's `listening on 127.0.0.1:<port>` log —
-/// the ephemeral-port read-back that lets the pico `z_sub` + the wz publisher dial
-/// this router without a reserved-port allocation.
-fn listen_port(captured: &str) -> u16 {
-    let marker = "listening on 127.0.0.1:";
-    let rest = captured
-        .split(marker)
-        .nth(1)
-        .unwrap_or_else(|| panic!("no '{marker}' in:\n{captured}"));
-    rest.chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .unwrap_or_else(|e| panic!("unparseable port after '{marker}': {e}\n{captured}"))
-}
-
-/// Spawn the wz `--router-hat` node on an ephemeral port and return it once bound,
-/// with its stderr reader and the read-back port. Presents wire `WhatAmI::Router`.
-fn spawn_router_hat(label: &str) -> (ChildGuard, File, u16) {
-    let stderr = tempfile::tempfile().expect("tempfile for router stderr");
-    let writer = stderr.try_clone().expect("dup router stderr handle");
-    let mut reader = stderr;
-    let mut guard = ChildGuard::wrap(
-        label.to_string(),
-        Command::new(wz_ap_demo_binary())
-            .args(["--router-hat", "127.0.0.1:0"])
-            .env("RUST_LOG", "info")
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(writer))
-            .spawn()
-            .unwrap_or_else(|e| panic!("spawn {label}: {e}")),
-    );
-    let captured = wait_for_substring(
-        &mut reader,
-        "router-hat: listening on 127.0.0.1:",
-        Duration::from_secs(5),
-    )
-    .unwrap_or_else(|c| {
-        let _ = guard.child_mut().kill();
-        let _ = guard.child_mut().wait();
-        panic!(
-            "{label} did not bind within 5s (is the binary built with \
-             --features router-hat-router?)\n--- {label} stderr ---\n{c}"
-        )
-    });
-    let port = listen_port(&captured);
-    (guard, reader, port)
-}
-
-/// Spawn a zenoh-pico `z_sub` as a CLIENT of the wz router, returned once its
-/// session is OPEN and the subscriber DECLARED (`"Declaring Subscriber on"`).
-///
-/// Two robustness details, both learned from the sibling `wz_to_zenohd_router.rs`
-/// and confirmed against this router:
-///   * `stdbuf -oL -eL` forces line buffering — pico's CLI block-buffers stdout when
-///     it is not a TTY, so without this its `Received` line never reaches the file
-///     until exit (the subscribe/receive would look like it never happened).
-///   * pico's `z_sub` is a one-shot that prints `"Unable to open session!"` and
-///     exits if its open transiently fails, and it does NOT self-retry — so under
-///     full-run-ci load the orchestrator respawns it. The transient sits at the
-///     pico<->router OPEN handshake boundary; the retry tolerates it at either end.
-///     The wz router side has shown no independent flake in the wz<->wz E2E suite,
-///     and this test's standalone repeats pass zero-flake (WITH the retry in place).
-fn spawn_subscribed_pico_zsub(z_sub: &Path, sub_key: &str, endpoint: &str) -> (ChildGuard, File) {
-    const ATTEMPTS: usize = 6;
-    for attempt in 1..=ATTEMPTS {
-        let out = tempfile::tempfile().expect("tempfile for z_sub stdout");
-        let out_writer = out.try_clone().expect("dup z_sub stdout handle");
-        let mut out_reader = out;
-        let mut child = ChildGuard::wrap(
-            "z_sub client (zenoh-pico)".to_string(),
-            Command::new("stdbuf")
-                .args(["-oL", "-eL"])
-                .arg(z_sub)
-                .args(["-k", sub_key, "-e", endpoint, "-m", "client"])
-                .stdout(Stdio::from(out_writer))
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("spawn z_sub via stdbuf"),
-        );
-        let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
-            let cap = read_captured(&mut out_reader);
-            if cap.contains("Declaring Subscriber on") {
-                return (child, out_reader); // session open + subscriber declared
-            }
-            if cap.contains("Unable to open session") || Instant::now() >= deadline {
-                break; // transient open failure / timeout -> respawn
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        let _ = child.child_mut().kill();
-        let _ = child.child_mut().wait();
-        eprintln!("pico z_sub open attempt {attempt}/{ATTEMPTS} did not subscribe; retrying");
-    }
-    panic!("pico z_sub failed to open a session to the wz router-hat after {ATTEMPTS} attempts");
-}
 
 /// wz publisher -> wz router-hat -> pico `z_sub`: the wz router routes a wz client's
 /// `Put` to a real zenoh-pico client subscriber — the §5.21 router's first
@@ -161,8 +60,16 @@ fn wz_router_hat_routes_wz_publish_to_pico_zsub() {
     let publish_value = "hello-pico-via-wz-router";
 
     // The wz router-hat binds first so the pico client + the wz publisher can dial
-    // its ephemeral port.
-    let (mut r_guard, mut r_reader, port) = spawn_router_hat("router-hat");
+    // its ephemeral port. `spawn_on_ephemeral_port` (common) owns the bind+read-back;
+    // the caller owns the tempfile (`tempfile` is a dev-dependency).
+    let router_stderr = tempfile::tempfile().expect("tempfile for router stderr");
+    let (mut r_guard, mut r_reader, port) = spawn_on_ephemeral_port(
+        &demo,
+        &["--router-hat", "127.0.0.1:0"],
+        "router-hat: listening on 127.0.0.1:",
+        "router-hat",
+        router_stderr,
+    );
     let endpoint = format!("tcp/127.0.0.1:{port}");
 
     // pico z_sub: a CLIENT of the wz router, subscribed and ready (retried past any
@@ -172,7 +79,9 @@ fn wz_router_hat_routes_wz_publish_to_pico_zsub() {
     // the 5x200ms Put burst outlast the localhost declare propagation (the same
     // mechanism the zenohd sibling leg 2 relies on), not on a strict barrier.
     let (mut z_sub_child, mut z_sub_reader) =
-        spawn_subscribed_pico_zsub(&z_sub, sub_key, &endpoint);
+        spawn_subscribed_zsub(&z_sub, sub_key, &endpoint, "the wz router-hat", || {
+            tempfile::tempfile().expect("tempfile for z_sub stdout")
+        });
 
     // wz-ap-demo: a WhatAmI::Client of the same wz router that emits a Put burst on
     // `demo/pico`. The router's route_push delivers it to the pico client subscriber

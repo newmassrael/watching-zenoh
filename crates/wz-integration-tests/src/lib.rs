@@ -560,6 +560,135 @@ pub mod common {
         (guard, stderr)
     }
 
+    /// Parse the bound port from a node's `listening on 127.0.0.1:<port>`
+    /// log line — the ephemeral-port read-back that lets the next node
+    /// dial this one without a reserved-port allocation.
+    ///
+    /// R311y138 — lifted from four byte-identical per-test copies
+    /// (`wz_peer_data_forward`, `wz_peer_adminspace_config_write`,
+    /// `wz_router_hat_mesh`, `wz_router_hat_pico_interop`), the same
+    /// per-test-duplicate consolidation R216 / R305 / R311q1 applied to
+    /// the port picker, `graceful_terminate`, and `spawn_listen_acceptor`.
+    pub fn listen_port(captured: &str) -> u16 {
+        let marker = "listening on 127.0.0.1:";
+        let rest = captured
+            .split(marker)
+            .nth(1)
+            .unwrap_or_else(|| panic!("no '{marker}' in:\n{captured}"));
+        rest.chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap_or_else(|e| panic!("unparseable port after '{marker}': {e}\n{captured}"))
+    }
+
+    /// Spawn a `wz-ap-demo` node that binds an EPHEMERAL port
+    /// (`… 127.0.0.1:0`), wait until it logs `listen_marker`, and read the
+    /// bound port back via [`listen_port`]. Routes the child's stderr into
+    /// the caller-supplied `stderr` tempfile (the [`spawn_listen_acceptor`]
+    /// caller-owns-File convention — `tempfile` is a dev-dependency unusable
+    /// from this lib target) and wraps the child in a panic-safe
+    /// [`ChildGuard`]. `listen_marker` is the role-specific listen-line prefix
+    /// (`"router-hat: listening on 127.0.0.1:"` /
+    /// `"peer: listening on 127.0.0.1:"`), so one spawner serves every
+    /// ephemeral-bind node kind.
+    ///
+    /// R311y138 — lifted from `wz_router_hat_mesh::spawn_node` +
+    /// `wz_router_hat_pico_interop::spawn_router_hat` (near-verbatim copies).
+    pub fn spawn_on_ephemeral_port(
+        demo: &Path,
+        args: &[&str],
+        listen_marker: &str,
+        label: &str,
+        stderr: File,
+    ) -> (ChildGuard, File, u16) {
+        let writer = stderr.try_clone().expect("dup node stderr handle");
+        let mut reader = stderr;
+        let mut guard = ChildGuard::wrap(
+            label,
+            Command::new(demo)
+                .args(args)
+                .env("RUST_LOG", "info")
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(writer))
+                .spawn()
+                .unwrap_or_else(|e| panic!("spawn {label}: {e}")),
+        );
+        let captured = wait_for_substring(&mut reader, listen_marker, Duration::from_secs(5))
+            .unwrap_or_else(|c| {
+                let _ = guard.child_mut().kill();
+                let _ = guard.child_mut().wait();
+                panic!("{label} did not bind within 5s\n--- {label} stderr ---\n{c}");
+            });
+        let port = listen_port(&captured);
+        (guard, reader, port)
+    }
+
+    /// Spawn a zenoh-pico `z_sub` as a CLIENT of a router
+    /// (`-e <endpoint> -m client`), returned once its session is OPEN and the
+    /// subscriber DECLARED (`"Declaring Subscriber on"`). `stdbuf -oL -eL`
+    /// forces line buffering (pico's CLI block-buffers non-TTY stdout, else its
+    /// `Received` line never reaches the file); the 6-attempt retry absorbs
+    /// pico's non-self-retrying one-shot open transient
+    /// (`"Unable to open session!"`) — robustness for a FOREIGN binary, not a
+    /// wz workaround. `router_label` names the dial target in the give-up panic;
+    /// `mk_stderr` is the per-attempt stdout tempfile factory (the caller owns
+    /// the dev-dependency `tempfile::tempfile()` call, once per attempt).
+    ///
+    /// Why the retry, honestly (R311pf / R311pi): the pico open transient was NOT
+    /// reproduced synthetically (~200+ opens under 5x CPU oversubscription produced
+    /// zero failures), so the mechanism is a HYPOTHESIS — scheduler starvation of the
+    /// handshake window under full-run-ci load — not a verified fact; a router-side
+    /// handshake stall is not excludable (the symptom `z_open() < 0` is reported on
+    /// the pico side and would look identical either way). Callers should gate their
+    /// router's cold-start where they can (the zenohd caller drives a wz handshake to
+    /// Established first); this retry is the residual client-side safety net for a
+    /// foreign one-shot that cannot self-retry.
+    ///
+    /// R311y138 — lifted from the ~95%-identical
+    /// `wz_to_zenohd_router::spawn_subscribed_zsub` +
+    /// `wz_router_hat_pico_interop::spawn_subscribed_pico_zsub` into one SSOT.
+    pub fn spawn_subscribed_zsub(
+        z_sub: &Path,
+        sub_key: &str,
+        endpoint: &str,
+        router_label: &str,
+        mut mk_stderr: impl FnMut() -> File,
+    ) -> (ChildGuard, File) {
+        const ATTEMPTS: usize = 6;
+        for attempt in 1..=ATTEMPTS {
+            let out = mk_stderr();
+            let out_writer = out.try_clone().expect("dup z_sub stdout handle");
+            let mut out_reader = out;
+            let mut child = ChildGuard::wrap(
+                "z_sub client (zenoh-pico)",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(z_sub)
+                    .args(["-k", sub_key, "-e", endpoint, "-m", "client"])
+                    .stdout(Stdio::from(out_writer))
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn z_sub via stdbuf"),
+            );
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let cap = read_captured(&mut out_reader);
+                if cap.contains("Declaring Subscriber on") {
+                    return (child, out_reader); // session open + subscriber declared
+                }
+                if cap.contains("Unable to open session") || Instant::now() >= deadline {
+                    break; // transient open failure / timeout -> respawn
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.child_mut().kill();
+            let _ = child.child_mut().wait();
+            eprintln!("z_sub open attempt {attempt}/{ATTEMPTS} did not subscribe; retrying");
+        }
+        panic!("pico z_sub failed to open a session to {router_label} after {ATTEMPTS} attempts");
+    }
+
     /// Send `SIGTERM` to `child` via `kill -TERM <pid>`, then poll
     /// `try_wait()` every 50 ms until either the process exits or
     /// `timeout` elapses, in which case `Child::kill` (SIGKILL on

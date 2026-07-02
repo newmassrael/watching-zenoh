@@ -89,65 +89,34 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    graceful_terminate, read_captured, spawn_on_ephemeral_port, wait_for_substring,
+    wz_ap_demo_binary, ChildGuard,
 };
 
-/// Parse the bound port from a node's `listening on 127.0.0.1:<port>` log line —
-/// the ephemeral-port read-back that lets the next node dial this one without a
-/// reserved-port allocation. Shared by the router-hat and peer spawns (both log
-/// the same `listening on 127.0.0.1:` marker).
-fn listen_port(captured: &str) -> u16 {
-    let marker = "listening on 127.0.0.1:";
-    let rest = captured
-        .split(marker)
-        .nth(1)
-        .unwrap_or_else(|| panic!("no '{marker}' in:\n{captured}"));
-    rest.chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .unwrap_or_else(|e| panic!("unparseable port after '{marker}': {e}\n{captured}"))
-}
-
-/// Spawn a demo node on an ephemeral port and wait until it binds, then read the
-/// bound port back from its listen log. `listen_marker` is the role-specific
-/// prefix of the listen line (`"router-hat: listening on 127.0.0.1:"` /
-/// `"peer: listening on 127.0.0.1:"`), so one spawner serves both node kinds.
-fn spawn_node(label: &str, listen_marker: &str, args: &[&str]) -> (ChildGuard, File, u16) {
-    let stderr = tempfile::tempfile().expect("tempfile for node stderr");
-    let writer = stderr.try_clone().expect("dup node stderr handle");
-    let mut reader = stderr;
-    let mut guard = ChildGuard::wrap(
-        label.to_string(),
-        Command::new(wz_ap_demo_binary())
-            .args(args)
-            .env("RUST_LOG", "info")
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(writer))
-            .spawn()
-            .unwrap_or_else(|e| panic!("spawn {label}: {e}")),
-    );
-    let captured = wait_for_substring(&mut reader, listen_marker, Duration::from_secs(5))
-        .unwrap_or_else(|c| {
-            let _ = guard.child_mut().kill();
-            let _ = guard.child_mut().wait();
-            panic!(
-                "{label} did not bind within 5s (is the binary built with \
-                 --features router-hat-router?)\n--- {label} stderr ---\n{c}"
-            );
-        });
-    let port = listen_port(&captured);
-    (guard, reader, port)
-}
-
 /// Spawn the router-hat node (`--router-hat`) — presents wire `WhatAmI::Router`.
+/// Thin wrapper over [`spawn_on_ephemeral_port`](wz_integration_tests::common) that
+/// owns the tempfile the dev-dependency-restricted lib helper cannot allocate.
 fn spawn_router_hat(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
-    spawn_node(label, "router-hat: listening on 127.0.0.1:", args)
+    let stderr = tempfile::tempfile().expect("tempfile for node stderr");
+    spawn_on_ephemeral_port(
+        &wz_ap_demo_binary(),
+        args,
+        "router-hat: listening on 127.0.0.1:",
+        label,
+        stderr,
+    )
 }
 
 /// Spawn a `--peer` mesh node — presents wire `WhatAmI::Peer`.
 fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
-    spawn_node(label, "peer: listening on 127.0.0.1:", args)
+    let stderr = tempfile::tempfile().expect("tempfile for node stderr");
+    spawn_on_ephemeral_port(
+        &wz_ap_demo_binary(),
+        args,
+        "peer: listening on 127.0.0.1:",
+        label,
+        stderr,
+    )
 }
 
 /// Spawn a single-session node that DIALS a router (`--connect <router>`) — a

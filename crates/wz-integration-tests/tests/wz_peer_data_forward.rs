@@ -62,24 +62,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    graceful_terminate, listen_port, read_captured, wait_for_substring, wz_ap_demo_binary,
+    ChildGuard,
 };
-
-/// Parse the bound port from a peer's `listening on 127.0.0.1:<port>` log line
-/// — the ephemeral-port read-back that lets the next peer dial this one without
-/// a reserved-port allocation.
-fn listen_port(captured: &str) -> u16 {
-    let marker = "listening on 127.0.0.1:";
-    let rest = captured
-        .split(marker)
-        .nth(1)
-        .unwrap_or_else(|| panic!("no '{marker}' in:\n{captured}"));
-    rest.chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .unwrap_or_else(|e| panic!("unparseable port after '{marker}': {e}\n{captured}"))
-}
 
 /// Spawn a `--peer` demo on an ephemeral port and wait until it binds, then read
 /// the bound port back from its listen log. Returns the guard, its stderr
