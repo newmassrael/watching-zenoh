@@ -689,6 +689,224 @@ pub mod common {
         panic!("pico z_sub failed to open a session to {router_label} after {ATTEMPTS} attempts");
     }
 
+    /// Spawn a zenoh-pico `z_pub` against a router (`-e <endpoint> -m client`)
+    /// and return it once it has opened a session, declared its publisher, and
+    /// begun putting (stdout `"Putting Data"`). Publishes `-n 30` times with a
+    /// `z_sleep_s(1)` before each Put, so the burst spans ~30s — the caller
+    /// spawns this only AFTER the matching subscription has propagated to the
+    /// router, so every Put in the burst lands on an already-installed route
+    /// (no one-shot drop to race). Like [`spawn_subscribed_zsub`], the 6-attempt
+    /// retry absorbs pico's non-self-retrying one-shot open transient
+    /// (`"Unable to open session!"`) — robustness for a FOREIGN binary, not a wz
+    /// workaround. `router_label` names the dial target in the give-up panic;
+    /// `mk_stdout` is the per-attempt stdout tempfile factory (the caller owns
+    /// the dev-dependency `tempfile::tempfile()` call, once per attempt, since
+    /// the lib crate cannot depend on the dev-only `tempfile`).
+    ///
+    /// R311y140 — lifted from `wz_to_zenohd_router::spawn_publishing_zpub` into
+    /// this SSOT when the wz-router-hat <-> zenohd router-tier interop test
+    /// (`wz_router_hat_zenohd_interop`) became its second consumer, the same
+    /// second-user trigger that lifted [`spawn_subscribed_zsub`] in R311y138.
+    pub fn spawn_publishing_zpub(
+        z_pub: &Path,
+        key: &str,
+        value: &str,
+        endpoint: &str,
+        router_label: &str,
+        mut mk_stdout: impl FnMut() -> File,
+    ) -> ChildGuard {
+        const ATTEMPTS: usize = 6;
+        for attempt in 1..=ATTEMPTS {
+            let out = mk_stdout();
+            let out_writer = out.try_clone().expect("dup z_pub stdout handle");
+            let mut out_reader = out;
+            let mut child = ChildGuard::wrap(
+                "z_pub client (zenoh-pico)",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(z_pub)
+                    .args([
+                        "-k", key, "-v", value, "-e", endpoint, "-m", "client", "-n", "30",
+                    ])
+                    .stdout(Stdio::from(out_writer))
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn z_pub via stdbuf"),
+            );
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let cap = read_captured(&mut out_reader);
+                if cap.contains("Putting Data") {
+                    return child; // session open + publisher declared + publishing
+                }
+                if cap.contains("Unable to open session") || Instant::now() >= deadline {
+                    break; // transient open failure / timeout -> respawn
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.child_mut().kill();
+            let _ = child.child_mut().wait();
+            eprintln!("z_pub open attempt {attempt}/{ATTEMPTS} did not start publishing; retrying");
+        }
+        panic!("pico z_pub failed to open a session to {router_label} after {ATTEMPTS} attempts");
+    }
+
+    /// Spawn a zenohd router on the given `-l` listener locators and block until
+    /// it is HANDSHAKE-ready. The spawn + two-stage readiness SSOT both zenohd
+    /// spawn variants delegate to (R311pn). `--no-multicast-scouting` +
+    /// `--rest-http-port none` keep it to the configured unicast listeners.
+    ///
+    /// Two-stage readiness (R311pi). First a TCP-accept probe on `accept_port`
+    /// ([`wait_for_tcp_accept`]): a captured-stderr log-wait would race zenohd's
+    /// block-buffered startup flush, so the connect is the listener-up signal.
+    /// But TCP-accept proves only that the KERNEL accepted the SYN — not that
+    /// zenohd's transport/routing tasks are scheduled and can complete a zenoh
+    /// handshake. Under load there is a cold-start window between "listener up"
+    /// and "handshake-ready" that a bare TCP-accept gate leaves open. So the
+    /// second stage drives a real wz client to `Established` against
+    /// `handshake_probe` ([`wait_for_zenohd_handshake_ready`]) before returning.
+    ///
+    /// `mk_probe_stderr` is the readiness-probe stderr tempfile factory (the
+    /// caller owns the dev-dependency `tempfile::tempfile()` call, since the lib
+    /// crate cannot depend on the dev-only `tempfile`) — same factory-closure
+    /// shape as [`spawn_subscribed_zsub`] / [`spawn_publishing_zpub`].
+    ///
+    /// R311y140 — lifted from `wz_to_zenohd_router` into this SSOT when the
+    /// wz-router-hat <-> zenohd router-tier interop test
+    /// (`wz_router_hat_zenohd_interop`) became a second consumer, the same
+    /// second-user trigger that lifted [`spawn_subscribed_zsub`] in R311y138.
+    pub fn spawn_zenohd_listeners(
+        listeners: &[String],
+        accept_port: u16,
+        handshake_probe: &str,
+        mk_probe_stderr: impl FnMut() -> File,
+    ) -> ChildGuard {
+        let mut command = Command::new(zenohd_binary());
+        for locator in listeners {
+            command.arg("-l").arg(locator);
+        }
+        command
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let guard = ChildGuard::wrap(
+            "zenohd (reference router)",
+            command.spawn().expect("spawn zenohd"),
+        );
+        assert!(
+            wait_for_tcp_accept(accept_port, Duration::from_secs(10)),
+            "zenohd did not start accepting on 127.0.0.1:{accept_port} within 10s"
+        );
+        // R311pi — close the TCP-accept-vs-handshake-ready gap with a real wz session.
+        wait_for_zenohd_handshake_ready(handshake_probe, mk_probe_stderr);
+        guard
+    }
+
+    /// Spawn a TCP-only zenohd router on the reserved `port` and block until it
+    /// is HANDSHAKE-ready. A single unicast TCP listener; both readiness gates
+    /// target the one port. See [`spawn_zenohd_listeners`] for the readiness
+    /// rationale and the `mk_probe_stderr` factory.
+    pub fn spawn_zenohd(port: u16, mk_probe_stderr: impl FnMut() -> File) -> ChildGuard {
+        spawn_zenohd_listeners(
+            &[format!("tcp/127.0.0.1:{port}")],
+            port,
+            &format!("127.0.0.1:{port}"),
+            mk_probe_stderr,
+        )
+    }
+
+    /// Spawn a zenohd router listening on BOTH `tcp/` (for pico TCP clients) and
+    /// `ws/` (for a wz WebSocket client) on the reserved ports, and block until
+    /// it is HANDSHAKE-ready. R311pk — the dual-transport variant of
+    /// [`spawn_zenohd`] for the WS legs: zenoh-pico has NO native WS link
+    /// (emscripten-only), so pico dials TCP while wz dials WS, and zenohd routes
+    /// between its two listeners. The TCP-accept gate targets `tcp_port` (pico
+    /// dials it), and the handshake-ready probe drives a real wz client to
+    /// `Established` over `ws/127.0.0.1:{ws_port}` — a genuine RFC6455 upgrade +
+    /// zenoh handshake that exercises the WS listener directly. This REAL
+    /// handshake is required, not a raw-TCP poke: R311pk's earlier bare
+    /// `TcpStream::connect`-then-close (no upgrade) made zenoh's serial
+    /// single-worker `zenoh-link-ws` accept task hit a tungstenite EOF, return
+    /// `Err`, and self-delete — wedging every later `ws/` dial. A completed WS
+    /// upgrade keeps the accept task alive, so it is the only sound WS-readiness
+    /// signal.
+    pub fn spawn_zenohd_tcp_ws(
+        tcp_port: u16,
+        ws_port: u16,
+        mk_probe_stderr: impl FnMut() -> File,
+    ) -> ChildGuard {
+        spawn_zenohd_listeners(
+            &[
+                format!("tcp/127.0.0.1:{tcp_port}"),
+                format!("ws/127.0.0.1:{ws_port}"),
+            ],
+            tcp_port,
+            &format!("ws/127.0.0.1:{ws_port}"),
+            mk_probe_stderr,
+        )
+    }
+
+    /// R311pi — confirm zenohd can complete a zenoh handshake by driving a
+    /// throwaway wz client to `Established` against the `connect` locator, then
+    /// dropping the client. The wz open is deterministic (in-process, no fork),
+    /// so this probe is reliable even when the foreign one-shot clients' opens
+    /// occasionally need a retry under load. This is the readiness signal
+    /// [`spawn_zenohd_listeners`] returns on (replacing the bare TCP-accept
+    /// gate). The probe publishes to a dedicated keyexpr no test subscribes to,
+    /// and is killed before returning, so it leaves no routing state behind.
+    ///
+    /// R311pn — `connect` is a full `--connect` locator (not a bare port), so the
+    /// probe can target a `ws/...` listener with a REAL WS handshake (the
+    /// TCP-only variant passes `127.0.0.1:{port}`, the dual variant
+    /// `ws/127.0.0.1:{ws_port}`). A `ws/...` probe needs the `ws` feature in the
+    /// demo binary (the Layer Z build enables it); without it the demo surfaces a
+    /// typed `Unsupported` and this probe fails loudly rather than passing on a
+    /// TCP fallback. `mk_probe_stderr` is the stderr tempfile factory (see
+    /// [`spawn_zenohd_listeners`]).
+    pub fn wait_for_zenohd_handshake_ready(
+        connect: &str,
+        mut mk_probe_stderr: impl FnMut() -> File,
+    ) {
+        let demo = wz_ap_demo_binary();
+        let probe_stderr = mk_probe_stderr();
+        let probe_writer = probe_stderr
+            .try_clone()
+            .expect("dup readiness probe stderr handle");
+        let mut probe_reader = probe_stderr;
+        let mut probe = ChildGuard::wrap(
+            "wz-ap-demo (zenohd handshake readiness probe)",
+            Command::new(&demo)
+                .arg("--connect")
+                .arg(connect)
+                .arg("--publish")
+                .arg("wz/zenohd/readiness-probe")
+                .arg("--value")
+                .arg("ready")
+                .env("RUST_LOG", "info")
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(probe_writer))
+                .spawn()
+                .expect("spawn zenohd readiness probe"),
+        );
+        let ready = wait_for_substring(
+            &mut probe_reader,
+            "session Established",
+            Duration::from_secs(10),
+        );
+        let _ = probe.child_mut().kill();
+        let _ = probe.child_mut().wait();
+        if ready.is_err() {
+            let cap = read_captured(&mut probe_reader);
+            panic!(
+                "zenohd readiness probe (wz client) did not reach Established within 10s \
+                 over {connect:?} — zenohd is up but not handshake-ready.\n\
+                 --- probe stderr ---\n{cap}"
+            );
+        }
+    }
+
     /// Send `SIGTERM` to `child` via `kill -TERM <pid>`, then poll
     /// `try_wait()` every 50 ms until either the process exits or
     /// `timeout` elapses, in which case `Child::kill` (SIGKILL on

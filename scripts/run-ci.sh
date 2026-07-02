@@ -4123,12 +4123,22 @@ layer_z_zenohd_interop() {
         echo "Layer Z SKIP: zenoh-pico z_sub not built (run: bash scripts/build-zenoh-pico-cli.sh)"
         return 0
     fi
-    # wz-ap-demo is the wz client (--connect zenohd); build it like Layer E,
-    # plus the `ws` feature (R311pk; renamed from `connect-ws` in R311pp) so
-    # the WS legs 8/9 can dial `ws/...`. The feature is additive — the TCP
-    # legs 1-7 dial through the same binary unchanged; pico dials TCP
-    # (zenoh-pico has no native WS).
-    (cd crates && cargo build -p wz-ap-demo --features ws --quiet) || return 1
+    # R311y140 — the router-hat interop leg 2 spawns z_pub too (a pico client of
+    # zenohd), which `zenoh_pico_cli_binary` panics on if absent. build-zenoh-pico-
+    # cli.sh builds z_pub + z_sub together, so this is a symmetry guard, not an
+    # expected split — SKIP (not FAIL) on the near-impossible z_sub-without-z_pub.
+    if [[ ! -x target/zenoh-pico-cli/z_pub ]]; then
+        echo "Layer Z SKIP: zenoh-pico z_pub not built (run: bash scripts/build-zenoh-pico-cli.sh)"
+        return 0
+    fi
+    # wz-ap-demo is the wz client (--connect zenohd) for the client-tier legs
+    # AND the `--router-hat` node for the R311y140 router-tier federation leg
+    # (wz_router_hat_zenohd_interop). Build it with BOTH the `ws` feature
+    # (R311pk; renamed from `connect-ws` in R311pp — the WS legs 8/9 dial
+    # `ws/...`) and `router-hat-router` (the run-mode presenting wire
+    # WhatAmI::Router). Both are additive — the TCP client legs 1-7 dial through
+    # the same binary unchanged; pico dials TCP (zenoh-pico has no native WS).
+    (cd crates && cargo build -p wz-ap-demo --features ws,router-hat-router --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients
@@ -4141,6 +4151,17 @@ layer_z_zenohd_interop() {
     # e2e tests, so serial execution costs only wall-clock, not coverage.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_to_zenohd_router -- --ignored --quiet --test-threads=1) || return 1
+    # R311y140 — wz-ROUTER-HAT <-> zenohd ROUTER-TIER federation interop, the
+    # FIRST cross-impl test on wz's `routers_net` link-state wire (every other
+    # zenohd leg pairs wz as a CLIENT, never on the router tier). Leg 1 converges
+    # the router tier with the reference router (routers-net -> 2, proving the
+    # cross-impl LinkStateList OAM exchange); leg 2 routes a pico Put across the
+    # MIXED-VENDOR router backbone (pico -> zenohd -> linkstate -> wz-router ->
+    # pico). Needs zenohd + the pico z_pub/z_sub CLIs (checked above) + the
+    # `router-hat-router` binary (built above). Same --test-threads=1 per-zenohd
+    # isolation as the client legs.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_router_hat_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R3b-2 — wz<->zenohd usrpwd AUTH interop. Needs ONLY zenohd (no
     # storage-manager plugin, no pico CLI): wz authenticates to a
     # mandatory-usrpwd zenohd (correct creds -> Established) and is rejected
