@@ -70,6 +70,24 @@ pub fn read_request_target(request: &RequestOwned) -> Option<QueryTarget> {
         .and_then(QueryTarget::from_wire_byte)
 }
 
+/// The Request `ext_timeout` extension id — zenoh-pico's
+/// `_Z_MSG_EXT_ENC_ZINT | 0x06` timeout slot (`network.c:150-155`), the SSOT
+/// const the [`RequestQueryBuilder`](crate::request_build::RequestQueryBuilder)
+/// writer and [`read_request_timeout_ms`] reader both key on.
+pub const TIMEOUT_EXT_ID: u8 = 0x06;
+
+/// Read the per-query timeout (milliseconds) a routed Query carries in its
+/// `ext_timeout` extension — zenoh's `msg.ext_timeout`, which EVERY relay hop
+/// honors when arming its pending-entry deadline (`route_query`,
+/// `dispatcher/queries.rs:514`: `ext_timeout.unwrap_or(queries_default_timeout)`).
+/// `None` when absent — the relay falls back to its configured default. A zint
+/// over the same `Z64` body the target ext uses, so this is a thin projection of
+/// the shared [`read_z64_ext`](crate::ext_nodeid::read_z64_ext) over
+/// [`TIMEOUT_EXT_ID`].
+pub fn read_request_timeout_ms(request: &RequestOwned) -> Option<u64> {
+    ext_nodeid::read_z64_ext(request.extensions.as_ref(), TIMEOUT_EXT_ID)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +165,21 @@ mod tests {
                 "explicit target reads back through the ext chain",
             );
         }
+    }
+
+    #[test]
+    fn read_request_timeout_ms_reads_the_ext_or_none_when_absent() {
+        use crate::request_build::build_request_query_with_timeout_ms;
+        // A plain Query carries NO timeout ext -> None (relay uses its default).
+        assert_eq!(
+            read_request_timeout_ms(&request()),
+            None,
+            "absent ext_timeout = the relay's configured default",
+        );
+        // An explicit timeout survives the build and reads back — the value a
+        // relay hop feeds its pending-entry deadline (zenoh queries.rs:514).
+        let r = build_request_query_with_timeout_ms(42, 0, Some("demo/q"), 5_000).expect("build");
+        assert_eq!(read_request_timeout_ms(&r), Some(5_000));
     }
 
     #[test]

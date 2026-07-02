@@ -198,15 +198,17 @@
 //! single-net [`LinkstateForwarder`]'s proven return path:
 //! [`forward_response`](RouterForwarder::forward_response) peeks (more replies may
 //! follow) and [`forward_response_final`](RouterForwarder::forward_response_final)
-//! takes (the final closes the query and frees the entry), each rewriting the
-//! `request_id` back to the recorded upstream rid and unicasting to the recorded
-//! inbound face — a MESH face (transit) or a CLIENT face (a local querier), the
-//! tier-agnostic [`send_to_face`](RouterForwarder::send_to_face). The
-//! [`tick`](FaceForwarder::tick) additionally sweeps the pending table for entries
-//! past their deadline
+//! takes — freeing that BRANCH; the closing final propagates upstream only from
+//! the fan's LAST branch (the last-out gate, zenoh `finalize_pending_query`'s
+//! `Arc::into_inner`) — each rewriting the `request_id` back to the recorded
+//! upstream rid and unicasting to the recorded inbound face — a MESH face
+//! (transit) or a CLIENT face (a local querier), the tier-agnostic
+//! [`send_to_face`](RouterForwarder::send_to_face). The
+//! [`tick`](FaceForwarder::tick) additionally sweeps the pending table for
+//! branches past their deadline
 //! ([`reap_timed_out_queries`](RouterForwarder::reap_timed_out_queries), zenoh's
-//! `QueryCleanup`): each reaped query gets a synthesized `Err("Timeout")` reply +
-//! the closing `ResponseFinal` back to its querier, so a queryable that crashes
+//! `QueryCleanup`): a synthesized `Err("Timeout")` reply per reaped branch + the
+//! closing `ResponseFinal` for a `last` branch, so a queryable that crashes
 //! without a final on a still-up face cannot hang a `get()` forever.
 //!
 //! ## Deferred to later slices (named, not silently dropped)
@@ -284,7 +286,7 @@ use wz_session_core::linkstate_oam::{
 };
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::reliteralize_push;
-use wz_session_core::wireexpr_resolve::resolve_wireexpr;
+use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
 
 use crate::accept_loop::{FaceForwarder, FaceId};
 use crate::linkstate_forward::{
@@ -292,7 +294,7 @@ use crate::linkstate_forward::{
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
     declare_queryable_wireexpr, declare_subscriber_wireexpr, is_tree_forward_target,
     peer_whatami_routing, peer_zid_routing, re_advertise_interest_into, resolve_source_in,
-    select_best_matching,
+    select_best_matching, synthesize_drained_fan_finals, synthesize_expired_query_returns,
 };
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{PendingQueries, QueryFan};
@@ -304,7 +306,7 @@ use wz_session_core::query_mode::QueryTarget;
 use wz_session_core::queryable_info::{read_queryable_info, QueryableInfo};
 use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{
-    read_request_source, read_request_target, set_request_source,
+    read_request_source, read_request_target, read_request_timeout_ms, set_request_source,
 };
 use wz_session_core::response_build::set_response_keyexpr_literal;
 
@@ -519,8 +521,9 @@ pub struct RouterForwarder {
     query_timeout: Cell<Duration>,
     /// Count of pending queries reaped by the timeout sweep (C5c) — the GC
     /// witness, the router twin of the single-net forwarder's `timed_out`. Rises
-    /// once per abandoned query (a queryable that never sent its `ResponseFinal`
-    /// on a still-up face); `0` on a healthy mesh where every query finalizes.
+    /// once per abandoned BRANCH (a queryable that never sent its `ResponseFinal`
+    /// on a still-up face; a 2-branch fan expiring counts 2); `0` on a healthy
+    /// mesh where every branch finalizes.
     timed_out: Cell<usize>,
     /// Running total of link-state lists ingested across both nets — the
     /// control-plane work witness (the router twin of
@@ -1787,7 +1790,14 @@ impl RouterForwarder {
         // the legs below (mesh tiers + clients): zenoh's one `Arc<Query>` cloned
         // per branch of `compute_final_route`.
         let fan = QueryFan::new(inbound, request.rid);
-        let deadline = self.now() + self.query_timeout.get();
+        // The per-branch deadline — the Query's own carried ext_timeout when
+        // present, else this relay's configured default: zenoh route_query's
+        // `ext_timeout.unwrap_or(queries_default_timeout)`
+        // (dispatcher/queries.rs:514), honored at EVERY relay hop.
+        let deadline = self.now()
+            + read_request_timeout_ms(request)
+                .map(Duration::from_millis)
+                .unwrap_or_else(|| self.query_timeout.get());
 
         let forwarded = match read_request_target(request) {
             // BestMatching (wire default): the SINGLE globally-nearest COMPLETE
@@ -1890,9 +1900,12 @@ impl RouterForwarder {
         }
         if src_tier == block_tier {
             // Within-tier: route along the querier's tree (its resolved source +
-            // psid), excluding its own inbound neighbour. `within` is `Some` here —
-            // a mesh inbound resolved it before this call (else the whole route was
-            // dropped) — so `?` never short-circuits in practice.
+            // psid), excluding its own inbound neighbour. `within` is `None` when
+            // the mesh source was UNRESOLVABLE (a transit Query naming a psid this
+            // node has not learned) — the `?` short-circuit here IS the
+            // within-leg-only drop: this block is omitted while the cross-tier +
+            // client legs (self-originated, no querier source) still route, the
+            // route_push / zenoh per-block degrade parity.
             let (source_zid, out_node_id) = within?;
             Some(MeshQueryBlock {
                 tier: block_tier,
@@ -1949,13 +1962,16 @@ impl RouterForwarder {
                 // (`hat/router/queries.rs:1107`): the per-net `select_best_matching`
                 // picks the truly-nearest by the full f64 (jitter breaks a same-cost
                 // tie deterministically WITHIN a net), but the CROSS-block compare
-                // must be on the same integer scale zenoh sorts by. The default link
-                // weight is 100 (matching zenoh's `DEFAULT_LINK_WEIGHT`), so a 1-hop
-                // mesh queryable is ~100 and a client is 1 — a client always wins by
-                // distance (never a tie). The truncation's real load-bearing role is
-                // cross-net MESH-vs-MESH ties: a router-net 100.6 and a peer-net
-                // 100.3 both → u16 100, and the strict `<` + routers-first order then
-                // breaks that tie exactly as zenoh's stable B1/B2/B3 sort does.
+                // must be on the same integer scale zenoh sorts by. With the DEFAULT
+                // link weight (100, matching zenoh's `DEFAULT_LINK_WEIGHT`) a 1-hop
+                // mesh queryable is ~100 and a client is 1, so a client wins by
+                // distance; an advertised weight-1 link CAN tie a client at u16 1,
+                // and the mesh block (fed first) then wins — zenoh's insertion
+                // order (B1/B2 before B3) breaks the same tie the same way. The
+                // truncation's other load-bearing role is cross-net MESH-vs-MESH
+                // ties: a router-net 100.6 and a peer-net 100.3 both → u16 100, and
+                // the strict `<` + routers-first order then breaks that tie exactly
+                // as zenoh's stable B1/B2/B3 sort does.
                 Self::consider_best(&mut best, dist as u16, BestQueryWinner::Mesh(bi, hop));
             }
         }
@@ -2204,14 +2220,21 @@ impl RouterForwarder {
     fn forward_response(&self, inbound: FaceId, reliable: bool, response: &ResponseOwned) {
         // Resolve the reply keyexpr against the inbound (forward-outbound) face's
         // alias table — scoped borrow (an unresolvable alias drops the Response;
-        // the closing final still terminates the querier).
-        let keyexpr = {
+        // the closing final still terminates the querier). A keyexpr-LESS reply
+        // (the EMPTY wireexpr — a downstream relay's synthesized timeout Err,
+        // zenoh WireExpr::empty()) is passed THROUGH unresolved with only the
+        // rid rewritten, as zenoh route_send_response forwards a reply with no
+        // keyexpr resolution at all (dispatcher/queries.rs:595-635) — resolving
+        // it would drop the explicit Err the querier is owed.
+        let keyexpr = if wireexpr_is_empty(&response.keyexpr.body) {
+            None
+        } else {
             let faces = self.faces.borrow();
             let Some(s) = faces.get(&inbound) else {
                 return;
             };
             match resolve_wireexpr(&response.keyexpr.body, &s.keyexpr_table) {
-                Some(k) => k,
+                Some(k) => Some(k),
                 None => return,
             }
         };
@@ -2221,8 +2244,10 @@ impl RouterForwarder {
         };
         let mut carrier = response.clone();
         carrier.request_id = orig_rid;
-        if set_response_keyexpr_literal(&mut carrier, &keyexpr).is_err() {
-            return;
+        if let Some(ke) = &keyexpr {
+            if set_response_keyexpr_literal(&mut carrier, ke).is_err() {
+                return;
+            }
         }
         self.send_to_face(orig_face, reliable, || {
             NetworkMessage::Response(Box::new(carrier.clone()))
@@ -2269,56 +2294,30 @@ impl RouterForwarder {
         });
     }
 
-    /// Reap pending queries past their deadline (C5c) — the router twin of
-    /// [`LinkstateForwarder::reap_timed_out_queries`], the wz form of zenoh's
-    /// per-query `QueryCleanup::run` (`dispatcher/queries.rs:305-349`). The
+    /// Reap pending query BRANCHES past their deadline (C5c) — the router twin
+    /// of [`LinkstateForwarder::reap_timed_out_queries`], the wz form of zenoh's
+    /// per-branch `QueryCleanup::run` (`dispatcher/queries.rs:305-349`). The
     /// [`tick`](FaceForwarder::tick) calls this each coalescing window: sweep the
     /// pending table ([`PendingQueries::expired`]) for branches whose
     /// `ResponseFinal` never arrived on a still-up face and route the synthesized
-    /// timeout messages back to the querier — an `Err("Timeout")` reply per reaped
-    /// BRANCH (zenoh runs one `QueryCleanup` per branch, each sending an Err) and
-    /// the closing `ResponseFinal` only for a `last` branch (the fan's last-out
-    /// gate — a sibling branch still answering must not have its query closed by
-    /// this branch's timeout). The final is the load-bearing part (it terminates
-    /// the querier's `get()`); the Err gives an explicit timeout error rather than
-    /// a silent empty result. Both carry the recorded upstream rid, unicast to the
-    /// recorded inbound face (mesh OR client), reliable — a synthesized
-    /// control-plane close, matching the sibling forwarder. Multi-hop note (peer
-    /// parity): a relaying hop's `forward_response` drops the empty-keyexpr Err at
-    /// its keyexpr resolution — the query still terminates (the final always
-    /// propagates); the multi-hop Err is graceful-degrade, as the sibling
-    /// documents. The `expired` borrow is released before the per-entry send
-    /// re-borrows the faces table.
+    /// timeout messages back via the shared [`synthesize_expired_query_returns`]
+    /// core: an `Err("Timeout")` reply per reaped BRANCH (zenoh runs one
+    /// `QueryCleanup` per branch, each sending an Err) and the closing
+    /// `ResponseFinal` only for a `last` branch (the fan's last-out gate — a
+    /// sibling branch still answering must not have its query closed by this
+    /// branch's timeout). The final is the load-bearing part (it terminates the
+    /// querier's `get()`); the Err gives an explicit timeout error rather than a
+    /// silent empty result — and a relaying wz hop passes the empty-keyexpr Err
+    /// THROUGH (`forward_response`'s `wireexpr_is_empty` arm), so both reach a
+    /// multi-hop querier. The `expired` borrow is released before the per-entry
+    /// send re-borrows the faces table.
     fn reap_timed_out_queries(&self) {
         let reaped = self.pending.borrow_mut().expired(self.now());
         if reaped.is_empty() {
             return;
         }
         self.timed_out.set(self.timed_out.get() + reaped.len());
-        for eq in reaped {
-            // 1) The Err("Timeout") reply, empty keyexpr (zenoh WireExpr::empty()),
-            //    rid rewritten to the recorded upstream rid (a build error just
-            //    skips the Err — the closing final below is the load-bearing part).
-            //    Per BRANCH, as zenoh runs one QueryCleanup per branch.
-            if let Ok(err_msg) = wz_session_core::response_build::build_response_err_empty(
-                eq.inbound_rid,
-                b"Timeout",
-            ) {
-                self.send_to_face(eq.inbound, true, || {
-                    NetworkMessage::Response(Box::new(err_msg.clone()))
-                });
-            }
-            // 2) The closing final, rewritten to the recorded upstream rid — ONLY
-            //    when this branch was the fan's LAST (the last-out gate).
-            if !eq.last {
-                continue;
-            }
-            let final_msg =
-                wz_session_core::response_final_build::build_response_final(eq.inbound_rid);
-            self.send_to_face(eq.inbound, true, || {
-                NetworkMessage::ResponseFinal(final_msg.clone())
-            });
-        }
+        synthesize_expired_query_returns(&reaped, |face, msg| self.send_one_to_face(face, msg));
     }
 
     /// Total live pending query branches — the pending-table witness the shutdown
@@ -2328,8 +2327,9 @@ impl RouterForwarder {
         self.pending.borrow().len()
     }
 
-    /// Total pending queries reaped by the timeout sweep — the GC witness; the
-    /// router twin of [`LinkstateForwarder::pending_timed_out`].
+    /// Total pending query BRANCHES reaped by the timeout sweep (a 2-branch fan
+    /// expiring counts 2) — the GC witness; the router twin of
+    /// [`LinkstateForwarder::pending_timed_out`].
     pub fn pending_timed_out(&self) -> usize {
         self.timed_out.get()
     }
@@ -2355,6 +2355,18 @@ impl RouterForwarder {
             .actions
             .send_network_message(build(), reliable, false)
             .is_ok()
+    }
+
+    /// [`send_to_face`](Self::send_to_face) for an already-BUILT owned message —
+    /// the adapter the shared synthesis cores ([`synthesize_expired_query_returns`]
+    /// / [`synthesize_drained_fan_finals`]) hand their per-send `NetworkMessage`
+    /// to (`NetworkMessage` is not `Clone`; the one-shot `Option` take feeds the
+    /// at-most-once builder — the target face is looked up exactly once).
+    fn send_one_to_face(&self, face: FaceId, msg: NetworkMessage) {
+        let mut carrier = Some(msg);
+        self.send_to_face(face, true, || {
+            carrier.take().expect("send_one_to_face builds once")
+        });
     }
 }
 
@@ -2433,15 +2445,7 @@ impl FaceForwarder for RouterForwarder {
         // its get() waits out its own timeout. A drained fan whose querier IS the
         // departed face has nobody left to notify (skipped).
         let drained = self.pending.borrow_mut().remove_face(&id);
-        for (querier, rid) in drained {
-            if querier == id {
-                continue;
-            }
-            let final_msg = wz_session_core::response_final_build::build_response_final(rid);
-            self.send_to_face(querier, true, || {
-                NetworkMessage::ResponseFinal(final_msg.clone())
-            });
-        }
+        synthesize_drained_fan_finals(&drained, id, |face, msg| self.send_one_to_face(face, msg));
         self.client_qabls.borrow_mut().remove(&id);
         // Purge the FaceId-keyed client sub store, withdrawing self's cross-tier
         // advertisement for any keyexpr this was the LAST client of. A Client face
@@ -2617,7 +2621,8 @@ impl FaceForwarder for RouterForwarder {
                 }
                 // A queryable's reply: route it BACK toward the querier via the
                 // pending table (C5c) — peek on a Response (more replies may
-                // follow), take on the ResponseFinal (closes the query).
+                // follow); take on the ResponseFinal frees that BRANCH, and the
+                // final propagates upstream only from the fan's LAST branch.
                 NetworkMessage::Response(response) => {
                     self.forward_response(id, *reliable, response);
                 }
@@ -5608,6 +5613,93 @@ mod tests {
             forwarded_response_final_rid(&sink_cq.frame_bytes(1)),
             51,
             "so does the closing final"
+        );
+    }
+
+    #[test]
+    fn an_ext_timeout_overrides_the_relay_default_deadline() {
+        // zenoh route_query arms the pending deadline from the Query's OWN
+        // carried ext_timeout (`ext_timeout.unwrap_or(queries_default_timeout)`,
+        // dispatcher/queries.rs:514) — the router must honor it, not its 10s
+        // knob: a 5ms ext on an un-answered query is reaped at 5ms.
+        let base = Instant::now();
+        let offset = Rc::new(Cell::new(Duration::ZERO));
+        let offset_clock = offset.clone();
+        let fwd =
+            RouterForwarder::with_clock(zid(0x01), Box::new(move || base + offset_clock.get()));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (c, _sc) = face(zid(0xCC), WIRE_PEER); // queryable (never replies)
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick(); // flush the topology recomputes so later ticks only reap
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+        sink_a.reset();
+        let request = NetworkMessage::Request(Box::new(
+            wz_session_core::request_build::build_request_query_with_timeout_ms(
+                90,
+                0,
+                Some("demo/q"),
+                5,
+            )
+            .expect("build request"),
+        ));
+        forward_one(&fwd, FaceId(0), request);
+        assert_eq!(fwd.pending_len(), 1, "the branch is pending");
+        offset.set(Duration::from_millis(4));
+        fwd.tick();
+        assert_eq!(
+            fwd.pending_timed_out(),
+            0,
+            "not reaped before the ext deadline"
+        );
+        offset.set(Duration::from_millis(5));
+        fwd.tick();
+        assert_eq!(
+            fwd.pending_timed_out(),
+            1,
+            "reaped AT the Query's own 5ms ext_timeout, not the 10s default"
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            2,
+            "the querier received the Err + the closing final"
+        );
+    }
+
+    #[test]
+    fn an_empty_keyexpr_err_reply_is_relayed_not_dropped() {
+        // The multi-hop timeout-Err path: a DOWNSTREAM relay's synthesized
+        // Err("Timeout") carries the EMPTY wireexpr (zenoh WireExpr::empty()).
+        // The router must pass it THROUGH with only the rid rewritten (zenoh
+        // route_send_response does no keyexpr resolution), not drop it at
+        // resolve_wireexpr.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // queryable
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+        sink_a.reset();
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), request_best(95, "demo/q"));
+        let qid = forwarded_request(&sink_c.frame_bytes(0)).rid;
+        let err = wz_session_core::response_build::build_response_err_empty(qid, b"Timeout")
+            .expect("build err");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Response(Box::new(err)));
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "the empty-keyexpr Err was RELAYED to the querier, not dropped"
+        );
+        assert_eq!(
+            forwarded_response(&sink_a.frame_bytes(0)).request_id,
+            95,
+            "with the rid rewritten to the querier's"
         );
     }
 }

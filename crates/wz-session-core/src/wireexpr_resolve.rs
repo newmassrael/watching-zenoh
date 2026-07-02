@@ -31,6 +31,21 @@ use wz_codecs::wireexpr::WireexprOwnedVariant;
 /// caller decides whether to skip the dispatch (preferred, the
 /// declaration is incomplete) or surface the half-truth (currently
 /// no caller does the latter).
+/// Whether `body` is the EMPTY wire keyexpr (`id == 0` with no — or an empty —
+/// suffix): zenoh's `WireExpr::empty()`, carried by keyexpr-less replies such
+/// as the synthesized timeout `Err` (`build_response_err_empty`). A relay MUST
+/// NOT route such a message through [`resolve_wireexpr`] (which returns `None`
+/// for it — an empty keyexpr resolves to nothing) but pass it through with only
+/// the rid rewritten, exactly as zenoh's `route_send_response` forwards a reply
+/// with NO keyexpr resolution at all (`dispatcher/queries.rs:595-635`).
+pub fn wireexpr_is_empty(body: &WireexprOwnedVariant) -> bool {
+    let (id, suffix_opt) = match body {
+        WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
+        WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
+    };
+    id == 0 && suffix_opt.map_or(true, str::is_empty)
+}
+
 pub fn resolve_wireexpr(
     body: &WireexprOwnedVariant,
     table: &HashMap<u64, String>,

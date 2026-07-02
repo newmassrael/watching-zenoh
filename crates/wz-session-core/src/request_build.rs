@@ -41,6 +41,7 @@ use wz_codecs::wireexpr_local::WireexprLocalOwned;
 use crate::codec_owned::{owned_bytes, owned_string};
 use crate::qos::{CongestionControl, Priority};
 use crate::query_mode::{ConsolidationMode, QueryTarget, TARGET_EXT_ID};
+use crate::request_routing_context::TIMEOUT_EXT_ID;
 use sce_forge_runtime::codec::CodecError;
 
 /// R121j-1 — build a `Request` network-message that carries a
@@ -636,9 +637,10 @@ impl RequestQueryBuilder {
         }
         if let Some(timeout_ms) = self.request_timeout_ms {
             request_exts.push(ExtEntryOwned {
-                // ENC_ZINT(0x20) | id_timeout(0x06). M stays clear
-                // (timeout is informational).
-                header: 0x20 | 0x06,
+                // ENC_ZINT(0x20) | TIMEOUT_EXT_ID(0x06). M stays clear
+                // (timeout is informational). The id is the SSOT const the
+                // read_request_timeout_ms reader (the relay deadline) keys on.
+                header: 0x20 | TIMEOUT_EXT_ID,
                 body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value: timeout_ms }),
             });
         }
