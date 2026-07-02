@@ -4258,6 +4258,22 @@ layer_e6_peer_mesh() {
         --test wz_peer_adminspace_config_write -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
+#
+# The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
+# transport for the first time — a `--router-hat` node presenting wire
+# WhatAmI::Router through accept_loop, with `--peer` nodes dialing it. ONE binary
+# built with `--features routing-router-hat` serves both kinds (the feature pulls
+# routing-peer transitively). The two tests are STAGED: a 2-node topology floor
+# (convergence + tier classification) then a 3-node star data-forward through the
+# router. The test fns carry the `wz_router_hat_` prefix so the default Layer E
+# sweep's `--skip wz_router` excludes them from the arbitrary-feature binary run.
+layer_e7_router_hat() {
+    (cd crates && cargo build -p wz-ap-demo --features routing-router-hat --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_mesh -- --ignored --quiet) || return 1
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -4454,6 +4470,7 @@ run_layer E3 layer_e3_router_multi_peer || overall=1
 run_layer E4 layer_e4_router_reject || overall=1
 run_layer E5 layer_e5_router_forward || overall=1
 run_layer E6 layer_e6_peer_mesh || overall=1
+run_layer E7 layer_e7_router_hat || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

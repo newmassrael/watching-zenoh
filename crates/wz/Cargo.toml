@@ -457,6 +457,14 @@ routing-router = ["transport-link-tcp", "transport-unicast", "wz-runtime-tokio?/
 # path (runtime-tokio profile pulls wz-runtime-tokio).
 routing-routes = ["routing-router", "wz-runtime-tokio?/routing-routes"]
 routing-static-routes = ["routing-router"]
+# P4 §5.21 — routing-router-hat forwards the wz-runtime-tokio `routing-router-hat`
+# atom (the dual-mesh RouterForwarder, the zenoh hat/router port) on top of the
+# `routing-peer` mesh-node foundation it reuses (peer_loop, the shared
+# link-state graph, per-port zid derivation). `?/` activates only on the AP path
+# (runtime-tokio profile pulls wz-runtime-tokio). This is the ACTIVATION build
+# feature — it makes the RouterForwarder reachable through a real run-mode; the
+# `router-hat-router` inventory atom stays reserved until a run-mode active flip.
+routing-router-hat = ["routing-peer", "wz-runtime-tokio?/routing-router-hat"]
 
 # ----- domain: runtime (6 atomic, 2 active / 4 reserved) -----
 runtime-async-std = []

@@ -127,6 +127,15 @@ pub(crate) enum NodeKind {
     /// for now (a distinct WhatAmI refinement is a later atom).
     #[cfg(feature = "routing-peer")]
     Peer,
+    /// P4 §5.21 ACTIVATION — the router-hat node (`--router-hat`): the ONE demo
+    /// kind that announces a TRUE wire [`WhatAmI::Router`], driving the dual-mesh
+    /// `RouterForwarder`. Distinct from [`NodeKind::Router`] (the star
+    /// concentrator, which keeps the Peer stand-in wire value so the R121c/e
+    /// accept tests and `run_router` are unchanged): the router-hat node needs
+    /// the real Router role so connecting peers classify it into their linkstate
+    /// graph as a router and this node partitions its two meshes by peer role.
+    #[cfg(feature = "routing-router-hat")]
+    RouterHat,
 }
 
 impl Role {
@@ -149,6 +158,12 @@ pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
         // A hold-only mesh peer announces Peer too (whatami refinement later).
         #[cfg(feature = "routing-peer")]
         NodeKind::Peer => WhatAmI::Peer,
+        // P4 §5.21 ACTIVATION — the router-hat node announces the TRUE Router
+        // wire value (0b00), so a connecting peer's linkstate graph tags it as a
+        // router and this node's RouterForwarder partitions faces by role. This
+        // is the first wz run-mode to present WhatAmI::Router on the wire.
+        #[cfg(feature = "routing-router-hat")]
+        NodeKind::RouterHat => WhatAmI::Router,
         NodeKind::Initiator => WhatAmI::Client, // R121f initiator path
     };
     SessionInitParams {

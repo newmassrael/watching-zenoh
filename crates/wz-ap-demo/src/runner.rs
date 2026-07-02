@@ -1115,6 +1115,37 @@ fn zid_hex(zid: Option<&[u8]>) -> String {
     }
 }
 
+/// The shared face-lifecycle observer for the multi-peer run-modes — one log line
+/// per `AcceptEvent`, prefixed with the caller's `node_label` (`"router"` /
+/// `"peer"` / `"router-hat"`). Extracted (rule-of-three) from the byte-identical
+/// four-arm match `run_router`, `run_peer`, and `run_router_hat` would otherwise
+/// each carry; only the prefix differed. Passed as `|event| log_face_event("...",
+/// event)` to `accept_loop` / `peer_loop`.
+#[cfg(any(feature = "routing-router", feature = "routing-peer"))]
+fn log_face_event(node_label: &str, event: &wz::runtime_tokio::accept_loop::AcceptEvent) {
+    use wz::runtime_tokio::accept_loop::AcceptEvent;
+    match event {
+        AcceptEvent::FaceUp(face) => log::info!(
+            "wz-ap-demo {node_label}: face {} UP (peer {}, zid {})",
+            face.id.0,
+            face.peer,
+            zid_hex(face.peer_zid.as_deref())
+        ),
+        AcceptEvent::FaceDown(face, outcome) => log::info!(
+            "wz-ap-demo {node_label}: face {} DOWN (peer {}, {outcome:?})",
+            face.id.0,
+            face.peer
+        ),
+        AcceptEvent::FaceFailed { id, peer, cause } => log::warn!(
+            "wz-ap-demo {node_label}: face {} FAILED (peer {peer}, {cause:?})",
+            id.0
+        ),
+        AcceptEvent::AcceptError(e) => {
+            log::warn!("wz-ap-demo {node_label}: accept error (continuing): {e}")
+        }
+    }
+}
+
 /// R311qa — multi-peer ROUTER mode: bind once and hold N concurrent peer faces
 /// (the `routing-router` foundation), distinct from the one-shot `--listen`
 /// Acceptor. Binds the `--router` endpoint, then runs the library
@@ -1167,28 +1198,7 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
         TokioTime::new(),
         DEFAULT_OPEN_TICK_MS,
         shutdown_signal(),
-        |event: &AcceptEvent| match event {
-            AcceptEvent::FaceUp(face) => {
-                log::info!(
-                    "wz-ap-demo router: face {} UP (peer {}, zid {})",
-                    face.id.0,
-                    face.peer,
-                    zid_hex(face.peer_zid.as_deref())
-                )
-            }
-            AcceptEvent::FaceDown(face, outcome) => log::info!(
-                "wz-ap-demo router: face {} DOWN (peer {}, {outcome:?})",
-                face.id.0,
-                face.peer
-            ),
-            AcceptEvent::FaceFailed { id, peer, cause } => log::warn!(
-                "wz-ap-demo router: face {} FAILED (peer {peer}, {cause:?})",
-                id.0
-            ),
-            AcceptEvent::AcceptError(e) => {
-                log::warn!("wz-ap-demo router: accept error (continuing): {e}")
-            }
-        },
+        |event: &AcceptEvent| log_face_event("router", event),
         &forwarder,
     )
     .await;
@@ -1671,28 +1681,7 @@ pub(crate) async fn run_peer(
         TokioTime::new(),
         DEFAULT_OPEN_TICK_MS,
         shutdown_signal(),
-        |event: &AcceptEvent| match event {
-            AcceptEvent::FaceUp(face) => {
-                log::info!(
-                    "wz-ap-demo peer: face {} UP (peer {}, zid {})",
-                    face.id.0,
-                    face.peer,
-                    zid_hex(face.peer_zid.as_deref())
-                )
-            }
-            AcceptEvent::FaceDown(face, outcome) => log::info!(
-                "wz-ap-demo peer: face {} DOWN (peer {}, {outcome:?})",
-                face.id.0,
-                face.peer
-            ),
-            AcceptEvent::FaceFailed { id, peer, cause } => log::warn!(
-                "wz-ap-demo peer: face {} FAILED (peer {peer}, {cause:?})",
-                id.0
-            ),
-            AcceptEvent::AcceptError(e) => {
-                log::warn!("wz-ap-demo peer: accept error (continuing): {e}")
-            }
-        },
+        |event: &AcceptEvent| log_face_event("peer", event),
         &forwarder,
     );
     tokio::pin!(loop_fut);
@@ -1880,6 +1869,195 @@ pub(crate) async fn run_peer(
         log::info!(
             "wz-ap-demo peer: interceptor dropped ({} message(s))",
             forwarder.interceptor_dropped()
+        );
+    }
+    Ok(())
+}
+
+/// P4 §5.21 ACTIVATION — router-hat MODE (`--router-hat <listen>`): the first wz
+/// run-mode to present a TRUE wire [`WhatAmI::Router`] and drive the dual-mesh
+/// [`RouterForwarder`](wz::runtime_tokio::router_forward::RouterForwarder) (the
+/// zenoh `hat/router` port) over real transport. The dial+accept
+/// [`peer_loop`](wz::runtime_tokio::accept_loop::peer_loop) generalisation of
+/// [`run_router`]: like the peer-mesh [`run_peer`] it binds `listen`, dials each
+/// `dial_targets` (a ROUTER dialing another router for federation — ACTIVATION-4),
+/// and holds both directions' faces; unlike the peer it announces Router, drives
+/// the router forwarder, and hosts NO local publisher / subscriber / interceptors
+/// / autoconnect / locators (a pure router forwards, it does not originate). The
+/// forwarder partitions each held face into `routers_net` (a Router neighbour) or
+/// `linkstatepeers_net` (a Peer) by the handshake role, converging both meshes on
+/// the [`FaceForwarder`](wz::runtime_tokio::accept_loop::FaceForwarder) tick that
+/// `peer_loop` drives.
+///
+/// The application driver here only OBSERVES the forwarder for the e2e witnesses
+/// (a pure router runs no application I/O): per-tier convergence (a positive-edge
+/// log once a mesh learns its first neighbour), data transit (the first Push that
+/// crossed this router), and the deterministic shutdown counterparts (so a test
+/// asserts on teardown output without racing the 250 ms tick). Runs until the
+/// graceful-shutdown signal (SIGTERM / SIGINT).
+#[cfg(feature = "routing-router-hat")]
+pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io::Result<()> {
+    use crate::args::NodeKind;
+    use std::time::Duration;
+    use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
+    use wz::runtime_tokio::linkstate_forward::Zid;
+    use wz::runtime_tokio::router_forward::RouterForwarder;
+    use wz::runtime_tokio::session_open::bind_endpoint;
+
+    // Distinct 2-byte zid prefix ("rh") so a router-hat node and a peer bound to
+    // the same port still derive DIFFERENT routing zids: RouterForwarder dedups
+    // faces by zid (`dedups_faces_by_zid`), and two mesh nodes sharing a zid would
+    // silently drop one's face and never converge. Ports differ across the harness
+    // nodes anyway, so the distinct prefix is belt-and-suspenders + keeps the
+    // router-hat's derived zids in a recognisable range (peers use 0x7072).
+    const ROUTER_HAT_ZID_PREFIX: u16 = 0x7268;
+    // Cadence of the OBSERVE-only application driver (a pure router originates no
+    // data); matches the peer's so the witnesses log promptly after convergence.
+    const APP_TICK_MS: u64 = 250;
+
+    let listener = bind_endpoint(listen).await?;
+    let local = listener.local_addr()?;
+
+    // Parse the outbound dial targets (empty for a listen-only router; non-empty
+    // for router-to-router federation, ACTIVATION-4). A malformed target fails
+    // fast rather than silently dropping a mesh link — the run_peer discipline.
+    let mut dials = Vec::with_capacity(dial_targets.len());
+    for target in dial_targets {
+        match target.parse::<std::net::SocketAddr>() {
+            Ok(addr) => dials.push(addr),
+            Err(e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("wz-ap-demo router-hat: invalid --connect dial target {target:?}: {e}"),
+                ));
+            }
+        }
+    }
+
+    log::info!(
+        "wz-ap-demo router-hat: listening on {local}; dialing {} configured \
+         router(s), presenting WhatAmI::Router and forwarding across the router \
+         and peer meshes (dual-tier RouterForwarder)",
+        dials.len()
+    );
+
+    let mut params = demo_session_init_params(NodeKind::RouterHat);
+    // A DISTINCT routing zid per node (the run_peer discipline), derived from the
+    // listen port so the demo's zids never collide — the mesh graph keys on it.
+    let port = local.port();
+    params.zid = vec![
+        (ROUTER_HAT_ZID_PREFIX >> 8) as u8,
+        (ROUTER_HAT_ZID_PREFIX & 0xff) as u8,
+        (port >> 8) as u8,
+        (port & 0xff) as u8,
+    ];
+
+    // The dual-mesh router forwarder. Self is a WhatAmI::Router in BOTH meshes
+    // (the ctor seeds both nets with Router); its zid is this node's own trusted
+    // identity, so the infallible boundary ctor is right (a wire zid would use the
+    // validating `Zid::try_from`). No set_self_locators (a pure router advertises
+    // no dial hint — topology still converges over the accepted/dialed faces), no
+    // interceptors (admit-all), no autoconnect (dial only the configured set).
+    let forwarder = RouterForwarder::new(Zid::from_slice(&params.zid));
+
+    let loop_fut = peer_loop(
+        FaceSources {
+            listener,
+            dial_targets: dials,
+            // No gossip-autoconnect on a router (zenoh: routers are reached via
+            // configured links, `default_autoconnect_matcher(Router)` is empty) —
+            // so no dial-intent stream, exactly run_peer's `--autoconnect`-off arm.
+            dial_intents: None,
+        },
+        params,
+        TokioTime::new(),
+        DEFAULT_OPEN_TICK_MS,
+        shutdown_signal(),
+        |event: &AcceptEvent| log_face_event("router-hat", event),
+        &forwarder,
+    );
+    tokio::pin!(loop_fut);
+
+    // OBSERVE-only application driver: a pure router hosts no publisher/subscriber,
+    // so the tick samples the dual-mesh convergence + transit for the e2e
+    // witnesses. The topology flood + spanning-tree recompute + query-timeout reap
+    // run on the FaceForwarder seam (peer_loop drives the tick), NOT here.
+    let mut app_tick = tokio::time::interval(Duration::from_millis(APP_TICK_MS));
+    // High-water node counts per tier (teardown collapses the live graphs toward
+    // self, so the peak is the meaningful converged-size witness — the run_peer
+    // peak_nodes discipline, per net).
+    let mut peak_routers = 0usize;
+    let mut peak_peers = 0usize;
+    // Per-tier convergence high-water announced so far (self alone = 1). A log
+    // fires each time a tier reaches a NEW high (self + each newly-learned
+    // neighbour), so the trace steps through convergence (2 node(s), then 3, ...)
+    // rather than latching at the first >= 2 and hiding later joins. A single
+    // router never sees a Router neighbour, so the routers-net line stays silent
+    // until federation (ACTIVATION-4). NOTE: these in-run logs are a convergence
+    // TRACE — a test that needs a SPECIFIC converged size asserts the deterministic
+    // shutdown-summary peak below (which cannot race the tick), not this edge.
+    let mut last_announced_peers = 1usize;
+    let mut last_announced_routers = 1usize;
+    let mut last_data_seen = 0usize;
+    let summary = loop {
+        tokio::select! {
+            done = &mut loop_fut => break done,
+            _ = app_tick.tick() => {
+                let routers = forwarder.routers_net_node_count();
+                let peers = forwarder.linkstatepeers_net_node_count();
+                peak_routers = peak_routers.max(routers);
+                peak_peers = peak_peers.max(peers);
+                if peers > last_announced_peers {
+                    last_announced_peers = peers;
+                    log::info!("wz-ap-demo router-hat: peers-net converged ({peers} node(s))");
+                }
+                if routers > last_announced_routers {
+                    last_announced_routers = routers;
+                    log::info!("wz-ap-demo router-hat: routers-net converged ({routers} node(s))");
+                }
+                // Transit witness: a Push crossed this router. The peers know only
+                // THIS router's address (no autoconnect), so a rise proves the data
+                // plane routed THROUGH here — not around it.
+                let seen = forwarder.data_seen();
+                if seen > last_data_seen {
+                    last_data_seen = seen;
+                    log::info!("wz-ap-demo router-hat: forwarded mesh data ({seen} push(es))");
+                }
+            }
+        }
+    };
+
+    log::info!(
+        "wz-ap-demo router-hat: shutdown; dialed {}, accepted {}, served {} \
+         peer(s), peak {} concurrent face(s), ingested {} link-state(s), peak \
+         routers-net {} node(s), peak peers-net {} node(s), {} data push(es) \
+         forwarded",
+        summary.dialed,
+        summary.accepted,
+        summary.established,
+        summary.peak_concurrent,
+        forwarder.ingested(),
+        peak_routers,
+        peak_peers,
+        forwarder.data_seen()
+    );
+    // Deterministic shutdown witnesses (the run_peer counterparts): a router that
+    // INGESTED a neighbour's link-state converged over the wire, and one that
+    // FORWARDED any Push carried transit — both emitted unconditionally at
+    // teardown so a test need not race the 250 ms app tick.
+    if forwarder.ingested() > 0 {
+        log::info!(
+            "wz-ap-demo router-hat: learned mesh topology (ingested {} \
+             link-state(s), peak routers-net {} node(s), peak peers-net {} node(s))",
+            forwarder.ingested(),
+            peak_routers,
+            peak_peers
+        );
+    }
+    if forwarder.data_seen() > 0 {
+        log::info!(
+            "wz-ap-demo router-hat: forwarded mesh data ({} push(es))",
+            forwarder.data_seen()
         );
     }
     Ok(())

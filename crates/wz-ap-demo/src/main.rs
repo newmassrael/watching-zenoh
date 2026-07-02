@@ -235,6 +235,32 @@ fn main() -> ExitCode {
         }
     }
 
+    // P4 §5.21 ACTIVATION — `--router-hat <listen>` selects the router-hat mode:
+    // present a true wire WhatAmI::Router and drive the dual-mesh RouterForwarder
+    // over real transport (bind `<listen>`, dial the `--connect` router set for
+    // federation, hold both directions). Handled before the single-session role
+    // parse. Opt-in behind `routing-router-hat`: a build without it rejects the
+    // flag (the --router / --peer feature-gate discipline) so the catalog claim
+    // and the binary stay in lockstep.
+    if let Some(router_hat_listen) = parse_pair(rest, "--router-hat") {
+        #[cfg(feature = "routing-router-hat")]
+        {
+            let dial_targets: Vec<String> = parse_pair(rest, "--connect")
+                .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
+                .unwrap_or_default();
+            return run_router_hat_mode(router_hat_listen, dial_targets);
+        }
+        #[cfg(not(feature = "routing-router-hat"))]
+        {
+            let _ = router_hat_listen;
+            eprintln!(
+                "wz-ap-demo: --router-hat requires the `routing-router-hat` feature \
+                 (build: cargo build -p wz-ap-demo --features routing-router-hat)"
+            );
+            return ExitCode::from(2);
+        }
+    }
+
     // R121f — exactly one of --listen / --connect must be supplied.
     // The demo's session FSM role-start is hard-coded to one or
     // the other (Acceptor calls InboundStart on listen; Initiator
@@ -731,6 +757,30 @@ fn run_peer_mode(
         &opts,
         &interceptors,
     )) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("wz-ap-demo: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// P4 §5.21 ACTIVATION — router-hat mode entry (`--router-hat <listen>`): present
+/// a true wire WhatAmI::Router and drive the dual-mesh RouterForwarder over real
+/// transport ([`runner::run_router_hat`](crate::runner::run_router_hat)). Mirrors
+/// [`run_peer_mode`] — bind + dial the `--connect` router set + hold faces — but
+/// the node announces Router and hosts no application I/O (a pure router).
+#[cfg(feature = "routing-router-hat")]
+fn run_router_hat_mode(listen: String, dial_targets: Vec<String>) -> ExitCode {
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
+    let runtime = match build_demo_runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match runtime.block_on(crate::runner::run_router_hat(&listen, &dial_targets)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wz-ap-demo: {e}");

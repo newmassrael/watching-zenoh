@@ -191,6 +191,15 @@ routing-peer = [
 # write applies, the pre-y51 path). The run_peer config-write handler holds the
 # cfg(feature="adminspace-write") site. Layer E6 builds the gate-ON binary.
 adminspace-write = ["wz/adminspace-write"]
+# P4 §5.21 ACTIVATION — opt-in router-hat MODE (`--router-hat <listen>`): drives
+# the dual-mesh `RouterForwarder` (the zenoh hat/router port) over real transport,
+# presenting wire WhatAmI::Router through accept_loop. Forwards the facade
+# `routing-router-hat`, which pulls `routing-peer` transitively — so ONE binary
+# built with `--features routing-router-hat` serves BOTH the router-hat node
+# (`--router-hat`) AND the peer nodes (`--peer`) of the E2E harness. Not in
+# `default`; only `--features routing-router-hat` compiles the mode. Layer E7
+# builds this binary.
+routing-router-hat = ["routing-peer", "wz/routing-router-hat"]
 
 [lints]
 workspace = true

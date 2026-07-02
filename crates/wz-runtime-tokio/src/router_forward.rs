@@ -628,6 +628,47 @@ impl RouterForwarder {
         self.query_timeout.set(timeout);
     }
 
+    /// Number of nodes in the ROUTER-tier graph (self + every learned Router) —
+    /// the `routers_net` state witness. The dual-tier router twin of
+    /// [`LinkstateForwarder::node_count`](crate::linkstate_forward::LinkstateForwarder::node_count);
+    /// exposed as its own method (not a `(usize, usize)` tuple with the peer
+    /// count) so each mirrors the field it reads and a caller cannot transpose
+    /// them. A single-router topology (no Router faces) reads 1 (self alone).
+    pub fn routers_net_node_count(&self) -> usize {
+        self.routers_net.borrow().node_count()
+    }
+
+    /// Number of nodes in the PEER-tier graph (self + every learned Peer) — the
+    /// `linkstatepeers_net` state witness, the sibling of
+    /// [`routers_net_node_count`](Self::routers_net_node_count). A router serving
+    /// N connected peers reads `1 + N` once converged (the E2E convergence
+    /// witness the ACTIVATION harness asserts on).
+    pub fn linkstatepeers_net_node_count(&self) -> usize {
+        self.linkstatepeers_net.borrow().node_count()
+    }
+
+    /// Total link-state lists ingested across both nets — the control-plane
+    /// convergence witness (name-matched to
+    /// [`LinkstateForwarder::ingested`](crate::linkstate_forward::LinkstateForwarder::ingested)).
+    /// Rising above zero proves this router ingested a neighbour's link-state
+    /// flood, i.e. topology converged over the wire (not merely that a face is
+    /// held).
+    pub fn ingested(&self) -> usize {
+        self.ingested.get()
+    }
+
+    /// Total data `Push` messages received across all faces — the data-plane
+    /// TRANSIT witness (name-matched to
+    /// [`LinkstateForwarder::data_seen`](crate::linkstate_forward::LinkstateForwarder::data_seen)).
+    /// Raised once at the `Push` dispatch arm, immediately before
+    /// [`route_push`](Self::route_push) routes it — on EVERY inbound Push, so a
+    /// pure router that hosts no subscription still counts a Push it forwarded —
+    /// the "delivery went THROUGH this router" proof the ACTIVATION harness
+    /// asserts on.
+    pub fn data_seen(&self) -> usize {
+        self.data_seen.get()
+    }
+
     /// The current instant from the injected clock — the single read site the
     /// pending-query deadline stamp ([`route_request`](Self::route_request)) and
     /// the C5c timeout sweep will share, so an injected test clock governs both.
