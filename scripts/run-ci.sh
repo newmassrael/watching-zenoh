@@ -4286,6 +4286,26 @@ layer_e7_router_hat() {
         --test wz_router_hat_mesh -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E8 — router-hat CROSS-IMPL vs zenoh-pico (P4 §5.21) ───
+#
+# The dual-mesh RouterForwarder proven against a FOREIGN zenoh client: a wz
+# --connect --publish routes wz-client -> [wz router-hat] -> pico z_sub -- the pico
+# analog of Layer Z leg 2 (wz -> zenohd -> pico), with wz's OWN router replacing
+# zenohd. This is the router daemon's first cross-impl (non-wz) data-plane proof.
+# Needs wz-ap-demo built with --features router-hat-router AND the zenoh-pico CLI;
+# SKIPs if the pico CLI is absent (like Layer E), FAILs on a real routing break. The
+# test fn's `wz_router_hat_` prefix keeps the default Layer E sweep's `--skip
+# wz_router` from double-running it on an arbitrary-feature binary.
+layer_e8_router_hat_pico() {
+    if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
+        echo "Layer E8 SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+        return 0
+    fi
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_pico_interop -- --ignored --quiet) || return 1
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -4483,6 +4503,7 @@ run_layer E4 layer_e4_router_reject || overall=1
 run_layer E5 layer_e5_router_forward || overall=1
 run_layer E6 layer_e6_peer_mesh || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
+run_layer E8 layer_e8_router_hat_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
