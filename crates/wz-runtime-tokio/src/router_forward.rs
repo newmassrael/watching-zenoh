@@ -211,7 +211,7 @@
 //! closing `ResponseFinal` for a `last` branch, so a queryable that crashes
 //! without a final on a still-up face cannot hang a `get()` forever.
 //!
-//! ## Slices A2a + A2b (FEDERATION cross-tier-native bubble, both planes) — landed
+//! ## Slices A2a + A2b + A3 (FEDERATION cross-tier bubble + client qabl) — landed
 //!
 //! The cross-tier self-advertisement now derives from the OTHER tier's NATIVES,
 //! not just from `client_subs` (C2). A ROUTER-native sub advertises self's
@@ -239,6 +239,17 @@
 //! deferred (`UndeclareQueryable` carries no keyexpr ext — the native qabl plane's
 //! documented gap).
 //!
+//! A3 adds the CLIENT-queryable cross-tier advertisement (the query twin of C2's
+//! [`advertise_client_cross_tier_sub`](RouterForwarder::advertise_client_cross_tier_sub)):
+//! a client `DeclareQueryable` makes self flood a self-sourced `DeclareQueryable`
+//! carrying the merged info into BOTH meshes (a client is in neither), so a REMOTE
+//! mesh querier steers toward the client's queryable
+//! ([`advertise_client_cross_tier_qabl`](RouterForwarder::advertise_client_cross_tier_qabl)).
+//! It reuses [`derived_cross_tier_qabl_info`](RouterForwarder::derived_cross_tier_qabl_info)
+//! (which already folds `client_qabls`), so A3 is a trigger-only add; a client
+//! face-down re-advertises the downgraded merge. What remains for the query plane
+//! is the E2E remote-querier steer, with the 2-router ACTIVATION harness.
+//!
 //! ## Deferred to later slices (named, not silently dropped)
 //!
 //! - **Per-peer ingress/egress master filter + source-dimensioned route cache
@@ -263,14 +274,6 @@
 //!   elected master on the other) to exercise the attract + master-gated bridge end
 //!   to end — LATENT until then (single-router `router_subs` is empty). (The
 //!   client-behind-a-router variant was already rescued by C2.)
-//! - **The client-queryable cross-tier ADVERTISEMENT** — the query-plane twin of
-//!   C2's `advertise_client_cross_tier_sub`: a client `DeclareQueryable` should make
-//!   this router flood a self-sourced `DeclareQueryable` (carrying the MERGED
-//!   `QueryableInfo`, `complete = OR` / `distance = min`) into the meshes so a
-//!   REMOTE mesh querier routes toward it. C5b STORES the client queryable + routes
-//!   an inbound Request to it (single-router unit-testable), but does not yet
-//!   advertise it; the E2E steer of a remote querier lands with this + the
-//!   ACTIVATION 2-node harness.
 //! - **Gossip / autoconnect / interceptors** — the per-net policy knobs the
 //!   `LinkstateForwarder` carries; added as the router gains the corresponding
 //!   plane. (The pending-query GC — the timeout sweep — landed with C5c above.)
@@ -520,11 +523,14 @@ pub struct RouterForwarder {
     /// block 3, `hat/router/queries.rs:1499`, gated `master || source == Router`);
     /// their completeness feeds the GLOBAL BestMatching at distance 1. FaceId-keyed
     /// leaf state, so [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE
-    /// its linkless early-return (OBLIGATION 1), like `client_subs`. The cross-tier
-    /// ADVERTISEMENT of these queryables into the meshes (the query-plane twin of
-    /// C2's `advertise_client_cross_tier_sub`, so a REMOTE mesh querier routes toward
-    /// this router) is a NAMED deferral landing with the ACTIVATION slice — see the
-    /// module docs.
+    /// its linkless early-return (OBLIGATION 1), like `client_subs`. A3 landed the
+    /// cross-tier ADVERTISEMENT of these queryables into BOTH meshes (the query-plane
+    /// twin of C2's `advertise_client_cross_tier_sub`, so a REMOTE mesh querier routes
+    /// toward this router):
+    /// [`advertise_client_cross_tier_qabl`](Self::advertise_client_cross_tier_qabl) on
+    /// ingest, and a downgrade re-advertise on face-down. This store is also a
+    /// contributor to the merged
+    /// [`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info).
     client_qabls: RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>,
     /// The pending-query return table (C5b) — one entry per outbound Request,
     /// keyed by the out face + a per-face local qid, recording where the matching
@@ -1977,13 +1983,16 @@ impl RouterForwarder {
     /// mesh-face declare path ([`ingest_queryable`](Self::ingest_queryable)) drops a
     /// Client-tier declare (no Zid-keyed tier table); a client-hosted queryable
     /// lands here instead, keyed by the client face + its declared
-    /// [`QueryableInfo`] (the query route reads `complete` / `distance`). The
-    /// cross-tier ADVERTISEMENT of this queryable into the meshes (the query-plane
-    /// twin of C2's [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub),
-    /// so a REMOTE mesh querier routes toward this router) is a NAMED deferral
-    /// (module docs): C5b stores WITHOUT flooding, so THIS router routes an inbound
-    /// Request to the client queryable, but a remote querier is not yet steered
-    /// here (single-router unit-testable; the E2E steer lands with ACTIVATION).
+    /// [`QueryableInfo`] (the query route reads `complete` / `distance`), and — A3
+    /// — ADVERTISES self's cross-tier merged queryable into BOTH meshes so a REMOTE
+    /// mesh querier routes toward this router (the query-plane twin of C2's
+    /// [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub)).
+    /// A client is a leaf in NEITHER mesh, so it steers both (unlike a native,
+    /// which steers only the opposite mesh). The advertised value is the MERGED
+    /// [`QueryableInfo`] ([`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info),
+    /// which already folds `client_qabls` — the A2b seam), so A3 is a trigger-only
+    /// add over the A2b machinery. Fires only on a real change (a new client
+    /// queryable OR a changed info) so a redundant re-declare does not re-flood.
     fn ingest_client_queryable(&self, inbound: FaceId, declare: &DeclareOwned) {
         let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
             return;
@@ -2006,11 +2015,37 @@ impl RouterForwarder {
             }
             _ => QueryableInfo::DEFAULT,
         };
-        self.client_qabls
+        // The change gate (mirrors the native value-diff): re-advertise only on a
+        // NEW keyexpr for this face OR a CHANGED info — `insert` returns the prior
+        // value, so `Some(prev) if prev == info` is the redundant re-declare.
+        let prev = self
+            .client_qabls
             .borrow_mut()
             .entry(inbound)
             .or_default()
-            .insert(keyexpr, info);
+            .insert(keyexpr.clone(), info);
+        if prev != Some(info) {
+            self.advertise_client_cross_tier_qabl(&keyexpr);
+        }
+    }
+
+    /// Flood self's cross-tier queryable ADVERTISEMENT for `keyexpr` into BOTH
+    /// meshes (A3) — a self-sourced `DeclareQueryable` (node_id 0) carrying the
+    /// MERGED [`QueryableInfo`] ([`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info)),
+    /// so a REMOTE querier on either mesh routes `keyexpr` toward this router. The
+    /// client-qabl twin of [`advertise_native_cross_tier_qabl`](Self::advertise_native_cross_tier_qabl),
+    /// but into BOTH meshes (a client is in neither). Also the DOWNGRADE seam a
+    /// client face-down calls to re-flood the recomputed merge (or no-op when the
+    /// merge is now `None` — the codec-deferred full retraction). NOT master-gated.
+    fn advertise_client_cross_tier_qabl(&self, keyexpr: &str) {
+        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            let Some(info) = self.derived_cross_tier_qabl_info(target, keyexpr) else {
+                continue;
+            };
+            self.flood_self_sourced(target, keyexpr, move |ke| {
+                build_declare_queryable_with_info(ke, info)
+            });
+        }
     }
 
     /// Route an inbound `Request` (a Query) through the router's full zenoh
@@ -2753,9 +2788,11 @@ impl FaceForwarder for RouterForwarder {
         // this face as their OUT face (C5b) — mirrors the sibling forwarder's
         // `pending.remove_face`-first deregister; entries on OTHER faces that point
         // back to this one as their inbound target self-heal at send / timeout. (b)
-        // this face's hosted client queryables (C5b); its cross-tier advertisement
-        // is a NAMED deferral so there is no advertisement to withdraw (unlike the
-        // client sub store below).
+        // this face's hosted client queryables (C5b) — and, since A3 advertises a
+        // client queryable cross-tier, RE-ADVERTISE the recomputed merge per
+        // departed keyexpr (a DOWNGRADE if another contributor remains; a no-op /
+        // codec-deferred full retraction if none — the same UndeclareQueryable gap
+        // the native qabl plane accepts), mirroring the client sub withdraw below.
         //
         // A fan whose LAST answering branch died with this face is DRAINED: its
         // querier is owed the closing ResponseFinal NOW (zenoh
@@ -2764,7 +2801,12 @@ impl FaceForwarder for RouterForwarder {
         // departed face has nobody left to notify (skipped).
         let drained = self.pending.borrow_mut().remove_face(&id);
         synthesize_drained_fan_finals(&drained, id, |face, msg| self.send_one_to_face(face, msg));
-        self.client_qabls.borrow_mut().remove(&id);
+        let departed_qabls = self.client_qabls.borrow_mut().remove(&id);
+        if let Some(qabls) = departed_qabls {
+            for keyexpr in qabls.into_keys() {
+                self.advertise_client_cross_tier_qabl(&keyexpr);
+            }
+        }
         // Purge the FaceId-keyed client sub store, withdrawing self's cross-tier
         // advertisement for any keyexpr this was the LAST client of. A Client face
         // is skipped by the peer/router fan-out (its tier), so flooding before its
@@ -4815,6 +4857,73 @@ mod tests {
         assert!(
             !forwarded_qabl_info(&sink_p.frame_bytes(0)).complete,
             "the merged info downgraded to incomplete (only B remains)"
+        );
+    }
+
+    #[test]
+    fn client_qabl_advertises_into_both_meshes() {
+        // A3: a CLIENT queryable is in NEITHER mesh, so it ADVERTISES self's merged
+        // queryable into BOTH — a router tree child AND a peer tree child each
+        // receive the self-sourced DeclareQueryable carrying the client's info.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c, _cs) = face(zid(0xAA), WIRE_CLIENT); // the client queryable source
+        let (rc, sink_rc) = face(zid(0xCC), WIRE_ROUTER); // a router tree child
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // a peer tree child
+        fwd.register(FaceId(0), &c);
+        fwd.register(FaceId(1), &rc);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5); // self<->Rc router edge
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 6); // self<->P peer edge
+        fwd.tick();
+        sink_rc.reset();
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // client queryable
+        assert_eq!(sink_rc.frame_count(), 1, "advertised into the router mesh");
+        assert_eq!(sink_p.frame_count(), 1, "advertised into the peer mesh");
+        assert!(
+            forwarded_qabl_info(&sink_rc.frame_bytes(0)).complete
+                && forwarded_qabl_info(&sink_p.frame_bytes(0)).complete,
+            "both meshes carry the client's complete=true"
+        );
+        assert!(
+            fwd.router_qabls.borrow().interested("demo/q").is_empty()
+                && fwd
+                    .linkstatepeer_qabls
+                    .borrow()
+                    .interested("demo/q")
+                    .is_empty(),
+            "derive-not-store: self is NOT stored in either qabls table"
+        );
+    }
+
+    #[test]
+    fn client_qabl_face_down_re_advertises_the_downgrade() {
+        // A client queryable (complete) + a router-native queryable (incomplete)
+        // for K both feed the PEER-mesh advertisement, merging to complete=true.
+        // When the client face goes down, the peer-mesh advertisement re-declares
+        // with the router-native's info alone — complete=FALSE (the downgrade), NOT
+        // a full withdraw (a contributor remains).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c, _cs) = face(zid(0xAA), WIRE_CLIENT); // client, complete
+        let (r, _rs) = face(zid(0xCC), WIRE_ROUTER); // router-native, incomplete
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // peer tree child (target)
+        fwd.register(FaceId(0), &c);
+        fwd.register(FaceId(1), &r);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 5); // self<->P peer edge
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", false)); // router-native incomplete
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // client complete
+        sink_p.reset();
+        fwd.deregister(FaceId(0)); // the client (complete) goes down
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the client face-down re-advertised the downgraded merge into the peer mesh"
+        );
+        assert!(
+            !forwarded_qabl_info(&sink_p.frame_bytes(0)).complete,
+            "the merge downgraded to incomplete (only the router-native remains)"
         );
     }
 
