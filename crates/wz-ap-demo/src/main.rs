@@ -711,6 +711,11 @@ fn parse_zid_hex(h: &str) -> Result<Vec<u8>, String> {
     if h.is_empty() || h.len() % 2 != 0 {
         return Err(format!("must be non-empty even-length hex (got {h:?})"));
     }
+    // Reject any non-hex char up front — `u8::from_str_radix` otherwise accepts a
+    // leading `+`/`-` inside a pair (e.g. "+a"), which is not valid hex here.
+    if !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("invalid hex in {h:?}"));
+    }
     (0..h.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&h[i..i + 2], 16).map_err(|_| format!("invalid hex in {h:?}")))

@@ -569,8 +569,28 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
             "0b0b0b0b",
         ],
     );
+    // BARRIER (not a race): wait until R has actually INGESTED the queryable's
+    // DeclareQueryable before spawning the issuer, so the issuer's one-shot query
+    // cannot arrive before R knows the queryable. `spawn_session` above only gated
+    // on the queryable's own TCP dial; this gates on R's routing state. R polls the
+    // witness on its 250 ms app tick, so allow generous slack.
+    wait_for_substring(
+        &mut r_reader,
+        "router-hat: learned a queryable",
+        Duration::from_secs(10),
+    )
+    .unwrap_or_else(|c| {
+        let _ = qbl_guard.child_mut().kill();
+        let _ = qbl_guard.child_mut().wait();
+        let _ = r_guard.child_mut().kill();
+        let _ = r_guard.child_mut().wait();
+        panic!(
+            "router never logged it learned the queryable within 10s — the \
+             queryable's DeclareQueryable did not reach R\n--- router stderr ---\n{c}"
+        )
+    });
     // The query issuer behind R (distinct zid): its one-shot query fires on
-    // Established and must route THROUGH R to the queryable.
+    // Established and now provably routes THROUGH R to a queryable R already knows.
     let (mut iss_guard, mut iss_reader) = spawn_session(
         "issuer",
         &[

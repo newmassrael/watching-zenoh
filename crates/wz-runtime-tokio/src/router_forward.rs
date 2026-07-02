@@ -336,12 +336,14 @@ use crate::linkstate_forward::{
     absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info,
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
     declare_queryable_wireexpr, declare_subscriber_wireexpr, is_tree_forward_target,
-    peer_whatami_routing, peer_zid_routing, re_advertise_interest_into, resolve_source_in,
-    select_best_matching, synthesize_drained_fan_finals, synthesize_expired_query_returns,
+    peer_whatami_routing, peer_zid_routing, re_advertise_interest_into, resolve_governed_keyexpr,
+    resolve_source_in, select_best_matching, synthesize_drained_fan_finals,
+    synthesize_expired_query_returns,
 };
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{PendingQueries, QueryFan};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
+use wz_codecs::ext_entry::ExtEntryOwned;
 use wz_codecs::request::RequestOwned;
 use wz_codecs::response::ResponseOwned;
 use wz_codecs::response_final::ResponseFinalOwned;
@@ -732,6 +734,19 @@ impl RouterForwarder {
     /// asserts on.
     pub fn data_seen(&self) -> usize {
         self.data_seen.get()
+    }
+
+    /// Total distinct queryable interests this router currently holds across all
+    /// tiers — client-hosted ([`client_qabls`](Self#structfield.client_qabls)) +
+    /// mesh-native (`router_qabls` + `linkstatepeer_qabls`). The query-plane
+    /// READINESS witness the ACTIVATION query e2e gates the issuer spawn on: a `>0`
+    /// value proves R ingested a queryable's `DeclareQueryable` BEFORE the issuer
+    /// fires its one-shot query, making that e2e a barrier rather than a race.
+    pub fn queryables_seen(&self) -> usize {
+        let client: usize = self.client_qabls.borrow().values().map(|m| m.len()).sum();
+        let router = self.router_qabls.borrow().entries().len();
+        let peer = self.linkstatepeer_qabls.borrow().entries().len();
+        client + router + peer
     }
 
     /// Install the full §5.16 interceptor configuration — the router twin of
@@ -1167,32 +1182,66 @@ impl RouterForwarder {
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
             _ => return,
         };
-        let Some((net, _dirty)) = self.plane(tier) else {
-            return;
-        };
         let Some(subs) = self.subs_table(tier) else {
             return;
         };
+        // FEDERATION cross-tier bubble (R311y125): on a real removal, if that was
+        // the LAST native source for `keyexpr` in this tier (and no client covers
+        // it), withdraw self's advertisement into the opposite mesh (flip
+        // true->false). The shared withdraw returns the resolved keyexpr on a real
+        // change, exactly as `ingest_interest` returns it for the advertise side.
+        if let Some(keyexpr) = self.withdraw_interest(
+            inbound,
+            tier,
+            reliable,
+            declare,
+            exts,
+            subs,
+            build_undeclare_subscriber_with_keyexpr,
+        ) {
+            self.withdraw_native_cross_tier_sub(tier, &keyexpr);
+        }
+    }
+
+    /// The SSOT for a sourced interest WITHDRAWAL (subscriber `V = ()` / queryable
+    /// `V = QueryableInfo`) — the router twin of
+    /// [`LinkstateForwarder`]'s `forward_interest_withdrawal`, and the removal
+    /// counterpart of [`ingest_interest`](Self::ingest_interest). Withdraw the
+    /// resolved SOURCE's interest from the inbound tier's `table` (the retracted
+    /// keyexpr rides `exts` = the body's `ext_wire_expr` chain) and — only on a
+    /// real removal — re-flood a clean sourced retraction WITHIN that tier via
+    /// `build` (re-stamped with this node's psid for the source). Returns
+    /// `Some(resolved keyexpr)` IFF it removed a REAL interest (the signal the
+    /// caller uses to recompute the CROSS-tier advertisement, mirroring
+    /// `ingest_interest`'s change-signal); `None` on any drop (client tier /
+    /// unresolvable / not held). The cross-tier bubble is NOT done here (it differs
+    /// per plane: presence for subs, merged-info for qabls) — the caller owns it.
+    #[allow(clippy::too_many_arguments)]
+    fn withdraw_interest<V>(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        declare: &DeclareOwned,
+        exts: Option<&Vec<ExtEntryOwned>>,
+        table: &RefCell<LinkstatepeerInterest<V>>,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) -> Option<String> {
+        let (net, _dirty) = self.plane(tier)?;
         let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
-            };
-            let Some(keyexpr) = resolve_ext_keyexpr(exts, &s.keyexpr_table) else {
-                return;
-            };
+            let s = faces.get(&inbound)?;
+            let keyexpr = resolve_ext_keyexpr(exts, &s.keyexpr_table)?;
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
-        let Some((source_zid, out_node_id)) = resolve_source_in(
+        let (source_zid, out_node_id) = resolve_source_in(
             &net.borrow(),
             inbound_zid,
             inbound_link,
             read_declare_source(declare),
-        ) else {
-            return;
-        };
-        if !subs.borrow_mut().withdraw(&keyexpr, &source_zid) {
-            return;
+        )?;
+        if !table.borrow_mut().withdraw(&keyexpr, &source_zid) {
+            return None;
         }
         self.reflood_declaration(
             inbound,
@@ -1203,12 +1252,9 @@ impl RouterForwarder {
             out_node_id,
             reliable,
             &keyexpr,
-            build_undeclare_subscriber_with_keyexpr,
+            build,
         );
-        // FEDERATION cross-tier bubble (R311y125): if that was the LAST native
-        // source for `keyexpr` in this tier (and no client covers it), withdraw
-        // self's advertisement into the opposite mesh — the flip true->false.
-        self.withdraw_native_cross_tier_sub(tier, &keyexpr);
+        Some(keyexpr)
     }
 
     /// Ingest a sourced `DeclareQueryable` (1c) — the query-plane twin of
@@ -1287,48 +1333,26 @@ impl RouterForwarder {
             DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
             _ => return,
         };
-        let Some((net, _dirty)) = self.plane(tier) else {
-            return;
-        };
         let Some(qabls) = self.qabls_table(tier) else {
             return;
         };
-        let (inbound_zid, inbound_link, keyexpr) = {
-            let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
-            };
-            let Some(keyexpr) = resolve_ext_keyexpr(exts, &s.keyexpr_table) else {
-                return;
-            };
-            (peer_zid_routing(&s.actions), s.link, keyexpr)
-        };
-        let Some((source_zid, out_node_id)) = resolve_source_in(
-            &net.borrow(),
-            inbound_zid,
-            inbound_link,
-            read_declare_source(declare),
-        ) else {
-            return;
-        };
-        if !qabls.borrow_mut().withdraw(&keyexpr, &source_zid) {
-            return;
-        }
-        self.reflood_declaration(
+        // FEDERATION cross-tier bubble (A2b): on a real removal, recompute self's
+        // advertisement into the opposite mesh — a downgrade if a contributor
+        // remains, or a full `UndeclareQueryable` retraction if the merge is now
+        // `None`. Shares the withdraw SSOT with the sub plane (only the table,
+        // carrier, and this cross-tier step differ), the query twin of the
+        // `ingest_queryable`/`ingest_subscription` split over `ingest_interest`.
+        if let Some(keyexpr) = self.withdraw_interest(
             inbound,
             tier,
-            net,
-            source_zid,
-            inbound_zid,
-            out_node_id,
             reliable,
-            &keyexpr,
+            declare,
+            exts,
+            qabls,
             build_undeclare_queryable_with_keyexpr,
-        );
-        // FEDERATION cross-tier bubble (A2b): recompute self's advertisement into
-        // the opposite mesh now that a native left — a downgrade if a contributor
-        // remains, or a full retraction if the merge is now `None`.
-        self.withdraw_native_cross_tier_qabl(tier, &keyexpr);
+        ) {
+            self.withdraw_native_cross_tier_qabl(tier, &keyexpr);
+        }
     }
 
     /// A NATIVE qabl for `keyexpr` in `native_tier` just left (undeclare or
@@ -3281,24 +3305,10 @@ impl InterceptorContext for RouterFaceContext<'_> {
     }
 
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
-        // Resolve the governed kinds' keyexpr alias-aware against THIS face's table
-        // (the same resolution the route paths do). A kind carrying no governed
-        // keyexpr here (an UndeclareSubscriber / alias declaration / keyless
-        // ResponseFinal / Oam) yields None, so the enforcer admits it. Mirror of the
-        // single-net FaceContext.
-        match msg {
-            NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, &self.face.keyexpr_table),
-            NetworkMessage::Request(r) => {
-                resolve_wireexpr(&r.keyexpr.body, &self.face.keyexpr_table)
-            }
-            NetworkMessage::Response(r) => {
-                resolve_wireexpr(&r.keyexpr.body, &self.face.keyexpr_table)
-            }
-            NetworkMessage::Declare(d) => declare_subscriber_wireexpr(d)
-                .or_else(|| declare_queryable_wireexpr(d))
-                .and_then(|we| resolve_wireexpr(&we.body, &self.face.keyexpr_table)),
-            _ => None,
-        }
+        // Delegates to the shared SSOT (the single-net FaceContext delegates to the
+        // same free fn), alias-resolved against THIS face's table — one
+        // governed-kind match for both forwarders.
+        resolve_governed_keyexpr(msg, &self.face.keyexpr_table)
     }
 }
 

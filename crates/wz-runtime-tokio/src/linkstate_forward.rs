@@ -660,6 +660,28 @@ impl LinkstateForwarder {
     }
 }
 
+/// Resolve the GOVERNED keyexpr a §5.16 ACL enforcer gates for `msg`, alias-aware
+/// against `keyexpr_table` — the SSOT both forwarders' `InterceptorContext::full_keyexpr`
+/// delegate to (one governed-kind match, not one per forwarder). Push / Request /
+/// Response carry the keyexpr inline; a DeclareSubscriber / DeclareQueryable carries
+/// it in the declaration body; any other kind (UndeclareSubscriber / alias
+/// declaration / keyless ResponseFinal / Oam) carries no governed keyexpr, so the
+/// enforcer admits it (`None`). Adding a new governed kind is a ONE-place edit here.
+pub(crate) fn resolve_governed_keyexpr(
+    msg: &NetworkMessage,
+    keyexpr_table: &hashbrown::HashMap<u64, String>,
+) -> Option<String> {
+    match msg {
+        NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, keyexpr_table),
+        NetworkMessage::Request(r) => resolve_wireexpr(&r.keyexpr.body, keyexpr_table),
+        NetworkMessage::Response(r) => resolve_wireexpr(&r.keyexpr.body, keyexpr_table),
+        NetworkMessage::Declare(d) => declare_subscriber_wireexpr(d)
+            .or_else(|| declare_queryable_wireexpr(d))
+            .and_then(|we| resolve_wireexpr(&we.body, keyexpr_table)),
+        _ => None,
+    }
+}
+
 /// The per-message [`InterceptorContext`] for one face — borrows that face's
 /// state so an enforcer can read the subject (the peer's routing zid) and
 /// resolve a message keyexpr against the face's link-local alias table. Serves
@@ -680,25 +702,9 @@ impl InterceptorContext for FaceContext<'_> {
     }
 
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
-        // Resolve the governed kinds' keyexpr alias-aware against THIS face's
-        // table — the same resolution the forward paths do (Push / Request /
-        // Response carry the keyexpr inline; a DeclareSubscriber / DeclareQueryable
-        // carries it in the declaration body). An UndeclareSubscriber / alias
-        // declaration / keyless ResponseFinal / other kind carries no governed
-        // keyexpr here, so the enforcer admits it.
-        match msg {
-            NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, &self.face.keyexpr_table),
-            NetworkMessage::Request(r) => {
-                resolve_wireexpr(&r.keyexpr.body, &self.face.keyexpr_table)
-            }
-            NetworkMessage::Response(r) => {
-                resolve_wireexpr(&r.keyexpr.body, &self.face.keyexpr_table)
-            }
-            NetworkMessage::Declare(d) => declare_subscriber_wireexpr(d)
-                .or_else(|| declare_queryable_wireexpr(d))
-                .and_then(|we| resolve_wireexpr(&we.body, &self.face.keyexpr_table)),
-            _ => None,
-        }
+        // The governed-kind resolution is the shared SSOT (the router twin
+        // delegates to the same free fn), alias-resolved against THIS face's table.
+        resolve_governed_keyexpr(msg, &self.face.keyexpr_table)
     }
 }
 

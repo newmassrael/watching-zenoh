@@ -602,15 +602,11 @@ pub fn build_undeclare_kexpr(mapping_id: u64) -> DeclareOwned {
 /// `_z_undecl_encode(has_keyexpr_ext = false)` at
 /// `vendor/zenoh-pico/src/protocol/codec/declarations.c:90-103`.
 ///
-/// AP MVP scope: the wz UndeclSubscriber codec emits the no-ext
-/// shape only. The wz codegen for UndeclSubscriber does not model
-/// the optional `_z_decl_ext_keyexpr_encode` tail (declarations.c:38-50)
-/// — the SCXML stops at `id`. Peers route undeclare by id alone, so
-/// the ext is purely informational at this layer (used by routers for
-/// cross-validation). Future rounds that need the ext_keyexpr surface
-/// extend `sources/codecs/undecl_subscriber.scxml` with the optional
-/// ext field + add a separate `build_undeclare_subscriber_with_keyexpr`
-/// helper; the no-ext contract here stays byte-stable.
+/// This builds the NO-EXT (id-only) retraction shape — peers route an id-only
+/// undeclare by id alone. The keyexpr-carrying SOURCED form (the SCXML DOES model
+/// the optional `_z_decl_ext_keyexpr_encode` tail; the ext chain now exists) is the
+/// separate [`build_undeclare_subscriber_with_keyexpr`] below; this id-only contract
+/// stays byte-stable.
 ///
 /// Wire shape:
 ///

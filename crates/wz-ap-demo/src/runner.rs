@@ -2014,6 +2014,7 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     let mut last_announced_peers = 1usize;
     let mut last_announced_routers = 1usize;
     let mut last_data_seen = 0usize;
+    let mut announced_queryable = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -2037,6 +2038,15 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
                 if seen > last_data_seen {
                     last_data_seen = seen;
                     log::info!("wz-ap-demo router-hat: forwarded mesh data ({seen} push(es))");
+                }
+                // Query-plane READINESS witness (barrier for the query e2e): fires
+                // ONCE when this router has ingested its first queryable's
+                // DeclareQueryable, so a test can gate a query ISSUER's spawn on R
+                // provably knowing the queryable — turning the one-shot-query e2e
+                // into a barrier instead of racing declare-propagation.
+                if !announced_queryable && forwarder.queryables_seen() > 0 {
+                    announced_queryable = true;
+                    log::info!("wz-ap-demo router-hat: learned a queryable");
                 }
             }
         }

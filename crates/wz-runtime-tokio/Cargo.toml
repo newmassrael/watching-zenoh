@@ -826,13 +826,13 @@ routing-peer = [
 # tables, the whatami/zid decode), so it forwards `routing-peer`; the dual-tier
 # Declare INGEST + cross-tier bubble + route-compute + master-election are
 # later slices. Off by default; the run-ci Layer C1ay lane selects it.
-# This is a FOUNDATION feature, not the `router-hat-router` inventory atom:
-# slice 1a is topology STATE only (it routes nothing), the exact analogue of
-# `routing-accept` (accept-and-hold without forwarding), so — like
-# routing-accept — it gates code WITHOUT being an inventory atom. The
-# `router-hat-router` atom stays reserved and flips active only once the HAT
-# actually routes (the COMPUTE slice), mirroring how `routing-routes`/
-# `routing-router` flip active on top of the `routing-accept` foundation.
+# This is the FOUNDATION feature (the `routing-accept` analogue): it compiles the
+# library RouterForwarder module (topology STATE + INGEST + COMPUTE) and gates the
+# C1ay lane, WITHOUT being an inventory atom. The `router-hat-router` inventory atom
+# is the run-mode toggle LAYERED on this foundation (routing-routes-on-routing-accept
+# pattern): the wz-ap-demo `--router-hat` run-mode gates on `cfg(feature="router-hat-router")`
+# (the A3 active site) and pulls this foundation. R311y132 flipped `router-hat-router`
+# reserved -> ACTIVE once the ACTIVATION E2E harness landed.
 routing-router-hat = ["routing-peer"]
 # ── §5.16 access-control composition knobs ───────────────────────────
 # Each independently elides ONE interceptor on the routing-peer admission
