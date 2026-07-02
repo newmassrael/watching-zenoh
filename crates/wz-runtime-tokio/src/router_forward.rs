@@ -736,6 +736,17 @@ impl RouterForwarder {
         self.data_seen.get()
     }
 
+    /// Total `Request(Query)` messages received across all faces — the query-plane
+    /// TRANSIT witness (the query twin of [`data_seen`](Self::data_seen)). Raised
+    /// once at the `Request` dispatch arm, immediately before
+    /// [`route_request`](Self::route_request) routes it — on EVERY inbound Query, so a
+    /// pure router that hosts no local queryable still counts a Query it forwarded.
+    /// The 2-router query-federation e2e asserts this on BOTH routers to pin the
+    /// query's cross-mesh transit from the routers' own logs (not topology alone).
+    pub fn queries_seen(&self) -> usize {
+        self.queries_seen.get()
+    }
+
     /// Total distinct queryable interests this router currently holds across all
     /// tiers — client-hosted ([`client_qabls`](Self#structfield.client_qabls)) +
     /// mesh-native (`router_qabls` + `linkstatepeer_qabls`). The query-plane

@@ -2014,6 +2014,7 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     let mut last_announced_peers = 1usize;
     let mut last_announced_routers = 1usize;
     let mut last_data_seen = 0usize;
+    let mut last_queries_seen = 0usize;
     let mut announced_queryable = false;
     let summary = loop {
         tokio::select! {
@@ -2038,6 +2039,16 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
                 if seen > last_data_seen {
                     last_data_seen = seen;
                     log::info!("wz-ap-demo router-hat: forwarded mesh data ({seen} push(es))");
+                }
+                // Query transit witness: a Request(Query) crossed this router. With no
+                // autoconnect the querier reaches the queryable only THROUGH the router
+                // mesh, so a rise proves this router routed the query — the query-plane
+                // twin of the data transit witness above (the 2-router query-federation
+                // e2e asserts it on BOTH routers to pin the cross-mesh transit).
+                let queries = forwarder.queries_seen();
+                if queries > last_queries_seen {
+                    last_queries_seen = queries;
+                    log::info!("wz-ap-demo router-hat: routed a query ({queries} request(s))");
                 }
                 // Query-plane READINESS witness (barrier for the query e2e): fires
                 // ONCE when this router has ingested its first queryable's
@@ -2083,6 +2094,16 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
         log::info!(
             "wz-ap-demo router-hat: forwarded mesh data ({} push(es))",
             forwarder.data_seen()
+        );
+    }
+    // The query-plane transit counterpart (latched, emitted unconditionally on >0 at
+    // teardown so a test need not race the app tick) — a router that ROUTED any Query
+    // carried query transit, the proof the 2-router query-federation e2e asserts on
+    // both routers.
+    if forwarder.queries_seen() > 0 {
+        log::info!(
+            "wz-ap-demo router-hat: routed a query ({} request(s))",
+            forwarder.queries_seen()
         );
     }
     Ok(())

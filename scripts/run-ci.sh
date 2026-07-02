@@ -4274,9 +4274,10 @@ layer_e6_peer_mesh() {
 # WhatAmI::Router through accept_loop, with `--peer` nodes dialing it. ONE binary
 # built with `--features router-hat-router` (the run-mode ACTIVE atom, R311y132;
 # pulls the routing-router-hat foundation -> routing-peer) serves both kinds. The
-# four tests are STAGED (topology before
-# forwarding, single router before federation): a 2-node floor, a 3-node star
-# data-forward, a 2-router convergence floor, and a 2-router peer-native data
+# six tests are STAGED (topology before forwarding, single router before
+# federation, data plane before query plane): a 2-node floor, a 3-node star
+# data-forward, a 2-router convergence floor, a 2-router peer-native data
+# federation E2E, a single-router query-plane E2E, and a 2-router query-plane
 # federation E2E. The test fns carry the `wz_router_hat_` prefix so the default
 # Layer E sweep's `--skip wz_router` excludes them from the arbitrary-feature run.
 layer_e7_router_hat() {

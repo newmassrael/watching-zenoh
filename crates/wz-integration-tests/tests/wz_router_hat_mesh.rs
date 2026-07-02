@@ -16,8 +16,8 @@
 //! load-bearing obligation the R311y116 session review pinned before any run-mode
 //! flip.
 //!
-//! Four tests, STAGED so a failure localises (topology before forwarding, single
-//! router before federation):
+//! Six tests, STAGED so a failure localises (topology before forwarding, single
+//! router before federation, data plane before query plane):
 //!
 //! 1. `wz_router_hat_converges_with_a_peer` — the 2-node topology floor: a
 //!    router-hat R + one peer P dialing it. R must ingest P's link-state and
@@ -53,15 +53,33 @@
 //!    exercised, and `router_subs` stays empty (a router-native sub is undrivable
 //!    by the OBSERVE-only demo router). The router-native direction + the
 //!    non-master-attract corner stay UNIT-proven; this adds the peer-native
-//!    federation + sole-master bridge E2E. The QUERY-plane E2E is likewise a NAMED
-//!    follow-up — the demo has no mesh-mode query issuer and single-session query
-//!    nodes collide on the hardcoded zid; the query ROUTE itself is unit-proven
-//!    (route_request / forward_response, incl. 2-router HRW).
+//!    federation + sole-master bridge E2E (the query plane leaves that split
+//!    unchanged).
+//!
+//! 5. `wz_router_hat_routes_a_client_query_to_a_client_queryable` — the SINGLE-router
+//!    QUERY-plane E2E: a queryable client and a query-issuer client (distinct
+//!    `--zid`s so they do not collide in R's mesh graph) each dial ONLY R. R routes
+//!    the issuer's `Request(Query)` to the queryable's `client_qabls` entry and
+//!    returns the `Reply` + `ResponseFinal` back down the querier's face —
+//!    `route_request` / `forward_response` composed over the wire for the first time.
+//!    A barrier on R's `learned a queryable` orders the queryable ahead of the
+//!    one-shot query.
+//!
+//! 6. `wz_router_hat_federates_a_query_across_two_routers` — the 2-router QUERY-plane
+//!    FEDERATION E2E (the query twin of #4): an issuer behind R1 reaches a queryable
+//!    behind R2, routed issuer -> R1 -> [router mesh] -> R2 -> queryable. R2 floods
+//!    its client queryable into the router mesh (`advertise_client_cross_tier_qabl`),
+//!    so R1's `router_qabls` steers the query toward R2 via `route_request` (composed
+//!    E2E). Like #4's data plane, each router is sole master of its own domain, so the
+//!    HRW master-election is a NO-OP here (unit-proven separately, not exercised by
+//!    this topology). The barrier gates the issuer's spawn on R1 — the issuer's router
+//!    — logging `learned a queryable`, so the one-shot query cannot outrun the 2-hop
+//!    cross-mesh advertise.
 //!
 //! Requires the binary built with `--features router-hat-router` (the run-mode
 //! ACTIVE atom, which pulls the routing-router-hat foundation -> `routing-peer`
 //! transitively, so ONE binary serves both the `--router-hat` node
-//! and the `--peer` nodes). run-ci's Layer E7 builds it and runs all four tests on
+//! and the `--peer` nodes). run-ci's Layer E7 builds it and runs all six tests on
 //! the `--ignored` lane, like the other binary-dep e2es. The test fn names carry the
 //! `wz_router_hat_` prefix so the default Layer E sweep's `--skip wz_router`
 //! substring excludes them from the arbitrary-feature binary run.
@@ -423,10 +441,10 @@ fn wz_router_hat_federates_data_across_two_routers() {
     // Both the router-native direction and the non-master-attract corner stay
     // UNIT-proven (advertise_native_cross_tier_sub / push_bridges_cross_mesh_only_
     // when_master); this E2E adds the peer-native federation + the sole-master
-    // bridge over real transport. The QUERY-plane E2E is likewise a NAMED
-    // follow-up — the demo has no mesh-mode query issuer, and single-session query
-    // nodes collide on the hardcoded zid; the query ROUTE is unit-proven
-    // (route_request / forward_response, incl. 2-router HRW).
+    // bridge over real transport. The QUERY-plane twin of this federation is the
+    // separate `wz_router_hat_federates_a_query_across_two_routers` (test #6), which
+    // composes `route_request` / `forward_response` (incl. 2-router HRW) over the
+    // same 2-router mesh.
     let (mut r2_guard, mut r2_reader, p_r2) =
         spawn_router_hat("router-hat-2", &["--router-hat", "127.0.0.1:0"]);
     let addr_r2 = format!("127.0.0.1:{p_r2}");
@@ -648,4 +666,207 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
         "the queryable never fired — the routed query did not reach it through \
          R\n--- queryable stderr ---\n{qbl_captured}"
     );
+    // Transit pin: R's OWN query counter rose (it counts every inbound Request before
+    // routing), so the query transited THROUGH R — the query-plane twin of test #2's
+    // `forwarded mesh data` data-transit pin. Latched shutdown witness (emitted on
+    // `>0`), so it cannot race the app tick.
+    assert!(
+        r_captured.contains("router-hat: routed a query"),
+        "router-hat never routed a query — the issuer's Request(Query) did not \
+         transit the router\n--- router-hat stderr ---\n{r_captured}"
+    );
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
+fn wz_router_hat_federates_a_query_across_two_routers() {
+    // P4 §5.21 QUERY-plane FEDERATION E2E — the query twin of
+    // `wz_router_hat_federates_data_across_two_routers`, and the 2-router
+    // composition of the single-router query E2E above. A query-issuer CLIENT behind
+    // R1 reaches a queryable CLIENT behind R2, routed issuer -> R1 -> [router mesh]
+    // -> R2 -> queryable, with the `Reply` + `ResponseFinal` returning back down the
+    // same two-hop path. With autoconnect OFF, the issuer knows only R1, the
+    // queryable only R2, and R1 only dials R2 — so the ONLY issuer->queryable path
+    // is through BOTH routers, exactly as the data federation test pins delivery.
+    //
+    // This composes, over the wire, the query-plane twin of test #4's A2a advertise:
+    // R2 floods the client-hosted queryable into the router mesh
+    // (`ingest_client_queryable` -> `advertise_client_cross_tier_qabl`, a
+    // self-sourced `DeclareQueryable`), so R1 lands it in `router_qabls` and its
+    // `route_request` steers the issuer's `Request(Query)` toward R2 (composed E2E).
+    // As in test #4's data plane, each router is sole master of its domain, so the HRW
+    // master-election is a NO-OP here — unit-proven separately, not exercised by this
+    // 2-sole-master topology. This closes the QUERY-plane federation the
+    // R311y128/y133 rounds named as a follow-up: R311y133 proved the SINGLE-router
+    // query E2E (test #5), and the 2-router federation query was OBSERVED-ONCE but
+    // left uncommitted because a one-shot query races the 2-hop cross-mesh advertise.
+    //
+    // The BARRIER that makes it deterministic (not a race): gate the issuer's spawn
+    // on R1 — the ISSUER's router — logging `learned a queryable`. R1 emits that only
+    // once its `queryables_seen()` rises, and for R1 that count is fed by
+    // `router_qabls` (the mesh-learned tier), so the log fires precisely when R1 has
+    // ingested R2's cross-mesh queryable advertise. Gating on R1 (the 2-hop learner)
+    // rather than R2 (the 1-hop client host) is the load-bearing choice: the issuer
+    // is behind R1, so R1 — not R2 — must know the route before the one-shot query
+    // fires. R2 necessarily has the queryable already (it is what R2 advertised).
+    let (mut r2_guard, mut r2_reader, p_r2) =
+        spawn_router_hat("router-hat-2", &["--router-hat", "127.0.0.1:0"]);
+    let addr_r2 = format!("127.0.0.1:{p_r2}");
+    let (mut r1_guard, mut r1_reader, p_r1) = spawn_router_hat(
+        "router-hat-1",
+        &["--router-hat", "127.0.0.1:0", "--connect", &addr_r2],
+    );
+    let addr_r1 = format!("127.0.0.1:{p_r1}");
+
+    // Await BOTH routers' router-tier convergence FIRST (the federation floor, as in
+    // the data federation test) — a positive edge that latches `peak_routers >= 2`,
+    // so the shutdown "peak routers-net 2" assertion below is guaranteed explicitly.
+    for (label, reader) in [
+        ("router-hat-1", &mut r1_reader),
+        ("router-hat-2", &mut r2_reader),
+    ] {
+        wait_for_substring(
+            reader,
+            "router-hat: routers-net converged (2 node(s))",
+            Duration::from_secs(15),
+        )
+        .unwrap_or_else(|c| {
+            panic!(
+                "{label} never federated its router tier to 2 within 15s\n--- {label} \
+                 stderr ---\n{c}"
+            )
+        });
+    }
+
+    // The queryable client behind R2 (distinct zid), UP before the issuer.
+    let (mut qbl_guard, mut qbl_reader) = spawn_session(
+        "queryable",
+        &[
+            "--connect",
+            &addr_r2,
+            "--queryable",
+            "demo/**",
+            "--reply",
+            "value-across-two-routers",
+            "--zid",
+            "0b0b0b0b",
+        ],
+    );
+    // BARRIER: wait until R1 (the ISSUER's router) has ingested the queryable's
+    // advertise THROUGH the router mesh from R2 before spawning the issuer, so the
+    // issuer's one-shot query cannot outrun the 2-hop cross-mesh propagation. R1
+    // polls the witness on its app tick, so allow generous slack (2 hops + a tick).
+    wait_for_substring(
+        &mut r1_reader,
+        "router-hat: learned a queryable",
+        Duration::from_secs(15),
+    )
+    .unwrap_or_else(|c| {
+        let _ = qbl_guard.child_mut().kill();
+        let _ = qbl_guard.child_mut().wait();
+        let _ = r1_guard.child_mut().kill();
+        let _ = r1_guard.child_mut().wait();
+        let _ = r2_guard.child_mut().kill();
+        let _ = r2_guard.child_mut().wait();
+        panic!(
+            "router-hat-1 never logged it learned the queryable within 15s — the \
+             queryable's cross-mesh advertise did not federate R2 -> [router mesh] \
+             -> R1 (so R1 would not route the issuer's query toward R2)\n--- \
+             router-hat-1 stderr ---\n{c}"
+        )
+    });
+
+    // The query issuer behind R1 (distinct zid): its one-shot query fires on
+    // Established and now provably routes issuer -> R1 -> [router mesh] -> R2 to a
+    // queryable R1 already knows via the mesh.
+    let (mut iss_guard, mut iss_reader) = spawn_session(
+        "issuer",
+        &[
+            "--connect",
+            &addr_r1,
+            "--query",
+            "demo/fedq",
+            "--on-query-reply-log",
+            "--on-query-final-log",
+            "--zid",
+            "0a0a0a0a",
+        ],
+    );
+
+    let reply = wait_for_substring(&mut iss_reader, "REPLY RECEIVED", Duration::from_secs(15));
+    let final_recv = wait_for_substring(&mut iss_reader, "FINAL RECEIVED", Duration::from_secs(10));
+
+    graceful_terminate(iss_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(qbl_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r2_guard.child_mut(), Duration::from_secs(5));
+    let r1_captured = read_captured(&mut r1_reader);
+    let r2_captured = read_captured(&mut r2_reader);
+    let qbl_captured = read_captured(&mut qbl_reader);
+    let iss_captured = read_captured(&mut iss_reader);
+    eprintln!("--- router-hat-1 stderr ---\n{r1_captured}");
+    eprintln!("--- router-hat-2 stderr ---\n{r2_captured}");
+    eprintln!("--- queryable stderr ---\n{qbl_captured}");
+    eprintln!("--- issuer stderr ---\n{iss_captured}");
+
+    let reply_line = reply.unwrap_or_else(|c| {
+        panic!(
+            "issuer (behind R1) never received a reply within 15s — the query did \
+             not route across the two routers to the queryable behind R2 \
+             (route_request / forward_response did not compose over the router \
+             mesh)\n--- issuer stderr ---\n{c}\n--- queryable stderr ---\n\
+             {qbl_captured}\n--- router-hat-1 stderr ---\n{r1_captured}\n--- \
+             router-hat-2 stderr ---\n{r2_captured}"
+        )
+    });
+    assert!(
+        reply_line.contains("rid=1"),
+        "the routed reply must echo the query's rid=1\n--- issuer ---\n{reply_line}"
+    );
+    assert!(
+        reply_line.contains("payload=\"value-across-two-routers\""),
+        "the queryable's configured reply payload must route back across both \
+         routers\n--- issuer ---\n{reply_line}"
+    );
+    final_recv.unwrap_or_else(|c| {
+        panic!(
+            "issuer never received the ResponseFinal within 10s — the query \
+             termination did not route back across the router mesh\n--- issuer \
+             ---\n{c}"
+        )
+    });
+    // Backstop: the queryable behind R2 actually ANSWERED, so a green reply cannot be
+    // a stale/other-run artifact — the federated query reached it through both routers.
+    assert!(
+        qbl_captured.contains("QUERYABLE FIRED"),
+        "the queryable (behind R2) never fired — the federated query did not reach \
+         it across the router mesh\n--- queryable stderr ---\n{qbl_captured}"
+    );
+    // Federation pin: BOTH routers converged their router tier to 2 (self + the
+    // other). Latched high-water peaks, emitted unconditionally at shutdown, so they
+    // cannot race the tick. With autoconnect off, this — plus the reply arriving —
+    // proves the query and its reply crossed the router mesh (the issuer and queryable
+    // have no link but through their own router, and the routers only to each other).
+    for (label, captured) in [
+        ("router-hat-1", &r1_captured),
+        ("router-hat-2", &r2_captured),
+    ] {
+        assert!(
+            captured.contains("peak routers-net 2 node(s)"),
+            "{label}'s router tier did not converge to 2 — the routers did not \
+             federate, so the query could not have crossed the router mesh\n--- \
+             {label} stderr ---\n{captured}"
+        );
+        // Transit pin: EACH router's own query counter rose, so the query transited
+        // BOTH — issuer -> R1 (client-tier Request) -> R2 (router-tier transit
+        // Request) -> queryable. This makes the cross-mesh query transit self-evident
+        // from the routers' own logs, not inferred from topology + reply arrival alone
+        // (the query-plane twin of test #4's per-router `forwarded mesh data` pin).
+        assert!(
+            captured.contains("router-hat: routed a query"),
+            "{label} never routed a query — the federated query did not transit it, \
+             so it did not cross the router mesh (issuer -> R1 -> R2 -> \
+             queryable)\n--- {label} stderr ---\n{captured}"
+        );
+    }
 }
