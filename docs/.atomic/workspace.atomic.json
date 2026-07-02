@@ -52675,6 +52675,58 @@
         "LOCAL: R311y133 atop 2e2c3eb (flake fix) atop R311y132 (b30acba) atop origin/main=f737429. 6 commits ahead. NOT pushed without explicit consent; full run-ci at the batch pre-push."
       ]
     },
+    "Round 311y134": {
+      "decision_summary": "R311y134 -- 5.22 plugin family honest reclassification (follow-up #6). Direct-read of zenoh 49c8a53 commons/zenoh-plugin-trait + arbitration: the entire zenoh RUNTIME plugin system (dlopen .so + PluginsManager registry + Plugin host-trait + lifecycle FSM + ABI-compat gate + static-registration) exists solely to compose OPTIONAL out-of-tree subsystems (the plugins/ dir IS storage-manager + REST) at runtime, and is NOT load-bearing for core routing. wz OBVIATES it via compile-time cargo-feature composition -- zero libloading/PluginsManager in wz, and the subsystems zenoh loads as plugins are already wz feature families (5.24 storage, 5.26 rest); the in-tree decision is explicit (storage_config.rs:19: wz composes at build time, not via dlopen). So the family is obviated as a whole (superset-not-mirror). Corrected 5 reasons: host-trait/lifecycle foundational -> out-of-scope, manager cfg -> out-of-scope, static-registration cfg -> foundational/already-realized (cargo [features]+cfg IS the static registration), abi-compat foundational-inert -> out-of-scope (inseparable from dynamic-loading); dynamic-loading stays out-of-scope. Inventory reasons ONLY -- no code/Cargo/CI, no status change (all 6 stay reserved with 0 cfg sites); A3 unaffected; re-openable AP-only. NOT a buildable gap.",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory reasons only; no code/Cargo/CI, no status change -- all 6 stay reserved): the 5.22 plugin family reclassified by direct-read of zenoh 49c8a53 commons/zenoh-plugin-trait + arbitration against the in-tree decision.",
+        "plugin-host-trait: foundational -> OUT-OF-SCOPE (the Plugin start()/StartArgs/Instance contract, plugin.rs:182, exists only to give the runtime manager a uniform start seam; wz wires each subsystem via cfg with no always-on host-trait analog).",
+        "plugin-lifecycle: foundational -> OUT-OF-SCOPE (Declared->Loaded->Started, plugin.rs:36, models a runtime-load pipeline whose Declared->Loaded gap exists only because dlopen can fail; a cfg subsystem is compiled-in-or-absent).",
+        "plugin-manager: cfg -> OUT-OF-SCOPE (PluginsManager runtime registry, manager.rs:104; wz composes statically + introspects via 5.23 adminspace, no plugin registry).",
+        "plugin-static-registration: cfg -> FOUNDATIONAL/already-realized (declare_static_plugin manager.rs:131 IS compile-time selection; wz realizes the SAME static registration at the build-system layer -- cargo [features]+cfg(feature) audited by audit-catalog-status.sh -- not a runtime call).",
+        "plugin-abi-compat: foundational-inert -> OUT-OF-SCOPE (Compatibility/StructVersion, compatibility.rs:57; sole caller is the dynamic loader dynamic_plugin.rs:71; a compile-time build has one ABI by construction, inseparable from dynamic-loading).",
+        "plugin-dynamic-loading: unchanged (already OUT-OF-SCOPE: dlopen .so + repr(C) vtable, dynamic_plugin.rs:30 / vtable.rs:61; no_std-impossible; re-openable AP-only)."
+      ],
+      "verification_bullets": [
+        "Direct-read arbiter (zenoh 49c8a53 commons/zenoh-plugin-trait + zenoh/src): the plugin system is the RUNTIME composition mechanism for OPTIONAL out-of-tree subsystems (plugins = optional cargo feature, zenoh/Cargo.toml:52; the plugins/ dir IS storage-manager + REST; the runtime loader defaults to dynamic dlopen, loader.rs:51) -- NOT load-bearing for core routing. The 6 concepts map to that machine; abi-compat + dynamic-loading are dlopen-bound; host-trait/lifecycle/manager earn value only inside the manager+dlopen loop.",
+        "wz obviates it by COMPILE-TIME cargo-feature composition: grep for libloading/PluginsManager/declare_static_plugin across crates = ZERO wz hits; the very subsystems zenoh needs plugins for are already first-class wz feature families (5.24 storage-backend, 5.26 rest). The in-tree decision is explicit: wz-session-core/src/storage_config.rs:19 \"wz composes volumes at build time, not via dlopen -- storage-mgr-dynamic-volume-loading is out-of-scope-AP\". Both spot-checked and confirmed.",
+        "Superset-not-mirror: wz's build-time composition is a type-safe/no-ABI-risk/no-dlopen superset that makes the runtime plugin system out-of-scope (re-openable for the AP/std tier only; MCU/no_std cannot dlopen). No genuine buildable gap in the family; static-registration is already realized as the feature system itself.",
+        "A3 unaffected: all 6 stay reserved with 0 cfg sites (invariant #2 holds); reason markers are not A3 inputs; active count unchanged. validate_workspace orphan new=+0. No code/Cargo/CI touched, so no lane behavior changes. full run-ci at the batch push covers Layer A3 (inventory<->cargo join)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin"
+      ],
+      "carry_forward_bullets": [
+        "R311y134 = 5.22 plugin family honest reclassification (follow-up #6; direct-read + arbitration, R311xz pattern). The whole zenoh runtime plugin system (host-trait/lifecycle/manager/static-registration/abi-compat/dynamic-loading) is OBVIATED by wz's compile-time cargo-feature composition superset -- the subsystems it exists to load (storage, REST) are already wz feature families (5.24, 5.26). 5 reasons corrected (4 -> out-of-scope, static-registration -> foundational/already-realized); dynamic-loading was already out-of-scope. Inventory reasons only, no code/status change; re-openable AP-only per superset-not-mirror. NOT a buildable gap.",
+        "NEXT P4 breadth (re-openable, direct-read-first): 5.26 rest (rest-http-bridge/rest-sse-subscribe -- zenoh-plugin-rest, likely out-of-scope-AP HTTP bridge) + 5.27 api-compat (api-compat-c/api-compat-pico -- C/pico API-shape compat, likely out-of-scope superset). The remaining 5.21 router USEFUL/DEFER atoms (interest-broker, interest-pending-gc, token-tables, multicast-faces, interceptor-framework) are mostly built-and-reused; A3-cfg-audit first.",
+        "SESSION follow-ups ALL addressed: #1 codec (R311y130) #2 descoped #3 query E2E (R311y133) #4 flip (R311y132) #5 egress-ACL (R311y131) #6 plugin reclassify (R311y134) + flake fix (2e2c3eb).",
+        "LOCAL: R311y134 atop 17adaa1 (R311y133). 7 commits ahead of origin/main=f737429. NOT pushed without explicit consent; full run-ci at the batch pre-push (esp Layer A3)."
+      ],
+      "publishable_decision_summary": "R311y134 -- 5.22 plugin family honest reclassification (follow-up #6). Direct-read of zenoh 49c8a53 commons/zenoh-plugin-trait + arbitration: the entire zenoh RUNTIME plugin system (dlopen .so + PluginsManager registry + Plugin host-trait + lifecycle FSM + ABI-compat gate + static-registration) exists solely to compose OPTIONAL out-of-tree subsystems (the plugins/ dir IS storage-manager + REST) at runtime, and is NOT load-bearing for core routing. wz OBVIATES it via compile-time cargo-feature composition -- zero libloading/PluginsManager in wz, and the subsystems zenoh loads as plugins are already wz feature families (5.24 storage, 5.26 rest); the in-tree decision is explicit (storage_config.rs:19: wz composes at build time, not via dlopen). So the family is obviated as a whole (superset-not-mirror). Corrected 5 reasons: host-trait/lifecycle foundational -> out-of-scope, manager cfg -> out-of-scope, static-registration cfg -> foundational/already-realized (cargo [features]+cfg IS the static registration), abi-compat foundational-inert -> out-of-scope (inseparable from dynamic-loading); dynamic-loading stays out-of-scope. Inventory reasons ONLY -- no code/Cargo/CI, no status change (all 6 stay reserved with 0 cfg sites); A3 unaffected; re-openable AP-only. NOT a buildable gap.",
+      "publishable_changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory reasons only; no code/Cargo/CI, no status change -- all 6 stay reserved): the 5.22 plugin family reclassified by direct-read of zenoh 49c8a53 commons/zenoh-plugin-trait + arbitration against the in-tree decision.",
+        "plugin-host-trait: foundational -> OUT-OF-SCOPE (the Plugin start()/StartArgs/Instance contract, plugin.rs:182, exists only to give the runtime manager a uniform start seam; wz wires each subsystem via cfg with no always-on host-trait analog).",
+        "plugin-lifecycle: foundational -> OUT-OF-SCOPE (Declared->Loaded->Started, plugin.rs:36, models a runtime-load pipeline whose Declared->Loaded gap exists only because dlopen can fail; a cfg subsystem is compiled-in-or-absent).",
+        "plugin-manager: cfg -> OUT-OF-SCOPE (PluginsManager runtime registry, manager.rs:104; wz composes statically + introspects via 5.23 adminspace, no plugin registry).",
+        "plugin-static-registration: cfg -> FOUNDATIONAL/already-realized (declare_static_plugin manager.rs:131 IS compile-time selection; wz realizes the SAME static registration at the build-system layer -- cargo [features]+cfg(feature) audited by audit-catalog-status.sh -- not a runtime call).",
+        "plugin-abi-compat: foundational-inert -> OUT-OF-SCOPE (Compatibility/StructVersion, compatibility.rs:57; sole caller is the dynamic loader dynamic_plugin.rs:71; a compile-time build has one ABI by construction, inseparable from dynamic-loading).",
+        "plugin-dynamic-loading: unchanged (already OUT-OF-SCOPE: dlopen .so + repr(C) vtable, dynamic_plugin.rs:30 / vtable.rs:61; no_std-impossible; re-openable AP-only)."
+      ],
+      "publishable_verification_bullets": [
+        "Direct-read arbiter (zenoh 49c8a53 commons/zenoh-plugin-trait + zenoh/src): the plugin system is the RUNTIME composition mechanism for OPTIONAL out-of-tree subsystems (plugins = optional cargo feature, zenoh/Cargo.toml:52; the plugins/ dir IS storage-manager + REST; the runtime loader defaults to dynamic dlopen, loader.rs:51) -- NOT load-bearing for core routing. The 6 concepts map to that machine; abi-compat + dynamic-loading are dlopen-bound; host-trait/lifecycle/manager earn value only inside the manager+dlopen loop.",
+        "wz obviates it by COMPILE-TIME cargo-feature composition: grep for libloading/PluginsManager/declare_static_plugin across crates = ZERO wz hits; the very subsystems zenoh needs plugins for are already first-class wz feature families (5.24 storage-backend, 5.26 rest). The in-tree decision is explicit: wz-session-core/src/storage_config.rs:19 \"wz composes volumes at build time, not via dlopen -- storage-mgr-dynamic-volume-loading is out-of-scope-AP\". Both spot-checked and confirmed.",
+        "Superset-not-mirror: wz's build-time composition is a type-safe/no-ABI-risk/no-dlopen superset that makes the runtime plugin system out-of-scope (re-openable for the AP/std tier only; MCU/no_std cannot dlopen). No genuine buildable gap in the family; static-registration is already realized as the feature system itself.",
+        "A3 unaffected: all 6 stay reserved with 0 cfg sites (invariant #2 holds); reason markers are not A3 inputs; active count unchanged. validate_workspace orphan new=+0. No code/Cargo/CI touched, so no lane behavior changes. full run-ci at the batch push covers Layer A3 (inventory<->cargo join)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y134 = 5.22 plugin family honest reclassification (follow-up #6; direct-read + arbitration, R311xz pattern). The whole zenoh runtime plugin system (host-trait/lifecycle/manager/static-registration/abi-compat/dynamic-loading) is OBVIATED by wz's compile-time cargo-feature composition superset -- the subsystems it exists to load (storage, REST) are already wz feature families (5.24, 5.26). 5 reasons corrected (4 -> out-of-scope, static-registration -> foundational/already-realized); dynamic-loading was already out-of-scope. Inventory reasons only, no code/status change; re-openable AP-only per superset-not-mirror. NOT a buildable gap.",
+        "NEXT P4 breadth (re-openable, direct-read-first): 5.26 rest (rest-http-bridge/rest-sse-subscribe -- zenoh-plugin-rest, likely out-of-scope-AP HTTP bridge) + 5.27 api-compat (api-compat-c/api-compat-pico -- C/pico API-shape compat, likely out-of-scope superset). The remaining 5.21 router USEFUL/DEFER atoms (interest-broker, interest-pending-gc, token-tables, multicast-faces, interceptor-framework) are mostly built-and-reused; A3-cfg-audit first.",
+        "SESSION follow-ups ALL addressed: #1 codec (R311y130) #2 descoped #3 query E2E (R311y133) #4 flip (R311y132) #5 egress-ACL (R311y131) #6 plugin reclassify (R311y134) + flake fix (2e2c3eb).",
+        "LOCAL: R311y134 atop 17adaa1 (R311y133). 7 commits ahead of origin/main=f737429. NOT pushed without explicit consent; full run-ci at the batch pre-push (esp Layer A3)."
+      ]
+    },
     "Round 311y14": {
       "decision_summary": "R311y14 -- root-cause fix for the Layer Q qemu-load-flake that blocked the R311y12+y13 push (NOT a --no-verify bypass). The Q qemu runs are wall-clock-bounded by run_qemu_case's `timeout`; 10s was too tight -- under full-CI concurrent load (parallel cargo builds + several qemu instances) a ~2s-standalone MCU e2e slowed past 10s and Q.2.mps2-an500 flaked exit=124, aborting the pre-push hook. DIAGNOSED per [[feedback-layer-q-qemu-load-flake]] + [[feedback-no-flaky-ever]]: Layer Q PASSES standalone (Q_EXIT=0, every Q.0/Q.1/Q.2/Q.4 x mps2-an385/an500 lane incl the one that flaked), the R311y12/y13 changes are AP-only (quic/facade/unixpipe-doc/CI + inventory -- NOT in the MCU/mcu-qemu-demo build), and the R311y13 full run-ci had already passed Q -- so it is the documented load-flake, not a regression. Root-caused: raised the run_qemu_case wall-clock timeout 10s -> 30s (~15x the standalone runtime; absorbs CI-load slowdown while still bounding a genuine runaway loop -- a real hang runs the full 30s vs ~2s, distinguishable in the captured log). run-ci.sh only (the Q.0/Q.2/Q.4 shared helper); no code/inventory change.",
       "changes_bullets": [
@@ -63291,7 +63343,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=cross-binary ABI compat gate (Compatibility/StructVersion); P=zenoh compatibility.rs:57; C=inert w/o dynamic-loading; class=foundational-inert"
+      "reason": "OUT-OF-SCOPE (obviated, re-label from foundational-inert): Compatibility/StructVersion cross-binary ABI gate (zenoh compatibility.rs:57); its SOLE caller is the dynamic loader (dynamic_plugin.rs:71). A single compile-time build has one ABI by construction -- no cross-binary FFI boundary to gate. Inseparable from plugin-dynamic-loading, obviated with it. Re-openable AP-only. class=out-of-scope"
     },
     "plugin-dynamic-loading": {
       "status": "reserved",
@@ -63303,25 +63355,25 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=Plugin trait (StartArgs/Instance/start) + control/instance markers; P=zenoh plugin.rs:182; C=no_std-able; class=foundational"
+      "reason": "OUT-OF-SCOPE (obviated by the cargo-feature composition superset): the Plugin start()/StartArgs/Instance contract (zenoh plugin.rs:182) exists only to give the RUNTIME manager a uniform start seam; wz wires each subsystem directly via cfg(feature) with no always-on host-trait analog. Not a gap. Re-openable AP-only. class=out-of-scope"
     },
     "plugin-lifecycle": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=Declared->Loaded->Started FSM; P=zenoh manager.rs:26 static_plugin.rs:79; C=needs host-trait; class=foundational"
+      "reason": "OUT-OF-SCOPE (obviated): Declared->Loaded->Started (zenoh plugin.rs:36) models a RUNTIME-load pipeline whose Declared->Loaded gap exists only because dlopen can fail; a cfg-gated subsystem is compiled-in-or-absent, no load step, no such FSM. No wz analog. class=out-of-scope"
     },
     "plugin-manager": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=PluginsManager registry (declare/query, static_plugins_only); P=zenoh manager.rs:104; C=needs host-trait+lifecycle; class=cfg"
+      "reason": "OUT-OF-SCOPE (obviated): PluginsManager runtime registry of loaded plugins (zenoh manager.rs:104); wz composes subsystems statically at build time and introspects via the 5.23 adminspace, needing no plugin registry. class=out-of-scope"
     },
     "plugin-static-registration": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=compile-time static plugin linking (declare_static_plugin); P=zenoh manager.rs:131; C=needs manager; no_std-safe; class=cfg"
+      "reason": "FOUNDATIONAL (already realized differently): declare_static_plugin (zenoh manager.rs:131) IS compile-time plugin selection; wz realizes the SAME static registration at the BUILD-SYSTEM layer -- cargo [features] + cfg(feature=X) audited by audit-catalog-status.sh ARE the static-registration mechanism -- instead of a runtime declare_static_plugin() call. Structural, no own cfg toggle. class=foundational"
     },
     "preset-ap-client": {
       "status": "active",
