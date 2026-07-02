@@ -329,6 +329,9 @@ use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
 
 use crate::accept_loop::{FaceForwarder, FaceId};
+use crate::interceptor::{
+    InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow,
+};
 use crate::linkstate_forward::{
     absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info,
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
@@ -582,6 +585,22 @@ pub struct RouterForwarder {
     /// and, when self is the route master, BRIDGED to the other mesh (C4,
     /// [`bridge_push_cross_mesh`](RouterForwarder::bridge_push_cross_mesh)).
     data_seen: Cell<usize>,
+    /// §5.16 access-control INGRESS interceptor chain — consulted at the top of
+    /// [`forward`](FaceForwarder::forward) before the kind-dispatch, the router twin
+    /// of [`LinkstateForwarder`](crate::linkstate_forward)'s `ingress_interceptors`.
+    /// Empty (admits everything) until [`set_interceptors`](Self::set_interceptors).
+    ingress_interceptors: RefCell<InterceptorChain>,
+    /// §5.16 access-control EGRESS interceptor chain — consulted per outbound
+    /// message in [`fan_out_tier`](Self::fan_out_tier) + [`send_to_face`](Self::send_to_face),
+    /// the router twin of the single-net `egress_interceptors`. This closes the
+    /// y113 obligation: the router's egress helpers now carry the same
+    /// `admit_outbound` gate the single-net `fan_out` has (the one router↔single-net
+    /// data-path parity gap).
+    egress_interceptors: RefCell<InterceptorChain>,
+    /// Count of messages ANY interceptor dropped on either flow — the router twin
+    /// of the single-net `interceptor_dropped` witness (a coarse per-node count, not
+    /// per-interceptor). `0` in any config with no ACL wired.
+    interceptor_dropped: Cell<usize>,
     /// A `routers_net` spanning-tree recompute is pending (D2c coalescing flag).
     /// zenoh runs a SEPARATE `TreesComputationWorker` per net; wz coalesces both
     /// nets onto the one [`tick`](FaceForwarder::tick) cadence the trait seam
@@ -655,6 +674,9 @@ impl RouterForwarder {
             timed_out: Cell::new(0),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
+            ingress_interceptors: RefCell::new(InterceptorChain::new()),
+            egress_interceptors: RefCell::new(InterceptorChain::new()),
+            interceptor_dropped: Cell::new(0),
             trees_dirty_routers: Cell::new(false),
             trees_dirty_peers: Cell::new(false),
             recomputes: Cell::new(0),
@@ -712,6 +734,54 @@ impl RouterForwarder {
         self.data_seen.get()
     }
 
+    /// Install the full §5.16 interceptor configuration — the router twin of
+    /// [`LinkstateForwarder::set_interceptors`](crate::linkstate_forward::LinkstateForwarder::set_interceptors).
+    /// Builds BOTH the ingress and egress chains from ONE [`InterceptorConfig`] in
+    /// zenoh's fixed factory order; a later call REPLACES both (no accumulation), so
+    /// a re-config is idempotent. Empty config -> both chains empty -> every message
+    /// admitted (the default). Denials are counted by
+    /// [`interceptor_dropped`](Self::interceptor_dropped).
+    pub fn set_interceptors(&self, config: InterceptorConfig) {
+        *self.ingress_interceptors.borrow_mut() = config.build_chain(InterceptorFlow::Ingress);
+        *self.egress_interceptors.borrow_mut() = config.build_chain(InterceptorFlow::Egress);
+    }
+
+    /// The number of messages ANY interceptor has dropped so far (ACL denial on
+    /// either flow) — the router twin of the single-net drop witness.
+    pub fn interceptor_dropped(&self) -> usize {
+        self.interceptor_dropped.get()
+    }
+
+    /// Whether the INGRESS chain admits this inbound `msg` arriving on face `id` —
+    /// the router twin of
+    /// [`LinkstateForwarder::admit_inbound`](crate::linkstate_forward::LinkstateForwarder).
+    /// Consulted at the top of [`forward`](FaceForwarder::forward) ahead of the
+    /// kind-dispatch. Empty chain (no ACL) admits without touching the face table.
+    fn admit_inbound(&self, id: FaceId, msg: &NetworkMessage) -> bool {
+        let chain = self.ingress_interceptors.borrow();
+        if chain.is_empty() {
+            return true;
+        }
+        let faces = self.faces.borrow();
+        let Some(face) = faces.get(&id) else {
+            return true; // an unknown face has no relay path anyway
+        };
+        chain.admit(&RouterFaceContext { face }, msg)
+    }
+
+    /// Whether the EGRESS chain admits sending `msg` to the face whose `state` the
+    /// caller already holds — the router twin of the single-net `admit_outbound`.
+    /// Takes the already-borrowed `state` (not a `FaceId`) because the egress seams
+    /// ([`fan_out_tier`](Self::fan_out_tier)) hold the `faces` borrow across the
+    /// per-face loop. Empty chain admits without building a context.
+    fn admit_outbound(&self, state: &RouterFaceState, msg: &NetworkMessage) -> bool {
+        let chain = self.egress_interceptors.borrow();
+        if chain.is_empty() {
+            return true;
+        }
+        chain.admit(&RouterFaceContext { face: state }, msg)
+    }
+
     /// The current instant from the injected clock — the single read site the
     /// pending-query deadline stamp ([`route_request`](Self::route_request)) and
     /// the C5c timeout sweep will share, so an injected test clock governs both.
@@ -756,6 +826,16 @@ impl RouterForwarder {
             }
             let peer_zid = peer_zid_routing(&state.actions);
             if let Some(msg) = build(*id, peer_zid)? {
+                // §5.16 EGRESS access control (y113): gate the built message by the
+                // DESTINATION face's subject before it leaves — a denied outbound is
+                // dropped for THIS face (not sent, not counted) and witnessed. The
+                // router twin of `LinkstateForwarder::fan_out`'s `admit_outbound`
+                // gate; empty chain (no ACL) is a no-op fast path.
+                if !self.admit_outbound(state, &msg) {
+                    self.interceptor_dropped
+                        .set(self.interceptor_dropped.get() + 1);
+                    continue;
+                }
                 if state
                     .actions
                     .send_network_message(msg, reliable, false)
@@ -2867,9 +2947,19 @@ impl RouterForwarder {
         let Some(state) = faces.get(&target) else {
             return false;
         };
+        let msg = build();
+        // §5.16 EGRESS access control (y113): gate the single-target send (a query
+        // Response / ResponseFinal / prompt final) by the destination's subject —
+        // a denied reply is dropped and witnessed, not returned. The other egress
+        // seam beside `fan_out_tier`.
+        if !self.admit_outbound(state, &msg) {
+            self.interceptor_dropped
+                .set(self.interceptor_dropped.get() + 1);
+            return false;
+        }
         state
             .actions
-            .send_network_message(build(), reliable, false)
+            .send_network_message(msg, reliable, false)
             .is_ok()
     }
 
@@ -3065,6 +3155,16 @@ impl FaceForwarder for RouterForwarder {
             }
         };
         for message in messages {
+            // §5.16 INGRESS access control (y113): consult the ingress chain ONCE
+            // here, ahead of the kind-dispatch — a denied message is dropped (not
+            // counted as received Push/Query, not routed) and witnessed. The router
+            // twin of `LinkstateForwarder::forward`'s admit_inbound gate; the
+            // empty-chain fast path (no ACL) is a single predicate read.
+            if !self.admit_inbound(id, message) {
+                self.interceptor_dropped
+                    .set(self.interceptor_dropped.get() + 1);
+                continue;
+            }
             match message {
                 // A topology link-state: ingest into the INBOUND tier's net,
                 // re-flood the changed nodes onward to the SAME tier, purge the
@@ -3165,12 +3265,63 @@ impl FaceForwarder for RouterForwarder {
     }
 }
 
+/// The per-message [`InterceptorContext`] for one router face — the router twin of
+/// [`LinkstateForwarder`](crate::linkstate_forward)'s `FaceContext`. Borrows the
+/// face's state so an enforcer reads the subject (the peer's routing zid) and
+/// resolves a governed message's keyexpr against that face's link-local alias
+/// table. Serves BOTH flows: the inbound face for ingress, the destination face
+/// for egress (the subject is the peer on the other end of the link either way).
+struct RouterFaceContext<'a> {
+    face: &'a RouterFaceState,
+}
+
+impl InterceptorContext for RouterFaceContext<'_> {
+    fn subject(&self) -> Option<Zid> {
+        peer_zid_routing(&self.face.actions)
+    }
+
+    fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
+        // Resolve the governed kinds' keyexpr alias-aware against THIS face's table
+        // (the same resolution the route paths do). A kind carrying no governed
+        // keyexpr here (an UndeclareSubscriber / alias declaration / keyless
+        // ResponseFinal / Oam) yields None, so the enforcer admits it. Mirror of the
+        // single-net FaceContext.
+        match msg {
+            NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, &self.face.keyexpr_table),
+            NetworkMessage::Request(r) => {
+                resolve_wireexpr(&r.keyexpr.body, &self.face.keyexpr_table)
+            }
+            NetworkMessage::Response(r) => {
+                resolve_wireexpr(&r.keyexpr.body, &self.face.keyexpr_table)
+            }
+            NetworkMessage::Declare(d) => declare_subscriber_wireexpr(d)
+                .or_else(|| declare_queryable_wireexpr(d))
+                .and_then(|we| resolve_wireexpr(&we.body, &self.face.keyexpr_table)),
+            _ => None,
+        }
+    }
+}
+
+/// The production [`InterceptorSink`](crate::interceptor::InterceptorSink) impl for
+/// the router — the typed config SSOT drives the live forwarder through this seam
+/// (parity with [`LinkstateForwarder`](crate::linkstate_forward)). Delegates to the
+/// inherent [`set_interceptors`](RouterForwarder::set_interceptors).
+impl crate::interceptor::InterceptorSink for RouterForwarder {
+    fn set_interceptors(&self, config: crate::interceptor::InterceptorConfig) {
+        RouterForwarder::set_interceptors(self, config)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime_impl::TokioRuntime;
     use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
     use sce_forge_runtime::codec::SceBytes;
+    #[cfg(feature = "access-acl")]
+    use wz_access_control::{
+        AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+    };
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_runtime_core::runtime::Runtime;
@@ -3502,6 +3653,125 @@ mod tests {
             1,
             "bridged to the router-tier subscriber (self is master in single-router)"
         );
+    }
+
+    /// An `AclPolicy` that DENIES `Put` on `keyexpr` for `flow`, allow-default —
+    /// the router twin of the single-net `deny_put_policy`, parameterised on the
+    /// flow so a test can gate ingress vs egress.
+    #[cfg(feature = "access-acl")]
+    fn deny_put_policy(keyexpr: &str, flow: AclFlow) -> AclPolicy {
+        AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec![keyexpr.to_owned()],
+                messages: vec![AclMessage::Put],
+                flow,
+                permission: Permission::Deny,
+            }],
+        })
+    }
+
+    /// The within-tier demo topology (peer source A + peer subscriber C, a tree
+    /// child of self) with C subscribed to `demo/data` and both sinks reset —
+    /// ready for a Put from A that routes A -> self -> C within the peer tier.
+    #[cfg(feature = "access-acl")]
+    fn peer_source_and_subscriber() -> (
+        RouterForwarder,
+        Arc<RecordingLinkDriver>,
+        Arc<RecordingLinkDriver>,
+    ) {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // peer source
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // peer subscriber (tree child)
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // C subscribes
+        sink_a.reset();
+        sink_c.reset();
+        (fwd, sink_a, sink_c)
+    }
+
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn an_ingress_acl_deny_drops_a_push_before_route() {
+        // With self configured to DENY demo/** on INGRESS, a Put from A is dropped
+        // at the top of forward(): not counted as received data, not routed to the
+        // interested child C, and witnessed. The router twin of the single-net
+        // an_acl_deny_drops_an_inbound_put_before_relay.
+        let (fwd, _sink_a, sink_c) = peer_source_and_subscriber();
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(deny_put_policy("demo/**", AclFlow::Ingress)),
+            ..Default::default()
+        });
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(fwd.interceptor_dropped(), 1, "the denied Put is witnessed");
+        assert_eq!(
+            fwd.data_seen(),
+            0,
+            "a denied ingress Put is not counted as received"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a denied ingress Put is not routed to C"
+        );
+    }
+
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn an_egress_acl_deny_drops_the_within_tier_relay() {
+        // The y113 obligation: with self configured to DENY demo/** on EGRESS, a Put
+        // from A is ADMITTED on ingress (counted, routed) but its within-tier relay
+        // to the subscriber C is dropped at fan_out_tier's admit_outbound gate and
+        // witnessed — the router↔single-net egress parity the fan_out gate closes.
+        let (fwd, _sink_a, sink_c) = peer_source_and_subscriber();
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(deny_put_policy("demo/**", AclFlow::Egress)),
+            ..Default::default()
+        });
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            fwd.data_seen(),
+            1,
+            "the Put is admitted on ingress and counted"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "the egress relay to C is dropped by the ACL"
+        );
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "the dropped egress relay is witnessed"
+        );
+    }
+
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn an_egress_acl_allow_relays_a_non_denied_push() {
+        // Selective, not blanket: the EGRESS deny targets a DIFFERENT subtree
+        // (admin/**), so the demo/data relay reaches C exactly as without an ACL —
+        // proving the gate is a filter, not a block.
+        let (fwd, _sink_a, sink_c) = peer_source_and_subscriber();
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(deny_put_policy("admin/**", AclFlow::Egress)),
+            ..Default::default()
+        });
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(fwd.data_seen(), 1, "the Put is counted");
+        assert_eq!(sink_c.frame_count(), 1, "a non-denied Put relays to C");
+        assert_eq!(fwd.interceptor_dropped(), 0, "nothing dropped");
     }
 
     #[test]

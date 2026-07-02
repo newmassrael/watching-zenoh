@@ -1178,11 +1178,20 @@ layer_c1ax_cargo_test_routing_namespace() {
 #      mesh federation bridge + master-election (HRW elect_router over shared_nodes,
 #      re-gating C3a local delivery + C3b's router leg). The query route (Request/
 #      Response) + source-dimensioned route cache are the later C5 slice.
+#   4. §5.16 access-control (R311y131, the y113 obligation): the router now carries
+#      the ingress/egress interceptor plane (parity with LinkstateForwarder). The
+#      `routing-router-hat,access-acl` arm RUNS the router ACL tests (an_ingress /
+#      an_egress_acl_* — fan_out_tier + admit_inbound gates); the full access combo
+#      (acl+downsampling+quota) clippy-gates --all-targets so the shared
+#      `InterceptorConfig { .. }` spread is non-redundant (the C1y needless_update
+#      caveat).
 layer_c1ay_cargo_test_router_hat() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,access-acl,access-downsampling,access-quota --quiet -- -D warnings)
 }
 
 # ─── Layer C1af — SHM transport (R3a+R3b): provider + live swap + e2e ─
