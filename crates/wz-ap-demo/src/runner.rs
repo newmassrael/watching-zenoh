@@ -1848,14 +1848,21 @@ pub(crate) async fn run_peer(
             forwarder.data_seen()
         );
     }
-    // Subscription-withdrawal witness — the DETERMINISTIC shutdown counterpart to
-    // the in-run app-tick log (c3c-3 debt A1 / rem-2): a publisher that LEARNED an
-    // interested subscriber and then saw that interest go away emits this from
-    // STATE (`announced_interest` ever true AND the interest set now empty),
-    // unconditionally at shutdown, so a test need not race the 250 ms app-tick.
-    // Mirrors the `received mesh data` / `learned mesh topology` shutdown witnesses.
+    // Subscription-interest witnesses — the DETERMINISTIC shutdown counterparts to
+    // the in-run app-tick logs, emitted from STATE unconditionally at shutdown so a
+    // test need not race the 250 ms app-tick (mirrors the `received mesh data` /
+    // `learned mesh topology` shutdown witnesses). A publisher whose interest set is
+    // now NON-empty LEARNED a subscriber; one that saw a learned interest go away
+    // (`announced_interest` ever true AND the set now empty) WITHDREW. The learned
+    // latch hardens the 2-router federation e2e, whose subscription half propagates
+    // across a router hop (R311y128 design-panel A robustness note).
     if let Some(key) = publish_key {
-        if announced_interest && forwarder.interested(key).is_empty() {
+        if !forwarder.interested(key).is_empty() {
+            log::info!(
+                "wz-ap-demo peer: publisher learned subscriber interest ({} peer(s))",
+                forwarder.interested(key).len()
+            );
+        } else if announced_interest {
             log::info!("wz-ap-demo peer: publisher subscriber interest withdrawn");
         }
     }

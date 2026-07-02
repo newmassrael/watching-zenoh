@@ -16,7 +16,8 @@
 //! load-bearing obligation the R311y116 session review pinned before any run-mode
 //! flip.
 //!
-//! Two tests, STAGED so a failure localises (topology before forwarding):
+//! Four tests, STAGED so a failure localises (topology before forwarding, single
+//! router before federation):
 //!
 //! 1. `wz_router_hat_converges_with_a_peer` — the 2-node topology floor: a
 //!    router-hat R + one peer P dialing it. R must ingest P's link-state and
@@ -35,10 +36,29 @@
 //!    `data_seen` rises (the Push crossed the router), so P1's reception is proof
 //!    the router FORWARDED it, not that the peers reached each other directly.
 //!
+//! 3. `wz_router_hat_two_routers_converge` — the FEDERATION topology floor: two
+//!    router-hat nodes dialing each other, each classifying the other into
+//!    `routers_net` (WhatAmI::Router both sides), converging the router tier to 2.
+//!
+//! 4. `wz_router_hat_federates_data_across_two_routers` — the R311y120 FEDERATION
+//!    black-hole proof: a publisher behind R1 reaches a subscriber behind R2,
+//!    routed P1 -> R1 -> [router mesh] -> R2 -> P2 (autoconnect off, so the only
+//!    path is through BOTH routers). Composes over the wire the A2a
+//!    cross-tier-native advertise (R2 floods P2's peer-native sub into the router
+//!    mesh so R1 attracts P1's publish) + the master-gated cross-mesh bridge. Each
+//!    router is the sole master of its own domain (the other router is only in its
+//!    `routers_net`, never its `linkstatepeers_net`), so the bridge direction is
+//!    deterministic — this does NOT exercise master-vs-non-master ELECTION (that
+//!    corner needs 3+ routers and stays unit-proven). SCOPE: this is the DATA-plane
+//!    federation. The QUERY-plane E2E (a remote querier steered across the router
+//!    mesh) is a NAMED follow-up — the demo has no mesh-mode query issuer and
+//!    single-session query nodes collide on the hardcoded zid; the query ROUTE
+//!    itself is unit-proven (route_request / forward_response, incl. 2-router HRW).
+//!
 //! Requires the binary built with `--features routing-router-hat` (which pulls
 //! `routing-peer` transitively, so ONE binary serves both the `--router-hat` node
-//! and the `--peer` nodes). run-ci's Layer E7 builds it and runs both tests on the
-//! `--ignored` lane, like the other binary-dep e2es. The test fn names carry the
+//! and the `--peer` nodes). run-ci's Layer E7 builds it and runs all four tests on
+//! the `--ignored` lane, like the other binary-dep e2es. The test fn names carry the
 //! `wz_router_hat_` prefix so the default Layer E sweep's `--skip wz_router`
 //! substring excludes them from the arbitrary-feature binary run.
 
@@ -268,5 +288,206 @@ fn wz_router_hat_forwards_between_peers() {
         "peer-pub never learned the subscriber's interest — the DeclareSubscriber \
          did not flood through the router to the publisher\n--- peer-pub \
          stderr ---\n{pub_captured}"
+    );
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-router-hat); Layer E runs via --ignored"]
+fn wz_router_hat_two_routers_converge() {
+    // The federation topology floor: two router-hat nodes dialing each other. R2
+    // binds first; R1 dials it. Both present WhatAmI::Router, so each classifies
+    // the other into `routers_net` (NOT `linkstatepeers_net`) — the router mesh.
+    // This isolates a router-to-router topology failure from a federated-forwarding
+    // failure (the ACTIVATION-1 staging discipline).
+    let (mut r2_guard, mut r2_reader, p_r2) =
+        spawn_router_hat("router-hat-2", &["--router-hat", "127.0.0.1:0"]);
+    let addr_r2 = format!("127.0.0.1:{p_r2}");
+    let (mut r1_guard, mut r1_reader, _p_r1) = spawn_router_hat(
+        "router-hat-1",
+        &["--router-hat", "127.0.0.1:0", "--connect", &addr_r2],
+    );
+
+    // BOTH routers must converge their ROUTER tier to 2 (self + the other) — the
+    // in-run positive-edge witness, deterministic once each ingests the other's
+    // link-state. Await BOTH before terminating: R1 (the dialer) adds R2 on its
+    // dial-face-up while R2 (the listener) adds R1 on accept and needs its next app
+    // tick to sample the peak, so terminating on R1's convergence alone can beat
+    // R2's peak sample (the observed flake). Once a router logs this positive edge
+    // its `peak_routers` has reached 2, so the shutdown peak below is then latched.
+    let r1_converged = wait_for_substring(
+        &mut r1_reader,
+        "router-hat: routers-net converged (2 node(s))",
+        Duration::from_secs(15),
+    );
+    let r2_converged = wait_for_substring(
+        &mut r2_reader,
+        "router-hat: routers-net converged (2 node(s))",
+        Duration::from_secs(15),
+    );
+
+    graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r2_guard.child_mut(), Duration::from_secs(5));
+    let r1_captured = read_captured(&mut r1_reader);
+    let r2_captured = read_captured(&mut r2_reader);
+    eprintln!("--- router-hat-1 stderr ---\n{r1_captured}");
+    eprintln!("--- router-hat-2 stderr ---\n{r2_captured}");
+
+    r1_converged.unwrap_or_else(|c| {
+        panic!(
+            "router-hat-1 never converged its router tier to 2 within 15s — the two \
+             routers did not federate over the router mesh\n--- router-hat-1 \
+             stderr ---\n{c}"
+        )
+    });
+    r2_converged.unwrap_or_else(|c| {
+        panic!(
+            "router-hat-2 never converged its router tier to 2 within 15s — the two \
+             routers did not federate over the router mesh\n--- router-hat-2 \
+             stderr ---\n{c}"
+        )
+    });
+    // Deterministic shutdown peaks: BOTH routers peaked at 2 in the ROUTER tier
+    // (self + the other router) and stayed at 1 in the PEER tier (the neighbour is
+    // a router, not a peer — the tier classification, from the WhatAmI::Router
+    // handshake on both sides).
+    for (label, captured) in [
+        ("router-hat-1", &r1_captured),
+        ("router-hat-2", &r2_captured),
+    ] {
+        assert!(
+            captured.contains("peak routers-net 2 node(s), peak peers-net 1 node(s)"),
+            "{label} did not peak at 2 router-tier nodes / 1 peer-tier node — the \
+             router federation did not converge, or the peer classified the other \
+             router into the wrong tier\n--- {label} stderr ---\n{captured}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-router-hat); Layer E runs via --ignored"]
+fn wz_router_hat_federates_data_across_two_routers() {
+    // The R311y120 FEDERATION black-hole proof over real transport (the load-bearing
+    // ACTIVATION obligation): a publisher behind ONE router reaches a subscriber
+    // behind ANOTHER, routed P1 -> R1 -> [router mesh] -> R2 -> P2. With autoconnect
+    // OFF (the default), P1 knows only R1, P2 only R2, and R1 only dials R2 — so the
+    // ONLY P1->P2 path is through BOTH routers. This composes, over the wire, the
+    // A2a cross-tier-native advertise (R2 floods P2's peer-native subscription into
+    // the router mesh so R1 ATTRACTS P1's publish toward R2) and the master-gated
+    // cross-mesh bridge (each router is the sole master of its own domain, since the
+    // other router is only in its `routers_net`, never its `linkstatepeers_net`).
+    //
+    // NOTE (scope): this proves the DATA-plane federation. The QUERY-plane E2E (a
+    // remote querier steered across the router mesh) is a NAMED follow-up — the demo
+    // has no mesh-mode query issuer, and single-session query nodes collide on the
+    // hardcoded zid so they cannot form a federated query topology; the query ROUTE
+    // itself is unit-proven (route_request / forward_response, incl. 2-router HRW).
+    let (mut r2_guard, mut r2_reader, p_r2) =
+        spawn_router_hat("router-hat-2", &["--router-hat", "127.0.0.1:0"]);
+    let addr_r2 = format!("127.0.0.1:{p_r2}");
+    let (mut r1_guard, mut r1_reader, p_r1) = spawn_router_hat(
+        "router-hat-1",
+        &["--router-hat", "127.0.0.1:0", "--connect", &addr_r2],
+    );
+    let addr_r1 = format!("127.0.0.1:{p_r1}");
+    // The subscriber sits behind R2; the publisher behind R1.
+    let (mut sub_guard, mut sub_reader, _p_sub) = spawn_peer(
+        "peer-sub",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            &addr_r2,
+            "--subscribe",
+            "demo/fed",
+        ],
+    );
+    let (mut pub_guard, mut pub_reader, _p_pub) = spawn_peer(
+        "peer-pub",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            &addr_r1,
+            "--publish",
+            "demo/fed",
+        ],
+    );
+
+    // Await BOTH routers' router-tier convergence FIRST — a positive edge that
+    // latches `peak_routers >= 2`, so the shutdown "peak routers-net 2" assertion
+    // below is guaranteed EXPLICITLY (not merely implied by the data-receipt
+    // timing). The routers converge on the R1<->R2 dial, independent of the peers.
+    for (label, reader) in [
+        ("router-hat-1", &mut r1_reader),
+        ("router-hat-2", &mut r2_reader),
+    ] {
+        wait_for_substring(
+            reader,
+            "router-hat: routers-net converged (2 node(s))",
+            Duration::from_secs(15),
+        )
+        .unwrap_or_else(|c| {
+            panic!(
+                "{label} never federated its router tier to 2 within 15s\n--- {label} \
+                 stderr ---\n{c}"
+            )
+        });
+    }
+
+    // The subscriber behind R2 must RECEIVE the publisher-behind-R1's data — over a
+    // path it has no direct link for. The publisher republishes every app tick, so
+    // once the federation converges delivery is self-healing (no one-shot drop).
+    let sub_data = wait_for_substring(
+        &mut sub_reader,
+        "received mesh data",
+        Duration::from_secs(15),
+    );
+
+    graceful_terminate(pub_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(sub_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r2_guard.child_mut(), Duration::from_secs(5));
+    let r1_captured = read_captured(&mut r1_reader);
+    let r2_captured = read_captured(&mut r2_reader);
+    let sub_captured = read_captured(&mut sub_reader);
+    let pub_captured = read_captured(&mut pub_reader);
+    eprintln!("--- router-hat-1 stderr ---\n{r1_captured}");
+    eprintln!("--- router-hat-2 stderr ---\n{r2_captured}");
+    eprintln!("--- peer-sub stderr ---\n{sub_captured}");
+    eprintln!("--- peer-pub stderr ---\n{pub_captured}");
+
+    sub_data.unwrap_or_else(|c| {
+        panic!(
+            "peer-sub (behind R2) never received the publisher-behind-R1's data \
+             within 15s — the federation black-hole is NOT closed (P1's Push did \
+             not route through the two routers to P2)\n--- peer-sub stderr ---\n{c}"
+        )
+    });
+    // Transit pin: BOTH routers forwarded a Push, so the delivery crossed the router
+    // mesh (P1 and P2 never know each other or the far router — autoconnect off). If
+    // either router had not forwarded, P2 could not have received.
+    for (label, captured) in [
+        ("router-hat-1", &r1_captured),
+        ("router-hat-2", &r2_captured),
+    ] {
+        assert!(
+            captured.contains("router-hat: forwarded mesh data"),
+            "{label} never forwarded a Push — the federated delivery did not transit \
+             it, so it did not cross the router mesh\n--- {label} stderr ---\n{captured}"
+        );
+        assert!(
+            captured.contains("peak routers-net 2 node(s)"),
+            "{label}'s router tier did not converge to 2 — the routers did not \
+             federate\n--- {label} stderr ---\n{captured}"
+        );
+    }
+    // The subscription half: P2's peer-native subscription flooded P2 -> R2 ->
+    // [router mesh] -> R1 (the A2a cross-tier-native advertise) so R1's any-interest
+    // gate opened and it forwarded P1's publish. Deterministic shutdown witness.
+    assert!(
+        pub_captured.contains("publisher learned subscriber interest"),
+        "peer-pub (behind R1) never learned the subscriber's interest — the \
+         cross-tier-native subscription advertise did not federate across the \
+         router mesh to R1\n--- peer-pub stderr ---\n{pub_captured}"
     );
 }
