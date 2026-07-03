@@ -1195,7 +1195,7 @@ impl RouterForwarder {
             "router forward: mesh sub ingest on face {inbound:?} tier {tier:?} -> {}",
             match &changed {
                 Some(ke) => format!("REGISTERED {ke:?}"),
-                None => "not registered (unresolvable / client-tier / no-change)".to_string(),
+                None => "not registered (unresolvable / no-change)".to_string(),
             }
         );
         // FEDERATION cross-tier bubble (R311y125): a NATIVE sub for `ke` in this
@@ -1225,7 +1225,7 @@ impl RouterForwarder {
     /// non-current / body-less (Final) interest gets no reply here (`if !c()`
     /// mirrors zenoh's `if mode.current()`). Tier-agnostic — routers answer
     /// interests from any tier — the faithful zenoh behavior.
-    fn respond_to_interest(&self, inbound: FaceId, _tier: FaceTier, interest: &InterestOwned) {
+    fn respond_to_interest(&self, inbound: FaceId, interest: &InterestOwned) {
         if !interest.c() {
             return; // Tier 1: CURRENT only (a pure-Future / Final interest gets no reply yet).
         }
@@ -3569,7 +3569,7 @@ impl FaceForwarder for RouterForwarder {
                 // a matching remote declaration) deactivates. Previously dropped
                 // (`_ => {}`), which black-holed the reverse-data path.
                 NetworkMessage::Interest(interest) => {
-                    self.respond_to_interest(id, tier, interest);
+                    self.respond_to_interest(id, interest);
                 }
                 _ => {}
             }

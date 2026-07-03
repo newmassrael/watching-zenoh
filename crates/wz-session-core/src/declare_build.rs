@@ -762,6 +762,19 @@ pub fn build_declare_final() -> DeclareOwned {
     }
 }
 
+/// Stamp the interest-response coupling onto a built `DeclareOwned`: the envelope
+/// `I` flag ([`wire_const::FLAG_N_DECLARE_I`]) AND `interest_id = Some(id)` — BOTH,
+/// always together. The encoder emits the id VLE iff `interest_id.is_some()` and
+/// the decoder reads it iff the header `I` bit is set, so a builder that set one
+/// without the other would short-read the frame on the peer. Keeping the pair in
+/// one place makes that desync unrepresentable — a future reply builder cannot set
+/// half of it (the `unrepresentable > test` principle). The SSOT for the three
+/// `build_declare_*_reply` builders below.
+fn stamp_interest_reply(declare: &mut DeclareOwned, interest_id: u64) {
+    declare.header |= wire_const::FLAG_N_DECLARE_I;
+    declare.interest_id = Some(interest_id);
+}
+
 /// R311y141 — the interest-response `Declare(DeclSubscriber)` reply: a
 /// `DeclareSubscriber` stamped with the soliciting `interest_id` — the CURRENT
 /// dump a router sends back per matching remote subscription
@@ -784,8 +797,7 @@ pub fn build_declare_subscriber_reply(
     keyexpr: &str,
 ) -> Result<DeclareOwned, CodecError> {
     let mut declare = build_declare_subscriber(0, 0, Some(keyexpr))?;
-    declare.header |= wire_const::FLAG_N_DECLARE_I;
-    declare.interest_id = Some(interest_id);
+    stamp_interest_reply(&mut declare, interest_id);
     Ok(declare)
 }
 
@@ -805,8 +817,7 @@ pub fn build_declare_queryable_reply(
 ) -> Result<DeclareOwned, CodecError> {
     let mut declare = build_declare_queryable(0, 0, Some(keyexpr))?;
     set_declare_queryable_info(&mut declare, info);
-    declare.header |= wire_const::FLAG_N_DECLARE_I;
-    declare.interest_id = Some(interest_id);
+    stamp_interest_reply(&mut declare, interest_id);
     Ok(declare)
 }
 
@@ -820,8 +831,7 @@ pub fn build_declare_queryable_reply(
 /// are set (see [`build_declare_subscriber_reply`] for the coupling).
 pub fn build_declare_final_reply(interest_id: u64) -> DeclareOwned {
     let mut declare = build_declare_final();
-    declare.header |= wire_const::FLAG_N_DECLARE_I;
-    declare.interest_id = Some(interest_id);
+    stamp_interest_reply(&mut declare, interest_id);
     declare
 }
 

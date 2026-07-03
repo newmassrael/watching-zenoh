@@ -17,7 +17,8 @@
 //! sn-newest-wins, full dump on new link) — the true "zenohd-equivalent" acid
 //! test for wz's router tier.
 //!
-//! Two legs, STAGED so a failure localises (topology before data):
+//! Three legs, STAGED so a failure localises (topology before data before
+//! reverse data):
 //!
 //!   1. `wz_router_hat_federates_with_zenohd_at_router_tier` — the CONTROL-PLANE
 //!      floor: wz `--router-hat --connect <zenohd>` dials the reference router;
@@ -49,13 +50,20 @@
 //!      green receipt cannot be a direct pub<->sub link — the sub dials only wz,
 //!      the pub only zenohd.
 //!
+//!   3. `wz_router_hat_and_zenohd_federate_pico_data_in_reverse` — the REVERSE
+//!      data-plane acid test (R311y141): a zenoh-pico `z_pub` (client of the WZ
+//!      router) publishes `demo/key`, a zenoh-pico `z_sub` (client of ZENOHD)
+//!      subscribes `demo/**`. The Put crosses the backbone the OTHER way — pico
+//!      -> wz-router -> [`routers_net` link-state] -> zenohd -> pico — which
+//!      needs wz to ANSWER the pico publisher's declare-Interest (the zenoh-1.x
+//!      write-filter handshake): without it the publisher's filter drops every
+//!      Put LOCALLY. Barrier-gated on wz's `learned a mesh sub` (wz has ingested
+//!      zenohd's sub off the mesh) so the CURRENT-mode reply is non-empty —
+//!      i.e. the sub-before-pub ordering only (FUTURE-mode pub-first = round B).
+//!
 //! SCOPE — what this does NOT yet cover (the cross-impl router tier is a large
 //! surface; this is the first, deliberately-2-node slice, mirroring how the
 //! wz<->wz mesh suite staged its own coverage):
-//!   * (CLOSED by leg 3, R311y141) BOTH data directions now covered: leg 2 is
-//!     pub-behind-zenohd -> sub-behind-wz; leg 3 is the reverse (pub behind wz ->
-//!     sub behind zenohd), which needed wz to answer a pico publisher's
-//!     declare-Interest (the zenoh-1.x write-filter handshake).
 //!   * DATA-push only — no cross-impl query/reply federation (the wz<->wz mesh
 //!     has that as its test #6; the zenohd twin does not exist yet).
 //!   * TWO routers on ONE direct face — each router is therefore the SOLE master
