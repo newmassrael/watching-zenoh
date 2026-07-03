@@ -337,10 +337,10 @@ use crate::interceptor::{
 use crate::linkstate_forward::{
     absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info,
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
-    declare_queryable_wireexpr, declare_subscriber_wireexpr, is_tree_forward_target,
-    peer_whatami_routing, peer_zid_routing, re_advertise_interest_into, resolve_governed_keyexpr,
-    resolve_source_in, select_best_matching, synthesize_drained_fan_finals,
-    synthesize_expired_query_returns,
+    declare_queryable_wireexpr, declare_subscriber_wireexpr, emit_current_interest_replies,
+    is_tree_forward_target, peer_whatami_routing, peer_zid_routing, re_advertise_interest_into,
+    resolve_governed_keyexpr, resolve_source_in, select_best_matching,
+    synthesize_drained_fan_finals, synthesize_expired_query_returns,
 };
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{PendingQueries, QueryFan};
@@ -1312,10 +1312,10 @@ impl RouterForwarder {
         let Some(target) = target else {
             return; // match-all deferred; the caller's DeclareFinal still closes the interest.
         };
-        let mut kes: Vec<String> = Vec::new();
+        let mut per_ke: HashMap<String, ()> = HashMap::new();
         for table in [&self.router_subs, &self.linkstatepeer_subs] {
-            for (ke, _zid, _v) in table.borrow().matching_entries(target, Some(self_zid)) {
-                kes.push(ke.to_string());
+            for (ke, _zid, ()) in table.borrow().matching_entries(target, Some(self_zid)) {
+                per_ke.insert(ke.to_string(), ());
             }
         }
         let target_chunks: Vec<&str> = target.split('/').collect();
@@ -1325,26 +1325,19 @@ impl RouterForwarder {
             }
             for k in keys {
                 if keyexpr_intersects_target(k, &target_chunks) {
-                    kes.push(k.clone());
+                    per_ke.insert(k.clone(), ());
                 }
             }
         }
-        if kes.is_empty() {
-            return; // no matching remote sub; the filter stays active (correct)
-        }
-        if aggregate {
-            if let Ok(decl) = build_declare_subscriber_reply(interest_id, target) {
-                self.send_one_to_face(inbound, NetworkMessage::Declare(Box::new(decl)));
-            }
-        } else {
-            kes.sort_unstable();
-            kes.dedup();
-            for ke in kes {
-                if let Ok(decl) = build_declare_subscriber_reply(interest_id, &ke) {
-                    self.send_one_to_face(inbound, NetworkMessage::Declare(Box::new(decl)));
-                }
-            }
-        }
+        emit_current_interest_replies(
+            interest_id,
+            target,
+            aggregate,
+            per_ke,
+            |a, _b| a,
+            |id, ke, ()| build_declare_subscriber_reply(id, ke),
+            |msg| self.send_one_to_face(inbound, msg),
+        );
     }
 
     /// The CURRENT-dump QUERYABLE leg of [`respond_to_interest`] — the query-plane
@@ -1390,27 +1383,15 @@ impl RouterForwarder {
                 }
             }
         }
-        if per_ke.is_empty() {
-            return;
-        }
-        if aggregate {
-            let merged = per_ke
-                .values()
-                .copied()
-                .reduce(|a, b| a.merge(b))
-                .unwrap_or(QueryableInfo::DEFAULT);
-            if let Ok(decl) = build_declare_queryable_reply(interest_id, target, merged) {
-                self.send_one_to_face(inbound, NetworkMessage::Declare(Box::new(decl)));
-            }
-        } else {
-            let mut entries: Vec<(String, QueryableInfo)> = per_ke.into_iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            for (ke, info) in entries {
-                if let Ok(decl) = build_declare_queryable_reply(interest_id, &ke, info) {
-                    self.send_one_to_face(inbound, NetworkMessage::Declare(Box::new(decl)));
-                }
-            }
-        }
+        emit_current_interest_replies(
+            interest_id,
+            target,
+            aggregate,
+            per_ke,
+            |a, b| a.merge(b),
+            build_declare_queryable_reply,
+            |msg| self.send_one_to_face(inbound, msg),
+        );
     }
 
     /// A sourced `UndeclareSubscriber` (1b): withdraw the SOURCE peer's interest
