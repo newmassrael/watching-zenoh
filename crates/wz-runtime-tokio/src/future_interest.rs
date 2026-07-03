@@ -1,119 +1,185 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! FUTURE-mode subscriber-interest store (R311y146) — the per-forwarder record of
-//! which CLIENT faces declared a FUTURE (`f()`) subscriber `Interest`, and which
-//! `DeclareSubscriber`s wz has already pushed back to them.
+//! FUTURE-mode declare-interest store (R311y146 subs; R311y150 generalized to
+//! queryables) — the per-forwarder record of which CLIENT faces declared a FUTURE
+//! (`f()`) `Interest`, and which declarations wz has already pushed back to them.
 //!
 //! ## Why this exists
 //!
-//! A zenoh(-pico) PUBLISHER keeps a WRITE-FILTER that drops its own puts locally
-//! until it receives a matching `DeclareSubscriber` (pico `net/filtering.c`). Its
-//! declare-`Interest` is `RESTRICTED | CURRENT | AGGREGATE | FUTURE` for a client
-//! (`filtering.c:231-234`). The CURRENT part is answered by the forwarder's
-//! `respond_to_interest` current dump; the FUTURE part means: when a matching
-//! subscriber is LEARNED LATER, PROACTIVELY push a `DeclareSubscriber` to the
-//! publisher so its filter deactivates — closing the pub-BEFORE-sub hole (an empty
-//! current dump would otherwise leave the filter armed forever).
+//! A zenoh(-pico) PUBLISHER/QUERIER keeps a WRITE-FILTER that drops its own
+//! puts/gets locally until it receives a matching `DeclareSubscriber`/
+//! `DeclareQueryable` (pico `net/filtering.c`). Its declare-`Interest` is
+//! `RESTRICTED | CURRENT | AGGREGATE | FUTURE` for a client (`filtering.c:231-234`).
+//! The CURRENT part is answered by the forwarder's `respond_to_interest` current
+//! dump; the FUTURE part means: when a matching subscriber/queryable is LEARNED
+//! LATER, PROACTIVELY push a declaration to the publisher/querier so its filter
+//! deactivates — closing the pub-BEFORE-sub / querier-BEFORE-queryable hole (an
+//! empty current dump would otherwise leave the filter armed forever).
 //!
 //! wz previously DROPPED the FUTURE bit (`respond_to_interest` early-returned on
 //! `!interest.c()` and never read `f()`); this store is the FUTURE half.
 //!
+//! ## The value parameter `V` (subs vs queryables)
+//!
+//! The SUBSCRIBER plane is presence-only: a `DeclareSubscriber` carries no value,
+//! so once pushed it is never re-pushed (`V = ()`, [`FutureSubStore`]). The
+//! QUERYABLE plane is VALUE-AWARE: a `DeclareQueryable` carries a [`QueryableInfo`]
+//! (`complete` + `distance`), and a `Z_QUERY_TARGET_ALL_COMPLETE` querier's filter
+//! deactivates only on a `msg->is_complete` reply (`filtering.c:206`). So when the
+//! FOLDED completeness of a matched keyexpr flips `false -> true`, wz must RE-push
+//! the same declaration id carrying the new value (zenoh
+//! `linkstate_peer/queries.rs:180-198` `current.unwrap().1 != info`, reusing
+//! `current.0`) — else the ALL_COMPLETE querier black-holes. `V = QueryableInfo`
+//! ([`FutureQablStore`]) makes [`pushes_for_new`](FutureInterestStore::pushes_for_new)
+//! re-emit on a value change; `V = ()` degenerates to presence-only (a `()` value
+//! never differs, so the qabl re-push logic is provably inert for subs).
+//!
+//! The pushed value MUST be the RE-FOLDED merged info (the fold over every matching
+//! queryable source — zenoh's `local_qabl_info`), NOT a single source's raw info:
+//! pushing a second source's incomplete info while a complete source is still
+//! present would DOWNGRADE the querier's view (`merge` is OR-complete) and re-arm
+//! an ALL_COMPLETE filter. The forwarder recomputes the fold at each push site.
+//!
 //! ## The zenoh mapping (bundled per face on purpose)
 //!
-//! - [`ClientFutureSubs::interests`] = zenoh's per-`FaceState`
+//! - [`ClientFutureInterests::interests`] = zenoh's per-`FaceState`
 //!   `remote_interests` (the interests a face declared), filtered to FUTURE
-//!   subscriber interests. Keyed by the soliciting `interest_id` so an inbound
+//!   declare interests. Keyed by the soliciting `interest_id` so an inbound
 //!   `Interest(Final)` (pico sends one on every publisher/querier drop —
 //!   `net/primitives.c:_z_remove_interest`) removes exactly one.
-//! - [`ClientFutureSubs::pushed`] = zenoh's `face_hat.local_subs` (`reply keyexpr
-//!   -> the decl id declared to that face`). Seeded by the current dump and by
-//!   every FUTURE push; read for dedup (never declare the same reply ke twice to a
-//!   face) and to keep the `(decl_id, peer)` a pico write-filter target is keyed on
-//!   (`filtering.c:202`) consistent for the deferred undeclare-push.
+//! - [`ClientFutureInterests::pushed`] = zenoh's `face_hat.local_subs` /
+//!   `local_qabls` (`reply keyexpr -> (decl id, last-declared value)`). Seeded by
+//!   the current dump and by every FUTURE push; read for the value-diff re-push
+//!   decision and to keep the `(decl_id, peer)` a pico write-filter target is keyed
+//!   on (`filtering.c:202`) consistent for the deferred undeclare-push.
 //!
 //! zenoh warns against two parallel `FaceId`-keyed maps drifting
 //! ([`crate::linkstate_forward`] `FaceState` doc); the two live in ONE per-face
 //! struct so a single [`FutureInterestStore::purge_face`] on `deregister` covers
-//! both.
+//! both — and the sub and qabl stores are ONE generic type, so the invariant is
+//! enforced once for both planes (mirroring the y144 `emit_current_interest_replies`
+//! `<V>` lift, which already unifies the sub/qabl current-dump emit on this same
+//! `V=() / V=QueryableInfo` split).
 //!
-//! ## Scope (SUBS plane only)
+//! ## Deferred: match-all + undeclare-push
 //!
-//! This store carries the SUBSCRIBER plane. The QUERYABLE future-push needs a
-//! VALUE-AWARE `(id, QueryableInfo)` registry that RE-pushes when completeness
-//! flips `false -> true` (zenoh `linkstate_peer/queries.rs:186`; a presence-only
-//! dedup would black-hole a `Z_QUERY_TARGET_ALL_COMPLETE` querier whose filter
-//! deactivates only on `msg->is_complete`), so it is a SEPARATE unit, not this
-//! type. Likewise a match-all (`r()==false`) future interest is NOT stored — the
-//! current dump defers match-all, and storing it would push every new sub with no
+//! A match-all (`r()==false`) future interest is NOT stored — the current dump
+//! defers match-all, and storing it would push every new declaration with no
 //! current-dump parity; pico always sets RESTRICTED so this is not a live gap.
+//!
+//! The undeclare-push (a declaration WITHDRAWN clears `pushed` + re-arms the filter,
+//! zenoh `propagate_forget_simple_subscription/_queryable`) is a SEPARATE unit
+//! (R311y151). See [`remove_interest`](FutureInterestStore::remove_interest) for the
+//! stale-`pushed` residual it closes.
 
 use std::collections::HashMap;
 
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+use wz_session_core::queryable_info::QueryableInfo;
 
 use crate::accept_loop::FaceId;
 
-/// One CLIENT face's declared FUTURE subscriber interest: the RESOLVED literal
-/// target keyexpr and whether the interest is AGGREGATE (a match reply is keyed on
-/// the interest keyexpr, not the concrete subscription — pico matches an aggregate
-/// interest's replies by keyexpr EQUALITY).
+/// The subscriber-plane store: presence-only (no value), so a pushed
+/// `DeclareSubscriber` is never re-pushed.
+pub type FutureSubStore = FutureInterestStore<()>;
+
+/// The queryable-plane store: value-aware over [`QueryableInfo`], so a completeness
+/// flip `false -> true` re-pushes the same id carrying the new (folded) value.
+pub type FutureQablStore = FutureInterestStore<QueryableInfo>;
+
+/// One CLIENT face's declared FUTURE interest: the RESOLVED literal target keyexpr
+/// and whether the interest is AGGREGATE (a match reply is keyed on the interest
+/// keyexpr, not the concrete declaration — pico matches an aggregate interest's
+/// replies by keyexpr EQUALITY). Value-agnostic: the same shape for subs and qabls
+/// (the value lives on the [`ClientFutureInterests::pushed`] side, not here).
 #[derive(Debug, Clone)]
 struct FutureInterest {
     target: String,
     aggregate: bool,
 }
 
-/// One CLIENT face's FUTURE subscriber interests + the declarations already pushed
-/// to it. See the module docs for the zenoh mapping.
-#[derive(Debug, Default)]
-struct ClientFutureSubs {
+/// One CLIENT face's FUTURE interests + the declarations already pushed to it. See
+/// the module docs for the zenoh mapping. `V` is `()` for subs, [`QueryableInfo`]
+/// for queryables.
+#[derive(Debug)]
+struct ClientFutureInterests<V> {
     /// Declared FUTURE interests, keyed by the soliciting `interest_id`.
     interests: HashMap<u64, FutureInterest>,
-    /// `reply keyexpr -> the decl id declared to this face` (zenoh
-    /// `face_hat.local_subs`). Seeded by the current dump (get-or-alloc, so a
-    /// redundant re-declare REUSES the id and pico stays idempotent) and by each
-    /// FUTURE push.
-    pushed: HashMap<String, u64>,
+    /// `reply keyexpr -> (decl id declared to this face, last-declared value)`
+    /// (zenoh `face_hat.local_subs` / `local_qabls`). Seeded by the current dump
+    /// (get-or-alloc, so a redundant re-declare REUSES the id) and by each FUTURE
+    /// push. The value drives the re-push decision (a change re-pushes the SAME id).
+    pushed: HashMap<String, (u64, V)>,
     /// Per-face monotonic decl-id source. Ids start at 1 (0 is a NON-future
     /// current-dump reply id and pico's declarations-propagation sentinel, so any
     /// interned id is `>= 1`) and are never recycled.
     next_id: u64,
 }
 
-impl ClientFutureSubs {
-    /// Get-or-allocate the decl id for `reply_ke`, returning `(id, is_new)`.
-    /// `is_new` is `true` only on the first allocation — the current dump reports a
-    /// current sub whether or not it is new (always emitting with the returned id),
-    /// while the FUTURE push emits only when it actually adds a declaration.
-    fn intern(&mut self, reply_ke: &str) -> (u64, bool) {
-        if let Some(id) = self.pushed.get(reply_ke) {
-            return (*id, false);
+// A manual `Default` (deriving it would demand `V: Default`, which is not needed —
+// an empty store holds no value).
+impl<V> Default for ClientFutureInterests<V> {
+    fn default() -> Self {
+        Self {
+            interests: HashMap::new(),
+            pushed: HashMap::new(),
+            next_id: 0,
         }
-        self.next_id += 1;
-        let id = self.next_id;
-        self.pushed.insert(reply_ke.to_owned(), id);
-        (id, true)
     }
 }
 
-/// The per-forwarder FUTURE-mode subscriber-interest store — the wz analogue of
-/// zenoh's per-`FaceState` `remote_interests` + `face_hat.local_subs`, keyed by the
-/// CLIENT [`FaceId`]. Both forwarders (router + peer) own one; the store logic is
-/// shared here.
-#[derive(Debug, Default)]
-pub struct FutureInterestStore {
-    by_face: HashMap<FaceId, ClientFutureSubs>,
+impl<V: Copy + PartialEq> ClientFutureInterests<V> {
+    /// Get-or-allocate the decl id for `reply_ke` carrying `value`, returning
+    /// `(id, should_push)`. `should_push` is `true` when the reply ke is NEW (first
+    /// declaration) or its value CHANGED (a value-aware re-push, same id, updated
+    /// value); `false` when the same value was already declared (dedup). For
+    /// `V = ()` a value never changes, so `should_push == is_new` — presence-only,
+    /// the subscriber behavior.
+    fn intern(&mut self, reply_ke: &str, value: V) -> (u64, bool) {
+        match self.pushed.get_mut(reply_ke) {
+            Some((id, stored)) => {
+                let changed = *stored != value;
+                if changed {
+                    *stored = value;
+                }
+                (*id, changed)
+            }
+            None => {
+                self.next_id += 1;
+                let id = self.next_id;
+                self.pushed.insert(reply_ke.to_owned(), (id, value));
+                (id, true)
+            }
+        }
+    }
 }
 
-impl FutureInterestStore {
+/// The per-forwarder FUTURE-mode declare-interest store — the wz analogue of
+/// zenoh's per-`FaceState` `remote_interests` + `face_hat.local_subs`/`local_qabls`,
+/// keyed by the CLIENT [`FaceId`]. Both forwarders (router + peer) own one per plane
+/// ([`FutureSubStore`] + [`FutureQablStore`]); the store logic is shared here.
+#[derive(Debug)]
+pub struct FutureInterestStore<V> {
+    by_face: HashMap<FaceId, ClientFutureInterests<V>>,
+}
+
+impl<V> Default for FutureInterestStore<V> {
+    fn default() -> Self {
+        Self {
+            by_face: HashMap::new(),
+        }
+    }
+}
+
+impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// An empty store.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Record a CLIENT face's FUTURE subscriber interest for `target` (a resolved
-    /// literal; a match-all interest is not stored — see the module docs). Keyed by
+    /// Record a CLIENT face's FUTURE interest for `target` (a resolved literal; a
+    /// match-all interest is not stored — see the module docs). Keyed by
     /// `interest_id`; a re-declare of the same id is last-wins.
     pub fn store_interest(
         &mut self,
@@ -130,29 +196,51 @@ impl FutureInterestStore {
     }
 
     /// Get-or-allocate the decl id the CURRENT-dump reply of a FUTURE interest
-    /// carries for `reply_ke`, seeding `pushed` so a later FUTURE push of the same
-    /// ke dedups. Always returns an id (the current dump reports the sub whether or
-    /// not the id is new). Call only after [`store_interest`](Self::store_interest)
-    /// for the same face (else the seed would linger with no interest); an existing
-    /// entry's id is reused (redundant re-declare stays idempotent on pico).
-    pub fn intern_current_reply(&mut self, face: FaceId, reply_ke: &str) -> u64 {
-        self.by_face.entry(face).or_default().intern(reply_ke).0
+    /// carries for `reply_ke` (with the folded `value`), seeding `pushed` so a later
+    /// FUTURE push of the same ke dedups (subs) or re-pushes on a value change
+    /// (qabls). Always returns an id (the current dump reports the declaration
+    /// whether or not the id is new). Call only after
+    /// [`store_interest`](Self::store_interest) for the same face; an existing
+    /// entry's id is reused (redundant re-declare stays idempotent on pico), and its
+    /// stored value is REFRESHED to `value` so the seed matches what the dump emitted.
+    pub fn intern_current_reply(&mut self, face: FaceId, reply_ke: &str, value: V) -> u64 {
+        self.by_face
+            .entry(face)
+            .or_default()
+            .intern(reply_ke, value)
+            .0
     }
 
-    /// A newly-learned subscription `new_ke` sourced at `origin` (`None` for a
-    /// self-originated local subscriber, which has no inbound face) — return the
-    /// `(face, reply keyexpr, decl id)` FUTURE pushes to emit: one per stored
+    /// A newly-learned declaration `new_ke` sourced at `origin` (`None` for a
+    /// self-originated local declaration, which has no inbound face) — return the
+    /// `(face, reply keyexpr, decl id, value)` FUTURE pushes to emit: one per stored
     /// interest whose target INTERSECTS `new_ke`, on a face other than `origin`,
     /// whose reply keyexpr (the interest ke for an aggregate interest, else
-    /// `new_ke`) has NOT already been declared to that face. Interns each reply ke,
-    /// so a second matching interest on the same face and any later sub for the same
-    /// ke dedup. The caller builds the unsolicited `DeclareSubscriber(id, reply_ke)`
-    /// (interest_id `None`, no `I` flag) and sends it to `face`.
-    pub fn pushes_for_new_sub(
+    /// `new_ke`) is NEW to that face OR whose value CHANGED.
+    ///
+    /// `value_of(reply_ke)` yields the value to declare for a given reply keyexpr —
+    /// for the queryable plane this MUST be the RE-FOLDED merged [`QueryableInfo`]
+    /// over ALL current matching queryables for THAT reply keyexpr (zenoh's
+    /// `local_qabl_info`), which differs between an aggregate reply (folded over the
+    /// whole interest target) and a concrete reply (folded for `new_ke`) — passing a
+    /// single source's raw info would DOWNGRADE an aggregate reply and re-arm an
+    /// ALL_COMPLETE filter. For the subscriber plane it is `|_| ()`. Interns each
+    /// reply ke (updating the stored value), so a second matching interest on the
+    /// same face and any later declaration for the same ke with the same value dedup.
+    /// The caller builds the unsolicited `DeclareSubscriber`/`DeclareQueryable(id,
+    /// reply_ke, value)` (interest_id `None`, no `I` flag) and sends it to `face`.
+    /// `value_of(reply_ke, dest_face)` receives the DESTINATION face so a
+    /// queryable-plane fold can EXCLUDE that face's own co-hosted queryable (zenoh's
+    /// `local_qabl_info(res, dst_face)` is per-destination, and the wz current dump
+    /// likewise excludes the requesting face) — so the CURRENT-dump seed and this
+    /// later push are like-for-like and a querier that co-hosts a matching queryable
+    /// gets no spurious re-push. The subscriber plane ignores both args (`|_, _| ()`).
+    pub fn pushes_for_new<F: Fn(&str, FaceId) -> V>(
         &mut self,
         new_ke: &str,
         origin: Option<FaceId>,
-    ) -> Vec<(FaceId, String, u64)> {
+        value_of: F,
+    ) -> Vec<(FaceId, String, u64, V)> {
         let mut out = Vec::new();
         for (face, state) in self.by_face.iter_mut() {
             if origin == Some(*face) {
@@ -172,9 +260,10 @@ impl FutureInterestStore {
                 }
             }
             for reply_ke in reply_kes {
-                let (id, is_new) = state.intern(&reply_ke);
-                if is_new {
-                    out.push((*face, reply_ke, id));
+                let value = value_of(&reply_ke, *face);
+                let (id, should_push) = state.intern(&reply_ke, value);
+                if should_push {
+                    out.push((*face, reply_ke, id, value));
                 }
             }
         }
@@ -186,20 +275,24 @@ impl FutureInterestStore {
     ///
     /// When the face's LAST interest is removed, the whole face entry (including
     /// `pushed`) is pruned: pico sends an `Interest(Final)` precisely because a
-    /// publisher DROPPED (`net/filtering.c:_z_write_filter_clear` ->
-    /// `_z_remove_interest`), so with no interests left the face has no publisher
-    /// and pico holds no write-filter — a retained `pushed` record would then
-    /// wrongly DEDUP-SUPPRESS a push to a FUTURE publisher on the same face (a later
-    /// `store_interest` re-starts a fresh registry). While OTHER interests remain,
-    /// `pushed` is kept — a shared reply ke may still back a live publisher.
+    /// publisher/querier DROPPED (`net/filtering.c:_z_write_filter_clear` ->
+    /// `_z_remove_interest`), so with no interests left the face has no
+    /// publisher/querier and pico holds no write-filter — a retained `pushed` record
+    /// would then wrongly DEDUP-SUPPRESS a push to a FUTURE publisher/querier on the
+    /// same face (a later `store_interest` re-starts a fresh registry). While OTHER
+    /// interests remain, `pushed` is kept — a shared reply ke may still back a live
+    /// publisher/querier.
     ///
-    /// RESIDUAL (subsumed by the deferred undeclare-push, NOT a silent gap): a sub
-    /// that WITHDRAWS while an interest is still live leaves the `pushed` entry
-    /// stale (wz defers the sub-withdrawal UndeclareSubscriber), so a second
-    /// publisher on that ke, declared during the sub's absence, can miss its
-    /// re-push when the sub reappears. The undeclare-push unit — which clears
-    /// `pushed` and re-arms the filter on sub-withdrawal, zenoh
-    /// `propagate_forget_simple_subscription` — is the complete fix.
+    /// RESIDUAL (subsumed by the deferred undeclare-push R311y151, NOT a silent gap):
+    /// a subscriber/queryable that WITHDRAWS while an interest is still live leaves
+    /// the `pushed` entry stale (wz defers the withdrawal Undeclare), so a second
+    /// publisher/querier on that ke, declared during the absence, can miss its
+    /// re-push when the declaration reappears. For the QUERYABLE plane it is strictly
+    /// WORSE: the stale `(id, value)` entry also pins a stale COMPLETENESS, so a
+    /// reappearing queryable can leave an ALL_COMPLETE filter mis-armed. The
+    /// undeclare-push unit — which clears `pushed` and re-arms the filter on
+    /// withdrawal, zenoh `propagate_forget_simple_subscription/_queryable` — is the
+    /// complete fix.
     pub fn remove_interest(&mut self, face: FaceId, interest_id: u64) -> bool {
         let Some(state) = self.by_face.get_mut(&face) else {
             return false;
@@ -244,16 +337,20 @@ mod tests {
         FaceId(n)
     }
 
+    // ── SUBSCRIBER plane (V = ()): the R311y146 presence-only behavior, unchanged
+    // by the R311y150 generic lift (a `()` value never differs, so the re-push logic
+    // is inert — these prove the specialization is behavior-preserving). ──────────
+
     #[test]
     fn pub_before_sub_pushes_the_first_later_sub_with_a_non_zero_id() {
         // The raison d'être: an interest arrives with NO matching sub (empty
         // current dump seeds nothing), then a sub is learned later -> exactly one
         // push, id >= 1.
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let pushes = s.pushes_for_new_sub("demo/data", Some(face(9)));
+        let pushes = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
         assert_eq!(pushes.len(), 1, "one push to the interest holder");
-        let (f, reply_ke, id) = &pushes[0];
+        let (f, reply_ke, id, ()) = &pushes[0];
         assert_eq!(*f, face(1));
         assert_eq!(
             reply_ke, "demo/**",
@@ -267,9 +364,9 @@ mod tests {
 
     #[test]
     fn non_aggregate_reply_is_keyed_on_the_concrete_sub_ke() {
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), false);
-        let pushes = s.pushes_for_new_sub("demo/data", Some(face(9)));
+        let pushes = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
         assert_eq!(pushes.len(), 1);
         assert_eq!(
             pushes[0].1, "demo/data",
@@ -279,11 +376,11 @@ mod tests {
 
     #[test]
     fn a_second_sub_for_an_aggregate_interest_dedups() {
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let first = s.pushes_for_new_sub("demo/a", Some(face(9)));
+        let first = s.pushes_for_new("demo/a", Some(face(9)), |_, _| ());
         assert_eq!(first.len(), 1);
-        let second = s.pushes_for_new_sub("demo/b", Some(face(9)));
+        let second = s.pushes_for_new("demo/b", Some(face(9)), |_, _| ());
         assert!(
             second.is_empty(),
             "a second sub under the same aggregate ke needs no new declare (filter already off)",
@@ -292,20 +389,22 @@ mod tests {
 
     #[test]
     fn a_non_matching_sub_pushes_nothing() {
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         assert!(
-            s.pushes_for_new_sub("other/key", Some(face(9))).is_empty(),
+            s.pushes_for_new("other/key", Some(face(9)), |_, _| ())
+                .is_empty(),
             "a sub outside the interest target is not pushed",
         );
     }
 
     #[test]
     fn a_sub_sourced_by_the_interest_holder_is_not_echoed() {
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         assert!(
-            s.pushes_for_new_sub("demo/data", Some(face(1))).is_empty(),
+            s.pushes_for_new("demo/data", Some(face(1)), |_, _| ())
+                .is_empty(),
             "never push a declaration back to the face that sourced it",
         );
     }
@@ -315,12 +414,13 @@ mod tests {
         // A sub that existed at interest time is reported by the current dump
         // (intern_current_reply seeds `pushed`); a later re-learn of the SAME
         // aggregate ke must not double-declare.
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let seeded_id = s.intern_current_reply(face(1), "demo/**");
+        let seeded_id = s.intern_current_reply(face(1), "demo/**", ());
         assert!(seeded_id >= 1);
         assert!(
-            s.pushes_for_new_sub("demo/late", Some(face(9))).is_empty(),
+            s.pushes_for_new("demo/late", Some(face(9)), |_, _| ())
+                .is_empty(),
             "the aggregate reply ke was already seeded by the current dump",
         );
     }
@@ -329,10 +429,10 @@ mod tests {
     fn two_interests_same_target_share_one_push() {
         // Two publishers on the same key -> two interests, one aggregate target ->
         // a single declaration covers both (pico fires every matching filter).
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/x".to_owned(), true);
         s.store_interest(face(1), 8, "demo/x".to_owned(), true);
-        let pushes = s.pushes_for_new_sub("demo/x", Some(face(9)));
+        let pushes = s.pushes_for_new("demo/x", Some(face(9)), |_, _| ());
         assert_eq!(
             pushes.len(),
             1,
@@ -342,11 +442,11 @@ mod tests {
 
     #[test]
     fn two_faces_each_get_their_own_push() {
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         s.store_interest(face(2), 3, "demo/**".to_owned(), true);
-        let mut pushes = s.pushes_for_new_sub("demo/data", Some(face(9)));
-        pushes.sort_by_key(|(f, _, _)| f.0);
+        let mut pushes = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        pushes.sort_by_key(|(f, _, _, _)| f.0);
         assert_eq!(pushes.len(), 2);
         assert_eq!(pushes[0].0, face(1));
         assert_eq!(pushes[1].0, face(2));
@@ -354,14 +454,15 @@ mod tests {
 
     #[test]
     fn interest_final_removes_one_interest_and_stops_its_future_pushes() {
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         assert!(
             s.remove_interest(face(1), 7),
             "the stored interest is removed"
         );
         assert!(
-            s.pushes_for_new_sub("demo/data", Some(face(9))).is_empty(),
+            s.pushes_for_new("demo/data", Some(face(9)), |_, _| ())
+                .is_empty(),
             "a removed interest attracts no further pushes",
         );
         assert!(!s.remove_interest(face(1), 7), "removing again is a no-op");
@@ -372,9 +473,9 @@ mod tests {
         // Removing the LAST interest (the publisher DROPPED — pico's write-filter is
         // gone) prunes the whole face, so a stale `pushed` entry cannot suppress a
         // push to a FUTURE publisher on the same face.
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let _ = s.pushes_for_new_sub("demo/data", Some(face(9)));
+        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
         assert_eq!(s.pushed_count(face(1)), 1);
         assert!(s.remove_interest(face(1), 7));
         assert_eq!(
@@ -385,7 +486,7 @@ mod tests {
         // A FRESH publisher on the same face + same aggregate ke, pub-before-sub,
         // is NOT suppressed by the pruned registry.
         s.store_interest(face(1), 9, "demo/**".to_owned(), true);
-        let pushes = s.pushes_for_new_sub("demo/late", Some(face(9)));
+        let pushes = s.pushes_for_new("demo/late", Some(face(9)), |_, _| ());
         assert_eq!(
             pushes.len(),
             1,
@@ -397,10 +498,10 @@ mod tests {
     fn interest_final_of_one_of_several_keeps_pushed_for_the_rest() {
         // Removing ONE of several interests keeps `pushed` — a shared reply ke may
         // still back a live publisher; only when the last goes is it pruned.
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         s.store_interest(face(1), 8, "other/**".to_owned(), true);
-        let _ = s.pushes_for_new_sub("demo/data", Some(face(9)));
+        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
         assert_eq!(s.pushed_count(face(1)), 1);
         assert!(s.remove_interest(face(1), 7));
         assert_eq!(s.interest_count(face(1)), 1, "interest 8 remains");
@@ -415,13 +516,14 @@ mod tests {
 
     #[test]
     fn purge_face_drops_everything_for_a_face() {
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         s.store_interest(face(2), 3, "other/**".to_owned(), true);
         assert!(s.purge_face(face(1)));
         assert_eq!(s.face_count(), 1, "only face 2 remains");
         assert!(
-            s.pushes_for_new_sub("demo/data", Some(face(9))).is_empty(),
+            s.pushes_for_new("demo/data", Some(face(9)), |_, _| ())
+                .is_empty(),
             "the purged face attracts no push",
         );
         assert!(!s.purge_face(face(1)), "purging an absent face is a no-op");
@@ -433,11 +535,108 @@ mod tests {
         // declarations-propagation sentinel) and advance per distinct reply ke while
         // the face entry lives. (Across a face prune the counter restarts from a
         // fresh entry — the old publisher is gone, so no live id can collide.)
-        let mut s = FutureInterestStore::new();
+        let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), false);
-        let a = s.pushes_for_new_sub("demo/a", Some(face(9)));
-        let b = s.pushes_for_new_sub("demo/b", Some(face(9)));
+        let a = s.pushes_for_new("demo/a", Some(face(9)), |_, _| ());
+        let b = s.pushes_for_new("demo/b", Some(face(9)), |_, _| ());
         assert_eq!(a[0].2, 1, "first alloc is 1 (0 is reserved)");
         assert_eq!(b[0].2, 2, "second distinct ke gets a fresh id");
+    }
+
+    // ── QUERYABLE plane (V = QueryableInfo): the R311y150 VALUE-AWARE behavior the
+    // subscriber store cannot have. ─────────────────────────────────────────────
+
+    fn info(complete: bool) -> QueryableInfo {
+        QueryableInfo {
+            complete,
+            distance: 0,
+        }
+    }
+
+    #[test]
+    fn querier_before_queryable_pushes_the_first_later_qabl() {
+        // The query-plane presence hole (analog of pub-before-sub): a querier
+        // solicits with no matching queryable, then one is learned later -> one push.
+        let mut s = FutureQablStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let pushes = s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(false));
+        assert_eq!(pushes.len(), 1, "one push to the interest holder");
+        let (f, reply_ke, id, v) = &pushes[0];
+        assert_eq!(*f, face(1));
+        assert_eq!(
+            reply_ke, "demo/**",
+            "aggregate reply keyed on the interest ke"
+        );
+        assert!(*id >= 1);
+        assert_eq!(*v, info(false), "carries the queryable's (folded) info");
+    }
+
+    #[test]
+    fn complete_flip_false_to_true_re_pushes_the_same_id() {
+        // A Z_QUERY_TARGET_ALL_COMPLETE querier's filter deactivates only on a
+        // complete reply. Seed an incomplete current reply; a later fold flip to
+        // complete=true must RE-push the SAME id with the new value.
+        let mut s = FutureQablStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let seeded_id = s.intern_current_reply(face(1), "demo/**", info(false));
+        assert!(seeded_id >= 1);
+        // Fold now complete=true (a complete queryable learned/merged in).
+        let pushes = s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(true));
+        assert_eq!(pushes.len(), 1, "the completeness flip re-pushes");
+        assert_eq!(pushes[0].2, seeded_id, "re-push reuses the SAME decl id");
+        assert_eq!(
+            pushes[0].3,
+            info(true),
+            "carries the new complete=true value"
+        );
+    }
+
+    #[test]
+    fn same_value_qabl_dedups_no_re_push() {
+        // Once complete=true is declared, a later fold that is STILL complete=true
+        // (a second complete source, no change) does NOT re-push.
+        let mut s = FutureQablStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let _ = s.intern_current_reply(face(1), "demo/**", info(true));
+        assert!(
+            s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(true))
+                .is_empty(),
+            "no value change -> no re-push (presence dedup on the value)",
+        );
+    }
+
+    #[test]
+    fn value_change_true_to_false_re_pushes_same_id() {
+        // The store re-pushes on ANY value change, including a DOWNGRADE — correct,
+        // because a genuine fold downgrade must re-arm an ALL_COMPLETE filter. The
+        // fold is monotonic-up when a NEW source is ADDED (merge = OR-complete), so
+        // an add-ingest never fires this arm; but a same-source completeness
+        // DOWNGRADE re-declare (true->false) IS a value-diff ingest that fires it
+        // (correctly), and the y151 undeclare (a complete source WITHDRAWS) is the
+        // other downgrade path — both reuse this change-symmetric store.
+        let mut s = FutureQablStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let id0 = s.intern_current_reply(face(1), "demo/**", info(true));
+        let pushes = s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(false));
+        assert_eq!(pushes.len(), 1, "a value change re-pushes");
+        assert_eq!(pushes[0].2, id0, "same id");
+        assert_eq!(pushes[0].3, info(false), "carries the changed value");
+    }
+
+    #[test]
+    fn qabl_interest_final_and_purge_mirror_the_sub_plane() {
+        let mut s = FutureQablStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let _ = s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(false));
+        assert_eq!(s.pushed_count(face(1)), 1);
+        assert!(s.remove_interest(face(1), 7));
+        assert_eq!(s.face_count(), 0, "last interest gone -> face pruned");
+        // A fresh querier on the same face is not suppressed by the pruned registry.
+        s.store_interest(face(1), 9, "demo/**".to_owned(), true);
+        assert_eq!(
+            s.pushes_for_new("demo/late", Some(face(9)), |_, _| info(false))
+                .len(),
+            1,
+        );
     }
 }

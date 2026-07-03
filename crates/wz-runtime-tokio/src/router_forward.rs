@@ -315,9 +315,11 @@ use wz_codecs::push::PushOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
 use wz_session_core::declare_build::{
-    build_declare_final_reply, build_declare_queryable_reply, build_declare_subscriber,
-    build_declare_subscriber_reply, build_declare_subscriber_reply_with_id,
-    build_undeclare_queryable_with_keyexpr, build_undeclare_subscriber_with_keyexpr,
+    build_declare_final_reply, build_declare_queryable_reply,
+    build_declare_queryable_reply_with_id, build_declare_queryable_with_id_info,
+    build_declare_subscriber, build_declare_subscriber_reply,
+    build_declare_subscriber_reply_with_id, build_undeclare_queryable_with_keyexpr,
+    build_undeclare_subscriber_with_keyexpr,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
@@ -331,7 +333,7 @@ use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
 
 use crate::accept_loop::{FaceForwarder, FaceId};
-use crate::future_interest::FutureInterestStore;
+use crate::future_interest::{FutureQablStore, FutureSubStore};
 use crate::interceptor::{
     InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow,
 };
@@ -564,8 +566,17 @@ pub struct RouterForwarder {
     /// so a pub-BEFORE-sub publisher's write-filter deactivates. FaceId-keyed leaf
     /// state, so [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE its
     /// linkless early-return (OBLIGATION 1), like `client_subs`. SUBS plane only
-    /// (the QABL future-push is a separate value-aware unit).
-    future_subs: RefCell<FutureInterestStore>,
+    /// (the QABL future-push is the value-aware [`future_qabls`](Self#structfield.future_qabls)).
+    future_subs: RefCell<FutureSubStore>,
+    /// The QUERYABLE-plane FUTURE store (R311y150) — the value-aware twin of
+    /// [`future_subs`](Self#structfield.future_subs): a queryable learned LATER
+    /// ([`ingest_queryable`](Self::ingest_queryable) /
+    /// [`ingest_client_queryable`](Self::ingest_client_queryable)) is proactively
+    /// pushed via [`push_future_queryable`](Self::push_future_queryable) so a
+    /// querier-BEFORE-queryable querier's write-filter deactivates, and a
+    /// completeness flip re-pushes the same id. Same OBLIGATION-1 purge as
+    /// `future_subs`.
+    future_qabls: RefCell<FutureQablStore>,
     /// The pending-query return table (C5b) — one entry per outbound Request,
     /// keyed by the out face + a per-face local qid, recording where the matching
     /// `Response` / `ResponseFinal` routes back (the querier's inbound face + rid).
@@ -613,6 +624,12 @@ pub struct RouterForwarder {
     /// raced CURRENT interest dump (which logs nothing either) — without it the
     /// two paths are separable only by timing.
     future_pushes: Cell<usize>,
+    /// Running total of unsolicited FUTURE `DeclareQueryable` pushes emitted by
+    /// [`push_future_queryable`](Self::push_future_queryable) — the R311y150
+    /// query-plane proactive-push witness (twin of
+    /// [`future_pushes`](Self#structfield.future_pushes)). Rises once per CLIENT
+    /// face told a newly-learned OR completeness-flipped queryable.
+    future_qabl_pushes: Cell<usize>,
     /// §5.16 access-control INGRESS interceptor chain — consulted at the top of
     /// [`forward`](FaceForwarder::forward) before the kind-dispatch, the router twin
     /// of [`LinkstateForwarder`](crate::linkstate_forward)'s `ingress_interceptors`.
@@ -696,7 +713,8 @@ impl RouterForwarder {
             linkstatepeer_qabls: RefCell::new(LinkstatepeerInterest::new()),
             client_subs: RefCell::new(HashMap::new()),
             client_qabls: RefCell::new(HashMap::new()),
-            future_subs: RefCell::new(FutureInterestStore::new()),
+            future_subs: RefCell::new(FutureSubStore::new()),
+            future_qabls: RefCell::new(FutureQablStore::new()),
             pending: RefCell::new(PendingQueries::new()),
             queries_seen: Cell::new(0),
             query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
@@ -704,6 +722,7 @@ impl RouterForwarder {
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
             future_pushes: Cell::new(0),
+            future_qabl_pushes: Cell::new(0),
             ingress_interceptors: RefCell::new(InterceptorChain::new()),
             egress_interceptors: RefCell::new(InterceptorChain::new()),
             interceptor_dropped: Cell::new(0),
@@ -784,6 +803,19 @@ impl RouterForwarder {
     /// raced CURRENT dump.
     pub fn future_pushes_seen(&self) -> usize {
         self.future_pushes.get()
+    }
+
+    /// Total unsolicited FUTURE `DeclareQueryable` pushes emitted — the R311y150
+    /// query-plane proactive-push witness
+    /// ([`future_qabl_pushes`](Self#structfield.future_qabl_pushes)). A `>0` value
+    /// proves this router told a CLIENT face a queryable it learned AFTER that
+    /// face's FUTURE interest (or a completeness flip), the sole wz cause of a
+    /// querier-before-queryable querier's write-filter deactivation. No caller yet —
+    /// it awaits the deferred querier-before-queryable Layer-Z leg (the query twin of
+    /// leg 5), exactly as the sub [`future_pushes_seen`](Self::future_pushes_seen)
+    /// witness was added in y146 ahead of its leg-5 consumer in y147.
+    pub fn future_qabl_pushes_seen(&self) -> usize {
+        self.future_qabl_pushes.get()
     }
 
     /// Total distinct queryable interests this router currently holds across all
@@ -1277,7 +1309,12 @@ impl RouterForwarder {
         // this `interest_id` must be dropped (else it leaks + keeps pushing to a
         // publisher whose write-filter is gone). No reply (a Final carries no body).
         if !interest.c() && !interest.f() {
+            // The interest_id lives in exactly ONE plane's store (an interest is
+            // su() XOR qu()); removing from both is safe (the other no-ops).
             self.future_subs
+                .borrow_mut()
+                .remove_interest(inbound, interest.interest_id);
+            self.future_qabls
                 .borrow_mut()
                 .remove_interest(inbound, interest.interest_id);
             return;
@@ -1327,12 +1364,28 @@ impl RouterForwarder {
         // faces only — zenoh pushes future subs to `whatami==Client` faces
         // (`propagate_simple_subscription_to`); peers/routers converge via proactive
         // link-state, not interest-push. SUBS plane only (`su()`); match-all (target
-        // None) is not stored (current-dump parity — the qabl future-push and
-        // match-all are separate units).
+        // None) is not stored (current-dump parity). The QABL future-push is the
+        // parallel `store_future_qabl` block below (R311y150); match-all stays a
+        // separate deferred unit.
         let store_future = interest.f() && body.su() && self.is_client_face(inbound);
         if store_future {
             if let Some(t) = target.as_deref() {
                 self.future_subs.borrow_mut().store_interest(
+                    inbound,
+                    interest_id,
+                    t.to_owned(),
+                    aggregate,
+                );
+            }
+        }
+        // The QUERYABLE-plane twin (R311y150): store a FUTURE queryable interest so a
+        // queryable learned LATER is pushed to this querier (the querier-before-
+        // queryable close), and a completeness flip re-pushes (value-aware). Same
+        // CLIENT-only + literal-target gate as the sub plane.
+        let store_future_qabl = interest.f() && body.qu() && self.is_client_face(inbound);
+        if store_future_qabl {
+            if let Some(t) = target.as_deref() {
+                self.future_qabls.borrow_mut().store_interest(
                     inbound,
                     interest_id,
                     t.to_owned(),
@@ -1364,6 +1417,7 @@ impl RouterForwarder {
                     aggregate,
                     &self_zid,
                     interest_id,
+                    store_future_qabl,
                 );
             }
             self.send_one_to_face(
@@ -1434,10 +1488,10 @@ impl RouterForwarder {
             // CURRENT-only interest keeps id 0 (`make_sub_id` = 0 for non-future).
             |id, ke, ()| {
                 if future {
-                    let sub_id = self
-                        .future_subs
-                        .borrow_mut()
-                        .intern_current_reply(inbound, ke);
+                    let sub_id =
+                        self.future_subs
+                            .borrow_mut()
+                            .intern_current_reply(inbound, ke, ());
                     build_declare_subscriber_reply_with_id(id, sub_id, ke)
                 } else {
                     build_declare_subscriber_reply(id, ke)
@@ -1463,6 +1517,7 @@ impl RouterForwarder {
         aggregate: bool,
         self_zid: &Zid,
         interest_id: u64,
+        future: bool,
     ) {
         let Some(target) = target else {
             return;
@@ -1496,7 +1551,22 @@ impl RouterForwarder {
             aggregate,
             per_ke,
             |a, b| a.merge(b),
-            build_declare_queryable_reply,
+            // A FUTURE (C+F) interest's current reply carries a NON-ZERO id interned
+            // per (face, reply ke) with the FOLDED info seeded, so the id is REUSED
+            // and a later completeness flip re-pushes the SAME target (HOLE 3: the
+            // seed id must match the wire id, mirror of the sub future branch). A
+            // CURRENT-only interest keeps id 0.
+            |id, ke, info| {
+                if future {
+                    let qabl_id = self
+                        .future_qabls
+                        .borrow_mut()
+                        .intern_current_reply(inbound, ke, info);
+                    build_declare_queryable_reply_with_id(id, qabl_id, ke, info)
+                } else {
+                    build_declare_queryable_reply(id, ke, info)
+                }
+            },
             |msg| self.send_one_to_face(inbound, msg),
         );
     }
@@ -1646,6 +1716,10 @@ impl RouterForwarder {
         // recomputed merge — an upgrade or downgrade).
         if let Some(ke) = changed {
             self.advertise_native_cross_tier_qabl(tier, &ke);
+            // FUTURE-push (R311y150): a queryable learned off the mesh is proactively
+            // pushed to any CLIENT face whose FUTURE querier-interest matches, with
+            // the RE-FOLDED merged info — the query twin of the mesh-sub future push.
+            self.push_future_queryable(&ke, inbound);
         }
     }
 
@@ -2205,8 +2279,8 @@ impl RouterForwarder {
         let pushes = self
             .future_subs
             .borrow_mut()
-            .pushes_for_new_sub(new_ke, Some(origin));
-        for (face, reply_ke, id) in pushes {
+            .pushes_for_new(new_ke, Some(origin), |_, _| ());
+        for (face, reply_ke, id, ()) in pushes {
             match build_declare_subscriber(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
                     self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
@@ -2214,6 +2288,73 @@ impl RouterForwarder {
                 }
                 Err(e) => log::warn!(
                     "router forward: future sub push build failed for {reply_ke:?}: {e:?}"
+                ),
+            }
+        }
+    }
+
+    /// The MERGED [`QueryableInfo`] the querier on `exclude_face` interested in `ke`
+    /// would see — the OR of `complete` (min of `distance`) over EVERY queryable wz
+    /// holds that intersects `ke` (`router_qabls` + `linkstatepeer_qabls` excluding
+    /// self, plus `client_qabls` EXCLUDING the destination face). zenoh's
+    /// `local_qabl_info(res, dst_face)` fold, the SAME fold
+    /// [`dump_interest_qabls`](Self::dump_interest_qabls) inlines per reply ke (which
+    /// likewise excludes the requesting `inbound` face) — the value a FUTURE qabl
+    /// push MUST carry: a single source's raw info would DOWNGRADE an aggregate reply
+    /// (`merge` is OR-complete) and re-arm an ALL_COMPLETE filter. Excluding
+    /// `exclude_face` keeps the CURRENT-dump seed and this later push like-for-like,
+    /// so a querier that CO-HOSTS a matching queryable gets no spurious re-push.
+    fn merged_qabl_info(&self, ke: &str, self_zid: &Zid, exclude_face: FaceId) -> QueryableInfo {
+        let mut merged: Option<QueryableInfo> = None;
+        let mut fold = |info: QueryableInfo| {
+            merged = Some(match merged {
+                Some(m) => m.merge(info),
+                None => info,
+            });
+        };
+        for table in [&self.router_qabls, &self.linkstatepeer_qabls] {
+            for (_ke, _zid, info) in table.borrow().matching_entries(ke, Some(self_zid)) {
+                fold(*info);
+            }
+        }
+        let ke_chunks: Vec<&str> = ke.split('/').collect();
+        for (face, m) in self.client_qabls.borrow().iter() {
+            if *face == exclude_face {
+                continue; // don't fold the destination querier's own queryable
+            }
+            for (k, info) in m {
+                if keyexpr_intersects_target(k, &ke_chunks) {
+                    fold(*info);
+                }
+            }
+        }
+        merged.unwrap_or(QueryableInfo::DEFAULT)
+    }
+
+    /// Emit the unsolicited FUTURE `DeclareQueryable` pushes a newly-learned
+    /// queryable `new_ke` (sourced at `origin`) triggers — the query-plane twin of
+    /// [`push_future_subscription`](Self::push_future_subscription). Each push
+    /// carries the RE-FOLDED merged [`QueryableInfo`] for its reply ke
+    /// ([`merged_qabl_info`](Self::merged_qabl_info)), so an aggregate reply folds
+    /// the whole target and a completeness flip `false -> true` re-declares the SAME
+    /// interned id (pico updates the `(decl_id, peer)` write-filter target in place).
+    /// `origin` is never pushed (no self-echo).
+    fn push_future_queryable(&self, new_ke: &str, origin: FaceId) {
+        let self_zid = *self.routers_net.borrow().self_zid();
+        let pushes = self.future_qabls.borrow_mut().pushes_for_new(
+            new_ke,
+            Some(origin),
+            |reply_ke, dest| self.merged_qabl_info(reply_ke, &self_zid, dest),
+        );
+        for (face, reply_ke, id, info) in pushes {
+            match build_declare_queryable_with_id_info(id, &reply_ke, info) {
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.future_qabl_pushes
+                        .set(self.future_qabl_pushes.get() + 1);
+                }
+                Err(e) => log::warn!(
+                    "router forward: future qabl push build failed for {reply_ke:?}: {e:?}"
                 ),
             }
         }
@@ -2603,6 +2744,12 @@ impl RouterForwarder {
             .insert(keyexpr.clone(), info);
         if prev != Some(info) {
             self.advertise_client_cross_tier_qabl(&keyexpr);
+            // FUTURE-push (R311y150): a client queryable is proactively pushed to
+            // ANOTHER client face whose FUTURE querier-interest matches (the value-
+            // aware site — `prev` carried the old info, so a completeness flip
+            // re-pushes the recomputed merge). `inbound` (the queryable's own face)
+            // is never self-echoed.
+            self.push_future_queryable(&keyexpr, inbound);
         }
     }
 
@@ -3471,6 +3618,7 @@ impl FaceForwarder for RouterForwarder {
         // its own write-filter targets on the transport drop (filtering.c
         // CONNECTION_DROPPED), so no undeclare is owed.
         self.future_subs.borrow_mut().purge_face(id);
+        self.future_qabls.borrow_mut().purge_face(id);
         let Some(state) = self.faces.borrow_mut().remove(&id) else {
             return;
         };
@@ -4838,6 +4986,123 @@ mod tests {
             sink_c.frame_count(),
             0,
             "a second distinct sub under the same aggregate ke is deduped by the pushed registry"
+        );
+    }
+
+    #[test]
+    fn future_qabl_interest_pushes_a_later_mesh_qabl_to_the_client_querier() {
+        // The querier-before-queryable close (R311y150, the query-plane twin of the
+        // pub-before-sub push): a CLIENT querier solicits a C+F QUERYABLES interest
+        // for demo/key while NO matching queryable exists -> empty current dump, only
+        // a DeclareFinal. A MESH qabl for demo/** (complete) is learned LATER -> wz
+        // PROACTIVELY pushes an unsolicited DeclareQueryable (non-zero id, aggregate
+        // ke, interest_id None) carrying the FOLDED completeness so an ALL_COMPLETE
+        // querier's write-filter deactivates.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER); // the LATER mesh qabl source
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT); // the pico querier
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, false, true, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "empty current dump -> only the terminating DeclareFinal"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the later mesh qabl is pushed to the waiting client querier"
+        );
+        let push = forwarded_declare(&sink_c.frame_bytes(0));
+        assert_eq!(
+            push.interest_id, None,
+            "an unsolicited FUTURE push carries no interest_id / no I flag"
+        );
+        match &push.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_ne!(d.id, 0, "a future qabl push carries a non-zero decl id");
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
+                        w.suffix.as_deref(),
+                        Some("demo/key"),
+                        "the aggregate push is keyed on the INTEREST ke, not demo/**"
+                    ),
+                    _ => panic!("push keyexpr must be literal"),
+                }
+                assert!(
+                    read_queryable_info(d.extensions.as_ref()).complete,
+                    "the folded completeness (complete=true) rides the push"
+                );
+            }
+            _ => panic!("expected a DeclareQueryable future push"),
+        }
+    }
+
+    #[test]
+    fn future_qabl_complete_flip_re_pushes_the_same_id() {
+        // The value-aware re-push the y146 sub store cannot have (subs carry no
+        // value): a mesh qabl arrives INCOMPLETE -> pushed complete=false; the SAME
+        // source later re-declares it COMPLETE -> a value-diff re-push carrying the
+        // SAME decl id with complete=true (so pico updates the (decl_id, peer)
+        // write-filter target in place and a Z_QUERY_TARGET_ALL_COMPLETE querier's
+        // filter, which deactivates only on complete=true, is released). A raw
+        // single-source push would instead DOWNGRADE and black-hole.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, false, true, true),
+        );
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", false));
+        assert_eq!(sink_c.frame_count(), 1, "the incomplete qabl is pushed");
+        let first_id = match &forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert!(
+                    !read_queryable_info(d.extensions.as_ref()).complete,
+                    "the first push carries complete=false"
+                );
+                d.id
+            }
+            _ => panic!("expected a DeclareQueryable"),
+        };
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true));
+        assert_eq!(sink_c.frame_count(), 1, "the completeness flip re-pushes");
+        match &forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(
+                    d.id, first_id,
+                    "the re-push reuses the SAME decl id (pico updates the target in place)"
+                );
+                assert!(
+                    read_queryable_info(d.extensions.as_ref()).complete,
+                    "the re-push carries complete=true"
+                );
+            }
+            _ => panic!("expected a DeclareQueryable re-push"),
+        }
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true));
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a redundant re-declare (still complete=true) is not re-pushed"
         );
     }
 

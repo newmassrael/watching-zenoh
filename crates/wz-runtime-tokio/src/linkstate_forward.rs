@@ -95,6 +95,7 @@ use wz_codecs::response_final::ResponseFinalOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable, build_declare_queryable_reply,
+    build_declare_queryable_reply_with_id, build_declare_queryable_with_id_info,
     build_declare_subscriber, build_declare_subscriber_reply,
     build_declare_subscriber_reply_with_id, build_undeclare_queryable_with_keyexpr,
     build_undeclare_subscriber_with_keyexpr, set_declare_queryable_info,
@@ -130,7 +131,7 @@ use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
-use crate::future_interest::FutureInterestStore;
+use crate::future_interest::{FutureQablStore, FutureSubStore};
 use crate::interceptor::{InterceptorChain, InterceptorContext, InterceptorFlow};
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{ExpiredQuery, PendingQueries, QueryFan};
@@ -290,8 +291,17 @@ pub struct LinkstateForwarder {
     /// so a pub-BEFORE-sub client publisher's write-filter deactivates. FaceId-keyed
     /// leaf state, purged UNCONDITIONALLY in
     /// [`deregister`](FaceForwarder::deregister) (a client face has `link == None`,
-    /// mirroring the router's OBLIGATION-1). SUBS plane only.
-    future_subs: RefCell<FutureInterestStore>,
+    /// mirroring the router's OBLIGATION-1). SUBS plane only (the QABL future-push is
+    /// the value-aware [`future_qabls`](Self#structfield.future_qabls) below).
+    future_subs: RefCell<FutureSubStore>,
+    /// The QUERYABLE-plane FUTURE store (R311y150) — the value-aware twin of
+    /// [`future_subs`](Self#structfield.future_subs): a queryable learned LATER
+    /// (self-local [`declare_queryable`](Self::declare_queryable) or mesh
+    /// [`forward_queryable`](Self::forward_queryable)) is proactively pushed via
+    /// [`push_future_queryable`](Self::push_future_queryable) so a querier-BEFORE-
+    /// queryable querier's write-filter deactivates, and a completeness flip
+    /// re-pushes the same id. Same OBLIGATION-1 purge as `future_subs`.
+    future_qabls: RefCell<FutureQablStore>,
     /// The pending-query RETURN table (query-routing atom 3): the
     /// per-outbound-face `out qid -> (inbound face, inbound rid)` map that routes
     /// a routed Query's `Response` / `ResponseFinal` BACK to the querier — the wz
@@ -527,7 +537,8 @@ impl LinkstateForwarder {
             data_seen: Cell::new(0),
             subs: RefCell::new(LinkstatepeerInterest::new()),
             qabls: RefCell::new(LinkstatepeerInterest::new()),
-            future_subs: RefCell::new(FutureInterestStore::new()),
+            future_subs: RefCell::new(FutureSubStore::new()),
+            future_qabls: RefCell::new(FutureQablStore::new()),
             pending: RefCell::new(PendingQueries::new()),
             local_queryables: RefCell::new(Vec::new()),
             local_subscribers: RefCell::new(Vec::new()),
@@ -1504,12 +1515,60 @@ impl LinkstateForwarder {
         let pushes = self
             .future_subs
             .borrow_mut()
-            .pushes_for_new_sub(new_ke, origin);
-        for (face, reply_ke, id) in pushes {
+            .pushes_for_new(new_ke, origin, |_, _| ());
+        for (face, reply_ke, id, ()) in pushes {
             match build_declare_subscriber(id, 0, Some(&reply_ke)) {
                 Ok(decl) => self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl))),
                 Err(e) => {
                     log::warn!("peer forward: future sub push build failed for {reply_ke:?}: {e:?}")
+                }
+            }
+        }
+    }
+
+    /// The MERGED [`QueryableInfo`] a querier interested in `ke` would see — the OR
+    /// of `complete` (min `distance`) over every queryable in `self.qabls` that
+    /// intersects `ke` (self-local declares register there under `self_zid`, so they
+    /// fold in — the SAME single-set fold [`dump_interest_qabls`](Self::dump_interest_qabls)
+    /// uses). The value a FUTURE qabl push MUST carry (a single source's raw info
+    /// would downgrade an aggregate reply and re-arm an ALL_COMPLETE filter). The
+    /// querier hosts no queryable (the peer drops client declares), so no exclusion.
+    fn merged_qabl_info(&self, ke: &str) -> QueryableInfo {
+        let mut merged: Option<QueryableInfo> = None;
+        for (_ke, _zid, info) in self.qabls.borrow().matching_entries(ke, None) {
+            merged = Some(match merged {
+                Some(m) => m.merge(*info),
+                None => *info,
+            });
+        }
+        merged.unwrap_or(QueryableInfo::DEFAULT)
+    }
+
+    /// Emit the unsolicited FUTURE `DeclareQueryable` pushes a newly-learned
+    /// queryable `new_ke` (sourced at `origin`, `None` for self-local) triggers — the
+    /// query-plane twin of [`push_future_subscription`](Self::push_future_subscription).
+    /// Each push carries the RE-FOLDED merged [`QueryableInfo`] for its reply ke
+    /// ([`merged_qabl_info`](Self::merged_qabl_info)), so a completeness flip re-
+    /// declares the SAME interned id. `origin` is never pushed (no self-echo). No
+    /// push counter (the peer sub push is likewise counterless — a peer-mode
+    /// pub/querier-before-decl e2e witness is a re-openable follow-up).
+    fn push_future_queryable(&self, new_ke: &str, origin: Option<FaceId>) {
+        let pushes =
+            self.future_qabls
+                .borrow_mut()
+                .pushes_for_new(new_ke, origin, |reply_ke, _dest| {
+                    // The peer folds only `self.qabls` (no client-qabl plane — client
+                    // declares are dropped in resolve_source), so there is no
+                    // destination face to exclude.
+                    self.merged_qabl_info(reply_ke)
+                });
+        for (face, reply_ke, id, info) in pushes {
+            match build_declare_queryable_with_id_info(id, &reply_ke, info) {
+                Ok(decl) => self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl))),
+                Err(e) => {
+                    log::warn!(
+                        "peer forward: future qabl push build failed for {reply_ke:?}: {e:?}"
+                    )
                 }
             }
         }
@@ -1551,6 +1610,11 @@ impl LinkstateForwarder {
         // with remote queryables (the late-joiner convergence, like
         // declare_subscription).
         self.qabls.borrow_mut().register(keyexpr, self_zid, info);
+        // FUTURE-push (R311y150): a self-local queryable is proactively pushed to any
+        // CLIENT face whose FUTURE querier-interest matches (origin None = no inbound
+        // face), with the RE-FOLDED merged info; the store dedups a redundant
+        // re-declare and re-pushes only a completeness flip.
+        self.push_future_queryable(keyexpr, None);
         // node_id 0 = self-originated; the completeness rides the body ext
         // (omitted when DEFAULT/incomplete — the byte-identical no-info wire).
         let mut declare = build_declare_queryable(0, 0, Some(keyexpr))?;
@@ -1857,9 +1921,7 @@ impl LinkstateForwarder {
             }
             _ => wz_session_core::queryable_info::QueryableInfo::DEFAULT,
         };
-        // The qabl plane is NOT future-pushed in this round (the value-aware
-        // `(id, info)` re-push is a separate unit), so the registered ke is ignored.
-        let _ = self.forward_interest_declaration(
+        let registered = self.forward_interest_declaration(
             inbound,
             reliable,
             declare,
@@ -1874,6 +1936,14 @@ impl LinkstateForwarder {
             // Fn closure.
             move |ke| build_declare_queryable_with_info(ke, info),
         );
+        // FUTURE-push (R311y150): a mesh queryable learned off the tree is
+        // proactively pushed to any CLIENT face whose FUTURE querier-interest
+        // matches, with the RE-FOLDED merged info — closing the y146 residual (the
+        // registered ke was previously discarded). Fires on a NEW registration OR a
+        // value-diff (a completeness flip re-declares the same interned id).
+        if let Some(ke) = registered {
+            self.push_future_queryable(&ke, Some(inbound));
+        }
     }
 
     /// The shared sourced-interest-declaration re-flood, SSOT for both the
@@ -2253,7 +2323,12 @@ impl LinkstateForwarder {
         // this `interest_id` (else it leaks + keeps pushing to a gone publisher). No
         // reply (a Final carries no body).
         if !interest.c() && !interest.f() {
+            // The interest_id lives in exactly ONE plane's store (su() XOR qu());
+            // removing from both is safe (the other no-ops).
             self.future_subs
+                .borrow_mut()
+                .remove_interest(inbound, interest.interest_id);
+            self.future_qabls
                 .borrow_mut()
                 .remove_interest(inbound, interest.interest_id);
             return;
@@ -2318,6 +2393,20 @@ impl LinkstateForwarder {
                 );
             }
         }
+        // The QUERYABLE-plane twin (R311y150): store a FUTURE queryable interest so a
+        // queryable learned LATER (mesh or self-local) is pushed to this querier, and
+        // a completeness flip re-pushes (value-aware). Same CLIENT-only + literal gate.
+        let store_future_qabl = interest.f() && body.qu() && is_client;
+        if store_future_qabl {
+            if let Some(t) = target.as_deref() {
+                self.future_qabls.borrow_mut().store_interest(
+                    inbound,
+                    interest_id,
+                    t.to_owned(),
+                    aggregate,
+                );
+            }
+        }
         // CURRENT (`c()`) half: the client-only dump + the DeclareFinal (sent for
         // ANY current interest, even a non-client one — its write-filter still needs
         // the terminator). A FUTURE-only interest gets neither.
@@ -2340,6 +2429,7 @@ impl LinkstateForwarder {
                         aggregate,
                         requester_zid.as_ref(),
                         interest_id,
+                        store_future_qabl,
                     );
                 }
             }
@@ -2388,10 +2478,10 @@ impl LinkstateForwarder {
             // dedups; a CURRENT-only interest keeps id 0.
             |id, ke, ()| {
                 if future {
-                    let sub_id = self
-                        .future_subs
-                        .borrow_mut()
-                        .intern_current_reply(inbound, ke);
+                    let sub_id =
+                        self.future_subs
+                            .borrow_mut()
+                            .intern_current_reply(inbound, ke, ());
                     build_declare_subscriber_reply_with_id(id, sub_id, ke)
                 } else {
                     build_declare_subscriber_reply(id, ke)
@@ -2416,6 +2506,7 @@ impl LinkstateForwarder {
         aggregate: bool,
         exclude: Option<&Zid>,
         interest_id: u64,
+        future: bool,
     ) {
         let Some(target) = target else {
             return;
@@ -2433,7 +2524,21 @@ impl LinkstateForwarder {
             aggregate,
             per_ke,
             |a, b| a.merge(b),
-            build_declare_queryable_reply,
+            // A FUTURE (C+F) interest's current reply carries a NON-ZERO id interned
+            // per (face, reply ke) with the FOLDED info, so the id is REUSED and a
+            // later completeness flip re-pushes the SAME target (mirror of the sub
+            // future branch). A CURRENT-only interest keeps id 0.
+            |id, ke, info| {
+                if future {
+                    let qabl_id = self
+                        .future_qabls
+                        .borrow_mut()
+                        .intern_current_reply(inbound, ke, info);
+                    build_declare_queryable_reply_with_id(id, qabl_id, ke, info)
+                } else {
+                    build_declare_queryable_reply(id, ke, info)
+                }
+            },
             |msg| self.send_one_to_face(inbound, msg),
         );
     }
@@ -3251,6 +3356,7 @@ impl FaceForwarder for LinkstateForwarder {
         // write-filter targets on the transport drop (filtering.c
         // CONNECTION_DROPPED), so no undeclare is owed.
         self.future_subs.borrow_mut().purge_face(id);
+        self.future_qabls.borrow_mut().purge_face(id);
         let dropped_link = if let Some(state) = self.faces.borrow_mut().remove(&id) {
             if let Some(link) = state.link {
                 // remove_link drops the self<->neighbour edge and GC-prunes every
@@ -4727,6 +4833,51 @@ mod tests {
             forwarded_declare_keyexpr(&sink_c.frame_bytes(0)).as_deref(),
             Some("demo/key"),
         );
+    }
+
+    #[test]
+    fn peer_future_qabl_interest_pushes_a_self_local_qabl_to_the_client_querier() {
+        // The self-local qabl push (R311y150, query-plane twin): a client querier
+        // declares a C+F QUERYABLES interest, then THIS peer declares its OWN local
+        // queryable matching it -> the querier is pushed the peer's queryable
+        // (declare_queryable's future push, origin None) carrying its completeness.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, false, true, true),
+        );
+        sink_c.reset();
+        fwd.declare_queryable("demo/**", true)
+            .expect("declare local queryable");
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the self-local queryable is pushed to the client querier"
+        );
+        let push = forwarded_declare(&sink_c.frame_bytes(0));
+        assert_eq!(push.interest_id, None);
+        match &push.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_ne!(d.id, 0, "a future qabl push carries a non-zero decl id");
+                assert!(
+                    wz_session_core::queryable_info::read_queryable_info(d.extensions.as_ref())
+                        .complete,
+                    "the peer's complete=true rides the push"
+                );
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
+                        w.suffix.as_deref(),
+                        Some("demo/key"),
+                        "the aggregate push is keyed on the INTEREST ke"
+                    ),
+                    _ => panic!("push keyexpr must be literal"),
+                }
+            }
+            _ => panic!("expected a DeclareQueryable future push"),
+        }
     }
 
     #[test]

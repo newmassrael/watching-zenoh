@@ -840,6 +840,45 @@ pub fn build_declare_queryable_reply(
     Ok(declare)
 }
 
+/// R311y150 — the interest-response `Declare(DeclQueryable)` reply of a FUTURE
+/// (C+F) interest, carrying a NON-ZERO queryable id — the query-plane twin of
+/// [`build_declare_subscriber_reply_with_id`]. The plain
+/// [`build_declare_queryable_reply`] hardcodes id 0; a FUTURE interest instead
+/// allocates a per-`(face, reply keyexpr)` id so the SAME id can be REUSED on the
+/// later value-aware FUTURE push of the same keyexpr (a completeness flip
+/// `false -> true` re-declares the SAME `(decl_id, peer)` target pico keys its
+/// write-filter on, `net/filtering.c:202`). Same `I`-flag + `interest_id` coupling
+/// and same folded-[`QueryableInfo`] contract as [`build_declare_queryable_reply`].
+pub fn build_declare_queryable_reply_with_id(
+    interest_id: u64,
+    queryable_id: u64,
+    keyexpr: &str,
+    info: crate::queryable_info::QueryableInfo,
+) -> Result<DeclareOwned, CodecError> {
+    let mut declare = build_declare_queryable(queryable_id, 0, Some(keyexpr))?;
+    set_declare_queryable_info(&mut declare, info);
+    stamp_interest_reply(&mut declare, interest_id);
+    Ok(declare)
+}
+
+/// R311y150 — the UNSOLICITED FUTURE `Declare(DeclQueryable)` push: a
+/// `DeclareQueryable` carrying a NON-ZERO queryable id + the folded
+/// [`QueryableInfo`], with `interest_id: None` and NO `I` flag (an unsolicited
+/// declare, NOT an interest reply — the query-plane twin of the subscriber future
+/// push's plain `build_declare_subscriber(id, 0, Some(ke))`). Distinct from
+/// [`build_declare_queryable_with_info`](crate::declare_build) callers that force
+/// id 0: the push MUST carry the interned non-zero id so pico updates the existing
+/// `(decl_id, peer)` write-filter target in place on a value-aware re-push.
+pub fn build_declare_queryable_with_id_info(
+    queryable_id: u64,
+    keyexpr: &str,
+    info: crate::queryable_info::QueryableInfo,
+) -> Result<DeclareOwned, CodecError> {
+    let mut declare = build_declare_queryable(queryable_id, 0, Some(keyexpr))?;
+    set_declare_queryable_info(&mut declare, info);
+    Ok(declare)
+}
+
 /// R311y141 — the interest-response terminator: a `Declare(DeclFinal)` stamped
 /// with `interest_id`, the single `DeclFinal` a router sends after the CURRENT
 /// dump to close the interest (`hat/router/interests.rs`). The `interest_id` is
