@@ -762,6 +762,69 @@ pub fn build_declare_final() -> DeclareOwned {
     }
 }
 
+/// R311y141 — the interest-response `Declare(DeclSubscriber)` reply: a
+/// `DeclareSubscriber` stamped with the soliciting `interest_id` — the CURRENT
+/// dump a router sends back per matching remote subscription
+/// (`hat/router/pubsub.rs::declare_sub_interest`). Two wire couplings a plain
+/// [`build_declare_subscriber`] does NOT carry, and BOTH are required: the
+/// envelope `I` flag ([`wire_const::FLAG_N_DECLARE_I`]) AND `interest_id =
+/// Some(id)`. The encoder emits the id VLE iff `interest_id.is_some()` and the
+/// decoder reads it iff the header `I` bit is set, so setting one without the
+/// other short-reads the frame on the peer.
+///
+/// The reply keyexpr is the literal `keyexpr` (mapping id 0 + full suffix). For
+/// an AGGREGATE interest the caller MUST pass the interest's OWN keyexpr, not a
+/// matched subscription's: zenoh-pico associates an aggregate interest's replies
+/// by `_z_keyexpr_equals` (`session/interest.c`), not intersect, so a
+/// concrete-subscription keyexpr would silently fail to match. The subscriber
+/// `id` is 0 (a current-dump sub carries no id — zenoh `make_sub_id` = 0 for
+/// non-future).
+pub fn build_declare_subscriber_reply(
+    interest_id: u64,
+    keyexpr: &str,
+) -> Result<DeclareOwned, CodecError> {
+    let mut declare = build_declare_subscriber(0, 0, Some(keyexpr))?;
+    declare.header |= wire_const::FLAG_N_DECLARE_I;
+    declare.interest_id = Some(interest_id);
+    Ok(declare)
+}
+
+/// R311y141 — the interest-response `Declare(DeclQueryable)` reply: the
+/// query-plane twin of [`build_declare_subscriber_reply`]. Additionally folds
+/// the matched queryables' [`QueryableInfo`] onto the body ext chain (via
+/// [`set_declare_queryable_info`]): a `Z_QUERY_TARGET_ALL_COMPLETE` querier's
+/// write-filter deactivates ONLY on a reply carrying `complete = true`
+/// (zenoh-pico `net/filtering.c`), so an aggregate reply must carry the MERGED
+/// completeness rather than dropping it to the DEFAULT `{ complete: false }`.
+/// Same `I`-flag + `interest_id` coupling and same aggregate-keyexpr contract as
+/// the subscriber reply.
+pub fn build_declare_queryable_reply(
+    interest_id: u64,
+    keyexpr: &str,
+    info: crate::queryable_info::QueryableInfo,
+) -> Result<DeclareOwned, CodecError> {
+    let mut declare = build_declare_queryable(0, 0, Some(keyexpr))?;
+    set_declare_queryable_info(&mut declare, info);
+    declare.header |= wire_const::FLAG_N_DECLARE_I;
+    declare.interest_id = Some(interest_id);
+    Ok(declare)
+}
+
+/// R311y141 — the interest-response terminator: a `Declare(DeclFinal)` stamped
+/// with `interest_id`, the single `DeclFinal` a router sends after the CURRENT
+/// dump to close the interest (`hat/router/interests.rs`). The `interest_id` is
+/// MANDATORY here (unlike the unsolicited [`build_declare_final`]): zenoh-pico
+/// HARD-ERRORS on a `DeclFinal` with no interest_id
+/// (`_Z_ERR_MESSAGE_ZENOH_DECLARATION_UNKNOWN`, `transport/unicast/rx.c`), and
+/// that error propagates up the frame reader. Both the `I` flag and the id field
+/// are set (see [`build_declare_subscriber_reply`] for the coupling).
+pub fn build_declare_final_reply(interest_id: u64) -> DeclareOwned {
+    let mut declare = build_declare_final();
+    declare.header |= wire_const::FLAG_N_DECLARE_I;
+    declare.interest_id = Some(interest_id);
+    declare
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1822,6 +1885,93 @@ mod tests {
                 );
             }
             _ => panic!("build_declare_final must produce CodecZenohDeclFinal"),
+        }
+    }
+
+    /// R311y141 — the interest-response subscriber reply stamps BOTH the envelope
+    /// `I` flag (0x20) and `interest_id`, keyed on the literal keyexpr (id 0 +
+    /// suffix). The peer reads the id iff the header `I` bit is set, so both must
+    /// travel together; the leading wire bytes assert exactly that coupling.
+    #[test]
+    fn build_declare_subscriber_reply_stamps_interest_id_and_i_flag() {
+        let declare = build_declare_subscriber_reply(5, "demo/key").unwrap();
+        assert_eq!(
+            declare.header,
+            wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
+            "reply envelope must set the I flag (0x20) atop N_MID_DECLARE",
+        );
+        assert_eq!(
+            declare.interest_id,
+            Some(5),
+            "reply must echo the received interest id"
+        );
+        match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                assert_eq!(d.id, 0, "a current-dump sub uses id 0 (zenoh make_sub_id)");
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 0, "literal-keyexpr sentinel 0");
+                        assert_eq!(w.suffix.as_deref(), Some("demo/key"));
+                    }
+                    _ => panic!("reply keyexpr must be the literal WireexprLocal form"),
+                }
+            }
+            _ => panic!("build_declare_subscriber_reply must produce a DeclSubscriber"),
+        }
+        // Wire lead: 0x3E (N_MID_DECLARE 0x1E | I 0x20), then interest_id VLE(5).
+        let outer = declare.wire();
+        assert_eq!(
+            &outer[..2],
+            &[0x3E, 0x05],
+            "the I-flagged envelope + interest_id varint must lead the wire",
+        );
+    }
+
+    /// R311y141 — the interest terminator. The `interest_id` is MANDATORY (pico
+    /// hard-errors on a DeclFinal without it), so the wire is exactly
+    /// `[0x3E, VLE(id), 0x1A]` — unlike the unsolicited two-byte
+    /// `build_declare_final` (`[0x1E, 0x1A]`).
+    #[test]
+    fn build_declare_final_reply_stamps_interest_id_and_i_flag() {
+        let declare = build_declare_final_reply(9);
+        assert_eq!(
+            declare.header,
+            wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
+        );
+        assert_eq!(declare.interest_id, Some(9));
+        assert_eq!(
+            declare.wire(),
+            vec![0x3E, 0x09, 0x1A],
+            "envelope+I, interest_id VLE(9), DeclFinal MID (0x1A)",
+        );
+    }
+
+    /// R311y141 — the query-plane reply carries the `I`+id coupling AND a
+    /// non-DEFAULT `QueryableInfo` on the body ext chain: a
+    /// `Z_QUERY_TARGET_ALL_COMPLETE` querier's write-filter deactivates only on a
+    /// reply with `complete = true`, so the info must NOT collapse to DEFAULT.
+    #[test]
+    fn build_declare_queryable_reply_stamps_id_and_carries_complete() {
+        let declare = build_declare_queryable_reply(
+            3,
+            "query/svc",
+            crate::queryable_info::QueryableInfo::local(true),
+        )
+        .unwrap();
+        assert_eq!(
+            declare.header,
+            wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
+        );
+        assert_eq!(declare.interest_id, Some(3));
+        match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.id, 0);
+                assert!(
+                    d.extensions.is_some(),
+                    "a complete=true QueryableInfo must ride the body ext chain",
+                );
+            }
+            _ => panic!("build_declare_queryable_reply must produce a DeclQueryable"),
         }
     }
 }

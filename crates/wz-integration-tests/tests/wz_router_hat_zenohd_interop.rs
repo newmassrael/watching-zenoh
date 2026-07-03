@@ -52,8 +52,10 @@
 //! SCOPE — what this does NOT yet cover (the cross-impl router tier is a large
 //! surface; this is the first, deliberately-2-node slice, mirroring how the
 //! wz<->wz mesh suite staged its own coverage):
-//!   * ONE data direction — pub-behind-zenohd -> sub-behind-wz only; the reverse
-//!     (pub behind wz -> sub behind zenohd) is untested.
+//!   * (CLOSED by leg 3, R311y141) BOTH data directions now covered: leg 2 is
+//!     pub-behind-zenohd -> sub-behind-wz; leg 3 is the reverse (pub behind wz ->
+//!     sub behind zenohd), which needed wz to answer a pico publisher's
+//!     declare-Interest (the zenoh-1.x write-filter handshake).
 //!   * DATA-push only — no cross-impl query/reply federation (the wz<->wz mesh
 //!     has that as its test #6; the zenohd twin does not exist yet).
 //!   * TWO routers on ONE direct face — each router is therefore the SOLE master
@@ -270,6 +272,132 @@ fn wz_router_hat_and_zenohd_federate_pico_data_across_the_backbone() {
                  reached the subscriber without transiting wz's router, so the \
                  delivery did not exercise the cross-backbone route\n--- \
                  wz-router-hat stderr ---\n{c}"
+            )
+        });
+}
+
+/// Leg 3 — the REVERSE data-plane acid test (the capstone of the R311y141
+/// interest-handshake work). A pico Put crosses the mixed-vendor backbone in the
+/// OPPOSITE direction to leg 2: pub-behind-WZ -> wz-router -> [`routers_net`
+/// link-state] -> zenohd -> sub-behind-ZENOHD. This exercises what leg 2 could
+/// not: wz ANSWERING a pico publisher's declare-`Interest` (the zenoh-1.x
+/// write-filter handshake) with the remote subscription it learned from zenohd.
+/// Without that answer a pico publisher's write-filter never deactivates and it
+/// drops every Put LOCALLY (the reverse-data black-hole this round fixes) — so the
+/// puts never even reach wz's wire.
+///
+/// Gated on wz's `learned a mesh sub` witness — wz has INGESTED zenohd's
+/// subscriber off the router mesh, so it can answer the publisher's interest
+/// NON-empty. This barrier (NOT leg 2's `learned a client sub`, of which there is
+/// none in the reverse case) is what makes the leg deterministic: a Put burst
+/// cannot rescue an already-active write filter (it emits zero wire traffic), so
+/// the publisher must not spawn until wz provably holds the remote sub.
+#[test]
+#[ignore = "binary-dep e2e (zenohd + zenoh-pico z_pub/z_sub + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
+fn wz_router_hat_and_zenohd_federate_pico_data_in_reverse() {
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+    let z_pub = zenoh_pico_cli_binary("z_pub");
+    let port_res = PortReservation::pick();
+    let zport = port_res.port();
+    let _zenohd = spawn_zenohd(zport, tempfile);
+    let zaddr = format!("127.0.0.1:{zport}");
+
+    // wz --router-hat dials zenohd; wait for the router backbone to converge
+    // BEFORE attaching clients so the link-state mesh is established.
+    let (mut wz_guard, mut wz_reader, wz_port) = spawn_router_hat_dialing(&zaddr);
+    if wait_for_substring(
+        &mut wz_reader,
+        ROUTERS_NET_CONVERGED,
+        Duration::from_secs(15),
+    )
+    .is_err()
+    {
+        let c = read_captured(&mut wz_reader);
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        panic!("wz <-> zenohd router backbone never converged within 15s\n--- wz-router-hat stderr ---\n{c}");
+    }
+
+    // z_sub: a pico CLIENT of ZENOHD, subscribing demo/**. zenohd propagates the
+    // sub across the router backbone into wz's routers_net (the direction leg 2's
+    // wz->zenohd advertise proved works; here it is zenohd->wz).
+    let z_sub_endpoint = format!("tcp/127.0.0.1:{zport}");
+    let (mut z_sub_guard, mut z_sub_reader) =
+        spawn_subscribed_zsub(&z_sub, "demo/**", &z_sub_endpoint, "zenohd", tempfile);
+
+    // Barrier: wz has INGESTED zenohd's sub off the mesh, so it can now answer a
+    // publisher's write-filter interest with a matching DeclareSubscriber.
+    let learned = wait_for_substring(
+        &mut wz_reader,
+        "router-hat: learned a mesh sub",
+        Duration::from_secs(10),
+    );
+
+    // z_pub: a pico CLIENT of WZ, publishing demo/key. Its write-filter interest is
+    // answered by wz (the R311y141 fix), so it puts the 30-Put burst on the wire;
+    // wz routes it across the backbone to zenohd, which delivers to z_sub.
+    let z_pub_endpoint = format!("tcp/127.0.0.1:{wz_port}");
+    let z_pub_guard = learned.is_ok().then(|| {
+        spawn_publishing_zpub(
+            &z_pub,
+            "demo/key",
+            "reverse-federation",
+            &z_pub_endpoint,
+            "wz-router-hat",
+            tempfile,
+        )
+    });
+
+    // The acid test: the pico Put published behind wz reaches the pico subscriber
+    // behind zenohd, having crossed the cross-impl router backbone in REVERSE.
+    let received = wait_for_substring(
+        &mut z_sub_reader,
+        "Received ('demo/key'",
+        Duration::from_secs(15),
+    );
+    // Transit pin: wz forwarded the cross-backbone Push (it counts every inbound
+    // Push it routes) — so the delivery genuinely transited wz, not a direct link.
+    let transit = received.is_ok().then(|| {
+        wait_for_substring(
+            &mut wz_reader,
+            "router-hat: forwarded mesh data",
+            Duration::from_secs(5),
+        )
+    });
+
+    if let Some(mut c) = z_pub_guard {
+        let _ = c.child_mut().kill();
+        let _ = c.child_mut().wait();
+    }
+    let _ = z_sub_guard.child_mut().kill();
+    let _ = z_sub_guard.child_mut().wait();
+    graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+    let wz_captured = read_captured(&mut wz_reader);
+    let z_sub_captured = read_captured(&mut z_sub_reader);
+    eprintln!("--- wz-router-hat stderr ---\n{wz_captured}");
+    eprintln!("--- z_sub stdout ---\n{z_sub_captured}");
+
+    learned.unwrap_or_else(|c| {
+        panic!(
+            "wz-router-hat never INGESTED zenohd's subscriber off the mesh within \
+             10s (no 'learned a mesh sub') — the sub did not propagate across the \
+             router backbone\n--- wz-router-hat stderr ---\n{c}"
+        )
+    });
+    received.unwrap_or_else(|c| {
+        panic!(
+            "pico z_sub behind zenohd never received the Put published behind wz \
+             within 15s — reverse data did not cross the cross-impl router backbone \
+             (the publisher's write-filter never deactivated?)\n--- z_sub stdout \
+             ---\n{c}"
+        )
+    });
+    transit
+        .expect("received implies transit was probed")
+        .unwrap_or_else(|c| {
+            panic!(
+                "wz-router-hat never logged 'forwarded mesh data' — the Put reached \
+                 the subscriber without transiting wz's router\n--- wz-router-hat \
+                 stderr ---\n{c}"
             )
         });
 }

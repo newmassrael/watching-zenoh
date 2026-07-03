@@ -309,12 +309,14 @@ use std::time::{Duration, Instant};
 use sce_forge_runtime::codec::CodecError;
 
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
+use wz_codecs::interest::InterestOwned;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::push::PushOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
 use wz_session_core::declare_build::{
-    build_declare_subscriber, build_undeclare_queryable_with_keyexpr,
+    build_declare_final_reply, build_declare_queryable_reply, build_declare_subscriber,
+    build_declare_subscriber_reply, build_undeclare_queryable_with_keyexpr,
     build_undeclare_subscriber_with_keyexpr,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
@@ -770,6 +772,22 @@ impl RouterForwarder {
         self.client_subs.borrow().values().map(|s| s.len()).sum()
     }
 
+    /// Total mesh-native subscriptions this router currently holds
+    /// (`router_subs` + `linkstatepeer_subs`) — the REVERSE-data READINESS
+    /// witness, the mesh twin of [`client_subs_seen`](Self::client_subs_seen). A
+    /// `>0` value proves R has INGESTED a peer router's (e.g. zenohd's)
+    /// `DeclareSubscriber` off the mesh, letting a reverse-data e2e (publisher
+    /// behind THIS router -> subscriber behind the peer) gate the publisher spawn
+    /// on a router-CONFIRMED remote subscription. Required because a pico
+    /// publisher's write-filter deactivates only once wz answers its Interest with
+    /// a matching sub — which needs wz to already hold that sub HERE; an empty
+    /// CURRENT dump leaves the filter active and the puts never reach the wire.
+    pub fn mesh_subs_seen(&self) -> usize {
+        let router = self.router_subs.borrow().entries().len();
+        let peer = self.linkstatepeer_subs.borrow().entries().len();
+        router + peer
+    }
+
     /// Install the full §5.16 interceptor configuration — the router twin of
     /// [`LinkstateForwarder::set_interceptors`](crate::linkstate_forward::LinkstateForwarder::set_interceptors).
     /// Builds BOTH the ingress and egress chains from ONE [`InterceptorConfig`] in
@@ -1173,6 +1191,13 @@ impl RouterForwarder {
             self.ingest_interest(inbound, tier, reliable, declare, wireexpr, subs, (), |ke| {
                 build_declare_subscriber(0, 0, Some(ke))
             });
+        log::debug!(
+            "router forward: mesh sub ingest on face {inbound:?} tier {tier:?} -> {}",
+            match &changed {
+                Some(ke) => format!("REGISTERED {ke:?}"),
+                None => "not registered (unresolvable / client-tier / no-change)".to_string(),
+            }
+        );
         // FEDERATION cross-tier bubble (R311y125): a NATIVE sub for `ke` in this
         // tier makes self ADVERTISE `ke` into the OPPOSITE mesh (a router-native
         // -> peer mesh; a peer-native -> router mesh) so a publisher on that mesh
@@ -1183,6 +1208,208 @@ impl RouterForwarder {
         // bridge is gated). Fires on the flip false->true only.
         if let Some(ke) = changed {
             self.advertise_native_cross_tier_sub(tier, &ke);
+        }
+    }
+
+    /// Respond to an inbound `Interest` solicitation — the zenoh-1.x
+    /// interest-declaration handshake. A pico publisher/querier keeps a
+    /// WRITE-FILTER that drops its own put/get LOCALLY until the router answers
+    /// its declare-Interest with a matching `Declare(Sub/Qabl)`; wz previously
+    /// DROPPED the Interest (`_ => {}`), which is exactly why a pico publisher
+    /// behind wz never puts data on the wire (the reverse-data path). This is the
+    /// CURRENT-mode reply (`hat/router/interests.rs::declare_interest` +
+    /// `declare_{sub,qabl}_interest`): per matching REMOTE declaration wz holds, a
+    /// `Declare(Sub)` / `Declare(Qabl)` stamped with the soliciting `interest_id`,
+    /// then ONE terminating `Declare(DeclFinal)`. FUTURE-mode (an ongoing push of
+    /// later declarations) + `Interest(Final)` teardown are round B; a
+    /// non-current / body-less (Final) interest gets no reply here (`if !c()`
+    /// mirrors zenoh's `if mode.current()`). Tier-agnostic — routers answer
+    /// interests from any tier — the faithful zenoh behavior.
+    fn respond_to_interest(&self, inbound: FaceId, _tier: FaceTier, interest: &InterestOwned) {
+        if !interest.c() {
+            return; // Tier 1: CURRENT only (a pure-Future / Final interest gets no reply yet).
+        }
+        let Some(body) = interest.body.as_ref() else {
+            return; // a CURRENT interest always carries a body (the C||F decode gate).
+        };
+        let interest_id = interest.interest_id;
+        // Resolve the RESTRICTED target keyexpr against the inbound face's alias
+        // table in ONE scoped borrow (`None` => match-all, deferred; pico always
+        // sets RESTRICTED). An unresolvable alias still terminates the interest so
+        // the peer is not left waiting.
+        let target: Option<String> = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            if body.r() {
+                match body
+                    .keyexpr
+                    .as_ref()
+                    .and_then(|w| resolve_wireexpr(&w.body, &s.keyexpr_table))
+                {
+                    Some(ke) => Some(ke),
+                    None => {
+                        self.send_one_to_face(
+                            inbound,
+                            NetworkMessage::Declare(Box::new(build_declare_final_reply(
+                                interest_id,
+                            ))),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            }
+        };
+        let aggregate = body.ag();
+        let self_zid = *self.routers_net.borrow().self_zid();
+        if body.su() {
+            self.dump_interest_subs(
+                inbound,
+                target.as_deref(),
+                aggregate,
+                &self_zid,
+                interest_id,
+            );
+        }
+        if body.qu() {
+            self.dump_interest_qabls(
+                inbound,
+                target.as_deref(),
+                aggregate,
+                &self_zid,
+                interest_id,
+            );
+        }
+        // The single terminating DeclareFinal (interest_id) — zenoh sends it for a
+        // CURRENT interest regardless of the dump size (0 matches => the filter
+        // stays active = "no subscriber yet", which is correct).
+        self.send_one_to_face(
+            inbound,
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
+        );
+    }
+
+    /// The CURRENT-dump SUBSCRIBER leg of [`respond_to_interest`]: reply with the
+    /// REMOTE subscriptions matching the interest target. Sources both meshes
+    /// (`router_subs` + `linkstatepeer_subs`, excluding SELF — zenoh's `*r !=
+    /// tables.zid`) plus the client leaf subs (excluding the requesting face). For
+    /// an AGGREGATE interest, ONE reply keyed on the INTEREST's keyexpr (pico
+    /// matches an aggregate interest's replies by keyexpr EQUALITY, so a concrete
+    /// sub keyexpr would silently fail to match); else one reply per distinct
+    /// matching sub keyexpr. Keyexprs are collected OWNED before any send, so no
+    /// interest-table borrow is held across the egress.
+    fn dump_interest_subs(
+        &self,
+        inbound: FaceId,
+        target: Option<&str>,
+        aggregate: bool,
+        self_zid: &Zid,
+        interest_id: u64,
+    ) {
+        let Some(target) = target else {
+            return; // match-all deferred; the caller's DeclareFinal still closes the interest.
+        };
+        let mut kes: Vec<String> = Vec::new();
+        for table in [&self.router_subs, &self.linkstatepeer_subs] {
+            for (ke, _zid, _v) in table.borrow().matching_entries(target, Some(self_zid)) {
+                kes.push(ke.to_string());
+            }
+        }
+        let target_chunks: Vec<&str> = target.split('/').collect();
+        for (face, keys) in self.client_subs.borrow().iter() {
+            if *face == inbound {
+                continue; // never advertise a face its own subscription
+            }
+            for k in keys {
+                if keyexpr_intersects_target(k, &target_chunks) {
+                    kes.push(k.clone());
+                }
+            }
+        }
+        if kes.is_empty() {
+            return; // no matching remote sub; the filter stays active (correct)
+        }
+        if aggregate {
+            if let Ok(decl) = build_declare_subscriber_reply(interest_id, target) {
+                self.send_one_to_face(inbound, NetworkMessage::Declare(Box::new(decl)));
+            }
+        } else {
+            kes.sort_unstable();
+            kes.dedup();
+            for ke in kes {
+                if let Ok(decl) = build_declare_subscriber_reply(interest_id, &ke) {
+                    self.send_one_to_face(inbound, NetworkMessage::Declare(Box::new(decl)));
+                }
+            }
+        }
+    }
+
+    /// The CURRENT-dump QUERYABLE leg of [`respond_to_interest`] — the query-plane
+    /// twin of [`dump_interest_subs`] with one addition: each reply carries the
+    /// MERGED [`QueryableInfo`] (complete = OR, distance = min — zenoh's
+    /// `local_qabl_info` fold) of the matched queryables. A
+    /// `Z_QUERY_TARGET_ALL_COMPLETE` querier's write-filter deactivates ONLY on a
+    /// reply with `complete = true`, so the completeness must be folded, not
+    /// dropped to DEFAULT. Aggregate => one reply (all matched infos merged) keyed
+    /// on the interest ke; else one per distinct keyexpr (each keyexpr's sources
+    /// pre-merged).
+    fn dump_interest_qabls(
+        &self,
+        inbound: FaceId,
+        target: Option<&str>,
+        aggregate: bool,
+        self_zid: &Zid,
+        interest_id: u64,
+    ) {
+        let Some(target) = target else {
+            return;
+        };
+        let mut per_ke: HashMap<String, QueryableInfo> = HashMap::new();
+        for table in [&self.router_qabls, &self.linkstatepeer_qabls] {
+            for (ke, _zid, info) in table.borrow().matching_entries(target, Some(self_zid)) {
+                per_ke
+                    .entry(ke.to_string())
+                    .and_modify(|e| *e = e.merge(*info))
+                    .or_insert(*info);
+            }
+        }
+        let target_chunks: Vec<&str> = target.split('/').collect();
+        for (face, m) in self.client_qabls.borrow().iter() {
+            if *face == inbound {
+                continue;
+            }
+            for (k, info) in m {
+                if keyexpr_intersects_target(k, &target_chunks) {
+                    per_ke
+                        .entry(k.clone())
+                        .and_modify(|e| *e = e.merge(*info))
+                        .or_insert(*info);
+                }
+            }
+        }
+        if per_ke.is_empty() {
+            return;
+        }
+        if aggregate {
+            let merged = per_ke
+                .values()
+                .copied()
+                .reduce(|a, b| a.merge(b))
+                .unwrap_or(QueryableInfo::DEFAULT);
+            if let Ok(decl) = build_declare_queryable_reply(interest_id, target, merged) {
+                self.send_one_to_face(inbound, NetworkMessage::Declare(Box::new(decl)));
+            }
+        } else {
+            let mut entries: Vec<(String, QueryableInfo)> = per_ke.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            for (ke, info) in entries {
+                if let Ok(decl) = build_declare_queryable_reply(interest_id, &ke, info) {
+                    self.send_one_to_face(inbound, NetworkMessage::Declare(Box::new(decl)));
+                }
+            }
         }
     }
 
@@ -3196,10 +3423,41 @@ impl FaceForwarder for RouterForwarder {
             let faces = self.faces.borrow();
             match faces.get(&id) {
                 Some(s) => s.tier,
-                None => return,
+                None => {
+                    log::debug!(
+                        "router forward: DROP {} inbound message(s) from unregistered face {id:?}",
+                        messages.len()
+                    );
+                    return;
+                }
             }
         };
         for message in messages {
+            log::debug!(
+                "router forward: face {id:?} tier {tier:?} inbound {}",
+                match message {
+                    NetworkMessage::Oam(_) => "Oam".to_string(),
+                    NetworkMessage::Push(_) => "Push".to_string(),
+                    NetworkMessage::Declare(d) => match &d.body {
+                        DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => "Declare(Sub)",
+                        DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => "Undeclare(Sub)",
+                        DeclareOwnedVariant::CodecZenohDeclKexpr(_) => "Declare(Kexpr)",
+                        DeclareOwnedVariant::CodecZenohUndeclKexpr(_) => "Undeclare(Kexpr)",
+                        DeclareOwnedVariant::CodecZenohDeclQueryable(_) => "Declare(Qabl)",
+                        DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => "Undeclare(Qabl)",
+                        _ => "Declare(other)",
+                    }
+                    .to_string(),
+                    NetworkMessage::Request(_) => "Request".to_string(),
+                    NetworkMessage::Response(_) => "Response".to_string(),
+                    NetworkMessage::ResponseFinal(_) => "ResponseFinal".to_string(),
+                    NetworkMessage::Interest(_) => "Interest".to_string(),
+                    NetworkMessage::Unknown { mid, body } =>
+                        format!("Unknown{{mid=0x{mid:02x}, len={}}}", body.len()),
+                    #[allow(unreachable_patterns)]
+                    _ => "other".to_string(),
+                }
+            );
             // §5.16 INGRESS access control (y113): consult the ingress chain ONCE
             // here, ahead of the kind-dispatch — a denied message is dropped (not
             // counted as received Push/Query, not routed) and witnessed. The router
@@ -3304,6 +3562,15 @@ impl FaceForwarder for RouterForwarder {
                 NetworkMessage::ResponseFinal(response_final) => {
                     self.forward_response_final(id, *reliable, response_final);
                 }
+                // An Interest solicitation (the zenoh-1.x interest-declaration
+                // handshake). Reply with the matching CURRENT declarations wz
+                // holds + a DeclareFinal so the soliciting peer's write-filter (a
+                // pico publisher/querier drops its own data LOCALLY until it learns
+                // a matching remote declaration) deactivates. Previously dropped
+                // (`_ => {}`), which black-holed the reverse-data path.
+                NetworkMessage::Interest(interest) => {
+                    self.respond_to_interest(id, tier, interest);
+                }
                 _ => {}
             }
         }
@@ -3355,6 +3622,8 @@ mod tests {
     };
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
+    use wz_codecs::wireexpr::WireexprOwnedVariant;
+    use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_runtime_core::runtime::Runtime;
     use wz_session_core::push_routing_context::{read_push_hoplimit, read_push_source};
 
@@ -4132,6 +4401,467 @@ mod tests {
             0,
             "the router-net leg is master-gated (a non-master suppresses it)"
         );
+    }
+
+    #[test]
+    fn reverse_data_a_foreign_router_client_sub_is_delivered_a_wz_client_push() {
+        // Cross-impl REVERSE-data reproduction, wz-side + deterministic: a
+        // subscriber behind a FOREIGN router (zenohd) publishes its interest onto
+        // wz's router-tier mesh, then a wz LOCAL client publishes that keyexpr — wz
+        // must forward the Put out the router face toward zenohd. This is the ②
+        // reverse direction (pub@wz -> sub@zenohd), the mirror of the y140-forward
+        // leg, and it pins the ENTIRE wz-side path: declaration INGEST + client-pub
+        // DELIVERY.
+        //
+        // Direct-read of zenoh 49c8a53 settles the wire the prior spike could not:
+        // zenohd's OWN client sub is sourced at `tables.zid` (declare_simple_ ->
+        // register_router_subscription, pubsub.rs:337), whose net index is ALWAYS 0
+        // (Network::new adds self FIRST, network.rs:156), and the flood stamps
+        // `ext_nodeid = tree_sid.index()` (pubsub.rs:210). So it arrives at wz as a
+        // node_id-0 sourced DeclareSubscriber on the router face — the direct
+        // neighbour IS the source — NOT a transit non-zero node_id. (psid ==
+        // NodeIndex, make_link_state:328, so wz's link `mappings` and zenohd's
+        // ext_nodeid share one numbering.) In a pure router-tier topology zenohd is
+        // in routers_net ONLY, so `shared_nodes = {self}` and wz elects itself
+        // master (is_master true) => the client-push router leg (C3b block 1,
+        // publish_client_push_into_meshes) is NOT suppressed. A GREEN here redirects
+        // the remaining reverse-data gap OFF the wz side and onto zenohd's egress /
+        // wire form; a RED pins a wz bug.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (zenohd, sink_zenohd) = face(zid(0xAA), WIRE_ROUTER); // the foreign router
+        let (cpub, _sc) = face(zid(0xCC), WIRE_CLIENT); // a wz local client publisher
+        fwd.register(FaceId(0), &zenohd);
+        fwd.register(FaceId(1), &cpub);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5); // mutual routers_net edge + tree
+        fwd.tick();
+        // zenohd's own client subscribes -> reaches wz as a node_id-0 sourced
+        // declare (zenohd, the direct neighbour, IS the source).
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        assert_eq!(
+            fwd.router_subs.borrow().interested("demo/data"),
+            vec![zid(0xAA)],
+            "the foreign router's client sub registers the peer in router_subs"
+        );
+        assert!(
+            fwd.is_master("demo/data"),
+            "pure router-tier topology: shared_nodes = {{self}} => self is master"
+        );
+        sink_zenohd.reset();
+        // A wz local client publishes the keyexpr zenohd subscribed.
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            sink_zenohd.frame_count(),
+            1,
+            "the wz client's Put is forwarded out the router face toward zenohd (reverse data)"
+        );
+    }
+
+    #[test]
+    fn reverse_data_faithful_zenohd_wire_aliased_compound_wildcard_sub() {
+        // The EXACT zenohd 49c8a53 wire for a `demo/**` client-sub propagated to a
+        // router peer, captured by direct `RUST_LOG=zenoh=trace` on zenohd's
+        // egress toward the wz router link:
+        //   DeclareKeyExpr   { id: 3, wire_expr: scope:0, suffix:"demo" }   // map 3 -> "demo"
+        //   DeclareSubscriber{ id: 0, wire_expr: scope:3, suffix:"/**", node_id:0 }
+        // i.e. a COMPOUND aliased keyexpr — a mapped PREFIX ("demo") + a literal
+        // suffix ("/**") — sourced at zenohd's self node-index (0). The prior
+        // sibling test used a LITERAL exact keyexpr; wz's `aliased_declare_...`
+        // test uses a FULL-keyexpr alias with an EMPTY suffix. This is the
+        // untested middle: prefix-alias + non-empty-suffix, then a WILDCARD
+        // delivery match ("demo/**" sub vs a "demo/key" pub, not the exact-literal
+        // match the first test used). This is the faithful reverse-data repro.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (zenohd, sink_zenohd) = face(zid(0xAA), WIRE_ROUTER);
+        let (cpub, _sc) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &zenohd);
+        fwd.register(FaceId(1), &cpub);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        // zenohd maps id 3 -> "demo" on its link, then subscribes "demo" + "/**".
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(3, "demo").expect("kexpr"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(0, 3, Some("/**")).expect("compound aliased sub"),
+            )),
+        );
+        assert_eq!(
+            fwd.router_subs.borrow().interested("demo/**"),
+            vec![zid(0xAA)],
+            "the compound aliased (prefix 'demo' + suffix '/**') sub registers 'demo/**'"
+        );
+        sink_zenohd.reset();
+        // A wz client publishes demo/key — a WILDCARD match vs the demo/** sub.
+        let push = wz_session_core::push_build::build_push_literal("demo/key", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            sink_zenohd.frame_count(),
+            1,
+            "the wz client's demo/key Put is forwarded to the demo/** router \
+             subscriber (reverse data, wildcard match)"
+        );
+    }
+
+    /// A CURRENT-mode `Interest` restricted to `keyexpr` (mapping id 0 + literal
+    /// suffix), for SUBSCRIBERS and/or QUERYABLES, optionally AGGREGATE — the
+    /// write-filter interest a zenoh(-pico) publisher/querier emits. Outer header
+    /// `N_MID_INTEREST (0x19) | C (0x20)`; body `SU|QU | R(0x10) | N(0x20) |
+    /// M(0x40) | [A(0x80)]`.
+    #[allow(clippy::too_many_arguments)]
+    fn interest_with_mode(
+        interest_id: u64,
+        keyexpr: &str,
+        current: bool,
+        future: bool,
+        su: bool,
+        qu: bool,
+        aggregate: bool,
+    ) -> NetworkMessage {
+        let outer = 0x19 | (if current { 0x20 } else { 0 }) | (if future { 0x40 } else { 0 });
+        let body_header = (if su { 0x02 } else { 0 })
+            | (if qu { 0x04 } else { 0 })
+            | 0x10
+            | 0x20
+            | 0x40
+            | (if aggregate { 0x80 } else { 0 });
+        NetworkMessage::Interest(InterestOwned {
+            header: outer,
+            interest_id,
+            body: Some(wz_codecs::interest_body::InterestBodyOwned {
+                header: body_header,
+                keyexpr: Some(WireexprOwned {
+                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                        id: 0,
+                        suffix_len: Some(keyexpr.len() as u64),
+                        suffix: Some(
+                            sce_forge_runtime::codec::SceString::from_view(keyexpr)
+                                .expect("interest keyexpr fits the SceString capacity"),
+                        ),
+                    }),
+                }),
+            }),
+            extensions: None,
+        })
+    }
+
+    /// The common CURRENT-only interest (C set, F clear).
+    fn interest_msg(
+        interest_id: u64,
+        keyexpr: &str,
+        su: bool,
+        qu: bool,
+        aggregate: bool,
+    ) -> NetworkMessage {
+        interest_with_mode(interest_id, keyexpr, true, false, su, qu, aggregate)
+    }
+
+    /// Decode the FIRST message of a recorded frame as a `DeclareOwned` (the
+    /// interest-reply twin of [`forwarded_push`]).
+    fn forwarded_declare(frame: &[u8]) -> DeclareOwned {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.into_iter().next() {
+            Some(NetworkMessage::Declare(d)) => *d,
+            other => panic!("expected a forwarded Declare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interest_current_subscribers_replies_with_the_matching_sub_then_final() {
+        // The reverse-data fix: a pico publisher's CURRENT write-filter interest
+        // (SUBSCRIBERS, RESTRICTED demo/key, AGGREGATE) is answered with the
+        // matching REMOTE sub wz holds (zenohd's demo/**) + a DeclareFinal, so the
+        // publisher's filter deactivates and it puts data on the wire.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER); // the zenohd analog
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT); // the pico publisher (requester)
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**")); // zenohd's sub -> router_subs
+        assert_eq!(
+            fwd.router_subs.borrow().interested("demo/**"),
+            vec![zid(0xAA)]
+        );
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_msg(7, "demo/key", true, false, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "one DeclareSubscriber reply + one terminating DeclareFinal"
+        );
+        // Reply 0: DeclareSubscriber, interest_id echoed, keyed on the INTEREST ke
+        // demo/key — NOT the sub's demo/** (INVARIANT: pico matches an aggregate
+        // interest's replies by keyexpr EQUALITY, so demo/** would silently fail).
+        let reply = forwarded_declare(&sink_c.frame_bytes(0));
+        assert_eq!(reply.interest_id, Some(7), "reply echoes the interest id");
+        match &reply.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => match &d.keyexpr.body {
+                WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
+                    w.suffix.as_deref(),
+                    Some("demo/key"),
+                    "aggregate reply is keyed on the interest keyexpr, not demo/**"
+                ),
+                _ => panic!("reply keyexpr must be literal"),
+            },
+            other => panic!("expected a DeclSubscriber reply, got {other:?}"),
+        }
+        // Reply 1: the terminating DeclareFinal, interest_id echoed.
+        let fin = forwarded_declare(&sink_c.frame_bytes(1));
+        assert_eq!(fin.interest_id, Some(7));
+        assert!(matches!(
+            fin.body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+    }
+
+    #[test]
+    fn interest_with_no_matching_sub_replies_only_a_final() {
+        // A CURRENT interest whose keyexpr no sub matches: wz still terminates it
+        // with a DeclareFinal (0 subs => the filter stays active = "no subscriber
+        // yet", correct) — but dumps nothing.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_msg(3, "other/key", true, false, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "no matching sub -> only the terminating DeclareFinal"
+        );
+        let fin = forwarded_declare(&sink_c.frame_bytes(0));
+        assert_eq!(fin.interest_id, Some(3));
+        assert!(matches!(
+            fin.body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+    }
+
+    #[test]
+    fn interest_excludes_the_requesting_faces_own_client_sub() {
+        // A client that both subscribes AND publishes: its own sub must NOT be
+        // echoed back as a matching remote sub (zenoh's face.id exclusion).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**")); // the requester's OWN sub (client tier)
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            interest_msg(5, "demo/key", true, false, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the requester's own sub is excluded -> only the DeclareFinal"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+    }
+
+    #[test]
+    fn interest_non_aggregate_replies_per_matching_sub_keyexpr() {
+        // A non-AGGREGATE interest: one reply per matching sub, keyed on the sub's
+        // OWN keyexpr (demo/**), not the interest ke.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_msg(9, "demo/key", true, false, false),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "one per-sub reply + the DeclareFinal"
+        );
+        match &forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => match &d.keyexpr.body {
+                WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
+                    w.suffix.as_deref(),
+                    Some("demo/**"),
+                    "non-aggregate reply is keyed on the sub's own keyexpr"
+                ),
+                _ => panic!("literal keyexpr expected"),
+            },
+            other => panic!("expected a DeclSubscriber reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interest_queryables_reply_carries_the_merged_complete_bit() {
+        // The query-plane twin: a QUERYABLES interest is answered with a
+        // DeclareQueryable carrying the merged completeness (a complete queryable
+        // -> reply complete=true, which a Z_QUERY_TARGET_ALL_COMPLETE querier's
+        // filter requires).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true)); // a COMPLETE queryable
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_msg(4, "demo/key", false, true, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "one DeclareQueryable reply + one DeclareFinal"
+        );
+        assert_eq!(
+            forwarded_declare(&sink_c.frame_bytes(0)).interest_id,
+            Some(4)
+        );
+        // Decode the QueryableInfo off the ext chain and assert complete == true,
+        // NOT merely `extensions.is_some()`: a Z_QUERY_TARGET_ALL_COMPLETE querier's
+        // write-filter deactivates only on complete=true, and once distance
+        // handling grows a non-zero value an `is_some()`-only check would pass on a
+        // `complete=false` reply (a silent write-filter regression).
+        assert_eq!(
+            forwarded_qabl_info(&sink_c.frame_bytes(0)),
+            QueryableInfo {
+                complete: true,
+                distance: 0
+            },
+            "the reply carries the complete=true bit on the wire"
+        );
+    }
+
+    #[test]
+    fn interest_queryables_aggregate_reply_merges_completeness_across_sources() {
+        // The MERGE path (the round's headline): TWO sources for the SAME keyexpr,
+        // one incomplete + one complete, fold to complete=true in the aggregate
+        // reply (zenoh's local_qabl_info OR). The prior test has a single source,
+        // so it cannot exercise the fold.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (ra, _sa) = face(zid(0xAA), WIRE_ROUTER);
+        let (rb, _sb) = face(zid(0xEE), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &ra);
+        fwd.register(FaceId(1), &rb);
+        fwd.register(FaceId(2), &client);
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", false)); // source A: incomplete
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/**", true)); // source B: complete
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(2),
+            interest_msg(6, "demo/key", false, true, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "one MERGED DeclareQueryable reply + one DeclareFinal"
+        );
+        assert!(
+            forwarded_qabl_info(&sink_c.frame_bytes(0)).complete,
+            "the aggregate reply folds complete=false||true -> true across the two \
+             sources"
+        );
+    }
+
+    #[test]
+    fn interest_future_only_and_final_get_no_reply() {
+        // Tier 1 answers CURRENT only. A pure-Future (C=0,F=1) and a body-less
+        // Final (C=0,F=0) interest each get ZERO reply frames — FUTURE is round B.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        sink_c.reset();
+        // Pure-Future interest (F set, C clear) — no CURRENT dump, no reply.
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(1, "demo/key", false, true, true, false, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a pure-Future interest gets no CURRENT reply (round B)"
+        );
+        // Body-less Final interest (C=0, F=0).
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Interest(InterestOwned {
+                header: 0x19, // N_MID_INTEREST, no C/F
+                interest_id: 2,
+                body: None,
+                extensions: None,
+            }),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a body-less Final interest gets no reply"
+        );
+    }
+
+    #[test]
+    fn interest_with_no_entity_options_replies_only_a_final() {
+        // A CURRENT interest targeting neither SUBSCRIBERS nor QUERYABLES (e.g.
+        // KEYEXPRS-only): no dump, just the terminating DeclareFinal.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_msg(8, "demo/key", false, false, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "no S/Q options -> only the terminating DeclareFinal"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
     }
 
     #[test]

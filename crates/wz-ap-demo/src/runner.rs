@@ -2017,6 +2017,7 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     let mut last_queries_seen = 0usize;
     let mut announced_queryable = false;
     let mut announced_client_sub = false;
+    let mut announced_mesh_sub = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -2069,6 +2070,17 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
                 if !announced_client_sub && forwarder.client_subs_seen() > 0 {
                     announced_client_sub = true;
                     log::info!("wz-ap-demo router-hat: learned a client sub");
+                }
+                // REVERSE-data READINESS witness (barrier for the reverse leg):
+                // fires ONCE when this router has INGESTED a peer router's (e.g.
+                // zenohd's) DeclareSubscriber off the mesh, so a test can gate a
+                // PUBLISHER-behind-wz spawn on R provably holding the remote
+                // subscription — the write-filter interest a pico publisher sends
+                // is answered non-empty only once wz holds a matching sub here
+                // (the mesh twin of the "learned a client sub" data-plane witness).
+                if !announced_mesh_sub && forwarder.mesh_subs_seen() > 0 {
+                    announced_mesh_sub = true;
+                    log::info!("wz-ap-demo router-hat: learned a mesh sub");
                 }
             }
         }
