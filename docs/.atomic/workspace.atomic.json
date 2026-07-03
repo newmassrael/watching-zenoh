@@ -53169,6 +53169,48 @@
         "LOCAL: R311y142 (this) atop R311y141 (fb29f5d) atop R311y140 (9a35630) atop origin/main=88bb005 (R311y139). 3 commits ahead after this. NOT pushed without explicit consent (pre-push = full run-ci)."
       ]
     },
+    "Round 311y143": {
+      "decision_summary": "R311y143 -- B-d: LinkstatepeerInterest::count() replaces the entries().len() clone in the router readiness witnesses (mesh_subs_seen / queryables_seen). A value-agnostic sum of per-key source counts (no V:Clone bound, no owned Vec<(String,Zid,V)> clone). Pure refactor -- no inventory / behavior change. The first Round-B atom (interest-plane cleanup) ahead of the peer-forwarder interest answer + <V>-generic dump lift.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/linkstate_interest.rs: added `pub fn count(&self) -> usize` (sum of per-key source counts) to LinkstatepeerInterest<V> -- the cardinality of `entries()` WITHOUT its owned `Vec<(String, Zid, V)>` clone. Value-agnostic (no `V: Clone` bound, unlike entries).",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the readiness witnesses `mesh_subs_seen` (router_subs + linkstatepeer_subs) and `queryables_seen` (router_qabls + linkstatepeer_qabls) now call `count()` on the 4 mesh tables instead of `entries().len()` -- they need only the cardinality, not an owned snapshot of every keyexpr + zid + value they immediately discard."
+      ],
+      "verification_bullets": [
+        "new unit test count_totals_every_keyexpr_peer_pair_without_cloning: empty=0; 3 registrations across 2 keys => count==3==entries().len(); per-key withdraw => 2; remove_peer purge => 1.",
+        "cargo test -p wz-runtime-tokio --features routing-router-hat --lib: linkstate_interest:: 15 pass, router_forward 116 pass (mesh_subs_seen / queryables_seen witnesses still compile + pass with count()).",
+        "clippy -p wz-runtime-tokio --all-targets --features routing-router-hat AND --no-default-features --features routing-router-hat: both -D warnings clean; cargo fmt --check clean.",
+        "validate_workspace: orphan new=+0 (code-only round; atomic store untouched)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "B-d DONE (R311y143): LinkstatepeerInterest::count() replaces the entries() clone in the router readiness witnesses (mesh_subs_seen / queryables_seen). Pure refactor -- no inventory / behavior change.",
+        "Round-B remaining (in build order): B-c = peer forwarder (LinkstateForwarder) inbound Interest answer + lift the router dump_interest_{subs,qabls} to a shared <V>-generic core (linkstate_forward.rs:3121 `_ => {}` drops a client-edge Interest, so a pico publisher behind a wz PEER is still write-filter-blackholed -- the same gap the y141 fix closed for the router-hat only); B-b = FUTURE-mode interest (per-face RemoteInterest store + proactive push; respond_to_interest is CURRENT-only today, router_forward.rs:1229 `if !c() return`); B-a = cross-impl QUERY E2E (the ③ closer; interop test has no cross-impl query/reply leg yet).",
+        "Then C = ①3-router non-master + ④router-native honesty investigation (y129 follow-up #2 descoped the 2-router version as a FALSE PROOF; direct-read whether a 3-router topology changes that before building any E2E).",
+        "NOT pushed -- batched with the rest of B/C; push on explicit consent (pre-push = full run-ci)."
+      ],
+      "publishable_decision_summary": "R311y143 -- B-d: LinkstatepeerInterest::count() replaces the entries().len() clone in the router readiness witnesses (mesh_subs_seen / queryables_seen). A value-agnostic sum of per-key source counts (no V:Clone bound, no owned Vec<(String,Zid,V)> clone). Pure refactor -- no inventory / behavior change. The first Round-B atom (interest-plane cleanup) ahead of the peer-forwarder interest answer + <V>-generic dump lift.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/linkstate_interest.rs: added `pub fn count(&self) -> usize` (sum of per-key source counts) to LinkstatepeerInterest<V> -- the cardinality of `entries()` WITHOUT its owned `Vec<(String, Zid, V)>` clone. Value-agnostic (no `V: Clone` bound, unlike entries).",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the readiness witnesses `mesh_subs_seen` (router_subs + linkstatepeer_subs) and `queryables_seen` (router_qabls + linkstatepeer_qabls) now call `count()` on the 4 mesh tables instead of `entries().len()` -- they need only the cardinality, not an owned snapshot of every keyexpr + zid + value they immediately discard."
+      ],
+      "publishable_verification_bullets": [
+        "new unit test count_totals_every_keyexpr_peer_pair_without_cloning: empty=0; 3 registrations across 2 keys => count==3==entries().len(); per-key withdraw => 2; remove_peer purge => 1.",
+        "cargo test -p wz-runtime-tokio --features routing-router-hat --lib: linkstate_interest:: 15 pass, router_forward 116 pass (mesh_subs_seen / queryables_seen witnesses still compile + pass with count()).",
+        "clippy -p wz-runtime-tokio --all-targets --features routing-router-hat AND --no-default-features --features routing-router-hat: both -D warnings clean; cargo fmt --check clean.",
+        "validate_workspace: orphan new=+0 (code-only round; atomic store untouched)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B-d DONE (R311y143): LinkstatepeerInterest::count() replaces the entries() clone in the router readiness witnesses (mesh_subs_seen / queryables_seen). Pure refactor -- no inventory / behavior change.",
+        "Round-B remaining (in build order): B-c = peer forwarder (LinkstateForwarder) inbound Interest answer + lift the router dump_interest_{subs,qabls} to a shared <V>-generic core (linkstate_forward.rs:3121 `_ => {}` drops a client-edge Interest, so a pico publisher behind a wz PEER is still write-filter-blackholed -- the same gap the y141 fix closed for the router-hat only); B-b = FUTURE-mode interest (per-face RemoteInterest store + proactive push; respond_to_interest is CURRENT-only today, router_forward.rs:1229 `if !c() return`); B-a = cross-impl QUERY E2E (the ③ closer; interop test has no cross-impl query/reply leg yet).",
+        "Then C = ①3-router non-master + ④router-native honesty investigation (y129 follow-up #2 descoped the 2-router version as a FALSE PROOF; direct-read whether a 3-router topology changes that before building any E2E).",
+        "NOT pushed -- batched with the rest of B/C; push on explicit consent (pre-push = full run-ci)."
+      ]
+    },
     "Round 311y15": {
       "decision_summary": "R311y15 -- fix the 3 red CI jobs to green. (1) Layer A: the CI-pinned mnemosyne-cli (R415, schema <=9) could not read the current atomic store (schema_version 23), hard-failing 'schema version mismatch' on every push; bumped the pin to R584 (bb01cc6b, on mnemosyne origin/main), matching the locally-installed --path binary. (2) Layer Q: the mps2-an386/an500 qemu hang root-caused to a non-monotonic SystickClock::now_us() in mcu-qemu-demo -- on Cortex-M4F/M7 the SysTick exception is delayed past a wrap boundary so wraps lags and now_us steps backward, violating the ClockSource monotonic contract; the backward step makes a SleepFuture see now<deadline AFTER pop_expired consumed its timer entry, losing the wake and livelocking the cooperative loop (m3 softfloat never delays the ISR far enough). Fixed with a monotonic floor on the demo clock; corrected R311y14's wrong load-slowdown timeout justification. (3) portability/windows: sce-codegen's libxml crate needs native libxml2, absent on the windows runner -> vcpkg install libxml2:x64-windows-static-md + VCPKG_ROOT/VCPKGRS_TRIPLET. full run-ci RUNCI_EXIT=0; validate_workspace orphan new=+0.",
       "changes_bullets": [

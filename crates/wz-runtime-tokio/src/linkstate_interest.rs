@@ -156,6 +156,20 @@ impl<V> LinkstatepeerInterest<V> {
             .collect()
     }
 
+    /// The total number of `(keyexpr, source-peer)` registrations across every
+    /// key — the cardinality of [`entries`](Self::entries) WITHOUT its owned
+    /// clone. The router forwarder's readiness witnesses
+    /// ([`mesh_subs_seen`](crate::router_forward::RouterForwarder::mesh_subs_seen)
+    /// / [`queryables_seen`](crate::router_forward::RouterForwarder::queryables_seen))
+    /// need only "how many declarations do I hold", not the declarations
+    /// themselves, so they sum the per-key source counts directly instead of
+    /// materialising (and immediately discarding via `.len()`) an owned
+    /// `Vec<(String, Zid, V)>` of every keyexpr + zid + value clone.
+    /// Value-agnostic (no `V: Clone` bound, unlike `entries`).
+    pub fn count(&self) -> usize {
+        self.by_key.values().map(|peers| peers.len()).sum()
+    }
+
     /// The distinct peers whose declaration keyexpr INTERSECTS `target`,
     /// optionally excluding `exclude` (this node's own zid). Wildcard-aware via
     /// the shared [`keyexpr_intersects_target`] scan SSOT — an O(declarations)
@@ -560,6 +574,43 @@ mod tests {
             qabls.entries(),
             vec![("demo/q".to_owned(), zid(0xAA), complete)],
             "the entry carries the peer's QueryableInfo, not just the (key, peer) pair",
+        );
+    }
+
+    #[test]
+    fn count_totals_every_keyexpr_peer_pair_without_cloning() {
+        // count() is the cardinality of entries() (B-d): the readiness witnesses
+        // need only "how many declarations", so they must NOT clone every
+        // (keyexpr, zid, value) triple just to read its length.
+        let mut subs = subs();
+        assert_eq!(subs.count(), 0, "an empty table holds nothing");
+        subs.register("demo/a", zid(0xAA), ());
+        subs.register("demo/a", zid(0xBB), ()); // same key, second peer
+        subs.register("demo/b", zid(0xAA), ()); // second key, first peer again
+        assert_eq!(
+            subs.count(),
+            3,
+            "three (keyexpr, peer) registrations across two keys",
+        );
+        assert_eq!(
+            subs.count(),
+            subs.entries().len(),
+            "count() is exactly entries().len(), minus the owned clone",
+        );
+        assert!(
+            subs.withdraw("demo/a", &zid(0xAA)),
+            "AA drops out of demo/a"
+        );
+        assert_eq!(
+            subs.count(),
+            2,
+            "a per-key withdraw removes one registration"
+        );
+        subs.remove_peer(&zid(0xAA)); // drops the remaining demo/b:AA
+        assert_eq!(
+            subs.count(),
+            1,
+            "the sole survivor is demo/a:BB after AA is purged everywhere",
         );
     }
 

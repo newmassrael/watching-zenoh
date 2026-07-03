@@ -757,8 +757,8 @@ impl RouterForwarder {
     /// fires its one-shot query, making that e2e a barrier rather than a race.
     pub fn queryables_seen(&self) -> usize {
         let client: usize = self.client_qabls.borrow().values().map(|m| m.len()).sum();
-        let router = self.router_qabls.borrow().entries().len();
-        let peer = self.linkstatepeer_qabls.borrow().entries().len();
+        let router = self.router_qabls.borrow().count();
+        let peer = self.linkstatepeer_qabls.borrow().count();
         client + router + peer
     }
 
@@ -783,8 +783,8 @@ impl RouterForwarder {
     /// a matching sub — which needs wz to already hold that sub HERE; an empty
     /// CURRENT dump leaves the filter active and the puts never reach the wire.
     pub fn mesh_subs_seen(&self) -> usize {
-        let router = self.router_subs.borrow().entries().len();
-        let peer = self.linkstatepeer_subs.borrow().entries().len();
+        let router = self.router_subs.borrow().count();
+        let peer = self.linkstatepeer_subs.borrow().count();
         router + peer
     }
 
