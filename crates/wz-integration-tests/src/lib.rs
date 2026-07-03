@@ -751,6 +751,123 @@ pub mod common {
         panic!("pico z_pub failed to open a session to {router_label} after {ATTEMPTS} attempts");
     }
 
+    /// Spawn a zenoh-pico `z_queryable` against a router (`-e <endpoint> -m
+    /// client`) and return it once it has opened a session and declared its
+    /// queryable (stdout `"Creating Queryable on"` — the pico example's
+    /// pre-declare line; there is no "Declaring Queryable" string). Answers every
+    /// matching query with a single Put-form reply carrying `value`. Like
+    /// [`spawn_subscribed_zsub`], the 6-attempt retry absorbs pico's
+    /// non-self-retrying one-shot open transient (`"Unable to open session!"`) —
+    /// robustness for a FOREIGN binary, not a wz workaround. `router_label` names
+    /// the dial target in the give-up panic; `mk_stdout` is the per-attempt
+    /// stdout tempfile factory (the caller owns the dev-dependency
+    /// `tempfile::tempfile()` call, since the lib crate cannot depend on the
+    /// dev-only `tempfile`). Returns `(ChildGuard, File)` — the `File` is the
+    /// stdout reader so a caller can later assert the foreign-side
+    /// `"[Queryable handler] Received Query"` witness.
+    pub fn spawn_answering_zqueryable(
+        z_queryable: &Path,
+        key: &str,
+        value: &str,
+        endpoint: &str,
+        router_label: &str,
+        mut mk_stdout: impl FnMut() -> File,
+    ) -> (ChildGuard, File) {
+        const ATTEMPTS: usize = 6;
+        for attempt in 1..=ATTEMPTS {
+            let out = mk_stdout();
+            let out_writer = out.try_clone().expect("dup z_queryable stdout handle");
+            let mut out_reader = out;
+            let mut child = ChildGuard::wrap(
+                "z_queryable client (zenoh-pico)",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(z_queryable)
+                    .args(["-k", key, "-v", value, "-e", endpoint, "-m", "client"])
+                    .stdout(Stdio::from(out_writer))
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn z_queryable via stdbuf"),
+            );
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let cap = read_captured(&mut out_reader);
+                if cap.contains("Creating Queryable on") {
+                    return (child, out_reader); // session open + queryable declared
+                }
+                if cap.contains("Unable to open session") || Instant::now() >= deadline {
+                    break; // transient open failure / timeout -> respawn
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.child_mut().kill();
+            let _ = child.child_mut().wait();
+            eprintln!("z_queryable open attempt {attempt}/{ATTEMPTS} did not declare; retrying");
+        }
+        panic!(
+            "pico z_queryable failed to open a session to {router_label} after {ATTEMPTS} attempts"
+        );
+    }
+
+    /// Spawn a zenoh-pico `z_querier` (the PERSISTENT querier — the only pico CLI
+    /// that installs a querier write-filter, unlike the one-shot `z_get`) against
+    /// a router (`-e <endpoint> -m client`) and return it once it has opened a
+    /// session and declared its querier (stdout `"Declaring Querier on"`). Issues
+    /// an `-n 30` get burst (one `z_querier_get` per second) so delivery is
+    /// self-healing across the route install, mirroring [`spawn_publishing_zpub`].
+    /// `-t 3000` overrides pico's 10 s `Z_GET_TIMEOUT_DEFAULT` so an unanswered
+    /// query (sent into a not-yet-installed reverse route) retries on a ~3 s
+    /// cadence instead of stalling ~10 s — restoring parity with the 1/s put
+    /// burst. Selector is passed via `-s` (NOT `-k`, which z_querier does not
+    /// accept). The 6-attempt retry absorbs pico's non-self-retrying one-shot
+    /// open transient, as for [`spawn_subscribed_zsub`]. Returns
+    /// `(ChildGuard, File)` — the `File` is the stdout reader on which the caller
+    /// asserts the reply witness `">> Received ('"`.
+    pub fn spawn_querying_zquerier(
+        z_querier: &Path,
+        selector: &str,
+        endpoint: &str,
+        router_label: &str,
+        mut mk_stdout: impl FnMut() -> File,
+    ) -> (ChildGuard, File) {
+        const ATTEMPTS: usize = 6;
+        for attempt in 1..=ATTEMPTS {
+            let out = mk_stdout();
+            let out_writer = out.try_clone().expect("dup z_querier stdout handle");
+            let mut out_reader = out;
+            let mut child = ChildGuard::wrap(
+                "z_querier client (zenoh-pico)",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(z_querier)
+                    .args([
+                        "-s", selector, "-e", endpoint, "-m", "client", "-n", "30", "-t", "3000",
+                    ])
+                    .stdout(Stdio::from(out_writer))
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn z_querier via stdbuf"),
+            );
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let cap = read_captured(&mut out_reader);
+                if cap.contains("Declaring Querier on") {
+                    return (child, out_reader); // session open + querier declared
+                }
+                if cap.contains("Unable to open session") || Instant::now() >= deadline {
+                    break; // transient open failure / timeout -> respawn
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.child_mut().kill();
+            let _ = child.child_mut().wait();
+            eprintln!("z_querier open attempt {attempt}/{ATTEMPTS} did not declare; retrying");
+        }
+        panic!(
+            "pico z_querier failed to open a session to {router_label} after {ATTEMPTS} attempts"
+        );
+    }
+
     /// Spawn a zenohd router on the given `-l` listener locators and block until
     /// it is HANDSHAKE-ready. The spawn + two-stage readiness SSOT both zenohd
     /// spawn variants delegate to (R311pn). `--no-multicast-scouting` +

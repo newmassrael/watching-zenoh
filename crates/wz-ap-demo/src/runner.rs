@@ -2018,6 +2018,7 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     let mut announced_queryable = false;
     let mut announced_client_sub = false;
     let mut announced_mesh_sub = false;
+    let mut announced_future_push = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -2082,6 +2083,18 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
                     announced_mesh_sub = true;
                     log::info!("wz-ap-demo router-hat: learned a mesh sub");
                 }
+                // FUTURE-push witness (barrier-free discriminator for the
+                // pub-before-sub reverse leg): fires ONCE when this router has
+                // PROACTIVELY pushed an unsolicited DeclareSubscriber to a CLIENT
+                // face whose FUTURE interest predated the subscription (y146
+                // push_future_subscription). A publisher that declared BEFORE any
+                // subscriber has its write-filter deactivated ONLY by this push;
+                // asserting it distinguishes the FUTURE push from a raced CURRENT
+                // interest dump (both otherwise silent).
+                if !announced_future_push && forwarder.future_pushes_seen() > 0 {
+                    announced_future_push = true;
+                    log::info!("wz-ap-demo router-hat: pushed a future subscriber");
+                }
             }
         }
     };
@@ -2127,6 +2140,15 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
         log::info!(
             "wz-ap-demo router-hat: routed a query ({} request(s))",
             forwarder.queries_seen()
+        );
+    }
+    // FUTURE-push counterpart (latched, emitted unconditionally on >0 at teardown
+    // so a test need not race the 250 ms app tick) — the y146 proactive-push proof
+    // the pub-before-sub reverse leg asserts.
+    if forwarder.future_pushes_seen() > 0 {
+        log::info!(
+            "wz-ap-demo router-hat: pushed a future subscriber ({} push(es))",
+            forwarder.future_pushes_seen()
         );
     }
     Ok(())

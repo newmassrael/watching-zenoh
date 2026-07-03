@@ -4131,6 +4131,16 @@ layer_z_zenohd_interop() {
         echo "Layer Z SKIP: zenoh-pico z_pub not built (run: bash scripts/build-zenoh-pico-cli.sh)"
         return 0
     fi
+    # R311y147 — the router-hat interop leg 4 (QUERY plane) spawns the pico
+    # z_querier (the PERSISTENT querier that installs a write-filter, unlike
+    # one-shot z_get) + z_queryable. z_queryable ships with the base TARGETS;
+    # z_querier was added to build-zenoh-pico-cli.sh in R311y147. Same near-
+    # impossible symmetry guard as z_pub: build-zenoh-pico-cli.sh emits all CLIs
+    # together, so a missing z_querier means a stale build -> SKIP, not FAIL.
+    if [[ ! -x target/zenoh-pico-cli/z_querier ]]; then
+        echo "Layer Z SKIP: zenoh-pico z_querier not built (run: bash scripts/build-zenoh-pico-cli.sh)"
+        return 0
+    fi
     # wz-ap-demo is the wz client (--connect zenohd) for the client-tier legs
     # AND the `--router-hat` node for the R311y140 router-tier federation leg
     # (wz_router_hat_zenohd_interop). Build it with BOTH the `ws` feature
@@ -4157,7 +4167,10 @@ layer_z_zenohd_interop() {
     # the router tier with the reference router (routers-net -> 2, proving the
     # cross-impl LinkStateList OAM exchange); leg 2 routes a pico Put across the
     # MIXED-VENDOR router backbone (pico -> zenohd -> linkstate -> wz-router ->
-    # pico). Needs zenohd + the pico z_pub/z_sub CLIs (checked above) + the
+    # pico); leg 3 the reverse Put; leg 4 (R311y147) the QUERY plane (pico
+    # z_querier behind wz -> zenohd -> pico z_queryable, reply in reverse); leg 5
+    # the FUTURE-mode pub-before-sub proactive-push closure. Needs zenohd + the
+    # pico z_pub/z_sub/z_querier/z_queryable CLIs (checked above) + the
     # `router-hat-router` binary (built above). Same --test-threads=1 per-zenohd
     # isolation as the client legs.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \

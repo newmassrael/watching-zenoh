@@ -17,8 +17,8 @@
 //! sn-newest-wins, full dump on new link) — the true "zenohd-equivalent" acid
 //! test for wz's router tier.
 //!
-//! Three legs, STAGED so a failure localises (topology before data before
-//! reverse data):
+//! Five legs, STAGED so a failure localises (topology before data before reverse
+//! data before query before future-mode):
 //!
 //!   1. `wz_router_hat_federates_with_zenohd_at_router_tier` — the CONTROL-PLANE
 //!      floor: wz `--router-hat --connect <zenohd>` dials the reference router;
@@ -59,13 +59,55 @@
 //!      write-filter handshake): without it the publisher's filter drops every
 //!      Put LOCALLY. Barrier-gated on wz's `learned a mesh sub` (wz has ingested
 //!      zenohd's sub off the mesh) so the CURRENT-mode reply is non-empty —
-//!      i.e. the sub-before-pub ordering only (FUTURE-mode pub-first = round B).
+//!      i.e. the sub-before-pub ordering only (FUTURE-mode pub-first = leg 5).
+//!
+//!   4. `wz_router_hat_and_zenohd_federate_a_pico_query` — the QUERY-plane acid
+//!      test (R311y147; the query twin of leg 3). A zenoh-pico `z_querier` (the
+//!      PERSISTENT querier — the only pico CLI that installs a querier
+//!      write-filter, unlike one-shot `z_get`) behind the WZ router queries
+//!      `demo/key`; a zenoh-pico `z_queryable` behind ZENOHD answers. wz ANSWERS
+//!      the querier's declare-Interest with the queryable it learned off the mesh
+//!      from zenohd (the y141 qabl interest-dump), deactivating the querier's
+//!      write-filter; the Query then routes querier -> wz -> [routers_net] ->
+//!      zenohd -> queryable and the Reply returns in reverse — every hop
+//!      cross-impl. Barrier-gated on wz's `learned a queryable` (an unscoped
+//!      count, but effectively precise here — `demo/**` is the only queryable —
+//!      so wz's CURRENT qabl dump answers the querier non-empty; the 30-get burst
+//!      absorbs the reverse-route install slack; wz has NO qabl future-push).
+//!      Transit-pinned on wz's `routed a query`. The default querier target is
+//!      BEST_MATCHING so its filter is NON-complete — this exercises the
+//!      intersects deactivation path, NOT the ALL_COMPLETE `complete && includes`
+//!      fold (not CLI-drivable; stays unit-proven).
+//!
+//!   5. `wz_router_hat_pushes_a_future_subscriber_to_a_pico_publisher` — the
+//!      FUTURE-mode pub-before-sub acid test (R311y147; the cross-impl closure of
+//!      the R311y146 proactive-push work). Same topology as leg 3 (pub behind wz,
+//!      sub behind zenohd) but the publisher declares BEFORE any subscriber, so
+//!      wz's CURRENT interest dump is empty and the ONLY deactivation path is the
+//!      y146 FUTURE push (wz stores the pub's f() interest, then pushes an
+//!      unsolicited DeclareSubscriber once zenohd's sub floods across the mesh).
+//!      Asserted via the `pushed a future subscriber` witness so the deactivation
+//!      is provably the FUTURE push, not a raced CURRENT dump.
 //!
 //! SCOPE — what this does NOT yet cover (the cross-impl router tier is a large
 //! surface; this is the first, deliberately-2-node slice, mirroring how the
 //! wz<->wz mesh suite staged its own coverage):
-//!   * DATA-push only — no cross-impl query/reply federation (the wz<->wz mesh
-//!     has that as its test #6; the zenohd twin does not exist yet).
+//!   * FORWARD-direction query deferred — leg 4 covers the REVERSE query (querier
+//!     behind wz, so wz answers the interest, the distinctive direction). A
+//!     FORWARD query (querier behind zenohd, queryable behind wz — zenohd answers
+//!     the interest, wz routes an INGRESS query to a local queryable + reply
+//!     EGRESS) is the query twin of leg 2 and a re-openable follow-up.
+//!   * ALL_COMPLETE querier fold deferred — leg 4's default z_querier is
+//!     NON-complete; the `complete && includes` fold is not CLI-drivable (no
+//!     target flag) and stays unit-proven.
+//!   * qabl future-push + undeclare-push deferred — a queryable learned AFTER a
+//!     querier's FUTURE interest (the query-plane analog of leg 5) and a sub/qabl
+//!     WITHDRAWAL re-arming the filter are the R311y146 named deferrals, not
+//!     covered here.
+//!   * peer-tier FUTURE-push observability deferred — leg 5's `future_pushes`
+//!     witness is on the ROUTER forwarder only; the peer `LinkstateForwarder`'s
+//!     own `push_future_subscription` carries no counter yet (no peer-mode
+//!     pub-before-sub e2e exists), a re-openable follow-up when one lands.
 //!   * TWO routers on ONE direct face — each router is therefore the SOLE master
 //!     of its own domain, so NO multi-hop spanning-tree route / non-master HRW
 //!     election / transit-through-a-third-router is exercised (the R311y120
@@ -85,9 +127,9 @@
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_on_ephemeral_port, spawn_publishing_zpub,
-    spawn_subscribed_zsub, spawn_zenohd, wait_for_substring, wz_ap_demo_binary,
-    zenoh_pico_cli_binary, PortReservation,
+    graceful_terminate, read_captured, spawn_answering_zqueryable, spawn_on_ephemeral_port,
+    spawn_publishing_zpub, spawn_querying_zquerier, spawn_subscribed_zsub, spawn_zenohd,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, PortReservation,
 };
 
 /// The router-tier convergence witness the wz `--router-hat` node logs once its
@@ -397,6 +439,286 @@ fn wz_router_hat_and_zenohd_federate_pico_data_in_reverse() {
              within 15s — reverse data did not cross the cross-impl router backbone \
              (the publisher's write-filter never deactivated?)\n--- z_sub stdout \
              ---\n{c}"
+        )
+    });
+    transit
+        .expect("received implies transit was probed")
+        .unwrap_or_else(|c| {
+            panic!(
+                "wz-router-hat never logged 'forwarded mesh data' — the Put reached \
+                 the subscriber without transiting wz's router\n--- wz-router-hat \
+                 stderr ---\n{c}"
+            )
+        });
+}
+
+/// Leg 4 — the QUERY-plane acid test (R311y147), the query twin of leg 3. A pico
+/// `z_querier` (client of the WZ router) queries `demo/key`; a pico `z_queryable`
+/// (client of ZENOHD) answers. The Query crosses the mixed-vendor backbone
+/// querier -> wz-router -> [`routers_net` link-state] -> zenohd -> queryable and
+/// the Reply returns in reverse. Uses the PERSISTENT `z_querier` (not one-shot
+/// `z_get`, which installs no write-filter) so wz must ANSWER the querier's
+/// declare-Interest with the queryable it learned off the mesh from zenohd (the
+/// y141 qabl interest-dump) before the querier's write-filter deactivates — the
+/// query-plane analog of leg 3's publisher handshake.
+///
+/// Gated on wz's `learned a queryable` witness — wz has INGESTED zenohd's
+/// queryable off the routers_net. `queryables_seen()` is an unscoped count, but in
+/// this 2-node topology `demo/**` is the ONLY queryable that ever exists, so the
+/// barrier is effectively precise: by the time the querier spawns, wz's CURRENT
+/// qabl dump (`dump_interest_qabls`) answers its declare-Interest non-empty and
+/// deactivates the write-filter. Note wz has NO qabl future-push — it stores a
+/// FUTURE interest only for subscribers (`su()`); a querier's `qa()` interest is
+/// CURRENT-only, so the query-plane analog of leg 5's push is a named deferral,
+/// NOT a safety net here. The `-n 30 -t 3000` get burst absorbs the residual
+/// dispatched-!=-installed slack on the reverse route into zenohd. The primary
+/// proof — the reply crossing the backbone (+ transit `routed a query` + the
+/// foreign `Received Query`) — is independent of the deactivation timing.
+#[test]
+#[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
+fn wz_router_hat_and_zenohd_federate_a_pico_query() {
+    let z_querier = zenoh_pico_cli_binary("z_querier");
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+    let port_res = PortReservation::pick();
+    let zport = port_res.port();
+    let _zenohd = spawn_zenohd(zport, tempfile);
+    let zaddr = format!("127.0.0.1:{zport}");
+
+    // wz --router-hat dials zenohd; wait for the router backbone to converge
+    // BEFORE attaching clients so the link-state mesh is established.
+    let (mut wz_guard, mut wz_reader, wz_port) = spawn_router_hat_dialing(&zaddr);
+    if wait_for_substring(
+        &mut wz_reader,
+        ROUTERS_NET_CONVERGED,
+        Duration::from_secs(15),
+    )
+    .is_err()
+    {
+        let c = read_captured(&mut wz_reader);
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        panic!("wz <-> zenohd router backbone never converged within 15s\n--- wz-router-hat stderr ---\n{c}");
+    }
+
+    // z_queryable: a pico CLIENT of ZENOHD, answering demo/**. zenohd floods the
+    // queryable across the router backbone into wz's router_qabls (the query-plane
+    // analog of the subscriber flood leg 3 relies on).
+    let z_qabl_endpoint = format!("tcp/127.0.0.1:{zport}");
+    let (mut z_qabl_guard, mut z_qabl_reader) = spawn_answering_zqueryable(
+        &z_queryable,
+        "demo/**",
+        "query-federation",
+        &z_qabl_endpoint,
+        "zenohd",
+        tempfile,
+    );
+
+    // Barrier: wz has INGESTED zenohd's queryable off the mesh, so it can answer a
+    // querier's write-filter interest with a matching DeclareQueryable.
+    let learned = wait_for_substring(
+        &mut wz_reader,
+        "router-hat: learned a queryable",
+        Duration::from_secs(10),
+    );
+
+    // z_querier: a pico CLIENT of WZ, querying demo/key as a 30-get burst. Its
+    // write-filter interest is answered by wz (the y141/y146 qabl handshake), so
+    // it puts the get on the wire; wz routes it across the backbone to zenohd,
+    // which dispatches to z_queryable; the reply returns the same path in reverse.
+    let q_endpoint = format!("tcp/127.0.0.1:{wz_port}");
+    let mut z_querier_pair = learned.is_ok().then(|| {
+        spawn_querying_zquerier(
+            &z_querier,
+            "demo/key",
+            &q_endpoint,
+            "wz-router-hat",
+            tempfile,
+        )
+    });
+
+    // The acid test: the reply from z_queryable behind zenohd reaches the pico
+    // querier behind wz, having crossed the cross-impl router backbone.
+    let received = z_querier_pair.as_mut().map(|(_, reader)| {
+        wait_for_substring(reader, ">> Received ('demo/key'", Duration::from_secs(20))
+    });
+    // Transit pin: the Query transited wz's router (`queries_seen` rose). By the
+    // time `received` fired the Query has transited, so wait a short window for
+    // the log to flush. `queries_seen` counts inbound Request(Query) only, so this
+    // is unsatisfiable by a mere interest/declare round-trip.
+    let transit = matches!(&received, Some(Ok(_))).then(|| {
+        wait_for_substring(
+            &mut wz_reader,
+            "router-hat: routed a query",
+            Duration::from_secs(5),
+        )
+    });
+
+    let z_querier_captured = if let Some((mut child, mut reader)) = z_querier_pair {
+        let _ = child.child_mut().kill();
+        let _ = child.child_mut().wait();
+        read_captured(&mut reader)
+    } else {
+        String::new()
+    };
+    let _ = z_qabl_guard.child_mut().kill();
+    let _ = z_qabl_guard.child_mut().wait();
+    graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+    let wz_captured = read_captured(&mut wz_reader);
+    let z_qabl_captured = read_captured(&mut z_qabl_reader);
+    eprintln!("--- wz-router-hat stderr ---\n{wz_captured}");
+    eprintln!("--- z_querier stdout ---\n{z_querier_captured}");
+    eprintln!("--- z_queryable stdout ---\n{z_qabl_captured}");
+
+    learned.unwrap_or_else(|c| {
+        panic!(
+            "wz-router-hat never INGESTED zenohd's queryable off the mesh within \
+             10s (no 'learned a queryable') — the queryable did not propagate \
+             across the router backbone\n--- wz-router-hat stderr ---\n{c}"
+        )
+    });
+    received
+        .expect("learned implies the querier was spawned")
+        .unwrap_or_else(|c| {
+            panic!(
+                "pico z_querier behind wz never received a reply to demo/key within \
+                 20s — the query/reply did not complete over the cross-impl router \
+                 backbone (the querier's write-filter never deactivated, the query \
+                 was not routed to the queryable, or the reply was lost on the \
+                 return path — the z_queryable stdout above shows which)\n--- \
+                 z_querier stdout ---\n{c}"
+            )
+        });
+    transit
+        .expect("received implies transit was probed")
+        .unwrap_or_else(|c| {
+            panic!(
+                "wz-router-hat never logged 'routed a query' — the reply reached the \
+                 querier without a Query transiting wz's router\n--- wz-router-hat \
+                 stderr ---\n{c}"
+            )
+        });
+    // Foreign-side proof: the query reached the REAL cross-impl answerer, not a
+    // wz-local synthesised reply (wz hosts no local queryable in this test).
+    assert!(
+        z_qabl_captured.contains("[Queryable handler] Received Query"),
+        "z_queryable behind zenohd never logged 'Received Query' — the reply \
+         z_querier saw did not originate at the real cross-impl answerer\n--- \
+         z_queryable stdout ---\n{z_qabl_captured}"
+    );
+}
+
+/// Leg 5 — FUTURE-mode pub-before-sub (R311y147), the cross-impl closure of the
+/// R311y146 proactive subscriber push. Same topology as leg 3 (pub behind wz, sub
+/// behind zenohd) but the publisher declares BEFORE any subscriber exists, so
+/// wz's CURRENT interest dump is empty and the ONLY way the publisher's
+/// write-filter deactivates is the y146 FUTURE push: wz stores the publisher's
+/// `f()` interest, then — when zenohd's subscriber later floods across the mesh —
+/// proactively pushes an unsolicited `DeclareSubscriber` to the publisher's face.
+///
+/// Asserted via the `pushed a future subscriber` witness so the deactivation is
+/// provably the FUTURE push, not a raced CURRENT dump (both are otherwise silent
+/// — `push_future_subscription` and the CURRENT interest reply log nothing on
+/// success). The publisher spawns FIRST with NO barrier (a barrier would destroy
+/// the pub-before-sub ordering that IS the discriminator); its `-n 30` burst is
+/// self-healing across the push, so puts dropped while the filter was active are
+/// followed by puts that flow once it deactivates.
+#[test]
+#[ignore = "binary-dep e2e (zenohd + zenoh-pico z_pub/z_sub + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
+fn wz_router_hat_pushes_a_future_subscriber_to_a_pico_publisher() {
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+    let z_pub = zenoh_pico_cli_binary("z_pub");
+    let port_res = PortReservation::pick();
+    let zport = port_res.port();
+    let _zenohd = spawn_zenohd(zport, tempfile);
+    let zaddr = format!("127.0.0.1:{zport}");
+
+    // wz --router-hat dials zenohd; wait for the router backbone to converge
+    // BEFORE attaching clients so the link-state mesh is established.
+    let (mut wz_guard, mut wz_reader, wz_port) = spawn_router_hat_dialing(&zaddr);
+    if wait_for_substring(
+        &mut wz_reader,
+        ROUTERS_NET_CONVERGED,
+        Duration::from_secs(15),
+    )
+    .is_err()
+    {
+        let c = read_captured(&mut wz_reader);
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        panic!("wz <-> zenohd router backbone never converged within 15s\n--- wz-router-hat stderr ---\n{c}");
+    }
+
+    // z_pub: a pico CLIENT of WZ, publishing demo/key — spawned FIRST, with NO
+    // matching subscriber anywhere. Its write-filter is ACTIVE, so its early puts
+    // drop LOCALLY; wz stores its f() interest (an empty CURRENT dump). The helper
+    // returns once z_pub is looping ("Putting Data" prints regardless of the
+    // filter dropping the put) — so the publisher's declare-Interest is on the wire
+    // before the sub is spawned. That wz actually STORED it is proven downstream by
+    // the `pushed a future subscriber` witness, which can only fire from a stored
+    // future interest.
+    let z_pub_endpoint = format!("tcp/127.0.0.1:{wz_port}");
+    let mut z_pub_guard = spawn_publishing_zpub(
+        &z_pub,
+        "demo/key",
+        "future-mode-federation",
+        &z_pub_endpoint,
+        "wz-router-hat",
+        tempfile,
+    );
+
+    // z_sub: a pico CLIENT of ZENOHD, subscribing demo/** — spawned SECOND. zenohd
+    // floods it across the router backbone to wz, which PUSHES an unsolicited
+    // DeclareSubscriber to z_pub's stored future interest (y146), deactivating the
+    // publisher's write-filter so its remaining burst flows.
+    let z_sub_endpoint = format!("tcp/127.0.0.1:{zport}");
+    let (mut z_sub_guard, mut z_sub_reader) =
+        spawn_subscribed_zsub(&z_sub, "demo/**", &z_sub_endpoint, "zenohd", tempfile);
+
+    // FUTURE-push proof: wz proactively pushed the subscriber to the publisher's
+    // face — the ONLY deactivation path given the pub-before-sub ordering.
+    let pushed = wait_for_substring(
+        &mut wz_reader,
+        "router-hat: pushed a future subscriber",
+        Duration::from_secs(20),
+    );
+
+    // The acid test: the Put published behind wz reaches the subscriber behind
+    // zenohd — which can only happen after the future push deactivated the pub.
+    let received = wait_for_substring(
+        &mut z_sub_reader,
+        "Received ('demo/key'",
+        Duration::from_secs(20),
+    );
+    let transit = received.is_ok().then(|| {
+        wait_for_substring(
+            &mut wz_reader,
+            "router-hat: forwarded mesh data",
+            Duration::from_secs(5),
+        )
+    });
+
+    let _ = z_pub_guard.child_mut().kill();
+    let _ = z_pub_guard.child_mut().wait();
+    let _ = z_sub_guard.child_mut().kill();
+    let _ = z_sub_guard.child_mut().wait();
+    graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+    let wz_captured = read_captured(&mut wz_reader);
+    let z_sub_captured = read_captured(&mut z_sub_reader);
+    eprintln!("--- wz-router-hat stderr ---\n{wz_captured}");
+    eprintln!("--- z_sub stdout ---\n{z_sub_captured}");
+
+    pushed.unwrap_or_else(|c| {
+        panic!(
+            "wz-router-hat never PUSHED a future subscriber within 20s (no 'pushed \
+             a future subscriber') — the y146 proactive push did not fire, so a \
+             pub-before-sub publisher's write-filter would never deactivate\n--- \
+             wz-router-hat stderr ---\n{c}"
+        )
+    });
+    received.unwrap_or_else(|c| {
+        panic!(
+            "pico z_sub behind zenohd never received the Put published behind wz \
+             within 20s — the FUTURE-mode pub-before-sub data did not cross the \
+             backbone (the future push did not deactivate the publisher?)\n--- \
+             z_sub stdout ---\n{c}"
         )
     });
     transit

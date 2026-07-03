@@ -604,6 +604,15 @@ pub struct RouterForwarder {
     /// and, when self is the route master, BRIDGED to the other mesh (C4,
     /// [`bridge_push_cross_mesh`](RouterForwarder::bridge_push_cross_mesh)).
     data_seen: Cell<usize>,
+    /// Running total of unsolicited FUTURE `DeclareSubscriber` pushes emitted by
+    /// [`push_future_subscription`](Self::push_future_subscription) — the y146
+    /// proactive-push witness. Rises once per CLIENT face actually told a
+    /// newly-learned subscription (a pub-before-sub publisher's write-filter
+    /// deactivation cause). A reverse-data e2e where the publisher declares
+    /// BEFORE any subscriber asserts this to distinguish the FUTURE push from a
+    /// raced CURRENT interest dump (which logs nothing either) — without it the
+    /// two paths are separable only by timing.
+    future_pushes: Cell<usize>,
     /// §5.16 access-control INGRESS interceptor chain — consulted at the top of
     /// [`forward`](FaceForwarder::forward) before the kind-dispatch, the router twin
     /// of [`LinkstateForwarder`](crate::linkstate_forward)'s `ingress_interceptors`.
@@ -694,6 +703,7 @@ impl RouterForwarder {
             timed_out: Cell::new(0),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
+            future_pushes: Cell::new(0),
             ingress_interceptors: RefCell::new(InterceptorChain::new()),
             egress_interceptors: RefCell::new(InterceptorChain::new()),
             interceptor_dropped: Cell::new(0),
@@ -763,6 +773,17 @@ impl RouterForwarder {
     /// query's cross-mesh transit from the routers' own logs (not topology alone).
     pub fn queries_seen(&self) -> usize {
         self.queries_seen.get()
+    }
+
+    /// Total unsolicited FUTURE `DeclareSubscriber` pushes emitted — the y146
+    /// proactive-push witness ([`future_pushes`](Self#structfield.future_pushes)).
+    /// A `>0` value proves this router told at least one CLIENT face a
+    /// subscription it learned AFTER that face's FUTURE interest, the sole wz
+    /// cause of a pub-before-sub publisher's write-filter deactivation. The
+    /// FUTURE-mode reverse-data e2e asserts it to prove the push fired, not a
+    /// raced CURRENT dump.
+    pub fn future_pushes_seen(&self) -> usize {
+        self.future_pushes.get()
     }
 
     /// Total distinct queryable interests this router currently holds across all
@@ -2187,7 +2208,10 @@ impl RouterForwarder {
             .pushes_for_new_sub(new_ke, Some(origin));
         for (face, reply_ke, id) in pushes {
             match build_declare_subscriber(id, 0, Some(&reply_ke)) {
-                Ok(decl) => self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl))),
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.future_pushes.set(self.future_pushes.get() + 1);
+                }
                 Err(e) => log::warn!(
                     "router forward: future sub push build failed for {reply_ke:?}: {e:?}"
                 ),
