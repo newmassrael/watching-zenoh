@@ -316,8 +316,8 @@ use wz_codecs::wireexpr::WireexprOwned;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable_reply, build_declare_subscriber,
-    build_declare_subscriber_reply, build_undeclare_queryable_with_keyexpr,
-    build_undeclare_subscriber_with_keyexpr,
+    build_declare_subscriber_reply, build_declare_subscriber_reply_with_id,
+    build_undeclare_queryable_with_keyexpr, build_undeclare_subscriber_with_keyexpr,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
@@ -331,6 +331,7 @@ use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
 
 use crate::accept_loop::{FaceForwarder, FaceId};
+use crate::future_interest::FutureInterestStore;
 use crate::interceptor::{
     InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow,
 };
@@ -551,6 +552,20 @@ pub struct RouterForwarder {
     /// contributor to the merged
     /// [`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info).
     client_qabls: RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>,
+    /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
+    /// declared a FUTURE (`f()`) subscriber `Interest`, and which
+    /// `DeclareSubscriber`s wz has pushed back to them (zenoh's per-`FaceState`
+    /// `remote_interests` + `face_hat.local_subs`). The CURRENT half of the
+    /// handshake is [`respond_to_interest`](Self::respond_to_interest)'s dump; this
+    /// is the FUTURE half: a subscriber learned LATER
+    /// ([`ingest_subscription`](Self::ingest_subscription) /
+    /// [`ingest_client_subscription`](Self::ingest_client_subscription)) is
+    /// proactively pushed via [`push_future_subscription`](Self::push_future_subscription)
+    /// so a pub-BEFORE-sub publisher's write-filter deactivates. FaceId-keyed leaf
+    /// state, so [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE its
+    /// linkless early-return (OBLIGATION 1), like `client_subs`. SUBS plane only
+    /// (the QABL future-push is a separate value-aware unit).
+    future_subs: RefCell<FutureInterestStore>,
     /// The pending-query return table (C5b) — one entry per outbound Request,
     /// keyed by the out face + a per-face local qid, recording where the matching
     /// `Response` / `ResponseFinal` routes back (the querier's inbound face + rid).
@@ -672,6 +687,7 @@ impl RouterForwarder {
             linkstatepeer_qabls: RefCell::new(LinkstatepeerInterest::new()),
             client_subs: RefCell::new(HashMap::new()),
             client_qabls: RefCell::new(HashMap::new()),
+            future_subs: RefCell::new(FutureInterestStore::new()),
             pending: RefCell::new(PendingQueries::new()),
             queries_seen: Cell::new(0),
             query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
@@ -1208,6 +1224,11 @@ impl RouterForwarder {
         // bridge is gated). Fires on the flip false->true only.
         if let Some(ke) = changed {
             self.advertise_native_cross_tier_sub(tier, &ke);
+            // FUTURE-mode push: a mesh sub just became known -> declare it to any
+            // CLIENT face whose stored FUTURE interest matches (the pub-before-sub
+            // close). Never echoed to `inbound` (a mesh face is not a future holder,
+            // but the guard is faithful).
+            self.push_future_subscription(&ke, inbound);
         }
     }
 
@@ -1220,17 +1241,28 @@ impl RouterForwarder {
     /// CURRENT-mode reply (`hat/router/interests.rs::declare_interest` +
     /// `declare_{sub,qabl}_interest`): per matching REMOTE declaration wz holds, a
     /// `Declare(Sub)` / `Declare(Qabl)` stamped with the soliciting `interest_id`,
-    /// then ONE terminating `Declare(DeclFinal)`. FUTURE-mode (an ongoing push of
-    /// later declarations) + `Interest(Final)` teardown are round B; a
-    /// non-current / body-less (Final) interest gets no reply here (`if !c()`
-    /// mirrors zenoh's `if mode.current()`). Tier-agnostic — routers answer
+    /// then ONE terminating `Declare(DeclFinal)`. FUTURE (`f()`): a CLIENT face's
+    /// SUBSCRIBER interest is additionally STORED
+    /// ([`future_subs`](Self#structfield.future_subs)) so a sub learned LATER is
+    /// pushed ([`push_future_subscription`](Self::push_future_subscription)) — the
+    /// pub-before-sub close (R311y146); an `Interest(Final)` tears the stored
+    /// interest down. A body-less Final gets no wire reply. The current dump is
+    /// tier-agnostic — routers answer
     /// interests from any tier — the faithful zenoh behavior.
     fn respond_to_interest(&self, inbound: FaceId, interest: &InterestOwned) {
-        if !interest.c() {
-            return; // Tier 1: CURRENT only (a pure-Future / Final interest gets no reply yet).
+        // Interest(Final) (`!c && !f`): a client CANCELLING a prior interest. pico
+        // sends one on every publisher/querier drop (`net/primitives.c:
+        // _z_remove_interest`, client-gated), so the stored FUTURE interest for
+        // this `interest_id` must be dropped (else it leaks + keeps pushing to a
+        // publisher whose write-filter is gone). No reply (a Final carries no body).
+        if !interest.c() && !interest.f() {
+            self.future_subs
+                .borrow_mut()
+                .remove_interest(inbound, interest.interest_id);
+            return;
         }
         let Some(body) = interest.body.as_ref() else {
-            return; // a CURRENT interest always carries a body (the C||F decode gate).
+            return; // a C||F interest always carries a body (the C||F decode gate).
         };
         let interest_id = interest.interest_id;
         // Resolve the RESTRICTED target keyexpr against the inbound face's alias
@@ -1250,12 +1282,17 @@ impl RouterForwarder {
                 {
                     Some(ke) => Some(ke),
                     None => {
-                        self.send_one_to_face(
-                            inbound,
-                            NetworkMessage::Declare(Box::new(build_declare_final_reply(
-                                interest_id,
-                            ))),
-                        );
+                        // A CURRENT interest is still terminated so the peer is not
+                        // left waiting; a FUTURE-only interest has no snapshot to
+                        // close (nothing was stored — the alias was unresolvable).
+                        if interest.c() {
+                            self.send_one_to_face(
+                                inbound,
+                                NetworkMessage::Declare(Box::new(build_declare_final_reply(
+                                    interest_id,
+                                ))),
+                            );
+                        }
                         return;
                     }
                 }
@@ -1264,32 +1301,65 @@ impl RouterForwarder {
             }
         };
         let aggregate = body.ag();
-        let self_zid = *self.routers_net.borrow().self_zid();
-        if body.su() {
-            self.dump_interest_subs(
+        // FUTURE (`f()`) half: STORE the subscriber interest so a matching sub
+        // learned LATER is pushed to this face (the pub-before-sub close). CLIENT
+        // faces only — zenoh pushes future subs to `whatami==Client` faces
+        // (`propagate_simple_subscription_to`); peers/routers converge via proactive
+        // link-state, not interest-push. SUBS plane only (`su()`); match-all (target
+        // None) is not stored (current-dump parity — the qabl future-push and
+        // match-all are separate units).
+        let store_future = interest.f() && body.su() && self.is_client_face(inbound);
+        if store_future {
+            if let Some(t) = target.as_deref() {
+                self.future_subs.borrow_mut().store_interest(
+                    inbound,
+                    interest_id,
+                    t.to_owned(),
+                    aggregate,
+                );
+            }
+        }
+        // CURRENT (`c()`) half: dump the matching declarations wz holds + the single
+        // terminating DeclareFinal (sent regardless of dump size — 0 matches keeps
+        // the peer's write-filter armed = "no subscriber yet", correct). A
+        // FUTURE-only interest (no `c()`) gets neither — an ongoing subscription has
+        // no current snapshot to close.
+        if interest.c() {
+            let self_zid = *self.routers_net.borrow().self_zid();
+            if body.su() {
+                self.dump_interest_subs(
+                    inbound,
+                    target.as_deref(),
+                    aggregate,
+                    &self_zid,
+                    interest_id,
+                    store_future,
+                );
+            }
+            if body.qu() {
+                self.dump_interest_qabls(
+                    inbound,
+                    target.as_deref(),
+                    aggregate,
+                    &self_zid,
+                    interest_id,
+                );
+            }
+            self.send_one_to_face(
                 inbound,
-                target.as_deref(),
-                aggregate,
-                &self_zid,
-                interest_id,
+                NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
             );
         }
-        if body.qu() {
-            self.dump_interest_qabls(
-                inbound,
-                target.as_deref(),
-                aggregate,
-                &self_zid,
-                interest_id,
-            );
-        }
-        // The single terminating DeclareFinal (interest_id) — zenoh sends it for a
-        // CURRENT interest regardless of the dump size (0 matches => the filter
-        // stays active = "no subscriber yet", which is correct).
-        self.send_one_to_face(
-            inbound,
-            NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
-        );
+    }
+
+    /// Whether `face` is a held CLIENT face — the tier gate for STORING a FUTURE
+    /// subscriber interest (zenoh pushes future declarations to `whatami==Client`
+    /// faces only). A vanished face is not a client.
+    fn is_client_face(&self, face: FaceId) -> bool {
+        self.faces
+            .borrow()
+            .get(&face)
+            .is_some_and(|s| s.tier == FaceTier::Client)
     }
 
     /// The CURRENT-dump SUBSCRIBER leg of [`respond_to_interest`]: reply with the
@@ -1308,6 +1378,7 @@ impl RouterForwarder {
         aggregate: bool,
         self_zid: &Zid,
         interest_id: u64,
+        future: bool,
     ) {
         let Some(target) = target else {
             return; // match-all deferred; the caller's DeclareFinal still closes the interest.
@@ -1335,7 +1406,22 @@ impl RouterForwarder {
             aggregate,
             per_ke,
             |a, _b| a,
-            |id, ke, ()| build_declare_subscriber_reply(id, ke),
+            // For a FUTURE (C+F) interest the current reply carries a NON-ZERO id
+            // interned per (face, reply ke) (zenoh `make_sub_id`'s `mode.future()`
+            // branch seeds `local_subs`), so the id can be REUSED on a redundant
+            // re-declare and the later FUTURE push of the same ke dedups. A
+            // CURRENT-only interest keeps id 0 (`make_sub_id` = 0 for non-future).
+            |id, ke, ()| {
+                if future {
+                    let sub_id = self
+                        .future_subs
+                        .borrow_mut()
+                        .intern_current_reply(inbound, ke);
+                    build_declare_subscriber_reply_with_id(id, sub_id, ke)
+                } else {
+                    build_declare_subscriber_reply(id, ke)
+                }
+            },
             |msg| self.send_one_to_face(inbound, msg),
         );
     }
@@ -2074,8 +2160,38 @@ impl RouterForwarder {
             .entry(inbound)
             .or_default()
             .insert(keyexpr.clone());
-        if inserted && !already {
-            self.advertise_client_cross_tier_sub(&keyexpr);
+        if inserted {
+            if !already {
+                self.advertise_client_cross_tier_sub(&keyexpr);
+            }
+            // FUTURE-mode push: a new client sub -> declare it to any OTHER client
+            // face whose stored FUTURE interest matches (client-to-client via this
+            // router). Fires even when `already` (a co-client subscribes): the push
+            // dedups per interest-holder via the pushed registry, so a holder the
+            // earlier sub already covered is a no-op. `inbound` (the source) is
+            // never echoed.
+            self.push_future_subscription(&keyexpr, inbound);
+        }
+    }
+
+    /// Emit the unsolicited FUTURE `DeclareSubscriber` pushes a newly-learned
+    /// subscription `new_ke` (sourced at `origin`) triggers: one per CLIENT face
+    /// whose stored FUTURE interest matches and has not yet been told this reply ke
+    /// (zenoh `propagate_simple_subscription_to`). The push carries the interned
+    /// non-zero decl id, `interest_id: None`, no `I` flag — an unsolicited declare,
+    /// NOT an interest reply. `origin` is never pushed (no self-echo).
+    fn push_future_subscription(&self, new_ke: &str, origin: FaceId) {
+        let pushes = self
+            .future_subs
+            .borrow_mut()
+            .pushes_for_new_sub(new_ke, Some(origin));
+        for (face, reply_ke, id) in pushes {
+            match build_declare_subscriber(id, 0, Some(&reply_ke)) {
+                Ok(decl) => self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl))),
+                Err(e) => log::warn!(
+                    "router forward: future sub push build failed for {reply_ke:?}: {e:?}"
+                ),
+            }
         }
     }
 
@@ -3325,6 +3441,12 @@ impl FaceForwarder for RouterForwarder {
                 }
             }
         }
+        // Purge this face's FUTURE-mode interest + pushed-declaration state
+        // (OBLIGATION 1, alongside client_subs/client_qabls): a client face is
+        // `link == None` so it never reaches the graph teardown below. pico clears
+        // its own write-filter targets on the transport drop (filtering.c
+        // CONNECTION_DROPPED), so no undeclare is owed.
+        self.future_subs.borrow_mut().purge_face(id);
         let Some(state) = self.faces.borrow_mut().remove(&id) else {
             return;
         };
@@ -4615,6 +4737,240 @@ mod tests {
     }
 
     #[test]
+    fn future_interest_pushes_a_later_mesh_sub_to_the_client_publisher() {
+        // The pub-before-sub close (R311y146): a CLIENT publisher solicits a C+F
+        // SUBSCRIBERS interest for demo/key while NO matching sub exists -> an empty
+        // current dump, only a DeclareFinal, its write-filter stays armed. A MESH
+        // sub for demo/** is learned LATER -> wz PROACTIVELY pushes an UNSOLICITED
+        // DeclareSubscriber to the publisher (non-zero id, keyed on the AGGREGATE
+        // interest ke, interest_id None) so its filter deactivates. This proves the
+        // wz push MECHANISM; the actual filter-deactivation lives in a pico binary
+        // (Layer Z, deferred) — a wz face has no write-filter to observe.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER); // the LATER mesh sub source
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT); // the pico publisher
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        // 1) C+F interest, no matching sub yet -> ONLY a DeclareFinal (stored, not
+        //    answered inline).
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, true, false, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "empty current dump -> only the terminating DeclareFinal"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+        sink_c.reset();
+        // 2) A mesh sub for demo/** is learned LATER -> the FUTURE push fires.
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the later mesh sub is pushed to the waiting client publisher"
+        );
+        let push = forwarded_declare(&sink_c.frame_bytes(0));
+        assert_eq!(
+            push.interest_id, None,
+            "an unsolicited FUTURE push carries no interest_id / no I flag"
+        );
+        match &push.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                assert_ne!(
+                    d.id, 0,
+                    "a future push carries a non-zero decl id (make_sub_id)"
+                );
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
+                        w.suffix.as_deref(),
+                        Some("demo/key"),
+                        "the aggregate push is keyed on the INTEREST ke, not demo/**"
+                    ),
+                    _ => panic!("push keyexpr must be literal"),
+                }
+            }
+            other => panic!("expected a DeclSubscriber push, got {other:?}"),
+        }
+        // 3a) A redundant re-declare of the SAME sub does NOT re-push — register's
+        //     no-change gate stops it BEFORE the push path (the push never runs).
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a redundant re-declare is not re-pushed"
+        );
+        // 3b) A DISTINCT sub keyexpr (demo/*) that registers as a NEW source but maps
+        //     to the SAME aggregate reply ke (demo/key) IS reached by the push path,
+        //     yet the pushed-registry dedup suppresses it (the filter is already off).
+        forward_one(&fwd, FaceId(0), declare_sub("demo/*"));
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a second distinct sub under the same aggregate ke is deduped by the pushed registry"
+        );
+    }
+
+    #[test]
+    fn future_interest_final_stops_further_pushes() {
+        // pico sends an Interest(Final) when a publisher drops (net/primitives.c
+        // _z_remove_interest, client-gated); wz must FORGET the stored FUTURE
+        // interest so a later sub is no longer pushed to a gone publisher.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        // Store the future interest, then CANCEL it with an Interest(Final)
+        // (C=0,F=0) carrying the same interest_id.
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, true, false, true),
+        );
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", false, false, false, false, false),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "an Interest(Final) gets no wire reply"
+        );
+        // A later matching mesh sub must NOT be pushed — the interest is gone.
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "no push after the future interest was torn down"
+        );
+    }
+
+    #[test]
+    fn future_interest_pushes_a_later_client_sub_to_another_client() {
+        // Client-to-client via the router (the client-ingest push site): publisher A
+        // declares a C+F interest; a SECOND client B declares a matching subscriber
+        // -> A is pushed. A subscriber declared by the interest HOLDER itself is NOT
+        // echoed back to it (the only non-moot origin-skip case).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (pub_a, sink_a) = face(zid(0xAA), WIRE_CLIENT); // publisher A = interest holder
+        let (sub_b, _sb) = face(zid(0xBB), WIRE_CLIENT); // subscriber B
+        fwd.register(FaceId(0), &pub_a);
+        fwd.register(FaceId(1), &sub_b);
+        forward_one(
+            &fwd,
+            FaceId(0),
+            interest_with_mode(7, "demo/key", true, true, true, false, true),
+        );
+        assert_eq!(sink_a.frame_count(), 1, "empty dump -> only a DeclareFinal");
+        sink_a.reset();
+        // B (a client) declares a matching subscriber -> A is pushed.
+        forward_one(&fwd, FaceId(1), declare_sub("demo/**"));
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "the later client-B sub is pushed to publisher A"
+        );
+        let push = forwarded_declare(&sink_a.frame_bytes(0));
+        assert_eq!(push.interest_id, None);
+        match &push.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                assert_ne!(d.id, 0, "the push carries a non-zero decl id")
+            }
+            other => panic!("expected a DeclSubscriber push, got {other:?}"),
+        }
+        // The interest holder A subscribing its OWN matching keyexpr is NOT echoed
+        // back to A (origin-skip).
+        sink_a.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/*"));
+        assert_eq!(
+            sink_a.frame_count(),
+            0,
+            "a sub from the interest holder is not echoed back to it"
+        );
+    }
+
+    #[test]
+    fn future_interest_current_dump_seeds_a_non_zero_id_and_dedups_the_later_push() {
+        // When a matching sub EXISTS at C+F interest time, the current-dump reply
+        // carries a NON-ZERO interned id (make_sub_id semantics) AND seeds the pushed
+        // registry so a later re-learn of the same aggregate ke does not
+        // double-declare. This is the only test that exercises
+        // build_declare_subscriber_reply_with_id + the seed->dedup path E2E.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**")); // a sub EXISTS at interest time
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, true, false, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "one DeclareSubscriber reply + the DeclareFinal"
+        );
+        let reply = forwarded_declare(&sink_c.frame_bytes(0));
+        assert_eq!(
+            reply.interest_id,
+            Some(7),
+            "a current reply is interest-stamped"
+        );
+        match &reply.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => assert_ne!(
+                d.id, 0,
+                "a C+F (future) current reply carries a non-zero interned id, not 0"
+            ),
+            other => panic!("expected a DeclSubscriber reply, got {other:?}"),
+        }
+        // A re-learn of the SAME aggregate reply ke (via a distinct sub) is deduped
+        // by the seed -> no second declare.
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/*"));
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "the current-dump seed dedups the later matching push"
+        );
+    }
+
+    #[test]
+    fn deregister_purges_the_future_interest() {
+        // A client face going down purges its stored future interest (OBLIGATION 1),
+        // so a later matching sub is neither pushed nor a panic on a gone face.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, true, false, true),
+        );
+        fwd.deregister(FaceId(1)); // the publisher's face drops
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a purged (face-down) interest holder is not pushed to"
+        );
+    }
+
+    #[test]
     fn interest_with_no_matching_sub_replies_only_a_final() {
         // A CURRENT interest whose keyexpr no sub matches: wz still terminates it
         // with a DeclareFinal (0 subs => the filter stays active = "no subscriber
@@ -4780,8 +5136,11 @@ mod tests {
 
     #[test]
     fn interest_future_only_and_final_get_no_reply() {
-        // Tier 1 answers CURRENT only. A pure-Future (C=0,F=1) and a body-less
-        // Final (C=0,F=0) interest each get ZERO reply frames — FUTURE is round B.
+        // A pure-Future (C=0,F=1) and a body-less Final (C=0,F=0) interest each emit
+        // ZERO immediate reply frames (no current dump, no Final). Since R311y146 a
+        // future-only interest is STORED for a later push and a Final TEARS DOWN a
+        // stored interest — both without a wire reply; this test locks that
+        // no-immediate-reply property.
         let fwd = RouterForwarder::new(zid(0x01));
         let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
         let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
@@ -4798,7 +5157,7 @@ mod tests {
         assert_eq!(
             sink_c.frame_count(),
             0,
-            "a pure-Future interest gets no CURRENT reply (round B)"
+            "a pure-Future interest gets no immediate CURRENT reply (it is stored)"
         );
         // Body-less Final interest (C=0, F=0).
         forward_one(

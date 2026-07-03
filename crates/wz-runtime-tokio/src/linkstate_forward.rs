@@ -96,8 +96,8 @@ use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable, build_declare_queryable_reply,
     build_declare_subscriber, build_declare_subscriber_reply,
-    build_undeclare_queryable_with_keyexpr, build_undeclare_subscriber_with_keyexpr,
-    set_declare_queryable_info,
+    build_declare_subscriber_reply_with_id, build_undeclare_queryable_with_keyexpr,
+    build_undeclare_subscriber_with_keyexpr, set_declare_queryable_info,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
@@ -130,6 +130,7 @@ use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
+use crate::future_interest::FutureInterestStore;
 use crate::interceptor::{InterceptorChain, InterceptorContext, InterceptorFlow};
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{ExpiredQuery, PendingQueries, QueryFan};
@@ -277,6 +278,20 @@ pub struct LinkstateForwarder {
     /// purged whole on its face-down (`purge_detached_interest`). `RefCell` by
     /// the same single-task contract as `subs`.
     qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
+    /// declared a FUTURE (`f()`) subscriber `Interest`, and which
+    /// `DeclareSubscriber`s this peer has pushed back to them (zenoh's per-`FaceState`
+    /// `remote_interests` + `face_hat.local_subs`). The CURRENT half of the
+    /// handshake is [`respond_to_interest`](Self::respond_to_interest)'s dump; this
+    /// is the FUTURE half: a subscriber learned LATER — from the mesh
+    /// ([`forward_subscription`](Self::forward_subscription)) or this node's own
+    /// local declaration ([`declare_subscription`](Self::declare_subscription)) — is
+    /// proactively pushed via [`push_future_subscription`](Self::push_future_subscription)
+    /// so a pub-BEFORE-sub client publisher's write-filter deactivates. FaceId-keyed
+    /// leaf state, purged UNCONDITIONALLY in
+    /// [`deregister`](FaceForwarder::deregister) (a client face has `link == None`,
+    /// mirroring the router's OBLIGATION-1). SUBS plane only.
+    future_subs: RefCell<FutureInterestStore>,
     /// The pending-query RETURN table (query-routing atom 3): the
     /// per-outbound-face `out qid -> (inbound face, inbound rid)` map that routes
     /// a routed Query's `Response` / `ResponseFinal` BACK to the querier — the wz
@@ -512,6 +527,7 @@ impl LinkstateForwarder {
             data_seen: Cell::new(0),
             subs: RefCell::new(LinkstatepeerInterest::new()),
             qabls: RefCell::new(LinkstatepeerInterest::new()),
+            future_subs: RefCell::new(FutureInterestStore::new()),
             pending: RefCell::new(PendingQueries::new()),
             local_queryables: RefCell::new(Vec::new()),
             local_subscribers: RefCell::new(Vec::new()),
@@ -1461,13 +1477,42 @@ impl LinkstateForwarder {
     /// self-origination structure.
     pub fn declare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
         let self_zid = *self.net.borrow().self_zid();
-        self.subs.borrow_mut().register(keyexpr, self_zid, ());
+        let registered = self.subs.borrow_mut().register(keyexpr, self_zid, ());
         // node_id 0 = self-originated (build_declare_subscriber emits no ext_nodeid);
         // literal keyexpr (mapping id 0 + suffix, the wz MVP form).
         let declare = build_declare_subscriber(0, 0, Some(keyexpr))?;
+        // FUTURE-mode push: a NEW local subscriber -> declare it to any CLIENT face
+        // whose stored FUTURE interest matches (a co-attached publisher's
+        // write-filter learns THIS node's own subscriber). No inbound face (origin
+        // None); only on a genuinely new registration.
+        if registered {
+            self.push_future_subscription(keyexpr, None);
+        }
         self.flood_to_tree_children(&self_zid, || {
             NetworkMessage::Declare(Box::new(declare.clone()))
         })
+    }
+
+    /// Emit the unsolicited FUTURE `DeclareSubscriber` pushes a newly-learned
+    /// subscription `new_ke` (sourced at `origin`, `None` for this node's own local
+    /// subscriber) triggers: one per CLIENT face whose stored FUTURE interest
+    /// matches and has not yet been told this reply ke (zenoh
+    /// `propagate_simple_subscription_to`). The push carries the interned non-zero
+    /// decl id, `interest_id: None`, no `I` flag — an unsolicited declare, NOT an
+    /// interest reply. `origin` is never pushed (no self-echo).
+    fn push_future_subscription(&self, new_ke: &str, origin: Option<FaceId>) {
+        let pushes = self
+            .future_subs
+            .borrow_mut()
+            .pushes_for_new_sub(new_ke, origin);
+        for (face, reply_ke, id) in pushes {
+            match build_declare_subscriber(id, 0, Some(&reply_ke)) {
+                Ok(decl) => self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl))),
+                Err(e) => {
+                    log::warn!("peer forward: future sub push build failed for {reply_ke:?}: {e:?}")
+                }
+            }
+        }
     }
 
     /// Originate a LOCAL queryable INTO the mesh: this node offers a queryable for
@@ -1769,7 +1814,7 @@ impl LinkstateForwarder {
         };
         // Subscriptions carry no per-peer value (V = ()); the value-diff gate
         // reduces to new-peer for subs.
-        self.forward_interest_declaration(
+        let registered = self.forward_interest_declaration(
             inbound,
             reliable,
             declare,
@@ -1780,6 +1825,12 @@ impl LinkstateForwarder {
             },
             |ke| build_declare_subscriber(0, 0, Some(ke)),
         );
+        // FUTURE-mode push: a mesh sub just became known -> declare it to any CLIENT
+        // face whose stored FUTURE interest matches (pub-before-sub close). `inbound`
+        // (the mesh source) is never echoed.
+        if let Some(ke) = registered {
+            self.push_future_subscription(&ke, Some(inbound));
+        }
     }
 
     /// A sourced `DeclareQueryable` arrived on `inbound`: the queryable-plane
@@ -1806,7 +1857,9 @@ impl LinkstateForwarder {
             }
             _ => wz_session_core::queryable_info::QueryableInfo::DEFAULT,
         };
-        self.forward_interest_declaration(
+        // The qabl plane is NOT future-pushed in this round (the value-aware
+        // `(id, info)` re-push is a separate unit), so the registered ke is ignored.
+        let _ = self.forward_interest_declaration(
             inbound,
             reliable,
             declare,
@@ -1859,24 +1912,17 @@ impl LinkstateForwarder {
         wireexpr: &WireexprOwned,
         reg: InterestRegistration<V>,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
-    ) {
+    ) -> Option<String> {
         // The inbound face's zid + graph link AND the RESOLVED keyexpr, in one
         // scoped borrow (an unresolvable alias drops the declaration).
         let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
-            };
-            let Some(keyexpr) = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) else {
-                return;
-            };
+            let s = faces.get(&inbound)?;
+            let keyexpr = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table)?;
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
-        let Some((source_zid, out_node_id)) =
-            self.resolve_source(inbound_zid, inbound_link, read_declare_source(declare))
-        else {
-            return;
-        };
+        let (source_zid, out_node_id) =
+            self.resolve_source(inbound_zid, inbound_link, read_declare_source(declare))?;
         // Register the resolved interest with its declared value; re-flood ONLY
         // on a real change — a new peer OR a changed value (the loop-bounding
         // value-diff change-gate, R311ul).
@@ -1885,31 +1931,30 @@ impl LinkstateForwarder {
             .borrow_mut()
             .register(&keyexpr, source_zid, reg.value)
         {
-            return;
+            return None;
         }
+        // Re-flood a CLEAN sourced literal declaration to self's children in the
+        // source's tree (B1b normalize — a downstream link does not share this
+        // link's alias table, so it must see a literal; a sourced re-flood carries
+        // no id, id 0, the keyexpr being the identity). Independent of the caller's
+        // FUTURE push: a peer with no tree children still returns the registered ke
+        // so a co-attached client's future interest is served.
         let children = self.net.borrow().tree_children_of(&source_zid);
-        if children.is_empty() {
-            return;
+        if !children.is_empty() {
+            if let Ok(mut carrier) = build(keyexpr.as_str()) {
+                set_declare_source(&mut carrier, out_node_id);
+                // The same shared re-forward predicate forward_push uses (excludes
+                // the inbound face and the source's own neighbour); only the carrier
+                // differs.
+                let _ = self.fan_out(reliable, None, |id, zid| {
+                    Ok(
+                        is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
+                            .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
+                    )
+                });
+            }
         }
-        // Re-flood a CLEAN sourced literal declaration built from the resolved
-        // keyexpr (B1b normalize): a downstream link does not share this link's
-        // alias table, so it must see a literal, and a sourced re-flood carries no
-        // id (id 0 — the keyexpr is the identity). Always rebuild, never re-emit
-        // the inbound body verbatim — the same UNIFORM normalize the data plane
-        // does (forward_push), so there is no aliased-vs-literal branch.
-        let Ok(mut carrier) = build(keyexpr.as_str()) else {
-            return;
-        };
-        set_declare_source(&mut carrier, out_node_id);
-        // Re-flood to self's children in the source's tree — the same shared
-        // re-forward predicate forward_push uses (excludes the inbound face and
-        // the source's own neighbour); only the carrier differs.
-        let _ = self.fan_out(reliable, None, |id, zid| {
-            Ok(
-                is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
-                    .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
-            )
-        });
+        Some(keyexpr)
     }
 
     /// A sourced `UndeclareSubscriber` arrived on `inbound`: withdraw the SOURCE
@@ -2168,8 +2213,13 @@ impl LinkstateForwarder {
     /// and the reverse-data write-filter handshake for a pico publisher/querier
     /// attached to THIS peer (not a router). A zenoh(-pico) publisher keeps a
     /// write-filter that drops its own put/get LOCALLY until it learns a matching
-    /// remote declaration; this reply is that declaration. CURRENT-mode only
-    /// (`if !c()` mirrors zenoh `mode.current()`; FUTURE-mode is round B).
+    /// remote declaration; this reply is that declaration. CURRENT (`c()`) is
+    /// answered by the dump below; FUTURE (`f()`) stores the client's SUBSCRIBER
+    /// interest ([`future_subs`](Self#structfield.future_subs)) so a sub learned
+    /// LATER is pushed
+    /// ([`push_future_subscription`](Self::push_future_subscription)) — the
+    /// pub-before-sub close (R311y146); an `Interest(Final)` tears the stored
+    /// interest down.
     ///
     /// FAITHFUL to zenoh's `linkstate_peer` HAT, which answers a CURRENT interest
     /// ONLY from a CLIENT face (the `declare_sub_interest` / `declare_qabl_interest`
@@ -2182,25 +2232,34 @@ impl LinkstateForwarder {
     /// client-gated. 0 matches => no `Declare`, the filter stays active ("no
     /// subscriber yet"), which is correct.
     ///
-    /// SCOPE (round-B carry, named — not silent): the answer surfaces the MESH
-    /// declarations + this node's SELF-LOCAL declarations (both keyed by a
-    /// graph zid in [`subs`](Self#structfield.subs) / `qabls`). It does NOT
-    /// surface a subscription declared by ANOTHER client attached to THIS peer:
-    /// unlike the router (which keeps a per-face `client_subs` store), the peer
-    /// drops a client-face declaration in
-    /// [`resolve_source_in`] (a client is not a link-state graph node), so a
-    /// two-clients-on-one-isolated-peer reverse-data case is not covered here — a
-    /// pre-existing limitation, not introduced by this handshake. And because
-    /// this is CURRENT-only, the pub-BEFORE-sub ordering has an open hole: a
-    /// publisher that solicits before any matching subscriber exists gets an
-    /// empty dump, and a subscriber appearing LATER does not re-notify it
-    /// (FUTURE-mode + a per-face `RemoteInterest` store = round B).
+    /// SCOPE (named — not silent): the CURRENT dump AND the FUTURE push surface the
+    /// MESH declarations + this node's SELF-LOCAL declarations (both keyed by a
+    /// graph zid in [`subs`](Self#structfield.subs) / `qabls`, plus a self-local
+    /// [`declare_subscription`](Self::declare_subscription) push). The FUTURE push
+    /// (R311y146) CLOSES the pub-before-sub hole for the SUBSCRIBER plane: a
+    /// publisher soliciting before any matching sub gets an empty dump, but a sub
+    /// appearing LATER now pushes an unsolicited `DeclareSubscriber` that
+    /// deactivates its write-filter. Two open items remain, both named: (1) a
+    /// subscription declared by ANOTHER client attached to THIS peer is still not
+    /// surfaced — unlike the router (which keeps a per-face `client_subs` store),
+    /// the peer drops a client-face declaration in [`resolve_source_in`] (a client
+    /// is not a link-state graph node), so a two-clients-on-one-isolated-peer case
+    /// is uncovered (pre-existing); (2) the QUERYABLE future-push and the
+    /// undeclare-push (a sub DISAPPEARING) are separate deferred units.
     fn respond_to_interest(&self, inbound: FaceId, interest: &InterestOwned) {
-        if !interest.c() {
-            return; // CURRENT only (a pure-Future / Final interest gets no reply yet).
+        // Interest(Final) (`!c && !f`): a client CANCELLING a prior interest. pico
+        // sends one on every publisher/querier drop (`net/primitives.c:
+        // _z_remove_interest`, client-gated), so drop the stored FUTURE interest for
+        // this `interest_id` (else it leaks + keeps pushing to a gone publisher). No
+        // reply (a Final carries no body).
+        if !interest.c() && !interest.f() {
+            self.future_subs
+                .borrow_mut()
+                .remove_interest(inbound, interest.interest_id);
+            return;
         }
         let Some(body) = interest.body.as_ref() else {
-            return; // a CURRENT interest always carries a body (the C||F decode gate).
+            return; // a C||F interest always carries a body (the C||F decode gate).
         };
         let interest_id = interest.interest_id;
         // Resolve the RESTRICTED target keyexpr, the requesting face's ROLE, and
@@ -2223,12 +2282,17 @@ impl LinkstateForwarder {
                 {
                     Some(ke) => Some(ke),
                     None => {
-                        self.send_one_to_face(
-                            inbound,
-                            NetworkMessage::Declare(Box::new(build_declare_final_reply(
-                                interest_id,
-                            ))),
-                        );
+                        // A CURRENT interest is still terminated so the peer is not
+                        // left waiting; a FUTURE-only interest has no snapshot to
+                        // close (nothing stored — the alias was unresolvable).
+                        if interest.c() {
+                            self.send_one_to_face(
+                                inbound,
+                                NetworkMessage::Declare(Box::new(build_declare_final_reply(
+                                    interest_id,
+                                ))),
+                            );
+                        }
                         return;
                     }
                 }
@@ -2237,31 +2301,53 @@ impl LinkstateForwarder {
             };
             (target, requester_zid, is_client)
         };
-        if is_client {
-            let aggregate = body.ag();
-            if body.su() {
-                self.dump_interest_subs(
+        let aggregate = body.ag();
+        // FUTURE (`f()`) half: STORE the subscriber interest so a matching sub
+        // learned LATER (mesh or self-local) is pushed to this face — the
+        // pub-before-sub close. CLIENT faces only (zenoh pushes future subs to
+        // `whatami==Client` faces); SUBS plane only (`su()`); match-all (target
+        // None) is not stored (current-dump parity).
+        let store_future = interest.f() && body.su() && is_client;
+        if store_future {
+            if let Some(t) = target.as_deref() {
+                self.future_subs.borrow_mut().store_interest(
                     inbound,
-                    target.as_deref(),
-                    aggregate,
-                    requester_zid.as_ref(),
                     interest_id,
-                );
-            }
-            if body.qu() {
-                self.dump_interest_qabls(
-                    inbound,
-                    target.as_deref(),
+                    t.to_owned(),
                     aggregate,
-                    requester_zid.as_ref(),
-                    interest_id,
                 );
             }
         }
-        self.send_one_to_face(
-            inbound,
-            NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
-        );
+        // CURRENT (`c()`) half: the client-only dump + the DeclareFinal (sent for
+        // ANY current interest, even a non-client one — its write-filter still needs
+        // the terminator). A FUTURE-only interest gets neither.
+        if interest.c() {
+            if is_client {
+                if body.su() {
+                    self.dump_interest_subs(
+                        inbound,
+                        target.as_deref(),
+                        aggregate,
+                        requester_zid.as_ref(),
+                        interest_id,
+                        store_future,
+                    );
+                }
+                if body.qu() {
+                    self.dump_interest_qabls(
+                        inbound,
+                        target.as_deref(),
+                        aggregate,
+                        requester_zid.as_ref(),
+                        interest_id,
+                    );
+                }
+            }
+            self.send_one_to_face(
+                inbound,
+                NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
+            );
+        }
     }
 
     /// The CURRENT-dump SUBSCRIBER leg of [`respond_to_interest`]: reply with the
@@ -2281,6 +2367,7 @@ impl LinkstateForwarder {
         aggregate: bool,
         exclude: Option<&Zid>,
         interest_id: u64,
+        future: bool,
     ) {
         let Some(target) = target else {
             return; // match-all deferred; the caller's DeclareFinal still closes it.
@@ -2295,7 +2382,21 @@ impl LinkstateForwarder {
             aggregate,
             per_ke,
             |a, _b| a,
-            |id, ke, ()| build_declare_subscriber_reply(id, ke),
+            // A FUTURE (C+F) interest's current reply carries a NON-ZERO id interned
+            // per (face, reply ke) (zenoh `make_sub_id`'s `mode.future()` branch),
+            // seeding the pushed registry so the later FUTURE push of the same ke
+            // dedups; a CURRENT-only interest keeps id 0.
+            |id, ke, ()| {
+                if future {
+                    let sub_id = self
+                        .future_subs
+                        .borrow_mut()
+                        .intern_current_reply(inbound, ke);
+                    build_declare_subscriber_reply_with_id(id, sub_id, ke)
+                } else {
+                    build_declare_subscriber_reply(id, ke)
+                }
+            },
             |msg| self.send_one_to_face(inbound, msg),
         );
     }
@@ -3143,6 +3244,13 @@ impl FaceForwarder for LinkstateForwarder {
         // nobody left to notify (skipped).
         let drained = self.pending.borrow_mut().remove_face(&id);
         synthesize_drained_fan_finals(&drained, id, |face, msg| self.send_one_to_face(face, msg));
+        // Purge this face's FUTURE-mode interest + pushed-declaration state
+        // UNCONDITIONALLY, before the graph teardown below (a client face is
+        // `link == None`, so it never reaches that branch) — the peer's analogue of
+        // the router's OBLIGATION-1 client-leaf purge. pico clears its own
+        // write-filter targets on the transport drop (filtering.c
+        // CONNECTION_DROPPED), so no undeclare is owed.
+        self.future_subs.borrow_mut().purge_face(id);
         let dropped_link = if let Some(state) = self.faces.borrow_mut().remove(&id) {
             if let Some(link) = state.link {
                 // remove_link drops the self<->neighbour edge and GC-prunes every
@@ -4505,11 +4613,12 @@ mod tests {
 
     #[test]
     fn peer_future_only_interest_gets_no_reply() {
-        // A pure-FUTURE interest (C clear, F set) is not answered at all — not
-        // even a DeclareFinal (zenoh sends the Final only on `mode.current()`).
-        // FUTURE-mode (register a per-face RemoteInterest + push later
-        // declarations) is round B; the early `if !interest.c()` return here is
-        // its scope boundary, exercised even when a matching sub DOES exist.
+        // A pure-FUTURE interest (C clear, F set) emits NO immediate wire reply —
+        // not even a DeclareFinal (zenoh sends the Final only on `mode.current()`),
+        // even when a matching sub already exists. Since R311y146 the interest is
+        // STORED (so a sub learned LATER is pushed — see the future_interest store
+        // tests + wz_router_future_sub_push E2E); this test locks the
+        // no-spurious-immediate-reply property that storage must not break.
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (mesh, _sm) = peer_face(zid(0x0A));
         let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
@@ -4526,7 +4635,134 @@ mod tests {
         assert_eq!(
             sink_c.frame_count(),
             0,
-            "a future-only interest gets NO reply (not even a Final) — round B"
+            "a future-only interest gets NO immediate reply (not even a Final); \
+             it is stored, not answered inline"
+        );
+    }
+
+    #[test]
+    fn peer_future_interest_pushes_a_later_mesh_sub_to_the_client_publisher() {
+        // The pub-before-sub close on the peer (R311y146): a CLIENT publisher
+        // solicits a C+F SUBSCRIBERS interest for demo/key while NO matching sub
+        // exists -> only a DeclareFinal. A MESH sub for demo/** is learned LATER ->
+        // the peer proactively pushes an unsolicited DeclareSubscriber (non-zero id,
+        // keyed on the aggregate interest ke, interest_id None) to the publisher.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (mesh, _sm) = peer_face(zid(0x0A));
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &mesh);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        // 1) C+F interest, no matching sub yet -> only the DeclareFinal.
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, true, false, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "empty current dump -> only a DeclareFinal"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+        sink_c.reset();
+        // 2) a mesh sub for demo/** is learned LATER -> the FUTURE push fires.
+        declare_interest(&fwd, FaceId(0), "demo/**");
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the later mesh sub is pushed to the waiting client publisher"
+        );
+        let push = forwarded_declare(&sink_c.frame_bytes(0));
+        assert_eq!(
+            push.interest_id, None,
+            "unsolicited FUTURE push carries no interest_id"
+        );
+        match &push.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                assert_ne!(d.id, 0, "a future push carries a non-zero decl id")
+            }
+            other => panic!("expected a DeclSubscriber push, got {other:?}"),
+        }
+        assert_eq!(
+            forwarded_declare_keyexpr(&sink_c.frame_bytes(0)).as_deref(),
+            Some("demo/key"),
+            "the aggregate push is keyed on the INTEREST ke"
+        );
+    }
+
+    #[test]
+    fn peer_future_interest_pushes_a_self_local_sub_to_the_client_publisher() {
+        // The self-local push: a client publisher declares a C+F interest, then
+        // THIS peer declares its OWN local subscriber matching it -> the publisher
+        // is pushed the peer's subscriber (declare_subscription's future push, origin
+        // None). Exercises the peer path that has no inbound face.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, true, false, true),
+        );
+        sink_c.reset();
+        // This node declares a LOCAL subscriber matching the interest.
+        fwd.declare_subscription("demo/**")
+            .expect("declare local subscriber");
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the self-local subscriber is pushed to the client publisher"
+        );
+        let push = forwarded_declare(&sink_c.frame_bytes(0));
+        assert_eq!(push.interest_id, None);
+        assert!(matches!(
+            push.body,
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_)
+        ));
+        assert_eq!(
+            forwarded_declare_keyexpr(&sink_c.frame_bytes(0)).as_deref(),
+            Some("demo/key"),
+        );
+    }
+
+    #[test]
+    fn peer_future_interest_final_stops_further_pushes() {
+        // The peer's Interest(Final) teardown (mirror of the router's): a Final
+        // removes the stored interest so a later mesh sub is not pushed to a gone
+        // publisher.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (mesh, _sm) = peer_face(zid(0x0A));
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &mesh);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, true, false, true),
+        );
+        sink_c.reset();
+        // Interest(Final) (C=0,F=0) cancels the stored interest.
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", false, false, false, false, false),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "an Interest(Final) gets no wire reply"
+        );
+        // A later matching mesh sub must NOT be pushed.
+        declare_interest(&fwd, FaceId(0), "demo/**");
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "no push after the future interest was torn down"
         );
     }
 

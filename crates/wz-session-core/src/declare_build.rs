@@ -801,6 +801,25 @@ pub fn build_declare_subscriber_reply(
     Ok(declare)
 }
 
+/// R311y146 — the interest-response `Declare(DeclSubscriber)` reply of a FUTURE
+/// (C+F) interest, carrying a NON-ZERO subscriber id. The plain
+/// [`build_declare_subscriber_reply`] hardcodes id 0 (zenoh `make_sub_id` = 0 for a
+/// non-future interest); a FUTURE interest instead allocates a per-`(face, reply
+/// keyexpr)` id (zenoh `make_sub_id`'s `mode.future()` branch inserts into
+/// `face_hat.local_subs`), so the SAME id can be REUSED on a redundant re-declare
+/// (pico dedups a `(decl_id, peer)` target, `net/filtering.c`) and later carried on
+/// the unsolicited FUTURE push of the same keyexpr. Same `I`-flag + `interest_id`
+/// coupling and same aggregate-keyexpr contract as [`build_declare_subscriber_reply`].
+pub fn build_declare_subscriber_reply_with_id(
+    interest_id: u64,
+    subscriber_id: u64,
+    keyexpr: &str,
+) -> Result<DeclareOwned, CodecError> {
+    let mut declare = build_declare_subscriber(subscriber_id, 0, Some(keyexpr))?;
+    stamp_interest_reply(&mut declare, interest_id);
+    Ok(declare)
+}
+
 /// R311y141 — the interest-response `Declare(DeclQueryable)` reply: the
 /// query-plane twin of [`build_declare_subscriber_reply`]. Additionally folds
 /// the matched queryables' [`QueryableInfo`] onto the body ext chain (via

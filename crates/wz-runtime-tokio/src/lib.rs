@@ -885,6 +885,17 @@ pub mod interceptor;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_interest;
 
+/// FUTURE-mode subscriber-interest store (R311y146) —
+/// [`future_interest::FutureInterestStore`]: which CLIENT faces declared a FUTURE
+/// (`f()`) subscriber `Interest`, and which `DeclareSubscriber`s wz has pushed back
+/// to them. The FUTURE half of the interest handshake (the CURRENT half is the
+/// forwarder `respond_to_interest` dump): a matching subscriber learned LATER is
+/// proactively pushed so a pub-before-sub publisher's write-filter deactivates.
+/// zenoh's per-`FaceState` `remote_interests` + `face_hat.local_subs`, bundled per
+/// face; both forwarders own one. Gated on `routing-peer`.
+#[cfg(feature = "routing-peer")]
+pub mod future_interest;
+
 /// P4 linkstate-peer routing (query-routing atom 3) — the pending-query return
 /// table [`linkstate_pending::PendingQueries`]: the per-outbound-face `out qid
 /// -> (inbound face, inbound rid)` map that routes a routed Query's `Response` /
