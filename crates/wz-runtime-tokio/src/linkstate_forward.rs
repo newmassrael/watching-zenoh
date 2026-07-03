@@ -2700,15 +2700,56 @@ impl LinkstateForwarder {
     /// `remove_link` detached set) and an ingest that detached nodes (`forward`,
     /// `changes.removed`). A gone node's interest must not keep a publisher's /
     /// querier's route gate spuriously armed. No-op for an empty set.
+    ///
+    /// R311y152 — this also fires the UNGRACEFUL detach undeclare-push (the peer
+    /// twin of the router's `purge_detached_interest_tier`): a native leaving
+    /// un-backs a co-attached CLIENT publisher's/querier's pushed reply ke exactly
+    /// as a graceful `Undeclare` does, so `undeclare_push_subs/qabls` re-arm its pico
+    /// write-filter here — zenoh's `pubsub_remove_node` ->
+    /// `propagate_forget_simple_subscription` (and the `queries_remove_node` twin).
+    /// The `subs`/`qabls` `borrow_mut`s are dropped BEFORE the undeclare loops, which
+    /// re-borrow `self.subs`/`qabls` (`any_sub/qabl_matches`) and `self.faces`
+    /// (`fan_out`); `deregister` hoists its own `self.faces` borrow so this runs with
+    /// it free. `still_backed` is the post-removal GLOBAL fold, so a reply ke a
+    /// surviving decl still backs is NOT undeclared. (Peer-specific: `any_sub_matches`
+    /// folds only `self.subs` — a client's over-the-wire sub is dropped in
+    /// `resolve_source_in` and never surfaces here — so a mesh-sub detach can undeclare
+    /// to a co-attached client PUBLISHER even while a co-attached client SUBSCRIBER
+    /// still wants the ke, re-arming that publisher's filter = UNDER-deliver toward that
+    /// subscriber; but benign — that subscriber is invisible to the peer's DATA plane
+    /// too (`publish` folds only `self.subs`), so it was never served here regardless
+    /// (the pre-existing two-clients-on-one-isolated-peer gap at `respond_to_interest`,
+    /// not introduced here — no NEW black-hole). Case c (the qabl completeness
+    /// DOWNGRADE on a partial withdrawal) stays deferred consistently with the
+    /// graceful path (see [`undeclare_push_qabls`](Self::undeclare_push_qabls)).
     fn purge_detached_interest(&self, removed: &[Zid]) {
         if removed.is_empty() {
             return;
         }
-        let mut subs = self.subs.borrow_mut();
-        let mut qabls = self.qabls.borrow_mut();
-        for zid in removed {
-            subs.remove_peer(zid);
-            qabls.remove_peer(zid);
+        // Remove the departed natives from both tables, COLLECTING the affected
+        // keyexprs (`remove_peer_keys`, the value-carrying twin of `remove_peer`) so
+        // the undeclare-push below re-arms per un-backed reply ke. Scoped so the
+        // `borrow_mut`s drop before the undeclare loops (which re-borrow the tables +
+        // `self.faces`). A `Vec` (not the router's `HashSet`) is fine: a ke backed by
+        // two removed zids appears twice, but undeclare_push is idempotent (the first
+        // clears `pushed`, the second no-ops) — the peer set feeds ONLY the undeclare,
+        // whereas the router set also feeds the cross-tier withdraw and dedups there.
+        let (affected_subs, affected_qabls) = {
+            let mut subs = self.subs.borrow_mut();
+            let mut qabls = self.qabls.borrow_mut();
+            let mut affected_subs: Vec<String> = Vec::new();
+            let mut affected_qabls: Vec<String> = Vec::new();
+            for zid in removed {
+                affected_subs.extend(subs.remove_peer_keys(zid));
+                affected_qabls.extend(qabls.remove_peer_keys(zid));
+            }
+            (affected_subs, affected_qabls)
+        };
+        for keyexpr in affected_subs {
+            self.undeclare_push_subs(&keyexpr);
+        }
+        for keyexpr in affected_qabls {
+            self.undeclare_push_qabls(&keyexpr);
         }
     }
 }
@@ -3417,7 +3458,15 @@ impl FaceForwarder for LinkstateForwarder {
         // CONNECTION_DROPPED), so no undeclare is owed.
         self.future_subs.borrow_mut().purge_face(id);
         self.future_qabls.borrow_mut().purge_face(id);
-        let dropped_link = if let Some(state) = self.faces.borrow_mut().remove(&id) {
+        // R311y152 — hoist the face removal OUT of the `if let` scrutinee so its
+        // `RefMut` on `self.faces` drops at THIS `;`. Edition 2021 keeps a scrutinee
+        // temporary alive across the whole `if let` block, and
+        // `purge_detached_interest` below now fires the undeclare-push, whose fan_out
+        // re-borrows `self.faces` (`undeclare_push_subs` -> `send_one_to_face` ->
+        // `fan_out`); the hoist frees that borrow before the choke point runs (the
+        // router's `deregister` is already `let-else`, so it needs no such hoist).
+        let removed_face = self.faces.borrow_mut().remove(&id);
+        let dropped_link = if let Some(state) = removed_face {
             if let Some(link) = state.link {
                 // remove_link drops the self<->neighbour edge and GC-prunes every
                 // node the link's loss DETACHED from the mesh (zenoh remove_link ->
@@ -4977,6 +5026,102 @@ mod tests {
                 assert_eq!(u.id, pushed_id, "the undeclare carries the pushed decl id")
             }
             _ => panic!("expected an UndeclareSubscriber"),
+        }
+    }
+
+    #[test]
+    fn peer_link_down_undeclares_to_the_client_publisher() {
+        // gap (a) / R311y152 — the CRITICAL peer regression guard: a MESH sub backing
+        // a co-attached client publisher's pushed reply ke goes DOWN via a LINK-DOWN
+        // (deregister -> remove_link -> purge_detached_interest), NOT a graceful
+        // Undeclare. The detach choke point must fire the undeclare-push so the
+        // publisher's write-filter re-arms — AND must not panic. The link-down path
+        // is the one that exercises the deregister `self.faces` borrow scope (the
+        // Oam-ingest detach path holds no such borrow), so a test on the Oam path
+        // alone would pass while link-down panics in production.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (mesh, _sm) = peer_face(zid(0x0A));
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &mesh);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, true, false, true),
+        );
+        sink_c.reset();
+        declare_interest(&fwd, FaceId(0), "demo/**"); // mesh sub learned -> pushed
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the mesh sub is pushed to the waiting client publisher"
+        );
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => d.id,
+            _ => panic!("expected a DeclareSubscriber push"),
+        };
+        assert_ne!(pushed_id, 0);
+        sink_c.reset();
+        fwd.deregister(FaceId(0)); // the backing mesh face goes DOWN (link-down)
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the link-down undeclares to the waiting publisher (the write-filter re-arms)"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => assert_eq!(
+                u.id, pushed_id,
+                "the link-down undeclare carries the pushed decl id"
+            ),
+            _ => panic!("expected an UndeclareSubscriber on link-down"),
+        }
+    }
+
+    #[test]
+    fn peer_link_down_undeclares_to_the_client_querier() {
+        // gap (a) query twin on the peer: a MESH queryable backing a co-attached
+        // client querier's pushed reply ke goes DOWN via a LINK-DOWN -> the detach
+        // choke point undeclares to the querier (its write-filter re-arms), through
+        // the same undeclare_push_qabls seam + hoisted-borrow path as the sub twin.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (mesh, _sm) = peer_face(zid(0x0A));
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &mesh);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, false, true, true),
+        );
+        sink_c.reset();
+        declare_queryable_interest(&fwd, FaceId(0), "demo/**"); // mesh qabl -> pushed
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the mesh qabl is pushed to the querier"
+        );
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            _ => panic!("expected a DeclareQueryable push"),
+        };
+        assert_ne!(pushed_id, 0);
+        sink_c.reset();
+        fwd.deregister(FaceId(0)); // the backing mesh qabl's face goes DOWN
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the link-down undeclares to the waiting querier"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
+                assert_eq!(
+                    u.id, pushed_id,
+                    "the link-down undeclare carries the pushed qabl id"
+                )
+            }
+            _ => panic!("expected an UndeclareQueryable on link-down"),
         }
     }
 

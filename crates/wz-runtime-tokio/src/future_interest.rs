@@ -283,16 +283,19 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// interests remain, `pushed` is kept — a shared reply ke may still back a live
     /// publisher/querier.
     ///
-    /// RESIDUAL (subsumed by the deferred undeclare-push R311y151, NOT a silent gap):
-    /// a subscriber/queryable that WITHDRAWS while an interest is still live leaves
-    /// the `pushed` entry stale (wz defers the withdrawal Undeclare), so a second
-    /// publisher/querier on that ke, declared during the absence, can miss its
-    /// re-push when the declaration reappears. For the QUERYABLE plane it is strictly
-    /// WORSE: the stale `(id, value)` entry also pins a stale COMPLETENESS, so a
-    /// reappearing queryable can leave an ALL_COMPLETE filter mis-armed. The
-    /// undeclare-push unit — which clears `pushed` and re-arms the filter on
-    /// withdrawal, zenoh `propagate_forget_simple_subscription/_queryable` — is the
-    /// complete fix.
+    /// RESIDUAL (CLOSED by the undeclare-push — R311y151 graceful + R311y152 detach,
+    /// NOT a silent gap): a subscriber/queryable that WITHDRAWS while an interest is
+    /// still live would leave the `pushed` entry stale, so a second publisher/querier
+    /// on that ke declared during the absence could miss its re-push when the
+    /// declaration reappears — and for the QUERYABLE plane strictly WORSE, the stale
+    /// `(id, value)` also pinning a stale COMPLETENESS (an ALL_COMPLETE filter
+    /// mis-armed). Both the GRACEFUL explicit-Undeclare (R311y151) and the UNGRACEFUL
+    /// face-down / link-down / topology-detach (R311y152) now run
+    /// [`forgets_for_withdrawn`](Self::forgets_for_withdrawn) → clear `pushed` + re-arm
+    /// the filter (zenoh `propagate_forget_simple_subscription/_queryable`). What stays
+    /// deferred is only the qabl completeness-DOWNGRADE on a PARTIAL withdrawal (the
+    /// reply ke stays backed at a lower folded completeness) — case (c), value-aware
+    /// re-push, not a `pushed`-clear; see [`forgets_for_withdrawn`](Self::forgets_for_withdrawn).
     pub fn remove_interest(&mut self, face: FaceId, interest_id: u64) -> bool {
         let Some(state) = self.by_face.get_mut(&face) else {
             return false;

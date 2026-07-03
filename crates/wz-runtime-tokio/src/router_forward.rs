@@ -1126,24 +1126,51 @@ impl RouterForwarder {
                 affected_qabl_keys.extend(qabls.remove_peer_keys(zid));
             }
         }
-        // R311y151 face-down residual (NAMED deferral, benign): this UNGRACEFUL
-        // departure removes mesh backing but does NOT fire the undeclare-push
-        // (undeclare_push_subs/qabls) to a co-attached, still-alive publisher whose
-        // pushed reply ke may have just lost its last backer — so that publisher's
-        // write-filter stays OFF (fail-open, over-deliver, self-heals on the next
-        // re-fold push; NOT a black-hole). The graceful explicit-Undeclare sites do
-        // fire it; wiring it here (per removed keyexpr) is the re-openable follow-up.
+        // R311y152 — the UNGRACEFUL detach now fires the undeclare-push too (this
+        // was the "benign NAMED deferral" the R311y151 residual left OFF here): a
+        // native departing via face-down / link-down / topology-detach un-backs a
+        // co-attached CLIENT publisher's/querier's pushed reply ke exactly as a
+        // graceful UndeclareSubscriber/Queryable does, so the SAME
+        // undeclare_push_subs/qabls seam re-arms its pico write-filter here — zenoh's
+        // node-removal forget-to-simple-face `propagate_forget_simple_subscription`,
+        // reached on a node drop (router hat via `unregister_router_subscription`,
+        // hat/router/pubsub.rs:568; linkstate_peer hat via `unregister_peer_subscription`,
+        // hat/linkstate_peer/pubsub.rs:482), and the `queries_remove_node` twin.
+        // The two per-keyexpr retraction actions are co-located: the cross-tier mesh
+        // WITHDRAW (opposite-mesh wire advertisement) and the client undeclare-push
+        // (client-face pushed declarations) are DISJOINT and order-free. still_backed
+        // (any_sub/qabl_matches) is the post-removal GLOBAL existence fold, so a reply
+        // ke a surviving tier / client still backs is NOT undeclared. The undeclare
+        // fires INSIDE this choke point because BOTH router callers hold NO
+        // `self.faces` borrow (deregister's let-else; the Oam-ingest arm of `forward`);
+        // the peer twin defers it PAST its if-let, which does hold that borrow.
+        //
+        // Cross-tier qabl withdraw (A2b): a partial removal that leaves a contributor
+        // DOWNGRADES via a re-declared DeclareQueryable; a full removal floods an
+        // explicit UndeclareQueryable retraction (expressible via the ext_wire_expr
+        // codec).
+        //
+        // STILL DEFERRED here (named, NOT silent): (c) the qabl completeness-DOWNGRADE
+        // on a PARTIAL withdrawal toward the CLIENT querier — a native leaves but the
+        // reply ke stays backed at a now-lower folded completeness. undeclare_push_qabls
+        // forgets only a FULLY un-backed reply ke; a still-backed-but-downgraded one
+        // keeps its stale `(id, ALL_COMPLETE)`. This is a KNOWN divergence from zenoh's
+        // ROUTER hat, which re-declares the downgraded QueryableInfo on partial
+        // node-removal (register_router_queryable via local_router_qabl_info,
+        // hat/router/queries.rs:930-940) — the linkstate_peer hat is full-undeclare-only
+        // like wz. Deferred CONSISTENTLY with the graceful path (see undeclare_push_qabls).
+        // Also pre-existing + benign: any_sub/qabl_matches fold with NO destination-face
+        // exclusion (vs zenoh loop-2's remote_*_subs(&m, &face)), so a client that both
+        // publishes AND subscribes a ke keeps its OWN filter OFF after the other backer
+        // detaches (over-deliver, never a spurious undeclare) — a property of the reused
+        // graceful seam, not introduced by this wiring.
         for keyexpr in affected_sub_keys {
             self.withdraw_native_cross_tier_sub(tier, &keyexpr);
+            self.undeclare_push_subs(&keyexpr);
         }
-        // The qabl plane recomputes self's cross-tier advertisement per affected
-        // keyexpr (A2b) via the SAME withdraw seam the per-keyexpr undeclare uses:
-        // a partial removal that leaves a contributor DOWNGRADES via a re-declared
-        // DeclareQueryable; a full removal (no contributor) floods an explicit
-        // `UndeclareQueryable` retraction (now expressible via the ext_wire_expr
-        // codec — no longer the SELF-down-only staleness the deferral left).
         for keyexpr in affected_qabl_keys {
             self.withdraw_native_cross_tier_qabl(tier, &keyexpr);
+            self.undeclare_push_qabls(&keyexpr);
         }
     }
 
@@ -5353,6 +5380,186 @@ mod tests {
             forwarded_declare(&sink_c.frame_bytes(0)).body,
             DeclareOwnedVariant::CodecZenohDeclQueryable(_)
         ));
+    }
+
+    #[test]
+    fn native_detach_undeclares_to_the_waiting_publisher() {
+        // gap (a) / R311y152: the UNGRACEFUL twin of
+        // withdrawing_the_last_backing_sub... . A mesh native that BACKED a
+        // co-attached publisher's pushed reply ke goes DOWN (face-down / link-down),
+        // so the detach choke point (purge_detached_interest_tier) must fire the
+        // undeclare-push exactly as the graceful UndeclareSubscriber path does —
+        // zenoh's pubsub_remove_node -> propagate_forget_simple_subscription. Before
+        // R311y152 the detach path removed the mesh backing but left the publisher's
+        // write-filter OFF forever (the "benign NAMED deferral").
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (native, _ns) = face(zid(0xBB), WIRE_PEER); // the backing mesh native
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT); // the waiting publisher
+        fwd.register(FaceId(0), &native);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, true, false, true),
+        );
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**")); // learned -> pushed
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the mesh sub is pushed to the waiting publisher"
+        );
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => d.id,
+            _ => panic!("expected a DeclareSubscriber push"),
+        };
+        assert_ne!(pushed_id, 0);
+        sink_c.reset();
+        fwd.deregister(FaceId(0)); // the backing native's face goes DOWN (ungraceful)
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the detach undeclares to the waiting publisher (the write-filter re-arms)"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => assert_eq!(
+                u.id, pushed_id,
+                "the detach undeclare carries the pushed decl id (pico keys its filter on it)"
+            ),
+            _ => panic!("expected an UndeclareSubscriber on detach"),
+        }
+    }
+
+    #[test]
+    fn native_detach_undeclares_to_the_waiting_querier() {
+        // gap (a) query twin: the backing mesh queryable's face goes DOWN -> the
+        // detach choke point undeclares to the waiting querier (its ALL_COMPLETE
+        // filter re-arms), mirroring zenoh queries_remove_node ->
+        // propagate_forget_simple_queryable (full un-backing).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (native, _ns) = face(zid(0xBB), WIRE_PEER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &native);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, false, true, true),
+        );
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true));
+        assert_eq!(sink_c.frame_count(), 1, "the mesh qabl is pushed");
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            _ => panic!("expected a DeclareQueryable push"),
+        };
+        sink_c.reset();
+        fwd.deregister(FaceId(0));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the detach undeclares to the waiting querier"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
+                assert_eq!(
+                    u.id, pushed_id,
+                    "the detach undeclare carries the pushed qabl id"
+                )
+            }
+            _ => panic!("expected an UndeclareQueryable on detach"),
+        }
+    }
+
+    #[test]
+    fn native_detach_keeps_a_reply_ke_a_client_still_backs() {
+        // gap (a) still-backed guard: a mesh native AND a co-attached client both
+        // back the publisher's pushed reply ke. The native detaches, but the client
+        // sub still backs it -> NO undeclare (the global existence fold any_sub_matches
+        // sees the surviving client sub), so the filter correctly stays OFF.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (native, _ns) = face(zid(0xBB), WIRE_PEER); // backing mesh native
+        let (pubc, sink_p) = face(zid(0xCC), WIRE_CLIENT); // the waiting publisher
+        let (subc, _ss) = face(zid(0xDD), WIRE_CLIENT); // a co-attached client subscriber
+        fwd.register(FaceId(0), &native);
+        fwd.register(FaceId(1), &pubc);
+        fwd.register(FaceId(2), &subc);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, true, false, true),
+        );
+        sink_p.reset(); // clear the empty-dump DeclareFinal
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**")); // native backs + pushes
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the mesh sub is pushed to the publisher (guards against a vacuous negative)"
+        );
+        forward_one(&fwd, FaceId(2), declare_sub("demo/key")); // client also backs (dedups)
+        sink_p.reset();
+        fwd.deregister(FaceId(0)); // the native detaches, but the client sub remains
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "a reply ke still backed by a surviving client sub is NOT undeclared on detach"
+        );
+    }
+
+    #[test]
+    fn remote_oam_detach_undeclares_to_the_waiting_publisher() {
+        // gap (a) via the OTHER detach entry point: a topology Oam-ingest detach
+        // (changes.removed), not a local face-down. A router-native sub is sourced
+        // from a DISTANT router Rd learned via neighbour A; a co-attached client
+        // publisher was pushed that sub. When an Oam drops A's link to Rd, Rd
+        // detaches and purge_detached_interest_tier(tier, &changes.removed) — the
+        // SAME choke point the link-down uses — fires the undeclare-push. Guards
+        // that the Oam-ingest call site (which runs inside forward's message loop)
+        // holds no self.faces borrow across the undeclare fan_out.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _as) = face(zid(0xAA), WIRE_ROUTER); // router neighbour
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT); // the waiting publisher
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &client);
+        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xBB, 7, 5); // Rd(0xBB) via A, psid 7
+        fwd.tick();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, true, false, true),
+        );
+        sink_c.reset(); // clear the empty-dump DeclareFinal
+                        // A router-native sub for demo/** sourced from the DISTANT router Rd (node_id 7).
+        let mut decl = build_declare_subscriber(0, 0, Some("demo/**")).expect("build");
+        set_declare_source(&mut decl, 7);
+        forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(decl)));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the distant-router sub is pushed to the waiting publisher"
+        );
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => d.id,
+            _ => panic!("expected a DeclareSubscriber push"),
+        };
+        sink_c.reset();
+        // A now links ONLY to self (drops Rd), higher sn -> Rd unreachable -> the
+        // ingest detaches it -> the shared choke point fires the undeclare-push.
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 6);
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the Oam-detach of the distant-router sub undeclares to the waiting publisher"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => {
+                assert_eq!(
+                    u.id, pushed_id,
+                    "the Oam-detach undeclare carries the pushed decl id"
+                )
+            }
+            _ => panic!("expected an UndeclareSubscriber on Oam-detach"),
+        }
     }
 
     #[test]
