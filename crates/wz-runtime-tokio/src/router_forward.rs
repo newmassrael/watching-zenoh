@@ -318,7 +318,8 @@ use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable_reply,
     build_declare_queryable_reply_with_id, build_declare_queryable_with_id_info,
     build_declare_subscriber, build_declare_subscriber_reply,
-    build_declare_subscriber_reply_with_id, build_undeclare_queryable_with_keyexpr,
+    build_declare_subscriber_reply_with_id, build_undeclare_queryable,
+    build_undeclare_queryable_with_keyexpr, build_undeclare_subscriber,
     build_undeclare_subscriber_with_keyexpr,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
@@ -1125,6 +1126,13 @@ impl RouterForwarder {
                 affected_qabl_keys.extend(qabls.remove_peer_keys(zid));
             }
         }
+        // R311y151 face-down residual (NAMED deferral, benign): this UNGRACEFUL
+        // departure removes mesh backing but does NOT fire the undeclare-push
+        // (undeclare_push_subs/qabls) to a co-attached, still-alive publisher whose
+        // pushed reply ke may have just lost its last backer — so that publisher's
+        // write-filter stays OFF (fail-open, over-deliver, self-heals on the next
+        // re-fold push; NOT a black-hole). The graceful explicit-Undeclare sites do
+        // fire it; wiring it here (per removed keyexpr) is the re-openable follow-up.
         for keyexpr in affected_sub_keys {
             self.withdraw_native_cross_tier_sub(tier, &keyexpr);
         }
@@ -1606,6 +1614,10 @@ impl RouterForwarder {
             build_undeclare_subscriber_with_keyexpr,
         ) {
             self.withdraw_native_cross_tier_sub(tier, &keyexpr);
+            // R311y151 undeclare-push: the mesh sub is gone from the table, so if a
+            // waiting publisher's pushed reply ke has now lost its LAST backer,
+            // re-arm its write-filter with an UndeclareSubscriber + clear `pushed`.
+            self.undeclare_push_subs(&keyexpr);
         }
     }
 
@@ -1762,6 +1774,10 @@ impl RouterForwarder {
             build_undeclare_queryable_with_keyexpr,
         ) {
             self.withdraw_native_cross_tier_qabl(tier, &keyexpr);
+            // R311y151 undeclare-push (query twin): a waiting querier whose pushed
+            // reply ke lost its LAST backing queryable is re-armed with an
+            // UndeclareQueryable + `pushed` cleared.
+            self.undeclare_push_qabls(&keyexpr);
         }
     }
 
@@ -2392,8 +2408,13 @@ impl RouterForwarder {
             }
             removed
         };
-        if removed && !self.any_client_subscribes(&keyexpr) {
-            self.withdraw_client_cross_tier_sub(&keyexpr);
+        if removed {
+            if !self.any_client_subscribes(&keyexpr) {
+                self.withdraw_client_cross_tier_sub(&keyexpr);
+            }
+            // R311y151 undeclare-push: this client sub is gone; re-arm any waiting
+            // publisher whose pushed reply ke lost its last backer.
+            self.undeclare_push_subs(&keyexpr);
         }
     }
 
@@ -2408,6 +2429,80 @@ impl RouterForwarder {
             .borrow()
             .values()
             .any(|set| set.contains(keyexpr))
+    }
+
+    /// Whether ANY subscription wz still holds INTERSECTS `ke` — the "still backed"
+    /// existence predicate the R311y151 undeclare-push consults AFTER a withdrawal to
+    /// decide whether a pushed reply ke has lost its LAST backer (`false` => undeclare
+    /// and re-arm the filter). Folds GLOBALLY (no self/dest-face exclusion): the
+    /// current dump's "backed" is `matching_entries` non-empty or an intersecting
+    /// client sub, so a per-destination exclusion here would spuriously undeclare a
+    /// reply ke still backed by a co-hosted or self sub.
+    fn any_sub_matches(&self, ke: &str) -> bool {
+        for table in [&self.router_subs, &self.linkstatepeer_subs] {
+            if !table.borrow().matching_entries(ke, None).is_empty() {
+                return true;
+            }
+        }
+        let chunks: Vec<&str> = ke.split('/').collect();
+        self.client_subs
+            .borrow()
+            .values()
+            .any(|set| set.iter().any(|k| keyexpr_intersects_target(k, &chunks)))
+    }
+
+    /// The queryable twin of [`any_sub_matches`](Self::any_sub_matches). An EXISTENCE
+    /// check, NOT [`merged_qabl_info`](Self::merged_qabl_info) (which folds to
+    /// `QueryableInfo::DEFAULT` on zero matches — a value read would report "backed"
+    /// even when no queryable exists and suppress every undeclare).
+    fn any_qabl_matches(&self, ke: &str) -> bool {
+        for table in [&self.router_qabls, &self.linkstatepeer_qabls] {
+            if !table.borrow().matching_entries(ke, None).is_empty() {
+                return true;
+            }
+        }
+        let chunks: Vec<&str> = ke.split('/').collect();
+        self.client_qabls
+            .borrow()
+            .values()
+            .any(|m| m.keys().any(|k| keyexpr_intersects_target(k, &chunks)))
+    }
+
+    /// Emit the R311y151 UNDECLARE pushes a withdrawn SUBSCRIPTION `withdrawn_ke`
+    /// triggers: for each CLIENT face whose pushed reply ke is now UN-backed, an
+    /// unsolicited `UndeclareSubscriber(id)` (interest_id None) that re-arms the pico
+    /// publisher's write-filter, clearing the stale `pushed` entry so a later
+    /// re-declaration re-pushes (the residual the y146/y150 store documented). Run
+    /// AFTER the withdrawn sub is removed from its table so `any_sub_matches` is
+    /// post-withdrawal.
+    fn undeclare_push_subs(&self, withdrawn_ke: &str) {
+        let forgets = self
+            .future_subs
+            .borrow_mut()
+            .forgets_for_withdrawn(withdrawn_ke, |rk| self.any_sub_matches(rk));
+        for (face, _reply_ke, id) in forgets {
+            self.send_one_to_face(
+                face,
+                NetworkMessage::Declare(Box::new(build_undeclare_subscriber(id))),
+            );
+        }
+    }
+
+    /// The queryable twin of [`undeclare_push_subs`](Self::undeclare_push_subs) —
+    /// `UndeclareQueryable(id)` for each un-backed pushed reply ke. (Case 1 only: a
+    /// PARTIAL withdrawal that leaves the reply ke backed at a DOWNGRADED completeness
+    /// is the deferred ALL_COMPLETE value-downgrade unit, not touched here.)
+    fn undeclare_push_qabls(&self, withdrawn_ke: &str) {
+        let forgets = self
+            .future_qabls
+            .borrow_mut()
+            .forgets_for_withdrawn(withdrawn_ke, |rk| self.any_qabl_matches(rk));
+        for (face, _reply_ke, id) in forgets {
+            self.send_one_to_face(
+                face,
+                NetworkMessage::Declare(Box::new(build_undeclare_queryable(id))),
+            );
+        }
     }
 
     /// The mesh a NATIVE in `tier` advertises its cross-tier interest INTO — the
@@ -2807,6 +2902,9 @@ impl RouterForwarder {
         };
         if removed {
             self.withdraw_client_cross_tier_qabl(&keyexpr);
+            // R311y151 undeclare-push (query twin): re-arm any waiting querier whose
+            // pushed reply ke lost its last backing queryable.
+            self.undeclare_push_qabls(&keyexpr);
         }
     }
 
@@ -5107,6 +5205,157 @@ mod tests {
     }
 
     #[test]
+    fn withdrawing_the_last_backing_sub_undeclares_and_lets_a_re_declare_re_push() {
+        // R311y151 undeclare-push: after a pub-before-sub push (a mesh sub learned +
+        // pushed to the waiting client publisher), WITHDRAWING that mesh sub (its
+        // last backer gone) pushes an UndeclareSubscriber carrying the SAME id so the
+        // publisher's write-filter RE-ARMS, and clears `pushed` so a later re-declared
+        // sub re-pushes (the residual y146/y150 documented).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, true, false, true),
+        );
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        assert_eq!(sink_c.frame_count(), 1, "the mesh sub is pushed");
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => d.id,
+            _ => panic!("expected a DeclareSubscriber push"),
+        };
+        assert_ne!(pushed_id, 0);
+        sink_c.reset();
+        // Withdraw the mesh sub -> UndeclareSubscriber(pushed_id) to the publisher.
+        forward_one(&fwd, FaceId(0), undeclare_sub("demo/**"));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the withdrawal of the last backer undeclares to the waiting publisher"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => assert_eq!(
+                u.id, pushed_id,
+                "the undeclare carries the pushed decl id (pico keys its filter on it)"
+            ),
+            _ => panic!("expected an UndeclareSubscriber"),
+        }
+        sink_c.reset();
+        // A re-declared mesh sub RE-pushes (the pushed entry was cleared, not stale).
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the reappearing sub re-pushes after the undeclare cleared the registry"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_)
+        ));
+    }
+
+    #[test]
+    fn withdrawal_while_another_sub_still_backs_does_not_undeclare() {
+        // The aggregate multi-backer case: two mesh subs (demo/a, demo/b) both back
+        // the aggregate demo/key push; withdrawing demo/a leaves demo/b backing, so
+        // NO undeclare fires (the publisher's filter stays correctly OFF).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, true, false, true),
+        );
+        // BOTH subs INTERSECT the interest target demo/key, so both back the
+        // aggregate reply ke (demo/**` matches demo/key; demo/key is exact). The
+        // FIRST push happens on demo/**; the second dedups (same aggregate reply ke).
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/key"));
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a second backer under the same aggregate reply ke needs no new push"
+        );
+        // Withdraw ONE backer -> the reply ke is STILL backed by demo/key -> NO
+        // undeclare (the publisher's filter stays correctly OFF).
+        forward_one(&fwd, FaceId(0), undeclare_sub("demo/**"));
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "demo/key still backs the aggregate reply ke -> no undeclare"
+        );
+        // Withdraw the LAST backer -> now un-backed -> the undeclare fires.
+        forward_one(&fwd, FaceId(0), undeclare_sub("demo/key"));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the LAST backer's withdrawal undeclares (the filter re-arms)"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(_)
+        ));
+    }
+
+    #[test]
+    fn withdrawing_the_backing_qabl_undeclares_to_the_waiting_querier() {
+        // R311y151 query twin: a mesh queryable was pushed to a waiting client
+        // querier; withdrawing it (last backer gone) pushes an UndeclareQueryable
+        // carrying the SAME id so the querier's write-filter RE-ARMS + clears
+        // `pushed`, and a re-declared queryable re-pushes.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, false, true, true),
+        );
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true));
+        assert_eq!(sink_c.frame_count(), 1, "the mesh qabl is pushed");
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            _ => panic!("expected a DeclareQueryable push"),
+        };
+        assert_ne!(pushed_id, 0);
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), undeclare_qabl("demo/**"));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the withdrawal of the last backing qabl undeclares to the waiting querier"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
+                assert_eq!(u.id, pushed_id, "the undeclare carries the pushed qabl id")
+            }
+            _ => panic!("expected an UndeclareQueryable"),
+        }
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the reappearing qabl re-pushes after the undeclare cleared the registry"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclQueryable(_)
+        ));
+    }
+
+    #[test]
     fn future_interest_final_stops_further_pushes() {
         // pico sends an Interest(Final) when a publisher drops (net/primitives.c
         // _z_remove_interest, client-gated); wz must FORGET the stored FUTURE
@@ -6563,6 +6812,12 @@ mod tests {
                 },
             )
             .expect("build queryable"),
+        ))
+    }
+
+    fn undeclare_qabl(keyexpr: &str) -> NetworkMessage {
+        NetworkMessage::Declare(Box::new(
+            build_undeclare_queryable_with_keyexpr(keyexpr).expect("build undeclare qabl"),
         ))
     }
 

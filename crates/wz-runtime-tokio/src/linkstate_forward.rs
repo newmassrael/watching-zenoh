@@ -97,7 +97,8 @@ use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable, build_declare_queryable_reply,
     build_declare_queryable_reply_with_id, build_declare_queryable_with_id_info,
     build_declare_subscriber, build_declare_subscriber_reply,
-    build_declare_subscriber_reply_with_id, build_undeclare_queryable_with_keyexpr,
+    build_declare_subscriber_reply_with_id, build_undeclare_queryable,
+    build_undeclare_queryable_with_keyexpr, build_undeclare_subscriber,
     build_undeclare_subscriber_with_keyexpr, set_declare_queryable_info,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
@@ -1574,6 +1575,52 @@ impl LinkstateForwarder {
         }
     }
 
+    /// Whether ANY subscription/queryable wz still holds INTERSECTS `ke` — the
+    /// "still backed" existence predicates the R311y151 undeclare-push consults AFTER
+    /// a withdrawal (`false` => the pushed reply ke lost its LAST backer, so undeclare
+    /// and re-arm the filter). Fold GLOBALLY (`None` exclusion) so a self-local decl
+    /// under `self_zid` still counts as backing. Existence, NOT `merged_qabl_info`
+    /// (which folds to DEFAULT on zero matches).
+    fn any_sub_matches(&self, ke: &str) -> bool {
+        !self.subs.borrow().matching_entries(ke, None).is_empty()
+    }
+
+    fn any_qabl_matches(&self, ke: &str) -> bool {
+        !self.qabls.borrow().matching_entries(ke, None).is_empty()
+    }
+
+    /// Emit the R311y151 UNDECLARE pushes a withdrawn SUBSCRIPTION `withdrawn_ke`
+    /// triggers — one `UndeclareSubscriber(id)` per CLIENT face whose pushed reply ke
+    /// is now un-backed, clearing the stale `pushed` entry so the pico write-filter
+    /// re-arms. Run AFTER the sub is removed from `self.subs`. Counterless (like the
+    /// peer push).
+    fn undeclare_push_subs(&self, withdrawn_ke: &str) {
+        let forgets = self
+            .future_subs
+            .borrow_mut()
+            .forgets_for_withdrawn(withdrawn_ke, |rk| self.any_sub_matches(rk));
+        for (face, _reply_ke, id) in forgets {
+            self.send_one_to_face(
+                face,
+                NetworkMessage::Declare(Box::new(build_undeclare_subscriber(id))),
+            );
+        }
+    }
+
+    /// The queryable twin of [`undeclare_push_subs`](Self::undeclare_push_subs).
+    fn undeclare_push_qabls(&self, withdrawn_ke: &str) {
+        let forgets = self
+            .future_qabls
+            .borrow_mut()
+            .forgets_for_withdrawn(withdrawn_ke, |rk| self.any_qabl_matches(rk));
+        for (face, _reply_ke, id) in forgets {
+            self.send_one_to_face(
+                face,
+                NetworkMessage::Declare(Box::new(build_undeclare_queryable(id))),
+            );
+        }
+    }
+
     /// Originate a LOCAL queryable INTO the mesh: this node offers a queryable for
     /// `keyexpr` with the given `complete` flag (the BestMatching input — `true` =
     /// this node can FULLY answer the keyexpr, e.g. a storage holding the whole
@@ -1614,6 +1661,10 @@ impl LinkstateForwarder {
         // CLIENT face whose FUTURE querier-interest matches (origin None = no inbound
         // face), with the RE-FOLDED merged info; the store dedups a redundant
         // re-declare and re-pushes only a completeness flip.
+        // R311y151 NAMED gap: there is no `undeclare_queryable` twin — a self-local
+        // queryable is never RETRACTED in wz, so no withdraw event exists to fire the
+        // undeclare-push (no stale `pushed` entry can form from this path). If a
+        // self-local qabl retraction lands later, wire its forget like undeclare_subscription.
         self.push_future_queryable(keyexpr, None);
         // node_id 0 = self-originated; the completeness rides the body ext
         // (omitted when DEFAULT/incomplete — the byte-identical no-info wire).
@@ -1807,7 +1858,12 @@ impl LinkstateForwarder {
     /// never held the interest).
     pub fn undeclare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
         let self_zid = *self.net.borrow().self_zid();
-        self.subs.borrow_mut().withdraw(keyexpr, &self_zid);
+        let removed = self.subs.borrow_mut().withdraw(keyexpr, &self_zid);
+        if removed {
+            // R311y151 undeclare-push: this self-local sub is gone; re-arm any
+            // waiting CLIENT publisher whose pushed reply ke lost its last backer.
+            self.undeclare_push_subs(keyexpr);
+        }
         let declare = build_undeclare_subscriber_with_keyexpr(keyexpr)?;
         self.flood_to_tree_children(&self_zid, || {
             NetworkMessage::Declare(Box::new(declare.clone()))
@@ -2049,14 +2105,18 @@ impl LinkstateForwarder {
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
             _ => return,
         };
-        self.forward_interest_withdrawal(
+        if let Some(keyexpr) = self.forward_interest_withdrawal(
             inbound,
             reliable,
             declare,
             exts,
             &self.subs,
             build_undeclare_subscriber_with_keyexpr,
-        );
+        ) {
+            // R311y151 undeclare-push: the mesh sub is gone; re-arm any waiting
+            // publisher whose pushed reply ke lost its last backer.
+            self.undeclare_push_subs(&keyexpr);
+        }
     }
 
     /// A sourced `UndeclareQueryable` arrived on `inbound`: the query-plane twin
@@ -2072,14 +2132,18 @@ impl LinkstateForwarder {
             DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
             _ => return,
         };
-        self.forward_interest_withdrawal(
+        if let Some(keyexpr) = self.forward_interest_withdrawal(
             inbound,
             reliable,
             declare,
             exts,
             &self.qabls,
             build_undeclare_queryable_with_keyexpr,
-        );
+        ) {
+            // R311y151 undeclare-push (query twin): re-arm any waiting querier whose
+            // pushed reply ke lost its last backing queryable.
+            self.undeclare_push_qabls(&keyexpr);
+        }
     }
 
     /// The shared sourced-interest-WITHDRAWAL re-flood, SSOT for both the
@@ -2101,6 +2165,12 @@ impl LinkstateForwarder {
     /// extension chain (extracted by the caller from its body-specific variant);
     /// `table` selects the subscriber/queryable interest instance; `build` mints
     /// the per-flow `Undeclare*` carrier from the resolved LITERAL keyexpr (id 0).
+    /// Returns the resolved keyexpr on a REAL removal (`None` on an unresolvable
+    /// alias / unknown source / no-op withdraw), so the caller can fire the
+    /// R311y151 undeclare-push forget for that keyexpr — the withdraw twin of
+    /// [`forward_interest_declaration`](Self::forward_interest_declaration)'s
+    /// `Option<String>`. The re-flood below is best-effort; a real removal returns
+    /// `Some(keyexpr)` whether or not there were tree children to re-flood to.
     fn forward_interest_withdrawal<V>(
         &self,
         inbound: FaceId,
@@ -2109,48 +2179,38 @@ impl LinkstateForwarder {
         exts: Option<&Vec<ExtEntryOwned>>,
         table: &RefCell<LinkstatepeerInterest<V>>,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
-    ) {
+    ) -> Option<String> {
         let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
-            };
-            let Some(keyexpr) = resolve_ext_keyexpr(exts, &s.keyexpr_table) else {
-                return;
-            };
+            let s = faces.get(&inbound)?;
+            let keyexpr = resolve_ext_keyexpr(exts, &s.keyexpr_table)?;
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
-        let Some((source_zid, out_node_id)) =
-            self.resolve_source(inbound_zid, inbound_link, read_declare_source(declare))
-        else {
-            return;
-        };
+        let (source_zid, out_node_id) =
+            self.resolve_source(inbound_zid, inbound_link, read_declare_source(declare))?;
         // Withdraw the resolved interest; re-flood ONLY on a real removal (the
         // loop-bounding change-gate).
         if !table.borrow_mut().withdraw(&keyexpr, &source_zid) {
-            return;
+            return None;
         }
+        // A real removal — re-flood a CLEAN sourced literal retraction to self's
+        // children in the source's tree (B1b normalize, uniform with the declare
+        // side): the downstream link withdraws by the resolved literal, a sourced
+        // retraction carries no id. Best-effort; the removal (and thus the caller's
+        // undeclare-push forget) stands regardless.
         let children = self.net.borrow().tree_children_of(&source_zid);
-        if children.is_empty() {
-            return;
+        if !children.is_empty() {
+            if let Ok(mut carrier) = build(keyexpr.as_str()) {
+                set_declare_source(&mut carrier, out_node_id);
+                let _ = self.fan_out(reliable, None, |id, zid| {
+                    Ok(
+                        is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
+                            .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
+                    )
+                });
+            }
         }
-        // Re-flood a CLEAN sourced literal retraction built from the resolved
-        // keyexpr (B1b normalize — uniform with the declare side and the data
-        // plane): the downstream link withdraws by the resolved literal, and a
-        // sourced retraction carries no id. Always rebuild, no aliased-vs-literal
-        // branch.
-        let Ok(mut carrier) = build(keyexpr.as_str()) else {
-            return;
-        };
-        set_declare_source(&mut carrier, out_node_id);
-        // Re-flood to self's children in the source's tree — the same shared
-        // re-forward predicate the declare path uses; only the carrier differs.
-        let _ = self.fan_out(reliable, None, |id, zid| {
-            Ok(
-                is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
-                    .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
-            )
-        });
+        Some(keyexpr)
     }
 
     /// Re-advertise known SUBSCRIPTIONS to the NEW children a tree-recompute
@@ -4877,6 +4937,46 @@ mod tests {
                 }
             }
             _ => panic!("expected a DeclareQueryable future push"),
+        }
+    }
+
+    #[test]
+    fn peer_withdrawing_the_self_local_sub_undeclares_to_the_client_publisher() {
+        // R311y151 peer undeclare-push: a self-local sub was pushed to a waiting
+        // client publisher; `undeclare_subscription` re-arms the publisher's
+        // write-filter with an UndeclareSubscriber carrying the SAME id + clears
+        // `pushed`. (The mesh path via forward_unsubscription is structurally the
+        // twin — both fire the forget after the removal.)
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, true, false, true),
+        );
+        sink_c.reset();
+        fwd.declare_subscription("demo/**")
+            .expect("declare local subscriber");
+        assert_eq!(sink_c.frame_count(), 1, "the self-local sub is pushed");
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => d.id,
+            _ => panic!("expected a DeclareSubscriber push"),
+        };
+        assert_ne!(pushed_id, 0);
+        sink_c.reset();
+        fwd.undeclare_subscription("demo/**")
+            .expect("undeclare local subscriber");
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the withdrawal undeclares to the waiting client publisher"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => {
+                assert_eq!(u.id, pushed_id, "the undeclare carries the pushed decl id")
+            }
+            _ => panic!("expected an UndeclareSubscriber"),
         }
     }
 

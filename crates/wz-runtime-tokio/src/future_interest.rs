@@ -304,6 +304,49 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         removed
     }
 
+    /// A declaration for `withdrawn_ke` was WITHDRAWN (R311y151 undeclare-push) —
+    /// return the `(face, reply keyexpr, decl id)` UNDECLARE pushes to emit and
+    /// REMOVE their now-stale `pushed` entries: one per pushed reply ke that
+    /// `withdrawn_ke` could have backed (they INTERSECT) AND is NO LONGER backed
+    /// (`!still_backed(reply_ke)`). The caller must run this AFTER the withdrawn
+    /// declaration is removed from its routing table, so `still_backed` reflects the
+    /// post-withdrawal state (a reply ke backed by ANOTHER declaration must return
+    /// `true` and NOT be undeclared — the aggregate multi-backer case). The caller
+    /// builds an unsolicited `Undeclare{Subscriber,Queryable}(id)` (interest_id
+    /// `None`) and sends it to `face`; clearing `pushed` re-arms the pico write-filter
+    /// AND lets a later re-declaration of the ke re-push (the stale-`pushed` residual
+    /// [`remove_interest`](Self::remove_interest) documents). Value-agnostic — an
+    /// undeclare drops the entry regardless of `V` (the qabl value-downgrade on a
+    /// PARTIAL withdrawal, where the reply ke stays backed, is a separate deferred
+    /// unit and is NOT touched here).
+    pub fn forgets_for_withdrawn<B: Fn(&str) -> bool>(
+        &mut self,
+        withdrawn_ke: &str,
+        still_backed: B,
+    ) -> Vec<(FaceId, String, u64)> {
+        let mut out = Vec::new();
+        for (face, state) in self.by_face.iter_mut() {
+            // Select the pushed reply kes the withdrawal could have un-backed (the
+            // withdrawn ke intersects the reply ke) that are now unbacked — collect
+            // before mutating `pushed` (the read borrow can't overlap the remove).
+            let to_forget: Vec<String> = state
+                .pushed
+                .keys()
+                .filter(|reply_ke| {
+                    let chunks: Vec<&str> = reply_ke.split('/').collect();
+                    keyexpr_intersects_target(withdrawn_ke, &chunks) && !still_backed(reply_ke)
+                })
+                .cloned()
+                .collect();
+            for reply_ke in to_forget {
+                if let Some((id, _)) = state.pushed.remove(&reply_ke) {
+                    out.push((*face, reply_ke, id));
+                }
+            }
+        }
+        out
+    }
+
     /// Drop ALL of a face's future-interest state — the `deregister` face-down
     /// purge. Returns `true` if the face held any.
     pub fn purge_face(&mut self, face: FaceId) -> bool {
@@ -638,5 +681,96 @@ mod tests {
                 .len(),
             1,
         );
+    }
+
+    // ── undeclare-push (R311y151): the withdrawal side. ──────────────────────────
+
+    #[test]
+    fn withdrawal_of_the_last_backer_undeclares_and_clears_pushed() {
+        // A sub was pushed to a waiting publisher; when the LAST backing sub
+        // withdraws (still_backed=false), the store returns the undeclare + clears
+        // the stale `pushed` entry (so the pico write-filter re-arms).
+        let mut s = FutureSubStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let pushed = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        assert_eq!(pushed.len(), 1);
+        let pushed_id = pushed[0].2;
+        let forgets = s.forgets_for_withdrawn("demo/data", |_| false);
+        assert_eq!(forgets.len(), 1, "the unbacked reply ke is undeclared");
+        assert_eq!(forgets[0].0, face(1));
+        assert_eq!(
+            forgets[0].1, "demo/**",
+            "undeclare keyed on the aggregate reply ke"
+        );
+        assert_eq!(
+            forgets[0].2, pushed_id,
+            "undeclare carries the pushed decl id"
+        );
+        assert_eq!(
+            s.pushed_count(face(1)),
+            0,
+            "the stale pushed entry is cleared"
+        );
+    }
+
+    #[test]
+    fn withdrawal_while_still_backed_does_not_undeclare() {
+        // demo/a withdraws but demo/b still backs the aggregate demo/** -> NO
+        // undeclare (still_backed=true), the pushed entry is kept.
+        let mut s = FutureSubStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let _ = s.pushes_for_new("demo/a", Some(face(9)), |_, _| ());
+        assert!(
+            s.forgets_for_withdrawn("demo/a", |_| true).is_empty(),
+            "a reply ke still backed by another sub is not undeclared",
+        );
+        assert_eq!(s.pushed_count(face(1)), 1, "the pushed entry is retained");
+    }
+
+    #[test]
+    fn cleared_pushed_lets_a_later_re_declaration_re_push() {
+        // The residual the undeclare-push closes: after a withdrawal clears `pushed`,
+        // a LATER re-declaration of the same ke re-pushes (a stale entry would have
+        // dedup-suppressed it).
+        let mut s = FutureSubStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        assert_eq!(s.forgets_for_withdrawn("demo/data", |_| false).len(), 1);
+        // The sub reappears -> re-push (not suppressed by a stale pushed entry).
+        let re = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        assert_eq!(
+            re.len(),
+            1,
+            "the reappearing sub re-pushes after the undeclare"
+        );
+    }
+
+    #[test]
+    fn a_non_intersecting_withdrawal_is_a_no_op() {
+        let mut s = FutureSubStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        assert!(
+            s.forgets_for_withdrawn("other/key", |_| false).is_empty(),
+            "a withdrawal outside the pushed reply ke does not undeclare",
+        );
+        assert_eq!(s.pushed_count(face(1)), 1);
+    }
+
+    #[test]
+    fn qabl_withdrawal_undeclares_value_agnostically() {
+        // The qabl twin: an undeclare drops the pushed (id, info) entry regardless of
+        // the stored completeness value.
+        let mut s = FutureQablStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let pushed = s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(true));
+        assert_eq!(pushed.len(), 1);
+        let forgets = s.forgets_for_withdrawn("demo/svc", |_| false);
+        assert_eq!(forgets.len(), 1);
+        assert_eq!(
+            forgets[0].2, pushed[0].2,
+            "undeclare carries the pushed qabl id"
+        );
+        assert_eq!(s.pushed_count(face(1)), 0);
     }
 }
