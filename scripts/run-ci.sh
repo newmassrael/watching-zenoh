@@ -4169,8 +4169,10 @@ layer_z_zenohd_interop() {
     # MIXED-VENDOR router backbone (pico -> zenohd -> linkstate -> wz-router ->
     # pico); leg 3 the reverse Put; leg 4 (R311y147) the QUERY plane (pico
     # z_querier behind wz -> zenohd -> pico z_queryable, reply in reverse); leg 5
-    # the FUTURE-mode pub-before-sub proactive-push closure. Needs zenohd + the
-    # pico z_pub/z_sub/z_querier/z_queryable CLIs (checked above) + the
+    # the FUTURE-mode pub-before-sub proactive-push closure; leg 6 (R311y149) the
+    # FORWARD query (pico z_querier behind zenohd -> wz -> pico z_queryable behind
+    # wz, wz advertising its client qabl cross-tier). Needs zenohd + the pico
+    # z_pub/z_sub/z_querier/z_queryable CLIs (checked above) + the
     # `router-hat-router` binary (built above). Same --test-threads=1 per-zenohd
     # isolation as the client legs.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \

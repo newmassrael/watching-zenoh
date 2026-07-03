@@ -17,8 +17,8 @@
 //! sn-newest-wins, full dump on new link) — the true "zenohd-equivalent" acid
 //! test for wz's router tier.
 //!
-//! Five legs, STAGED so a failure localises (topology before data before reverse
-//! data before query before future-mode):
+//! Six legs, STAGED so a failure localises (topology before data before reverse
+//! data before query before future-mode before forward-query):
 //!
 //!   1. `wz_router_hat_federates_with_zenohd_at_router_tier` — the CONTROL-PLANE
 //!      floor: wz `--router-hat --connect <zenohd>` dials the reference router;
@@ -89,15 +89,23 @@
 //!      Asserted via the `pushed a future subscriber` witness so the deactivation
 //!      is provably the FUTURE push, not a raced CURRENT dump.
 //!
+//!   6. `wz_router_hat_and_zenohd_federate_a_pico_query_across_the_backbone` — the FORWARD
+//!      QUERY-plane acid test (R311y149; the query twin of leg 2, OPPOSITE to leg
+//!      4). A pico `z_queryable` behind the WZ router answers `demo/**`; a pico
+//!      `z_querier` behind ZENOHD queries `demo/key`. wz ADVERTISES its client
+//!      queryable across the routers_net (`advertise_client_cross_tier_qabl`) so
+//!      zenohd routes the querier's Query toward wz; wz routes that INGRESS Query
+//!      to its client queryable and the Reply EGRESS back — query-INGRESS /
+//!      reply-EGRESS, the mirror of leg 4's query-EGRESS / reply-INGRESS.
+//!      Barrier-gated on `learned a queryable` (an unscoped count; here it fires
+//!      on wz's OWN client qabl, whose ingest synchronously dispatches the
+//!      cross-tier advertise — the `-n 30 -t 3000` burst absorbs any imprecision);
+//!      transit-pinned on `routed a query`.
+//!
 //! SCOPE — what this does NOT yet cover (the cross-impl router tier is a large
 //! surface; this is the first, deliberately-2-node slice, mirroring how the
 //! wz<->wz mesh suite staged its own coverage):
-//!   * FORWARD-direction query deferred — leg 4 covers the REVERSE query (querier
-//!     behind wz, so wz answers the interest, the distinctive direction). A
-//!     FORWARD query (querier behind zenohd, queryable behind wz — zenohd answers
-//!     the interest, wz routes an INGRESS query to a local queryable + reply
-//!     EGRESS) is the query twin of leg 2 and a re-openable follow-up.
-//!   * ALL_COMPLETE querier fold deferred — leg 4's default z_querier is
+//!   * ALL_COMPLETE querier fold deferred — legs 4 & 6's default z_querier is
 //!     NON-complete; the `complete && includes` fold is not CLI-drivable (no
 //!     target flag) and stays unit-proven.
 //!   * qabl future-push + undeclare-push deferred — a queryable learned AFTER a
@@ -133,8 +141,8 @@ use wz_integration_tests::common::{
 };
 
 /// The router-tier convergence witness the wz `--router-hat` node logs once its
-/// `routers_net` reaches two nodes (self + the federated peer). Shared by both
-/// legs — leg 2 waits on it to gate client attach until the backbone is up.
+/// `routers_net` reaches two nodes (self + the federated peer). Shared by all
+/// legs — each waits on it to gate client attach until the backbone is up.
 const ROUTERS_NET_CONVERGED: &str = "router-hat: routers-net converged (2 node(s))";
 
 /// The stderr/stdout tempfile factory the common spawn helpers require (the lib
@@ -730,4 +738,148 @@ fn wz_router_hat_pushes_a_future_subscriber_to_a_pico_publisher() {
                  stderr ---\n{c}"
             )
         });
+}
+
+/// Leg 6 — the FORWARD QUERY-plane acid test (R311y149), the query twin of leg 2
+/// (the OPPOSITE direction to leg 4). A pico `z_queryable` (client of the WZ
+/// router) answers `demo/**`; a pico `z_querier` (client of ZENOHD) queries
+/// `demo/key`. The Query crosses the backbone querier -> zenohd -> [`routers_net`
+/// link-state] -> wz-router -> queryable and the Reply returns in reverse. This
+/// exercises what leg 4 does NOT: wz ADVERTISING its client queryable across the
+/// router backbone (`advertise_client_cross_tier_qabl`, the query twin of leg 2's
+/// client-sub advertise) so zenohd routes a remote querier's Query toward wz, and
+/// wz routing that INGRESS Query to its client queryable + the Reply EGRESS back —
+/// query-INGRESS/reply-EGRESS, the mirror of leg 4's query-EGRESS/reply-INGRESS.
+///
+/// Gated on wz's `learned a queryable` witness — here it fires on wz ingesting its
+/// OWN client queryable (`client_qabls`), which synchronously dispatches the
+/// cross-tier advertise toward zenohd. zenohd's route install is the residual
+/// dispatched-!=-installed gap the `z_querier -n 30 -t 3000` burst absorbs (the
+/// querier's write-filter is answered by ZENOHD here, not wz). Transit-pinned on
+/// wz's `routed a query`: the querier dials only zenohd and the queryable only wz,
+/// so a reply implies the Query transited wz's router.
+#[test]
+#[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
+fn wz_router_hat_and_zenohd_federate_a_pico_query_across_the_backbone() {
+    let z_querier = zenoh_pico_cli_binary("z_querier");
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+    let port_res = PortReservation::pick();
+    let zport = port_res.port();
+    let _zenohd = spawn_zenohd(zport, tempfile);
+    let zaddr = format!("127.0.0.1:{zport}");
+
+    // wz --router-hat dials zenohd; wait for the router backbone to converge
+    // BEFORE attaching clients so the link-state mesh is established.
+    let (mut wz_guard, mut wz_reader, wz_port) = spawn_router_hat_dialing(&zaddr);
+    if wait_for_substring(
+        &mut wz_reader,
+        ROUTERS_NET_CONVERGED,
+        Duration::from_secs(15),
+    )
+    .is_err()
+    {
+        let c = read_captured(&mut wz_reader);
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        panic!("wz <-> zenohd router backbone never converged within 15s\n--- wz-router-hat stderr ---\n{c}");
+    }
+
+    // z_queryable: a pico CLIENT of WZ, answering demo/**. wz ingests it into
+    // client_qabls and advertises the cross-tier queryable into the routers_net so
+    // zenohd learns wz hosts a matching queryable.
+    let z_qabl_endpoint = format!("tcp/127.0.0.1:{wz_port}");
+    let (mut z_qabl_guard, mut z_qabl_reader) = spawn_answering_zqueryable(
+        &z_queryable,
+        "demo/**",
+        "forward-query-federation",
+        &z_qabl_endpoint,
+        "wz-router-hat",
+        tempfile,
+    );
+
+    // Barrier: wz has INGESTED its client queryable (and synchronously dispatched
+    // the cross-tier advertise toward zenohd), so zenohd can answer a querier's
+    // write-filter interest with a route toward wz.
+    let learned = wait_for_substring(
+        &mut wz_reader,
+        "router-hat: learned a queryable",
+        Duration::from_secs(10),
+    );
+
+    // z_querier: a pico CLIENT of ZENOHD, querying demo/key as a 30-get burst. Its
+    // write-filter is answered by ZENOHD (which learned wz's advertised qabl off
+    // the mesh); the Query routes zenohd -> wz, wz dispatches it to its client
+    // queryable, and the reply returns the same path in reverse.
+    let q_endpoint = format!("tcp/127.0.0.1:{zport}");
+    let mut z_querier_pair = learned
+        .is_ok()
+        .then(|| spawn_querying_zquerier(&z_querier, "demo/key", &q_endpoint, "zenohd", tempfile));
+
+    // The acid test: the reply from z_queryable behind wz reaches the pico querier
+    // behind zenohd, having crossed the cross-impl router backbone in the forward
+    // direction.
+    let received = z_querier_pair.as_mut().map(|(_, reader)| {
+        wait_for_substring(reader, ">> Received ('demo/key'", Duration::from_secs(20))
+    });
+    // Transit pin: the Query transited wz's router (`queries_seen` rose, counting
+    // inbound Request(Query) only). By the time `received` fired the Query has
+    // transited, so wait a short window for the log to flush.
+    let transit = matches!(&received, Some(Ok(_))).then(|| {
+        wait_for_substring(
+            &mut wz_reader,
+            "router-hat: routed a query",
+            Duration::from_secs(5),
+        )
+    });
+
+    let z_querier_captured = if let Some((mut child, mut reader)) = z_querier_pair {
+        let _ = child.child_mut().kill();
+        let _ = child.child_mut().wait();
+        read_captured(&mut reader)
+    } else {
+        String::new()
+    };
+    let _ = z_qabl_guard.child_mut().kill();
+    let _ = z_qabl_guard.child_mut().wait();
+    graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+    let wz_captured = read_captured(&mut wz_reader);
+    let z_qabl_captured = read_captured(&mut z_qabl_reader);
+    eprintln!("--- wz-router-hat stderr ---\n{wz_captured}");
+    eprintln!("--- z_querier stdout ---\n{z_querier_captured}");
+    eprintln!("--- z_queryable stdout ---\n{z_qabl_captured}");
+
+    learned.unwrap_or_else(|c| {
+        panic!(
+            "wz-router-hat never INGESTED its client queryable within 10s (no \
+             'learned a queryable') — the queryable's DeclareQueryable did not \
+             reach wz\n--- wz-router-hat stderr ---\n{c}"
+        )
+    });
+    received
+        .expect("learned implies the querier was spawned")
+        .unwrap_or_else(|c| {
+            panic!(
+                "pico z_querier behind zenohd never received a reply to demo/key \
+                 within 20s — the query/reply did not complete over the cross-impl \
+                 router backbone (wz did not advertise its client queryable to \
+                 zenohd, the query was not routed to wz, or the reply was lost on \
+                 the return path — the z_queryable stdout above shows which)\n--- \
+                 z_querier stdout ---\n{c}"
+            )
+        });
+    transit
+        .expect("received implies transit was probed")
+        .unwrap_or_else(|c| {
+            panic!(
+                "wz-router-hat never logged 'routed a query' — the reply reached the \
+                 querier without a Query transiting wz's router\n--- wz-router-hat \
+                 stderr ---\n{c}"
+            )
+        });
+    // Foreign-side proof: the query reached the REAL cross-impl answerer behind wz.
+    assert!(
+        z_qabl_captured.contains("[Queryable handler] Received Query"),
+        "z_queryable behind wz never logged 'Received Query' — the reply z_querier \
+         saw did not originate at the real cross-impl answerer\n--- z_queryable \
+         stdout ---\n{z_qabl_captured}"
+    );
 }
