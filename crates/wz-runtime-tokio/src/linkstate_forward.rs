@@ -1291,10 +1291,25 @@ impl LinkstateForwarder {
         // Resolve the source (querier, tree root) + this node's psid for it — the
         // SAME shared seam forward_push uses; a routed Query floods along the
         // querier's tree, not the relaying neighbour's.
-        let Some((source_zid, out_node_id)) =
-            self.resolve_source(inbound_zid, inbound_link, read_request_source(request))
-        else {
-            return;
+        //
+        // R311y166 — a CLIENT querier is a LEAF (no graph node since the R311y163
+        // register Client-tier branch), so the shared `resolve_source` finds no psid
+        // and would DROP its Query. Route it with SELF as the query tree root
+        // (out_node_id 0) — the query twin of the D4b client-Push re-inject
+        // ([`reinject_client_push`](Self::reinject_client_push)) and zenoh
+        // `compute_query_route`'s `self.idx` for a `WhatAmI::Client` source. Without
+        // this a client's adminspace / mesh GET never routes (its only local match,
+        // e.g. `@/<zid>/peer/config`, reaches the self-dispatch `finish_unrouted_request`
+        // branch below only once the source resolves).
+        let (source_zid, out_node_id) = if self.is_client_face(inbound) {
+            (*self.net.borrow().self_zid(), 0)
+        } else {
+            let Some(resolved) =
+                self.resolve_source(inbound_zid, inbound_link, read_request_source(request))
+            else {
+                return;
+            };
+            resolved
         };
         // The query-route directions, dispatched on the Request's carried
         // QueryTarget (zenoh compute_final_route, dispatcher/queries.rs:214-266) —
@@ -9638,6 +9653,47 @@ mod tests {
             fwd.pending_len(),
             0,
             "self-dispatch records no pending return entry"
+        );
+    }
+
+    #[test]
+    fn forward_request_from_a_client_querier_dispatches_a_self_hosted_local_queryable() {
+        // R311y166 (FAILS before the fix): a CLIENT querier has no graph node since the
+        // R311y163 register Client-tier branch, so forward_request's shared
+        // resolve_source found no psid and DROPPED its Query (the wz_peer_adminspace_config
+        // e2e regression). A client's routed Query for a self-hosted local queryable is
+        // now routed with SELF as the tree root, reaches the self-dispatch branch, and
+        // the local handler's Reply + closing final unwind back to the client — the query
+        // twin of the D4b client-Push re-inject.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2); // a CLIENT querier (held, no graph node)
+        fwd.register(FaceId(0), &client);
+        fwd.register_local_queryable(
+            "demo/q",
+            true,
+            Box::new(|_view: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"local-reply")),
+        )
+        .expect("register local queryable");
+        sink_c.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "the client querier received a Reply + a ResponseFinal (self-dispatch)"
+        );
+        let resp = forwarded_response(&sink_c.frame_bytes(0));
+        assert_eq!(
+            resp.request_id, 99,
+            "reply carries the client querier's rid"
+        );
+        let final_msg = forwarded_response_final(&sink_c.frame_bytes(1));
+        assert_eq!(
+            final_msg.request_id, 99,
+            "final carries the client querier's rid"
         );
     }
 
