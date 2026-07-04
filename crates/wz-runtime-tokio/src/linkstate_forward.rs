@@ -258,6 +258,18 @@ pub struct LinkstateForwarder {
     /// the end-to-end proof that mesh data forwarding reached it (the data
     /// counterpart of `ingested`).
     data_seen: Cell<usize>,
+    /// Total unsolicited FUTURE `DeclareSubscriber` pushes emitted (R311y158) — a
+    /// NEW subscription told to a CLIENT face whose stored FUTURE interest predated
+    /// it ([`push_future_subscription`](Self::push_future_subscription)), the
+    /// peer-tier twin of the router's `future_pushes`. The sole wz cause of a
+    /// pub-before-sub publisher's write-filter deactivation; surfaced by `run_peer`
+    /// as the peer-mode analogue of the router-hat `pushed a future subscriber`
+    /// witness (the peer-mode cross-impl e2e that consumes it is a named follow-up).
+    future_pushes: Cell<usize>,
+    /// Total unsolicited FUTURE `DeclareQueryable` pushes emitted (R311y158) — the
+    /// query-plane twin ([`push_future_queryable`](Self::push_future_queryable)),
+    /// the peer-tier analogue of the router's `future_qabl_pushes`.
+    future_qabl_pushes: Cell<usize>,
     /// The linkstate-peer subscription interest table (c3c-3 atom2): which
     /// peers are interested in which keyexpr, learned from sourced
     /// `DeclareSubscriber`s flooded across the mesh. The HAT-analogue interest
@@ -546,6 +558,8 @@ impl LinkstateForwarder {
             faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
+            future_pushes: Cell::new(0),
+            future_qabl_pushes: Cell::new(0),
             subs: RefCell::new(LinkstatepeerInterest::new()),
             qabls: RefCell::new(LinkstatepeerInterest::new()),
             future_subs: RefCell::new(FutureSubStore::new()),
@@ -889,6 +903,22 @@ impl LinkstateForwarder {
     /// data forwarding reached it end to end.
     pub fn data_seen(&self) -> usize {
         self.data_seen.get()
+    }
+
+    /// Total unsolicited FUTURE `DeclareSubscriber` pushes emitted (R311y158) — the
+    /// peer-tier twin of the router's `future_pushes_seen`. A `>0` value proves this
+    /// peer told a CLIENT face a subscription it learned AFTER that face's FUTURE
+    /// interest (`push_future_subscription`), the sole wz cause of a pub-before-sub
+    /// publisher's write-filter deactivation.
+    pub fn future_pushes_seen(&self) -> usize {
+        self.future_pushes.get()
+    }
+
+    /// Total unsolicited FUTURE `DeclareQueryable` pushes emitted (R311y158) — the
+    /// query-plane twin (`push_future_queryable`), the peer-tier analogue of the
+    /// router's `future_qabl_pushes_seen`.
+    pub fn future_qabl_pushes_seen(&self) -> usize {
+        self.future_qabl_pushes.get()
     }
 
     /// Total spanning-tree recomputes flushed so far (D2c) — the coalescing
@@ -1529,7 +1559,10 @@ impl LinkstateForwarder {
             .pushes_for_new(new_ke, origin, |_, _| ());
         for (face, reply_ke, id, ()) in pushes {
             match build_declare_subscriber(id, 0, Some(&reply_ke)) {
-                Ok(decl) => self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl))),
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.future_pushes.set(self.future_pushes.get() + 1);
+                }
                 Err(e) => {
                     log::warn!("peer forward: future sub push build failed for {reply_ke:?}: {e:?}")
                 }
@@ -1560,9 +1593,11 @@ impl LinkstateForwarder {
     /// query-plane twin of [`push_future_subscription`](Self::push_future_subscription).
     /// Each push carries the RE-FOLDED merged [`QueryableInfo`] for its reply ke
     /// ([`merged_qabl_info`](Self::merged_qabl_info)), so a completeness flip re-
-    /// declares the SAME interned id. `origin` is never pushed (no self-echo). No
-    /// push counter (the peer sub push is likewise counterless — a peer-mode
-    /// pub/querier-before-decl e2e witness is a re-openable follow-up).
+    /// declares the SAME interned id. `origin` is never pushed (no self-echo).
+    /// Increments [`future_qabl_pushes`](Self#structfield.future_qabl_pushes) per
+    /// emitted push (R311y158, the peer-tier observability parity with the router);
+    /// the peer-mode cross-impl e2e that consumes the `run_peer` witness is a named
+    /// follow-up.
     fn push_future_queryable(&self, new_ke: &str, origin: Option<FaceId>) {
         let pushes =
             self.future_qabls
@@ -1575,7 +1610,11 @@ impl LinkstateForwarder {
                 });
         for (face, reply_ke, id, info) in pushes {
             match build_declare_queryable_with_id_info(id, &reply_ke, info) {
-                Ok(decl) => self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl))),
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.future_qabl_pushes
+                        .set(self.future_qabl_pushes.get() + 1);
+                }
                 Err(e) => {
                     log::warn!(
                         "peer forward: future qabl push build failed for {reply_ke:?}: {e:?}"
@@ -5018,6 +5057,11 @@ mod tests {
             forwarded_declare(&sink_c.frame_bytes(0)).body,
             DeclareOwnedVariant::CodecZenohDeclFinal(_)
         ));
+        assert_eq!(
+            fwd.future_pushes_seen(),
+            0,
+            "no future push yet (the interest found an empty current dump)"
+        );
         sink_c.reset();
         // 2) a mesh sub for demo/** is learned LATER -> the FUTURE push fires.
         declare_interest(&fwd, FaceId(0), "demo/**");
@@ -5041,6 +5085,11 @@ mod tests {
             forwarded_declare_keyexpr(&sink_c.frame_bytes(0)).as_deref(),
             Some("demo/key"),
             "the aggregate push is keyed on the INTEREST ke"
+        );
+        assert_eq!(
+            fwd.future_pushes_seen(),
+            1,
+            "the future push bumped the peer future_pushes counter (R311y158)"
         );
     }
 
@@ -5122,6 +5171,11 @@ mod tests {
             }
             _ => panic!("expected a DeclareQueryable future push"),
         }
+        assert_eq!(
+            fwd.future_qabl_pushes_seen(),
+            1,
+            "the future qabl push bumped the peer future_qabl_pushes counter (R311y158)"
+        );
     }
 
     #[test]

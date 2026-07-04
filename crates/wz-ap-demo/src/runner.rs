@@ -1856,6 +1856,23 @@ pub(crate) async fn run_peer(
             forwarder.data_seen()
         );
     }
+    // FUTURE-push witnesses (R311y158) — the peer-tier counterparts of the router-hat
+    // `pushed a future subscriber/queryable` logs, emitted unconditionally on >0 at
+    // shutdown (latched, so a test need not race the 250 ms app-tick) so a peer-mode
+    // pub/querier-before-decl cross-impl e2e (a named follow-up) can gate on the
+    // proactive push that deactivated a co-attached client's write-filter.
+    if forwarder.future_pushes_seen() > 0 {
+        log::info!(
+            "wz-ap-demo peer: pushed a future subscriber ({} push(es))",
+            forwarder.future_pushes_seen()
+        );
+    }
+    if forwarder.future_qabl_pushes_seen() > 0 {
+        log::info!(
+            "wz-ap-demo peer: pushed a future queryable ({} push(es))",
+            forwarder.future_qabl_pushes_seen()
+        );
+    }
     // Subscription-interest witnesses — the DETERMINISTIC shutdown counterparts to
     // the in-run app-tick logs, emitted from STATE unconditionally at shutdown so a
     // test need not race the 250 ms app-tick (mirrors the `received mesh data` /
