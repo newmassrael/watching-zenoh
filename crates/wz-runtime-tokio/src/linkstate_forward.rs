@@ -77,7 +77,7 @@
 //! filter is exact-match, B2). `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -127,6 +127,7 @@ use wz_session_core::request_routing_context::{
     read_request_source, read_request_target, read_request_timeout_ms, set_request_source,
 };
 use wz_session_core::response_build::set_response_keyexpr_literal;
+use wz_session_core::sample::Sample;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::{BorrowedSample, SampleView};
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
@@ -359,6 +360,37 @@ pub struct LinkstateForwarder {
     /// by the same single-task contract; no `Send` (a handler may capture an `Rc` —
     /// the §5.23 config-write handler's shared `WzConfig` in Phase 3b).
     local_subscribers: RefCell<Vec<LocalSubscriber>>,
+    /// #3-c (R311y167) — the bounded self-echo redelivery queue for
+    /// [`dispatch_local_subscribers`](Self::dispatch_local_subscribers). A
+    /// `LocalSubscriber` is a SYNCHRONOUS `FnMut` — zenoh's *callback* subscriber,
+    /// which re-enters itself on a self-echo and recurses to a stack overflow. When
+    /// a handler, mid-fire, re-drives a matching Put to ITSELF, `try_borrow_mut`
+    /// cannot re-enter the busy handler; instead of DROPPING the sample (the y156
+    /// skip) this queues the busy handler's `Rc` + an OWNED copy and REDELIVERS at
+    /// the outermost [`forward`](FaceForwarder::forward) exit — making the
+    /// synchronous callback subscriber behave like zenoh's DEFAULT (channel)
+    /// handler, whose `sender.send` decouples the self-put into a queue drained on
+    /// the receiver's next poll (handlers/mod.rs:38-41 + handlers/fifo.rs:57-66),
+    /// never a silent drop. Overflow is drop-OLDEST past
+    /// [`SELF_ECHO_QUEUE_CAP`](Self::SELF_ECHO_QUEUE_CAP) (a RingChannel,
+    /// handlers/ring.rs) — the default FifoChannel BLOCKS when full, but
+    /// backpressure is impossible single-task (the drainer IS the enqueuer's task,
+    /// so blocking self-deadlocks), so drop-oldest is the forced faithful bound.
+    /// This is the single-task twin of the Session-tier
+    /// [`DeferredListenerCell`](wz_session_core::deferred_fire::DeferredListenerCell)
+    /// (which cannot serve here: it requires `Send` + `Arc<Mutex>` + an `R: Runtime`;
+    /// this forwarder is non-`Send` `Rc`/`RefCell`, single-task, un-parameterized).
+    /// Purged on [`undeclare_subscription`](Self::undeclare_subscription) so a queued
+    /// echo for a retracted handler is not redelivered. `RefCell` / no `Send` by the
+    /// single-task contract (it holds the non-`Send` handler `Rc`).
+    sub_redelivery: RefCell<VecDeque<(Rc<RefCell<LocalSubscriberHandler>>, Sample)>>,
+    /// #3-c (R311y167) — re-entrancy depth of
+    /// [`forward`](FaceForwarder::forward). The self-echo drain runs only at the
+    /// OUTERMOST `forward` (depth 1, BEFORE the decrement), so a handler re-driving
+    /// a Put from inside its callback — or from inside the drain — re-enters at
+    /// depth >= 2 and does not re-trigger the drain. `Cell` by the single-task
+    /// contract.
+    forward_depth: Cell<u32>,
     /// D2c — a spanning-tree recompute is pending (the coalescing flag). The
     /// topology-change handlers ([`forward`](FaceForwarder::forward)'s inbound
     /// link-state, [`deregister`](FaceForwarder::deregister)'s face loss) SET this
@@ -584,6 +616,8 @@ impl LinkstateForwarder {
             pending: RefCell::new(PendingQueries::new()),
             local_queryables: RefCell::new(Vec::new()),
             local_subscribers: RefCell::new(Vec::new()),
+            sub_redelivery: RefCell::new(VecDeque::new()),
+            forward_depth: Cell::new(0),
             trees_dirty: Cell::new(false),
             trees_delay,
             recomputes: Cell::new(0),
@@ -1999,10 +2033,79 @@ impl LinkstateForwarder {
                 .collect()
         };
         for handler in &matched {
-            // Skip a handler already on the stack (its own re-delivery) — see the
-            // queryable twin.
-            if let Ok(mut h) = handler.try_borrow_mut() {
-                (**h)(&sample);
+            match handler.try_borrow_mut() {
+                Ok(mut h) => (**h)(&sample),
+                // #3-c (R311y167) — the handler is BUSY: it re-entered THIS dispatch
+                // for its OWN pattern (self-echo). Don't DROP the sample (the y156
+                // skip); queue the busy handler's `Rc` + an OWNED copy for redelivery
+                // at the outermost `forward` exit — faithful to zenoh's FifoChannel
+                // requeue (handlers/fifo.rs:57-66), which never drops a self-echo.
+                // (The queryable twin still drops, pending its own round: it emits
+                // ResponseFinal eagerly, so redelivery there needs the
+                // Reply-before-Final hold — the deferred #3-c query half.)
+                Err(_) => self.enqueue_self_echo(handler, &sample),
+            }
+        }
+    }
+
+    /// #3-c (R311y167) — the self-echo redelivery queue capacity + per-`forward`
+    /// drain budget, mirroring zenoh's default reception channel size
+    /// (`API_DATA_RECEPTION_CHANNEL_SIZE = 256`, api/session.rs:118). The queue is
+    /// drop-OLDEST past the cap (a RingChannel, api/handlers/ring.rs) so an
+    /// unconditional self-republisher spins with bounded memory, never an unbounded
+    /// queue — zenoh bounds memory / backpressure, never the loop itself.
+    const SELF_ECHO_QUEUE_CAP: usize = 256;
+
+    /// #3-c (R311y167) — queue a self-echo sample for redelivery. Called by
+    /// [`dispatch_local_subscribers`](Self::dispatch_local_subscribers) when a
+    /// matching handler is BUSY (it re-entered the dispatch for its own pattern, so
+    /// `try_borrow_mut` fails). Materializes an OWNED [`Sample`] (the borrowed view
+    /// cannot outlive the dispatch frame) and pushes it with the busy handler's
+    /// `Rc`; drop-OLDEST past [`SELF_ECHO_QUEUE_CAP`](Self::SELF_ECHO_QUEUE_CAP)
+    /// (RingChannel semantics) bounds an unconditional self-republisher.
+    fn enqueue_self_echo(
+        &self,
+        handler: &Rc<RefCell<LocalSubscriberHandler>>,
+        view: &dyn SampleView,
+    ) {
+        let mut q = self.sub_redelivery.borrow_mut();
+        if q.len() >= Self::SELF_ECHO_QUEUE_CAP {
+            q.pop_front(); // drop-oldest (RingChannel), never grow unbounded
+        }
+        q.push_back((Rc::clone(handler), Sample::from_view(view)));
+    }
+
+    /// #3-c (R311y167) — redeliver queued self-echo samples to their (now-unwound)
+    /// handlers. Run ONCE at the outermost [`forward`](FaceForwarder::forward) exit,
+    /// off the handler stack — mirroring zenoh's receiver-side channel drain running
+    /// on its own task, not nested in the publish call. Bounded to
+    /// [`SELF_ECHO_QUEUE_CAP`](Self::SELF_ECHO_QUEUE_CAP) deliveries per call: a
+    /// handler that self-echoes AGAIN during redelivery re-enqueues (drop-oldest
+    /// capped), so an unconditional self-republisher spins across `forward` ticks
+    /// with bounded per-tick work + bounded memory, never a synchronous hang or a
+    /// stack overflow. An over-budget remainder (only a pathological
+    /// unconditional-republisher exceeds the per-call budget) rides the NEXT
+    /// `forward`, so on a quiescent forwarder the last such echo waits for an
+    /// unrelated future Push. NB: a handler that PANICS unwinds past the
+    /// `forward_depth` decrement and disables the drain — the file's other counters
+    /// (`data_seen`, `recomputes`) are equally non-panic-safe, and a single-task
+    /// panic poisons the drive task regardless, so an `FnMut` handler must not panic.
+    fn drain_sub_redelivery(&self) {
+        let mut budget = Self::SELF_ECHO_QUEUE_CAP;
+        while budget > 0 {
+            let Some((handler, sample)) = self.sub_redelivery.borrow_mut().pop_front() else {
+                break;
+            };
+            budget -= 1;
+            // Off-stack now (redelivery runs after the dispatch unwound), so
+            // `try_borrow_mut` succeeds; a still-busy handler (a deeper nested
+            // `forward` mid-flight) is skipped this pass, the cap bounding it.
+            // Bind the borrow to a local so its `RefMut` drops before the owned
+            // `handler` (an inline `if let` scrutinee temporary would outlive
+            // `handler` at the loop-body scope end — E0597).
+            let delivery = handler.try_borrow_mut();
+            if let Ok(mut h) = delivery {
+                (**h)(&sample as &dyn SampleView);
             }
         }
     }
@@ -2027,9 +2130,25 @@ impl LinkstateForwarder {
         // — R311y154 closed this pre-existing residual symmetrically with
         // undeclare_queryable's local_queryables drop (dispatch_local_subscribers
         // would otherwise keep delivering) — and so the union check below sees it gone.
-        self.local_subscribers
-            .borrow_mut()
-            .retain(|ls| ls.keyexpr != keyexpr);
+        // R311y167 (#3-c) — collect the retracted handlers' `Rc`s and PURGE any
+        // self-echo already queued for them from `sub_redelivery`: else the
+        // outermost `forward` drain would redeliver to a retracted subscriber
+        // (extending the in-flight window past this "stops receiving" contract), and
+        // an `Rc`-capturing handler would leak via the undrained queued clone.
+        let mut retracted: Vec<Rc<RefCell<LocalSubscriberHandler>>> = Vec::new();
+        self.local_subscribers.borrow_mut().retain(|ls| {
+            if ls.keyexpr == keyexpr {
+                retracted.push(Rc::clone(&ls.handler));
+                false
+            } else {
+                true
+            }
+        });
+        if !retracted.is_empty() {
+            self.sub_redelivery
+                .borrow_mut()
+                .retain(|(h, _)| !retracted.iter().any(|r| Rc::ptr_eq(h, r)));
+        }
         // R311y163 (D4) — UNION-gated withdraw: the peer now co-hosts CLIENT subs on
         // the SAME (ke, self_zid) mesh-advertise slot, so an unconditional withdraw
         // would blackhole a surviving co-attached client subscriber. Only the LAST
@@ -4053,6 +4172,13 @@ impl FaceForwarder for LinkstateForwarder {
         else {
             return;
         };
+        // #3-c (R311y167) — track re-entrancy so the self-echo drain runs ONCE, at
+        // the outermost `forward`. A local subscriber handler that re-drives a Put
+        // to itself calls back into `forward` (this same method) at depth >= 2,
+        // where `dispatch_local_subscribers` enqueues the busy-handler self-echo;
+        // the outermost call drains it after the message loop (below).
+        let outermost = self.forward_depth.get() == 0;
+        self.forward_depth.set(self.forward_depth.get() + 1);
         for message in messages {
             // R311tt — §5.16 access control: consult the interceptor chain ONCE
             // here, ahead of the kind-dispatch (the relay-admission point). A
@@ -4212,6 +4338,16 @@ impl FaceForwarder for LinkstateForwarder {
                 _ => {}
             }
         }
+        // #3-c (R311y167) — redeliver queued self-echoes at the outermost `forward`,
+        // WHILE still at depth 1 (BEFORE the decrement) so a handler re-driving a Put
+        // during redelivery re-enters at depth 2 and does NOT re-trigger the drain
+        // (its `outermost` is false). Bounded per call (`SELF_ECHO_QUEUE_CAP`); any
+        // still-queued remainder rides the next `forward`, spreading work across
+        // ticks like zenoh's receiver-side channel drain.
+        if outermost {
+            self.drain_sub_redelivery();
+        }
+        self.forward_depth.set(self.forward_depth.get() - 1);
     }
 }
 
@@ -10323,16 +10459,16 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_self_reentrant_subscriber_is_skipped_not_looped() {
-        // R311y156 — the ONE irreducible case: a handler A that synchronously
-        // re-delivers to ITSELF (here by re-driving a matching Put through `forward`
-        // from inside its own callback). `try_borrow_mut` SKIPS the busy handler, so A
-        // cannot re-enter (a running `FnMut` cannot be aliased on two stack frames); a
-        // failed skip would recurse unboundedly and overflow the stack. A SECOND,
-        // non-self-referential subscriber B pins that the inner dispatch genuinely RAN
-        // (it fires B) while A alone was skipped: B fires TWICE (inner + outer) and A
-        // ONCE — distinguishing "skip exercised" from an inner dispatch that silently
-        // no-oped (both of which would give A==1 alone).
+    fn dispatch_self_reentrant_subscriber_redelivery_is_bounded_and_terminates() {
+        // #3-c (R311y167) — the loop-safety guard, superseding the y156
+        // skipped-not-looped contract: an UNCONDITIONAL self-echoer (A re-drives a
+        // matching Put on EVERY fire) is now REDELIVERED (not dropped), but the
+        // per-`forward` drain budget (`SELF_ECHO_QUEUE_CAP`) caps deliveries so the
+        // call TERMINATES with A fired a BOUNDED number of times — zenoh's
+        // RingChannel spins with bounded memory rather than a synchronous hang or a
+        // stack overflow (zenoh does not prevent the loop, only bounds it; a failed
+        // y156 skip would instead recurse unboundedly and overflow). A SECOND plain
+        // subscriber B pins that the inner dispatch genuinely ran.
         let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
         let (face_a, _sa) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
@@ -10340,7 +10476,7 @@ mod tests {
         let fires = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
         let weak = std::rc::Rc::downgrade(&fwd);
         let fa = fires.clone();
-        // A: on fire, record "A" and re-drive one matching Put (re-enters dispatch).
+        // A: on EVERY fire, re-drive one matching Put (unconditional self-echo).
         fwd.register_local_subscriber(
             "demo/**",
             Box::new(move |_s: &dyn SampleView| {
@@ -10362,18 +10498,118 @@ mod tests {
         )
         .expect("register B");
 
+        // A single outer Put must TERMINATE (no unbounded recursion / hang).
         fwd.forward(
             FaceId(0),
             IterationEvent::Poll(&push_outcome("demo/data", b"outer")),
         );
-        // Outer snapshot [A, B]: A fires ("A") -> re-drives the inner Put -> inner
-        // snapshot [A, B] SKIPS the busy A but fires B ("B") -> inner returns -> outer
-        // fires B ("B"). B twice proves the inner dispatch re-ran; A once proves it was
-        // skipped, not re-entered.
+        let a_count = fires.borrow().iter().filter(|&&x| x == "A").count();
+        // Redelivery happened (A fired past the single outer delivery) AND it is
+        // bounded by the drain budget (+1 for the outer, non-drained delivery).
+        assert!(
+            a_count > 1,
+            "the self-echo is REDELIVERED, not dropped (A fired {a_count} times)"
+        );
+        assert!(
+            a_count <= LinkstateForwarder::SELF_ECHO_QUEUE_CAP + 1,
+            "redelivery is BOUNDED by the per-forward drain budget (A fired {a_count} times)"
+        );
+        assert!(
+            fires.borrow().contains(&"B"),
+            "the inner dispatch genuinely ran (B fired)"
+        );
+    }
+
+    #[test]
+    fn dispatch_self_reentrant_subscriber_redelivers_a_single_self_echo() {
+        // #3-c (faithful self-echo redelivery) — the FIX target for the y156 drop.
+        // A handler A that re-delivers to ITSELF (re-drives one matching Put from
+        // inside its own callback) must have that self-echo REDELIVERED after the
+        // dispatch unwinds — mirroring zenoh's default FifoChannel, whose
+        // `sender.send` requeues the self-put for the receiver's next drain
+        // (handlers/fifo.rs:57-66), NOT dropped as the y156 `try_borrow_mut` skip
+        // does. A self-echoes exactly ONCE (a `Cell` guard) so redelivery is
+        // bounded and terminates: A must fire TWICE (outer Put + the redelivered
+        // self-echo). Diagnose-first: pre-fix this asserts A fires ONCE (self-echo
+        // dropped) and FAILS.
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fires = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let echoed = std::cell::Cell::new(false);
+        let fa = fires.clone();
+        fwd.register_local_subscriber(
+            "demo/**",
+            Box::new(move |_s: &dyn SampleView| {
+                fa.borrow_mut().push("A");
+                if !echoed.replace(true) {
+                    if let Some(fwd) = weak.upgrade() {
+                        fwd.forward(
+                            FaceId(0),
+                            IterationEvent::Poll(&push_outcome("demo/data", b"inner")),
+                        );
+                    }
+                }
+            }),
+        )
+        .expect("register self-echoing A");
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"outer")),
+        );
         assert_eq!(
             *fires.borrow(),
-            vec!["A", "B", "B"],
-            "A fired once (skipped on re-entry); B fired twice (inner + outer run)"
+            vec!["A", "A"],
+            "A's single self-echo is REDELIVERED after the dispatch unwinds, not dropped"
+        );
+    }
+
+    #[test]
+    fn undeclare_purges_a_pending_self_echo() {
+        // #3-c (R311y167) — a self-echo already QUEUED for a handler that then
+        // UNDECLARES itself in the same tick must NOT be redelivered: undeclare
+        // purges the handler's `sub_redelivery` entries, honoring the y154/y163
+        // "undeclare stops delivering" contract (and closing the `Rc`-capture leak
+        // window). A re-drives one matching Put (enqueuing a self-echo) THEN
+        // undeclares itself; the outermost drain finds nothing -> A fires ONCE.
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fires = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let echoed = std::cell::Cell::new(false);
+        let fa = fires.clone();
+        fwd.register_local_subscriber(
+            "demo/**",
+            Box::new(move |_s: &dyn SampleView| {
+                fa.borrow_mut().push("A");
+                if !echoed.replace(true) {
+                    if let Some(fwd) = weak.upgrade() {
+                        // Enqueue a self-echo (A is busy on this stack) ...
+                        fwd.forward(
+                            FaceId(0),
+                            IterationEvent::Poll(&push_outcome("demo/data", b"inner")),
+                        );
+                        // ... then retract self: the queued self-echo must be purged.
+                        let _ = fwd.undeclare_subscription("demo/**");
+                    }
+                }
+            }),
+        )
+        .expect("register self-echoing-then-undeclaring A");
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"outer")),
+        );
+        assert_eq!(
+            *fires.borrow(),
+            vec!["A"],
+            "the pending self-echo is purged on undeclare — A is not redelivered"
         );
     }
 
