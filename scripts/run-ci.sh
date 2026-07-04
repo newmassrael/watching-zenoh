@@ -4319,6 +4319,19 @@ layer_e6_peer_mesh() {
     # the reconfigure actually drives), so no extra build.
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_adminspace_config_write -- --ignored --quiet) || return 1
+    # R311y165 — the STRONG peer-mode future-push CROSS-IMPL e2e (the leg-5 peer analog,
+    # now that D4 gave the peer a client data plane): a pico z_pub CLIENT of peer-A
+    # (pub-before-sub) + a pico z_sub CLIENT of peer-B; A pushes the future
+    # DeclareSubscriber to z_pub (deactivating its write-filter) and re-injects its Put
+    # across the wz peer mesh (D4b/C3b) to B, which delivers it to z_sub (D4a/C3a). This
+    # is the FIRST E6 leg with a pico-CLI dependency, so — like Layer E/Z — SKIP it when
+    # the zenoh-pico CLI is absent (the other E6 legs are wz<->wz and need no guard).
+    if [[ -x target/zenoh-pico-cli/z_pub && -x target/zenoh-pico-cli/z_sub ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_future_push_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    else
+        echo "E6 SKIP: wz_peer_future_push_pico_interop (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+    fi
 }
 
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───

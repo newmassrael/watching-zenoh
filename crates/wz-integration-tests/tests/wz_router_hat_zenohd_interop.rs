@@ -134,10 +134,13 @@
 //!     queryable WITHDRAWAL re-arms the querier's write-filter (leg 8, the pico `-a`
 //!     matching listener's "NO MORE matching queryables." positive observable — NOT
 //!     a flaky negative). Both are also unit-proven on the forwarder.
-//!   * peer-tier FUTURE-push observability deferred — leg 5's `future_pushes`
-//!     witness is on the ROUTER forwarder only; the peer `LinkstateForwarder`'s
-//!     own `push_future_subscription` carries no counter yet (no peer-mode
-//!     pub-before-sub e2e exists), a re-openable follow-up when one lands.
+//!   * peer-tier FUTURE-push observability CLOSED (R311y158 counter + R311y165 e2e):
+//!     the peer `LinkstateForwarder` carries its own `future_pushes` counter
+//!     (surfaced by run_peer as `pushed a future subscriber`), and the strong
+//!     peer-mode pub-before-sub cross-impl e2e now lands in
+//!     `wz_peer_future_push_pico_interop.rs` — a pico z_pub client of peer-A is
+//!     pushed the future declare + its Put re-injected across the wz peer mesh to a
+//!     pico z_sub client of peer-B (D4, R311y163/y164, wired the peer client data plane).
 //!   * TWO routers on ONE direct face — each router is therefore the SOLE master
 //!     of its own domain, so NO multi-hop spanning-tree route / non-master HRW
 //!     election / transit-through-a-third-router is exercised (the R311y120
