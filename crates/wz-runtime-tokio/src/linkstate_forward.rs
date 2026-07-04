@@ -77,7 +77,7 @@
 //! filter is exact-match, B2). `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -111,7 +111,9 @@ use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::push_build::{build_push_literal, set_push_keyexpr_literal};
+use wz_session_core::push_build::{
+    build_push_literal, reliteralize_push, set_push_keyexpr_literal,
+};
 use wz_session_core::push_routing_context::{
     read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
 };
@@ -281,6 +283,20 @@ pub struct LinkstateForwarder {
     /// view. `RefCell` by the same single-task contract as the graph — borrowed
     /// only for a handler's synchronous duration.
     subs: RefCell<LinkstatepeerInterest<()>>,
+    /// Co-attached CLIENT subscriptions (R311y163 / D4) — per-client-face leaf
+    /// store, the peer-tier twin of the router's
+    /// [`client_subs`](crate::router_forward::RouterForwarder). A CLIENT is a leaf
+    /// (zenoh `session_ctxs`), never a link-state graph node, so its interest
+    /// cannot live in the zid-keyed [`subs`](Self#structfield.subs) tier table; it
+    /// is held here FaceId-keyed for (a) local delivery of a matching Push
+    /// ([`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers), C3a)
+    /// and (b) the face-down / graceful-undeclare withdraw. The MESH advertisement
+    /// of a client sub rides `subs` under SELF's zid (self-sourced, exactly as
+    /// zenoh's `register_linkstatepeer_subscription(.., tables.zid)`), UNION-refcounted
+    /// with any self-native local sub on the same keyexpr so the last source's
+    /// departure — client OR self-native — is what withdraws + floods the forget
+    /// ([`withdraw_mesh_sub_if_unbacked`](Self::withdraw_mesh_sub_if_unbacked)).
+    client_subs: RefCell<HashMap<FaceId, HashSet<String>>>,
     /// The linkstate-peer QUERYABLE interest table — the query-plane twin of
     /// [`subs`](Self#structfield.subs), learned from sourced `DeclareQueryable`s
     /// flooded across the mesh (zenoh's per-`Resource` `linkstatepeer_qabls`,
@@ -561,6 +577,7 @@ impl LinkstateForwarder {
             future_pushes: Cell::new(0),
             future_qabl_pushes: Cell::new(0),
             subs: RefCell::new(LinkstatepeerInterest::new()),
+            client_subs: RefCell::new(HashMap::new()),
             qabls: RefCell::new(LinkstatepeerInterest::new()),
             future_subs: RefCell::new(FutureSubStore::new()),
             future_qabls: RefCell::new(FutureQablStore::new()),
@@ -912,6 +929,16 @@ impl LinkstateForwarder {
     /// publisher's write-filter deactivation.
     pub fn future_pushes_seen(&self) -> usize {
         self.future_pushes.get()
+    }
+
+    /// Total co-attached CLIENT subscriptions currently held (R311y163 / D4) — the
+    /// data-plane READINESS witness, the peer-tier twin of the router's
+    /// `client_subs_seen`. A `>0` value proves this peer installed a client's
+    /// `DeclareSubscriber` in [`client_subs`](Self#structfield.client_subs) (and
+    /// advertised it into the mesh under self's zid), the barrier a co-attached
+    /// cross-impl e2e gates on before driving data.
+    pub fn client_subs_seen(&self) -> usize {
+        self.client_subs.borrow().values().map(|s| s.len()).sum()
     }
 
     /// Total unsolicited FUTURE `DeclareQueryable` pushes emitted (R311y158) — the
@@ -1980,17 +2007,73 @@ impl LinkstateForwarder {
     /// declaration, needs no late-joiner re-advertise — a peer that joins after
     /// never held the interest).
     pub fn undeclare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
-        let self_zid = *self.net.borrow().self_zid();
-        let removed = self.subs.borrow_mut().withdraw(keyexpr, &self_zid);
-        // Drop the self-hosted subscriber handler (the inverse of register_local_subscriber)
-        // so a RETRACTED local subscriber STOPS receiving — R311y154 closed this
-        // pre-existing residual symmetrically with undeclare_queryable's local_queryables
-        // drop (dispatch_local_subscribers would otherwise keep delivering).
+        // Drop the self-hosted subscriber handler FIRST (the inverse of
+        // register_local_subscriber) so a RETRACTED local subscriber STOPS receiving
+        // — R311y154 closed this pre-existing residual symmetrically with
+        // undeclare_queryable's local_queryables drop (dispatch_local_subscribers
+        // would otherwise keep delivering) — and so the union check below sees it gone.
         self.local_subscribers
             .borrow_mut()
             .retain(|ls| ls.keyexpr != keyexpr);
+        // R311y163 (D4) — UNION-gated withdraw: the peer now co-hosts CLIENT subs on
+        // the SAME (ke, self_zid) mesh-advertise slot, so an unconditional withdraw
+        // would blackhole a surviving co-attached client subscriber. Only the LAST
+        // source's departure (no other local sub AND no client sub for `keyexpr`)
+        // withdraws `subs` + floods the sourced UndeclareSubscriber + re-arms any
+        // waiting future-push backer.
+        self.withdraw_mesh_sub_if_unbacked(keyexpr)
+    }
+
+    /// R311y163 (D4) — is the inbound face a CLIENT (a leaf, not a mesh peer)? Read
+    /// from the face's handshake WhatAmI (`peer_whatami_routing`), the SAME role
+    /// source [`respond_to_interest`](Self::respond_to_interest) gates its
+    /// future-interest store on — NOT the graph (a client is held without a graph
+    /// node). A gone face is not a client.
+    fn is_client_face(&self, id: FaceId) -> bool {
+        self.faces
+            .borrow()
+            .get(&id)
+            .is_some_and(|s| peer_whatami_routing(&s.actions) == WhatAmI::Client)
+    }
+
+    /// R311y163 (D4) — does any co-attached CLIENT face subscribe EXACTLY `keyexpr`?
+    /// The client half of the mesh-advertise union refcount (the self-native half is
+    /// [`local_subscribers`](Self#structfield.local_subscribers)). Exact-string,
+    /// matching the per-ke `subs` slot the advertisement keys on.
+    fn any_client_subscribes(&self, keyexpr: &str) -> bool {
+        self.client_subs
+            .borrow()
+            .values()
+            .any(|keys| keys.contains(keyexpr))
+    }
+
+    /// R311y163 (D4) — does any self-native local subscriber hold EXACTLY `keyexpr`?
+    /// The self-native half of the mesh-advertise union refcount.
+    fn any_local_subscriber(&self, keyexpr: &str) -> bool {
+        self.local_subscribers
+            .borrow()
+            .iter()
+            .any(|ls| ls.keyexpr == keyexpr)
+    }
+
+    /// R311y163 (D4) — withdraw the SELF-sourced mesh advertisement for `keyexpr`
+    /// IFF no source still backs it: neither a self-native local subscriber
+    /// ([`any_local_subscriber`](Self::any_local_subscriber)) nor a co-attached
+    /// client sub ([`any_client_subscribes`](Self::any_client_subscribes)). On the
+    /// union's 1->0 transition it withdraws self from `subs` (so a tree change no
+    /// longer re-advertises the retracted ke), re-arms any waiting future-push
+    /// backer (`undeclare_push_subs`), and floods the sourced UndeclareSubscriber to
+    /// self's tree children. Shared by the self-native `undeclare_subscription` and
+    /// the client withdraw / face-down paths; the caller removes ITS OWN source (the
+    /// local-sub handler or the `client_subs` entry) BEFORE calling.
+    fn withdraw_mesh_sub_if_unbacked(&self, keyexpr: &str) -> Result<usize, CodecError> {
+        if self.any_local_subscriber(keyexpr) || self.any_client_subscribes(keyexpr) {
+            return Ok(0); // still backed by another source — keep the advertisement
+        }
+        let self_zid = *self.net.borrow().self_zid();
+        let removed = self.subs.borrow_mut().withdraw(keyexpr, &self_zid);
         if removed {
-            // R311y151 undeclare-push: this self-local sub is gone; re-arm any
+            // R311y151 undeclare-push: the last backer of this ke is gone; re-arm any
             // waiting CLIENT publisher whose pushed reply ke lost its last backer.
             self.undeclare_push_subs(keyexpr);
         }
@@ -1998,6 +2081,152 @@ impl LinkstateForwarder {
         self.flood_to_tree_children(&self_zid, || {
             NetworkMessage::Declare(Box::new(declare.clone()))
         })
+    }
+
+    /// R311y163 (D4) — ingest a co-attached CLIENT's `DeclareSubscriber`. A CLIENT is
+    /// a leaf (never a graph node), so its interest cannot ride the zid-keyed `subs`
+    /// tier table under its OWN zid (`resolve_source_in` would find no psid); instead
+    /// it is (a) recorded in [`client_subs`](Self#structfield.client_subs)
+    /// FaceId-keyed for local delivery + face-down purge, and (b) advertised into the
+    /// mesh under SELF's zid — exactly as zenoh `declare_simple_subscription`
+    /// re-sources a client sub under `tables.zid`. The mesh advertise is
+    /// UNION-refcounted with any self-native local sub on the same ke: the sourced
+    /// `DeclareSubscriber` + future-push fire only on the union's 0->1 transition
+    /// (`subs.register`'s `true` return), so a second backer neither re-floods nor
+    /// re-pushes.
+    fn ingest_client_subscription(&self, inbound: FaceId, declare: &DeclareOwned) {
+        // Resolve the client's DeclareSubscriber keyexpr against ITS face alias table
+        // (c3c-3 B1b) in one scoped borrow; an unresolvable alias drops it.
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
+                return;
+            };
+            match resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) {
+                Some(ke) => ke,
+                None => return,
+            }
+        };
+        // Record the leaf sub; a duplicate from the same client is a no-op.
+        let newly = self
+            .client_subs
+            .borrow_mut()
+            .entry(inbound)
+            .or_default()
+            .insert(keyexpr.clone());
+        if !newly {
+            return;
+        }
+        // Advertise into the mesh under SELF's zid. `register` returns `true` only on
+        // the union 0->1 transition (no self-native sub and no OTHER client already
+        // holds this ke) — gate the future-push + sourced flood on it so a second
+        // backer stays silent (the ke is already advertised).
+        let self_zid = *self.net.borrow().self_zid();
+        let registered = self.subs.borrow_mut().register(&keyexpr, self_zid, ());
+        if registered {
+            // A NEW subscriber (to this node) -> tell any co-attached CLIENT publisher
+            // whose stored FUTURE interest matches (pub-before-sub write-filter close).
+            // `origin = Some(inbound)` EXCLUDES the subscribing client itself, so a
+            // client that pubs+subs the same ke is never echoed its OWN sub (which
+            // would open its write-filter against a phantom self-subscriber) — zenoh
+            // `src_face != dst_face`, mirror of the router's
+            // `push_future_subscription(_, inbound)`. (Self-native `declare_subscription`
+            // passes None because SELF has no face to exclude.)
+            self.push_future_subscription(&keyexpr, Some(inbound));
+            match build_declare_subscriber(0, 0, Some(&keyexpr)) {
+                Ok(flood) => {
+                    let _ = self.flood_to_tree_children(&self_zid, || {
+                        NetworkMessage::Declare(Box::new(flood.clone()))
+                    });
+                }
+                Err(e) => {
+                    log::warn!("peer: client sub advertise build failed for {keyexpr:?}: {e:?}");
+                }
+            }
+        }
+    }
+
+    /// R311y163 (D4) — withdraw a co-attached CLIENT's subscription on its graceful
+    /// `UndeclareSubscriber` (keyexpr carried in `ext_keyexpr`). Removes the leaf
+    /// entry from [`client_subs`](Self#structfield.client_subs), then (union-gated)
+    /// withdraws the mesh advertisement if this was the ke's last backer. The
+    /// face-down path ([`deregister`](FaceForwarder::deregister)) reaches the same
+    /// [`withdraw_mesh_sub_if_unbacked`](Self::withdraw_mesh_sub_if_unbacked) seam
+    /// for every ke the departing client held.
+    fn withdraw_client_subscription(&self, inbound: FaceId, declare: &DeclareOwned) {
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let exts = match &declare.body {
+                DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
+                _ => return,
+            };
+            match resolve_ext_keyexpr(exts, &s.keyexpr_table) {
+                Some(ke) => ke,
+                None => return,
+            }
+        };
+        let removed = {
+            let mut cs = self.client_subs.borrow_mut();
+            let removed = cs
+                .get_mut(&inbound)
+                .is_some_and(|keys| keys.remove(&keyexpr));
+            if cs.get(&inbound).is_some_and(|keys| keys.is_empty()) {
+                cs.remove(&inbound);
+            }
+            removed
+        };
+        if removed {
+            let _ = self.withdraw_mesh_sub_if_unbacked(&keyexpr);
+        }
+    }
+
+    /// R311y163 (D4 / C3a) — deliver a received data `Push` to co-attached CLIENT
+    /// subscribers whose stored keyexpr wildcard-INTERSECTS the published key, the
+    /// peer-tier twin of `RouterForwarder::deliver_to_client_subscribers`.
+    /// UNCONDITIONAL: the single-net peer has no master election / cross-mesh bridge
+    /// (zenoh `linkstate_peer::compute_data_route` has no `elect_router` gate). The
+    /// sample is re-literalized ONCE (payload / encoding / attachment / timestamp /
+    /// qos preserved) and the inbound face is excluded (never echo a client's own
+    /// Push back). Wildcard-aware via the SAME `keyexpr_intersects_target` SSOT the
+    /// mesh route reads — an exact `HashSet::contains` would blackhole every
+    /// `demo/**` client sub receiving a `demo/data` Push.
+    fn deliver_to_client_subscribers(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
+        if self.client_subs.borrow().is_empty() {
+            return;
+        }
+        // Resolve the Push key against the INBOUND face's alias table (c3c-3 B1) in a
+        // scoped borrow, then re-literalize once; the fan-out clones the carrier per
+        // matching client.
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) {
+                Some(ke) => ke,
+                None => return,
+            }
+        };
+        let Ok(carrier) = reliteralize_push(push, &keyexpr) else {
+            return;
+        };
+        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+        let _ = self.fan_out(reliable, None, |id, _zid| {
+            if id == inbound {
+                return Ok(None);
+            }
+            let deliver = self.client_subs.borrow().get(&id).is_some_and(|keys| {
+                keys.iter()
+                    .any(|sub| keyexpr_intersects_target(sub, &target_chunks))
+            });
+            Ok(deliver.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
+        });
     }
 
     /// Retract self's LOCAL queryable for `keyexpr` (R311y154, gap b) — the inverse of
@@ -2541,13 +2770,16 @@ impl LinkstateForwarder {
     /// (R311y146) CLOSES the pub-before-sub hole for the SUBSCRIBER plane: a
     /// publisher soliciting before any matching sub gets an empty dump, but a sub
     /// appearing LATER now pushes an unsolicited `DeclareSubscriber` that
-    /// deactivates its write-filter. Two open items remain, both named: (1) a
-    /// subscription declared by ANOTHER client attached to THIS peer is still not
-    /// surfaced — unlike the router (which keeps a per-face `client_subs` store),
-    /// the peer drops a client-face declaration in [`resolve_source_in`] (a client
-    /// is not a link-state graph node), so a two-clients-on-one-isolated-peer case
-    /// is uncovered (pre-existing); (2) the QUERYABLE future-push and the
-    /// undeclare-push (a sub DISAPPEARING) are separate deferred units.
+    /// deactivates its write-filter. Formerly-open item (1) — a subscription
+    /// declared by ANOTHER client attached to THIS peer — was CLOSED by R311y163
+    /// (D4): the peer now keeps a per-face [`client_subs`](Self#structfield.client_subs)
+    /// store and re-sources a co-attached client's sub under SELF's zid in
+    /// [`subs`](Self#structfield.subs)
+    /// ([`ingest_client_subscription`](Self::ingest_client_subscription)), so the
+    /// CURRENT dump (which excludes only the requester's OWN zid) surfaces it to a
+    /// co-attached client publisher — the two-clients-on-one-peer case is now
+    /// covered. One deferred unit remains, named: (2) the QUERYABLE future-push and
+    /// the undeclare-push (a sub DISAPPEARING) are separate deferred units.
     fn respond_to_interest(&self, inbound: FaceId, interest: &InterestOwned) {
         // Interest(Final) (`!c && !f`): a client CANCELLING a prior interest. pico
         // sends one on every publisher/querier drop (`net/primitives.c:
@@ -2883,15 +3115,15 @@ impl LinkstateForwarder {
     /// re-borrow `self.subs`/`qabls` (`any_sub/qabl_matches`) and `self.faces`
     /// (`fan_out`); `deregister` hoists its own `self.faces` borrow so this runs with
     /// it free. `still_backed` is the post-removal GLOBAL fold, so a reply ke a
-    /// surviving decl still backs is NOT undeclared. (Peer-specific: `any_sub_matches`
-    /// folds only `self.subs` — a client's over-the-wire sub is dropped in
-    /// `resolve_source_in` and never surfaces here — so a mesh-sub detach can undeclare
-    /// to a co-attached client PUBLISHER even while a co-attached client SUBSCRIBER
-    /// still wants the ke, re-arming that publisher's filter = UNDER-deliver toward that
-    /// subscriber; but benign — that subscriber is invisible to the peer's DATA plane
-    /// too (`publish` folds only `self.subs`), so it was never served here regardless
-    /// (the pre-existing two-clients-on-one-isolated-peer gap at `respond_to_interest`,
-    /// not introduced here — no NEW black-hole). Case c (the qabl completeness
+    /// surviving decl still backs is NOT undeclared. (Peer-specific, R311y163/D4:
+    /// `any_sub_matches` folds `self.subs`, which now INCLUDES a co-attached client's
+    /// sub re-sourced under SELF's zid
+    /// ([`ingest_client_subscription`](Self::ingest_client_subscription)), so
+    /// `still_backed` counts it — a mesh-sub detach no longer spuriously re-arms a
+    /// co-attached client PUBLISHER's filter while a co-attached client SUBSCRIBER
+    /// still wants the ke, and that subscriber IS served by
+    /// [`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers). The
+    /// former two-clients-on-one-peer under-deliver gap is CLOSED.) Case c (the qabl completeness
     /// DOWNGRADE on a partial withdrawal) is CLOSED (R311y153):
     /// [`undeclare_push_qabls`](Self::undeclare_push_qabls) fires the value-aware
     /// downgrade re-push here too (a SUPERSET over zenoh's full-undeclare-only
@@ -3559,10 +3791,19 @@ impl FaceForwarder for LinkstateForwarder {
         // `add_link` a self-transport; wz guards it here (mirror in
         // `RouterForwarder::register`).
         let self_zid = *self.net.borrow().self_zid();
+        let neighbour_whatami = peer_whatami_routing(actions);
         let added = peer_zid_routing(actions)
             .filter(|neighbour| *neighbour != self_zid)
+            // R311y163 (D4) — a CLIENT face is a LEAF (zenoh `session_ctxs`), never a
+            // link-state graph node: held with its send seam (the `faces` insert
+            // below) but NOT `add_link`'d, so it neither inflates `node_count` (the
+            // hop budget) nor floods a spurious one-directional self->client link
+            // mesh-wide via `make_link_state`. Mirrors `RouterForwarder::register`'s
+            // Client-tier `None` arm and the OBLIGATION-3 self-zid parity guard above.
+            // A co-attached client's subscription rides `subs` under SELF's zid
+            // instead ([`ingest_client_subscription`](Self::ingest_client_subscription)).
+            .filter(|_| neighbour_whatami != WhatAmI::Client)
             .map(|neighbour| {
-                let neighbour_whatami = peer_whatami_routing(actions);
                 let mut net = self.net.borrow_mut();
                 // Whether this neighbour is NEW to the GRAPH (not merely a new
                 // face): a second link to an already-known peer re-advertises only
@@ -3632,6 +3873,22 @@ impl FaceForwarder for LinkstateForwarder {
         // CONNECTION_DROPPED), so no undeclare is owed.
         self.future_subs.borrow_mut().purge_face(id);
         self.future_qabls.borrow_mut().purge_face(id);
+        // R311y163 (D4) — purge this face's co-attached CLIENT subscriptions (leaf
+        // store) UNCONDITIONALLY, before the graph teardown below, and for each
+        // keyexpr it was the LAST source of (no surviving client or self-native
+        // local sub) withdraw the self-sourced mesh advertisement + flood the
+        // forget. The removed set is HOISTED out of the loop scrutinee (edition
+        // 2021 keeps a `borrow_mut()` temporary alive across the loop; the withdraw
+        // below re-borrows `client_subs` via `any_client_subscribes`) — the same
+        // hoist discipline as the face removal below.
+        let departed_client_subs = self
+            .client_subs
+            .borrow_mut()
+            .remove(&id)
+            .unwrap_or_default();
+        for keyexpr in departed_client_subs {
+            let _ = self.withdraw_mesh_sub_if_unbacked(&keyexpr);
+        }
         // R311y152 — hoist the face removal OUT of the `if let` scrutinee so its
         // `RefMut` on `self.faces` drops at THIS `;`. Edition 2021 keeps a scrutinee
         // temporary alive across the whole `if let` block, and
@@ -3784,6 +4041,13 @@ impl FaceForwarder for LinkstateForwarder {
                     // excludes self, so this is the self/local-delivery seam (in
                     // addition to the remote fan-out), not a double-delivery.
                     self.dispatch_local_subscribers(id, *reliable, push);
+                    // R311y163 (D4 / C3a) — deliver to co-attached CLIENT
+                    // subscribers whose keyexpr intersects this Push. Fires for a
+                    // MESH-sourced Push (a peer's data reaching a co-attached client
+                    // sub) AND a CLIENT-sourced Push (client A -> co-attached client
+                    // B); the inbound face is excluded, and a mesh face is never in
+                    // `client_subs`, so this neither echoes nor double-delivers.
+                    self.deliver_to_client_subscribers(id, *reliable, push);
                 }
                 // c3c-3 — a sourced subscription declaration: a
                 // DeclareSubscriber registers the source peer's interest, an
@@ -3798,7 +4062,15 @@ impl FaceForwarder for LinkstateForwarder {
                         self.absorb_keyexpr_declaration(id, declare);
                     }
                     DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
-                        self.forward_unsubscription(id, *reliable, declare);
+                        // R311y163 (D4) — a CLIENT's graceful UndeclareSubscriber
+                        // withdraws its leaf sub (union-gated mesh forget on the last
+                        // source's departure); a MESH source's retraction withdraws
+                        // its interest + re-floods along its tree.
+                        if self.is_client_face(id) {
+                            self.withdraw_client_subscription(id, declare);
+                        } else {
+                            self.forward_unsubscription(id, *reliable, declare);
+                        }
                     }
                     // The query-plane twin of the subscriber declare: a sourced
                     // DeclareQueryable registers the source peer's queryable
@@ -3826,7 +4098,17 @@ impl FaceForwarder for LinkstateForwarder {
                     DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
                         self.forward_queryable_undeclare(id, *reliable, declare);
                     }
-                    _ => self.forward_subscription(id, *reliable, declare),
+                    // A DeclareSubscriber (the subscriber catch-all): a CLIENT's is
+                    // INGESTED as a co-attached leaf sub (R311y163 / D4 — recorded in
+                    // `client_subs` + advertised into the mesh under SELF's zid); a
+                    // MESH source's registers its interest + re-floods along its tree.
+                    _ => {
+                        if self.is_client_face(id) {
+                            self.ingest_client_subscription(id, declare);
+                        } else {
+                            self.forward_subscription(id, *reliable, declare);
+                        }
+                    }
                 },
                 // A routed Query: relay it toward the matching queryables along
                 // the querier's tree (the query-plane twin of the data Push),
@@ -4105,22 +4387,31 @@ mod tests {
 
     #[test]
     fn register_threads_real_handshake_whatami() {
-        // R311td "F1": the neighbour's real role (not a hardcoded peer) lands on
-        // its graph node — a router neighbour and a client neighbour each record
-        // their true WhatAmI, the gossip-policy/autoconnect prerequisite.
+        // R311td "F1": a ROUTER/PEER neighbour's real role (not a hardcoded peer)
+        // lands on its graph node — the gossip-policy/autoconnect prerequisite.
+        // R311y163 (D4, diagnose-first for the register Client-tier branch): a CLIENT
+        // is a LEAF, held WITHOUT a graph node (never `add_link`'d), so its role is
+        // read from the face, never the graph. This CLIENT half FAILED before D4
+        // (`get_node(0xBB)` was `Some`, a ghost isolated vertex).
         let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
         let (router, _r) = peer_face_whatami(zid(0xAA), 0); // wire 0 = Router
         let (client, _c) = peer_face_whatami(zid(0xBB), 2); // wire 2 = Client
         fwd.register(FaceId(1), &router);
         fwd.register(FaceId(2), &client);
-        let net = fwd.net.borrow();
         assert_eq!(
-            net.get_node(&zid(0xAA)).unwrap().whatami,
+            fwd.net.borrow().get_node(&zid(0xAA)).unwrap().whatami,
             Some(WhatAmI::Router)
         );
-        assert_eq!(
-            net.get_node(&zid(0xBB)).unwrap().whatami,
-            Some(WhatAmI::Client)
+        assert!(
+            fwd.net.borrow().get_node(&zid(0xBB)).is_none(),
+            "a client is a leaf face, never a link-state graph node (D4)"
+        );
+        assert!(
+            fwd.faces
+                .borrow()
+                .get(&FaceId(2))
+                .is_some_and(|s| s.link.is_none()),
+            "the client face is HELD (its send seam kept) without a graph link"
         );
     }
 
@@ -4586,6 +4877,297 @@ mod tests {
             fwd.net.borrow().node_count(),
             1,
             "no self-loop neighbour added to the net (only self)"
+        );
+    }
+
+    // ── R311y163 (D4) — the peer's co-attached CLIENT data plane ─────────────
+
+    /// Feed a co-attached CLIENT's `DeclareSubscriber` through the dispatch seam
+    /// (`forward`), so the is_client branch routes it to `ingest_client_subscription`
+    /// (NOT the mesh `forward_subscription`). The `face` must be registered with a
+    /// Client WhatAmI (`peer_face_whatami(_, 2)`).
+    fn client_declare_sub(fwd: &LinkstateForwarder, face: FaceId, keyexpr: &str) {
+        let declare = build_declare_subscriber(0, 0, Some(keyexpr)).expect("build sub");
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(declare))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(face, IterationEvent::Poll(&outcome));
+    }
+
+    /// Feed a co-attached CLIENT's graceful `UndeclareSubscriber` (keyexpr in
+    /// ext_keyexpr) through the dispatch seam.
+    fn client_undeclare_sub(fwd: &LinkstateForwarder, face: FaceId, keyexpr: &str) {
+        let declare = build_undeclare_subscriber_with_keyexpr(keyexpr).expect("build undecl sub");
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(declare))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(face, IterationEvent::Poll(&outcome));
+    }
+
+    #[test]
+    fn a_client_sub_registers_under_self_and_advertises_to_a_mesh_child() {
+        // D4 / BLOCKER-1 fix (FAILS before D4: a client sub was mis-registered under
+        // the client's own zid and never re-flooded). A pico-style CLIENT of this
+        // peer declares a sub; it lands in `client_subs` AND is advertised into the
+        // mesh under SELF's zid, so a mesh child learns to route matching data back.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, sink_b) = peer_face(zid(0x0B)); // a real mesh child
+        let (client, _c) = peer_face_whatami(zid(0x0C), 2); // a CLIENT leaf
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05); // edge S<->B
+        sink_b.reset();
+
+        client_declare_sub(&fwd, FaceId(1), "demo/**");
+
+        assert_eq!(
+            fwd.client_subs_seen(),
+            1,
+            "the client sub is installed in client_subs"
+        );
+        assert!(
+            fwd.interested("demo/**").contains(&zid(0x05)),
+            "the client sub is advertised into the mesh under SELF's zid"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the mesh child learns the sub (a self-sourced DeclareSubscriber)"
+        );
+        assert_eq!(
+            forwarded_declare_keyexpr(&sink_b.frame_bytes(0)).as_deref(),
+            Some("demo/**")
+        );
+    }
+
+    #[test]
+    fn a_client_push_is_delivered_to_a_co_attached_client_subscriber() {
+        // D4 / C3a (FAILS before D4: the peer had no client delivery). A MESH Push
+        // reaches a co-attached CLIENT subscriber whose WILDCARD sub intersects the
+        // published key — the peer-tier deliver_to_client_subscribers.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_a, _sink_a) = peer_face(zid(0x0A)); // the mesh Push source
+        let (client_sub, sink_sub) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &peer_a);
+        fwd.register(FaceId(1), &client_sub);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        client_declare_sub(&fwd, FaceId(1), "demo/**");
+        sink_sub.reset();
+
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+
+        assert_eq!(
+            sink_sub.frame_count(),
+            1,
+            "the co-attached client sub (demo/**) receives the mesh Push demo/data (C3a)"
+        );
+        assert_eq!(
+            forwarded_keyexpr(&sink_sub.frame_bytes(0)).as_deref(),
+            Some("demo/data"),
+            "delivered with the published literal key (reliteralized)"
+        );
+    }
+
+    #[test]
+    fn a_departing_client_purges_client_subs_and_withdraws_the_advertisement() {
+        // D4 (FAILS before D4: deregister had no client_subs purge). A client face
+        // going down purges its subs AND — as the last backer — withdraws the mesh
+        // advertisement (a sourced UndeclareSubscriber to the mesh child).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, sink_b) = peer_face(zid(0x0B));
+        let (client, _c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        client_declare_sub(&fwd, FaceId(1), "demo/**");
+        assert_eq!(fwd.client_subs_seen(), 1);
+        sink_b.reset();
+
+        fwd.deregister(FaceId(1));
+
+        assert_eq!(
+            fwd.client_subs_seen(),
+            0,
+            "the departed client's subs are purged from client_subs"
+        );
+        assert!(
+            !fwd.interested("demo/**").contains(&zid(0x05)),
+            "the last backer's departure withdraws the mesh advertisement"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the mesh child receives the sourced UndeclareSubscriber"
+        );
+    }
+
+    #[test]
+    fn a_graceful_undeclare_from_a_client_withdraws_the_advertisement() {
+        // D4 — the graceful (UndeclareSubscriber) twin of the face-down purge: a
+        // client explicitly retracts; as the last backer, the mesh advertisement is
+        // withdrawn + the forget floods to the mesh child.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, sink_b) = peer_face(zid(0x0B));
+        let (client, _c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        client_declare_sub(&fwd, FaceId(1), "demo/**");
+        assert_eq!(fwd.client_subs_seen(), 1);
+        sink_b.reset();
+
+        client_undeclare_sub(&fwd, FaceId(1), "demo/**");
+
+        assert_eq!(fwd.client_subs_seen(), 0, "the client sub is withdrawn");
+        assert!(
+            !fwd.interested("demo/**").contains(&zid(0x05)),
+            "the last backer's retraction withdraws the mesh advertisement"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the mesh child receives the sourced UndeclareSubscriber"
+        );
+    }
+
+    #[test]
+    fn a_self_native_undeclare_keeps_a_surviving_client_subscribers_advertisement() {
+        // D4 union-refcount — the decisive BLACKHOLE guard. This peer co-hosts BOTH a
+        // self-native local sub AND a co-attached CLIENT sub on the SAME keyexpr,
+        // collapsed onto one (ke, self_zid) advertise slot. The self-native undeclare
+        // must NOT withdraw the shared advertisement while the client still backs it;
+        // only the LAST backer's departure withdraws + floods the forget.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, sink_b) = peer_face(zid(0x0B));
+        let (client, _c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        fwd.declare_subscription("demo/**")
+            .expect("self-native sub"); // source 1
+        client_declare_sub(&fwd, FaceId(1), "demo/**"); // source 2 (same ke, one slot)
+        sink_b.reset();
+
+        // The self-native source retracts while the client still subscribes.
+        fwd.undeclare_subscription("demo/**")
+            .expect("self-native undeclare");
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "a surviving client sub keeps the shared advertise — NO withdraw flood (blackhole guard)"
+        );
+        assert!(
+            fwd.interested("demo/**").contains(&zid(0x05)),
+            "the mesh advertisement survives while the client still backs it"
+        );
+
+        // Now the LAST backer (the client) departs -> the withdraw finally floods.
+        fwd.deregister(FaceId(1));
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the last backer's departure withdraws the shared advertisement"
+        );
+        assert!(!fwd.interested("demo/**").contains(&zid(0x05)));
+    }
+
+    #[test]
+    fn two_clients_on_the_same_ke_share_one_advertise_and_survive_one_departure() {
+        // D4 union-refcount among CLIENTS: two client faces subscribe the SAME ke ->
+        // ONE mesh advertise (the 2nd ingest is SILENT, `subs.register` false); one
+        // client departing KEEPS the advertise (the other still backs it via
+        // `any_client_subscribes`); only the LAST backer's departure withdraws it.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, sink_b) = peer_face(zid(0x0B));
+        let (client1, _c1) = peer_face_whatami(zid(0x0C), 2);
+        let (client2, _c2) = peer_face_whatami(zid(0x0D), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client1);
+        fwd.register(FaceId(2), &client2);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        client_declare_sub(&fwd, FaceId(1), "demo/**"); // first backer -> advertise
+        sink_b.reset();
+        client_declare_sub(&fwd, FaceId(2), "demo/**"); // second backer -> SILENT
+
+        assert_eq!(fwd.client_subs_seen(), 2, "both client subs recorded");
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "the second client on the same ke does NOT re-flood the advertise"
+        );
+
+        // client1 departs -> client2 still backs demo/** -> the advertise SURVIVES.
+        fwd.deregister(FaceId(1));
+        assert!(
+            fwd.interested("demo/**").contains(&zid(0x05)),
+            "a surviving client keeps the shared advertise"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "one of two client backers departing does not withdraw"
+        );
+
+        // client2 (the LAST backer) departs -> the advertise is withdrawn + flooded.
+        fwd.deregister(FaceId(2));
+        assert!(!fwd.interested("demo/**").contains(&zid(0x05)));
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the last backer's departure withdraws the shared advertise"
+        );
+    }
+
+    #[test]
+    fn a_client_that_pubs_and_subs_the_same_ke_is_not_echoed_its_own_sub() {
+        // D4 self-echo guard (FAILS with origin=None): a co-attached CLIENT that
+        // holds a FUTURE publish-interest on demo/key AND then subscribes demo/key
+        // must NOT be pushed its OWN DeclareSubscriber back (which would open its
+        // write-filter against a phantom self-subscriber). `ingest_client_subscription`
+        // passes `origin = Some(inbound)`, excluding the subscribing client — zenoh
+        // `src_face != dst_face` / the router's `push_future_subscription(_, inbound)`.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (mesh, _sm) = peer_face(zid(0x0A));
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &mesh);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        // The client solicits a C+F SUBSCRIBERS interest on demo/key (pub-before-sub),
+        // no matching sub yet -> only a DeclareFinal; it now holds a FUTURE interest.
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, true, false, true),
+        );
+        sink_c.reset();
+
+        // The SAME client now declares a subscriber on demo/key.
+        client_declare_sub(&fwd, FaceId(1), "demo/key");
+
+        assert_eq!(
+            fwd.future_pushes_seen(),
+            0,
+            "the subscribing client is NOT pushed its own sub (origin exclusion)"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "no self-echo of the client's own DeclareSubscriber back to it"
         );
     }
 

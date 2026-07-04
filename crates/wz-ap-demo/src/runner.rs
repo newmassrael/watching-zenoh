@@ -1873,6 +1873,18 @@ pub(crate) async fn run_peer(
             forwarder.future_qabl_pushes_seen()
         );
     }
+    // Co-attached CLIENT-sub witness (R311y163 / D4) — the peer-tier twin of the
+    // router-hat `learned a client sub` barrier, emitted unconditionally on >0 at
+    // shutdown (latched, from `client_subs_seen()` state, so a test need not race the
+    // 250 ms app-tick) so a peer-mode cross-impl e2e (the strong #3-a, a foreign pico
+    // z_sub CLIENT of this peer) can gate on the client subscription being installed
+    // in `client_subs` and advertised into the mesh under self's zid.
+    if forwarder.client_subs_seen() > 0 {
+        log::info!(
+            "wz-ap-demo peer: learned a client sub ({} sub(s))",
+            forwarder.client_subs_seen()
+        );
+    }
     // Subscription-interest witnesses — the DETERMINISTIC shutdown counterparts to
     // the in-run app-tick logs, emitted from STATE unconditionally at shutdown so a
     // test need not race the 250 ms app-tick (mirrors the `received mesh data` /
