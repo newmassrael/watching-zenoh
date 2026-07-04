@@ -1688,10 +1688,9 @@ impl LinkstateForwarder {
         // CLIENT face whose FUTURE querier-interest matches (origin None = no inbound
         // face), with the RE-FOLDED merged info; the store dedups a redundant
         // re-declare and re-pushes only a completeness flip.
-        // R311y151 NAMED gap: there is no `undeclare_queryable` twin — a self-local
-        // queryable is never RETRACTED in wz, so no withdraw event exists to fire the
-        // undeclare-push (no stale `pushed` entry can form from this path). If a
-        // self-local qabl retraction lands later, wire its forget like undeclare_subscription.
+        // The retraction twin [`undeclare_queryable`](Self::undeclare_queryable) exists
+        // (R311y154): it withdraws self from `qabls`, drops the `local_queryables` reply
+        // handler, re-arms any waiting client querier, and floods the mesh forget.
         self.push_future_queryable(keyexpr, None);
         // node_id 0 = self-originated; the completeness rides the body ext
         // (omitted when DEFAULT/incomplete — the byte-identical no-info wire).
@@ -1754,8 +1753,11 @@ impl LinkstateForwarder {
     /// `local_queryables`, accumulating into a `Vec<QueryReply>` via the Session's
     /// `QueryResponder`; the actual `send_to_face` (which borrows `faces`) runs
     /// AFTER that borrow is released.
-    /// (A handler that re-entrantly registered a local queryable would panic the
-    /// `RefCell` — the §5.23 admin handler does not.)
+    /// (A handler that re-entrantly registered OR undeclared a local queryable would
+    /// panic the `RefCell` — `register_local_queryable` / `undeclare_queryable` both
+    /// `borrow_mut` `local_queryables`, held here across the handler call; the §5.23
+    /// admin handler does neither. A re-entrancy-safe dispatch — collect matches, drop
+    /// the borrow, then invoke — is a re-openable follow-up for both planes.)
     fn dispatch_local_queryables(
         &self,
         inbound: FaceId,
@@ -1827,8 +1829,10 @@ impl LinkstateForwarder {
     /// the §5.23 config-write is a plain Put).
     ///
     /// Borrow discipline: handlers run under a `borrow_mut` of `local_subscribers`;
-    /// a handler that re-entrantly registered a local subscriber would panic the
-    /// `RefCell` (the §5.23 config-write handler does not).
+    /// a handler that re-entrantly registered OR undeclared a local subscriber would
+    /// panic the `RefCell` (`register_local_subscriber` / `undeclare_subscription` both
+    /// `borrow_mut` `local_subscribers`; the §5.23 config-write handler does neither).
+    /// A re-entrancy-safe dispatch is a re-openable follow-up for both planes.
     fn dispatch_local_subscribers(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
         // Resolve the Put keyexpr against the inbound face's alias table (as
         // forward_push does); an unresolvable alias is dropped.
@@ -1886,12 +1890,61 @@ impl LinkstateForwarder {
     pub fn undeclare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
         let self_zid = *self.net.borrow().self_zid();
         let removed = self.subs.borrow_mut().withdraw(keyexpr, &self_zid);
+        // Drop the self-hosted subscriber handler (the inverse of register_local_subscriber)
+        // so a RETRACTED local subscriber STOPS receiving — R311y154 closed this
+        // pre-existing residual symmetrically with undeclare_queryable's local_queryables
+        // drop (dispatch_local_subscribers would otherwise keep delivering).
+        self.local_subscribers
+            .borrow_mut()
+            .retain(|ls| ls.keyexpr != keyexpr);
         if removed {
             // R311y151 undeclare-push: this self-local sub is gone; re-arm any
             // waiting CLIENT publisher whose pushed reply ke lost its last backer.
             self.undeclare_push_subs(keyexpr);
         }
         let declare = build_undeclare_subscriber_with_keyexpr(keyexpr)?;
+        self.flood_to_tree_children(&self_zid, || {
+            NetworkMessage::Declare(Box::new(declare.clone()))
+        })
+    }
+
+    /// Retract self's LOCAL queryable for `keyexpr` (R311y154, gap b) — the inverse of
+    /// [`declare_queryable`](Self::declare_queryable) and the qabl twin of
+    /// [`undeclare_subscription`](Self::undeclare_subscription). Withdraw self's own
+    /// declaration from [`qabls`](Self#structfield.qabls), re-arm any waiting CLIENT
+    /// querier (`undeclare_push_qabls`), and flood the sourced forget to tree children —
+    /// zenoh's `undeclare_linkstatepeer_queryable` (`hat/linkstate_peer/queries.rs:516`)
+    /// -> `unregister_linkstatepeer_queryable` (`propagate_forget_simple_queryable`, :512)
+    /// + `propagate_forget_sourced_queryable` (:525). Returns the mesh flood reach.
+    ///
+    /// The `undeclare_push_qabls` re-arm fires BOTH the full-undeclare AND — via
+    /// `re_pushes_for_withdrawn` — the y153 completeness-DOWNGRADE re-push; the latter is
+    /// an intentional SUPERSET over zenoh's linkstate_peer hat (full-undeclare-only, no
+    /// partial re-declare), per that method's doc.
+    pub fn undeclare_queryable(&self, keyexpr: &str) -> Result<usize, CodecError> {
+        let self_zid = *self.net.borrow().self_zid();
+        let removed = self.qabls.borrow_mut().withdraw(keyexpr, &self_zid);
+        // Drop the self-hosted reply handler (the inverse of register_local_queryable) so a
+        // RETRACTED queryable STOPS answering, not just stops being routed to — else
+        // dispatch_local_queryables keeps replying on the empty-route branch (zenoh drops
+        // the callback with the declaration). Keyed by keyexpr (the wz declare/undeclare
+        // API is keyexpr-based); symmetric with undeclare_subscription's local_subscribers
+        // drop (R311y154 closed the identical pre-existing residual on both planes).
+        self.local_queryables
+            .borrow_mut()
+            .retain(|lq| lq.keyexpr != keyexpr);
+        if removed {
+            // Self-local queryable gone -> re-arm any waiting CLIENT querier whose pushed
+            // reply ke lost its last backer (full-undeclare) or dropped completeness (the
+            // y153 downgrade re-push). Run AFTER the withdraw so the fold excludes self.
+            self.undeclare_push_qabls(keyexpr);
+        }
+        // Flood the sourced forget to tree children UNCONDITIONALLY (like
+        // undeclare_subscription) -- a never-registered keyexpr floods an idempotent
+        // UndeclareQueryable that dies at the first receiver's no-op withdraw. (zenoh
+        // gates this on contains_key(peer); wz's unconditional flood is a benign
+        // divergence kept for cross-plane symmetry with the sub twin.)
+        let declare = build_undeclare_queryable_with_keyexpr(keyexpr)?;
         self.flood_to_tree_children(&self_zid, || {
             NetworkMessage::Declare(Box::new(declare.clone()))
         })
@@ -8632,6 +8685,167 @@ mod tests {
         assert_eq!(
             final_msg.request_id, 7,
             "the bare final carries the querier's rid"
+        );
+    }
+
+    #[test]
+    fn peer_undeclare_self_local_qabl_re_arms_the_client_querier() {
+        // gap (b) / R311y154: a self-local queryable pushed to a waiting client querier;
+        // undeclare_queryable re-arms the querier's write-filter with UndeclareQueryable
+        // (same id) — the qabl twin of peer_withdrawing_the_self_local_sub....
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, false, true, true),
+        );
+        sink_c.reset();
+        fwd.declare_queryable("demo/**", true).expect("declare");
+        assert_eq!(sink_c.frame_count(), 1, "the self-local qabl is pushed");
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            _ => panic!("expected a DeclareQueryable push"),
+        };
+        assert_ne!(pushed_id, 0);
+        sink_c.reset();
+        fwd.undeclare_queryable("demo/**").expect("undeclare");
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the retraction undeclares to the waiting querier"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
+                assert_eq!(u.id, pushed_id, "the undeclare carries the pushed qabl id")
+            }
+            _ => panic!("expected an UndeclareQueryable"),
+        }
+    }
+
+    #[test]
+    fn peer_undeclare_self_local_qabl_floods_the_mesh_forget() {
+        // undeclare_queryable floods a sourced UndeclareQueryable to tree children
+        // (zenoh propagate_forget_sourced_queryable).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // A is S's tree child
+        fwd.declare_queryable("demo/q", false).expect("declare");
+        sink_a.reset();
+        let reached = fwd.undeclare_queryable("demo/q").expect("undeclare");
+        assert_eq!(reached, 1, "the forget floods to the one tree child A");
+        assert!(matches!(
+            forwarded_declare(&sink_a.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(_)
+        ));
+    }
+
+    #[test]
+    fn peer_undeclare_self_local_qabl_downgrades_a_still_backed_querier() {
+        // gap (b) x case (c): a self-local COMPLETE qabl + a MESH INCOMPLETE one both back
+        // the aggregate reply demo/key; complete=true is pushed. undeclare_queryable removes
+        // self's complete backer but 0x0B still backs demo/key -> DOWNGRADE re-push
+        // complete=false (same id), NOT an undeclare — the y153 machinery via the new path.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (mesh_i, _si) = peer_face(zid(0x0B)); // incomplete co-backer, survives
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(2), &mesh_i);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(2), 0x0B, 0x05);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, false, true, true),
+        );
+        declare_queryable_complete(&fwd, FaceId(2), "demo/key", 0, false); // mesh incomplete co-backer
+        sink_c.reset();
+        fwd.declare_queryable("demo/**", true).expect("declare"); // self complete -> complete=true pushed
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            _ => panic!("expected a DeclareQueryable push"),
+        };
+        sink_c.reset();
+        fwd.undeclare_queryable("demo/**").expect("undeclare"); // self's complete backer gone; 0x0B remains
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "DOWNGRADE re-push (demo/key still backed by 0x0B)"
+        );
+        match &forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.id, pushed_id, "same interned id, re-declared in place");
+                assert!(
+                    !wz_session_core::queryable_info::read_queryable_info(d.extensions.as_ref())
+                        .complete,
+                    "downgraded to complete=false"
+                );
+            }
+            other => panic!("expected a downgrade DeclareQueryable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_undeclare_queryable_stops_the_local_reply_handler() {
+        // R311y154: undeclare_queryable is the INVERSE of register_local_queryable — it
+        // drops the reply handler so a RETRACTED queryable STOPS answering (zenoh drops the
+        // callback with the declaration). Without the local_queryables drop, a Query on the
+        // empty-route branch would still hit the handler (dispatch_local_queryables) and
+        // reply — a "retraction that keeps answering".
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        fwd.register_local_queryable(
+            "demo/q",
+            true,
+            Box::new(|_v: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"local-reply")),
+        )
+        .expect("register local queryable");
+        fwd.undeclare_queryable("demo/q").expect("undeclare");
+        sink_a.reset();
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "the retracted queryable no longer answers: only the bare final (a live handler \
+             would add a Reply = 2 frames)"
+        );
+        assert_eq!(
+            forwarded_response_final(&sink_a.frame_bytes(0)).request_id,
+            99,
+            "the bare empty-route final carries the querier's rid"
+        );
+    }
+
+    #[test]
+    fn peer_undeclare_subscription_stops_the_local_subscriber() {
+        // R311y154 symmetric: undeclare_subscription is the INVERSE of
+        // register_local_subscriber — it drops the handler so a retracted local subscriber
+        // STOPS receiving. This closes the identical pre-existing local-handler residual
+        // the qabl twin exposed; fixed on BOTH planes to preserve the twin symmetry.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let f = fired.clone();
+        fwd.register_local_subscriber(
+            "demo/data",
+            Box::new(move |_s: &dyn SampleView| f.set(true)),
+        )
+        .expect("register local subscriber");
+        fwd.undeclare_subscription("demo/data").expect("undeclare");
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"p")),
+        );
+        assert!(
+            !fired.get(),
+            "the retracted local subscriber no longer receives the Put"
         );
     }
 
