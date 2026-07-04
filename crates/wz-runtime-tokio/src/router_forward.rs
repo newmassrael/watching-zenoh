@@ -1150,20 +1150,17 @@ impl RouterForwarder {
         // explicit UndeclareQueryable retraction (expressible via the ext_wire_expr
         // codec).
         //
-        // STILL DEFERRED here (named, NOT silent): (c) the qabl completeness-DOWNGRADE
-        // on a PARTIAL withdrawal toward the CLIENT querier — a native leaves but the
-        // reply ke stays backed at a now-lower folded completeness. undeclare_push_qabls
-        // forgets only a FULLY un-backed reply ke; a still-backed-but-downgraded one
-        // keeps its stale `(id, ALL_COMPLETE)`. This is a KNOWN divergence from zenoh's
-        // ROUTER hat, which re-declares the downgraded QueryableInfo on partial
-        // node-removal (register_router_queryable via local_router_qabl_info,
-        // hat/router/queries.rs:930-940) — the linkstate_peer hat is full-undeclare-only
-        // like wz. Deferred CONSISTENTLY with the graceful path (see undeclare_push_qabls).
-        // Also pre-existing + benign: any_sub/qabl_matches fold with NO destination-face
-        // exclusion (vs zenoh loop-2's remote_*_subs(&m, &face)), so a client that both
-        // publishes AND subscribes a ke keeps its OWN filter OFF after the other backer
-        // detaches (over-deliver, never a spurious undeclare) — a property of the reused
-        // graceful seam, not introduced by this wiring.
+        // Case (c) — the qabl completeness-DOWNGRADE on a PARTIAL withdrawal toward the
+        // CLIENT querier (a native leaves but the reply ke stays backed at a now-lower
+        // folded completeness) — is CLOSED (R311y153): undeclare_push_qabls fires BOTH
+        // the full-undeclare AND the value-aware downgrade re-push here, matching zenoh's
+        // ROUTER hat register_router_queryable-via-local_router_qabl_info re-declare on
+        // partial node-removal (hat/router/queries.rs:930-940). See undeclare_push_qabls.
+        // Pre-existing + benign (named, not introduced here): any_sub/qabl_matches fold
+        // with NO destination-face exclusion (vs zenoh loop-2's remote_*_subs(&m, &face)),
+        // so a client that both publishes AND subscribes a ke keeps its OWN filter OFF
+        // after the other backer detaches (over-deliver, never a spurious undeclare) — a
+        // property of the reused graceful seam.
         for keyexpr in affected_sub_keys {
             self.withdraw_native_cross_tier_sub(tier, &keyexpr);
             self.undeclare_push_subs(&keyexpr);
@@ -2339,14 +2336,26 @@ impl RouterForwarder {
     /// The MERGED [`QueryableInfo`] the querier on `exclude_face` interested in `ke`
     /// would see — the OR of `complete` (min of `distance`) over EVERY queryable wz
     /// holds that intersects `ke` (`router_qabls` + `linkstatepeer_qabls` excluding
-    /// self, plus `client_qabls` EXCLUDING the destination face). zenoh's
-    /// `local_qabl_info(res, dst_face)` fold, the SAME fold
-    /// [`dump_interest_qabls`](Self::dump_interest_qabls) inlines per reply ke (which
-    /// likewise excludes the requesting `inbound` face) — the value a FUTURE qabl
-    /// push MUST carry: a single source's raw info would DOWNGRADE an aggregate reply
-    /// (`merge` is OR-complete) and re-arm an ALL_COMPLETE filter. Excluding
-    /// `exclude_face` keeps the CURRENT-dump seed and this later push like-for-like,
-    /// so a querier that CO-HOSTS a matching queryable gets no spurious re-push.
+    /// self, plus `client_qabls` EXCLUDING the destination face) — the value a FUTURE
+    /// qabl push/re-push MUST carry: a single source's raw info would DOWNGRADE an
+    /// aggregate reply (`merge` is OR-complete) and re-arm an ALL_COMPLETE filter.
+    /// Excluding `exclude_face` keeps the CURRENT-dump seed
+    /// ([`dump_interest_qabls`](Self::dump_interest_qabls), which inlines the SAME fold
+    /// excluding the requesting `inbound`), the ingest push, and the R311y153
+    /// downgrade re-push all like-for-like, so the stored value never drifts.
+    ///
+    /// DIVERGENCE from zenoh (benign, source-verified): zenoh's `local_qabl_info(res,
+    /// dst_face)` excludes the dst's own contribution only CONDITIONALLY — for a CLIENT
+    /// dst it FOLDS IN the dst's own queryable (hat/router/queries.rs:175-177, the
+    /// `face.whatami != Peer` disjunct), keeping that client's filter OFF via the fold.
+    /// wz excludes `exclude_face` UNCONDITIONALLY. The OUTCOME is nonetheless equivalent
+    /// for a co-hosted COMPLETE queryable: that scenario requires pico
+    /// `Z_FEATURE_LOCAL_QUERYABLE`, which registers the local queryable as a
+    /// `local_target` (zenoh-pico `net/filtering.c` `_z_write_filter_ctx_update_state`:
+    /// the filter is ACTIVE only when `targets == NULL && local_targets == 0`), so the
+    /// co-hosted queryable keeps the write-filter OFF independent of what wz declares —
+    /// no black-hole. Different mechanism (pico `local_targets` vs zenoh fold-in), same
+    /// outcome (filter stays OFF, the querier's get flows to the local answerer).
     fn merged_qabl_info(&self, ke: &str, self_zid: &Zid, exclude_face: FaceId) -> QueryableInfo {
         let mut merged: Option<QueryableInfo> = None;
         let mut fold = |info: QueryableInfo| {
@@ -2515,20 +2524,50 @@ impl RouterForwarder {
         }
     }
 
-    /// The queryable twin of [`undeclare_push_subs`](Self::undeclare_push_subs) —
-    /// `UndeclareQueryable(id)` for each un-backed pushed reply ke. (Case 1 only: a
-    /// PARTIAL withdrawal that leaves the reply ke backed at a DOWNGRADED completeness
-    /// is the deferred ALL_COMPLETE value-downgrade unit, not touched here.)
+    /// The queryable twin of [`undeclare_push_subs`](Self::undeclare_push_subs). TWO
+    /// halves, both fired here so every caller (graceful native / client undeclare +
+    /// the detach choke point) gets both:
+    /// - `forgets_for_withdrawn` -> `UndeclareQueryable(id)` for each reply ke now
+    ///   FULLY un-backed (its last backer gone) — R311y151/y152.
+    /// - `re_pushes_for_withdrawn` -> a re-declared `DeclareQueryable(id, ke,
+    ///   DOWNGRADED info)` for each STILL-backed reply ke whose FOLDED completeness
+    ///   dropped (case c, R311y153), so an ALL_COMPLETE querier's filter re-arms. The
+    ///   client-facing twin of zenoh's `register_router_queryable(local_router_qabl_info)`
+    ///   partial-removal re-declare — reached from a graceful undeclare via
+    ///   `undeclare_simple_queryable` (hat/router/queries.rs:808-809) and from a
+    ///   node-removal via `queries_remove_node` (:930-940); both route through the same
+    ///   `propagate_simple_queryable` value-diff gate (:255). Uses the SAME
+    ///   `merged_qabl_info` fold `push_future_queryable` uses (excludes self + dest).
+    ///
+    /// Run AFTER the withdrawn qabl left its table (both folds are post-withdrawal).
+    /// `forgets` runs FIRST so `re_pushes` only re-folds the SURVIVORS — no reply ke is
+    /// both undeclared and re-pushed (forgets removes the fully-unbacked from `pushed`;
+    /// re_pushes scans what remains). Both store calls read `self.*_qabls` (distinct
+    /// RefCells from `future_qabls`) via their closures — the proven `pushes_for_new`
+    /// borrow shape.
     fn undeclare_push_qabls(&self, withdrawn_ke: &str) {
-        let forgets = self
-            .future_qabls
-            .borrow_mut()
-            .forgets_for_withdrawn(withdrawn_ke, |rk| self.any_qabl_matches(rk));
+        let self_zid = *self.routers_net.borrow().self_zid();
+        let (forgets, re_pushes) = {
+            let mut store = self.future_qabls.borrow_mut();
+            let forgets = store.forgets_for_withdrawn(withdrawn_ke, |rk| self.any_qabl_matches(rk));
+            let re_pushes = store.re_pushes_for_withdrawn(withdrawn_ke, |rk, dest| {
+                self.merged_qabl_info(rk, &self_zid, dest)
+            });
+            (forgets, re_pushes)
+        };
         for (face, _reply_ke, id) in forgets {
             self.send_one_to_face(
                 face,
                 NetworkMessage::Declare(Box::new(build_undeclare_queryable(id))),
             );
+        }
+        for (face, reply_ke, id, info) in re_pushes {
+            match build_declare_queryable_with_id_info(id, &reply_ke, info) {
+                Ok(decl) => self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl))),
+                Err(e) => log::warn!(
+                    "router forward: qabl downgrade re-push build failed for {reply_ke:?}: {e:?}"
+                ),
+            }
         }
     }
 
@@ -5560,6 +5599,217 @@ mod tests {
             }
             _ => panic!("expected an UndeclareSubscriber on Oam-detach"),
         }
+    }
+
+    #[test]
+    fn partial_qabl_withdrawal_downgrades_the_waiting_querier_same_id() {
+        // gap (c) / R311y153: two mesh qabls (complete + incomplete) back the aggregate
+        // reply demo/key; complete=true is pushed to an ALL_COMPLETE querier. When the
+        // complete one WITHDRAWS, demo/key STAYS backed (incomplete) -> NOT an undeclare
+        // (forgets_for_withdrawn's any_qabl_matches is true), but a RE-PUSH of the
+        // DOWNGRADED complete=false carrying the SAME id, so the querier's ALL_COMPLETE
+        // filter re-arms. The client-facing twin of zenoh's register_router_queryable(
+        // local_router_qabl_info) partial-removal re-declare (hat/router/queries.rs:930-940).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, false, true, true),
+        );
+        sink_c.reset(); // clear the empty-dump DeclareFinal
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true)); // complete backer -> push
+        assert_eq!(sink_c.frame_count(), 1, "the complete qabl is pushed");
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            _ => panic!("expected a DeclareQueryable push"),
+        };
+        assert!(
+            forwarded_qabl_info(&sink_c.frame_bytes(0)).complete,
+            "pushed complete=true"
+        );
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/key", false)); // incomplete co-backer
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "folded still complete=true -> dedup, no re-push"
+        );
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), undeclare_qabl("demo/**")); // the complete backer withdraws
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the DOWNGRADE re-pushes (not an undeclare — demo/key still backs it)"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.id, pushed_id, "same interned id, re-declared in place")
+            }
+            other => panic!("expected a downgrade DeclareQueryable, got {other:?}"),
+        }
+        assert!(
+            !forwarded_qabl_info(&sink_c.frame_bytes(0)).complete,
+            "carries the folded complete=false"
+        );
+    }
+
+    #[test]
+    fn downgrade_re_push_excludes_the_queriers_own_co_hosted_queryable() {
+        // gap (c) Q1 exclusion edge (the CRUX the DESIGN panel split on, arbitrated by
+        // pico source): the querier F co-hosts its OWN complete queryable AND a REMOTE
+        // complete backer exists. The remote withdraws. any_qabl_matches("demo/key") is
+        // still TRUE (F's own qabl, no exclusion) so it is NOT undeclared; but the
+        // re-fold merged_qabl_info EXCLUDES F's own -> DEFAULT(complete=false) re-push.
+        // wz's exclude_face is UNCONDITIONAL (zenoh folds a client dst's own qabl IN,
+        // hat/router/queries.rs:175-177); the outcome is still safe because pico tracks
+        // the co-hosted queryable as a `local_target` that keeps F's write-filter OFF
+        // independent of this re-push (zenoh-pico net/filtering.c). This guards that the
+        // re-push flows through the same dest-exclusion as the ingest push (no drift).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, false, true, true),
+        );
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/**", true)); // F co-hosts its OWN complete qabl
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true)); // REMOTE complete backer -> push
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the remote complete qabl is pushed"
+        );
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            _ => panic!("expected a DeclareQueryable push"),
+        };
+        assert!(
+            forwarded_qabl_info(&sink_c.frame_bytes(0)).complete,
+            "pushed complete=true (F's own qabl is excluded, so the remote's true stands)"
+        );
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), undeclare_qabl("demo/**")); // the REMOTE backer withdraws
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "still backed by F's OWN qabl (not undeclared) -> DOWNGRADE re-push to DEFAULT"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.id, pushed_id, "same interned id")
+            }
+            other => panic!("expected a downgrade DeclareQueryable, got {other:?}"),
+        }
+        assert!(
+            !forwarded_qabl_info(&sink_c.frame_bytes(0)).complete,
+            "F's own co-hosted qabl is EXCLUDED from the re-fold -> complete=false"
+        );
+    }
+
+    #[test]
+    fn native_detach_downgrades_the_waiting_querier() {
+        // gap (c) via the DETACH path (not graceful undeclare): the detach choke point
+        // purge_detached_interest_tier -> undeclare_push_qabls must ALSO fire the
+        // downgrade re-push. A complete mesh qabl (0xBB) + an incomplete client co-backer
+        // both back the aggregate reply demo/key; complete=true is pushed to the querier.
+        // 0xBB's face goes DOWN -> demo/key stays backed (client incomplete) -> DOWNGRADE
+        // re-push complete=false, same id.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (native, _ns) = face(zid(0xBB), WIRE_PEER); // complete backer, detaches
+        let (querier, sink_q) = face(zid(0xCC), WIRE_CLIENT); // the ALL_COMPLETE querier
+        let (cobacker, _cs) = face(zid(0xDD), WIRE_CLIENT); // incomplete co-backer, survives
+        fwd.register(FaceId(0), &native);
+        fwd.register(FaceId(1), &querier);
+        fwd.register(FaceId(2), &cobacker);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, false, true, true),
+        );
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/key", false)); // client incomplete co-backer
+        sink_q.reset();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true)); // mesh complete -> re-push true
+        assert_eq!(sink_q.frame_count(), 1, "the complete fold is pushed");
+        let pushed_id = match forwarded_declare(&sink_q.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            _ => panic!("expected a DeclareQueryable push"),
+        };
+        assert!(forwarded_qabl_info(&sink_q.frame_bytes(0)).complete);
+        sink_q.reset();
+        fwd.deregister(FaceId(0)); // the complete mesh backer's face goes DOWN (detach)
+        assert_eq!(
+            sink_q.frame_count(),
+            1,
+            "the DETACH downgrades (client co-backer still backs demo/key)"
+        );
+        match forwarded_declare(&sink_q.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.id, pushed_id, "same id, re-declared in place on detach")
+            }
+            other => panic!("expected a downgrade DeclareQueryable on detach, got {other:?}"),
+        }
+        assert!(
+            !forwarded_qabl_info(&sink_q.frame_bytes(0)).complete,
+            "the detach re-push carries complete=false"
+        );
+    }
+
+    #[test]
+    fn seeded_qabl_downgrades_on_partial_withdrawal_same_id() {
+        // gap (c) F3 (test-rigor coverage): the qabl EXISTS at interest time, so the
+        // CURRENT-dump SEED (dump_interest_qabls -> intern_current_reply) sets `pushed`,
+        // NOT a future push. A later partial withdrawal must downgrade the SEEDED id —
+        // pinning that the current-dump seed fold and the re-push fold (both
+        // merged_qabl_info) AGREE (no drift; the F3 the IMPL panel flagged).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (native, _ns) = face(zid(0xAA), WIRE_ROUTER);
+        let (querier, sink_q) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &native);
+        fwd.register(FaceId(1), &querier);
+        // Both qabls exist BEFORE the interest (folded aggregate = complete=true).
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/**", true)); // complete
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/key", false)); // incomplete co-backer
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, false, true, true),
+        );
+        // The current dump: one aggregate DeclareQueryable(complete=true) + a DeclareFinal.
+        assert_eq!(sink_q.frame_count(), 2, "current dump reply + DeclareFinal");
+        let seeded_id = match forwarded_declare(&sink_q.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            other => panic!("expected the seeded DeclareQueryable first, got {other:?}"),
+        };
+        assert!(
+            forwarded_qabl_info(&sink_q.frame_bytes(0)).complete,
+            "the current-dump seed folds to complete=true"
+        );
+        sink_q.reset();
+        forward_one(&fwd, FaceId(0), undeclare_qabl("demo/**")); // the complete backer withdraws
+        assert_eq!(
+            sink_q.frame_count(),
+            1,
+            "the SEEDED id downgrades on the partial withdrawal"
+        );
+        match forwarded_declare(&sink_q.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => assert_eq!(
+                d.id, seeded_id,
+                "the downgrade reuses the SEEDED id — seed and re-push folds agree"
+            ),
+            other => panic!("expected a downgrade DeclareQueryable, got {other:?}"),
+        }
+        assert!(
+            !forwarded_qabl_info(&sink_q.frame_bytes(0)).complete,
+            "downgraded to complete=false"
+        );
     }
 
     #[test]

@@ -292,10 +292,11 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// mis-armed). Both the GRACEFUL explicit-Undeclare (R311y151) and the UNGRACEFUL
     /// face-down / link-down / topology-detach (R311y152) now run
     /// [`forgets_for_withdrawn`](Self::forgets_for_withdrawn) → clear `pushed` + re-arm
-    /// the filter (zenoh `propagate_forget_simple_subscription/_queryable`). What stays
-    /// deferred is only the qabl completeness-DOWNGRADE on a PARTIAL withdrawal (the
-    /// reply ke stays backed at a lower folded completeness) — case (c), value-aware
-    /// re-push, not a `pushed`-clear; see [`forgets_for_withdrawn`](Self::forgets_for_withdrawn).
+    /// the filter (zenoh `propagate_forget_simple_subscription/_queryable`). The qabl
+    /// completeness-DOWNGRADE on a PARTIAL withdrawal (the reply ke stays backed at a
+    /// lower folded completeness) — case (c), a value-aware re-push rather than a
+    /// `pushed`-clear — is CLOSED by
+    /// [`re_pushes_for_withdrawn`](Self::re_pushes_for_withdrawn) (R311y153).
     pub fn remove_interest(&mut self, face: FaceId, interest_id: u64) -> bool {
         let Some(state) = self.by_face.get_mut(&face) else {
             return false;
@@ -320,8 +321,9 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// AND lets a later re-declaration of the ke re-push (the stale-`pushed` residual
     /// [`remove_interest`](Self::remove_interest) documents). Value-agnostic — an
     /// undeclare drops the entry regardless of `V` (the qabl value-downgrade on a
-    /// PARTIAL withdrawal, where the reply ke stays backed, is a separate deferred
-    /// unit and is NOT touched here).
+    /// PARTIAL withdrawal, where the reply ke stays backed, is a separate unit —
+    /// [`re_pushes_for_withdrawn`](Self::re_pushes_for_withdrawn), R311y153 — NOT
+    /// touched here, since this method is value-agnostic).
     pub fn forgets_for_withdrawn<B: Fn(&str) -> bool>(
         &mut self,
         withdrawn_ke: &str,
@@ -344,6 +346,63 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
             for reply_ke in to_forget {
                 if let Some((id, _)) = state.pushed.remove(&reply_ke) {
                     out.push((*face, reply_ke, id));
+                }
+            }
+        }
+        out
+    }
+
+    /// After a withdrawal, RE-PUSH the value-aware DOWNGRADE — the value-aware twin of
+    /// [`forgets_for_withdrawn`](Self::forgets_for_withdrawn) (case c, R311y153). For
+    /// each STILL-PRESENT pushed reply ke that INTERSECTS `withdrawn_ke`, re-fold via
+    /// `value_of` and, if the value CHANGED, emit `(face, reply keyexpr, decl id,
+    /// new_value)` carrying the SAME interned id — the caller re-declares
+    /// `DeclareQueryable(id, reply_ke, new_value)` so pico updates the `(decl_id, peer)`
+    /// write-filter target in place. Call AFTER
+    /// [`forgets_for_withdrawn`](Self::forgets_for_withdrawn) (the FULLY-unbacked reply
+    /// kes are removed first, so the survivors this scans are still-backed) AND AFTER
+    /// the withdrawn declaration left its routing table (so `value_of` re-folds the
+    /// POST-withdrawal survivors). `value_of(reply_ke, dest_face)` receives the
+    /// ITERATING face as `dest` — exactly as [`pushes_for_new`](Self::pushes_for_new) —
+    /// so a per-destination fold excludes that face's own co-hosted declaration
+    /// like-for-like (see [`crate::router_forward`] `merged_qabl_info`).
+    ///
+    /// Inert for `V = ()` — a `()` value never differs, so the SUBSCRIBER plane never
+    /// downgrades (a `DeclareSubscriber` carries no value; only
+    /// [`FutureQablStore`](crate::future_interest::FutureQablStore)'s `undeclare_push`
+    /// drives this). Iterates `pushed` (the reply kes ALREADY declared to the face —
+    /// zenoh `face_hat.local_qabls`), NOT `interests` (that is
+    /// [`pushes_for_new`](Self::pushes_for_new)'s ingest domain): only an
+    /// already-declared id can be downgraded in place. `intern`'s value-diff is the
+    /// analogue of zenoh's `register_router_queryable` -> `propagate_simple_queryable`
+    /// re-declare gate `current.unwrap().1 != info` (hat/router/queries.rs:255, reusing
+    /// the same id `current.map(|c| c.0)` at :274-276), which fires on a partial
+    /// node-removal via the `register_router_queryable(local_router_qabl_info)` call at
+    /// queries.rs:930-940.
+    pub fn re_pushes_for_withdrawn<F: Fn(&str, FaceId) -> V>(
+        &mut self,
+        withdrawn_ke: &str,
+        value_of: F,
+    ) -> Vec<(FaceId, String, u64, V)> {
+        let mut out = Vec::new();
+        for (face, state) in self.by_face.iter_mut() {
+            // Collect the still-present pushed reply kes intersecting withdrawn_ke
+            // BEFORE interning (the read borrow of `pushed` cannot overlap `intern`'s
+            // mutable borrow) — the same collect-then-intern shape as `pushes_for_new`.
+            let candidates: Vec<String> = state
+                .pushed
+                .keys()
+                .filter(|reply_ke| {
+                    let chunks: Vec<&str> = reply_ke.split('/').collect();
+                    keyexpr_intersects_target(withdrawn_ke, &chunks)
+                })
+                .cloned()
+                .collect();
+            for reply_ke in candidates {
+                let value = value_of(&reply_ke, *face);
+                let (id, changed) = state.intern(&reply_ke, value);
+                if changed {
+                    out.push((*face, reply_ke, id, value));
                 }
             }
         }
@@ -775,5 +834,79 @@ mod tests {
             "undeclare carries the pushed qabl id"
         );
         assert_eq!(s.pushed_count(face(1)), 0);
+    }
+
+    // ── re-push on partial-withdrawal DOWNGRADE (R311y153, case c): a queryable
+    // withdraws but the reply ke STAYS backed at a lower folded completeness. ──────
+
+    #[test]
+    fn re_pushes_downgrades_a_still_backed_reply_ke_same_id() {
+        // Seed complete=true (a complete backer folded in); on a withdrawal the fold
+        // re-computes to complete=false (only incomplete survivors) -> re-push the SAME
+        // id with the downgraded value so an ALL_COMPLETE filter re-arms.
+        let mut s = FutureQablStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let id0 = s.intern_current_reply(face(1), "demo/**", info(true));
+        let re = s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest| info(false));
+        assert_eq!(re.len(), 1, "the downgrade re-pushes");
+        let (f, reply_ke, id, v) = &re[0];
+        assert_eq!(*f, face(1));
+        assert_eq!(reply_ke, "demo/**", "keyed on the aggregate reply ke");
+        assert_eq!(*id, id0, "re-push reuses the SAME interned id");
+        assert_eq!(*v, info(false), "carries the DOWNGRADED folded value");
+    }
+
+    #[test]
+    fn re_pushes_with_no_value_change_is_inert() {
+        // A withdrawal that does NOT move the fold (a redundant/incomplete source left)
+        // re-folds to the SAME value -> no re-push (the intern value-diff dedup).
+        let mut s = FutureQablStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let _ = s.intern_current_reply(face(1), "demo/**", info(true));
+        assert!(
+            s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest| info(true))
+                .is_empty(),
+            "an unchanged fold does not re-push",
+        );
+    }
+
+    #[test]
+    fn re_pushes_is_inert_on_the_subscriber_plane() {
+        // V = () never differs, so the subscriber store never downgrades (only the
+        // qabl plane's undeclare_push drives this; the specialization is provably inert).
+        let mut s = FutureSubStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let _ = s.intern_current_reply(face(1), "demo/**", ());
+        assert!(
+            s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest| ())
+                .is_empty(),
+            "a () value never differs -> the subscriber plane never re-pushes",
+        );
+    }
+
+    #[test]
+    fn re_pushes_skips_a_non_intersecting_withdrawal() {
+        let mut s = FutureQablStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        let _ = s.intern_current_reply(face(1), "demo/**", info(true));
+        assert!(
+            s.re_pushes_for_withdrawn("other/key", |_rk, _dest| info(false))
+                .is_empty(),
+            "a withdrawal outside the pushed reply ke does not re-fold it",
+        );
+    }
+
+    #[test]
+    fn re_pushes_only_touches_already_declared_reply_kes() {
+        // Iterates `pushed` (declared), NOT `interests`: an interest with NO pushed
+        // reply ke (nothing was ever declared to the face) yields no re-push, since
+        // there is no id for pico to downgrade in place.
+        let mut s = FutureQablStore::new();
+        s.store_interest(face(1), 7, "demo/**".to_owned(), true);
+        assert!(
+            s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest| info(false))
+                .is_empty(),
+            "no pushed reply ke -> nothing to downgrade",
+        );
     }
 }

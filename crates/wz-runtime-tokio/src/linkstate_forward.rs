@@ -1607,17 +1607,44 @@ impl LinkstateForwarder {
         }
     }
 
-    /// The queryable twin of [`undeclare_push_subs`](Self::undeclare_push_subs).
+    /// The queryable twin of [`undeclare_push_subs`](Self::undeclare_push_subs). Two
+    /// halves: `forgets_for_withdrawn` -> `UndeclareQueryable(id)` for each FULLY
+    /// un-backed reply ke (y151/y152), and `re_pushes_for_withdrawn` -> a re-declared
+    /// `DeclareQueryable(id, ke, DOWNGRADED info)` for each STILL-backed reply ke whose
+    /// FOLDED completeness dropped (case c, R311y153) so an ALL_COMPLETE querier re-arms.
+    /// The peer folds `self.qabls` GLOBALLY ([`merged_qabl_info`](Self::merged_qabl_info),
+    /// no exclusion — the peer has no client-qabl plane). `forgets` runs FIRST so
+    /// `re_pushes` re-folds only survivors.
+    ///
+    /// SUPERSET over zenoh (intentional, north-star superset-not-mirror): zenoh's
+    /// linkstate_peer hat `queries_remove_node` is FULL-UNDECLARE-ONLY — no partial
+    /// downgrade re-declare (hat/linkstate_peer/queries.rs `unregister_linkstatepeer_queryable`
+    /// fires `propagate_forget_simple_queryable` only when the qabl set empties; contrast
+    /// the ROUTER hat's re-declare arm at hat/router/queries.rs:930-940). Wiring the
+    /// downgrade re-push into the peer closes the same ALL_COMPLETE-downgrade hole the
+    /// linkstate_peer hat leaves open — a valid CLIENT-directed re-declare pico handles
+    /// via drop-first + conditional-readd (`net/filtering.c`), never sent to a real peer.
     fn undeclare_push_qabls(&self, withdrawn_ke: &str) {
-        let forgets = self
-            .future_qabls
-            .borrow_mut()
-            .forgets_for_withdrawn(withdrawn_ke, |rk| self.any_qabl_matches(rk));
+        let (forgets, re_pushes) = {
+            let mut store = self.future_qabls.borrow_mut();
+            let forgets = store.forgets_for_withdrawn(withdrawn_ke, |rk| self.any_qabl_matches(rk));
+            let re_pushes =
+                store.re_pushes_for_withdrawn(withdrawn_ke, |rk, _dest| self.merged_qabl_info(rk));
+            (forgets, re_pushes)
+        };
         for (face, _reply_ke, id) in forgets {
             self.send_one_to_face(
                 face,
                 NetworkMessage::Declare(Box::new(build_undeclare_queryable(id))),
             );
+        }
+        for (face, reply_ke, id, info) in re_pushes {
+            match build_declare_queryable_with_id_info(id, &reply_ke, info) {
+                Ok(decl) => self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl))),
+                Err(e) => log::warn!(
+                    "peer forward: qabl downgrade re-push build failed for {reply_ke:?}: {e:?}"
+                ),
+            }
         }
     }
 
@@ -2720,8 +2747,10 @@ impl LinkstateForwarder {
     /// too (`publish` folds only `self.subs`), so it was never served here regardless
     /// (the pre-existing two-clients-on-one-isolated-peer gap at `respond_to_interest`,
     /// not introduced here — no NEW black-hole). Case c (the qabl completeness
-    /// DOWNGRADE on a partial withdrawal) stays deferred consistently with the
-    /// graceful path (see [`undeclare_push_qabls`](Self::undeclare_push_qabls)).
+    /// DOWNGRADE on a partial withdrawal) is CLOSED (R311y153):
+    /// [`undeclare_push_qabls`](Self::undeclare_push_qabls) fires the value-aware
+    /// downgrade re-push here too (a SUPERSET over zenoh's full-undeclare-only
+    /// linkstate_peer hat).
     fn purge_detached_interest(&self, removed: &[Zid]) {
         if removed.is_empty() {
             return;
@@ -5122,6 +5151,67 @@ mod tests {
                 )
             }
             _ => panic!("expected an UndeclareQueryable on link-down"),
+        }
+    }
+
+    #[test]
+    fn peer_partial_qabl_withdrawal_downgrades_the_client_querier_same_id() {
+        // gap (c) / R311y153 on the peer (a SUPERSET over zenoh's full-undeclare-only
+        // linkstate_peer hat): a COMPLETE mesh qabl (0x0A) and an INCOMPLETE one (0x0B)
+        // both back the aggregate reply demo/key; complete=true is pushed to an
+        // ALL_COMPLETE client querier. 0x0A's link drops (detach), but 0x0B still backs
+        // demo/key -> NOT an undeclare, a RE-PUSH of the DOWNGRADED complete=false with
+        // the SAME id. 0x0B keeps its OWN link so it survives 0x0A's detach.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (mesh_c, _sc) = peer_face(zid(0x0A)); // complete backer, will detach
+        let (mesh_i, _si) = peer_face(zid(0x0B)); // incomplete co-backer, survives
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &mesh_c);
+        fwd.register(FaceId(2), &mesh_i);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(2), 0x0B, 0x05); // 0x0B's own link -> survives 0x0A detach
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, false, true, true),
+        );
+        sink_c.reset();
+        declare_queryable_complete(&fwd, FaceId(0), "demo/**", 0, true); // complete -> push
+        assert_eq!(sink_c.frame_count(), 1, "the complete qabl is pushed");
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            _ => panic!("expected a DeclareQueryable push"),
+        };
+        assert!(
+            wz_session_core::queryable_info::read_queryable_info(
+                match &forwarded_declare(&sink_c.frame_bytes(0)).body {
+                    DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.extensions.as_ref(),
+                    _ => None,
+                }
+            )
+            .complete,
+            "pushed complete=true"
+        );
+        declare_queryable_complete(&fwd, FaceId(2), "demo/key", 0, false); // incomplete co-backer
+        sink_c.reset();
+        fwd.deregister(FaceId(0)); // the complete backer's link drops (detach)
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the DOWNGRADE re-pushes (demo/key still backed by 0x0B)"
+        );
+        let re = forwarded_declare(&sink_c.frame_bytes(0));
+        match &re.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.id, pushed_id, "same interned id, re-declared in place");
+                assert!(
+                    !wz_session_core::queryable_info::read_queryable_info(d.extensions.as_ref())
+                        .complete,
+                    "carries the folded complete=false"
+                );
+            }
+            other => panic!("expected a downgrade DeclareQueryable, got {other:?}"),
         }
     }
 
