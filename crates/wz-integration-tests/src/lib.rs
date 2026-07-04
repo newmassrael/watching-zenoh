@@ -823,11 +823,18 @@ pub mod common {
     /// open transient, as for [`spawn_subscribed_zsub`]. Returns
     /// `(ChildGuard, File)` — the `File` is the stdout reader on which the caller
     /// asserts the reply witness `">> Received ('"`.
+    ///
+    /// `matching` adds `-a` (a background matching listener): the querier then also
+    /// prints `"Querier has matching queryable."` on write-filter DEACTIVATION and
+    /// `"Querier has NO MORE matching queryables."` on RE-ARM — the pico-side
+    /// positive observables of the wz future-push / undeclare-re-arm. Pass `false`
+    /// for the plain reply-witness legs.
     pub fn spawn_querying_zquerier(
         z_querier: &Path,
         selector: &str,
         endpoint: &str,
         router_label: &str,
+        matching: bool,
         mut mk_stdout: impl FnMut() -> File,
     ) -> (ChildGuard, File) {
         const ATTEMPTS: usize = 6;
@@ -843,6 +850,13 @@ pub mod common {
                     .args([
                         "-s", selector, "-e", endpoint, "-m", "client", "-n", "30", "-t", "3000",
                     ])
+                    // `matching` adds `-a`: z_querier declares a background matching
+                    // listener that prints "Querier has matching queryable." when its
+                    // write-filter DEACTIVATES (a queryable matched) and "Querier has
+                    // NO MORE matching queryables." when it RE-ARMS (all withdrawn) —
+                    // the positive cross-impl observables of the y150 future-push and
+                    // the y151 undeclare-re-arm on the pico querier's OWN filter state.
+                    .args(matching.then_some("-a"))
                     .stdout(Stdio::from(out_writer))
                     .stderr(Stdio::null())
                     .spawn()

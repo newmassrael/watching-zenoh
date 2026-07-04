@@ -17,8 +17,9 @@
 //! sn-newest-wins, full dump on new link) — the true "zenohd-equivalent" acid
 //! test for wz's router tier.
 //!
-//! Six legs, STAGED so a failure localises (topology before data before reverse
-//! data before query before future-mode before forward-query):
+//! Eight legs, STAGED so a failure localises (topology before data before reverse
+//! data before query before future-mode before forward-query before future-query
+//! before undeclare-re-arm):
 //!
 //!   1. `wz_router_hat_federates_with_zenohd_at_router_tier` — the CONTROL-PLANE
 //!      floor: wz `--router-hat --connect <zenohd>` dials the reference router;
@@ -102,16 +103,37 @@
 //!      cross-tier advertise — the `-n 30 -t 3000` burst absorbs any imprecision);
 //!      transit-pinned on `routed a query`.
 //!
+//!   7. `wz_router_hat_pushes_a_future_queryable_to_a_pico_querier` — the
+//!      FUTURE-mode querier-before-queryable acid test (R311y156; the QUERY-plane
+//!      twin of leg 5, cross-impl closure of the R311y150 proactive qabl push).
+//!      Same topology as leg 4 (querier behind wz, queryable behind zenohd) but the
+//!      QUERIER declares BEFORE any queryable, so wz's CURRENT dump is empty and the
+//!      ONLY deactivation path is the y150 FUTURE push (wz stores the querier's f()
+//!      queryable interest, then pushes an unsolicited DeclareQueryable once zenohd's
+//!      queryable floods across the mesh). Asserted via the `pushed a future
+//!      queryable` witness so the deactivation is provably the FUTURE push, not a
+//!      raced CURRENT dump.
+//!
+//!   8. `wz_router_hat_undeclare_re_arms_a_pico_queriers_write_filter` — the
+//!      UNDECLARE-RE-ARM acid test (R311y156; the QUERY-plane closure of R311y151).
+//!      Same setup as leg 7 but the pico `z_querier` runs with `-a` (a matching
+//!      listener), so its OWN write-filter state is a POSITIVE observable: "Querier
+//!      has matching queryable." on the future-push deactivation, then — the acid
+//!      test — "Querier has NO MORE matching queryables." after the queryable is
+//!      KILLED and wz's y151 undeclare_push_qabls re-arms the filter cross-impl.
+//!
 //! SCOPE — what this does NOT yet cover (the cross-impl router tier is a large
 //! surface; this is the first, deliberately-2-node slice, mirroring how the
 //! wz<->wz mesh suite staged its own coverage):
 //!   * ALL_COMPLETE querier fold deferred — legs 4 & 6's default z_querier is
 //!     NON-complete; the `complete && includes` fold is not CLI-drivable (no
 //!     target flag) and stays unit-proven.
-//!   * qabl future-push + undeclare-push deferred — a queryable learned AFTER a
-//!     querier's FUTURE interest (the query-plane analog of leg 5) and a sub/qabl
-//!     WITHDRAWAL re-arming the filter are the R311y146 named deferrals, not
-//!     covered here.
+//!   * qabl future-push + undeclare-re-arm CLOSED by legs 7 & 8 (R311y156) — a
+//!     queryable learned AFTER a querier's FUTURE interest pushes an unsolicited
+//!     DeclareQueryable (leg 7, the `pushed a future queryable` witness), and a
+//!     queryable WITHDRAWAL re-arms the querier's write-filter (leg 8, the pico `-a`
+//!     matching listener's "NO MORE matching queryables." positive observable — NOT
+//!     a flaky negative). Both are also unit-proven on the forwarder.
 //!   * peer-tier FUTURE-push observability deferred — leg 5's `future_pushes`
 //!     witness is on the ROUTER forwarder only; the peer `LinkstateForwarder`'s
 //!     own `push_future_subscription` carries no counter yet (no peer-mode
@@ -539,6 +561,7 @@ fn wz_router_hat_and_zenohd_federate_a_pico_query() {
             "demo/key",
             &q_endpoint,
             "wz-router-hat",
+            false,
             tempfile,
         )
     });
@@ -810,9 +833,16 @@ fn wz_router_hat_and_zenohd_federate_a_pico_query_across_the_backbone() {
     // the mesh); the Query routes zenohd -> wz, wz dispatches it to its client
     // queryable, and the reply returns the same path in reverse.
     let q_endpoint = format!("tcp/127.0.0.1:{zport}");
-    let mut z_querier_pair = learned
-        .is_ok()
-        .then(|| spawn_querying_zquerier(&z_querier, "demo/key", &q_endpoint, "zenohd", tempfile));
+    let mut z_querier_pair = learned.is_ok().then(|| {
+        spawn_querying_zquerier(
+            &z_querier,
+            "demo/key",
+            &q_endpoint,
+            "zenohd",
+            false,
+            tempfile,
+        )
+    });
 
     // The acid test: the reply from z_queryable behind wz reaches the pico querier
     // behind zenohd, having crossed the cross-impl router backbone in the forward
@@ -882,4 +912,298 @@ fn wz_router_hat_and_zenohd_federate_a_pico_query_across_the_backbone() {
          saw did not originate at the real cross-impl answerer\n--- z_queryable \
          stdout ---\n{z_qabl_captured}"
     );
+}
+
+/// Leg 7 — FUTURE-mode querier-before-queryable (R311y156), the QUERY-plane twin of
+/// leg 5 and the cross-impl closure of the R311y150 proactive queryable push. Same
+/// topology as leg 4 (querier behind wz, queryable behind zenohd) but the QUERIER
+/// declares BEFORE any queryable exists, so wz's CURRENT interest dump is empty and
+/// the ONLY way the querier's write-filter deactivates is the y150 FUTURE push: wz
+/// stores the querier's `f()` queryable interest, then — when zenohd's queryable
+/// later floods across the mesh — proactively pushes an unsolicited
+/// `DeclareQueryable` to the querier's face (`push_future_queryable`).
+///
+/// Asserted via the `pushed a future queryable` witness so the deactivation is
+/// provably the FUTURE push, not a raced CURRENT dump (both otherwise silent). The
+/// querier spawns FIRST with NO barrier (a barrier would establish the
+/// queryable-first ordering leg 4 uses, destroying the discriminator); its `-n 30`
+/// burst is self-healing across the push, so gets dropped while the filter was active
+/// are followed by gets that flow once it deactivates.
+///
+/// The UNDECLARE-RE-ARM half is NOT cross-impl assertable (the real pico `z_querier`
+/// prints nothing when its write-filter re-arms, and the negative "gets stopped over
+/// time" is inherently flaky), so it stays unit-proven on the forwarder — router
+/// `withdrawing_the_last_backing_sub_undeclares_and_lets_a_re_declare_re_push`
+/// (router_forward.rs) + the peer twins (linkstate_forward.rs
+/// `peer_link_down_undeclares_to_the_client_querier`,
+/// `peer_partial_qabl_withdrawal_downgrades_the_client_querier_same_id`).
+#[test]
+#[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
+fn wz_router_hat_pushes_a_future_queryable_to_a_pico_querier() {
+    let z_querier = zenoh_pico_cli_binary("z_querier");
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+    let port_res = PortReservation::pick();
+    let zport = port_res.port();
+    let _zenohd = spawn_zenohd(zport, tempfile);
+    let zaddr = format!("127.0.0.1:{zport}");
+
+    // wz --router-hat dials zenohd; wait for the router backbone to converge BEFORE
+    // attaching clients so the link-state mesh is established.
+    let (mut wz_guard, mut wz_reader, wz_port) = spawn_router_hat_dialing(&zaddr);
+    if wait_for_substring(
+        &mut wz_reader,
+        ROUTERS_NET_CONVERGED,
+        Duration::from_secs(15),
+    )
+    .is_err()
+    {
+        let c = read_captured(&mut wz_reader);
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        panic!("wz <-> zenohd router backbone never converged within 15s\n--- wz-router-hat stderr ---\n{c}");
+    }
+
+    // z_querier: a pico CLIENT of WZ, querying demo/key — spawned FIRST, with NO
+    // matching queryable anywhere. Its write-filter is ACTIVE, so its early gets drop
+    // LOCALLY; wz stores its f() queryable interest (an empty CURRENT dump). The
+    // helper returns on "Declaring Querier on" — so the querier's declare-Interest is
+    // on the wire before the queryable is spawned. That wz actually STORED it is
+    // proven downstream by the `pushed a future queryable` witness, which can only
+    // fire from a stored future interest.
+    let q_endpoint = format!("tcp/127.0.0.1:{wz_port}");
+    let (mut z_querier_guard, mut z_querier_reader) = spawn_querying_zquerier(
+        &z_querier,
+        "demo/key",
+        &q_endpoint,
+        "wz-router-hat",
+        false,
+        tempfile,
+    );
+
+    // z_queryable: a pico CLIENT of ZENOHD, answering demo/** — spawned SECOND. zenohd
+    // floods it across the router backbone to wz, which PUSHES an unsolicited
+    // DeclareQueryable to z_querier's stored future interest (y150), deactivating the
+    // querier's write-filter so its remaining get burst flows.
+    let z_qabl_endpoint = format!("tcp/127.0.0.1:{zport}");
+    let (mut z_qabl_guard, mut z_qabl_reader) = spawn_answering_zqueryable(
+        &z_queryable,
+        "demo/**",
+        "future-query-federation",
+        &z_qabl_endpoint,
+        "zenohd",
+        tempfile,
+    );
+
+    // FUTURE-push proof: wz proactively pushed the queryable to the querier's face —
+    // the ONLY deactivation path given the querier-before-queryable ordering.
+    let pushed = wait_for_substring(
+        &mut wz_reader,
+        "router-hat: pushed a future queryable",
+        Duration::from_secs(20),
+    );
+
+    // The acid test: the reply from z_queryable behind zenohd reaches the pico querier
+    // behind wz — which can only happen after the future push deactivated the querier.
+    let received = wait_for_substring(
+        &mut z_querier_reader,
+        ">> Received ('demo/key'",
+        Duration::from_secs(20),
+    );
+    // Transit pin: the Query transited wz's router (`queries_seen` counts inbound
+    // Request(Query) only, unsatisfiable by a mere interest/declare round-trip).
+    let transit = received.is_ok().then(|| {
+        wait_for_substring(
+            &mut wz_reader,
+            "router-hat: routed a query",
+            Duration::from_secs(5),
+        )
+    });
+
+    let _ = z_querier_guard.child_mut().kill();
+    let _ = z_querier_guard.child_mut().wait();
+    let _ = z_qabl_guard.child_mut().kill();
+    let _ = z_qabl_guard.child_mut().wait();
+    graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+    let wz_captured = read_captured(&mut wz_reader);
+    let z_querier_captured = read_captured(&mut z_querier_reader);
+    let z_qabl_captured = read_captured(&mut z_qabl_reader);
+    eprintln!("--- wz-router-hat stderr ---\n{wz_captured}");
+    eprintln!("--- z_querier stdout ---\n{z_querier_captured}");
+    eprintln!("--- z_queryable stdout ---\n{z_qabl_captured}");
+
+    pushed.unwrap_or_else(|c| {
+        panic!(
+            "wz-router-hat never PUSHED a future queryable within 20s (no 'pushed a \
+             future queryable') — the y150 proactive push did not fire, so a \
+             querier-before-queryable querier's write-filter would never deactivate \
+             (or the real pico z_querier did not send a FUTURE-mode queryable \
+             interest)\n--- wz-router-hat stderr ---\n{c}"
+        )
+    });
+    received.unwrap_or_else(|c| {
+        panic!(
+            "pico z_querier behind wz never received a reply to demo/key within 20s — \
+             the FUTURE-mode querier-before-queryable query did not complete over the \
+             cross-impl router backbone (the future push did not deactivate the \
+             querier, the query was not routed, or the reply was lost)\n--- z_querier \
+             stdout ---\n{c}"
+        )
+    });
+    transit
+        .expect("received implies transit was probed")
+        .unwrap_or_else(|c| {
+            panic!(
+                "wz-router-hat never logged 'routed a query' — the reply reached the \
+                 querier without a Query transiting wz's router\n--- wz-router-hat \
+                 stderr ---\n{c}"
+            )
+        });
+    // Foreign-side proof: the query reached the REAL cross-impl answerer, not a
+    // wz-local synthesised reply (wz hosts no local queryable in this test).
+    assert!(
+        z_qabl_captured.contains("[Queryable handler] Received Query"),
+        "z_queryable behind zenohd never logged 'Received Query' — the reply z_querier \
+         saw did not originate at the real cross-impl answerer\n--- z_queryable stdout \
+         ---\n{z_qabl_captured}"
+    );
+}
+
+/// Leg 8 — the UNDECLARE-RE-ARM cross-impl acid test (R311y156), the QUERY-plane
+/// closure of the R311y151 undeclare-push. Same topology + future-push as leg 7, but
+/// the pico `z_querier` runs with `-a` (a background matching listener), so its OWN
+/// write-filter state is a POSITIVE observable: it prints "Querier has matching
+/// queryable." when the y150 future push DEACTIVATES the filter, and — the acid test —
+/// "Querier has NO MORE matching queryables." when the queryable WITHDRAWS and wz's
+/// y151 `undeclare_push_qabls` pushes an `UndeclareQueryable` that RE-ARMS the filter.
+///
+/// This is the POSITIVE pico-side observable of the re-arm (`z_querier_get_matching_status`
+/// = `!_z_write_filter_active`, zenoh-pico api.c), NOT the flaky negative "gets stopped
+/// over time" — so the withdrawal half is proven on a REAL pico querier, not only on
+/// the forwarder units (router_forward.rs
+/// `withdrawing_the_last_backing_sub_undeclares_and_lets_a_re_declare_re_push`,
+/// linkstate_forward.rs `peer_link_down_undeclares_to_the_client_querier`). Sequence:
+/// querier (with -a) first → queryable second → "matching queryable" (future push
+/// deactivated) → KILL the queryable → "NO MORE matching queryables" (undeclare
+/// re-armed). The wz-side `pushed a future queryable` pins the deactivation was the
+/// FUTURE push (querier-before-queryable), making this the full-lifecycle acid test.
+#[test]
+#[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
+fn wz_router_hat_undeclare_re_arms_a_pico_queriers_write_filter() {
+    let z_querier = zenoh_pico_cli_binary("z_querier");
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+    let port_res = PortReservation::pick();
+    let zport = port_res.port();
+    let _zenohd = spawn_zenohd(zport, tempfile);
+    let zaddr = format!("127.0.0.1:{zport}");
+
+    let (mut wz_guard, mut wz_reader, wz_port) = spawn_router_hat_dialing(&zaddr);
+    if wait_for_substring(
+        &mut wz_reader,
+        ROUTERS_NET_CONVERGED,
+        Duration::from_secs(15),
+    )
+    .is_err()
+    {
+        let c = read_captured(&mut wz_reader);
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        panic!("wz <-> zenohd router backbone never converged within 15s\n--- wz-router-hat stderr ---\n{c}");
+    }
+
+    // z_querier WITH -a (matching listener): a pico CLIENT of WZ, querying demo/key —
+    // spawned FIRST. Its write-filter starts ACTIVE; the y150 future push is the only
+    // thing that deactivates it (querier-before-queryable, as in leg 7).
+    let q_endpoint = format!("tcp/127.0.0.1:{wz_port}");
+    let (mut z_querier_guard, mut z_querier_reader) = spawn_querying_zquerier(
+        &z_querier,
+        "demo/key",
+        &q_endpoint,
+        "wz-router-hat",
+        true, // -a: observe the querier's own write-filter state
+        tempfile,
+    );
+
+    // z_queryable: a pico CLIENT of ZENOHD, answering demo/** — spawned SECOND. zenohd
+    // floods it across the backbone to wz, which future-pushes a DeclareQueryable to
+    // the querier, deactivating its filter.
+    let z_qabl_endpoint = format!("tcp/127.0.0.1:{zport}");
+    let (mut z_qabl_guard, mut z_qabl_reader) = spawn_answering_zqueryable(
+        &z_queryable,
+        "demo/**",
+        "undeclare-re-arm-federation",
+        &z_qabl_endpoint,
+        "zenohd",
+        tempfile,
+    );
+
+    // Precondition (pico-side): the future push DEACTIVATED the querier's write-filter.
+    let matched = wait_for_substring(
+        &mut z_querier_reader,
+        "Querier has matching queryable.",
+        Duration::from_secs(20),
+    );
+    // wz-side cause: the deactivation was the y150 FUTURE push (querier-before-queryable).
+    let pushed = matched.is_ok().then(|| {
+        wait_for_substring(
+            &mut wz_reader,
+            "router-hat: pushed a future queryable",
+            Duration::from_secs(5),
+        )
+    });
+
+    // Withdraw the queryable: KILL z_queryable so zenohd floods an UndeclareQueryable
+    // across the backbone to wz, whose y151 undeclare_push_qabls pushes an
+    // UndeclareQueryable to the querier — re-arming its write-filter.
+    if matched.is_ok() {
+        let _ = z_qabl_guard.child_mut().kill();
+        let _ = z_qabl_guard.child_mut().wait();
+    }
+
+    // THE ACID TEST (pico-side positive observable): the querier's write-filter
+    // RE-ARMED — the withdrawal reached it via wz's undeclare-push.
+    let rearmed = matched.is_ok().then(|| {
+        wait_for_substring(
+            &mut z_querier_reader,
+            "Querier has NO MORE matching queryables.",
+            Duration::from_secs(20),
+        )
+    });
+
+    let _ = z_querier_guard.child_mut().kill();
+    let _ = z_querier_guard.child_mut().wait();
+    let _ = z_qabl_guard.child_mut().kill();
+    let _ = z_qabl_guard.child_mut().wait();
+    graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+    let wz_captured = read_captured(&mut wz_reader);
+    let z_querier_captured = read_captured(&mut z_querier_reader);
+    let z_qabl_captured = read_captured(&mut z_qabl_reader);
+    eprintln!("--- wz-router-hat stderr ---\n{wz_captured}");
+    eprintln!("--- z_querier stdout ---\n{z_querier_captured}");
+    eprintln!("--- z_queryable stdout ---\n{z_qabl_captured}");
+
+    matched.unwrap_or_else(|c| {
+        panic!(
+            "pico z_querier never observed 'Querier has matching queryable.' within 20s \
+             — the y150 future push did not deactivate the querier's write-filter (the \
+             re-arm test's precondition failed)\n--- z_querier stdout ---\n{c}"
+        )
+    });
+    pushed
+        .expect("matched implies the push was probed")
+        .unwrap_or_else(|c| {
+            panic!(
+                "wz-router-hat never logged 'pushed a future queryable' — the querier's \
+                 filter deactivated without the wz future push (a raced CURRENT dump?)\n\
+                 --- wz-router-hat stderr ---\n{c}"
+            )
+        });
+    rearmed
+        .expect("matched implies the re-arm was probed")
+        .unwrap_or_else(|c| {
+            panic!(
+                "pico z_querier never observed 'Querier has NO MORE matching \
+                 queryables.' within 20s after the queryable was killed — the y151 \
+                 undeclare-push did not re-arm the querier's write-filter cross-impl \
+                 (zenohd did not flood the UndeclareQueryable, or wz did not push it to \
+                 the querier)\n--- z_querier stdout ---\n{c}"
+            )
+        });
 }

@@ -811,10 +811,11 @@ impl RouterForwarder {
     /// ([`future_qabl_pushes`](Self#structfield.future_qabl_pushes)). A `>0` value
     /// proves this router told a CLIENT face a queryable it learned AFTER that
     /// face's FUTURE interest (or a completeness flip), the sole wz cause of a
-    /// querier-before-queryable querier's write-filter deactivation. No caller yet —
-    /// it awaits the deferred querier-before-queryable Layer-Z leg (the query twin of
-    /// leg 5), exactly as the sub [`future_pushes_seen`](Self::future_pushes_seen)
-    /// witness was added in y146 ahead of its leg-5 consumer in y147.
+    /// querier-before-queryable querier's write-filter deactivation. Surfaced by
+    /// `wz-ap-demo`'s `run_router_hat` as `router-hat: pushed a future queryable`
+    /// (R311y156), consumed by the querier-before-queryable cross-impl legs 7 & 8 of
+    /// `wz_router_hat_zenohd_interop` — the query twin of the sub
+    /// [`future_pushes_seen`](Self::future_pushes_seen) witness / leg 5.
     pub fn future_qabl_pushes_seen(&self) -> usize {
         self.future_qabl_pushes.get()
     }

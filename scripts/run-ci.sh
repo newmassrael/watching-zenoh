@@ -4171,7 +4171,10 @@ layer_z_zenohd_interop() {
     # z_querier behind wz -> zenohd -> pico z_queryable, reply in reverse); leg 5
     # the FUTURE-mode pub-before-sub proactive-push closure; leg 6 (R311y149) the
     # FORWARD query (pico z_querier behind zenohd -> wz -> pico z_queryable behind
-    # wz, wz advertising its client qabl cross-tier). Needs zenohd + the pico
+    # wz, wz advertising its client qabl cross-tier); leg 7 (R311y156) the
+    # querier-before-queryable FUTURE-mode qabl push (the query twin of leg 5); leg 8
+    # the undeclare-RE-ARM of the pico querier's write-filter (z_querier -a matching
+    # listener). Needs zenohd + the pico
     # z_pub/z_sub/z_querier/z_queryable CLIs (checked above) + the
     # `router-hat-router` binary (built above). Same --test-threads=1 per-zenohd
     # isolation as the client legs.

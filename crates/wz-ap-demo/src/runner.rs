@@ -2019,6 +2019,7 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     let mut announced_client_sub = false;
     let mut announced_mesh_sub = false;
     let mut announced_future_push = false;
+    let mut announced_future_qabl_push = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -2095,6 +2096,17 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
                     announced_future_push = true;
                     log::info!("wz-ap-demo router-hat: pushed a future subscriber");
                 }
+                // FUTURE-push QUERY-plane twin (barrier-free discriminator for the
+                // querier-before-queryable leg): fires ONCE when this router has
+                // PROACTIVELY pushed an unsolicited DeclareQueryable to a CLIENT face
+                // whose FUTURE queryable interest predated the queryable (y150
+                // push_future_queryable). A querier that declared BEFORE any queryable
+                // has its write-filter deactivated ONLY by this push; asserting it
+                // distinguishes the FUTURE push from a raced CURRENT interest dump.
+                if !announced_future_qabl_push && forwarder.future_qabl_pushes_seen() > 0 {
+                    announced_future_qabl_push = true;
+                    log::info!("wz-ap-demo router-hat: pushed a future queryable");
+                }
             }
         }
     };
@@ -2149,6 +2161,15 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
         log::info!(
             "wz-ap-demo router-hat: pushed a future subscriber ({} push(es))",
             forwarder.future_pushes_seen()
+        );
+    }
+    // FUTURE-push QUERY-plane counterpart (latched, emitted unconditionally on >0 at
+    // teardown so a test need not race the 250 ms app tick) — the y150 proactive qabl
+    // push proof the querier-before-queryable leg asserts.
+    if forwarder.future_qabl_pushes_seen() > 0 {
+        log::info!(
+            "wz-ap-demo router-hat: pushed a future queryable ({} push(es))",
+            forwarder.future_qabl_pushes_seen()
         );
     }
     Ok(())
