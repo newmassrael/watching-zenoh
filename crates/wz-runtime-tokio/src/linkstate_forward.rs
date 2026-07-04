@@ -439,7 +439,12 @@ type LocalQueryHandler = Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut)>;
 struct LocalQueryable {
     keyexpr: String,
     complete: bool,
-    handler: LocalQueryHandler,
+    /// `Rc<RefCell<…>>` so [`dispatch_local_queryables`](LinkstateForwarder::dispatch_local_queryables)
+    /// can clone the handle out under a short borrow, drop the `local_queryables`
+    /// borrow, and only THEN invoke — a handler may re-entrantly register /
+    /// undeclare a local queryable (incl. self-undeclare) without panicking the
+    /// outer `RefCell`. See that method's re-entrancy contract.
+    handler: Rc<RefCell<LocalQueryHandler>>,
 }
 
 /// R311y46 (§5.23 Phase 3a) — the heap handler backing a [`LocalSubscriber`]:
@@ -454,7 +459,12 @@ type LocalSubscriberHandler = Box<dyn FnMut(&dyn SampleView)>;
 /// is delivered to the handler (the Push-plane twin of [`LocalQueryable`]).
 struct LocalSubscriber {
     keyexpr: String,
-    handler: LocalSubscriberHandler,
+    /// `Rc<RefCell<…>>` — the Push-plane twin of [`LocalQueryable`]'s handler:
+    /// [`dispatch_local_subscribers`](LinkstateForwarder::dispatch_local_subscribers)
+    /// clones the handle out under a short borrow, drops the `local_subscribers`
+    /// borrow, then invokes, so a handler may re-entrantly register / undeclare a
+    /// local subscriber (incl. self-undeclare) without a `RefCell` panic.
+    handler: Rc<RefCell<LocalSubscriberHandler>>,
 }
 
 /// A minimal [`QueryView`] over a routed Request's resolved fields, for
@@ -1715,10 +1725,13 @@ impl LinkstateForwarder {
         handler: LocalQueryHandler,
     ) -> Result<usize, CodecError> {
         let reached = self.declare_queryable(keyexpr, complete)?;
+        // Wrap the caller's `Box<dyn FnMut>` in the shared `Rc<RefCell<…>>` cell here
+        // (INTERNAL — the pub `handler: LocalQueryHandler` signature is unchanged) so
+        // dispatch can invoke it with the `local_queryables` borrow released.
         self.local_queryables.borrow_mut().push(LocalQueryable {
             keyexpr: keyexpr.to_string(),
             complete,
-            handler,
+            handler: Rc::new(RefCell::new(handler)),
         });
         Ok(reached)
     }
@@ -1736,9 +1749,12 @@ impl LinkstateForwarder {
         handler: LocalSubscriberHandler,
     ) -> Result<usize, CodecError> {
         let reached = self.declare_subscription(keyexpr)?;
+        // Wrap in the shared `Rc<RefCell<…>>` cell here (INTERNAL — the pub
+        // `handler: LocalSubscriberHandler` signature is unchanged), the twin of
+        // register_local_queryable, so dispatch invokes with the borrow released.
         self.local_subscribers.borrow_mut().push(LocalSubscriber {
             keyexpr: keyexpr.to_string(),
-            handler,
+            handler: Rc::new(RefCell::new(handler)),
         });
         Ok(reached)
     }
@@ -1749,15 +1765,29 @@ impl LinkstateForwarder {
     /// return path unwinds it). Returns `true` iff at least one local queryable
     /// matched (so the caller skips the bare empty-route `ResponseFinal`).
     ///
-    /// Borrow discipline: the handlers run under a `borrow_mut` of
-    /// `local_queryables`, accumulating into a `Vec<QueryReply>` via the Session's
-    /// `QueryResponder`; the actual `send_to_face` (which borrows `faces`) runs
-    /// AFTER that borrow is released.
-    /// (A handler that re-entrantly registered OR undeclared a local queryable would
-    /// panic the `RefCell` — `register_local_queryable` / `undeclare_queryable` both
-    /// `borrow_mut` `local_queryables`, held here across the handler call; the §5.23
-    /// admin handler does neither. A re-entrancy-safe dispatch — collect matches, drop
-    /// the borrow, then invoke — is a re-openable follow-up for both planes.)
+    /// Re-entrancy contract (R311y156, collect-drop-invoke): matching handlers are
+    /// cloned out (`Rc<RefCell<…>>`) under a SHORT `borrow()` of `local_queryables`;
+    /// the borrow is DROPPED before any handler runs, and each is invoked via
+    /// `try_borrow_mut`. So a handler may re-entrantly `register_local_queryable` /
+    /// `undeclare_queryable` (both `borrow_mut` `local_queryables`) — including
+    /// undeclaring ITSELF — without panicking: a re-entrant register lands after the
+    /// snapshot (excluded from THIS query, zenoh's "declared after the query"
+    /// semantics); a re-entrant undeclare drops the Vec's `Rc` while the snapshot
+    /// clone keeps the mid-fire handler alive. This mirrors zenoh's lock-free
+    /// callback delivery (`route_query` drops `rtables` before `send_request`;
+    /// `handle_query` drops the session read guard before `cb.call`). The ONE
+    /// irreducible case: a handler that synchronously re-enters ITS OWN dispatch —
+    /// `try_borrow_mut` SKIPS it, since a running `FnMut` cannot be aliased on two
+    /// stack frames. Faithful queue-and-redeliver of that self-echo (zenoh's
+    /// callbacks run off a task queue, so self-reentry is async there) is the
+    /// re-openable follow-up. `send_to_face` (which borrows `faces`) still runs
+    /// AFTER, on the drained `replies`.
+    ///
+    /// Cost: the snapshot `Vec` allocates ONLY on ≥1 local match (Rust `Vec` is lazy,
+    /// so a no-match relay pays nothing); the alloc is inherent to dropping the borrow
+    /// before invoke. A `SmallVec<[_; 1]>` / SingleOrVec inline form (zenoh's
+    /// `SingleOrVec`, session.rs) is a re-openable micro-opt if per-delivery alloc ever
+    /// profiles hot — not warranted now (off the mesh fan-out hot path).
     fn dispatch_local_queryables(
         &self,
         inbound: FaceId,
@@ -1776,27 +1806,32 @@ impl LinkstateForwarder {
         // through the ONE `QueryReply::into_response` builder — so Put / keyed /
         // encoded / stamped / attached / Err replies are all handled identically,
         // with no parallel reply accumulator (SSOT).
+        // Snapshot the matching handlers under a SHORT borrow, then DROP it so the
+        // invoke runs borrow-free (the re-entrancy contract above). A queryable
+        // answers a query whose keyexpr its declaration INTERSECTS (zenoh's
+        // `decl.intersects(query)`); under AllComplete only COMPLETE queryables answer.
+        let matched: Vec<Rc<RefCell<LocalQueryHandler>>> = {
+            let locals = self.local_queryables.borrow();
+            locals
+                .iter()
+                .filter(|lq| keyexpr_intersects_target(&lq.keyexpr, &query_chunks))
+                .filter(|lq| !matches!(target, Some(QueryTarget::AllComplete)) || lq.complete)
+                .map(|lq| Rc::clone(&lq.handler))
+                .collect()
+        };
+        if matched.is_empty() {
+            return false;
+        }
         let mut replies: Vec<QueryReply> = Vec::new();
-        let mut matched = false;
         {
             let mut responder = QueryResponder::new(request.rid, keyexpr.to_string(), &mut replies);
-            let mut locals = self.local_queryables.borrow_mut();
-            for lq in locals.iter_mut() {
-                // A queryable answers a query whose keyexpr its declaration
-                // INTERSECTS (zenoh's `decl.intersects(query)`); under AllComplete
-                // only COMPLETE queryables answer.
-                if !keyexpr_intersects_target(&lq.keyexpr, &query_chunks) {
-                    continue;
+            for handler in &matched {
+                // `try_borrow_mut` SKIPS a handler already on the stack (its own
+                // synchronous re-dispatch) — a running `FnMut` cannot be re-entered.
+                if let Ok(mut h) = handler.try_borrow_mut() {
+                    (**h)(&view, &mut responder);
                 }
-                if matches!(target, Some(QueryTarget::AllComplete)) && !lq.complete {
-                    continue;
-                }
-                matched = true;
-                (lq.handler)(&view, &mut responder);
             }
-        }
-        if !matched {
-            return false;
         }
         // Emit the accumulated replies, then the closing ResponseFinal, on the
         // inbound face — the querier is one hop away (rid = its own inbound rid);
@@ -1828,11 +1863,17 @@ impl LinkstateForwarder {
     /// present, is delivered un-decoded (descriptor decoding is a deferred layer;
     /// the §5.23 config-write is a plain Put).
     ///
-    /// Borrow discipline: handlers run under a `borrow_mut` of `local_subscribers`;
-    /// a handler that re-entrantly registered OR undeclared a local subscriber would
-    /// panic the `RefCell` (`register_local_subscriber` / `undeclare_subscription` both
-    /// `borrow_mut` `local_subscribers`; the §5.23 config-write handler does neither).
-    /// A re-entrancy-safe dispatch is a re-openable follow-up for both planes.
+    /// Re-entrancy contract (R311y156, collect-drop-invoke): the twin of
+    /// [`dispatch_local_queryables`](Self::dispatch_local_queryables) — matching
+    /// handlers are cloned out (`Rc<RefCell<…>>`) under a SHORT `borrow()`, the
+    /// borrow is DROPPED, then each is invoked via `try_borrow_mut`. So a handler
+    /// may re-entrantly `register_local_subscriber` / `undeclare_subscription`
+    /// (incl. self-undeclare) without a `RefCell` panic (a re-entrant register is
+    /// excluded from THIS Put's snapshot; a re-entrant undeclare drops the Vec's
+    /// `Rc` while the snapshot clone keeps the mid-fire handler alive). A handler
+    /// that synchronously re-delivers to ITSELF (publishes to its own pattern) is
+    /// SKIPPED by `try_borrow_mut` — a running `FnMut` cannot be aliased; faithful
+    /// queue-and-redeliver of that self-echo is the re-openable follow-up.
     fn dispatch_local_subscribers(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
         // Resolve the Put keyexpr against the inbound face's alias table (as
         // forward_push does); an unresolvable alias is dropped.
@@ -1862,13 +1903,25 @@ impl LinkstateForwarder {
                 Reliability::BestEffort
             },
         };
-        // Fire every LOCAL subscriber whose declared keyexpr (a PATTERN) matches the
-        // concrete Put key (the R227 subscriber-side match).
-        let mut locals = self.local_subscribers.borrow_mut();
-        for sub in locals.iter_mut() {
-            let pattern_chunks: Vec<&str> = sub.keyexpr.split('/').collect();
-            if keyexpr_pattern_matches(&pattern_chunks, &keyexpr) {
-                (sub.handler)(&sample);
+        // Snapshot every LOCAL subscriber whose declared keyexpr (a PATTERN) matches
+        // the concrete Put key (the R227 subscriber-side match) under a SHORT borrow,
+        // drop it, then fire — so a handler may re-enter the registry (contract above).
+        let matched: Vec<Rc<RefCell<LocalSubscriberHandler>>> = {
+            let locals = self.local_subscribers.borrow();
+            locals
+                .iter()
+                .filter(|sub| {
+                    let pattern_chunks: Vec<&str> = sub.keyexpr.split('/').collect();
+                    keyexpr_pattern_matches(&pattern_chunks, &keyexpr)
+                })
+                .map(|sub| Rc::clone(&sub.handler))
+                .collect()
+        };
+        for handler in &matched {
+            // Skip a handler already on the stack (its own re-delivery) — see the
+            // queryable twin.
+            if let Ok(mut h) = handler.try_borrow_mut() {
+                (**h)(&sample);
             }
         }
     }
@@ -9230,6 +9283,330 @@ mod tests {
         );
         assert_eq!(fired.get(), 1, "the local handler fired exactly once");
         assert_eq!(sink_a.frame_count(), 0, "not echoed back to the source A");
+    }
+
+    #[test]
+    fn dispatch_reentrant_register_local_subscriber_is_safe_and_snapshot_excludes_it() {
+        // R311y156 re-entrancy contract (subscriber plane): a local subscriber
+        // handler that re-entrantly REGISTERS another matching local subscriber must
+        // not panic the `local_subscribers` RefCell (the collect-drop-invoke drops
+        // the Vec borrow before the handler runs), and the newly-registered handler
+        // is EXCLUDED from the in-flight Put (snapshot = zenoh's "declared after this
+        // sample"). The pre-y156 `borrow_mut`-across-handler would panic on the
+        // re-entrant register.
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fires = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let fires_a = fires.clone();
+        let fires_b = fires.clone();
+        let once = std::cell::Cell::new(false);
+        fwd.register_local_subscriber(
+            "demo/**",
+            Box::new(move |_s: &dyn SampleView| {
+                fires_a.borrow_mut().push("A");
+                if !once.replace(true) {
+                    if let Some(fwd) = weak.upgrade() {
+                        let fb = fires_b.clone();
+                        let _ = fwd.register_local_subscriber(
+                            "demo/**",
+                            Box::new(move |_s: &dyn SampleView| fb.borrow_mut().push("B")),
+                        );
+                    }
+                }
+            }),
+        )
+        .expect("register A");
+
+        // Put 1: snapshot = [A]. A fires (records "A") and re-entrantly registers B;
+        // B is NOT in this snapshot, so it is excluded from Put 1 (and no panic).
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"p1")),
+        );
+        assert_eq!(
+            *fires.borrow(),
+            vec!["A"],
+            "re-entrant register did not panic; B excluded from the in-flight Put"
+        );
+
+        // Put 2: snapshot = [A, B] -> both fire (B is now in the registry).
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"p2")),
+        );
+        assert_eq!(
+            *fires.borrow(),
+            vec!["A", "A", "B"],
+            "the re-entrantly-registered B fires on the NEXT Put"
+        );
+    }
+
+    #[test]
+    fn dispatch_reentrant_self_undeclare_local_subscriber_is_safe() {
+        // R311y156 (subscriber plane): a handler that undeclares ITSELF during
+        // dispatch must not panic — the snapshot `Rc` keeps the mid-fire handler
+        // alive while `undeclare_subscription`'s `retain` drops the Vec entry — and
+        // after the self-undeclare it no longer fires.
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fires = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let f = fires.clone();
+        fwd.register_local_subscriber(
+            "demo/**",
+            Box::new(move |_s: &dyn SampleView| {
+                f.set(f.get() + 1);
+                if let Some(fwd) = weak.upgrade() {
+                    let _ = fwd.undeclare_subscription("demo/**"); // self-undeclare mid-fire
+                }
+            }),
+        )
+        .expect("register self-undeclaring subscriber");
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"p1")),
+        );
+        assert_eq!(
+            fires.get(),
+            1,
+            "fired once; the self-undeclare did not panic"
+        );
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"p2")),
+        );
+        assert_eq!(
+            fires.get(),
+            1,
+            "the self-undeclared subscriber no longer fires"
+        );
+    }
+
+    #[test]
+    fn dispatch_reentrant_register_local_queryable_is_safe_and_snapshot_excludes_it() {
+        // R311y156 (queryable plane, the twin of the subscriber register test): a
+        // local queryable handler that re-entrantly registers another matching
+        // queryable must not panic `local_queryables`, and the new one is excluded
+        // from the in-flight Query (snapshot).
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let replies = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let ra = replies.clone();
+        let rb = replies.clone();
+        let once = std::cell::Cell::new(false);
+        fwd.register_local_queryable(
+            "demo/q",
+            true,
+            Box::new(move |_v: &dyn QueryView, out: &mut dyn ReplyOut| {
+                ra.set(ra.get() + 1);
+                out.reply(b"A");
+                if !once.replace(true) {
+                    if let Some(fwd) = weak.upgrade() {
+                        let rb2 = rb.clone();
+                        let _ = fwd.register_local_queryable(
+                            "demo/q",
+                            true,
+                            Box::new(move |_v: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                rb2.set(rb2.get() + 1);
+                                out.reply(b"B");
+                            }),
+                        );
+                    }
+                }
+            }),
+        )
+        .expect("register A");
+        sink_a.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(
+            replies.get(),
+            1,
+            "Query 1: only A dispatched (B excluded from the snapshot); no panic"
+        );
+
+        let request2 = wz_session_core::request_build::build_request_query(100, 0, Some("demo/q"))
+            .expect("build request 2");
+        fwd.forward_request(FaceId(0), true, &request2);
+        assert_eq!(
+            replies.get(),
+            3,
+            "Query 2: A + B both dispatch (1 + 2 = 3 total invocations)"
+        );
+    }
+
+    #[test]
+    fn dispatch_reentrant_self_undeclare_local_queryable_is_safe() {
+        // R311y156 (queryable plane): a handler that undeclares ITSELF during
+        // dispatch must not panic; its reply for THIS query is still emitted (already
+        // accumulated in `replies`), and it no longer answers the NEXT query.
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let replies = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let r = replies.clone();
+        fwd.register_local_queryable(
+            "demo/q",
+            true,
+            Box::new(move |_v: &dyn QueryView, out: &mut dyn ReplyOut| {
+                r.set(r.get() + 1);
+                out.reply(b"A");
+                if let Some(fwd) = weak.upgrade() {
+                    let _ = fwd.undeclare_queryable("demo/q"); // self-undeclare mid-fire
+                }
+            }),
+        )
+        .expect("register self-undeclaring queryable");
+        sink_a.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(
+            replies.get(),
+            1,
+            "answered once; the self-undeclare did not panic"
+        );
+        // Query 2: the queryable is gone -> no local dispatch (the empty-route final
+        // is sent instead; the handler count stays 1).
+        let request2 = wz_session_core::request_build::build_request_query(100, 0, Some("demo/q"))
+            .expect("build request 2");
+        fwd.forward_request(FaceId(0), true, &request2);
+        assert_eq!(
+            replies.get(),
+            1,
+            "the self-undeclared queryable no longer answers"
+        );
+    }
+
+    #[test]
+    fn dispatch_self_reentrant_subscriber_is_skipped_not_looped() {
+        // R311y156 — the ONE irreducible case: a handler A that synchronously
+        // re-delivers to ITSELF (here by re-driving a matching Put through `forward`
+        // from inside its own callback). `try_borrow_mut` SKIPS the busy handler, so A
+        // cannot re-enter (a running `FnMut` cannot be aliased on two stack frames); a
+        // failed skip would recurse unboundedly and overflow the stack. A SECOND,
+        // non-self-referential subscriber B pins that the inner dispatch genuinely RAN
+        // (it fires B) while A alone was skipped: B fires TWICE (inner + outer) and A
+        // ONCE — distinguishing "skip exercised" from an inner dispatch that silently
+        // no-oped (both of which would give A==1 alone).
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fires = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let fa = fires.clone();
+        // A: on fire, record "A" and re-drive one matching Put (re-enters dispatch).
+        fwd.register_local_subscriber(
+            "demo/**",
+            Box::new(move |_s: &dyn SampleView| {
+                fa.borrow_mut().push("A");
+                if let Some(fwd) = weak.upgrade() {
+                    fwd.forward(
+                        FaceId(0),
+                        IterationEvent::Poll(&push_outcome("demo/data", b"inner")),
+                    );
+                }
+            }),
+        )
+        .expect("register self-echoing A");
+        // B: a plain matching subscriber that just records "B".
+        let fb = fires.clone();
+        fwd.register_local_subscriber(
+            "demo/**",
+            Box::new(move |_s: &dyn SampleView| fb.borrow_mut().push("B")),
+        )
+        .expect("register B");
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"outer")),
+        );
+        // Outer snapshot [A, B]: A fires ("A") -> re-drives the inner Put -> inner
+        // snapshot [A, B] SKIPS the busy A but fires B ("B") -> inner returns -> outer
+        // fires B ("B"). B twice proves the inner dispatch re-ran; A once proves it was
+        // skipped, not re-entered.
+        assert_eq!(
+            *fires.borrow(),
+            vec!["A", "B", "B"],
+            "A fired once (skipped on re-entry); B fired twice (inner + outer run)"
+        );
+    }
+
+    #[test]
+    fn dispatch_sibling_undeclare_during_dispatch_still_fires_the_peer() {
+        // R311y156 — snapshot-Rc liveness (subscriber plane): a handler A that
+        // undeclares a DIFFERENT, not-yet-fired handler B during dispatch must NOT
+        // cancel B's in-flight delivery — the snapshot holds B's `Rc`, so B STILL
+        // fires THIS Put (zenoh's "a sample already being delivered is not un-delivered
+        // by a concurrent undeclare"), and B is gone from the NEXT Put. This isolates
+        // the snapshot-`Rc` liveness guarantee: the self-undeclare tests only show a
+        // handler surviving its OWN stack frame (trivially alive because it is running).
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fires = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        // A (registered FIRST, pattern "demo/**"): on fire, undeclare the sibling B once.
+        let fa = fires.clone();
+        let once = std::cell::Cell::new(false);
+        fwd.register_local_subscriber(
+            "demo/**",
+            Box::new(move |_s: &dyn SampleView| {
+                fa.borrow_mut().push("A");
+                if !once.replace(true) {
+                    if let Some(fwd) = weak.upgrade() {
+                        let _ = fwd.undeclare_subscription("demo/key"); // drop sibling B
+                    }
+                }
+            }),
+        )
+        .expect("register A");
+        // B (registered SECOND, exact "demo/key"): also matches the Put demo/key.
+        let fb = fires.clone();
+        fwd.register_local_subscriber(
+            "demo/key",
+            Box::new(move |_s: &dyn SampleView| fb.borrow_mut().push("B")),
+        )
+        .expect("register B");
+
+        // Put 1: snapshot = [A, B]. A fires ("A") and undeclares B; B is ALREADY in the
+        // snapshot, so it STILL fires this Put ("B") — a concurrent undeclare does not
+        // cancel an in-flight delivery.
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/key", b"p1")),
+        );
+        assert_eq!(
+            *fires.borrow(),
+            vec!["A", "B"],
+            "the sibling B, undeclared mid-dispatch, still fires THIS Put (snapshot Rc)"
+        );
+        // Put 2: B is gone -> only A fires.
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/key", b"p2")),
+        );
+        assert_eq!(
+            *fires.borrow(),
+            vec!["A", "B", "A"],
+            "B is gone from the NEXT Put; only A fires"
+        );
     }
 
     #[test]
