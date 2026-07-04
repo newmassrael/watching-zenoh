@@ -384,6 +384,21 @@ pub struct LinkstateForwarder {
     /// echo for a retracted handler is not redelivered. `RefCell` / no `Send` by the
     /// single-task contract (it holds the non-`Send` handler `Rc`).
     sub_redelivery: RefCell<VecDeque<(Rc<RefCell<LocalSubscriberHandler>>, Sample)>>,
+    /// #3-c QUERY half (R311y168) — the query-plane twin of
+    /// [`sub_redelivery`](Self#structfield.sub_redelivery): deferred self-queries (a
+    /// queryable that re-queried its OWN ke while answering, so `try_borrow_mut`
+    /// found it busy). The busy handler(s) + the query return context (rid / keyexpr
+    /// / inbound face / reliability) are held here with the closing `ResponseFinal`
+    /// SUPPRESSED, and redelivered at the outermost
+    /// [`forward`](FaceForwarder::forward) exit -- reply-before-final preserved (the
+    /// query plane cannot emit the Final eagerly the way the fire-and-forget sub
+    /// plane can, or the querier discards the redelivered reply -- zenoh removes the
+    /// query on ResponseFinal, session.rs:3023). Bounded drop-oldest by
+    /// [`SELF_ECHO_QUEUE_CAP`](Self::SELF_ECHO_QUEUE_CAP); purged of a retracted
+    /// queryable's handler on [`undeclare_queryable`](Self::undeclare_queryable) (the
+    /// record survives so the Final still terminates the querier). `RefCell` / no
+    /// `Send`, single-task.
+    query_redelivery: RefCell<VecDeque<DeferredQuery>>,
     /// #3-c (R311y167) — re-entrancy depth of
     /// [`forward`](FaceForwarder::forward). The self-echo drain runs only at the
     /// OUTERMOST `forward` (depth 1, BEFORE the decrement), so a handler re-driving
@@ -507,6 +522,21 @@ struct LocalQueryable {
     handler: Rc<RefCell<LocalQueryHandler>>,
 }
 
+/// #3-c QUERY half (R311y168) — a self-query DEFERRED for redelivery: the busy
+/// queryable handler(s) that could not answer inline (mid-fire on the stack) plus
+/// the return context needed to emit their replies + the HELD closing
+/// `ResponseFinal` at the outermost `forward` exit. The query twin of the
+/// sub-plane's `(handler, Sample)` queue entry, carrying the extra query context
+/// (rid / keyexpr / face) the Final-hold needs (a query, unlike a fire-and-forget
+/// Put, has a return path + a terminating Final).
+struct DeferredQuery {
+    handlers: Vec<Rc<RefCell<LocalQueryHandler>>>,
+    rid: u64,
+    keyexpr: String,
+    inbound: FaceId,
+    reliable: bool,
+}
+
 /// R311y46 (§5.23 Phase 3a) — the heap handler backing a [`LocalSubscriber`]:
 /// `FnMut(&dyn SampleView)` (the SAME view a Session subscriber callback reads),
 /// MINUS `Send` — the forwarder is single-task, so a handler may capture an `Rc`
@@ -617,6 +647,7 @@ impl LinkstateForwarder {
             local_queryables: RefCell::new(Vec::new()),
             local_subscribers: RefCell::new(Vec::new()),
             sub_redelivery: RefCell::new(VecDeque::new()),
+            query_redelivery: RefCell::new(VecDeque::new()),
             forward_depth: Cell::new(0),
             trees_dirty: Cell::new(false),
             trees_delay,
@@ -1890,13 +1921,15 @@ impl LinkstateForwarder {
     /// semantics); a re-entrant undeclare drops the Vec's `Rc` while the snapshot
     /// clone keeps the mid-fire handler alive. This mirrors zenoh's lock-free
     /// callback delivery (`route_query` drops `rtables` before `send_request`;
-    /// `handle_query` drops the session read guard before `cb.call`). The ONE
-    /// irreducible case: a handler that synchronously re-enters ITS OWN dispatch —
-    /// `try_borrow_mut` SKIPS it, since a running `FnMut` cannot be aliased on two
-    /// stack frames. Faithful queue-and-redeliver of that self-echo (zenoh's
-    /// callbacks run off a task queue, so self-reentry is async there) is the
-    /// re-openable follow-up. `send_to_face` (which borrows `faces`) still runs
-    /// AFTER, on the drained `replies`.
+    /// `handle_query` drops the session read guard before `cb.call`). The self-query
+    /// case: a handler that, mid-answer, re-queries ITS OWN ke re-enters this dispatch
+    /// where `try_borrow_mut` finds it busy; R311y168 DEFERS the busy handler + HOLDS
+    /// this query's `ResponseFinal` into `query_redelivery` and redelivers off-stack at
+    /// the outermost `forward` exit
+    /// ([`drain_query_redelivery`](Self::drain_query_redelivery)) -- reply-before-final
+    /// preserved (an eager Final would make the querier discard the redelivered reply,
+    /// zenoh removing the query on ResponseFinal, session.rs:3023). `send_to_face`
+    /// (which borrows `faces`) still runs AFTER, on the drained `replies`.
     ///
     /// Cost: the snapshot `Vec` allocates ONLY on ≥1 local match (Rust `Vec` is lazy,
     /// so a no-match relay pays nothing); the alloc is inherent to dropping the borrow
@@ -1938,20 +1971,55 @@ impl LinkstateForwarder {
             return false;
         }
         let mut replies: Vec<QueryReply> = Vec::new();
+        let mut deferred: Vec<Rc<RefCell<LocalQueryHandler>>> = Vec::new();
         {
             let mut responder = QueryResponder::new(request.rid, keyexpr.to_string(), &mut replies);
             for handler in &matched {
-                // `try_borrow_mut` SKIPS a handler already on the stack (its own
-                // synchronous re-dispatch) — a running `FnMut` cannot be re-entered.
-                if let Ok(mut h) = handler.try_borrow_mut() {
-                    (**h)(&view, &mut responder);
+                match handler.try_borrow_mut() {
+                    Ok(mut h) => (**h)(&view, &mut responder),
+                    // #3-c QUERY half (R311y168) — a BUSY queryable is mid-answer and
+                    // has re-queried ITS OWN ke (self-query). Skipping it AND emitting
+                    // the Final eagerly (the y156 behavior) would DROP its answer:
+                    // zenoh removes the query on ResponseFinal (session.rs:3023), then
+                    // discards a late reply (:2807). DEFER the busy handler + HOLD this
+                    // query's Final for redelivery at the outermost forward exit.
+                    Err(_) => deferred.push(Rc::clone(handler)),
                 }
             }
         }
-        // Emit the accumulated replies, then the closing ResponseFinal, on the
-        // inbound face — the querier is one hop away (rid = its own inbound rid);
-        // any upstream hops unwind via the existing forward_response path. Routed
+        // Emit the free handlers' replies now — order-agnostic (a query fan-out has
+        // no reply order); ONLY the closing ResponseFinal must come last. Routed
         // through send_to_face so egress ACL applies, as the bare final does.
+        self.emit_query_responses(inbound, reliable, replies);
+        if deferred.is_empty() {
+            // No self-query: emit the closing ResponseFinal now — the querier is one
+            // hop away (rid = its own inbound rid); upstream hops unwind via the
+            // existing forward_response path (the y44 behavior, unchanged).
+            self.emit_query_final(inbound, reliable, request.rid);
+        } else {
+            // Self-query: queue the busy handler(s) + this query's return context with
+            // the Final SUPPRESSED; drain_query_redelivery (outermost forward exit)
+            // fires them off-stack and emits reply-before-final. Bounded drop-oldest
+            // (RingChannel) by SELF_ECHO_QUEUE_CAP, like the sub-plane sub_redelivery.
+            self.enqueue_deferred_query(DeferredQuery {
+                handlers: deferred,
+                rid: request.rid,
+                keyexpr: keyexpr.to_string(),
+                inbound,
+                reliable,
+            });
+        }
+        true
+    }
+
+    /// #3-c QUERY half (R311y168) — emit a queryable's accumulated replies as
+    /// `Response` messages on the querier's `inbound` face, each mapped through the
+    /// ONE `QueryReply::into_response` SSOT builder (so Put / keyed / encoded /
+    /// stamped / attached / Err replies are handled identically). Factored from
+    /// [`dispatch_local_queryables`](Self::dispatch_local_queryables) so the deferred
+    /// self-query redelivery ([`drain_query_redelivery`](Self::drain_query_redelivery))
+    /// reuses the exact same emission.
+    fn emit_query_responses(&self, inbound: FaceId, reliable: bool, replies: Vec<QueryReply>) {
         for reply in replies {
             let Ok(resp) = reply.into_response() else {
                 continue;
@@ -1960,11 +2028,87 @@ impl LinkstateForwarder {
                 NetworkMessage::Response(Box::new(resp.clone()))
             });
         }
-        let final_msg = wz_session_core::response_final_build::build_response_final(request.rid);
+    }
+
+    /// #3-c QUERY half (R311y168) — emit the closing `ResponseFinal` (rid = the
+    /// querier's) that terminates a query. HELD BACK when a self-query defers a busy
+    /// queryable (an eager Final would make the querier discard the redelivered reply
+    /// -- zenoh removes the query on ResponseFinal, session.rs:3023), then emitted
+    /// once by [`drain_query_redelivery`](Self::drain_query_redelivery) after the
+    /// deferred handlers answer.
+    fn emit_query_final(&self, inbound: FaceId, reliable: bool, rid: u64) {
+        let final_msg = wz_session_core::response_final_build::build_response_final(rid);
         self.send_to_face(inbound, reliable, || {
             NetworkMessage::ResponseFinal(final_msg.clone())
         });
-        true
+    }
+
+    /// #3-c QUERY half (R311y168) — queue a deferred self-query, bounded drop-oldest
+    /// (RingChannel) at [`SELF_ECHO_QUEUE_CAP`](Self::SELF_ECHO_QUEUE_CAP) -- the query
+    /// twin of the sub-plane `sub_redelivery` cap in
+    /// [`enqueue_self_echo`](Self::enqueue_self_echo). UNLIKE a dropped fire-and-forget
+    /// Sample, a dropped `DeferredQuery` carries a HELD `ResponseFinal` a querier
+    /// awaits, so on eviction we EMIT that Final (an empty answer) rather than strand
+    /// the evicted querier to its get() timeout -- the query terminator drop-oldest
+    /// would otherwise swallow (only a pathological > CAP-deferred-in-one-tick
+    /// self-querier evicts). The evicted Final is emitted OUTSIDE the `query_redelivery`
+    /// borrow (send_to_face borrows `faces`, not `query_redelivery`).
+    fn enqueue_deferred_query(&self, dq: DeferredQuery) {
+        let evicted = {
+            let mut q = self.query_redelivery.borrow_mut();
+            let evicted = if q.len() >= Self::SELF_ECHO_QUEUE_CAP {
+                q.pop_front()
+            } else {
+                None
+            };
+            q.push_back(dq);
+            evicted
+        };
+        if let Some(ev) = evicted {
+            self.emit_query_final(ev.inbound, ev.reliable, ev.rid);
+        }
+    }
+
+    /// #3-c QUERY half (R311y168) — redeliver deferred self-queries to their
+    /// (now-unwound) queryables: the query twin of
+    /// [`drain_sub_redelivery`](Self::drain_sub_redelivery), run at the outermost
+    /// [`forward`](FaceForwarder::forward) exit off the handler stack. For each
+    /// deferred query, fire its (now-free) handlers into a fresh `QueryResponder`,
+    /// emit the replies, THEN the one closing `ResponseFinal` that was held -- so the
+    /// querier observes reply-before-final. Bounded to
+    /// [`SELF_ECHO_QUEUE_CAP`](Self::SELF_ECHO_QUEUE_CAP) per call: an unconditional
+    /// self-querier re-enqueues (drop-oldest capped) and spins across ticks, never a
+    /// hang or stack overflow. A queryable retracted after deferral is purged from the
+    /// record's handler set (undeclare_queryable) but the Final STILL emits (an empty
+    /// answer), so the querier's get() terminates instead of hanging. NB (the sub twin's
+    /// caveat, sharpened for queries): a handler that PANICS mid-drain unwinds past the
+    /// `forward_depth` decrement and disables the drain, stranding queued Finals -- their
+    /// queriers then time out (a query's Final is a terminator, not a droppable sample).
+    /// Same non-panic-safe class as `drain_sub_redelivery`; a single-task panic poisons
+    /// the drive task regardless, so an `FnMut` handler must not panic.
+    fn drain_query_redelivery(&self) {
+        let mut budget = Self::SELF_ECHO_QUEUE_CAP;
+        while budget > 0 {
+            let Some(dq) = self.query_redelivery.borrow_mut().pop_front() else {
+                break;
+            };
+            budget -= 1;
+            let view = LocalQueryView {
+                keyexpr: &dq.keyexpr,
+                rid: dq.rid,
+            };
+            let mut replies: Vec<QueryReply> = Vec::new();
+            {
+                let mut responder = QueryResponder::new(dq.rid, dq.keyexpr.clone(), &mut replies);
+                for handler in &dq.handlers {
+                    if let Ok(mut h) = handler.try_borrow_mut() {
+                        (**h)(&view, &mut responder);
+                    }
+                }
+            }
+            self.emit_query_responses(dq.inbound, dq.reliable, replies);
+            self.emit_query_final(dq.inbound, dq.reliable, dq.rid);
+        }
     }
 
     /// R311y46 (§5.23 Phase 3a) — deliver a Put to any LOCAL subscriber whose
@@ -1986,9 +2130,12 @@ impl LinkstateForwarder {
     /// (incl. self-undeclare) without a `RefCell` panic (a re-entrant register is
     /// excluded from THIS Put's snapshot; a re-entrant undeclare drops the Vec's
     /// `Rc` while the snapshot clone keeps the mid-fire handler alive). A handler
-    /// that synchronously re-delivers to ITSELF (publishes to its own pattern) is
-    /// SKIPPED by `try_borrow_mut` — a running `FnMut` cannot be aliased; faithful
-    /// queue-and-redeliver of that self-echo is the re-openable follow-up.
+    /// that synchronously re-delivers to ITSELF (publishes to its own pattern) finds
+    /// `try_borrow_mut` busy; R311y167 QUEUES the owned self-echo sample
+    /// ([`enqueue_self_echo`](Self::enqueue_self_echo)) and redelivers it off-stack at
+    /// the outermost `forward` exit
+    /// ([`drain_sub_redelivery`](Self::drain_sub_redelivery)) -- faithful to zenoh's
+    /// default channel handler, not a drop.
     fn dispatch_local_subscribers(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
         // Resolve the Put keyexpr against the inbound face's alias table (as
         // forward_push does); an unresolvable alias is dropped.
@@ -2430,9 +2577,27 @@ impl LinkstateForwarder {
         // the callback with the declaration). Keyed by keyexpr (the wz declare/undeclare
         // API is keyexpr-based); symmetric with undeclare_subscription's local_subscribers
         // drop (R311y154 closed the identical pre-existing residual on both planes).
-        self.local_queryables
-            .borrow_mut()
-            .retain(|lq| lq.keyexpr != keyexpr);
+        let mut retracted: Vec<Rc<RefCell<LocalQueryHandler>>> = Vec::new();
+        self.local_queryables.borrow_mut().retain(|lq| {
+            if lq.keyexpr == keyexpr {
+                retracted.push(Rc::clone(&lq.handler));
+                false
+            } else {
+                true
+            }
+        });
+        // #3-c QUERY half (R311y168) — purge the retracted queryable's handler from
+        // any DEFERRED self-query (query_redelivery). The DeferredQuery record
+        // SURVIVES (its Final must still emit so a querier awaiting the deferred
+        // answer terminates rather than hanging); only the retracted handler is
+        // removed from that query's answer set (an empty-handler record then emits
+        // just the Final).
+        if !retracted.is_empty() {
+            for dq in self.query_redelivery.borrow_mut().iter_mut() {
+                dq.handlers
+                    .retain(|h| !retracted.iter().any(|r| Rc::ptr_eq(h, r)));
+            }
+        }
         if removed {
             // Self-local queryable gone -> re-arm any waiting CLIENT querier whose pushed
             // reply ke lost its last backer (full-undeclare) or dropped completeness (the
@@ -4346,6 +4511,7 @@ impl FaceForwarder for LinkstateForwarder {
         // ticks like zenoh's receiver-side channel drain.
         if outermost {
             self.drain_sub_redelivery();
+            self.drain_query_redelivery();
         }
         self.forward_depth.set(self.forward_depth.get() - 1);
     }
@@ -10126,6 +10292,217 @@ mod tests {
             has_ext: false,
             extensions: Vec::new(),
         }
+    }
+
+    // #3-c QUERY half — drive a routed Query through the full `forward` message
+    // loop (so the depth-guarded self-query drain runs), the Request twin of
+    // `push_outcome`.
+    fn request_outcome(rid: u64, keyexpr: &str) -> DriverLoopOutcome {
+        let request = wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
+            .expect("build request");
+        DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Request(Box::new(request))],
+            has_ext: false,
+            extensions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn query_self_reentrant_queryable_redelivers_the_self_query() {
+        // #3-c QUERY half (R311y168) — the query twin of the sub-plane self-echo fix.
+        // A queryable handler QH that, while answering a query, RE-QUERIES its own
+        // keyexpr (self-query) hits a busy try_borrow_mut in the inner
+        // dispatch_local_queryables; the y44/y156 code skipped it AND emitted the
+        // inner query's ResponseFinal EAGERLY (dropping QH's answer -- zenoh removes
+        // the query on ResponseFinal, session.rs:3023, then discards a late reply,
+        // :2807). Faithful redelivery DEFERS the busy QH + HOLDS the inner Final, then
+        // at the outermost forward exit fires QH for the deferred self-query and emits
+        // its reply + the one closing Final. QH must fire TWICE (outer + redelivered
+        // self-query). Driven through forward (NOT forward_request) so the
+        // depth-guarded drain runs. Diagnose-first: pre-fix QH fires ONCE.
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fires = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let queried = std::cell::Cell::new(false);
+        let fc = fires.clone();
+        fwd.register_local_queryable(
+            "demo/**",
+            true,
+            Box::new(move |_v: &dyn QueryView, out: &mut dyn ReplyOut| {
+                fc.set(fc.get() + 1);
+                out.reply(b"R");
+                if !queried.replace(true) {
+                    if let Some(fwd) = weak.upgrade() {
+                        fwd.forward(
+                            FaceId(0),
+                            IterationEvent::Poll(&request_outcome(77, "demo/q")),
+                        );
+                    }
+                }
+            }),
+        )
+        .expect("register self-querying QH");
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&request_outcome(99, "demo/q")),
+        );
+        assert_eq!(
+            fires.get(),
+            2,
+            "QH answered the outer query AND the redelivered self-query (not dropped)"
+        );
+    }
+
+    #[test]
+    fn deferred_self_query_emits_reply_before_final() {
+        // #3-c QUERY half (R311y168) — the CORE correctness property: a deferred
+        // self-query's reply must precede its closing ResponseFinal on the wire (else
+        // the querier discards the redelivered reply). QH answers the outer query
+        // (rid 99: reply, final) inline, self-queries (rid 77) deferring itself; at the
+        // outermost forward exit the drain emits the rid-77 reply THEN its final.
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let queried = std::cell::Cell::new(false);
+        fwd.register_local_queryable(
+            "demo/**",
+            true,
+            Box::new(move |_v: &dyn QueryView, out: &mut dyn ReplyOut| {
+                out.reply(b"R");
+                if !queried.replace(true) {
+                    if let Some(fwd) = weak.upgrade() {
+                        fwd.forward(
+                            FaceId(0),
+                            IterationEvent::Poll(&request_outcome(77, "demo/q")),
+                        );
+                    }
+                }
+            }),
+        )
+        .expect("register self-querying QH");
+        sink_a.reset(); // drop the declare flood to A
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&request_outcome(99, "demo/q")),
+        );
+        // Outer 99 (reply, final) inline, THEN the deferred 77 (reply, final) at drain.
+        assert_eq!(
+            sink_a.frame_count(),
+            4,
+            "reply+final for the outer AND the deferred self-query"
+        );
+        assert_eq!(forwarded_response(&sink_a.frame_bytes(0)).request_id, 99);
+        assert_eq!(
+            forwarded_response_final(&sink_a.frame_bytes(1)).request_id,
+            99
+        );
+        assert_eq!(
+            forwarded_response(&sink_a.frame_bytes(2)).request_id,
+            77,
+            "the deferred self-query's REPLY is emitted first"
+        );
+        assert_eq!(
+            forwarded_response_final(&sink_a.frame_bytes(3)).request_id,
+            77,
+            "the deferred self-query's FINAL comes AFTER its reply (the hold worked)"
+        );
+    }
+
+    #[test]
+    fn query_self_reentrant_redelivery_is_bounded_and_terminates() {
+        // #3-c QUERY half (R311y168) — an UNCONDITIONAL self-querier (QH re-queries
+        // its own ke on EVERY answer) is REDELIVERED but BOUNDED by the drain budget
+        // (SELF_ECHO_QUEUE_CAP), so the outer forward TERMINATES with QH fired a
+        // bounded number of times — no hang / stack overflow (the query twin of the
+        // sub-plane bound).
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fires = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let fc = fires.clone();
+        fwd.register_local_queryable(
+            "demo/**",
+            true,
+            Box::new(move |_v: &dyn QueryView, out: &mut dyn ReplyOut| {
+                fc.set(fc.get() + 1);
+                out.reply(b"R");
+                if let Some(fwd) = weak.upgrade() {
+                    fwd.forward(
+                        FaceId(0),
+                        IterationEvent::Poll(&request_outcome(77, "demo/q")),
+                    );
+                }
+            }),
+        )
+        .expect("register unconditional self-querying QH");
+
+        // A single outer Query must TERMINATE (no unbounded recursion / hang).
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&request_outcome(99, "demo/q")),
+        );
+        let n = fires.get();
+        assert!(n > 1, "the self-query is REDELIVERED (QH fired {n} times)");
+        assert!(
+            n <= LinkstateForwarder::SELF_ECHO_QUEUE_CAP as u32 + 1,
+            "redelivery is BOUNDED by the per-forward drain budget (QH fired {n} times)"
+        );
+    }
+
+    #[test]
+    fn undeclare_queryable_purges_a_deferred_self_query() {
+        // #3-c QUERY half (R311y168) — QH self-queries (deferring itself) THEN
+        // undeclares itself in the same answer: the deferred handler is purged from
+        // the DeferredQuery, so QH is NOT redelivered (fires ONCE). The record
+        // survives with an empty handler set so the closing ResponseFinal still emits
+        // (an empty answer) — the self-querier's get() terminates rather than hanging.
+        let fwd = std::rc::Rc::new(LinkstateForwarder::new(zid(0x05), WhatAmI::Peer));
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fires = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let weak = std::rc::Rc::downgrade(&fwd);
+        let queried = std::cell::Cell::new(false);
+        let fc = fires.clone();
+        fwd.register_local_queryable(
+            "demo/**",
+            true,
+            Box::new(move |_v: &dyn QueryView, out: &mut dyn ReplyOut| {
+                fc.set(fc.get() + 1);
+                out.reply(b"R");
+                if !queried.replace(true) {
+                    if let Some(fwd) = weak.upgrade() {
+                        fwd.forward(
+                            FaceId(0),
+                            IterationEvent::Poll(&request_outcome(77, "demo/q")),
+                        );
+                        let _ = fwd.undeclare_queryable("demo/**");
+                    }
+                }
+            }),
+        )
+        .expect("register self-querying-then-undeclaring QH");
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&request_outcome(99, "demo/q")),
+        );
+        assert_eq!(
+            fires.get(),
+            1,
+            "the retracted queryable is not redelivered for its deferred self-query"
+        );
     }
 
     #[test]
