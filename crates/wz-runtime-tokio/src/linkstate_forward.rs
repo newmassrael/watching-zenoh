@@ -2229,6 +2229,51 @@ impl LinkstateForwarder {
         });
     }
 
+    /// R311y164 (D4b / C3b) — re-inject a co-attached CLIENT publisher's `Push` into
+    /// the mesh as a SELF-sourced publish, the client DATA direction (BLOCKER-2, the
+    /// twin of D4a's client SUB advertise). A CLIENT is a leaf (no graph node), so
+    /// the transit [`forward_push`](Self::forward_push) drops it
+    /// ([`compute_push_forward`] -> [`resolve_source_in`] finds no psid for a
+    /// non-graph client); this re-sources it under SELF's zid via
+    /// [`compute_self_publish_forward`] (self as tree root, node_id 0, fresh hop
+    /// budget), preserving the client sample's encoding / attachment / timestamp /
+    /// qos with [`reliteralize_push`] (NOT `build_push_literal`, which mints a FRESH
+    /// sample and loses that metadata). UNCONDITIONAL — the router's
+    /// `publish_client_push_into_meshes` peer leg is itself ungated and the single-net
+    /// peer has no master election (zenoh `linkstate_peer::compute_data_route` has no
+    /// `elect_router` gate). Mirrors zenoh routing a `source_type == Client` push over
+    /// `linkstatepeer_subs` with self as the tree root.
+    fn reinject_client_push(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
+        // Resolve the client Push key against ITS face alias table (c3c-3 B1), once.
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) {
+                Some(ke) => ke,
+                None => return,
+            }
+        };
+        let computed = match compute_self_publish_forward(&self.net, &self.subs, &keyexpr, || {
+            reliteralize_push(push, &keyexpr)
+        }) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("peer: client push re-inject build failed for {keyexpr:?}: {e:?}");
+                return;
+            }
+        };
+        let Some((carrier, children)) = computed else {
+            return; // no remote subscriber / no tree direction -> nothing to re-inject
+        };
+        let _ = self.fan_out(reliable, None, |_id, zid| {
+            Ok(zid
+                .is_some_and(|z| is_child(&children, z))
+                .then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
+        });
+    }
+
     /// Retract self's LOCAL queryable for `keyexpr` (R311y154, gap b) — the inverse of
     /// [`declare_queryable`](Self::declare_queryable) and the qabl twin of
     /// [`undeclare_subscription`](Self::undeclare_subscription). Withdraw self's own
@@ -4048,6 +4093,14 @@ impl FaceForwarder for LinkstateForwarder {
                     // B); the inbound face is excluded, and a mesh face is never in
                     // `client_subs`, so this neither echoes nor double-delivers.
                     self.deliver_to_client_subscribers(id, *reliable, push);
+                    // R311y164 (D4b / C3b) — re-inject a co-attached CLIENT
+                    // publisher's Push into the mesh as SELF-sourced (the transit
+                    // `forward_push` above drops a client source, which is not a graph
+                    // node). Gated on `is_client_face` so a MESH-sourced Push is NOT
+                    // self-re-sourced — it rides `forward_push`'s transit re-forward.
+                    if self.is_client_face(id) {
+                        self.reinject_client_push(id, *reliable, push);
+                    }
                 }
                 // c3c-3 — a sourced subscription declaration: a
                 // DeclareSubscriber registers the source peer's interest, an
@@ -5168,6 +5221,91 @@ mod tests {
             sink_c.frame_count(),
             0,
             "no self-echo of the client's own DeclareSubscriber back to it"
+        );
+    }
+
+    #[test]
+    fn a_client_push_re_injects_into_the_mesh_as_self_sourced() {
+        // D4b / C3b (FAILS before D4b: the transit forward_push drops a client-sourced
+        // Push -- a client is not a graph node). A co-attached CLIENT publisher's Put
+        // is re-injected into the mesh as SELF-sourced (node_id 0), so a subscribing
+        // MESH peer receives it.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, sink_b) = peer_face(zid(0x0B)); // a subscribing mesh peer
+        let (client_pub, _cp) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client_pub);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05); // edge S<->B
+        declare_interest(&fwd, FaceId(0), "demo/data"); // the MESH peer B subscribes
+        sink_b.reset();
+
+        // The client publishes demo/data via the Push dispatch.
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
+
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the client Put is re-injected to the subscribing mesh peer (C3b)"
+        );
+        assert_eq!(
+            forwarded_source(&sink_b.frame_bytes(0)),
+            0,
+            "re-injected as SELF-sourced (routing-context node_id 0)"
+        );
+        assert_eq!(
+            forwarded_keyexpr(&sink_b.frame_bytes(0)).as_deref(),
+            Some("demo/data")
+        );
+    }
+
+    #[test]
+    fn a_client_push_reaches_both_a_co_attached_client_sub_and_a_mesh_sub() {
+        // D4a C3a + D4b C3b COMPOSE: a CLIENT publisher's Put reaches BOTH a
+        // co-attached CLIENT subscriber (local delivery) AND a subscribing MESH peer
+        // (re-injected self-sourced) from the one dispatch.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, sink_b) = peer_face(zid(0x0B)); // mesh subscriber
+        let (client_pub, _cp) = peer_face_whatami(zid(0x0C), 2);
+        let (client_sub, sink_cs) = peer_face_whatami(zid(0x0D), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client_pub);
+        fwd.register(FaceId(2), &client_sub);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(0), "demo/data"); // MESH peer B subscribes
+        client_declare_sub(&fwd, FaceId(2), "demo/**"); // co-attached client D subscribes
+        sink_b.reset();
+        sink_cs.reset();
+
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data from client C
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
+
+        assert_eq!(
+            sink_cs.frame_count(),
+            1,
+            "the co-attached client subscriber receives it (C3a)"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the subscribing mesh peer receives it re-injected (C3b)"
+        );
+        assert_eq!(
+            forwarded_source(&sink_b.frame_bytes(0)),
+            0,
+            "the mesh copy is SELF-sourced"
         );
     }
 
