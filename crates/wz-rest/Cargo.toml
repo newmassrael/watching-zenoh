@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-rest — the §5.26 REST -> zenoh bridge (rest-http-bridge): a light,
+# HAND-ROLLED HTTP/1.1 server (ZERO external HTTP dependency) that translates
+# HTTP requests into wz Session operations:
+#   GET/POST  -> Session::query   (JSON reply array, or raw with `?_raw`)
+#   PUT/PATCH -> Session::publish  (Put; Content-Type -> encoding)
+#   DELETE    -> Session::publish  (Del)
+# The compile-time-composed superset of zenoh's `zenoh-plugin-rest` (which is a
+# dlopen `.so` plugin over `tide`): no plugin host-trait / ABI gate / lifecycle
+# FSM — the whole bridge is gated behind the `rest-http-bridge` cargo feature
+# and, being std/AP-only, lives in its own crate so no_std/MCU builds never pull
+# it (MCU-safe by construction). Trusted-localhost scope: bind 127.0.0.1 is a
+# network-exposure boundary, NOT authentication (see the crate-level docs).
+[package]
+name = "wz-rest"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "REST -> zenoh HTTP/1.1 bridge (zenoh-plugin-rest superset; hand-rolled, zero HTTP dep, AP-only)."
+
+[lib]
+name = "wz_rest"
+path = "src/lib.rs"
+
+[dependencies]
+# The wz session runtime that owns query/publish + the TokioSession type. The
+# feature list is the EXACT set the bridge calls through (verified by the design
+# panel's direct read): query-get (Session::query), codec-push (PUT/DELETE emit
+# the Put/Del wire frame — WITHOUT it publish silently returns Ok(0)),
+# codec-response-final (the wire ResponseFinal decode so a GET's on_final fires
+# and the response completes), query-timeout (bound a GET so a silent queryable
+# does not hang the connection), transport-unicast (query/publish are Unicast-
+# only), pubsub-encoding (Content-Type -> encoding on PUT), query-consolidation
+# + query-selector-parameters (mirror the ?-selector + Latest consolidation).
+# Defaults are left ON (this crate is AP-only, so the heavier default set is
+# free here); the list only ADDS the non-default gates the bridge needs.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
+    "transport-unicast",
+    "query-get",
+    "codec-response-final",
+    "codec-push",
+    "query-timeout",
+    "pubsub-encoding",
+    "query-consolidation",
+    "query-selector-parameters",
+] }
+# The keyexpr canonicaliser (path -> validated keyexpr, the 400-on-invalid gate)
+# + the encoding <-> MIME tables (Content-Type mapping + the JSON `encoding`
+# field). Not re-exported through wz-runtime-tokio's encoding path, so depended
+# on directly.
+wz-session-core = { path = "../wz-session-core" }
+# The async runtime. Mirrors wz-runtime-tokio's own tokio feature choice; net +
+# io-util for the TcpListener/stream, time for the per-connection read timeout,
+# sync for the reply-collection oneshot.
+tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "time"] }
+
+[dev-dependencies]
+# The integration test drives the bridge over a real TCP socket against a live
+# wz node; it needs the multi-thread runtime + macros to spawn the drive loop
+# and the bridge concurrently, and a peer to answer the WIRE path (not loopback).
+tokio = { version = "1", features = ["full"] }
+# The session-open fixture params for the two in-process test sessions (same
+# helper query_reply_e2e uses). The answerer-side session ops (declare_queryable
+# / declare_subscriber / receive Put+Del over the wire) are already covered by
+# wz-runtime-tokio's default feature set that this crate depends on.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }

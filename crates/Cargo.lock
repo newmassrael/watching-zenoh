@@ -2369,6 +2369,7 @@ dependencies = [
  "lwip-sys",
  "sce-rust-runtime",
  "wz-link-lwip",
+ "wz-rest",
  "wz-runtime-coop",
  "wz-runtime-core",
  "wz-runtime-freertos",
@@ -2545,6 +2546,16 @@ dependencies = [
  "wz",
  "wz-session-core",
  "wz-session-wire-fixtures",
+]
+
+[[package]]
+name = "wz-rest"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "wz-runtime-tokio",
+ "wz-runtime-tokio-test-support",
+ "wz-session-core",
 ]
 
 [[package]]

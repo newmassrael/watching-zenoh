@@ -798,6 +798,28 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         self.fires.drain(&self.observer)
     }
 
+    /// Sweep expired pending queries (reply-registry deadline enforcement)
+    /// using the Session's own monotonic clock, then drain any resulting
+    /// `on_final` fires. A `query` registered with a `query-timeout` deadline
+    /// leaks its pending entry unless something sweeps it once the deadline
+    /// passes — the drive loop no longer ticks the reply sweep (it was
+    /// relocated to a dedicated peer task, `session_glue.rs`). A long-running
+    /// query driver (e.g. wz-ap-demo's sweep task, or the REST bridge's
+    /// `serve` loop) periodically calls this. Idempotent + cheap when nothing
+    /// is expired; safe to call alongside another sweeper (a swept entry is a
+    /// no-op the second time). Returns the number of entries swept.
+    #[cfg(feature = "query-get")]
+    pub fn sweep_expired_queries(&self) -> usize {
+        let now_ms = self.clock.now_monotonic_ms();
+        let swept = R::with_mutex_mut(&self.observer, |observer| {
+            observer.replies.sweep_timed_out(now_ms)
+        });
+        // Drain OUTSIDE the observer lock (the standing drain-after-dispatch
+        // contract) — a timed-out query's staged `on_final` runs here.
+        self.drain_deferred_fires();
+        swept
+    }
+
     /// R311cy — borrow the Session-owned clock (R311cw fold-in
     /// stored `clock: Arc<T>`). Callers that need to thread the same
     /// monotonic epoch into a peer task (sweep_task,

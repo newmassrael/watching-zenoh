@@ -67,6 +67,10 @@ workspace = true
 
 [dependencies]
 wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-features = false }
+# §5.26 REST -> zenoh HTTP/1.1 bridge (rest-http-bridge). AP-only; pulled only
+# by the rest-http-bridge feature. It carries its own wz-runtime-tokio feature
+# set; the facade also forwards them below so wz::runtime_tokio composes.
+wz-rest = { path = "../wz-rest", optional = true }
 wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-features = false, features = ["alloc"] }
 # R311ax — wz-runtime-coop enters the facade as an optional dep.
 # The `runtime-coop` feature pulls this crate with its `alloc`
@@ -890,8 +894,26 @@ ext-pubsub-sample-miss-detection = ["wz-runtime-tokio?/ext-pubsub-sample-miss-de
 # reserved `= []` until built.
 ext-pubsub-serde-codec = ["wz-runtime-tokio?/ext-pubsub-serde-codec"]
 
-# ----- §5.26 rest (2 atomic, all reserved) -----
-rest-http-bridge = []
+# ----- §5.26 rest (rest-http-bridge active; rest-sse-subscribe reserved) -----
+# The REST -> zenoh HTTP/1.1 bridge. Pulls the wz-rest crate + the exact
+# wz-runtime-tokio feature set the bridge calls through (query-get,
+# codec-response-final so a GET completes, codec-push so PUT/DELETE emit,
+# query-timeout so a silent-queryable GET terminates, pubsub-encoding for the
+# Content-Type mapping, query-consolidation + query-selector-parameters for the
+# ?-selector). runtime-tokio makes wz::runtime_tokio available to construct the
+# session passed to wz::rest::serve.
+rest-http-bridge = [
+    "dep:wz-rest",
+    "runtime-tokio",
+    "wz-runtime-tokio?/transport-unicast",
+    "wz-runtime-tokio?/query-get",
+    "wz-runtime-tokio?/codec-response-final",
+    "wz-runtime-tokio?/codec-push",
+    "wz-runtime-tokio?/query-timeout",
+    "wz-runtime-tokio?/pubsub-encoding",
+    "wz-runtime-tokio?/query-consolidation",
+    "wz-runtime-tokio?/query-selector-parameters",
+]
 rest-sse-subscribe = []
 
 # ----- §5.27 api-compat (2 atomic, all reserved) -----

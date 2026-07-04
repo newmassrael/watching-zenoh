@@ -56,6 +56,11 @@ members = [
     # keyexpr-inclusion matcher). The interceptor seam + enforcer adapter that
     # touch NetworkMessage stay in wz-runtime-tokio.
     "wz-access-control",
+    # §5.26 REST -> zenoh HTTP/1.1 bridge (rest-http-bridge). AP-only,
+    # hand-rolled HTTP (zero external HTTP dep); depends on wz-runtime-tokio
+    # (Session) + wz-session-core (keyexpr canon + encoding). No MCU build
+    # pulls it.
+    "wz-rest",
     "wz-runtime-tokio",
     "wz-runtime-tokio-test-support",
     # R311mo (Level B) — isolated multicast-only test crate for the tokio

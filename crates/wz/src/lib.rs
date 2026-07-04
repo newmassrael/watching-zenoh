@@ -83,6 +83,13 @@ compile_error!(
 #[cfg(feature = "runtime-tokio")]
 pub use wz_runtime_tokio as runtime_tokio;
 
+// §5.26 rest-http-bridge — the REST -> zenoh HTTP/1.1 bridge, re-exported as
+// `wz::rest`. The cfg gate here is the atom's composition toggle (the
+// audit-catalog-status.sh A3 active-site); the whole wz-rest crate is elided
+// when the feature is off.
+#[cfg(feature = "rest-http-bridge")]
+pub use wz_rest as rest;
+
 // R311ax — runtime-coop namespace lands. Symmetric shape with the
 // AP-side `runtime_tokio` re-export so a generic consumer reading
 // `wz::runtime_tokio::TokioRuntime` and `wz::runtime_coop::CoopRuntime`
