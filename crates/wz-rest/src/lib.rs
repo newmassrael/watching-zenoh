@@ -32,6 +32,12 @@
 //!   not validated, so **any web page the user visits** can issue `GET`/`POST`
 //!   (query) requests to `127.0.0.1:<port>` cross-origin and read the JSON
 //!   response body — keyspace exfiltration with no DNS-rebinding needed.
+//! - The SSE stream (feature `rest-sse-subscribe`) amplifies that into a
+//!   PERSISTENT live tap: an `EventSource` from any origin keeps receiving the
+//!   keyspace in real time for as long as the tab stays open, not just a
+//!   one-shot snapshot. [`serve`] also imposes no cap on concurrent
+//!   connections/subscribers, so long-lived streams accumulate server
+//!   resources.
 //!
 //! Run this only as a local development / debugging convenience, on a trusted
 //! single-user host, where the keyspace is not treated as confidential. For a
@@ -64,6 +70,8 @@ use wz_runtime_tokio::session::TokioSession;
 mod bridge;
 mod http;
 mod json;
+#[cfg(feature = "rest-sse-subscribe")]
+mod sse;
 
 /// Default GET query timeout (ms). A `GET` whose queryable never answers is
 /// bounded to this so the HTTP connection cannot hang forever; the HTTP-side
@@ -142,23 +150,37 @@ pub async fn serve_on(
 async fn handle_connection(session: TokioSession, zid: Vec<u8>, mut stream: TcpStream) {
     let (mut rd, mut wr) = stream.split();
 
-    let response = match timeout(READ_TIMEOUT, http::read_request(&mut rd)).await {
+    let outcome = match timeout(READ_TIMEOUT, http::read_request(&mut rd)).await {
         // Timed out waiting for a complete request head/body.
-        Err(_) => http::Response::text(408, "Request Timeout", "request read timed out"),
+        Err(_) => bridge::Outcome::Response(http::Response::text(
+            408,
+            "Request Timeout",
+            "request read timed out",
+        )),
         // Clean connection close before any request — nothing to answer.
         Ok(Err(http::ParseError::Empty)) => return,
         // Malformed request -> the mapped HTTP status.
         Ok(Err(http::ParseError::Status(code, reason))) => {
-            http::Response::text(code, reason, reason)
+            bridge::Outcome::Response(http::Response::text(code, reason, reason))
         }
         // A well-formed request -> dispatch to the bridge.
         Ok(Ok(request)) => bridge::dispatch(&session, &zid, request).await,
     };
 
-    let bytes = response.encode();
-    let _ = timeout(WRITE_TIMEOUT, async {
-        let _ = wr.write_all(&bytes).await;
-        let _ = wr.flush().await;
-    })
-    .await;
+    match outcome {
+        bridge::Outcome::Response(response) => {
+            let bytes = response.encode();
+            let _ = timeout(WRITE_TIMEOUT, async {
+                let _ = wr.write_all(&bytes).await;
+                let _ = wr.flush().await;
+            })
+            .await;
+        }
+        // An SSE stream takes over the connection: declare the subscriber and
+        // stream its samples until the client disconnects (then undeclare).
+        #[cfg(feature = "rest-sse-subscribe")]
+        bridge::Outcome::Sse(keyexpr) => {
+            sse::stream(&session, keyexpr, &mut wr).await;
+        }
+    }
 }

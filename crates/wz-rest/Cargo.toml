@@ -60,6 +60,17 @@ wz-session-core = { path = "../wz-session-core" }
 # sync for the reply-collection oneshot.
 tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "time"] }
 
+[features]
+# The SSE half (Accept: text/event-stream GET -> declare_subscriber, streaming
+# each sample as an SSE event). Gated so a build can carry the request/response
+# bridge WITHOUT the streaming subscriber; pulls the subscriber + Put/Del
+# receive features the SSE path calls through.
+rest-sse-subscribe = [
+    "wz-runtime-tokio/declare-subscriber",
+    "wz-runtime-tokio/pubsub-put",
+    "wz-runtime-tokio/pubsub-delete",
+]
+
 [dev-dependencies]
 # The integration test drives the bridge over a real TCP socket against a live
 # wz node; it needs the multi-thread runtime + macros to spawn the drive loop

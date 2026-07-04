@@ -9,12 +9,14 @@
 //! String escaping routes through the wz SSOT escaper
 //! [`wz_session_core::json::escape_into`] (a correctness-bearing escaper must
 //! live in ONE place — the adminspace uses the same one). Documented fidelity
-//! deltas vs zenoh: `timestamp` is always `null` (the wz `ReplyView` receive
-//! surface carries no timestamp accessor), and a non-empty `value` is always a
-//! JSON *string* (base64 for non-UTF-8 payloads) rather than zenoh's
-//! nested-JSON embedding for JSON-encoded payloads — a minimal-but-safe choice
-//! that can never emit invalid JSON. An empty payload renders `null` (zenoh
-//! parity).
+//! deltas vs zenoh: `timestamp` is always `null` — the GET/query path's
+//! `ReplyView` genuinely carries no timestamp accessor, while the SSE path's
+//! `SampleView` DOES carry one, so rendering the real SSE-sample timestamp
+//! (matching zenoh's uhlc datetime string) is a deferred follow-up, not a
+//! surface limitation. A non-empty `value` is always a JSON *string* (base64
+//! for non-UTF-8 payloads) rather than zenoh's nested-JSON embedding for
+//! JSON-encoded payloads — a minimal-but-safe choice that can never emit
+//! invalid JSON. An empty payload renders `null` (zenoh parity).
 
 use wz_session_core::json::escape_into;
 

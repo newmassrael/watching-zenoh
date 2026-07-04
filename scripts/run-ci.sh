@@ -1194,6 +1194,21 @@ layer_c1ay_cargo_test_router_hat() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,access-acl,access-downsampling,access-quota --quiet -- -D warnings)
 }
 
+# ─── Layer C1az — §5.26 rest-sse-subscribe: the SSE half of the REST bridge ─
+#
+# R311y161: the wz-rest crate's request/response bridge (GET/PUT/DELETE) rides
+# the default Layer C1 `cargo test --workspace` (wz-rest is a workspace member,
+# no default features), but the SSE half is gated behind wz-rest's
+# `rest-sse-subscribe` feature -- OFF in the workspace build, so its sse unit
+# tests + the rest_sse_wire_e2e (Accept: text/event-stream GET -> subscriber
+# stream over two TCP sessions) never compile under C1. This lane turns the
+# feature ON: runs the SSE unit + wire-e2e tests and clippy-gates the SSE cfg.
+layer_c1az_cargo_test_rest_sse() {
+    (cd crates \
+        && cargo test -p wz-rest --features rest-sse-subscribe --quiet \
+        && cargo clippy -p wz-rest --all-targets --features rest-sse-subscribe --quiet -- -D warnings)
+}
+
 # ─── Layer C1af — SHM transport (R3a+R3b): provider + live swap + e2e ─
 #
 # R311xn (R3a) + R311xo (R3b): the scoped same-host SHM transport -- the wz mirror
@@ -4507,6 +4522,7 @@ run_layer C1av layer_c1av_cargo_test_ext_pubsub_advanced_history || overall=1
 run_layer C1aw layer_c1aw_cargo_test_ext_pubsub_group_membership || overall=1
 run_layer C1ax layer_c1ax_cargo_test_routing_namespace || overall=1
 run_layer C1ay layer_c1ay_cargo_test_router_hat || overall=1
+run_layer C1az layer_c1az_cargo_test_rest_sse || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

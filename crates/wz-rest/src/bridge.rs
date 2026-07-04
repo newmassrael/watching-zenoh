@@ -48,32 +48,56 @@ fn mime_for_packed(packed: Option<u32>) -> String {
     }
 }
 
-/// Dispatch one parsed request to a session op and build the response.
-pub async fn dispatch(session: &TokioSession, zid: &[u8], req: Request) -> Response {
+/// The result of dispatching a request: either a complete buffered response,
+/// or (feature `rest-sse-subscribe`) a keyexpr to stream as Server-Sent Events.
+pub enum Outcome {
+    Response(Response),
+    /// A `GET` with `Accept: text/event-stream` — the caller streams
+    /// `declare_subscriber(keyexpr)` samples as SSE events over the connection.
+    #[cfg(feature = "rest-sse-subscribe")]
+    Sse(String),
+}
+
+/// Does this request ask for an SSE stream (`Accept: text/event-stream`)?
+fn is_event_stream(req: &Request) -> bool {
+    req.headers
+        .get("accept")
+        .is_some_and(|a| a.contains("text/event-stream"))
+}
+
+/// Dispatch one parsed request to a session op and build the outcome.
+pub async fn dispatch(session: &TokioSession, zid: &[u8], req: Request) -> Outcome {
     match req.method {
-        Method::Options => Response::options(),
-        Method::Get | Method::Post => handle_query(session, zid, &req).await,
-        Method::Put | Method::Patch => handle_write(session, zid, &req, false),
-        Method::Delete => handle_write(session, zid, &req, true),
-        Method::Head => Response::empty(405, "Method Not Allowed"),
+        Method::Options => Outcome::Response(Response::options()),
+        Method::Get | Method::Post if is_event_stream(&req) => sse_outcome(zid, &req),
+        Method::Get | Method::Post => Outcome::Response(handle_query(session, zid, &req).await),
+        Method::Put | Method::Patch => Outcome::Response(handle_write(session, zid, &req, false)),
+        Method::Delete => Outcome::Response(handle_write(session, zid, &req, true)),
+        Method::Head => Outcome::Response(Response::empty(405, "Method Not Allowed")),
     }
 }
 
-async fn handle_query(session: &TokioSession, zid: &[u8], req: &Request) -> Response {
-    // SSE (Accept: text/event-stream) is the rest-sse-subscribe round, not this
-    // one — reported explicitly, not silently mis-answered.
-    if req
-        .headers
-        .get("accept")
-        .is_some_and(|a| a.contains("text/event-stream"))
-    {
-        return Response::text(
-            501,
-            "Not Implemented",
-            "SSE (text/event-stream) not supported in this build",
-        );
+/// SSE dispatch (feature-on): resolve the keyexpr and hand it to the streamer.
+#[cfg(feature = "rest-sse-subscribe")]
+fn sse_outcome(zid: &[u8], req: &Request) -> Outcome {
+    match path_to_keyexpr(split_target(&req.target).0, zid) {
+        Ok(ke) => Outcome::Sse(ke),
+        Err(()) => Outcome::Response(Response::text(400, "Bad Request", "invalid keyexpr")),
     }
+}
 
+/// SSE dispatch (feature-off): report `501` rather than silently mis-answering
+/// the `Accept: text/event-stream` request as a one-shot JSON query.
+#[cfg(not(feature = "rest-sse-subscribe"))]
+fn sse_outcome(_zid: &[u8], _req: &Request) -> Outcome {
+    Outcome::Response(Response::text(
+        501,
+        "Not Implemented",
+        "SSE (text/event-stream) not enabled in this build",
+    ))
+}
+
+async fn handle_query(session: &TokioSession, zid: &[u8], req: &Request) -> Response {
     let (path, query) = split_target(&req.target);
     let ke = match path_to_keyexpr(path, zid) {
         Ok(k) => k,

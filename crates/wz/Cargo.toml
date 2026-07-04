@@ -914,7 +914,10 @@ rest-http-bridge = [
     "wz-runtime-tokio?/query-consolidation",
     "wz-runtime-tokio?/query-selector-parameters",
 ]
-rest-sse-subscribe = []
+# The SSE streaming subscribe half (Accept: text/event-stream). Composes the
+# request/response bridge + turns on wz-rest's SSE feature (which pulls the
+# subscriber + Put/Del receive features it calls through).
+rest-sse-subscribe = ["rest-http-bridge", "wz-rest?/rest-sse-subscribe"]
 
 # ----- §5.27 api-compat (2 atomic, all reserved) -----
 api-compat-c = []
