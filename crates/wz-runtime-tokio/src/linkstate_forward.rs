@@ -5161,6 +5161,166 @@ mod tests {
     }
 
     #[test]
+    fn peer_oam_ingest_detach_undeclares_to_the_client_publisher() {
+        // gap (a) / R311y152 — the OAM-INGEST twin of
+        // `peer_link_down_undeclares_to_the_client_publisher`, covering the SECOND
+        // prune site that funnels through the SAME `purge_detached_interest` choke
+        // point. Here the MESH sub backing a co-attached client publisher's pushed
+        // reply ke detaches NOT by a local link-down (`deregister`) but by a TOPOLOGY
+        // change learned over the wire: a relay's linkstate OAM drops the last edge
+        // reaching the backing node, so `forward`'s `changes.removed` prunes it and
+        // fires the undeclare-push at the ingest site (linkstate_forward.rs `forward`,
+        // `purge_detached_interest(&changes.removed)`). The backing node (0x0B) is
+        // 2-hop — reachable ONLY via relay 0x0A — so ONLY an OAM ingest, never a
+        // `deregister`, can detach it. The link-down site is already guarded (that
+        // test exercises the harder `deregister` `self.faces` borrow scope); this
+        // proves the choke point is genuinely shared, not link-down-only.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (relay, _sr) = peer_face(zid(0x0A));
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &relay);
+        fwd.register(FaceId(1), &client);
+        // 0x0B is a 2-hop node reachable ONLY via relay 0x0A (psid 7 in 0x0A's link
+        // space), so it can be detached by an OAM topology change but never by a
+        // face-local `deregister`.
+        fwd.ingest_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0A, &[0, 7]),
+                entry(7, 5, 0x0B, &[1]),
+            ]),
+        );
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, true, false, true),
+        );
+        sink_c.reset();
+        // 0x0B (the transit source, psid 7) declares demo/** -> backs the client
+        // publisher's demo/key -> pushed to the waiting publisher.
+        let mut declare = build_declare_subscriber(0, 0, Some("demo/**")).expect("build sub");
+        set_declare_source(&mut declare, 7); // node_id 7 = 0x0B via relay 0x0A
+        fwd.forward_subscription(FaceId(0), true, &declare);
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the 2-hop mesh sub is pushed to the waiting client publisher"
+        );
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => d.id,
+            _ => panic!("expected a DeclareSubscriber push"),
+        };
+        assert_ne!(pushed_id, 0);
+        sink_c.reset();
+        // Relay 0x0A sends an updated linkstate OVER THE WIRE (through `forward`'s OAM
+        // ingest, options 0x03 so the zid/whatami round-trip through the codec) that
+        // drops its edge to 0x0B (higher sn supersedes the sn-5 entry): 0x0B loses its
+        // only path and detaches -> changes.removed = [0x0B] -> purge_detached_interest
+        // fires the undeclare-push here, exactly as the link-down site does.
+        let detach = list(vec![
+            LinkstateOwned {
+                options: 0x03,
+                ..entry(0, 2, 0x05, &[])
+            },
+            LinkstateOwned {
+                options: 0x03,
+                ..entry(1, 6, 0x0A, &[0])
+            },
+        ]);
+        let oam = build_linkstate_oam_owned(&detach).expect("build detach oam");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Oam(oam));
+        assert!(
+            fwd.net.borrow().get_node(&zid(0x0B)).is_none(),
+            "the OAM ingest detached 0x0B (its only path, via 0x0A, is gone)"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the OAM-ingest detach undeclares to the waiting publisher (the SAME \
+             purge_detached_interest choke point the link-down site uses)"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => assert_eq!(
+                u.id, pushed_id,
+                "the OAM-ingest undeclare carries the pushed decl id"
+            ),
+            _ => panic!("expected an UndeclareSubscriber on the OAM-ingest detach"),
+        }
+    }
+
+    #[test]
+    fn peer_oam_ingest_detach_undeclares_to_the_client_querier() {
+        // The query twin of `peer_oam_ingest_detach_undeclares_to_the_client_publisher`:
+        // a 2-hop mesh QUERYABLE backing a co-attached client querier detaches via an
+        // OAM topology change (not a `deregister`), and the SAME purge_detached_interest
+        // choke point fires `undeclare_push_qabls` (the `affected_qabls` branch) so the
+        // querier's write-filter re-arms. 0x0B is the sole backer of demo/key, so its
+        // detach is a FULL undeclare (not the y153 partial-withdrawal downgrade).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (relay, _sr) = peer_face(zid(0x0A));
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &relay);
+        fwd.register(FaceId(1), &client);
+        fwd.ingest_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0A, &[0, 7]),
+                entry(7, 5, 0x0B, &[1]),
+            ]),
+        );
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/key", true, true, false, true, true),
+        );
+        sink_c.reset();
+        // 0x0B (transit, psid 7) declares a COMPLETE queryable demo/** -> backs the
+        // querier's demo/key -> pushed.
+        declare_queryable_complete(&fwd, FaceId(0), "demo/**", 7, true);
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the 2-hop mesh qabl is pushed to the waiting client querier"
+        );
+        let pushed_id = match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => d.id,
+            _ => panic!("expected a DeclareQueryable push"),
+        };
+        assert_ne!(pushed_id, 0);
+        sink_c.reset();
+        let detach = list(vec![
+            LinkstateOwned {
+                options: 0x03,
+                ..entry(0, 2, 0x05, &[])
+            },
+            LinkstateOwned {
+                options: 0x03,
+                ..entry(1, 6, 0x0A, &[0])
+            },
+        ]);
+        let oam = build_linkstate_oam_owned(&detach).expect("build detach oam");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Oam(oam));
+        assert!(
+            fwd.net.borrow().get_node(&zid(0x0B)).is_none(),
+            "the OAM ingest detached 0x0B"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the OAM-ingest detach undeclares to the waiting querier"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => assert_eq!(
+                u.id, pushed_id,
+                "the OAM-ingest undeclare carries the pushed qabl id"
+            ),
+            _ => panic!("expected an UndeclareQueryable on the OAM-ingest detach"),
+        }
+    }
+
+    #[test]
     fn peer_link_down_undeclares_to_the_client_querier() {
         // gap (a) query twin on the peer: a MESH queryable backing a co-attached
         // client querier's pushed reply ke goes DOWN via a LINK-DOWN -> the detach
