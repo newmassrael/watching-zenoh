@@ -1147,20 +1147,27 @@ impl RouterForwarder {
                 affected_qabl_keys.extend(qabls.remove_peer_keys(zid));
             }
         }
-        // §5.21 routing-token-tables (slice-1) — drain the departed natives'
-        // token entries too, so a face-down / topology-detach does not LEAK a
-        // gone source in `router_tokens` / `linkstatepeer_tokens`. This is the
-        // register-only slice's face-down safety net (mirroring the subs/qabls
-        // drain above); slice-1 has no cross-tier token advertise and no
-        // client-token push, so the removed keys need no further re-evaluation
-        // (unlike subs/qabls, whose keys drive `withdraw_native_cross_tier_*` +
-        // `undeclare_push_*` below). tier is Routers|LinkstatePeers here (Client
-        // returned early above), so `tokens_table` is `Some`.
+        // §5.21 routing-token-tables — drain the departed natives' token entries,
+        // then (slice-2) withdraw self's CROSS-TIER advertisement for any keyexpr
+        // whose LAST native source just left — the token twin of the subs/qabls
+        // withdraw loops above (minus the client `undeclare_push`). tier is
+        // Routers|LinkstatePeers here (Client returned early), so `tokens_table` is
+        // `Some`. The drained keys are collected INSIDE the scoped `borrow_mut` and
+        // the withdraw runs AFTER it drops — `withdraw_native_cross_tier_token`
+        // re-reads the same table via `source_count`, so withdrawing under the live
+        // borrow_mut would RefCell-panic (mirrors the subs/qabls collect-then-act
+        // shape at the top of this fn).
         #[cfg(feature = "routing-token-tables")]
         if let Some(tokens) = self.tokens_table(tier) {
-            let mut tokens = tokens.borrow_mut();
-            for zid in removed {
-                let _ = tokens.remove_peer_keys(zid);
+            let mut affected_token_keys: HashSet<String> = HashSet::new();
+            {
+                let mut tokens = tokens.borrow_mut();
+                for zid in removed {
+                    affected_token_keys.extend(tokens.remove_peer_keys(zid));
+                }
+            }
+            for keyexpr in affected_token_keys {
+                self.withdraw_native_cross_tier_token(tier, &keyexpr);
             }
         }
         // R311y152 — the UNGRACEFUL detach now fires the undeclare-push too (this
@@ -1367,20 +1374,21 @@ impl RouterForwarder {
         }
     }
 
-    /// Ingest a sourced `DeclareToken` (§5.21 routing-token-tables, slice-1) —
-    /// the liveliness-token twin of
+    /// Ingest a sourced `DeclareToken` (§5.21 routing-token-tables) — the
+    /// liveliness-token twin of
     /// [`ingest_subscription`](Self::ingest_subscription): register the SOURCE
     /// in the inbound tier's `tokens` table (Router face -> `router_tokens`,
     /// Peer face -> `linkstatepeer_tokens`) + within-tier re-flood, carrier
     /// `build_declare_token(0, 0, Some(ke))` (id 0 = sourced, keyexpr inline —
     /// the identical convention `build_declare_subscriber(0, 0, Some(ke))` uses).
     ///
-    /// Slice-1 is REGISTER-ONLY and calls the shared
-    /// [`ingest_interest`](Self::ingest_interest) core DIRECTLY, NOT via the
-    /// `ingest_subscription` wrapper: the wrapper's
-    /// `advertise_native_cross_tier_sub` + `push_future_subscription` tail is the
-    /// cross-tier / client future-push plane, a LATER token slice. A Client face
-    /// (no tier table) is likewise deferred. The retraction counterpart is
+    /// Calls the shared [`ingest_interest`](Self::ingest_interest) core DIRECTLY,
+    /// NOT via the `ingest_subscription` wrapper; the CROSS-TIER advertise
+    /// ([`advertise_native_cross_tier_token`](Self::advertise_native_cross_tier_token),
+    /// slice-2) is invoked on the register flip in the tail here — but the
+    /// wrapper's `push_future_subscription` client future-push is deferred (no
+    /// client-token plane). A Client face (no tier table) is likewise deferred.
+    /// The retraction counterpart is
     /// [`withdraw_token`](Self::withdraw_token): a peer router's graceful sourced
     /// `UndeclareToken` (`{id:0, ext_wire_expr}`) withdraws by keyexpr (the
     /// `UndeclToken` codec now carries the ext chain), and the face-down
@@ -1417,6 +1425,13 @@ impl RouterForwarder {
                 None => "not registered (unresolvable / no-change)".to_string(),
             }
         );
+        // Cross-tier PROPAGATION (slice-2): a NATIVE token for `ke` in this tier
+        // makes self ADVERTISE it into the OPPOSITE mesh (the token twin of
+        // ingest_subscription's advertise_native_cross_tier_sub tail). Fires on the
+        // register flip false->true only (ingest_interest returns Some).
+        if let Some(ke) = changed {
+            self.advertise_native_cross_tier_token(tier, &ke);
+        }
     }
 
     /// Withdraw a sourced `UndeclareToken` (§5.21 routing-token-tables) — the
@@ -1427,11 +1442,13 @@ impl RouterForwarder {
     /// inbound tier's token table, and within-tier re-flood a clean sourced
     /// retraction via `build_undeclare_token_with_keyexpr`. Reuses the shared
     /// [`withdraw_interest`](Self::withdraw_interest) core DIRECTLY (like
-    /// ingest_token reuses ingest_interest). NATIVE-only: the cross-tier token
-    /// withdraw (the negation of the cross-tier advertise) is a later slice, so
-    /// the change signal is discarded here. An id-keyed simple `UndeclareToken`
-    /// (the RAII drop's form, no ext) resolves no keyexpr and is a no-op — the
-    /// router source-routes tokens by keyexpr, never by id.
+    /// ingest_token reuses ingest_interest); on a REAL removal it captures the
+    /// returned keyexpr and withdraws the CROSS-TIER advertisement
+    /// ([`withdraw_native_cross_tier_token`](Self::withdraw_native_cross_tier_token),
+    /// slice-2 — the negation of ingest_token's advertise) when the LAST native
+    /// source left. An id-keyed simple `UndeclareToken` (the RAII drop's form, no
+    /// ext) resolves no keyexpr and is a no-op — the router source-routes tokens
+    /// by keyexpr, never by id.
     #[cfg(feature = "routing-token-tables")]
     fn withdraw_token(
         &self,
@@ -1447,7 +1464,12 @@ impl RouterForwarder {
         let Some(tokens) = self.tokens_table(tier) else {
             return; // Client tier -> a later slice.
         };
-        let _ = self.withdraw_interest(
+        // Cross-tier PROPAGATION (slice-2): withdraw_interest returns Some(ke) on a
+        // REAL removal; if that was the LAST native token source, withdraw self's
+        // cross-tier advertisement into the opposite mesh (the flip true->false —
+        // the negation of ingest_token's advertise). Mirror of withdraw_subscription
+        // minus undeclare_push (a client-push concern).
+        if let Some(keyexpr) = self.withdraw_interest(
             inbound,
             tier,
             reliable,
@@ -1455,7 +1477,9 @@ impl RouterForwarder {
             exts,
             tokens,
             build_undeclare_token_with_keyexpr,
-        );
+        ) {
+            self.withdraw_native_cross_tier_token(tier, &keyexpr);
+        }
     }
 
     /// Respond to an inbound `Interest` solicitation — the zenoh-1.x
@@ -2386,6 +2410,20 @@ impl RouterForwarder {
                 |children, declare| self.flood_delta_tier(tier, children, declare),
             );
         }
+        // §5.21 routing-token-tables (slice-2) — re-advertise the native tokens to
+        // the tier's NEW tree children too, so a late-joining child converges on
+        // the within-tier token bubble (closes the slice-1 register-only gap where
+        // an ingested native token was never re-advertised to a late joiner).
+        #[cfg(feature = "routing-token-tables")]
+        if let Some(tokens) = self.tokens_table(tier) {
+            re_advertise_interest_into(
+                net,
+                tokens,
+                &new_children,
+                |ke, _: &()| build_declare_token(0, 0, Some(ke)),
+                |children, declare| self.flood_delta_tier(tier, children, declare),
+            );
+        }
         // C2: also re-advertise self's DERIVED cross-tier subs (from client_subs)
         // to self's NEW tree children — the derive's OBLIGATION-2 re-advertise feed
         // (a distinct self-sourced declaration), so a late-joining mesh node learns
@@ -2774,6 +2812,23 @@ impl RouterForwarder {
         set.into_iter().collect()
     }
 
+    /// The keyexprs self should advertise a cross-tier token for into `target` mesh
+    /// — the OPPOSITE mesh's native tokens, deduped. The token twin of
+    /// [`derived_cross_tier_subs_into`](Self::derived_cross_tier_subs_into) MINUS the
+    /// `client_subs` fold (no client-token plane yet); fed to the tick re-advertise
+    /// ([`re_advertise_self_cross_tier`](Self::re_advertise_self_cross_tier)) so a
+    /// late-joining tree child converges on self's cross-tier token bubble.
+    #[cfg(feature = "routing-token-tables")]
+    fn derived_cross_tier_tokens_into(&self, target: FaceTier) -> Vec<String> {
+        let mut set: HashSet<String> = HashSet::new();
+        if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.tokens_table(src)) {
+            for (keyexpr, _peer, ()) in table.borrow().entries() {
+                set.insert(keyexpr);
+            }
+        }
+        set.into_iter().collect()
+    }
+
     /// A CLIENT sub for `keyexpr` just appeared (the FIRST client for it): flood
     /// self's cross-tier ADVERTISEMENT into each mesh the client newly flips ON —
     /// a self-sourced `DeclareSubscriber` (node_id 0) to self's tree children, so
@@ -2851,6 +2906,53 @@ impl RouterForwarder {
         // it — `!self_advertises_sub_into(target, keyexpr)`.
         if !self.self_advertises_sub_into(target, keyexpr) {
             self.flood_self_sourced(target, keyexpr, build_undeclare_subscriber_with_keyexpr);
+        }
+    }
+
+    /// §5.21 routing-token-tables (slice-2) — the liveliness-token twin of
+    /// [`advertise_native_cross_tier_sub`](Self::advertise_native_cross_tier_sub):
+    /// a NATIVE token for `keyexpr` in `native_tier` makes self ADVERTISE it into
+    /// the OPPOSITE mesh (a self-sourced `DeclareToken` to self's tree children
+    /// there), so a token-interested face on that mesh learns self holds it. Fires
+    /// on the false->true flip ONLY (`source_count == 1`, the FIRST native). Tokens
+    /// carry no value, so unlike the qabl twin there is no merge; and there is no
+    /// `!any_client_subscribes` term (no client-token plane until a later slice —
+    /// which must then add the client term to BOTH this gate and the withdraw
+    /// negation symmetrically). DERIVE-not-STORE: self is NOT stored in the opposite
+    /// token table (`flood_self_sourced` floods self's tree children only).
+    #[cfg(feature = "routing-token-tables")]
+    fn advertise_native_cross_tier_token(&self, native_tier: FaceTier, keyexpr: &str) {
+        let Some(target) = Self::opposite_mesh(native_tier) else {
+            return; // a client native has no mesh (client-token plane deferred)
+        };
+        let sole = self
+            .tokens_table(native_tier)
+            .is_some_and(|t| t.borrow().source_count(keyexpr) == 1);
+        if sole {
+            self.flood_self_sourced(target, keyexpr, |ke| build_declare_token(0, 0, Some(ke)));
+        }
+    }
+
+    /// A NATIVE token for `keyexpr` in `native_tier` just left (retraction or
+    /// face-down purge): flood self's cross-tier WITHDRAWAL into the OPPOSITE mesh
+    /// IFF it flipped that mesh's advertise true->false — i.e. NO native token
+    /// source for the exact `keyexpr` remains (`source_count == 0` after removal).
+    /// The exact negation of
+    /// [`advertise_native_cross_tier_token`](Self::advertise_native_cross_tier_token),
+    /// inlined (single-caller, single-term — no client-token contributor yet, so the
+    /// `self_advertises_*_into` helper the sub plane needs does not carry over).
+    /// Centralized so BOTH the graceful retraction and the (local + Oam-detach)
+    /// purge paths route through it (the R311y125 lifecycle-symmetry class).
+    #[cfg(feature = "routing-token-tables")]
+    fn withdraw_native_cross_tier_token(&self, native_tier: FaceTier, keyexpr: &str) {
+        let Some(target) = Self::opposite_mesh(native_tier) else {
+            return;
+        };
+        let still_backed = self
+            .tokens_table(native_tier)
+            .is_some_and(|t| t.borrow().source_count(keyexpr) > 0);
+        if !still_backed {
+            self.flood_self_sourced(target, keyexpr, build_undeclare_token_with_keyexpr);
         }
     }
 
@@ -2991,6 +3093,16 @@ impl RouterForwarder {
                 continue;
             };
             let Ok(declare) = build_declare_queryable_with_info(&keyexpr, info) else {
+                continue;
+            };
+            self.flood_delta_tier(tier, self_delta, &declare);
+        }
+        // §5.21 routing-token-tables (slice-2) — the cross-tier token bubble's
+        // late-joiner feed (the token twin of the subs loop above): re-advertise
+        // self's derived cross-tier tokens to self's NEW tree children.
+        #[cfg(feature = "routing-token-tables")]
+        for keyexpr in self.derived_cross_tier_tokens_into(tier) {
+            let Ok(declare) = build_declare_token(0, 0, Some(&keyexpr)) else {
                 continue;
             };
             self.flood_delta_tier(tier, self_delta, &declare);
@@ -7632,6 +7744,114 @@ mod tests {
             "the retraction re-flooded to the tree child C"
         );
         assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
+    }
+
+    // ── §5.21 routing-token-tables (slice-2): token CROSS-TIER PROPAGATION ──
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn router_native_token_advertises_into_the_peer_mesh() {
+        // A ROUTER-native token makes self ADVERTISE that keyexpr into the PEER mesh
+        // (a self-sourced DeclareToken to a peer tree child) — the token twin of
+        // router_native_sub_advertises_into_the_peer_mesh. Derive-not-store: self is
+        // NOT registered in the peer tokens table.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (r, _rs) = face(zid(0xAA), WIRE_ROUTER); // the router-native source
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // a peer tree child
+        fwd.register(FaceId(0), &r);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5); // self<->P peer edge
+        fwd.tick();
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // router-native token
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "a router-native token advertised self's cross-tier interest to the peer mesh"
+        );
+        assert!(
+            fwd.linkstatepeer_tokens
+                .borrow()
+                .interested("live/data")
+                .is_empty(),
+            "derive-not-store: self is NOT stored in the peer tokens table"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn peer_native_token_advertises_into_the_router_mesh() {
+        // The mirror direction: a PEER-native token advertises into the ROUTER mesh.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (pn, _ps) = face(zid(0xBB), WIRE_PEER); // the peer-native source
+        let (rc, sink_rc) = face(zid(0xCC), WIRE_ROUTER); // a router tree child
+        fwd.register(FaceId(0), &pn);
+        fwd.register(FaceId(1), &rc);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        sink_rc.reset();
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
+        assert_eq!(
+            sink_rc.frame_count(),
+            1,
+            "a peer-native token advertised into the router mesh"
+        );
+        assert!(
+            fwd.router_tokens
+                .borrow()
+                .interested("live/data")
+                .is_empty(),
+            "derive-not-store: self is NOT stored in the router tokens table"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn native_token_face_down_withdraws_the_cross_tier_advertisement() {
+        // Lifecycle-symmetry: a peer-native token's face going down purges it
+        // (through purge_detached_interest_tier — the shared choke point that also
+        // covers the remote Oam-detach) and, since it was the LAST source, WITHDRAWS
+        // self's cross-tier advertisement from the router mesh. The token twin of
+        // native_sub_face_down_withdraws_the_cross_tier_advertisement — proves the
+        // slice-2 purge cross-tier withdraw (scoped-drain then withdraw-after-drop).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (pn, _ps) = face(zid(0xBB), WIRE_PEER);
+        let (rc, sink_rc) = face(zid(0xCC), WIRE_ROUTER);
+        fwd.register(FaceId(0), &pn);
+        fwd.register(FaceId(1), &rc);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // advertise into router mesh
+        sink_rc.reset();
+        fwd.deregister(FaceId(0)); // the peer-native's face goes down
+        assert_eq!(
+            sink_rc.frame_count(),
+            1,
+            "the departed native's last token source withdrew self's cross-tier advertisement"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn native_token_undeclare_withdraws_the_cross_tier_advertisement() {
+        // The GRACEFUL path (vs the face-down purge above): a sourced UndeclareToken
+        // for the LAST native source withdraws self's cross-tier advertisement, via
+        // withdraw_token capturing the withdraw_interest change signal.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (r, _rs) = face(zid(0xAA), WIRE_ROUTER);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &r);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // advertise into peer mesh
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), undeclare_token_msg("live/data"));
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the graceful retraction of the last source withdrew the cross-tier advertisement"
+        );
     }
 
     // ── slice 1c: queryable dual-tier INGEST ─────────────────────────────
