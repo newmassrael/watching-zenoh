@@ -1716,6 +1716,24 @@ pub(crate) async fn run_peer(
     // is what the e2e asserts on (it must read the converged size, not the
     // mid-teardown remnant).
     let mut peak_nodes = 0usize;
+    // High-water mark of the MUTUAL-edge count, sampled each tick — the
+    // reciprocal-link witness distinct from `peak_nodes`. An edge forms only
+    // when a neighbour's INGESTED link-state advertises a link back to self
+    // (`LinkstateForwarder::edge_count`), so `peak_edges > 0` proves this peer
+    // ingested a FULL-LINKSTATE flood (self-entry `links={self}`), not merely a
+    // gossip self-announcement (which bumps `ingested`/`peak_nodes` but carries
+    // no reciprocal link → no edge). Sampled at the tick because teardown prunes
+    // edges (remove_link), same rationale as `peak_nodes`.
+    let mut peak_edges = 0usize;
+    // Fires the in-run reciprocal-link witness once, on the positive edge of
+    // `edge_count` first rising — the settle barrier an e2e waits on before it
+    // graceful-terminates (post-ingest, eliminating the face-UP race).
+    let mut announced_reciprocal = false;
+    // Fires the in-run ingest witness once, on the positive edge of `ingested`
+    // first rising — the post-ingest settle barrier for a peer whose neighbour
+    // floods a NODE-only link-state (a gossip `peer_to_peer` peer: `ingested`
+    // rises but no reciprocal edge forms, so `announced_reciprocal` never trips).
+    let mut announced_ingest = false;
     // R311y48 (§5.23 Phase 3b) — config-write apply state: the deny keyexpr last
     // applied (so a repeated PUT of the same value reconfigures + logs ONCE, not
     // per tick — idempotent), and the high-water interceptor-drop count for the
@@ -1727,6 +1745,32 @@ pub(crate) async fn run_peer(
             done = &mut loop_fut => break done,
             _ = app_tick.tick() => {
                 peak_nodes = peak_nodes.max(forwarder.node_count());
+                peak_edges = peak_edges.max(forwarder.edge_count());
+                // Ingest witness: this peer decoded a neighbour's link-state flood
+                // (the wire control-plane arrived). Logged once, on the positive
+                // edge — the post-ingest settle a topology e2e waits on regardless
+                // of whether the flood carried a reciprocal link (so a gossip-mode
+                // neighbour, which never trips the edge witness below, still has a
+                // deterministic barrier).
+                if !announced_ingest && forwarder.ingested() > 0 {
+                    announced_ingest = true;
+                    log::info!(
+                        "wz-ap-demo peer: ingested neighbour link-state ({} so far)",
+                        forwarder.ingested()
+                    );
+                }
+                // Reciprocal-link witness: a MUTUAL edge appears only once an
+                // ingested neighbour flood advertised a link back to self. Logged
+                // once, on the positive edge — the deterministic post-ingest signal
+                // a full-linkstate federation e2e settles on (and the discriminator
+                // a gossip-mode peer never trips: its self-flood carries no links).
+                if !announced_reciprocal && forwarder.edge_count() > 0 {
+                    announced_reciprocal = true;
+                    log::info!(
+                        "wz-ap-demo peer: reciprocal mesh link confirmed ({} edge(s))",
+                        forwarder.edge_count()
+                    );
+                }
                 // c3c-3 debt A2 — a `--subscribe` peer declares its interest ONCE.
                 // pubsub_tree_change (re_advertise_subscriptions on each tree
                 // recompute) re-floods the subscription to peers that join later,
@@ -1824,13 +1868,14 @@ pub(crate) async fn run_peer(
     log::info!(
         "wz-ap-demo peer: shutdown; dialed {}, accepted {}, served {} peer(s), \
          peak {} concurrent face(s), ingested {} link-state(s), \
-         peak {} node(s) in topology graph, {} data push(es) received",
+         peak {} node(s) in topology graph, {} graph edge(s), {} data push(es) received",
         summary.dialed,
         summary.accepted,
         summary.established,
         summary.peak_concurrent,
         forwarder.ingested(),
         peak_nodes.max(forwarder.node_count()),
+        peak_edges.max(forwarder.edge_count()),
         forwarder.data_seen()
     );
     // Convergence witness the e2e asserts on: emitted ONLY when this peer
@@ -1843,6 +1888,21 @@ pub(crate) async fn run_peer(
             "wz-ap-demo peer: learned mesh topology (ingested {} link-state(s), peak {} node(s) in graph)",
             forwarder.ingested(),
             peak_nodes.max(forwarder.node_count())
+        );
+    }
+    // Reciprocal-link witness (the FULL-LINKSTATE discriminator): emitted ONLY
+    // when this peer's graph gained a MUTUAL edge — a neighbour's ingested flood
+    // advertised a link back to self. A gossip (`peer_to_peer`) neighbour bumps
+    // `ingested` (its self-announcement decodes) but its self-entry carries no
+    // links, so no edge forms and this witness stays absent. Thus a full-linkstate
+    // peer federation emits BOTH "learned mesh topology" AND this line, while a
+    // gossip peer emits ONLY the former — the load-bearing distinction between
+    // `routing/peer/mode=linkstate` and the default `peer_to_peer`. Deterministic
+    // at shutdown (peak-sampled), mirroring the `learned mesh topology` gate.
+    if peak_edges.max(forwarder.edge_count()) > 0 {
+        log::info!(
+            "wz-ap-demo peer: confirmed reciprocal mesh link ({} edge(s) in graph)",
+            peak_edges.max(forwarder.edge_count())
         );
     }
     // Data-reception witness — a DETERMINISTIC shutdown counterpart to the

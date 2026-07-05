@@ -1027,6 +1027,22 @@ impl LinkstateForwarder {
         self.net.borrow().node_count()
     }
 
+    /// Number of edges (MUTUAL links) in the topology graph. An edge exists
+    /// only when BOTH endpoints advertise a link to each other
+    /// ([`rebuild_edges`](wz_routing_graph::LinkstateNetwork) forms the edge
+    /// solely on `graph[dest].links.contains_key(self)`), so a bare
+    /// `add_link` (register) — which records self's outbound link but not the
+    /// neighbour's reciprocal one — yields NO edge until an inbound
+    /// link-state carrying the neighbour's link back to self is ingested. It
+    /// is therefore the discriminator between a full-linkstate peer flood
+    /// (self-entry carries `links={self}` → reciprocal edge) and a gossip
+    /// (`peer_to_peer`) peer flood (self-entry `links:false` → node only, no
+    /// edge): both bump [`ingested`](Self::ingested), only the linkstate one
+    /// bumps this. The demo samples its high-water at each tick.
+    pub fn edge_count(&self) -> usize {
+        self.net.borrow().edge_count()
+    }
+
     /// This peer's children in the spanning tree rooted at `source` — the
     /// faces to forward a message flooded along `source`'s tree to. The
     /// data-forwarding atom (c3b) reads this; exposed now as the graph

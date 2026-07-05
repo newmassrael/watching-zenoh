@@ -4195,6 +4195,20 @@ layer_z_zenohd_interop() {
     # isolation as the client legs.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_router_hat_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # wz-PEER <-> zenohd-PEER linkstate FEDERATION interop, the peer-tier twin of
+    # the router-hat leg above (the last cross-impl router gap): a wz `--peer`
+    # LinkstateForwarder meshes with a real zenohd in mode=peer +
+    # routing/peer/mode=linkstate and DECODES its linkstatepeers_net LinkStateList
+    # flood. Leg 1 (positive) converges a MUTUAL edge (the full-linkstate
+    # discriminator: zenohd's self-entry advertises a reciprocal link back to wz);
+    # leg 2 (neuter) points wz at a DEFAULT gossip (peer_to_peer) zenohd, which
+    # floods the SAME OAM_LINKSTATE self-announcement (so wz still "learned mesh
+    # topology") but carries no reciprocal link, so NO edge forms — proving the
+    # edge witness is load-bearing, not an ingested-only green-but-meaningless
+    # pass. Needs zenohd + the `router-hat-router` binary (built above; pulls
+    # routing-peer for --peer). Same --test-threads=1 per-zenohd isolation.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_peer_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R3b-2 — wz<->zenohd usrpwd AUTH interop. Needs ONLY zenohd (no
     # storage-manager plugin, no pico CLI): wz authenticates to a
     # mandatory-usrpwd zenohd (correct creds -> Established) and is rejected
