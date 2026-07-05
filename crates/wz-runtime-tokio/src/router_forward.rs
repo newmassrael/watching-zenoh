@@ -325,7 +325,7 @@ use wz_session_core::declare_build::{
 #[cfg(feature = "routing-token-tables")]
 use wz_session_core::declare_build::{
     build_declare_token, build_declare_token_reply, build_declare_token_reply_with_id,
-    build_undeclare_token_with_keyexpr,
+    build_undeclare_token, build_undeclare_token_with_keyexpr,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
@@ -628,9 +628,11 @@ pub struct RouterForwarder {
     /// is proactively pushed via [`push_future_token`](Self::push_future_token). The
     /// CURRENT dump ([`dump_interest_tokens`](Self::dump_interest_tokens)) is the
     /// FIRST reader of the token tables — it makes the slice-1/2/3 bubble observable.
-    /// Same OBLIGATION-1 purge as `future_subs`. NOTE (slice-4b, NAMED not dropped):
-    /// the withdraw->notify twin of `undeclare_push_subs` is DEFERRED — a future-push
-    /// reader is not yet told a token WITHDREW (liveliness stale-live residual).
+    /// Same OBLIGATION-1 purge as `future_subs`. The withdraw->notify twin of
+    /// `undeclare_push_subs` — [`undeclare_push_token`](Self::undeclare_push_token) —
+    /// is WIRED (slice-5) at all 5 token-removal sites (graceful mesh/client withdraw,
+    /// ungraceful detach, id-reuse displacement, client face-down), so a future-push
+    /// reader IS told a token withdrew: the liveliness stale-live residual is CLOSED.
     #[cfg(feature = "routing-token-tables")]
     future_tokens: RefCell<FutureSubStore>,
     /// The pending-query return table (C5b) — one entry per outbound Request,
@@ -1231,6 +1233,10 @@ impl RouterForwarder {
             }
             for keyexpr in affected_token_keys {
                 self.withdraw_native_cross_tier_token(tier, &keyexpr);
+                // slice-5: the ungraceful node-detach twin of the graceful withdraw's
+                // notify (the token half of zenoh token_remove_node's
+                // propagate_forget_simple_token, the R311y152 detach-push for tokens).
+                self.undeclare_push_token(&keyexpr);
             }
         }
         // R311y152 — the UNGRACEFUL detach now fires the undeclare-push too (this
@@ -1551,6 +1557,10 @@ impl RouterForwarder {
             build_undeclare_token_with_keyexpr,
         ) {
             self.withdraw_native_cross_tier_token(tier, &keyexpr);
+            // slice-5 withdraw->notify: the mesh token is gone from the table, so a
+            // future-push reader whose pushed reply ke lost its LAST backer is told it
+            // withdrew (mirror of withdraw_subscription's undeclare_push_subs).
+            self.undeclare_push_token(&keyexpr);
         }
     }
 
@@ -3239,8 +3249,15 @@ impl RouterForwarder {
         // could not). Retract the displaced keyexpr's cross-tier advertisement if this
         // was its last holder, so a liveliness token never leaks stale-live.
         if let Some(old) = displaced {
-            if old != keyexpr && !self.any_client_holds_token(&old) {
-                self.withdraw_client_cross_tier_token(&old);
+            if old != keyexpr {
+                if !self.any_client_holds_token(&old) {
+                    self.withdraw_client_cross_tier_token(&old);
+                }
+                // slice-5: the displaced old keyexpr also owes a reader-notify — the
+                // 5th token-removal path (id-reuse), which has NO sub mirror (client_subs
+                // is a HashSet that cannot displace), so the "3 sub sites" enumeration
+                // misses it. Closes the same stale-live residual as the other sites.
+                self.undeclare_push_token(&old);
             }
         }
     }
@@ -3278,6 +3295,11 @@ impl RouterForwarder {
         if !self.any_client_holds_token(&keyexpr) {
             self.withdraw_client_cross_tier_token(&keyexpr);
         }
+        // slice-5 withdraw->notify (unconditional on a real removal, like
+        // withdraw_client_subscription): a future-push reader whose pushed reply ke is
+        // now un-backed is told the token withdrew. The internal `any_token_matches`
+        // gate keeps a ke another token still backs from being spuriously undeclared.
+        self.undeclare_push_token(&keyexpr);
     }
 
     /// Whether ANY client face currently holds a liveliness token for `keyexpr` —
@@ -3349,6 +3371,60 @@ impl RouterForwarder {
         Self::opposite_mesh(target)
             .and_then(|src| self.tokens_table(src))
             .map_or(0, |t| t.borrow().source_count(keyexpr))
+    }
+
+    // ── §5.21 routing-token-tables (slice-5): topology-reconcile withdraw->notify ──
+
+    /// Whether ANY liveliness token wz still holds INTERSECTS `ke` — the token twin of
+    /// [`any_sub_matches`](Self::any_sub_matches), the post-withdrawal "still backed"
+    /// existence check [`undeclare_push_token`](Self::undeclare_push_token) consults.
+    /// Folds GLOBALLY (no face/self exclusion): both mesh tiers via
+    /// `matching_entries(ke, None)` ∪ the client leaf tokens (any inner-map VALUE
+    /// intersecting `ke`) — a per-face exclusion here would spuriously undeclare a
+    /// reply ke a co-hosted or mesh token still backs. DERIVE-not-STORE means self is
+    /// never in the mesh tables, so `None` (no self-zid filter) is correct.
+    #[cfg(feature = "routing-token-tables")]
+    fn any_token_matches(&self, ke: &str) -> bool {
+        for table in [&self.router_tokens, &self.linkstatepeer_tokens] {
+            if !table.borrow().matching_entries(ke, None).is_empty() {
+                return true;
+            }
+        }
+        let chunks: Vec<&str> = ke.split('/').collect();
+        self.client_tokens
+            .borrow()
+            .values()
+            .any(|ids| ids.values().any(|k| keyexpr_intersects_target(k, &chunks)))
+    }
+
+    /// Emit the withdraw->reader UNDECLARE pushes a withdrawn TOKEN `withdrawn_ke`
+    /// triggers — the token twin of [`undeclare_push_subs`](Self::undeclare_push_subs)
+    /// (slice-5, the withdraw half of zenoh `propagate_forget_simple_token` — its ARM 1,
+    /// the `pushed`/`local_tokens` faces; the interested-but-never-declared arm 2 is
+    /// omitted, symmetric with `undeclare_push_subs`, and unreachable in wz's flow — a
+    /// face interested in a ke wz holds is always interned into `pushed` first): for each
+    /// CLIENT face whose pushed reply ke is now UN-backed
+    /// ([`any_token_matches`](Self::any_token_matches) false), an unsolicited id-keyed
+    /// `UndeclareToken(id)` (interest_id None) that retracts the earlier FUTURE-push and
+    /// clears the stale `pushed` entry. For a LIVELINESS token this closes the
+    /// stale-live residual (a reader told a token appeared is now told it withdrew).
+    /// INVARIANT: run AFTER the withdrawn token left its table / store, so
+    /// `any_token_matches` reflects the post-withdrawal state (a ke still backed by
+    /// ANOTHER token must NOT be undeclared). Borrow-safe: `future_tokens.borrow_mut()`
+    /// with the closure reading the DISTINCT token-table RefCells (the
+    /// `undeclare_push_subs` shape).
+    #[cfg(feature = "routing-token-tables")]
+    fn undeclare_push_token(&self, withdrawn_ke: &str) {
+        let forgets = self
+            .future_tokens
+            .borrow_mut()
+            .forgets_for_withdrawn(withdrawn_ke, |rk| self.any_token_matches(rk));
+        for (face, _reply_ke, id) in forgets {
+            self.send_one_to_face(
+                face,
+                NetworkMessage::Declare(Box::new(build_undeclare_token(id))),
+            );
+        }
     }
 
     /// The MERGED [`QueryableInfo`] self advertises for `keyexpr` into `target`
@@ -4432,29 +4508,48 @@ impl FaceForwarder for RouterForwarder {
         // `remove` is bound to a `let` so the borrow_mut drops BEFORE the loop reads
         // `any_client_holds_token`; the keyexprs are deduped (a face may hold one
         // keyexpr under several decl ids) so the withdraw fires once.
+        // Purge this face's client tokens + withdraw self's cross-tier advertisement
+        // for any keyexpr it was the LAST client of. The departed keyexprs are HOISTED
+        // so the slice-5 reader-notify can run AFTER `future_tokens.purge_face` below
+        // (which removes the departed face, so it is not self-notified).
         #[cfg(feature = "routing-token-tables")]
-        {
+        let departed_token_keys: Vec<String> = {
             let departed_tokens = self.client_tokens.borrow_mut().remove(&id);
-            if let Some(ids) = departed_tokens {
-                let keyexprs: HashSet<String> = ids.into_values().collect();
-                for keyexpr in keyexprs {
-                    if !self.any_client_holds_token(&keyexpr) {
-                        self.withdraw_client_cross_tier_token(&keyexpr);
+            match departed_tokens {
+                Some(ids) => {
+                    let keyexprs: HashSet<String> = ids.into_values().collect();
+                    for keyexpr in &keyexprs {
+                        if !self.any_client_holds_token(keyexpr) {
+                            self.withdraw_client_cross_tier_token(keyexpr);
+                        }
                     }
+                    keyexprs.into_iter().collect()
                 }
+                None => Vec::new(),
             }
-        }
+        };
         // Purge this face's FUTURE-mode interest + pushed-declaration state
         // (OBLIGATION 1, alongside client_subs/client_qabls): a client face is
-        // `link == None` so it never reaches the graph teardown below. pico clears
-        // its own write-filter targets on the transport drop (filtering.c
-        // CONNECTION_DROPPED), so no undeclare is owed.
+        // `link == None` so it never reaches the graph teardown below. The DEPARTED
+        // face owes itself no undeclare (pico clears its own write-filter targets on
+        // the transport drop, filtering.c CONNECTION_DROPPED); the SURVIVING readers of
+        // this face's tokens ARE owed one — the slice-5 loop below (subs leave this a
+        // benign over-deliver gap; a liveliness token's stale-live is not benign, so
+        // tokens close it — zenoh close_face retracts on face-down for BOTH planes,
+        // mod.rs:498/541).
         self.future_subs.borrow_mut().purge_face(id);
         self.future_qabls.borrow_mut().purge_face(id);
         // §5.21 routing-token-tables (slice-4): the token FUTURE store is client leaf
         // state too — purge it alongside future_subs/future_qabls (OBLIGATION 1).
         #[cfg(feature = "routing-token-tables")]
         self.future_tokens.borrow_mut().purge_face(id);
+        // §5.21 slice-5: NOW notify the surviving future-push readers (future_tokens no
+        // longer holds the departed face). Runs before the `link == None` early-return
+        // so a Client face is covered.
+        #[cfg(feature = "routing-token-tables")]
+        for keyexpr in departed_token_keys {
+            self.undeclare_push_token(&keyexpr);
+        }
         let Some(state) = self.faces.borrow_mut().remove(&id) else {
             return;
         };
@@ -8866,6 +8961,189 @@ mod tests {
             2,
             "the reused id advertised the new keyexpr AND retracted the displaced old one"
         );
+    }
+
+    // ── §5.21 routing-token-tables (slice-5): topology reconcile withdraw->notify ──
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn mesh_token_withdraw_undeclares_to_a_pushed_reader() {
+        // slice-5: a future-push reader told a MESH token appeared is told it withdrew
+        // on a graceful UndeclareToken (the token twin of the sub undeclare-push).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER); // mesh token source
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT); // future reader
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/data", true, true, false),
+        );
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // -> pushed to the client
+        assert!(
+            fwd.future_token_pushes_seen() >= 1,
+            "the token was future-pushed"
+        );
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), undeclare_token_msg("live/data")); // graceful mesh withdraw
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the reader is notified the token withdrew"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohUndeclToken(_)
+        ));
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn client_token_withdraw_undeclares_to_a_pushed_reader() {
+        // slice-5: a client A's token pushed to reader B; A's graceful id-keyed
+        // UndeclareToken retracts it to B.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_CLIENT); // token holder
+        let (b, sink_b) = face(zid(0xBB), WIRE_CLIENT); // future reader
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/data", true, true, false),
+        );
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(9, "live/data")); // -> pushed to B
+        assert!(fwd.future_token_pushes_seen() >= 1);
+        sink_b.reset();
+        forward_one(&fwd, FaceId(0), undeclare_client_token_msg(9)); // A withdraws (id-keyed)
+        assert_eq!(sink_b.frame_count(), 1, "reader B told A's token withdrew");
+        assert!(matches!(
+            forwarded_declare(&sink_b.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohUndeclToken(_)
+        ));
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn token_node_detach_undeclares_to_a_pushed_reader() {
+        // slice-5: the UNGRACEFUL path — the mesh token source's face goes down, the
+        // detach purge notifies the future-push reader (a Client face gets no
+        // link-state, so the only frame it sees is the UndeclareToken).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER); // mesh source (will detach)
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT); // reader
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/data", true, true, false),
+        );
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
+        assert!(fwd.future_token_pushes_seen() >= 1);
+        sink_c.reset();
+        fwd.deregister(FaceId(0)); // the mesh source face goes down (ungraceful)
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the reader told the detached node's token withdrew"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohUndeclToken(_)
+        ));
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn client_face_down_undeclares_its_token_to_a_pushed_reader() {
+        // slice-5 the LIVELINESS 4th site (subs do NOT do this; a token's stale-live is
+        // not benign): client A's token pushed to reader B; A's client FACE going down
+        // retracts A's token to B (zenoh close_face -> undeclare_simple_token ->
+        // propagate_forget). Load-bearing for liveliness correctness.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_CLIENT); // token holder (faces down)
+        let (b, sink_b) = face(zid(0xBB), WIRE_CLIENT); // reader
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/data", true, true, false),
+        );
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(9, "live/data")); // -> pushed to B
+        assert!(fwd.future_token_pushes_seen() >= 1);
+        sink_b.reset();
+        fwd.deregister(FaceId(0)); // A's client face goes down
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "reader B told A's token withdrew on A's face-down (liveliness)"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_b.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohUndeclToken(_)
+        ));
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn undeclare_push_token_suppressed_while_another_backer_holds() {
+        // slice-5 the any_token_matches gate: two tokens back K (a mesh source + a
+        // client); one withdrawing does NOT undeclare to the reader (K still backed).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER); // mesh backer
+        let (a, _sa) = face(zid(0xBB), WIRE_CLIENT); // client backer (withdraws)
+        let (b, sink_b) = face(zid(0xCC), WIRE_CLIENT); // reader
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &a);
+        fwd.register(FaceId(2), &b);
+        forward_one(
+            &fwd,
+            FaceId(2),
+            token_interest_msg(7, "live/data", true, true, false),
+        );
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // mesh backer -> pushed to B
+        forward_one(&fwd, FaceId(1), declare_client_token_msg(9, "live/data")); // client backer (dedup push)
+        sink_b.reset();
+        forward_one(&fwd, FaceId(1), undeclare_client_token_msg(9)); // the client backer withdraws
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "the reader is NOT told (K still backed by the mesh source)"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn client_token_id_reuse_undeclares_the_displaced_to_a_reader() {
+        // slice-5 the 5th removal path (id-reuse, no sub mirror): A holds live/a under
+        // id 9 (pushed to reader B), then REUSES id 9 for live/b -> B is told live/a
+        // (now displaced + unbacked) withdrew.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_CLIENT); // holder (id-reuse)
+        let (b, sink_b) = face(zid(0xBB), WIRE_CLIENT); // reader of live/a
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/a", true, true, false),
+        );
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(9, "live/a")); // id9 -> live/a, pushed to B
+        assert!(fwd.future_token_pushes_seen() >= 1);
+        sink_b.reset();
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(9, "live/b")); // id9 REUSED -> live/b
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "reader B told the displaced live/a withdrew"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_b.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohUndeclToken(_)
+        ));
     }
 
     // ── slice 1c: queryable dual-tier INGEST ─────────────────────────────
