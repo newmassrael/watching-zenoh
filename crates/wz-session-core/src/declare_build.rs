@@ -850,6 +850,38 @@ pub fn build_declare_subscriber_reply_with_id(
     Ok(declare)
 }
 
+/// R311y174 — the interest-response `Declare(DeclToken)` reply: a `DeclareToken`
+/// stamped with the soliciting `interest_id` — the CURRENT dump a router sends back
+/// per matching held liveliness token (zenoh `declare_token_interest`). The token
+/// twin of [`build_declare_subscriber_reply`], routed through the SAME
+/// [`stamp_interest_reply`] I-flag + interest_id SSOT. Kept in this (ungated)
+/// `declare_build` module — NOT `declare::local_token::build_token_reply`, which is
+/// gated behind the `liveliness-token` feature — so the router `routing-token-tables`
+/// plane pulls no liveliness-token dependency. The token `id` is 0 (a current-dump
+/// token carries no id — zenoh `make_token_id` = 0 for a non-future interest).
+pub fn build_declare_token_reply(
+    interest_id: u64,
+    keyexpr: &str,
+) -> Result<DeclareOwned, CodecError> {
+    let mut declare = build_declare_token(0, 0, Some(keyexpr))?;
+    stamp_interest_reply(&mut declare, interest_id);
+    Ok(declare)
+}
+
+/// R311y174 — the interest-response `Declare(DeclToken)` reply of a FUTURE (C+F)
+/// interest, carrying a NON-ZERO token id (zenoh `make_token_id`'s `mode.future()`
+/// branch) so the id is REUSED on the later unsolicited FUTURE push of the same
+/// keyexpr. Same `I`-flag + `interest_id` coupling as [`build_declare_token_reply`].
+pub fn build_declare_token_reply_with_id(
+    interest_id: u64,
+    token_id: u64,
+    keyexpr: &str,
+) -> Result<DeclareOwned, CodecError> {
+    let mut declare = build_declare_token(token_id, 0, Some(keyexpr))?;
+    stamp_interest_reply(&mut declare, interest_id);
+    Ok(declare)
+}
+
 /// R311y141 — the interest-response `Declare(DeclQueryable)` reply: the
 /// query-plane twin of [`build_declare_subscriber_reply`]. Additionally folds
 /// the matched queryables' [`QueryableInfo`] onto the body ext chain (via

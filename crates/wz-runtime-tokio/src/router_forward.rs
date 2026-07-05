@@ -323,7 +323,10 @@ use wz_session_core::declare_build::{
     build_undeclare_subscriber_with_keyexpr,
 };
 #[cfg(feature = "routing-token-tables")]
-use wz_session_core::declare_build::{build_declare_token, build_undeclare_token_with_keyexpr};
+use wz_session_core::declare_build::{
+    build_declare_token, build_declare_token_reply, build_declare_token_reply_with_id,
+    build_undeclare_token_with_keyexpr,
+};
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
@@ -530,8 +533,8 @@ pub struct RouterForwarder {
     /// The TOKEN TWIN of `router_subs` — a source-zid set with NO value payload
     /// (tokens carry no info, unlike `QueryableInfo`), so `V = ()` exactly like
     /// the sub plane. Populated by the token-INGEST slice: NATIVE Router token
-    /// sources keyed by their zid; within-tier re-flood only (the cross-tier
-    /// self-bubble is a later slice).
+    /// sources keyed by their zid; within-tier re-flood (slice-1) + the cross-tier
+    /// self-bubble (slice-2) + read by the token-INTEREST current dump (slice-4).
     #[cfg(feature = "routing-token-tables")]
     router_tokens: RefCell<LinkstatepeerInterest<()>>,
     /// Peer-tier liveliness-TOKEN interest (zenoh `HatTables.linkstatepeer_tokens`).
@@ -617,6 +620,19 @@ pub struct RouterForwarder {
     /// completeness flip re-pushes the same id. Same OBLIGATION-1 purge as
     /// `future_subs`.
     future_qabls: RefCell<FutureQablStore>,
+    /// §5.21 routing-token-tables (slice-4) — the liveliness-TOKEN FUTURE store,
+    /// the token twin of [`future_subs`](Self#structfield.future_subs) (both
+    /// `FutureInterestStore<()>` — tokens carry no value). A CLIENT face's FUTURE
+    /// (`f()`) TOKEN interest is stored here so a token learned LATER
+    /// ([`ingest_token`](Self::ingest_token) / [`ingest_client_token`](Self::ingest_client_token))
+    /// is proactively pushed via [`push_future_token`](Self::push_future_token). The
+    /// CURRENT dump ([`dump_interest_tokens`](Self::dump_interest_tokens)) is the
+    /// FIRST reader of the token tables — it makes the slice-1/2/3 bubble observable.
+    /// Same OBLIGATION-1 purge as `future_subs`. NOTE (slice-4b, NAMED not dropped):
+    /// the withdraw->notify twin of `undeclare_push_subs` is DEFERRED — a future-push
+    /// reader is not yet told a token WITHDREW (liveliness stale-live residual).
+    #[cfg(feature = "routing-token-tables")]
+    future_tokens: RefCell<FutureSubStore>,
     /// The pending-query return table (C5b) — one entry per outbound Request,
     /// keyed by the out face + a per-face local qid, recording where the matching
     /// `Response` / `ResponseFinal` routes back (the querier's inbound face + rid).
@@ -670,6 +686,13 @@ pub struct RouterForwarder {
     /// [`future_pushes`](Self#structfield.future_pushes)). Rises once per CLIENT
     /// face told a newly-learned OR completeness-flipped queryable.
     future_qabl_pushes: Cell<usize>,
+    /// §5.21 routing-token-tables (slice-4) — running total of unsolicited FUTURE
+    /// `DeclareToken` pushes emitted by [`push_future_token`](Self::push_future_token),
+    /// the token twin of [`future_pushes`](Self#structfield.future_pushes). Rises once
+    /// per CLIENT face told a newly-learned token; the proactive-push witness a test
+    /// asserts to separate the FUTURE push from a raced CURRENT dump.
+    #[cfg(feature = "routing-token-tables")]
+    future_token_pushes: Cell<usize>,
     /// §5.16 access-control INGRESS interceptor chain — consulted at the top of
     /// [`forward`](FaceForwarder::forward) before the kind-dispatch, the router twin
     /// of [`LinkstateForwarder`](crate::linkstate_forward)'s `ingress_interceptors`.
@@ -761,6 +784,8 @@ impl RouterForwarder {
             client_qabls: RefCell::new(HashMap::new()),
             future_subs: RefCell::new(FutureSubStore::new()),
             future_qabls: RefCell::new(FutureQablStore::new()),
+            #[cfg(feature = "routing-token-tables")]
+            future_tokens: RefCell::new(FutureSubStore::new()),
             pending: RefCell::new(PendingQueries::new()),
             queries_seen: Cell::new(0),
             query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
@@ -769,6 +794,8 @@ impl RouterForwarder {
             data_seen: Cell::new(0),
             future_pushes: Cell::new(0),
             future_qabl_pushes: Cell::new(0),
+            #[cfg(feature = "routing-token-tables")]
+            future_token_pushes: Cell::new(0),
             ingress_interceptors: RefCell::new(InterceptorChain::new()),
             egress_interceptors: RefCell::new(InterceptorChain::new()),
             interceptor_dropped: Cell::new(0),
@@ -863,6 +890,17 @@ impl RouterForwarder {
     /// [`future_pushes_seen`](Self::future_pushes_seen) witness / leg 5.
     pub fn future_qabl_pushes_seen(&self) -> usize {
         self.future_qabl_pushes.get()
+    }
+
+    /// §5.21 routing-token-tables (slice-4) — total unsolicited FUTURE
+    /// `DeclareToken` pushes emitted ([`future_token_pushes`](Self#structfield.future_token_pushes)),
+    /// the token twin of [`future_pushes_seen`](Self::future_pushes_seen). A `>0`
+    /// value proves this router told a CLIENT face a liveliness token it learned
+    /// AFTER that face's FUTURE token interest — the witness a test asserts to
+    /// separate the FUTURE push from a raced CURRENT dump.
+    #[cfg(feature = "routing-token-tables")]
+    pub fn future_token_pushes_seen(&self) -> usize {
+        self.future_token_pushes.get()
     }
 
     /// Total distinct queryable interests this router currently holds across all
@@ -1411,10 +1449,11 @@ impl RouterForwarder {
     /// Calls the shared [`ingest_interest`](Self::ingest_interest) core DIRECTLY,
     /// NOT via the `ingest_subscription` wrapper; the CROSS-TIER advertise
     /// ([`advertise_native_cross_tier_token`](Self::advertise_native_cross_tier_token),
-    /// slice-2) is invoked on the register flip in the tail here — but the
-    /// wrapper's `push_future_subscription` client future-push is slice-4 (it is
-    /// interest-gated on a `future_tokens` registry that does not exist yet). A
-    /// Client-tier `DeclareToken` no longer reaches here: `forward()` routes it to
+    /// slice-2) AND the FUTURE push
+    /// ([`push_future_token`](Self::push_future_token), slice-4 — declares the newly
+    /// learned token to any CLIENT face with a matching stored token interest) are
+    /// both invoked on the register flip in the tail here. A Client-tier `DeclareToken`
+    /// no longer reaches here: `forward()` routes it to
     /// [`ingest_client_token`](Self::ingest_client_token) (slice-3), so the
     /// `tokens_table` `None` guard below is defensive-only.
     /// The retraction counterpart is
@@ -1460,6 +1499,10 @@ impl RouterForwarder {
         // register flip false->true only (ingest_interest returns Some).
         if let Some(ke) = changed {
             self.advertise_native_cross_tier_token(tier, &ke);
+            // FUTURE-mode push (slice-4): a mesh token just became known -> declare it
+            // to any CLIENT face whose stored FUTURE token interest matches (mirror of
+            // ingest_subscription's push_future_subscription). Never echoed to inbound.
+            self.push_future_token(&ke, inbound);
         }
     }
 
@@ -1535,12 +1578,17 @@ impl RouterForwarder {
         // this `interest_id` must be dropped (else it leaks + keeps pushing to a
         // publisher whose write-filter is gone). No reply (a Final carries no body).
         if !interest.c() && !interest.f() {
-            // The interest_id lives in exactly ONE plane's store (an interest is
-            // su() XOR qu()); removing from both is safe (the other no-ops).
+            // The interest_id lives in ONE plane's store per option bit set (su() /
+            // qu() / to() — a single interest MAY set several); removing from all is
+            // safe (a plane that never stored this id no-ops).
             self.future_subs
                 .borrow_mut()
                 .remove_interest(inbound, interest.interest_id);
             self.future_qabls
+                .borrow_mut()
+                .remove_interest(inbound, interest.interest_id);
+            #[cfg(feature = "routing-token-tables")]
+            self.future_tokens
                 .borrow_mut()
                 .remove_interest(inbound, interest.interest_id);
             return;
@@ -1619,6 +1667,23 @@ impl RouterForwarder {
                 );
             }
         }
+        // §5.21 routing-token-tables (slice-4): STORE a FUTURE liveliness-TOKEN
+        // interest so a token learned LATER is pushed to this face (the token twin of
+        // the sub/qabl future store). CLIENT-only + literal-target, same gate — the
+        // full-net token replay is client-directed (zenoh declare_token_interest:1001).
+        #[cfg(feature = "routing-token-tables")]
+        let store_future_token = interest.f() && body.to() && self.is_client_face(inbound);
+        #[cfg(feature = "routing-token-tables")]
+        if store_future_token {
+            if let Some(t) = target.as_deref() {
+                self.future_tokens.borrow_mut().store_interest(
+                    inbound,
+                    interest_id,
+                    t.to_owned(),
+                    aggregate,
+                );
+            }
+        }
         // CURRENT (`c()`) half: dump the matching declarations wz holds + the single
         // terminating DeclareFinal (sent regardless of dump size — 0 matches keeps
         // the peer's write-filter armed = "no subscriber yet", correct). A
@@ -1644,6 +1709,25 @@ impl RouterForwarder {
                     &self_zid,
                     interest_id,
                     store_future_qabl,
+                );
+            }
+            // §5.21 routing-token-tables (slice-4): the CURRENT liveliness-TOKEN dump —
+            // the FIRST reader of the token tables (makes the slice-1/2/3 bubble
+            // observable). CLIENT-GATED, UNLIKE the sub/qabl dumps above: zenoh
+            // `declare_token_interest` (token.rs:1001) gates the token replay on
+            // `Client || (Peer && !full_net)`, and wz is full-net (peers land in
+            // `linkstatepeer_tokens`), so it reduces to CLIENT-ONLY (`declare_sub_interest`
+            // is bare `if mode.current()`). A peer's token Interest(current) gets only the
+            // DeclareFinal below — peers learn tokens via the linkstate flood, not replay.
+            #[cfg(feature = "routing-token-tables")]
+            if body.to() && self.is_client_face(inbound) {
+                self.dump_interest_tokens(
+                    inbound,
+                    target.as_deref(),
+                    aggregate,
+                    &self_zid,
+                    interest_id,
+                    store_future_token,
                 );
             }
             self.send_one_to_face(
@@ -1791,6 +1875,75 @@ impl RouterForwarder {
                     build_declare_queryable_reply_with_id(id, qabl_id, ke, info)
                 } else {
                     build_declare_queryable_reply(id, ke, info)
+                }
+            },
+            |msg| self.send_one_to_face(inbound, msg),
+        );
+    }
+
+    /// §5.21 routing-token-tables (slice-4) — the CURRENT-dump liveliness-TOKEN leg
+    /// of [`respond_to_interest`], the FIRST reader of the token tables (makes the
+    /// slice-1/2/3 bubble observable). The token twin of [`dump_interest_subs`]
+    /// (tokens carry no value → no merge). Folds the REMOTE tokens matching the
+    /// interest target: both mesh tiers (`router_tokens` + `linkstatepeer_tokens`,
+    /// excluding SELF — zenoh's `*r != tables.zid`) ∪ the CLIENT leaf tokens
+    /// (`client_tokens`, excluding the requesting face — the SLICE-4 OBLIGATION from
+    /// the `client_tokens` field doc that makes a client-sourced derive-not-store
+    /// token observable). CLIENT-gated by the caller (zenoh `declare_token_interest`
+    /// is client-only). Uses the ungated `declare_build` token reply builders (routed
+    /// through the shared `stamp_interest_reply` I-flag SSOT), NOT
+    /// `declare::local_token::build_token_reply` (which is behind `liveliness-token` —
+    /// the router token plane must not pull that feature). A FUTURE (C+F) interest
+    /// interns a non-zero id (reused on the later FUTURE push, so it dedups — zenoh
+    /// `make_token_id`'s future branch); a CURRENT-only interest keeps id 0.
+    #[cfg(feature = "routing-token-tables")]
+    fn dump_interest_tokens(
+        &self,
+        inbound: FaceId,
+        target: Option<&str>,
+        aggregate: bool,
+        self_zid: &Zid,
+        interest_id: u64,
+        future: bool,
+    ) {
+        let Some(target) = target else {
+            return; // match-all deferred; the caller's DeclareFinal still closes it.
+        };
+        let mut per_ke: HashMap<String, ()> = HashMap::new();
+        for table in [&self.router_tokens, &self.linkstatepeer_tokens] {
+            for (ke, _zid, ()) in table.borrow().matching_entries(target, Some(self_zid)) {
+                per_ke.insert(ke.to_string(), ());
+            }
+        }
+        let target_chunks: Vec<&str> = target.split('/').collect();
+        for (face, ids) in self.client_tokens.borrow().iter() {
+            if *face == inbound {
+                continue; // never replay a face its own token
+            }
+            for k in ids.values() {
+                if keyexpr_intersects_target(k, &target_chunks) {
+                    per_ke.insert(k.clone(), ());
+                }
+            }
+        }
+        emit_current_interest_replies(
+            interest_id,
+            target,
+            aggregate,
+            per_ke,
+            |a, _b| a,
+            // A FUTURE (C+F) interest's current reply carries a NON-ZERO id interned
+            // per (face, reply ke) so it is REUSED on the later FUTURE push and dedups
+            // (mirror of the sub future branch); a CURRENT-only interest keeps id 0.
+            |id, ke, ()| {
+                if future {
+                    let token_id =
+                        self.future_tokens
+                            .borrow_mut()
+                            .intern_current_reply(inbound, ke, ());
+                    build_declare_token_reply_with_id(id, token_id, ke)
+                } else {
+                    build_declare_token_reply(id, ke)
                 }
             },
             |msg| self.send_one_to_face(inbound, msg),
@@ -2541,6 +2694,39 @@ impl RouterForwarder {
         }
     }
 
+    /// §5.21 routing-token-tables (slice-4) — emit the unsolicited FUTURE
+    /// `DeclareToken` pushes a newly-learned token `new_ke` (sourced at `origin`)
+    /// triggers: one per CLIENT face whose stored FUTURE token interest matches and
+    /// has not yet been told this ke (zenoh `propagate_simple_token`). The token twin
+    /// of [`push_future_subscription`](Self::push_future_subscription); the push
+    /// carries the interned non-zero decl id, `interest_id: None`, no `I` flag — an
+    /// unsolicited declare. `origin` is never pushed (no self-echo). The self-delivery
+    /// guard `|| dst.zid == tables.zid` (zenoh `propagate_simple_token_to:98`, the
+    /// token-only disjunct absent from the sub guard) targets the router's own
+    /// co-located local-session face; wz's forwarder has NO self-session face (external
+    /// transport faces only, and `future_tokens` stores CLIENT faces only), so the
+    /// guard is a faithful NO-OP here — if wz later co-locates a session on the router
+    /// node, this push must NOT exclude a face whose zid == self's zid.
+    #[cfg(feature = "routing-token-tables")]
+    fn push_future_token(&self, new_ke: &str, origin: FaceId) {
+        let pushes =
+            self.future_tokens
+                .borrow_mut()
+                .pushes_for_new(new_ke, Some(origin), |_, _| ());
+        for (face, reply_ke, id, ()) in pushes {
+            match build_declare_token(id, 0, Some(&reply_ke)) {
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.future_token_pushes
+                        .set(self.future_token_pushes.get() + 1);
+                }
+                Err(e) => log::warn!(
+                    "router forward: future token push build failed for {reply_ke:?}: {e:?}"
+                ),
+            }
+        }
+    }
+
     /// The MERGED [`QueryableInfo`] the querier on `exclude_face` interested in `ke`
     /// would see — the OR of `complete` (min of `distance`) over EVERY queryable wz
     /// holds that intersects `ke` (`router_qabls` + `linkstatepeer_qabls` excluding
@@ -3005,10 +3191,9 @@ impl RouterForwarder {
     /// [`ingest_client_subscription`](Self::ingest_client_subscription); the
     /// mesh-face path ([`ingest_token`](Self::ingest_token)) drops a Client-tier
     /// declare (no tier table), so the leaf input lands here instead. The
-    /// client-to-client / self FUTURE push (`propagate_simple_token` + the
-    /// self-delivery guard) is slice-4 — it is interest-gated on the `future_tokens`
-    /// registry that lands with `declare_token_interest`, so there is nothing to
-    /// push to yet.
+    /// FUTURE push to a CLIENT face with a matching stored token interest is
+    /// [`push_future_token`](Self::push_future_token) (slice-4, wired in the tail);
+    /// the self-delivery guard is a no-op in the forwarder (see that method).
     #[cfg(feature = "routing-token-tables")]
     fn ingest_client_token(&self, inbound: FaceId, declare: &DeclareOwned) {
         let (decl_id, wireexpr) = match &declare.body {
@@ -3039,6 +3224,13 @@ impl RouterForwarder {
             .insert(decl_id, keyexpr.clone());
         if !already {
             self.advertise_client_cross_tier_token(&keyexpr);
+        }
+        // FUTURE-mode push (slice-4): declare this token to any CLIENT face whose
+        // stored FUTURE token interest matches (mirror of ingest_client_subscription's
+        // push_future_subscription). Skip a redundant same-id/same-ke re-declare
+        // (pushes_for_new dedups anyway, but match the sub `if inserted` discipline).
+        if displaced.as_deref() != Some(keyexpr.as_str()) {
+            self.push_future_token(&keyexpr, inbound);
         }
         // Defensive: an id RE-USED for a DIFFERENT keyexpr without an intervening
         // undeclare silently displaced its old mapping (conforming clients — wz's own
@@ -4259,6 +4451,10 @@ impl FaceForwarder for RouterForwarder {
         // CONNECTION_DROPPED), so no undeclare is owed.
         self.future_subs.borrow_mut().purge_face(id);
         self.future_qabls.borrow_mut().purge_face(id);
+        // §5.21 routing-token-tables (slice-4): the token FUTURE store is client leaf
+        // state too — purge it alongside future_subs/future_qabls (OBLIGATION 1).
+        #[cfg(feature = "routing-token-tables")]
+        self.future_tokens.borrow_mut().purge_face(id);
         let Some(state) = self.faces.borrow_mut().remove(&id) else {
             return;
         };
@@ -8376,6 +8572,267 @@ mod tests {
             0,
             "a client leaving does not withdraw a token another client still holds"
         );
+    }
+
+    // ── §5.21 routing-token-tables (slice-4): token INTEREST (the FIRST reader) ──
+
+    /// A liveliness-TOKEN `Interest` restricted to `keyexpr` (the TOKENS option bit
+    /// 0x08), current/future selectable — the token twin of [`interest_with_mode`].
+    #[cfg(feature = "routing-token-tables")]
+    fn token_interest_msg(
+        interest_id: u64,
+        keyexpr: &str,
+        current: bool,
+        future: bool,
+        aggregate: bool,
+    ) -> NetworkMessage {
+        let outer = 0x19 | (if current { 0x20 } else { 0 }) | (if future { 0x40 } else { 0 });
+        let body_header = 0x08 | 0x10 | 0x20 | 0x40 | (if aggregate { 0x80 } else { 0 });
+        NetworkMessage::Interest(InterestOwned {
+            header: outer,
+            interest_id,
+            body: Some(wz_codecs::interest_body::InterestBodyOwned {
+                header: body_header,
+                keyexpr: Some(WireexprOwned {
+                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                        id: 0,
+                        suffix_len: Some(keyexpr.len() as u64),
+                        suffix: Some(
+                            sce_forge_runtime::codec::SceString::from_view(keyexpr)
+                                .expect("interest keyexpr fits the SceString capacity"),
+                        ),
+                    }),
+                }),
+            }),
+            extensions: None,
+        })
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn token_current_interest_replies_with_a_mesh_token() {
+        // The FIRST reader: a client's CURRENT token interest is answered with the
+        // matching REMOTE mesh token wz holds + a DeclareFinal — the slice-1/2 bubble
+        // is now observable.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER); // mesh token source
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT); // requester
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // -> router_tokens
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/data", true, false, false),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "one DeclareToken reply + one terminating DeclareFinal"
+        );
+        let reply = forwarded_declare(&sink_c.frame_bytes(0));
+        assert_eq!(reply.interest_id, Some(7), "reply echoes the interest id");
+        assert!(
+            matches!(reply.body, DeclareOwnedVariant::CodecZenohDeclToken(_)),
+            "the mesh token is replayed as a DeclareToken"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_c.frame_bytes(1)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn token_current_interest_replies_with_a_client_token() {
+        // THE slice-4 obligation: a client-sourced token (derive-not-store, kept OUT of
+        // the mesh tables) is folded into the current dump, so ANOTHER client's token
+        // interest SEES it. Without the client_tokens fold this token is invisible.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_CLIENT); // token holder
+        let (b, sink_b) = face(zid(0xBB), WIRE_CLIENT); // requester
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data"));
+        sink_b.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(9, "live/data", true, false, false),
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            2,
+            "the client-sourced token replay + DeclareFinal"
+        );
+        assert!(
+            matches!(
+                forwarded_declare(&sink_b.frame_bytes(0)).body,
+                DeclareOwnedVariant::CodecZenohDeclToken(_)
+            ),
+            "a client-sourced token is observable to another client's interest (the fold)"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn token_current_interest_excludes_the_requesters_own_token() {
+        // A face is never replayed its OWN token (parity with the sub dump's
+        // requester-exclusion): the sole holder's own interest gets only a DeclareFinal.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &a);
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data"));
+        sink_a.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            token_interest_msg(9, "live/data", true, false, false),
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "only the DeclareFinal (the requester's own token is excluded)"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_a.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn token_current_interest_from_a_peer_gets_only_the_final() {
+        // The CLIENT-GATE delta (zenoh declare_token_interest is client-only, UNLIKE
+        // the ungated sub dump): a PEER-tier face's CURRENT token interest gets NO token
+        // dump even when a mesh token matches — only the DeclareFinal. Peers learn tokens
+        // via the linkstate flood, not interest replay.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (src, _ss) = face(zid(0xAA), WIRE_ROUTER); // mesh token source
+        let (peer, sink_p) = face(zid(0xBB), WIRE_PEER); // a PEER requester
+        fwd.register(FaceId(0), &src);
+        fwd.register(FaceId(1), &peer);
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // -> router_tokens
+        sink_p.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/data", true, false, false),
+        );
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "a peer's token interest gets ONLY the DeclareFinal (the client-gate)"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn future_token_interest_pushes_a_later_token() {
+        // The FUTURE push witness: a client's C+F token interest for live/data (nothing
+        // held yet) gets an empty dump; a mesh token learned LATER is proactively pushed
+        // (future_token_pushes rises), the token twin of the sub future push.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER); // the LATER mesh token source
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/data", true, true, false),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "empty current dump -> only the terminating DeclareFinal"
+        );
+        sink_c.reset();
+        assert_eq!(fwd.future_token_pushes_seen(), 0);
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // learned LATER
+        assert_eq!(
+            fwd.future_token_pushes_seen(),
+            1,
+            "the later token was proactively pushed to the future-interested client"
+        );
+        assert!(
+            matches!(
+                forwarded_declare(&sink_c.frame_bytes(0)).body,
+                DeclareOwnedVariant::CodecZenohDeclToken(_)
+            ),
+            "the client got an unsolicited DeclareToken"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn token_interest_final_tears_down_the_future_token_interest() {
+        // An Interest(Final) removes the stored FUTURE token interest, so a later token
+        // is NOT pushed (parity with the sub Final teardown; else it leaks + keeps
+        // pushing to a face whose write-filter is gone).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, _sc) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/data", true, true, false),
+        ); // store the future interest
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/data", false, false, false),
+        ); // Interest(Final) -> teardown
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // learned AFTER teardown
+        assert_eq!(
+            fwd.future_token_pushes_seen(),
+            0,
+            "the torn-down future token interest is no longer pushed"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn aggregate_token_interest_replies_once_keyed_on_the_interest_ke() {
+        // An AGGREGATE token interest for a wildcard gets ONE reply keyed on the INTEREST
+        // keyexpr (pico matches aggregate replies by keyexpr EQUALITY), not one per
+        // matched token — parity with the aggregate sub dump.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        forward_one(&fwd, FaceId(0), declare_token_msg("demo/a"));
+        forward_one(&fwd, FaceId(0), declare_token_msg("demo/b"));
+        sink_c.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "demo/**", true, false, true),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "ONE aggregate DeclareToken reply + DeclareFinal"
+        );
+        match &forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => match &d.keyexpr.body {
+                WireexprOwnedVariant::WireexprLocal(w) => assert_eq!(
+                    w.suffix.as_deref(),
+                    Some("demo/**"),
+                    "aggregate reply is keyed on the interest keyexpr, not demo/a|demo/b"
+                ),
+                _ => panic!("reply keyexpr must be literal"),
+            },
+            other => panic!("expected a DeclToken reply, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "routing-token-tables")]
