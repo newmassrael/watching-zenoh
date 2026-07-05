@@ -77,7 +77,7 @@
 //! filter is exact-match, B2). `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -246,6 +246,11 @@ struct InterestRegistration<'t, V> {
     value: V,
 }
 
+/// The id-keyed co-attached CLIENT-queryable store ([`client_qabls`](LinkstateForwarder#structfield.client_qabls)):
+/// per client `FaceId`, the client's declaration `id -> (keyexpr, QueryableInfo)` so an
+/// id-only `UndeclareQueryable` resolves the (ke, info) by id (R311y178 id-map).
+type ClientQabls = HashMap<FaceId, HashMap<u64, (String, QueryableInfo)>>;
+
 pub struct LinkstateForwarder {
     /// Shared single-task topology graph (`Rc<RefCell>`, not `Mutex`).
     net: Rc<RefCell<LinkstateNetwork>>,
@@ -297,7 +302,15 @@ pub struct LinkstateForwarder {
     /// with any self-native local sub on the same keyexpr so the last source's
     /// departure — client OR self-native — is what withdraws + floods the forget
     /// ([`withdraw_mesh_sub_if_unbacked`](Self::withdraw_mesh_sub_if_unbacked)).
-    client_subs: RefCell<HashMap<FaceId, HashSet<String>>>,
+    ///
+    /// ID-KEYED (`declaration id -> keyexpr`, R311y178) — the token-plane shape (zenoh
+    /// `face_hat.remote_subs` id-keyed, `forget_simple_subscription` removes BY ID,
+    /// linkstate_peer/pubsub.rs). A real client's graceful `UndeclareSubscriber` is
+    /// ID-ONLY (`send_undeclare_subscriber(id)`, no `ext_keyexpr`), so
+    /// [`withdraw_client_subscription`](Self::withdraw_client_subscription) resolves the
+    /// keyexpr BY ID (was a keyexpr-set that no-op'd an id-only undeclare -> stale until
+    /// face-down). Per-FaceId namespace, so two clients may reuse an id.
+    client_subs: RefCell<HashMap<FaceId, HashMap<u64, String>>>,
     /// The linkstate-peer QUERYABLE interest table — the query-plane twin of
     /// [`subs`](Self#structfield.subs), learned from sourced `DeclareQueryable`s
     /// flooded across the mesh (zenoh's per-`Resource` `linkstatepeer_qabls`,
@@ -326,17 +339,19 @@ pub struct LinkstateForwarder {
     /// complete co-host UPGRADES the advert and a contributor's departure DOWNGRADES
     /// it ([`withdraw_mesh_qabl_if_unbacked`](Self::withdraw_mesh_qabl_if_unbacked)),
     /// the qabl-specific refinement over the sub union-refcount (subs carry no info).
-    /// Value-keyed by keyexpr (mirroring the router `client_qabls`). LIMITATION (a
-    /// PRIORITIZED follow-up, not a rare edge): a graceful `UndeclareQueryable` from a
-    /// real wz client is ID-ONLY (`send_undeclare_queryable(id)` carries no
-    /// `ext_keyexpr`), so [`withdraw_client_queryable`](Self::withdraw_client_queryable)
-    /// cannot resolve the keyexpr and NO-OPS — leaving a stale entry + advert until the
-    /// face-down purge (which covers DISCONNECT, not a live undeclare). This is the SAME
-    /// id-map gap the SHIPPED client-sub plane carries (`send_undeclare_subscriber` is
-    /// likewise id-only + `withdraw_client_subscription` keyexpr-keyed), so both planes
-    /// share ONE id-map follow-up — the token plane already DIVERGED to id-keyed for
-    /// exactly this. The unit tests drive the ext_keyexpr-carrying undeclare (which works).
-    client_qabls: RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>,
+    /// ID-KEYED (`declaration id -> (keyexpr, QueryableInfo)`, R311y178) — the token-plane
+    /// shape (zenoh `face_hat.remote_qabls` id-keyed, `forget_simple_queryable` removes BY
+    /// ID, linkstate_peer/queries.rs). A real client's graceful `UndeclareQueryable` is
+    /// ID-ONLY (`send_undeclare_queryable(id)`, no `ext_keyexpr`), so
+    /// [`withdraw_client_queryable`](Self::withdraw_client_queryable) resolves the keyexpr
+    /// BY ID (was keyexpr-keyed -> an id-only undeclare no-op'd -> stale until face-down).
+    /// The value carries the `QueryableInfo` so a face declaring the SAME ke under two ids
+    /// folds BOTH infos in [`derived_self_qabl_info`](Self::derived_self_qabl_info) (the
+    /// keyexpr-keyed map structurally overwrote — one slot per ke). Per-FaceId namespace.
+    /// The wz-peer client-sub + client-qabl planes are now BOTH id-keyed; the ROUTER
+    /// (`router_forward.rs` client_subs/client_qabls) still carries the keyexpr-keyed gap
+    /// as a named symmetric follow-up (its client_tokens was already id-keyed at slice-3).
+    client_qabls: RefCell<ClientQabls>,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
     /// `DeclareSubscriber`s this peer has pushed back to them (zenoh's per-`FaceState`
@@ -1454,7 +1469,7 @@ impl LinkstateForwarder {
                 }
                 let mut intersects = false;
                 let mut complete = false;
-                for (decl, info) in qabls {
+                for (decl, info) in qabls.values() {
                     if keyexpr_intersects_target(decl, &query_chunks) {
                         intersects = true;
                         if info.complete && keyexpr_includes_target(decl, &query_chunks) {
@@ -2502,7 +2517,7 @@ impl LinkstateForwarder {
         self.client_subs
             .borrow()
             .values()
-            .any(|keys| keys.contains(keyexpr))
+            .any(|ids| ids.values().any(|ke| ke == keyexpr))
     }
 
     /// R311y163 (D4) — does any self-native local subscriber hold EXACTLY `keyexpr`?
@@ -2564,9 +2579,11 @@ impl LinkstateForwarder {
                 acc = Some(acc.map_or(info, |a| a.merge(info)));
             }
         }
-        for qabls in self.client_qabls.borrow().values() {
-            if let Some(info) = qabls.get(keyexpr) {
-                acc = Some(acc.map_or(*info, |a| a.merge(*info)));
+        for ids in self.client_qabls.borrow().values() {
+            for (ke, info) in ids.values() {
+                if ke == keyexpr {
+                    acc = Some(acc.map_or(*info, |a| a.merge(*info)));
+                }
             }
         }
         acc
@@ -2633,35 +2650,35 @@ impl LinkstateForwarder {
     /// (`subs.register`'s `true` return), so a second backer neither re-floods nor
     /// re-pushes.
     fn ingest_client_subscription(&self, inbound: FaceId, declare: &DeclareOwned) {
-        // Resolve the client's DeclareSubscriber keyexpr against ITS face alias table
-        // (c3c-3 B1b) in one scoped borrow; an unresolvable alias drops it.
-        let keyexpr = {
+        // Read the DeclareSubscriber's declaration id + resolve its keyexpr against ITS
+        // face alias table (c3c-3 B1b) in one scoped borrow; an unresolvable alias drops
+        // it. The id keys the store so an id-only UndeclareSubscriber can resolve the ke.
+        let (decl_id, keyexpr) = {
+            let (decl_id, wireexpr) = match &declare.body {
+                DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => (d.id, &d.keyexpr),
+                _ => return,
+            };
             let faces = self.faces.borrow();
             let Some(s) = faces.get(&inbound) else {
                 return;
             };
-            let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
-                return;
-            };
             match resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) {
-                Some(ke) => ke,
+                Some(ke) => (decl_id, ke),
                 None => return,
             }
         };
-        // Record the leaf sub; a duplicate from the same client is a no-op.
-        let newly = self
+        // Record the leaf sub id -> ke, capturing any keyexpr this id previously mapped
+        // (an id RE-USED for a new ke without an intervening undeclare — displacement).
+        let displaced = self
             .client_subs
             .borrow_mut()
             .entry(inbound)
             .or_default()
-            .insert(keyexpr.clone());
-        if !newly {
-            return;
-        }
-        // Advertise into the mesh under SELF's zid. `register` returns `true` only on
-        // the union 0->1 transition (no self-native sub and no OTHER client already
-        // holds this ke) — gate the future-push + sourced flood on it so a second
-        // backer stays silent (the ke is already advertised).
+            .insert(decl_id, keyexpr.clone());
+        // Advertise into the mesh under SELF's zid. `register` returns `true` only on the
+        // union 0->1 transition (no self-native sub and no OTHER client/id already holds
+        // this ke) — gate the future-push + sourced flood on it so a duplicate (same id
+        // same ke, or a second holder) stays silent (the ke is already advertised).
         let self_zid = *self.net.borrow().self_zid();
         let registered = self.subs.borrow_mut().register(&keyexpr, self_zid, ());
         if registered {
@@ -2685,43 +2702,47 @@ impl LinkstateForwarder {
                 }
             }
         }
+        // id-reuse displacement: if this id previously mapped a DIFFERENT ke, that old ke
+        // lost this backer -> withdraw its self-sourced advert if it was the LAST holder
+        // (self-gated by withdraw_mesh_sub_if_unbacked's union check). Unreachable for
+        // conforming clients (monotonic ids + undeclare-first); the id-map makes it
+        // detectable where the keyexpr-set twin structurally could not.
+        if let Some(old) = displaced {
+            if old != keyexpr {
+                let _ = self.withdraw_mesh_sub_if_unbacked(&old);
+            }
+        }
     }
 
-    /// R311y163 (D4) — withdraw a co-attached CLIENT's subscription on its graceful
-    /// `UndeclareSubscriber` (keyexpr carried in `ext_keyexpr`). Removes the leaf
-    /// entry from [`client_subs`](Self#structfield.client_subs), then (union-gated)
-    /// withdraws the mesh advertisement if this was the ke's last backer. The
-    /// face-down path ([`deregister`](FaceForwarder::deregister)) reaches the same
-    /// [`withdraw_mesh_sub_if_unbacked`](Self::withdraw_mesh_sub_if_unbacked) seam
-    /// for every ke the departing client held.
+    /// R311y163 (D4) / R311y178 (id-map) — withdraw a co-attached CLIENT's subscription on
+    /// its graceful `UndeclareSubscriber`. A client's undeclare is ID-ONLY
+    /// (`build_undeclare_subscriber(id)`, no `ext_keyexpr` — the form wz's own
+    /// `send_undeclare_subscriber` + pico emit), so the retracted keyexpr is resolved BY
+    /// ID from [`client_subs`](Self#structfield.client_subs) (zenoh `forget_simple_subscription`
+    /// id-first), NOT by an ext the client never sends (the prior keyexpr-keyed resolve
+    /// NO-OP'd, leaving the advert stale until face-down). Then (union-gated) withdraws the
+    /// mesh advertisement if this was the ke's last backer. The mesh-sourced form (id 0 +
+    /// ext) is a peer's and routes through [`forward_unsubscription`](Self::forward_unsubscription)
+    /// instead. The face-down path ([`deregister`](FaceForwarder::deregister)) drains every
+    /// id the departing client held through the same
+    /// [`withdraw_mesh_sub_if_unbacked`](Self::withdraw_mesh_sub_if_unbacked) seam.
     fn withdraw_client_subscription(&self, inbound: FaceId, declare: &DeclareOwned) {
-        let keyexpr = {
-            let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
-            };
-            let exts = match &declare.body {
-                DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
-                _ => return,
-            };
-            match resolve_ext_keyexpr(exts, &s.keyexpr_table) {
-                Some(ke) => ke,
-                None => return,
-            }
+        let decl_id = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.id,
+            _ => return,
         };
-        let removed = {
+        let keyexpr = {
             let mut cs = self.client_subs.borrow_mut();
-            let removed = cs
-                .get_mut(&inbound)
-                .is_some_and(|keys| keys.remove(&keyexpr));
-            if cs.get(&inbound).is_some_and(|keys| keys.is_empty()) {
+            let removed = cs.get_mut(&inbound).and_then(|ids| ids.remove(&decl_id));
+            if cs.get(&inbound).is_some_and(|ids| ids.is_empty()) {
                 cs.remove(&inbound);
             }
             removed
         };
-        if removed {
-            let _ = self.withdraw_mesh_sub_if_unbacked(&keyexpr);
-        }
+        let Some(keyexpr) = keyexpr else {
+            return; // unknown id (never ingested / already gone) — nothing to withdraw
+        };
+        let _ = self.withdraw_mesh_sub_if_unbacked(&keyexpr);
     }
 
     /// Ingest a co-attached CLIENT's `DeclareQueryable` (the query-plane twin of
@@ -2737,41 +2758,41 @@ impl LinkstateForwarder {
     /// merged advert CHANGES (`register`'s value-diff gate), so a redundant re-declare
     /// stays silent.
     fn ingest_client_queryable(&self, inbound: FaceId, declare: &DeclareOwned) {
-        // Resolve the client's DeclareQueryable keyexpr + read its QueryableInfo in one
-        // scoped borrow (against ITS face alias table); an unresolvable alias drops it.
-        let (keyexpr, info) = {
+        // Read the DeclareQueryable's declaration id + QueryableInfo + resolve its keyexpr
+        // in one scoped borrow (against ITS face alias table); unresolvable -> drop. The id
+        // keys the store so an id-only UndeclareQueryable can resolve the (ke, info).
+        let (decl_id, keyexpr, info) = {
+            // The declared completeness rides the DeclQueryable body ext chain; absent ext
+            // = zenoh DEFAULT (incomplete), the SAME read `forward_queryable` does.
+            let (decl_id, wireexpr, info) = match &declare.body {
+                DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => (
+                    dq.id,
+                    &dq.keyexpr,
+                    wz_session_core::queryable_info::read_queryable_info(dq.extensions.as_ref()),
+                ),
+                _ => return,
+            };
             let faces = self.faces.borrow();
             let Some(s) = faces.get(&inbound) else {
-                return;
-            };
-            let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
                 return;
             };
             let Some(keyexpr) = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) else {
                 return;
             };
-            // The declared completeness rides the DeclQueryable body ext chain; absent
-            // ext = zenoh DEFAULT (incomplete), the SAME read `forward_queryable` does.
-            let info = match &declare.body {
-                DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => {
-                    wz_session_core::queryable_info::read_queryable_info(dq.extensions.as_ref())
-                }
-                _ => QueryableInfo::DEFAULT,
-            };
-            (keyexpr, info)
+            (decl_id, keyexpr, info)
         };
-        // Record the leaf queryable; a duplicate carrying the SAME info is a no-op.
-        let changed = {
-            let mut cq = self.client_qabls.borrow_mut();
-            cq.entry(inbound).or_default().insert(keyexpr.clone(), info) != Some(info)
-        };
-        if !changed {
-            return;
-        }
+        // Record id -> (ke, info), capturing any (ke, info) this id previously mapped (an id
+        // RE-USED for a new ke/info without an intervening undeclare — displacement).
+        let displaced = self
+            .client_qabls
+            .borrow_mut()
+            .entry(inbound)
+            .or_default()
+            .insert(decl_id, (keyexpr.clone(), info));
         // Advertise the MERGED info under SELF's zid; `register` returns `true` only when
         // the merged advert changed (a new ke, or an UPGRADE from a second complete
-        // co-host) — gate the future-push + sourced flood on it so a redundant backer
-        // stays silent. `derived_self_qabl_info` is `Some` here (this client just inserted).
+        // co-host) — gate the future-push + sourced flood on it so a duplicate (same id
+        // same ke+info) stays silent. `derived_self_qabl_info` is `Some` (this id inserted).
         let self_zid = *self.net.borrow().self_zid();
         let merged = self.derived_self_qabl_info(&keyexpr).unwrap_or(info);
         let registered = self.qabls.borrow_mut().register(&keyexpr, self_zid, merged);
@@ -2793,48 +2814,44 @@ impl LinkstateForwarder {
                 NetworkMessage::Declare(Box::new(declare.clone()))
             });
         }
+        // id-reuse displacement: an id re-declared for a DIFFERENT ke -> the old ke lost
+        // this backer -> downgrade/withdraw its self-sourced advert (self-gated by the
+        // re-derive in withdraw_mesh_qabl_if_unbacked). Unreachable for conforming clients
+        // (monotonic ids + undeclare-first); the id-map makes it detectable.
+        if let Some((old_ke, _)) = displaced {
+            if old_ke != keyexpr {
+                let _ = self.withdraw_mesh_qabl_if_unbacked(&old_ke);
+            }
+        }
     }
 
-    /// Withdraw a co-attached CLIENT's queryable on its graceful `UndeclareQueryable`
-    /// (keyexpr carried in `ext_keyexpr`) — the query-plane twin of
-    /// [`withdraw_client_subscription`](Self::withdraw_client_subscription). Removes the
-    /// leaf entry from [`client_qabls`](Self#structfield.client_qabls), then (via the
-    /// shared [`withdraw_mesh_qabl_if_unbacked`](Self::withdraw_mesh_qabl_if_unbacked)
-    /// seam) DOWNGRADES the mesh advert if another source remains, or fully withdraws it
-    /// if this was the last. LIMITATION (the PRIORITIZED id-map follow-up, [`client_qabls`]
-    /// (Self#structfield.client_qabls)): a real wz client's graceful undeclare is ID-ONLY,
-    /// so `resolve_ext_keyexpr` finds nothing and this NO-OPS — the entry + advert go stale
-    /// until face-down (which covers DISCONNECT, not a live undeclare). The shipped
-    /// client-sub plane carries the identical gap; the ext_keyexpr-carrying form (unit-driven)
-    /// withdraws correctly.
+    /// R311y178 (id-map) — withdraw a co-attached CLIENT's queryable on its graceful
+    /// `UndeclareQueryable`. A client's undeclare is ID-ONLY (`build_undeclare_queryable(id)`,
+    /// no `ext_keyexpr`), so the retracted keyexpr is resolved BY ID from
+    /// [`client_qabls`](Self#structfield.client_qabls) (zenoh `forget_simple_queryable`
+    /// id-first), NOT by an ext the client never sends (the prior keyexpr-keyed resolve
+    /// NO-OP'd on an id-only undeclare -> stale advert until face-down). Then (via the
+    /// shared [`withdraw_mesh_qabl_if_unbacked`](Self::withdraw_mesh_qabl_if_unbacked) seam)
+    /// DOWNGRADES the mesh advert if another source remains, or fully withdraws it if this
+    /// was the last. The query-plane twin of
+    /// [`withdraw_client_subscription`](Self::withdraw_client_subscription).
     fn withdraw_client_queryable(&self, inbound: FaceId, declare: &DeclareOwned) {
-        let keyexpr = {
-            let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
-            };
-            let exts = match &declare.body {
-                DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
-                _ => return,
-            };
-            match resolve_ext_keyexpr(exts, &s.keyexpr_table) {
-                Some(ke) => ke,
-                None => return,
-            }
+        let decl_id = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.id,
+            _ => return,
         };
-        let removed = {
+        let keyexpr = {
             let mut cq = self.client_qabls.borrow_mut();
-            let removed = cq
-                .get_mut(&inbound)
-                .is_some_and(|q| q.remove(&keyexpr).is_some());
-            if cq.get(&inbound).is_some_and(|q| q.is_empty()) {
+            let removed = cq.get_mut(&inbound).and_then(|ids| ids.remove(&decl_id));
+            if cq.get(&inbound).is_some_and(|ids| ids.is_empty()) {
                 cq.remove(&inbound);
             }
             removed
         };
-        if removed {
-            let _ = self.withdraw_mesh_qabl_if_unbacked(&keyexpr);
-        }
+        let Some((keyexpr, _)) = keyexpr else {
+            return; // unknown id (never ingested / already gone) — nothing to withdraw
+        };
+        let _ = self.withdraw_mesh_qabl_if_unbacked(&keyexpr);
     }
 
     /// R311y163 (D4 / C3a) — deliver a received data `Push` to co-attached CLIENT
@@ -2845,8 +2862,8 @@ impl LinkstateForwarder {
     /// sample is re-literalized ONCE (payload / encoding / attachment / timestamp /
     /// qos preserved) and the inbound face is excluded (never echo a client's own
     /// Push back). Wildcard-aware via the SAME `keyexpr_intersects_target` SSOT the
-    /// mesh route reads — an exact `HashSet::contains` would blackhole every
-    /// `demo/**` client sub receiving a `demo/data` Push.
+    /// mesh route reads (over the id-keyed store's ke VALUES) — an exact string match
+    /// would blackhole every `demo/**` client sub receiving a `demo/data` Push.
     fn deliver_to_client_subscribers(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
         if self.client_subs.borrow().is_empty() {
             return;
@@ -2872,8 +2889,8 @@ impl LinkstateForwarder {
             if id == inbound {
                 return Ok(None);
             }
-            let deliver = self.client_subs.borrow().get(&id).is_some_and(|keys| {
-                keys.iter()
+            let deliver = self.client_subs.borrow().get(&id).is_some_and(|ids| {
+                ids.values()
                     .any(|sub| keyexpr_intersects_target(sub, &target_chunks))
             });
             Ok(deliver.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
@@ -4607,7 +4624,13 @@ impl FaceForwarder for LinkstateForwarder {
             .borrow_mut()
             .remove(&id)
             .unwrap_or_default();
-        for keyexpr in departed_client_subs {
+        // Dedup the kes (a client may hold ONE ke under several ids) so the withdraw +
+        // forget flood fires ONCE per unique ke, not once per id (the old keyexpr-SET
+        // deduped structurally; the id-map must dedup here). BTreeSet = deterministic.
+        for keyexpr in departed_client_subs
+            .into_values()
+            .collect::<std::collections::BTreeSet<_>>()
+        {
             let _ = self.withdraw_mesh_sub_if_unbacked(&keyexpr);
         }
         // Query-plane twin of the client-sub purge above: drain this face's co-attached
@@ -4621,7 +4644,13 @@ impl FaceForwarder for LinkstateForwarder {
             .borrow_mut()
             .remove(&id)
             .unwrap_or_default();
-        for keyexpr in departed_client_qabls.into_keys() {
+        // Dedup the kes (same ke under several ids) so the downgrade-or-withdraw fires
+        // ONCE per unique ke, not once per id (the keyexpr-map twin deduped structurally).
+        for keyexpr in departed_client_qabls
+            .into_values()
+            .map(|(ke, _info)| ke)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
             let _ = self.withdraw_mesh_qabl_if_unbacked(&keyexpr);
         }
         // R311y152 — hoist the face removal OUT of the `if let` scrutinee so its
@@ -4858,9 +4887,9 @@ impl FaceForwarder for LinkstateForwarder {
                         // A CLIENT's UndeclareQueryable withdraws its hosted queryable
                         // (downgrade-or-retract the self advert via the shared seam); a
                         // MESH source's withdraws its interest + re-floods (the query twin
-                        // of the UndeclSubscriber fork above). An id-only client undeclare
-                        // (no ext_keyexpr) is a no-op in withdraw_client_queryable — the
-                        // face-down purge is the safety net (id-map = named follow-up).
+                        // of the UndeclSubscriber fork above). A client undeclare is ID-ONLY
+                        // (no ext_keyexpr); withdraw_client_queryable resolves the ke BY ID
+                        // (R311y178 id-map — was a no-op that left the advert stale).
                         if self.is_client_face(id) {
                             self.withdraw_client_queryable(id, declare);
                         } else {
@@ -5666,8 +5695,8 @@ mod tests {
     /// (`forward`), so the is_client branch routes it to `ingest_client_subscription`
     /// (NOT the mesh `forward_subscription`). The `face` must be registered with a
     /// Client WhatAmI (`peer_face_whatami(_, 2)`).
-    fn client_declare_sub(fwd: &LinkstateForwarder, face: FaceId, keyexpr: &str) {
-        let declare = build_declare_subscriber(0, 0, Some(keyexpr)).expect("build sub");
+    fn client_declare_sub(fwd: &LinkstateForwarder, face: FaceId, id: u64, keyexpr: &str) {
+        let declare = build_declare_subscriber(id, 0, Some(keyexpr)).expect("build sub");
         let outcome = DriverLoopOutcome::FramePayload {
             reliable: true,
             sn: 0,
@@ -5678,10 +5707,11 @@ mod tests {
         fwd.forward(face, IterationEvent::Poll(&outcome));
     }
 
-    /// Feed a co-attached CLIENT's graceful `UndeclareSubscriber` (keyexpr in
-    /// ext_keyexpr) through the dispatch seam.
-    fn client_undeclare_sub(fwd: &LinkstateForwarder, face: FaceId, keyexpr: &str) {
-        let declare = build_undeclare_subscriber_with_keyexpr(keyexpr).expect("build undecl sub");
+    /// Feed a client's graceful `UndeclareSubscriber` — ID-ONLY
+    /// (`build_undeclare_subscriber(id)`, no ext_keyexpr, the form a real wz/pico client
+    /// sends), so the withdraw resolves the ke by id (the R311y178 id-map).
+    fn client_undeclare_sub(fwd: &LinkstateForwarder, face: FaceId, id: u64) {
+        let declare = build_undeclare_subscriber(id);
         let outcome = DriverLoopOutcome::FramePayload {
             reliable: true,
             sn: 0,
@@ -5706,7 +5736,7 @@ mod tests {
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05); // edge S<->B
         sink_b.reset();
 
-        client_declare_sub(&fwd, FaceId(1), "demo/**");
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/**");
 
         assert_eq!(
             fwd.client_subs_seen(),
@@ -5739,7 +5769,7 @@ mod tests {
         fwd.register(FaceId(0), &peer_a);
         fwd.register(FaceId(1), &client_sub);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
-        client_declare_sub(&fwd, FaceId(1), "demo/**");
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/**");
         sink_sub.reset();
 
         let outcome = DriverLoopOutcome::FramePayload {
@@ -5774,7 +5804,7 @@ mod tests {
         fwd.register(FaceId(0), &peer_b);
         fwd.register(FaceId(1), &client);
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
-        client_declare_sub(&fwd, FaceId(1), "demo/**");
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/**");
         assert_eq!(fwd.client_subs_seen(), 1);
         sink_b.reset();
 
@@ -5807,11 +5837,11 @@ mod tests {
         fwd.register(FaceId(0), &peer_b);
         fwd.register(FaceId(1), &client);
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
-        client_declare_sub(&fwd, FaceId(1), "demo/**");
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/**");
         assert_eq!(fwd.client_subs_seen(), 1);
         sink_b.reset();
 
-        client_undeclare_sub(&fwd, FaceId(1), "demo/**");
+        client_undeclare_sub(&fwd, FaceId(1), 1);
 
         assert_eq!(fwd.client_subs_seen(), 0, "the client sub is withdrawn");
         assert!(
@@ -5840,7 +5870,7 @@ mod tests {
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
         fwd.declare_subscription("demo/**")
             .expect("self-native sub"); // source 1
-        client_declare_sub(&fwd, FaceId(1), "demo/**"); // source 2 (same ke, one slot)
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/**"); // source 2 (same ke, one slot)
         sink_b.reset();
 
         // The self-native source retracts while the client still subscribes.
@@ -5880,9 +5910,9 @@ mod tests {
         fwd.register(FaceId(1), &client1);
         fwd.register(FaceId(2), &client2);
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
-        client_declare_sub(&fwd, FaceId(1), "demo/**"); // first backer -> advertise
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/**"); // first backer -> advertise
         sink_b.reset();
-        client_declare_sub(&fwd, FaceId(2), "demo/**"); // second backer -> SILENT
+        client_declare_sub(&fwd, FaceId(2), 1, "demo/**"); // second backer -> SILENT
 
         assert_eq!(fwd.client_subs_seen(), 2, "both client subs recorded");
         assert_eq!(
@@ -5914,6 +5944,71 @@ mod tests {
     }
 
     #[test]
+    fn an_id_reused_for_a_new_ke_displaces_and_retracts_the_old_client_sub_advert() {
+        // R311y178 id-map displacement: a client RE-USES declaration id 1 for a DIFFERENT
+        // ke WITHOUT an intervening undeclare -> the old ke's advert is retracted (it was
+        // the last holder) + the new ke advertised. The keyexpr-SET twin structurally could
+        // not detect this (one id maps one ke); the id-map makes it detectable, mirror of
+        // the token plane's ingest_client_token displacement.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, _sb) = peer_face(zid(0x0B));
+        let (client, _c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/a");
+        assert!(
+            fwd.interested("demo/a").contains(&zid(0x05)),
+            "demo/a advertised under self"
+        );
+
+        // Re-use id 1 for demo/b (no undeclare of demo/a first).
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/b");
+
+        assert!(
+            fwd.interested("demo/b").contains(&zid(0x05)),
+            "demo/b now advertised (the new mapping for id 1)"
+        );
+        assert!(
+            !fwd.interested("demo/a").contains(&zid(0x05)),
+            "demo/a's advert was RETRACTED — id 1 no longer maps it (displacement)"
+        );
+        assert_eq!(fwd.client_subs_seen(), 1, "id 1 holds exactly one ke");
+    }
+
+    #[test]
+    fn an_id_reused_for_a_new_ke_displaces_and_retracts_the_old_client_qabl_advert() {
+        // R311y178 id-map displacement, QABL plane (the info-carrying twin — the retract
+        // re-derives the merged QueryableInfo): a client RE-USES declaration id 1 for a
+        // DIFFERENT ke without an undeclare -> the old ke's advert is retracted (last
+        // holder) + the new ke advertised.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, _sb) = peer_face(zid(0x0B));
+        let (client, _c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        client_declare_qabl(&fwd, FaceId(1), 1, "demo/a", true);
+        assert!(
+            fwd.interested_queryables("demo/a").contains(&zid(0x05)),
+            "demo/a advertised under self"
+        );
+
+        // Re-use id 1 for demo/b (no undeclare of demo/a first).
+        client_declare_qabl(&fwd, FaceId(1), 1, "demo/b", true);
+
+        assert!(
+            fwd.interested_queryables("demo/b").contains(&zid(0x05)),
+            "demo/b now advertised (the new mapping for id 1)"
+        );
+        assert!(
+            !fwd.interested_queryables("demo/a").contains(&zid(0x05)),
+            "demo/a's advert was RETRACTED — id 1 no longer maps it (displacement)"
+        );
+        assert_eq!(fwd.client_qabls_seen(), 1, "id 1 holds exactly one qabl");
+    }
+
+    #[test]
     fn a_client_that_pubs_and_subs_the_same_ke_is_not_echoed_its_own_sub() {
         // D4 self-echo guard (FAILS with origin=None): a co-attached CLIENT that
         // holds a FUTURE publish-interest on demo/key AND then subscribes demo/key
@@ -5937,7 +6032,7 @@ mod tests {
         sink_c.reset();
 
         // The SAME client now declares a subscriber on demo/key.
-        client_declare_sub(&fwd, FaceId(1), "demo/key");
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/key");
 
         assert_eq!(
             fwd.future_pushes_seen(),
@@ -6006,7 +6101,7 @@ mod tests {
         fwd.register(FaceId(2), &client_sub);
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
         declare_interest(&fwd, FaceId(0), "demo/data"); // MESH peer B subscribes
-        client_declare_sub(&fwd, FaceId(2), "demo/**"); // co-attached client D subscribes
+        client_declare_sub(&fwd, FaceId(2), 1, "demo/**"); // co-attached client D subscribes
         sink_b.reset();
         sink_cs.reset();
 
@@ -6047,8 +6142,14 @@ mod tests {
     /// Feed a co-attached CLIENT's `DeclareQueryable` (with its declared completeness)
     /// through the dispatch seam so the is_client branch routes it to
     /// `ingest_client_queryable` (NOT the mesh `forward_queryable`).
-    fn client_declare_qabl(fwd: &LinkstateForwarder, face: FaceId, keyexpr: &str, complete: bool) {
-        let mut declare = build_declare_queryable(0, 0, Some(keyexpr)).expect("build qabl");
+    fn client_declare_qabl(
+        fwd: &LinkstateForwarder,
+        face: FaceId,
+        id: u64,
+        keyexpr: &str,
+        complete: bool,
+    ) {
+        let mut declare = build_declare_queryable(id, 0, Some(keyexpr)).expect("build qabl");
         wz_session_core::declare_build::set_declare_queryable_info(
             &mut declare,
             wz_session_core::queryable_info::QueryableInfo {
@@ -6066,10 +6167,11 @@ mod tests {
         fwd.forward(face, IterationEvent::Poll(&outcome));
     }
 
-    /// Feed a co-attached CLIENT's graceful `UndeclareQueryable` (keyexpr in ext_keyexpr)
-    /// through the dispatch seam.
-    fn client_undeclare_qabl(fwd: &LinkstateForwarder, face: FaceId, keyexpr: &str) {
-        let declare = build_undeclare_queryable_with_keyexpr(keyexpr).expect("build undecl qabl");
+    /// Feed a client's graceful `UndeclareQueryable` — ID-ONLY
+    /// (`build_undeclare_queryable(id)`, no ext_keyexpr, the form a real wz/pico client
+    /// sends), so the withdraw resolves the ke by id (the R311y178 id-map).
+    fn client_undeclare_qabl(fwd: &LinkstateForwarder, face: FaceId, id: u64) {
+        let declare = build_undeclare_queryable(id);
         let outcome = DriverLoopOutcome::FramePayload {
             reliable: true,
             sn: 0,
@@ -6094,7 +6196,7 @@ mod tests {
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05); // edge S<->B
         sink_b.reset();
 
-        client_declare_qabl(&fwd, FaceId(1), "demo/q", true);
+        client_declare_qabl(&fwd, FaceId(1), 1, "demo/q", true);
 
         assert_eq!(
             fwd.client_qabls_seen(),
@@ -6128,7 +6230,7 @@ mod tests {
         let (queryable, sink_qa) = peer_face_whatami(zid(0x0C), 2); // a CLIENT queryable
         fwd.register(FaceId(0), &querier);
         fwd.register(FaceId(1), &queryable);
-        client_declare_qabl(&fwd, FaceId(1), "demo/q", true);
+        client_declare_qabl(&fwd, FaceId(1), 1, "demo/q", true);
         sink_q.reset();
         sink_qa.reset();
 
@@ -6179,7 +6281,7 @@ mod tests {
         fwd.register(FaceId(2), &client);
         advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B
         declare_queryable_complete(&fwd, FaceId(1), "demo/q", 0, true); // B's mesh qabl
-        client_declare_qabl(&fwd, FaceId(2), "demo/q", true); // C's client qabl
+        client_declare_qabl(&fwd, FaceId(2), 1, "demo/q", true); // C's client qabl
         sink_b.reset();
         sink_c.reset();
 
@@ -6215,14 +6317,14 @@ mod tests {
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
         sink_x.reset(); // ignore the link-state OAM from advertise_link_back
 
-        client_declare_qabl(&fwd, FaceId(1), "demo/q", false); // incomplete
+        client_declare_qabl(&fwd, FaceId(1), 1, "demo/q", false); // incomplete
         assert!(
             !forwarded_declare_queryable_info(&sink_x.frame_bytes(0)).complete,
             "the first (incomplete) client advertises incomplete"
         );
         sink_x.reset();
 
-        client_declare_qabl(&fwd, FaceId(2), "demo/q", true); // complete -> UPGRADE
+        client_declare_qabl(&fwd, FaceId(2), 1, "demo/q", true); // complete -> UPGRADE
         assert_eq!(
             sink_x.frame_count(),
             1,
@@ -6248,11 +6350,11 @@ mod tests {
         fwd.register(FaceId(1), &client_a);
         fwd.register(FaceId(2), &client_b);
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
-        client_declare_qabl(&fwd, FaceId(1), "demo/q", false);
-        client_declare_qabl(&fwd, FaceId(2), "demo/q", true);
+        client_declare_qabl(&fwd, FaceId(1), 1, "demo/q", false);
+        client_declare_qabl(&fwd, FaceId(2), 1, "demo/q", true);
         sink_x.reset();
 
-        client_undeclare_qabl(&fwd, FaceId(2), "demo/q"); // the COMPLETE contributor leaves
+        client_undeclare_qabl(&fwd, FaceId(2), 1); // the COMPLETE contributor leaves
 
         assert!(
             fwd.interested_queryables("demo/q").contains(&zid(0x05)),
@@ -6280,7 +6382,7 @@ mod tests {
         fwd.register(FaceId(0), &peer_b);
         fwd.register(FaceId(1), &client);
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
-        client_declare_qabl(&fwd, FaceId(1), "demo/q", true);
+        client_declare_qabl(&fwd, FaceId(1), 1, "demo/q", true);
         assert_eq!(fwd.client_qabls_seen(), 1);
         sink_b.reset();
 
@@ -6322,7 +6424,7 @@ mod tests {
             Box::new(|_v: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"local")),
         )
         .expect("register local queryable");
-        client_declare_qabl(&fwd, FaceId(1), "demo/q", true);
+        client_declare_qabl(&fwd, FaceId(1), 1, "demo/q", true);
 
         fwd.undeclare_queryable("demo/q")
             .expect("undeclare self-native");

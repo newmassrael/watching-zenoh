@@ -576,6 +576,12 @@ pub struct RouterForwarder {
     /// early-return (OBLIGATION 1). C2 is the ADVERTISEMENT half; the cross-tier
     /// DATA delivery TO these clients is C3a
     /// ([`deliver_to_client_subscribers`](RouterForwarder::deliver_to_client_subscribers)).
+    ///
+    /// CARRIED FOLLOW-UP (id-map): still KEYEXPR-keyed, so a client's ID-ONLY graceful
+    /// `UndeclareSubscriber` (no `ext_keyexpr`) no-ops in `withdraw_client_subscription` ->
+    /// stale until face-down. The wz-PEER client-sub/qabl planes were converted to id-keyed
+    /// at R311y178 (and `client_tokens` above at slice-3); the router client_subs/client_qabls
+    /// are the remaining keyexpr-keyed holdouts — the symmetric id-map fix is a named follow-up.
     client_subs: RefCell<HashMap<FaceId, HashSet<String>>>,
     /// Per-CLIENT-face QUERYABLE store (C5b) — the query-plane twin of
     /// [`client_subs`](Self#structfield.client_subs): zenoh's per-`Resource`
@@ -596,6 +602,10 @@ pub struct RouterForwarder {
     /// ingest, and a downgrade re-advertise on face-down. This store is also a
     /// contributor to the merged
     /// [`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info).
+    ///
+    /// CARRIED FOLLOW-UP (id-map): still KEYEXPR-keyed, so a client's ID-ONLY graceful
+    /// `UndeclareQueryable` no-ops in `withdraw_client_queryable` -> stale until face-down.
+    /// The symmetric id-map fix (the wz-peer planes got it at R311y178) is a named follow-up.
     client_qabls: RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
