@@ -309,6 +309,34 @@ pub struct LinkstateForwarder {
     /// purged whole on its face-down (`purge_detached_interest`). `RefCell` by
     /// the same single-task contract as `subs`.
     qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    /// Co-attached CLIENT queryables HOSTED by this peer (the query-plane twin of
+    /// [`client_subs`](Self#structfield.client_subs)) — per-client-face
+    /// `keyexpr -> QueryableInfo`. A CLIENT is a leaf (zenoh `session_ctxs`), never
+    /// a graph node, so its DeclareQueryable cannot ride the zid-keyed
+    /// [`qabls`](Self#structfield.qabls) tier table under its OWN zid
+    /// (`resolve_source` finds no psid → the declare is dropped). It is held here for
+    /// (a) local query DELIVERY — a routed Query matching it is fanned to the client
+    /// face + a pending return entry allocated
+    /// ([`forward_request_to_client_queryables`](Self::forward_request_to_client_queryables))
+    /// — and (b) the face-down / graceful-undeclare withdraw. The MESH ADVERTISEMENT
+    /// rides `qabls` under SELF's zid (self-sourced, exactly as zenoh's
+    /// `register_linkstatepeer_queryable(.., tables.zid)`), carrying the MERGED
+    /// [`QueryableInfo`] over every self-source
+    /// ([`derived_self_qabl_info`](Self::derived_self_qabl_info)) — so a second
+    /// complete co-host UPGRADES the advert and a contributor's departure DOWNGRADES
+    /// it ([`withdraw_mesh_qabl_if_unbacked`](Self::withdraw_mesh_qabl_if_unbacked)),
+    /// the qabl-specific refinement over the sub union-refcount (subs carry no info).
+    /// Value-keyed by keyexpr (mirroring the router `client_qabls`). LIMITATION (a
+    /// PRIORITIZED follow-up, not a rare edge): a graceful `UndeclareQueryable` from a
+    /// real wz client is ID-ONLY (`send_undeclare_queryable(id)` carries no
+    /// `ext_keyexpr`), so [`withdraw_client_queryable`](Self::withdraw_client_queryable)
+    /// cannot resolve the keyexpr and NO-OPS — leaving a stale entry + advert until the
+    /// face-down purge (which covers DISCONNECT, not a live undeclare). This is the SAME
+    /// id-map gap the SHIPPED client-sub plane carries (`send_undeclare_subscriber` is
+    /// likewise id-only + `withdraw_client_subscription` keyexpr-keyed), so both planes
+    /// share ONE id-map follow-up — the token plane already DIVERGED to id-keyed for
+    /// exactly this. The unit tests drive the ext_keyexpr-carrying undeclare (which works).
+    client_qabls: RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
     /// `DeclareSubscriber`s this peer has pushed back to them (zenoh's per-`FaceState`
@@ -641,6 +669,7 @@ impl LinkstateForwarder {
             subs: RefCell::new(LinkstatepeerInterest::new()),
             client_subs: RefCell::new(HashMap::new()),
             qabls: RefCell::new(LinkstatepeerInterest::new()),
+            client_qabls: RefCell::new(HashMap::new()),
             future_subs: RefCell::new(FutureSubStore::new()),
             future_qabls: RefCell::new(FutureQablStore::new()),
             pending: RefCell::new(PendingQueries::new()),
@@ -1004,6 +1033,16 @@ impl LinkstateForwarder {
     /// cross-impl e2e gates on before driving data.
     pub fn client_subs_seen(&self) -> usize {
         self.client_subs.borrow().values().map(|s| s.len()).sum()
+    }
+
+    /// Total co-attached CLIENT queryables currently hosted (the query-plane twin of
+    /// [`client_subs_seen`](Self::client_subs_seen)) — the READINESS witness a
+    /// co-attached cross-impl e2e gates on before driving a query. A `>0` value proves
+    /// this peer installed a client's `DeclareQueryable` in
+    /// [`client_qabls`](Self#structfield.client_qabls) and advertised it into the mesh
+    /// under self's zid.
+    pub fn client_qabls_seen(&self) -> usize {
+        self.client_qabls.borrow().values().map(|q| q.len()).sum()
     }
 
     /// Total unsolicited FUTURE `DeclareQueryable` pushes emitted (R311y158) — the
@@ -1392,71 +1431,134 @@ impl LinkstateForwarder {
             };
             resolved
         };
-        // The query-route directions, dispatched on the Request's carried
-        // QueryTarget (zenoh compute_final_route, dispatcher/queries.rs:214-266) —
-        // the shared [`compute_query_directions`] core (the query twin of
-        // [`compute_push_forward`]) so the router forwarder reuses the SAME
-        // BestMatching / All / AllComplete logic per tier. The wire DEFAULT (an
-        // ABSENT ext_target) is BestMatching (read_request_target -> None).
-        let children = compute_query_directions(
-            &self.net,
-            &self.qabls,
-            &keyexpr,
-            read_request_target(request),
-            &source_zid,
-            inbound_zid,
-        );
-        // zenoh route_query EMPTY route (dispatcher/queries.rs:518-530): a keyexpr
-        // no (complete, under AllComplete) queryable matches routes nowhere — but
-        // rather than drop silently, send a PROMPT ResponseFinal back to the
-        // querier so its get() TERMINATES immediately instead of waiting out its
-        // own timeout. Just the final (no Err — unlike the timeout sweep, which
-        // also synthesizes an Err), carrying the querier's rid; NO pending entry
-        // is recorded (nothing is awaited). Routed via send_to_face so egress ACL
-        // applies, exactly as the timeout final does.
-        if children.is_empty() {
-            // R311y44 (§5.23 Phase 2a) — self-dispatch: a routed Query whose only
-            // match is a queryable HOSTED BY THIS NODE lands here (self is excluded
-            // from query routing, so `children` is empty). Each node's admin keyexpr
-            // `@/<zid>/<whatami>/**` is unique to its own zid, so an admin GET always
-            // reaches this branch. On a local match the handler has emitted its
-            // replies + the closing final, so we are done.
+        // The query-route candidate set (zenoh compute_final_route): the single zenoh
+        // route folds MESH queryables (graph distance) AND co-attached CLIENT queryables
+        // (session_ctxs, distance 1) into one set, then applies the QueryTarget. wz
+        // computes the two sides separately and selects per target. The wire DEFAULT
+        // (absent ext_target) is BestMatching. UNCONDITIONAL — the single-net peer has no
+        // master election (zenoh linkstate_peer compute_query_route has no elect_router).
+        let target = read_request_target(request);
+        let query_chunks: Vec<&str> = keyexpr.split('/').collect();
+        // Co-attached CLIENT queryables matching this query — distance-1 candidates, the
+        // query twin of deliver_to_client_subscribers. The querier's OWN face is never a
+        // target (no routing a query back to its source). `complete` = declared complete
+        // AND the declaration keyexpr INCLUDES the query (zenoh's `complete && includes`);
+        // a plain INTERSECT is the BestMatching/All match. Wildcard-aware via the SAME
+        // keyexpr_intersects_target / keyexpr_includes_target SSOTs the mesh + local dispatch use.
+        let client_candidates: Vec<(FaceId, bool)> = {
+            let cq = self.client_qabls.borrow();
+            let mut candidates = Vec::new();
+            for (&face, qabls) in cq.iter() {
+                if face == inbound {
+                    continue;
+                }
+                let mut intersects = false;
+                let mut complete = false;
+                for (decl, info) in qabls {
+                    if keyexpr_intersects_target(decl, &query_chunks) {
+                        intersects = true;
+                        if info.complete && keyexpr_includes_target(decl, &query_chunks) {
+                            complete = true;
+                            break;
+                        }
+                    }
+                }
+                let matches = match target {
+                    Some(QueryTarget::AllComplete) => complete,
+                    _ => intersects,
+                };
+                if matches {
+                    candidates.push((face, complete));
+                }
+            }
+            candidates
+        };
+        // Select the mesh directions + client faces per QueryTarget. A client queryable is
+        // distance 1: for BestMatching a COMPLETE client is the nearest-complete winner (it
+        // suppresses the >= distance-1 mesh best); with no complete client the mesh's own
+        // complete-best stands, and if NOTHING is complete anywhere the All-fallback fans
+        // mesh + clients together (zenoh compute_final_route's distance-sorted
+        // first-complete, else all).
+        let self_zid = *self.net.borrow().self_zid();
+        let (children, client_targets): (Vec<Zid>, Vec<FaceId>) = match target {
+            None => {
+                if let Some(face) = client_candidates.iter().find(|(_, c)| *c).map(|(f, _)| *f) {
+                    // A distance-1 COMPLETE client wins BestMatching over any mesh best.
+                    (Vec::new(), vec![face])
+                } else {
+                    let net = self.net.borrow();
+                    match select_best_matching(
+                        &net,
+                        &self.qabls,
+                        &keyexpr,
+                        &source_zid,
+                        &self_zid,
+                        inbound_zid,
+                    ) {
+                        // A complete mesh queryable is the nearest-complete winner.
+                        Some((_distance, hop)) => (vec![hop], Vec::new()),
+                        // Nothing complete anywhere -> the All fallback: mesh + all clients.
+                        None => (
+                            all_query_directions(
+                                &net,
+                                &self.qabls,
+                                &keyexpr,
+                                &source_zid,
+                                &self_zid,
+                            ),
+                            client_candidates.iter().map(|(f, _)| *f).collect(),
+                        ),
+                    }
+                }
+            }
+            // All / AllComplete: fan to every mesh direction AND every matching client
+            // (client_candidates is already AllComplete-filtered above).
+            Some(QueryTarget::All) | Some(QueryTarget::AllComplete) => (
+                compute_query_directions(
+                    &self.net,
+                    &self.qabls,
+                    &keyexpr,
+                    target,
+                    &source_zid,
+                    inbound_zid,
+                ),
+                client_candidates.iter().map(|(f, _)| *f).collect(),
+            ),
+        };
+        // zenoh route_query EMPTY route: no mesh direction AND no co-attached client
+        // queryable -> try the self-hosted local queryables (the SYNCHRONOUS
+        // dispatch_local_queryables self-final path, e.g. an admin GET), else a prompt
+        // empty-route ResponseFinal so the querier's get() terminates. A client-qabl match
+        // takes the async fan path below, so the sync local dispatch runs ONLY when there
+        // is zero async branch (a client qabl on the SAME ke as a self-hosted queryable
+        // would suppress the local dispatch — no worse than the pre-existing local-vs-mesh
+        // gap, and self-hosted admin kes are zid-unique so it does not arise in practice).
+        if children.is_empty() && client_targets.is_empty() {
             self.finish_unrouted_request(inbound, reliable, request, &keyexpr);
             return;
         }
-        // out_node_id + the literal keyexpr are the same for every outbound face,
-        // so build the re-stamped TEMPLATE once; the per-face step below swaps in
-        // a freshly allocated qid. NORMALIZE the forwarded keyexpr to a literal
-        // (B1): a downstream child does not share THIS inbound link's alias table,
-        // the same normalize forward_push does for a Push.
+        // out_node_id + the literal keyexpr are the same for every outbound branch, so build
+        // the re-stamped TEMPLATE once; the per-branch step swaps in a freshly allocated qid.
+        // NORMALIZE the forwarded keyexpr to a literal (B1).
         let mut template = request.clone();
         set_request_source(&mut template, out_node_id);
         if set_request_keyexpr_literal(&mut template, &keyexpr).is_err() {
             return;
         }
-        // ONE shared fan target for this logical Query — the return mapping
-        // (inbound face + the upstream rid a Reply is rewritten back to) every
-        // branch's pending entry Rc-shares, so the fan's closing final aggregates
-        // last-out (zenoh's one `Arc<Query>` cloned per branch).
+        // ONE shared fan target for this logical Query — every MESH and CLIENT branch's
+        // pending entry Rc-shares it, so the fan's closing final aggregates last-out across
+        // both legs (zenoh's one Arc<Query> cloned per branch).
         let fan = QueryFan::new(inbound, request.rid);
-        // The deadline each pending entry is abandoned at if no ResponseFinal
-        // routes back — the Query's own carried ext_timeout when present, else
-        // this relay's configured default: zenoh route_query's
-        // `ext_timeout.unwrap_or(queries_default_timeout)`
-        // (dispatcher/queries.rs:514), honored at EVERY relay hop. Computed ONCE
-        // for every child forwarded in this call; the tick sweep reaps it.
+        // The deadline each pending entry is abandoned at if no ResponseFinal routes back
+        // (the Query's own ext_timeout, else this relay's default); the tick sweep reaps it.
         let deadline = self.now()
             + read_request_timeout_ms(request)
                 .map(Duration::from_millis)
                 .unwrap_or_else(|| self.query_timeout.get());
-        // Forward to the queryable-ward children in the source's tree (never to
-        // the inbound face nor back toward the source's neighbour — the shared
-        // predicate). atom 3: ALLOCATE a fresh local qid PER outbound face and
-        // record the shared return mapping, then stamp that qid as the outbound
-        // Request's rid — so a Response/ResponseFinal carrying it routes back via
-        // forward_response/_final. The per-face qid is why each child gets its
-        // OWN carrier (not one cloned template).
         let mut forwarded = 0usize;
+        // MESH branches: allocate a fresh local qid PER tree-forward child + stamp it as the
+        // outbound Request's rid, so its Response/ResponseFinal routes back via
+        // forward_response/_final. The per-face qid is why each child gets its OWN carrier.
         let _ = self.fan_out(reliable, None, |id, zid| {
             if !is_tree_forward_target(id, zid, inbound, inbound_zid, &children) {
                 return Ok(None);
@@ -1467,16 +1569,51 @@ impl LinkstateForwarder {
             forwarded += 1;
             Ok(Some(NetworkMessage::Request(Box::new(carrier))))
         });
-        // A non-empty direction set can still match ZERO live faces (a stale
-        // tree naming a just-departed neighbour, or the only direction pointing
-        // back at the querier's own side, which the tree-target predicate
-        // excludes). zenoh cannot reach this state (its route holds live
-        // FaceStates and gates on route.is_empty()); wz's face-matching fan
-        // must apply the SAME termination guarantee here — else the querier
-        // hangs with no pending entry and no timeout to rescue it.
+        // CLIENT-qabl branches: forward the Request to each matching co-attached client
+        // face, allocating a pending return entry sharing the SAME fan — so the client's
+        // Reply routes back via forward_response and the closing final aggregates last-out
+        // across mesh AND client branches (the query twin of deliver_to_client_subscribers).
+        forwarded += self.forward_request_to_client_queryables(
+            &fan,
+            deadline,
+            &template,
+            reliable,
+            &client_targets,
+        );
+        // A non-empty candidate set can still forward to ZERO live faces (a stale tree, or
+        // the only direction pointing back at the querier); apply the SAME termination
+        // guarantee here so the querier never hangs.
         if forwarded == 0 {
             self.finish_unrouted_request(inbound, reliable, request, &keyexpr);
         }
+    }
+
+    /// Forward a routed Query to each matching co-attached CLIENT queryable face — the
+    /// query twin of [`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers)
+    /// (and the router's `forward_request_to_clients`). Each client face gets its OWN
+    /// carrier with a freshly allocated pending qid that Rc-shares the caller's `fan`, so
+    /// the client's Reply routes back via [`forward_response`](Self::forward_response) and
+    /// the closing final aggregates last-out with the mesh branches. UNCONDITIONAL (no
+    /// master gate — the single-net peer). Returns the count forwarded.
+    fn forward_request_to_client_queryables(
+        &self,
+        fan: &Rc<QueryFan>,
+        deadline: Instant,
+        template: &RequestOwned,
+        reliable: bool,
+        client_faces: &[FaceId],
+    ) -> usize {
+        let mut forwarded = 0usize;
+        for &face in client_faces {
+            let qid = self.pending.borrow_mut().allocate(face, fan, deadline);
+            let mut carrier = template.clone();
+            carrier.rid = qid;
+            self.send_to_face(face, reliable, || {
+                NetworkMessage::Request(Box::new(carrier.clone()))
+            });
+            forwarded += 1;
+        }
+        forwarded
     }
 
     /// Terminate a Query that routed NOWHERE — the shared unrouted tail of
@@ -1698,8 +1835,14 @@ impl LinkstateForwarder {
     /// intersects `ke` (self-local declares register there under `self_zid`, so they
     /// fold in — the SAME single-set fold [`dump_interest_qabls`](Self::dump_interest_qabls)
     /// uses). The value a FUTURE qabl push MUST carry (a single source's raw info
-    /// would downgrade an aggregate reply and re-arm an ALL_COMPLETE filter). The
-    /// querier hosts no queryable (the peer drops client declares), so no exclusion.
+    /// would downgrade an aggregate reply and re-arm an ALL_COMPLETE filter). Folds
+    /// `qabls` GLOBALLY — a co-attached client queryable folds in through the SELF's-zid
+    /// aggregate slot ([`derived_self_qabl_info`](Self::derived_self_qabl_info) merged it
+    /// there on ingest), so the pushed value already reflects the client-qabl plane; the
+    /// querier's OWN-queryable exclusion is by the push-recipient `origin` arg of
+    /// [`push_future_queryable`](Self::push_future_queryable) (a self-query-and-host
+    /// querier's own qabl folding into the value it sees is a benign minor over-include —
+    /// a named merged_qabl_info-exclude refinement, not a black-hole).
     fn merged_qabl_info(&self, ke: &str) -> QueryableInfo {
         let mut merged: Option<QueryableInfo> = None;
         for (_ke, _zid, info) in self.qabls.borrow().matching_entries(ke, None) {
@@ -1726,9 +1869,11 @@ impl LinkstateForwarder {
             self.future_qabls
                 .borrow_mut()
                 .pushes_for_new(new_ke, origin, |reply_ke, _dest| {
-                    // The peer folds only `self.qabls` (no client-qabl plane — client
-                    // declares are dropped in resolve_source), so there is no
-                    // destination face to exclude.
+                    // Folds `self.qabls` GLOBALLY; a co-attached client queryable folds in
+                    // via SELF's-zid aggregate slot (merged there on ingest), so the pushed
+                    // value reflects the client-qabl plane. The `origin` push-recipient
+                    // exclusion (above) already suppresses echoing a declarer its own
+                    // queryable; a per-`_dest` merged-info exclusion is the named refinement.
                     self.merged_qabl_info(reply_ke)
                 });
         for (face, reply_ke, id, info) in pushes {
@@ -1785,8 +1930,8 @@ impl LinkstateForwarder {
     /// `DeclareQueryable(id, ke, DOWNGRADED info)` for each STILL-backed reply ke whose
     /// FOLDED completeness dropped (case c, R311y153) so an ALL_COMPLETE querier re-arms.
     /// The peer folds `self.qabls` GLOBALLY ([`merged_qabl_info`](Self::merged_qabl_info),
-    /// no exclusion — the peer has no client-qabl plane). `forgets` runs FIRST so
-    /// `re_pushes` re-folds only survivors.
+    /// no exclusion — a co-attached client queryable folds in via SELF's-zid aggregate).
+    /// `forgets` runs FIRST so `re_pushes` re-folds only survivors.
     ///
     /// SUPERSET over zenoh (intentional, north-star superset-not-mirror): zenoh's
     /// linkstate_peer hat `queries_remove_node` is FULL-UNDECLARE-ONLY — no partial
@@ -1854,20 +1999,36 @@ impl LinkstateForwarder {
         // declare_simple_queryable registers under tables.zid — so the tree-change
         // re-advertise re-floods it to peers that join LATER, iterated uniformly
         // with remote queryables (the late-joiner convergence, like
-        // declare_subscription).
-        self.qabls.borrow_mut().register(keyexpr, self_zid, info);
+        // declare_subscription). The single (ke, self_zid) slot OVERWRITES, so advertise
+        // the MERGED info over ALL of this node's sources (self-native + co-attached
+        // client queryables, [`derived_self_qabl_info`](Self::derived_self_qabl_info)) —
+        // else this self-native declare would CLOBBER a coexisting client queryable's
+        // completeness (and vice-versa). This declare's own source is not yet in
+        // `local_queryables` (register_local_queryable pushes AFTER), so fold `info` in
+        // explicitly; with no other source the merge is just `info` (behavior-preserving).
+        // INVARIANT: a self-hosted queryable MUST be declared via `register_local_queryable`
+        // (which records it in `local_queryables` so a LATER re-derive sees it). A BARE
+        // `declare_queryable` — never tracked in `local_queryables` — coexisting with a
+        // client queryable on the same ke would be invisible to `derived_self_qabl_info`
+        // and could be clobbered by the client's re-derive; the sole in-tree caller is
+        // `register_local_queryable`, so this stays a documented constraint, not a live gap.
+        let advert = self
+            .derived_self_qabl_info(keyexpr)
+            .map_or(info, |d| d.merge(info));
+        self.qabls.borrow_mut().register(keyexpr, self_zid, advert);
         // FUTURE-push (R311y150): a self-local queryable is proactively pushed to any
         // CLIENT face whose FUTURE querier-interest matches (origin None = no inbound
         // face), with the RE-FOLDED merged info; the store dedups a redundant
         // re-declare and re-pushes only a completeness flip.
         // The retraction twin [`undeclare_queryable`](Self::undeclare_queryable) exists
-        // (R311y154): it withdraws self from `qabls`, drops the `local_queryables` reply
-        // handler, re-arms any waiting client querier, and floods the mesh forget.
+        // (R311y154): it drops the `local_queryables` reply handler, re-arms any waiting
+        // client querier, and (via `withdraw_mesh_qabl_if_unbacked`) downgrades or fully
+        // withdraws the mesh advert depending on the surviving sources.
         self.push_future_queryable(keyexpr, None);
-        // node_id 0 = self-originated; the completeness rides the body ext
+        // node_id 0 = self-originated; the merged completeness rides the body ext
         // (omitted when DEFAULT/incomplete — the byte-identical no-info wire).
         let mut declare = build_declare_queryable(0, 0, Some(keyexpr))?;
-        set_declare_queryable_info(&mut declare, info);
+        set_declare_queryable_info(&mut declare, advert);
         self.flood_to_tree_children(&self_zid, || {
             NetworkMessage::Declare(Box::new(declare.clone()))
         })
@@ -2380,6 +2541,86 @@ impl LinkstateForwarder {
         })
     }
 
+    /// The MERGED [`QueryableInfo`] this peer advertises under SELF's zid for
+    /// `keyexpr` — the OR of `complete` (min `distance`) over every SELF source: a
+    /// self-native local queryable
+    /// ([`local_queryables`](Self#structfield.local_queryables)) and a co-attached
+    /// client queryable ([`client_qabls`](Self#structfield.client_qabls)) declaring
+    /// EXACTLY `keyexpr`. `None` = no self source (the advert must be withdrawn).
+    /// zenoh `local_peer_qabl_info` (`hat/linkstate_peer/queries.rs:67`): folds ONLY
+    /// the peer's OWN sources (session_ctxs), NOT the remote-peer `linkstatepeer_qabls`
+    /// and — single-net — NO cross-tier / `failover_brokering`. Deliberately NOT
+    /// [`merged_qabl_info`](Self::merged_qabl_info), which folds `qabls` GLOBALLY
+    /// (remote peers + self's own output slot) for the FUTURE-push value — folding
+    /// that here would pollute the advert with a remote's completeness. Exact-string
+    /// keying matches the per-ke `qabls` slot the advertisement registers under; seed
+    /// from the FIRST source (`Option`), never [`DEFAULT`](QueryableInfo::DEFAULT)
+    /// (whose `distance == 0` collapses the `min`).
+    fn derived_self_qabl_info(&self, keyexpr: &str) -> Option<QueryableInfo> {
+        let mut acc: Option<QueryableInfo> = None;
+        for lq in self.local_queryables.borrow().iter() {
+            if lq.keyexpr == keyexpr {
+                let info = QueryableInfo::local(lq.complete);
+                acc = Some(acc.map_or(info, |a| a.merge(info)));
+            }
+        }
+        for qabls in self.client_qabls.borrow().values() {
+            if let Some(info) = qabls.get(keyexpr) {
+                acc = Some(acc.map_or(*info, |a| a.merge(*info)));
+            }
+        }
+        acc
+    }
+
+    /// Withdraw-or-DOWNGRADE the SELF-sourced mesh advertisement for `keyexpr` after a
+    /// source was removed — the qabl twin of
+    /// [`withdraw_mesh_sub_if_unbacked`](Self::withdraw_mesh_sub_if_unbacked), with the
+    /// info-carrying refinement subs lack (a queryable advertises a `QueryableInfo`; a
+    /// subscription is presence-only). Re-derives the merged info over the SURVIVING
+    /// self sources ([`derived_self_qabl_info`](Self::derived_self_qabl_info)):
+    /// - `Some(merged)` — a source still backs `keyexpr`: RE-ADVERTISE a
+    ///   `DeclareQueryable` carrying the (possibly DOWNGRADED) merged info — the
+    ///   `register` value-diff gate suppresses a no-op re-flood — and re-arm any waiting
+    ///   client querier whose folded completeness dropped
+    ///   ([`undeclare_push_qabls`](Self::undeclare_push_qabls)). zenoh
+    ///   `undeclare_simple_queryable`'s "contributors remain" arm
+    ///   (`hat/linkstate_peer/queries.rs:559-569`).
+    /// - `None` — the last source is gone: WITHDRAW self from `qabls`, re-arm the
+    ///   filter, and flood the sourced `UndeclareQueryable`.
+    ///
+    /// The self-native [`undeclare_queryable`](Self::undeclare_queryable) and the client
+    /// withdraw / face-down paths share this seam; the caller removes ITS OWN source
+    /// (the `local_queryables` handler or the `client_qabls` entry) BEFORE calling.
+    fn withdraw_mesh_qabl_if_unbacked(&self, keyexpr: &str) -> Result<usize, CodecError> {
+        let self_zid = *self.net.borrow().self_zid();
+        match self.derived_self_qabl_info(keyexpr) {
+            Some(merged) => {
+                let changed = self.qabls.borrow_mut().register(keyexpr, self_zid, merged);
+                if !changed {
+                    return Ok(0); // the surviving sources already advertise this info
+                }
+                // A completeness downgrade must re-arm ALL_COMPLETE queriers whose
+                // pushed reply ke folded lower; the ke is still backed, so no forget.
+                self.undeclare_push_qabls(keyexpr);
+                let mut declare = build_declare_queryable(0, 0, Some(keyexpr))?;
+                set_declare_queryable_info(&mut declare, merged);
+                self.flood_to_tree_children(&self_zid, || {
+                    NetworkMessage::Declare(Box::new(declare.clone()))
+                })
+            }
+            None => {
+                let removed = self.qabls.borrow_mut().withdraw(keyexpr, &self_zid);
+                if removed {
+                    self.undeclare_push_qabls(keyexpr);
+                }
+                let declare = build_undeclare_queryable_with_keyexpr(keyexpr)?;
+                self.flood_to_tree_children(&self_zid, || {
+                    NetworkMessage::Declare(Box::new(declare.clone()))
+                })
+            }
+        }
+    }
+
     /// R311y163 (D4) — ingest a co-attached CLIENT's `DeclareSubscriber`. A CLIENT is
     /// a leaf (never a graph node), so its interest cannot ride the zid-keyed `subs`
     /// tier table under its OWN zid (`resolve_source_in` would find no psid); instead
@@ -2480,6 +2721,119 @@ impl LinkstateForwarder {
         };
         if removed {
             let _ = self.withdraw_mesh_sub_if_unbacked(&keyexpr);
+        }
+    }
+
+    /// Ingest a co-attached CLIENT's `DeclareQueryable` (the query-plane twin of
+    /// [`ingest_client_subscription`](Self::ingest_client_subscription)). A CLIENT is a
+    /// leaf, so its queryable cannot ride the zid-keyed [`qabls`](Self#structfield.qabls)
+    /// under its OWN zid (`resolve_source` finds no psid → drop); it is (a) recorded in
+    /// [`client_qabls`](Self#structfield.client_qabls) FaceId-keyed for local query
+    /// DELIVERY + face-down purge, and (b) advertised into the mesh under SELF's zid —
+    /// exactly as zenoh `declare_simple_queryable` re-sources under `tables.zid`. Unlike
+    /// the sub twin (presence-only), the advert carries the MERGED
+    /// [`QueryableInfo`](Self::derived_self_qabl_info) over every self source, so a second
+    /// complete co-host UPGRADES it; the sourced flood + future-push fire only when the
+    /// merged advert CHANGES (`register`'s value-diff gate), so a redundant re-declare
+    /// stays silent.
+    fn ingest_client_queryable(&self, inbound: FaceId, declare: &DeclareOwned) {
+        // Resolve the client's DeclareQueryable keyexpr + read its QueryableInfo in one
+        // scoped borrow (against ITS face alias table); an unresolvable alias drops it.
+        let (keyexpr, info) = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
+                return;
+            };
+            let Some(keyexpr) = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) else {
+                return;
+            };
+            // The declared completeness rides the DeclQueryable body ext chain; absent
+            // ext = zenoh DEFAULT (incomplete), the SAME read `forward_queryable` does.
+            let info = match &declare.body {
+                DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => {
+                    wz_session_core::queryable_info::read_queryable_info(dq.extensions.as_ref())
+                }
+                _ => QueryableInfo::DEFAULT,
+            };
+            (keyexpr, info)
+        };
+        // Record the leaf queryable; a duplicate carrying the SAME info is a no-op.
+        let changed = {
+            let mut cq = self.client_qabls.borrow_mut();
+            cq.entry(inbound).or_default().insert(keyexpr.clone(), info) != Some(info)
+        };
+        if !changed {
+            return;
+        }
+        // Advertise the MERGED info under SELF's zid; `register` returns `true` only when
+        // the merged advert changed (a new ke, or an UPGRADE from a second complete
+        // co-host) — gate the future-push + sourced flood on it so a redundant backer
+        // stays silent. `derived_self_qabl_info` is `Some` here (this client just inserted).
+        let self_zid = *self.net.borrow().self_zid();
+        let merged = self.derived_self_qabl_info(&keyexpr).unwrap_or(info);
+        let registered = self.qabls.borrow_mut().register(&keyexpr, self_zid, merged);
+        if registered {
+            // A NEW/UPGRADED queryable (to this node) -> tell any co-attached CLIENT
+            // querier whose stored FUTURE interest matches (querier-before-queryable
+            // write-filter close). `origin = Some(inbound)` excludes the declaring client
+            // itself, mirror of `ingest_client_subscription`.
+            self.push_future_queryable(&keyexpr, Some(inbound));
+            let mut declare = match build_declare_queryable(0, 0, Some(&keyexpr)) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("peer: client qabl advertise build failed for {keyexpr:?}: {e:?}");
+                    return;
+                }
+            };
+            set_declare_queryable_info(&mut declare, merged);
+            let _ = self.flood_to_tree_children(&self_zid, || {
+                NetworkMessage::Declare(Box::new(declare.clone()))
+            });
+        }
+    }
+
+    /// Withdraw a co-attached CLIENT's queryable on its graceful `UndeclareQueryable`
+    /// (keyexpr carried in `ext_keyexpr`) — the query-plane twin of
+    /// [`withdraw_client_subscription`](Self::withdraw_client_subscription). Removes the
+    /// leaf entry from [`client_qabls`](Self#structfield.client_qabls), then (via the
+    /// shared [`withdraw_mesh_qabl_if_unbacked`](Self::withdraw_mesh_qabl_if_unbacked)
+    /// seam) DOWNGRADES the mesh advert if another source remains, or fully withdraws it
+    /// if this was the last. LIMITATION (the PRIORITIZED id-map follow-up, [`client_qabls`]
+    /// (Self#structfield.client_qabls)): a real wz client's graceful undeclare is ID-ONLY,
+    /// so `resolve_ext_keyexpr` finds nothing and this NO-OPS — the entry + advert go stale
+    /// until face-down (which covers DISCONNECT, not a live undeclare). The shipped
+    /// client-sub plane carries the identical gap; the ext_keyexpr-carrying form (unit-driven)
+    /// withdraws correctly.
+    fn withdraw_client_queryable(&self, inbound: FaceId, declare: &DeclareOwned) {
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let exts = match &declare.body {
+                DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
+                _ => return,
+            };
+            match resolve_ext_keyexpr(exts, &s.keyexpr_table) {
+                Some(ke) => ke,
+                None => return,
+            }
+        };
+        let removed = {
+            let mut cq = self.client_qabls.borrow_mut();
+            let removed = cq
+                .get_mut(&inbound)
+                .is_some_and(|q| q.remove(&keyexpr).is_some());
+            if cq.get(&inbound).is_some_and(|q| q.is_empty()) {
+                cq.remove(&inbound);
+            }
+            removed
+        };
+        if removed {
+            let _ = self.withdraw_mesh_qabl_if_unbacked(&keyexpr);
         }
     }
 
@@ -2585,8 +2939,6 @@ impl LinkstateForwarder {
     /// an intentional SUPERSET over zenoh's linkstate_peer hat (full-undeclare-only, no
     /// partial re-declare), per that method's doc.
     pub fn undeclare_queryable(&self, keyexpr: &str) -> Result<usize, CodecError> {
-        let self_zid = *self.net.borrow().self_zid();
-        let removed = self.qabls.borrow_mut().withdraw(keyexpr, &self_zid);
         // Drop the self-hosted reply handler (the inverse of register_local_queryable) so a
         // RETRACTED queryable STOPS answering, not just stops being routed to — else
         // dispatch_local_queryables keeps replying on the empty-route branch (zenoh drops
@@ -2614,21 +2966,17 @@ impl LinkstateForwarder {
                     .retain(|h| !retracted.iter().any(|r| Rc::ptr_eq(h, r)));
             }
         }
-        if removed {
-            // Self-local queryable gone -> re-arm any waiting CLIENT querier whose pushed
-            // reply ke lost its last backer (full-undeclare) or dropped completeness (the
-            // y153 downgrade re-push). Run AFTER the withdraw so the fold excludes self.
-            self.undeclare_push_qabls(keyexpr);
-        }
-        // Flood the sourced forget to tree children UNCONDITIONALLY (like
-        // undeclare_subscription) -- a never-registered keyexpr floods an idempotent
-        // UndeclareQueryable that dies at the first receiver's no-op withdraw. (zenoh
-        // gates this on contains_key(peer); wz's unconditional flood is a benign
-        // divergence kept for cross-plane symmetry with the sub twin.)
-        let declare = build_undeclare_queryable_with_keyexpr(keyexpr)?;
-        self.flood_to_tree_children(&self_zid, || {
-            NetworkMessage::Declare(Box::new(declare.clone()))
-        })
+        // Withdraw-or-DOWNGRADE the self-sourced mesh advert through the shared
+        // union-refcount seam: a co-attached CLIENT queryable still hosting this ke
+        // DOWNGRADES the advert (re-declared with the surviving merged info) rather than
+        // fully retracting it (which would black-hole the client's queryable); only the
+        // LAST source's departure withdraws self from `qabls`, floods the sourced
+        // UndeclareQueryable, and re-arms waiting queriers (full-undeclare and the y153
+        // completeness downgrade). Mirrors how undeclare_subscription routes through
+        // withdraw_mesh_sub_if_unbacked (R311y163), with the qabl-specific info downgrade
+        // (subs are presence-only). A never-registered ke with no client backer floods an
+        // idempotent UndeclareQueryable (the None arm), preserving the prior behavior.
+        self.withdraw_mesh_qabl_if_unbacked(keyexpr)
     }
 
     /// Flood `msg` to self's CHILDREN in `root`'s spanning tree — the shared
@@ -4262,6 +4610,20 @@ impl FaceForwarder for LinkstateForwarder {
         for keyexpr in departed_client_subs {
             let _ = self.withdraw_mesh_sub_if_unbacked(&keyexpr);
         }
+        // Query-plane twin of the client-sub purge above: drain this face's co-attached
+        // CLIENT queryables and, for each ke, downgrade-or-withdraw the self-sourced mesh
+        // advert (a surviving self-native / other-client source DOWNGRADES the merged
+        // info; the LAST source's departure withdraws self + floods the forget). Same
+        // hoist discipline — withdraw_mesh_qabl_if_unbacked re-borrows client_qabls via
+        // derived_self_qabl_info.
+        let departed_client_qabls = self
+            .client_qabls
+            .borrow_mut()
+            .remove(&id)
+            .unwrap_or_default();
+        for keyexpr in departed_client_qabls.into_keys() {
+            let _ = self.withdraw_mesh_qabl_if_unbacked(&keyexpr);
+        }
         // R311y152 — hoist the face removal OUT of the `if let` scrutinee so its
         // `RefMut` on `self.faces` drops at THIS `;`. Edition 2021 keeps a scrutinee
         // temporary alive across the whole `if let` block, and
@@ -4468,7 +4830,16 @@ impl FaceForwarder for LinkstateForwarder {
                     // this explicit arm it fell to the `_` subscriber catch-all
                     // and was silently dropped (its body is not a subscriber).
                     DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
-                        self.forward_queryable(id, *reliable, declare);
+                        // A CLIENT's DeclareQueryable is INGESTED as a co-attached leaf
+                        // queryable (hosted in `client_qabls` + advertised into the mesh
+                        // under SELF's zid); a MESH source's registers its interest +
+                        // re-floods along its tree (the query twin of the DeclareSubscriber
+                        // fork below).
+                        if self.is_client_face(id) {
+                            self.ingest_client_queryable(id, declare);
+                        } else {
+                            self.forward_queryable(id, *reliable, declare);
+                        }
                     }
                     // UndeclareQueryable: the query-plane twin of the
                     // UndeclareSubscriber arm above. A sourced mesh retraction
@@ -4484,7 +4855,17 @@ impl FaceForwarder for LinkstateForwarder {
                     // shared withdrawal — matched EXPLICITLY so it is not mis-routed
                     // to the subscriber catch-all below (its body is not a sub).
                     DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
-                        self.forward_queryable_undeclare(id, *reliable, declare);
+                        // A CLIENT's UndeclareQueryable withdraws its hosted queryable
+                        // (downgrade-or-retract the self advert via the shared seam); a
+                        // MESH source's withdraws its interest + re-floods (the query twin
+                        // of the UndeclSubscriber fork above). An id-only client undeclare
+                        // (no ext_keyexpr) is a no-op in withdraw_client_queryable — the
+                        // face-down purge is the safety net (id-map = named follow-up).
+                        if self.is_client_face(id) {
+                            self.withdraw_client_queryable(id, declare);
+                        } else {
+                            self.forward_queryable_undeclare(id, *reliable, declare);
+                        }
                     }
                     // A DeclareSubscriber (the subscriber catch-all): a CLIENT's is
                     // INGESTED as a co-attached leaf sub (R311y163 / D4 — recorded in
@@ -5659,6 +6040,302 @@ mod tests {
     fn data_push() -> PushOwned {
         use wz_session_core::push_build::build_push_literal;
         build_push_literal("demo/data", b"payload").expect("build push")
+    }
+
+    // ── peer client-QUERYABLE hosting plane (the query-plane twin of D4a) ─────────
+
+    /// Feed a co-attached CLIENT's `DeclareQueryable` (with its declared completeness)
+    /// through the dispatch seam so the is_client branch routes it to
+    /// `ingest_client_queryable` (NOT the mesh `forward_queryable`).
+    fn client_declare_qabl(fwd: &LinkstateForwarder, face: FaceId, keyexpr: &str, complete: bool) {
+        let mut declare = build_declare_queryable(0, 0, Some(keyexpr)).expect("build qabl");
+        wz_session_core::declare_build::set_declare_queryable_info(
+            &mut declare,
+            wz_session_core::queryable_info::QueryableInfo {
+                complete,
+                distance: 0,
+            },
+        );
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(declare))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(face, IterationEvent::Poll(&outcome));
+    }
+
+    /// Feed a co-attached CLIENT's graceful `UndeclareQueryable` (keyexpr in ext_keyexpr)
+    /// through the dispatch seam.
+    fn client_undeclare_qabl(fwd: &LinkstateForwarder, face: FaceId, keyexpr: &str) {
+        let declare = build_undeclare_queryable_with_keyexpr(keyexpr).expect("build undecl qabl");
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(declare))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(face, IterationEvent::Poll(&outcome));
+    }
+
+    #[test]
+    fn a_client_qabl_registers_under_self_and_advertises_to_a_mesh_child() {
+        // U1 (FAILS before this build: a client DeclareQueryable was dropped in
+        // resolve_source — a client is not a graph node). A CLIENT of this peer declares
+        // a queryable; it lands in `client_qabls` AND is advertised into the mesh under
+        // SELF's zid carrying its QueryableInfo, so a mesh child routes matching queries here.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, sink_b) = peer_face(zid(0x0B)); // a real mesh child
+        let (client, _c) = peer_face_whatami(zid(0x0C), 2); // a CLIENT leaf
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05); // edge S<->B
+        sink_b.reset();
+
+        client_declare_qabl(&fwd, FaceId(1), "demo/q", true);
+
+        assert_eq!(
+            fwd.client_qabls_seen(),
+            1,
+            "the client queryable is installed in client_qabls"
+        );
+        assert!(
+            fwd.interested_queryables("demo/q").contains(&zid(0x05)),
+            "the client queryable is advertised into the mesh under SELF's zid"
+        );
+        assert_eq!(
+            forwarded_declare_queryable_keyexpr(&sink_b.frame_bytes(0)).as_deref(),
+            Some("demo/q"),
+            "the mesh child learns the queryable (a self-sourced DeclareQueryable)"
+        );
+        assert!(
+            forwarded_declare_queryable_info(&sink_b.frame_bytes(0)).complete,
+            "the advertised info carries the declared completeness"
+        );
+    }
+
+    #[test]
+    fn a_query_is_forwarded_to_a_co_attached_client_queryable_and_the_reply_returns() {
+        // U2 composed delivery (FAILS before this build: a client queryable was never
+        // hosted, so the query routed nowhere and the querier got only a bare final). A
+        // co-attached CLIENT queryable answers a routed Query: the Query is forwarded to
+        // the client face (a pending return entry allocated) and its Reply routes back to
+        // the querier via the reused forward_response path.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (querier, sink_q) = peer_face_whatami(zid(0x0A), 2); // a CLIENT querier
+        let (queryable, sink_qa) = peer_face_whatami(zid(0x0C), 2); // a CLIENT queryable
+        fwd.register(FaceId(0), &querier);
+        fwd.register(FaceId(1), &queryable);
+        client_declare_qabl(&fwd, FaceId(1), "demo/q", true);
+        sink_q.reset();
+        sink_qa.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+
+        assert_eq!(
+            sink_qa.frame_count(),
+            1,
+            "the Query is forwarded to the co-attached client queryable"
+        );
+        let forwarded = forwarded_request(&sink_qa.frame_bytes(0));
+        // The client answers with the pending qid this relay stamped.
+        let reply = wz_session_core::response_build::build_response_reply_literal(
+            forwarded.rid,
+            "demo/q",
+            b"client-reply",
+        )
+        .expect("build reply");
+        fwd.forward_response(FaceId(1), true, &reply);
+
+        assert_eq!(
+            sink_q.frame_count(),
+            1,
+            "the client queryable's Reply routes back to the querier"
+        );
+        assert_eq!(
+            forwarded_response(&sink_q.frame_bytes(0)).request_id,
+            99,
+            "the Reply carries the querier's own rid"
+        );
+    }
+
+    #[test]
+    fn a_complete_client_queryable_wins_bestmatching_over_a_coexisting_mesh_queryable() {
+        // U2b — the black-hole the forward_request restructure fixes. A CLIENT hosts a
+        // COMPLETE queryable for a ke a remote MESH peer ALSO offers. Before the restructure
+        // the mesh direction made `children` non-empty, so the query fanned only to the mesh
+        // and the co-hosted client was BLACK-HOLED (the empty-route tail never ran). Now the
+        // distance-1 complete client WINS BestMatching and the mesh best is suppressed.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (querier, _sq) = peer_face_whatami(zid(0x0A), 2); // a CLIENT querier
+        let (mesh_b, sink_b) = peer_face(zid(0x0B)); // a mesh peer that ALSO hosts demo/q
+        let (client, sink_c) = peer_face_whatami(zid(0x0C), 2); // the co-hosted client queryable
+        fwd.register(FaceId(0), &querier);
+        fwd.register(FaceId(1), &mesh_b);
+        fwd.register(FaceId(2), &client);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B
+        declare_queryable_complete(&fwd, FaceId(1), "demo/q", 0, true); // B's mesh qabl
+        client_declare_qabl(&fwd, FaceId(2), "demo/q", true); // C's client qabl
+        sink_b.reset();
+        sink_c.reset();
+
+        let request = wz_session_core::request_build::build_request_query(7, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the distance-1 complete client queryable receives the Query (NOT black-holed)"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "the farther mesh queryable is suppressed — the nearer complete client wins BestMatching"
+        );
+    }
+
+    #[test]
+    fn two_client_queryables_on_the_same_ke_advertise_the_merged_completeness() {
+        // U3 upgrade-merge — the qabl-specific refinement over the sub union-refcount
+        // (subs carry no info). Client A declares INCOMPLETE demo/q (advert incomplete),
+        // then client B declares COMPLETE demo/q: the self-sourced advert is UPGRADED to
+        // complete (the OR merge over both self sources).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_x, sink_x) = peer_face(zid(0x0B)); // a mesh child
+        let (client_a, _ca) = peer_face_whatami(zid(0x0C), 2);
+        let (client_b, _cb) = peer_face_whatami(zid(0x0D), 2);
+        fwd.register(FaceId(0), &peer_x);
+        fwd.register(FaceId(1), &client_a);
+        fwd.register(FaceId(2), &client_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        sink_x.reset(); // ignore the link-state OAM from advertise_link_back
+
+        client_declare_qabl(&fwd, FaceId(1), "demo/q", false); // incomplete
+        assert!(
+            !forwarded_declare_queryable_info(&sink_x.frame_bytes(0)).complete,
+            "the first (incomplete) client advertises incomplete"
+        );
+        sink_x.reset();
+
+        client_declare_qabl(&fwd, FaceId(2), "demo/q", true); // complete -> UPGRADE
+        assert_eq!(
+            sink_x.frame_count(),
+            1,
+            "the completeness UPGRADE re-advertises (value-diff gate fired)"
+        );
+        assert!(
+            forwarded_declare_queryable_info(&sink_x.frame_bytes(0)).complete,
+            "the merged advert is now COMPLETE (the OR over both client contributors)"
+        );
+    }
+
+    #[test]
+    fn a_partial_client_queryable_withdrawal_downgrades_the_advertisement() {
+        // U4 downgrade — one of two contributors leaves: the advert is RE-DECLARED with the
+        // surviving (lower) merged info, NOT fully undeclared (which would black-hole the
+        // survivor). Client A INCOMPLETE + client B COMPLETE -> advert complete; B withdraws
+        // -> advert DOWNGRADES to incomplete (a DeclareQueryable, not an UndeclareQueryable).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_x, sink_x) = peer_face(zid(0x0B));
+        let (client_a, _ca) = peer_face_whatami(zid(0x0C), 2);
+        let (client_b, _cb) = peer_face_whatami(zid(0x0D), 2);
+        fwd.register(FaceId(0), &peer_x);
+        fwd.register(FaceId(1), &client_a);
+        fwd.register(FaceId(2), &client_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        client_declare_qabl(&fwd, FaceId(1), "demo/q", false);
+        client_declare_qabl(&fwd, FaceId(2), "demo/q", true);
+        sink_x.reset();
+
+        client_undeclare_qabl(&fwd, FaceId(2), "demo/q"); // the COMPLETE contributor leaves
+
+        assert!(
+            fwd.interested_queryables("demo/q").contains(&zid(0x05)),
+            "the advert survives (client A still hosts demo/q)"
+        );
+        assert_eq!(
+            forwarded_declare_queryable_keyexpr(&sink_x.frame_bytes(0)).as_deref(),
+            Some("demo/q"),
+            "a DOWNGRADED DeclareQueryable is re-flooded (not an UndeclareQueryable)"
+        );
+        assert!(
+            !forwarded_declare_queryable_info(&sink_x.frame_bytes(0)).complete,
+            "the downgraded advert dropped completeness back to incomplete"
+        );
+    }
+
+    #[test]
+    fn a_departing_client_purges_client_qabls_and_withdraws_the_advertisement() {
+        // U5 / U7 (FAILS before this build: deregister had no client_qabls purge). A client
+        // face going down purges its hosted queryables AND — as the last backer — withdraws
+        // the mesh advertisement (a sourced UndeclareQueryable to the mesh child).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, sink_b) = peer_face(zid(0x0B));
+        let (client, _c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        client_declare_qabl(&fwd, FaceId(1), "demo/q", true);
+        assert_eq!(fwd.client_qabls_seen(), 1);
+        sink_b.reset();
+
+        fwd.deregister(FaceId(1));
+
+        assert_eq!(
+            fwd.client_qabls_seen(),
+            0,
+            "the departed client's queryables are purged from client_qabls"
+        );
+        assert!(
+            !fwd.interested_queryables("demo/q").contains(&zid(0x05)),
+            "the last backer's departure withdraws the mesh advertisement"
+        );
+        assert_eq!(
+            forwarded_undeclare_queryable_keyexpr(&sink_b.frame_bytes(0)).as_deref(),
+            Some("demo/q"),
+            "the mesh child learns the forget (a sourced UndeclareQueryable)"
+        );
+    }
+
+    #[test]
+    fn a_self_native_undeclare_keeps_a_surviving_client_queryables_advertisement() {
+        // U6 shared-slot rewire — the self-native undeclare_queryable and the client
+        // queryable share the SINGLE (ke, self_zid) advert slot. A self-native
+        // local_queryable + a client queryable on the SAME ke: retracting the self-native
+        // one must DOWNGRADE-not-nuke (the client's advert survives), proving
+        // undeclare_queryable routes through withdraw_mesh_qabl_if_unbacked (before this
+        // build it unconditionally withdrew self + would black-hole the client).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, _sb) = peer_face(zid(0x0B));
+        let (client, _c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        fwd.register_local_queryable(
+            "demo/q",
+            true,
+            Box::new(|_v: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"local")),
+        )
+        .expect("register local queryable");
+        client_declare_qabl(&fwd, FaceId(1), "demo/q", true);
+
+        fwd.undeclare_queryable("demo/q")
+            .expect("undeclare self-native");
+
+        assert!(
+            fwd.interested_queryables("demo/q").contains(&zid(0x05)),
+            "the client queryable's advert SURVIVES the self-native retraction (downgrade, not nuke)"
+        );
+        assert_eq!(
+            fwd.client_qabls_seen(),
+            1,
+            "the client queryable is still hosted"
+        );
     }
 
     /// One LinkState entry (psid-space, with the psids it links to) — mirrors
