@@ -17,9 +17,9 @@
 //! sn-newest-wins, full dump on new link) — the true "zenohd-equivalent" acid
 //! test for wz's router tier.
 //!
-//! Eight legs, STAGED so a failure localises (topology before data before reverse
+//! Nine legs, STAGED so a failure localises (topology before data before reverse
 //! data before query before future-mode before forward-query before future-query
-//! before undeclare-re-arm):
+//! before undeclare-re-arm before liveliness-token lifecycle):
 //!
 //!   1. `wz_router_hat_federates_with_zenohd_at_router_tier` — the CONTROL-PLANE
 //!      floor: wz `--router-hat --connect <zenohd>` dials the reference router;
@@ -122,6 +122,22 @@
 //!      test — "Querier has NO MORE matching queryables." after the queryable is
 //!      KILLED and wz's y151 undeclare_push_qabls re-arms the filter cross-impl.
 //!
+//!   9. `wz_router_hat_token_lifecycle_reaches_a_pico_liveliness_subscriber` — the
+//!      LIVELINESS-TOKEN lifecycle acid test (§5.21 routing-token-tables,
+//!      R311y170-175; the token twin of legs 7 & 8 FOLDED into one subscriber
+//!      lifecycle). A pico `z_sub_liveliness` (client of wz, FUTURE-only) is spawned
+//!      before a pico `z_liveliness` (client of zenohd) declares a token; zenohd
+//!      floods it over routers_net (a sourced full-flood, NOT interest-gated, the
+//!      same mechanism as subs/qabls) and wz PROACTIVELY pushes it to the
+//!      subscriber's stored future interest (slice-4 push_future_token) — proven the
+//!      FUTURE push by the `pushed a future token` witness. The subscriber prints
+//!      "New alive token"; then z_liveliness is KILLED and its socket close makes
+//!      zenohd flood an UndeclareToken that wz undeclare_push_token's to the
+//!      subscriber ("Dropped token", the slice-5 reconcile-notify closure). One
+//!      test because the same subscriber prints both observables (no `-a`-style flag
+//!      change is needed, unlike leg 8). Needs wz-ap-demo built with
+//!      `routing-token-tables` (the Layer Z build opts in).
+//!
 //! SCOPE — what this does NOT yet cover (the cross-impl router tier is a large
 //! surface; this is the first, deliberately-2-node slice, mirroring how the
 //! wz<->wz mesh suite staged its own coverage):
@@ -154,15 +170,18 @@
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z) AND double binary-dep: needs the
 //! external `zenohd` 1.5.0 build (`scripts/build-zenohd.sh`) AND `wz-ap-demo`
-//! built with `--features router-hat-router` (the run-mode ACTIVE atom). Neither
-//! is a default-sweep artifact, so this never gates the default test run.
+//! built with `--features router-hat-router` (the run-mode ACTIVE atom; leg 9
+//! additionally needs `routing-token-tables`, which the Layer Z build opts into
+//! and which pulls `router-hat-router`). Neither is a default-sweep artifact, so
+//! this never gates the default test run.
 
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_answering_zqueryable, spawn_on_ephemeral_port,
-    spawn_publishing_zpub, spawn_querying_zquerier, spawn_subscribed_zsub, spawn_zenohd,
-    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, PortReservation,
+    graceful_terminate, read_captured, spawn_answering_zqueryable, spawn_liveliness_subscriber,
+    spawn_liveliness_token, spawn_on_ephemeral_port, spawn_publishing_zpub,
+    spawn_querying_zquerier, spawn_subscribed_zsub, spawn_zenohd, wait_for_substring,
+    wz_ap_demo_binary, zenoh_pico_cli_binary, PortReservation,
 };
 
 /// The router-tier convergence witness the wz `--router-hat` node logs once its
@@ -1209,4 +1228,167 @@ fn wz_router_hat_undeclare_re_arms_a_pico_queriers_write_filter() {
                  the querier)\n--- z_querier stdout ---\n{c}"
             )
         });
+}
+
+/// Leg 9 — the LIVELINESS-TOKEN cross-impl lifecycle acid test (§5.21
+/// routing-token-tables, R311y170-175), the token twin of legs 7 & 8 folded into
+/// one subscriber lifecycle. A pico `z_sub_liveliness` (client of the WZ router,
+/// spawned FIRST) declares a FUTURE-only liveliness-token interest (no `-h`, pico
+/// `InterestMode::Future`); a pico `z_liveliness` (client of ZENOHD, spawned
+/// SECOND) declares a token `group1/zenoh-pico`. zenohd floods it over
+/// `routers_net` as a sourced DeclareToken (zenohd hat/router/token.rs
+/// `propagate_sourced_token` -> `send_sourced_token_to_net_clildren`: a full
+/// link-state flood, NOT interest-gated — the SAME mechanism legs 2-8 prove for
+/// subs/qabls), which wz `ingest_token`s and PROACTIVELY pushes to the
+/// subscriber's stored future interest (slice-4 `push_future_token`) — the ONLY
+/// delivery path given a FUTURE-only interest has no CURRENT dump to race. The
+/// subscriber prints `New alive token`. Then — the slice-5 undeclare closure —
+/// z_liveliness is KILLED; its socket close (it installs no signal handler) makes
+/// zenohd flood an UndeclareToken, which wz `undeclare_push_token`s to the
+/// subscriber, which prints `Dropped token`.
+///
+/// ONE test, not two: unlike legs 7/8 (leg 8 needs a DIFFERENT z_querier
+/// invocation `-a` to make the write-filter re-arm a positive observable), the
+/// SAME z_sub_liveliness process prints BOTH the declare (`New alive token`,
+/// z_sub_liveliness.c PUT) and the undeclare (`Dropped token`, DELETE) — so the
+/// token lifecycle is one continuous observable on one subscriber, and folding
+/// saves a zenohd respawn. The wz-side `pushed a future token` witness pins the
+/// declare delivery to the FUTURE push (not a raced dump); the exact keyexpr is
+/// asserted on BOTH pico lines so an id-keyed undeclare black-hole (a wrong/empty
+/// keyexpr) cannot pass. The CURRENT-mode token readiness leg (token-before-
+/// subscriber, gating on a `learned a mesh token` witness) is deferred — it needs
+/// `z_sub_liveliness -h` and a mesh-token readiness accessor no leg here consumes.
+#[test]
+#[ignore = "binary-dep e2e (zenohd + zenoh-pico z_sub_liveliness/z_liveliness + wz-ap-demo --features router-hat-router,routing-token-tables); run via Layer Z / --ignored"]
+fn wz_router_hat_token_lifecycle_reaches_a_pico_liveliness_subscriber() {
+    let z_liveliness = zenoh_pico_cli_binary("z_liveliness");
+    let z_sub_liveliness = zenoh_pico_cli_binary("z_sub_liveliness");
+    let port_res = PortReservation::pick();
+    let zport = port_res.port();
+    let _zenohd = spawn_zenohd(zport, tempfile);
+    let zaddr = format!("127.0.0.1:{zport}");
+
+    // wz --router-hat dials zenohd; wait for the router backbone to converge BEFORE
+    // attaching clients so the link-state token flood has a mesh to cross.
+    let (mut wz_guard, mut wz_reader, wz_port) = spawn_router_hat_dialing(&zaddr);
+    if wait_for_substring(
+        &mut wz_reader,
+        ROUTERS_NET_CONVERGED,
+        Duration::from_secs(15),
+    )
+    .is_err()
+    {
+        let c = read_captured(&mut wz_reader);
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        panic!(
+            "wz <-> zenohd router backbone never converged within 15s\n\
+             --- wz-router-hat stderr ---\n{c}"
+        );
+    }
+
+    // z_sub_liveliness: a pico CLIENT of WZ, subscribing group1/** — spawned FIRST,
+    // with NO token declared anywhere. FUTURE-only (no -h), so wz stores its token
+    // interest with an empty CURRENT dump; that wz stored it is proven downstream by
+    // the `pushed a future token` witness (which can only fire from a stored future
+    // interest). The token keyexpr group1/zenoh-pico intersects group1/**.
+    let sub_endpoint = format!("tcp/127.0.0.1:{wz_port}");
+    let (mut z_sub_guard, mut z_sub_reader) = spawn_liveliness_subscriber(
+        &z_sub_liveliness,
+        "group1/**",
+        &sub_endpoint,
+        "wz-router-hat",
+        tempfile,
+    );
+
+    // z_liveliness: a pico CLIENT of ZENOHD, declaring token group1/zenoh-pico —
+    // spawned SECOND. zenohd floods it over routers_net to wz, which pushes an
+    // unsolicited DeclareToken to z_sub_liveliness's stored future interest.
+    let token_endpoint = format!("tcp/127.0.0.1:{zport}");
+    let (mut z_token_guard, mut z_token_reader) = spawn_liveliness_token(
+        &z_liveliness,
+        "group1/zenoh-pico",
+        &token_endpoint,
+        "zenohd",
+        tempfile,
+    );
+
+    // FUTURE-push proof: wz proactively pushed the token to the subscriber's face —
+    // the ONLY delivery path given the FUTURE-only interest (no CURRENT dump).
+    let pushed = wait_for_substring(
+        &mut wz_reader,
+        "router-hat: pushed a future token",
+        Duration::from_secs(20),
+    );
+    // Acid test (declare half): the token declared by z_liveliness behind zenohd
+    // reaches the pico subscriber behind wz as a PUT — cross-impl, over the backbone.
+    let alive = wait_for_substring(
+        &mut z_sub_reader,
+        "New alive token ('group1/zenoh-pico')",
+        Duration::from_secs(20),
+    );
+
+    // Undeclare half (slice-5 reconcile-notify closure): kill z_liveliness. It
+    // installs no signal handler, so its SOCKET CLOSE (not a graceful undeclare) is
+    // what makes zenohd flood the UndeclareToken; wz undeclare_push_token's it to the
+    // subscriber, which prints the DELETE. Only probed once the declare half arrived.
+    let dropped = alive.is_ok().then(|| {
+        let _ = z_token_guard.child_mut().kill();
+        let _ = z_token_guard.child_mut().wait();
+        wait_for_substring(
+            &mut z_sub_reader,
+            "Dropped token ('group1/zenoh-pico')",
+            Duration::from_secs(20),
+        )
+    });
+
+    let _ = z_sub_guard.child_mut().kill();
+    let _ = z_sub_guard.child_mut().wait();
+    let _ = z_token_guard.child_mut().kill();
+    let _ = z_token_guard.child_mut().wait();
+    graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+    let wz_captured = read_captured(&mut wz_reader);
+    let z_sub_captured = read_captured(&mut z_sub_reader);
+    let z_token_captured = read_captured(&mut z_token_reader);
+    eprintln!("--- wz-router-hat stderr ---\n{wz_captured}");
+    eprintln!("--- z_sub_liveliness stdout ---\n{z_sub_captured}");
+    eprintln!("--- z_liveliness stdout ---\n{z_token_captured}");
+
+    pushed.unwrap_or_else(|c| {
+        panic!(
+            "wz-router-hat never PUSHED a future token within 20s (no 'pushed a future \
+             token') — the slice-4 proactive push did not fire, so a subscriber-before-\
+             token liveliness subscriber would never receive the token (or the real pico \
+             z_sub_liveliness did not send a FUTURE-mode token interest, or zenohd did not \
+             flood the token over routers_net)\n--- wz-router-hat stderr ---\n{c}"
+        )
+    });
+    alive.unwrap_or_else(|c| {
+        panic!(
+            "pico z_sub_liveliness behind wz never logged \"New alive token \
+             ('group1/zenoh-pico')\" within 20s — the FUTURE-mode token push did not \
+             deliver the token declared behind zenohd over the cross-impl router backbone \
+             (the future push did not reach the subscriber, or the keyexpr drifted)\n\
+             --- z_sub_liveliness stdout ---\n{c}"
+        )
+    });
+    dropped
+        .expect("alive implies the undeclare was probed")
+        .unwrap_or_else(|c| {
+            panic!(
+                "pico z_sub_liveliness never logged \"Dropped token \
+                 ('group1/zenoh-pico')\" within 20s after z_liveliness was killed — the \
+                 slice-5 undeclare_push_token did not reach the subscriber cross-impl \
+                 (zenohd did not flood the UndeclareToken on the socket close, wz did not \
+                 push it, or the id-keyed undeclare resolved the wrong keyexpr)\n\
+                 --- z_sub_liveliness stdout ---\n{c}"
+            )
+        });
+    // Foreign-side proof: the token originated at the REAL cross-impl declarer
+    // (z_liveliness behind zenohd), not a wz-local synthesis (wz declares no token).
+    assert!(
+        z_token_captured.contains("Declaring liveliness token 'group1/zenoh-pico'"),
+        "z_liveliness behind zenohd never logged its token declaration — the token the \
+         subscriber saw did not originate at the real cross-impl declarer\n\
+         --- z_liveliness stdout ---\n{z_token_captured}"
+    );
 }

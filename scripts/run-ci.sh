@@ -4168,6 +4168,16 @@ layer_z_zenohd_interop() {
         echo "Layer Z SKIP: zenoh-pico z_querier not built (run: bash scripts/build-zenoh-pico-cli.sh)"
         return 0
     fi
+    # §5.21 token cross-impl leg — the router-hat token lifecycle leg spawns the
+    # pico z_sub_liveliness (the liveliness SUBSCRIBER that prints "New alive
+    # token" on the future push + "Dropped token" on the undeclare; z_get_liveliness
+    # is a one-shot GET that can witness neither). z_sub_liveliness was added to
+    # build-zenoh-pico-cli.sh alongside z_liveliness; same near-impossible symmetry
+    # guard as z_querier -> SKIP (not FAIL) on a stale build missing it.
+    if [[ ! -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
+        echo "Layer Z SKIP: zenoh-pico z_sub_liveliness not built (run: bash scripts/build-zenoh-pico-cli.sh)"
+        return 0
+    fi
     # wz-ap-demo is the wz client (--connect zenohd) for the client-tier legs
     # AND the `--router-hat` node for the R311y140 router-tier federation leg
     # (wz_router_hat_zenohd_interop). Build it with BOTH the `ws` feature
@@ -4175,7 +4185,12 @@ layer_z_zenohd_interop() {
     # `ws/...`) and `router-hat-router` (the run-mode presenting wire
     # WhatAmI::Router). Both are additive — the TCP client legs 1-7 dial through
     # the same binary unchanged; pico dials TCP (zenoh-pico has no native WS).
-    (cd crates && cargo build -p wz-ap-demo --features ws,router-hat-router --quiet) || return 1
+    # `routing-token-tables` (R311y170-175) is additive: it compiles the router
+    # liveliness-TOKEN plane + the `pushed a future token` witness into the SAME
+    # binary so the token cross-impl leg exercises it; the non-token legs 1-8 dial
+    # through the unchanged binary. router-hat-router is redundant under the
+    # passthrough but kept explicit to match this line's documenting comment.
+    (cd crates && cargo build -p wz-ap-demo --features ws,router-hat-router,routing-token-tables --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients

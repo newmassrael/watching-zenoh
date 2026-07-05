@@ -2109,6 +2109,8 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     let mut announced_mesh_sub = false;
     let mut announced_future_push = false;
     let mut announced_future_qabl_push = false;
+    #[cfg(feature = "routing-token-tables")]
+    let mut announced_future_token_push = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -2196,6 +2198,19 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
                     announced_future_qabl_push = true;
                     log::info!("wz-ap-demo router-hat: pushed a future queryable");
                 }
+                // FUTURE-push LIVELINESS-TOKEN twin (§5.21 routing-token-tables,
+                // barrier-free discriminator for the token cross-impl leg): fires
+                // ONCE when this router has PROACTIVELY pushed an unsolicited
+                // DeclareToken to a CLIENT face whose FUTURE token interest predated
+                // the token (slice-4 push_future_token). A liveliness subscriber that
+                // declared BEFORE any token receives the token ONLY via this push
+                // (a FUTURE-only interest has no CURRENT dump to race), so asserting
+                // it proves the delivery was the proactive push, not a raced dump.
+                #[cfg(feature = "routing-token-tables")]
+                if !announced_future_token_push && forwarder.future_token_pushes_seen() > 0 {
+                    announced_future_token_push = true;
+                    log::info!("wz-ap-demo router-hat: pushed a future token");
+                }
             }
         }
     };
@@ -2259,6 +2274,16 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
         log::info!(
             "wz-ap-demo router-hat: pushed a future queryable ({} push(es))",
             forwarder.future_qabl_pushes_seen()
+        );
+    }
+    // FUTURE-push LIVELINESS-TOKEN counterpart (latched, emitted unconditionally on
+    // >0 at teardown so a test need not race the 250 ms app tick) — the slice-4
+    // proactive token-push proof the token cross-impl leg asserts.
+    #[cfg(feature = "routing-token-tables")]
+    if forwarder.future_token_pushes_seen() > 0 {
+        log::info!(
+            "wz-ap-demo router-hat: pushed a future token ({} push(es))",
+            forwarder.future_token_pushes_seen()
         );
     }
     Ok(())

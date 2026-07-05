@@ -882,6 +882,112 @@ pub mod common {
         );
     }
 
+    /// Spawn a zenoh-pico `z_liveliness` (a client + liveliness-TOKEN declarer)
+    /// against `endpoint`, blocking until it has declared its token (the
+    /// `Declaring liveliness token '<keyexpr>'...` readiness line). No `-t` is
+    /// passed, so the token is held for the process's whole lifetime — z_liveliness
+    /// undeclares only on exit / socket close, so killing the child triggers the
+    /// UndeclareToken flood the undeclare half of the token cross-impl leg observes.
+    /// The liveliness-token twin of [`spawn_answering_zqueryable`], with the same
+    /// 6-attempt foreign-one-shot open-retry.
+    pub fn spawn_liveliness_token(
+        z_liveliness: &Path,
+        keyexpr: &str,
+        endpoint: &str,
+        router_label: &str,
+        mut mk_stdout: impl FnMut() -> File,
+    ) -> (ChildGuard, File) {
+        const ATTEMPTS: usize = 6;
+        for attempt in 1..=ATTEMPTS {
+            let out = mk_stdout();
+            let out_writer = out.try_clone().expect("dup z_liveliness stdout handle");
+            let mut out_reader = out;
+            let mut child = ChildGuard::wrap(
+                "z_liveliness client (zenoh-pico)",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(z_liveliness)
+                    .args(["-k", keyexpr, "-e", endpoint, "-m", "client"])
+                    .stdout(Stdio::from(out_writer))
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn z_liveliness via stdbuf"),
+            );
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let cap = read_captured(&mut out_reader);
+                if cap.contains("Declaring liveliness token") {
+                    return (child, out_reader); // session open + token declared
+                }
+                if cap.contains("Unable to open session") || Instant::now() >= deadline {
+                    break; // transient open failure / timeout -> respawn
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.child_mut().kill();
+            let _ = child.child_mut().wait();
+            eprintln!("z_liveliness open attempt {attempt}/{ATTEMPTS} did not declare; retrying");
+        }
+        panic!(
+            "pico z_liveliness failed to open a session to {router_label} after {ATTEMPTS} attempts"
+        );
+    }
+
+    /// Spawn a zenoh-pico `z_sub_liveliness` (a client + liveliness SUBSCRIBER)
+    /// against `endpoint`, blocking until it has declared its subscriber (the
+    /// `Declaring liveliness subscriber on '<keyexpr>'...` readiness line). No `-h`
+    /// is passed, so the subscriber's token interest is FUTURE-only (no
+    /// CURRENT/history bit, pico `src/net/liveliness.c` `mode = FUTURE`) — a token
+    /// therefore reaches it ONLY via the router's proactive future push, making the
+    /// router's `future_token_pushes_seen()` a deterministic discriminator (no
+    /// CURRENT dump to race). Its handler prints `New alive token ('<ke>')` on a
+    /// token declaration and `Dropped token ('<ke>')` on an undeclare. Same
+    /// 6-attempt open-retry as the other pico client helpers.
+    pub fn spawn_liveliness_subscriber(
+        z_sub_liveliness: &Path,
+        keyexpr: &str,
+        endpoint: &str,
+        router_label: &str,
+        mut mk_stdout: impl FnMut() -> File,
+    ) -> (ChildGuard, File) {
+        const ATTEMPTS: usize = 6;
+        for attempt in 1..=ATTEMPTS {
+            let out = mk_stdout();
+            let out_writer = out.try_clone().expect("dup z_sub_liveliness stdout handle");
+            let mut out_reader = out;
+            let mut child = ChildGuard::wrap(
+                "z_sub_liveliness client (zenoh-pico)",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(z_sub_liveliness)
+                    .args(["-k", keyexpr, "-e", endpoint, "-m", "client"])
+                    .stdout(Stdio::from(out_writer))
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn z_sub_liveliness via stdbuf"),
+            );
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let cap = read_captured(&mut out_reader);
+                if cap.contains("Declaring liveliness subscriber on") {
+                    return (child, out_reader); // session open + subscriber declared
+                }
+                if cap.contains("Unable to open session") || Instant::now() >= deadline {
+                    break; // transient open failure / timeout -> respawn
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.child_mut().kill();
+            let _ = child.child_mut().wait();
+            eprintln!(
+                "z_sub_liveliness open attempt {attempt}/{ATTEMPTS} did not declare; retrying"
+            );
+        }
+        panic!(
+            "pico z_sub_liveliness failed to open a session to {router_label} after {ATTEMPTS} attempts"
+        );
+    }
+
     /// Spawn a zenohd router on the given `-l` listener locators and block until
     /// it is HANDSHAKE-ready. The spawn + two-stage readiness SSOT both zenohd
     /// spawn variants delegate to (R311pn). `--no-multicast-scouting` +

@@ -207,6 +207,17 @@ routing-router-hat = ["routing-peer", "wz/routing-router-hat"]
 # foundation's routing-peer) of the E2E harness. Not in `default`; Layer E7 builds
 # this binary.
 router-hat-router = ["routing-router-hat"]
+# §5.21 routing-token-tables (R311y170-175) — compiles the router-tier
+# liveliness-TOKEN propagation plane into the demo binary so `run_router_hat`
+# can surface its `pushed a future token` witness (the token twin of
+# `pushed a future subscriber`). Pulls `router-hat-router` (the token witnesses
+# live INSIDE the `#[cfg(feature="router-hat-router")]` run_router_hat fn — a
+# minimal `["wz/routing-token-tables"]` passthrough would let the feature be
+# enabled standalone with the run-mode compiled out, a silent NOP) plus the wz
+# facade forward. The Layer Z zenohd-interop build opts into it so the token
+# cross-impl leg exercises the plane; it stays independently toggleable (A3
+# active <=> its own cfg sites, distinct from router-hat-router's).
+routing-token-tables = ["router-hat-router", "wz/routing-token-tables"]
 
 [lints]
 workspace = true
