@@ -1185,13 +1185,25 @@ layer_c1ax_cargo_test_routing_namespace() {
 #      (acl+downsampling+quota) clippy-gates --all-targets so the shared
 #      `InterceptorConfig { .. }` spread is non-redundant (the C1y needless_update
 #      caveat).
+#   5. §5.21 routing-token-tables (slice-1): the router liveliness-TOKEN dual-tier
+#      ingest plane (the token twin of router_subs/router_qabls). The
+#      `routing-router-hat,routing-token-tables` arm RUNS the token units
+#      (router/peer/client tier landing, within-tier reflood, change-gate,
+#      face-down purge) that are `#[cfg(feature="routing-token-tables")]`-gated
+#      and NEVER compiled by the plain routing-router-hat arm above; the
+#      `--no-default-features --features routing-token-tables` clippy arm proves
+#      standalone composition (it pulls routing-router-hat), so the token cfg sites
+#      are never a dead, unlinted stub.
 layer_c1ay_cargo_test_router_hat() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,access-acl,access-downsampling,access-quota --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,access-acl,access-downsampling,access-quota --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,routing-token-tables --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-token-tables --quiet -- -D warnings)
 }
 
 # ─── Layer C1az — §5.26 rest-sse-subscribe: the SSE half of the REST bridge ─

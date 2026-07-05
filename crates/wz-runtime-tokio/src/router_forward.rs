@@ -314,6 +314,8 @@ use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::push::PushOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
+#[cfg(feature = "routing-token-tables")]
+use wz_session_core::declare_build::build_declare_token;
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable_reply,
     build_declare_queryable_reply_with_id, build_declare_queryable_with_id_info,
@@ -338,6 +340,8 @@ use crate::future_interest::{FutureQablStore, FutureSubStore};
 use crate::interceptor::{
     InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow,
 };
+#[cfg(feature = "routing-token-tables")]
+use crate::linkstate_forward::declare_token_wireexpr;
 use crate::linkstate_forward::{
     absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info,
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
@@ -522,6 +526,18 @@ pub struct RouterForwarder {
     /// Peer-tier queryable interest (zenoh `HatTables.linkstatepeer_qabls`).
     /// Populated by slice 1c (native Peer queryable sources keyed by zid).
     linkstatepeer_qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    /// Router-tier liveliness-TOKEN interest (zenoh `HatTables.router_tokens`).
+    /// The TOKEN TWIN of `router_subs` — a source-zid set with NO value payload
+    /// (tokens carry no info, unlike `QueryableInfo`), so `V = ()` exactly like
+    /// the sub plane. Populated by the token-INGEST slice: NATIVE Router token
+    /// sources keyed by their zid; within-tier re-flood only (the cross-tier
+    /// self-bubble is a later slice).
+    #[cfg(feature = "routing-token-tables")]
+    router_tokens: RefCell<LinkstatepeerInterest<()>>,
+    /// Peer-tier liveliness-TOKEN interest (zenoh `HatTables.linkstatepeer_tokens`).
+    /// The token twin of `linkstatepeer_subs` (native Peer token sources by zid).
+    #[cfg(feature = "routing-token-tables")]
+    linkstatepeer_tokens: RefCell<LinkstatepeerInterest<()>>,
     /// Per-CLIENT-face subscription store (C2) — zenoh's per-`Resource`
     /// `session_ctxs` leaf input, keyed by the client's [`FaceId`] (a Client face
     /// is HELD with no mesh, so its interest cannot live in a Zid-keyed tier
@@ -712,6 +728,10 @@ impl RouterForwarder {
             linkstatepeer_subs: RefCell::new(LinkstatepeerInterest::new()),
             router_qabls: RefCell::new(LinkstatepeerInterest::new()),
             linkstatepeer_qabls: RefCell::new(LinkstatepeerInterest::new()),
+            #[cfg(feature = "routing-token-tables")]
+            router_tokens: RefCell::new(LinkstatepeerInterest::new()),
+            #[cfg(feature = "routing-token-tables")]
+            linkstatepeer_tokens: RefCell::new(LinkstatepeerInterest::new()),
             client_subs: RefCell::new(HashMap::new()),
             client_qabls: RefCell::new(HashMap::new()),
             future_subs: RefCell::new(FutureSubStore::new()),
@@ -1127,6 +1147,22 @@ impl RouterForwarder {
                 affected_qabl_keys.extend(qabls.remove_peer_keys(zid));
             }
         }
+        // §5.21 routing-token-tables (slice-1) — drain the departed natives'
+        // token entries too, so a face-down / topology-detach does not LEAK a
+        // gone source in `router_tokens` / `linkstatepeer_tokens`. This is the
+        // register-only slice's face-down safety net (mirroring the subs/qabls
+        // drain above); slice-1 has no cross-tier token advertise and no
+        // client-token push, so the removed keys need no further re-evaluation
+        // (unlike subs/qabls, whose keys drive `withdraw_native_cross_tier_*` +
+        // `undeclare_push_*` below). tier is Routers|LinkstatePeers here (Client
+        // returned early above), so `tokens_table` is `Some`.
+        #[cfg(feature = "routing-token-tables")]
+        if let Some(tokens) = self.tokens_table(tier) {
+            let mut tokens = tokens.borrow_mut();
+            for zid in removed {
+                let _ = tokens.remove_peer_keys(zid);
+            }
+        }
         // R311y152 — the UNGRACEFUL detach now fires the undeclare-push too (this
         // was the "benign NAMED deferral" the R311y151 residual left OFF here): a
         // native departing via face-down / link-down / topology-detach un-backs a
@@ -1178,6 +1214,19 @@ impl RouterForwarder {
         match tier {
             FaceTier::Routers => Some(&self.router_subs),
             FaceTier::LinkstatePeers => Some(&self.linkstatepeer_subs),
+            FaceTier::Client => None,
+        }
+    }
+
+    /// The liveliness-token interest table for `tier`, or `None` for
+    /// [`FaceTier::Client`] (client-token propagation is a later slice) — the
+    /// token twin of [`subs_table`](Self::subs_table). Tokens carry no value,
+    /// so both tiers are `LinkstatepeerInterest<()>`, identical to the sub plane.
+    #[cfg(feature = "routing-token-tables")]
+    fn tokens_table(&self, tier: FaceTier) -> Option<&RefCell<LinkstatepeerInterest<()>>> {
+        match tier {
+            FaceTier::Routers => Some(&self.router_tokens),
+            FaceTier::LinkstatePeers => Some(&self.linkstatepeer_tokens),
             FaceTier::Client => None,
         }
     }
@@ -1316,6 +1365,58 @@ impl RouterForwarder {
             // but the guard is faithful).
             self.push_future_subscription(&ke, inbound);
         }
+    }
+
+    /// Ingest a sourced `DeclareToken` (§5.21 routing-token-tables, slice-1) —
+    /// the liveliness-token twin of
+    /// [`ingest_subscription`](Self::ingest_subscription): register the SOURCE
+    /// in the inbound tier's `tokens` table (Router face -> `router_tokens`,
+    /// Peer face -> `linkstatepeer_tokens`) + within-tier re-flood, carrier
+    /// `build_declare_token(0, 0, Some(ke))` (id 0 = sourced, keyexpr inline —
+    /// the identical convention `build_declare_subscriber(0, 0, Some(ke))` uses).
+    ///
+    /// Slice-1 is REGISTER-ONLY and calls the shared
+    /// [`ingest_interest`](Self::ingest_interest) core DIRECTLY, NOT via the
+    /// `ingest_subscription` wrapper: the wrapper's
+    /// `advertise_native_cross_tier_sub` + `push_future_subscription` tail is the
+    /// cross-tier / client future-push plane, a LATER token slice. A Client face
+    /// (no tier table) is likewise deferred, and an inbound SOURCED
+    /// `UndeclareToken` (`{id:0, ext_wire_expr}` from a peer router's graceful
+    /// withdraw) is dropped at the `forward()` catch-all until the `UndeclToken`
+    /// codec gains an `ext_wire_expr` extension (the qabl-plane pattern); the
+    /// face-down [`purge_detached_interest_tier`](Self::purge_detached_interest_tier)
+    /// drains a departed source's tokens in the meantime.
+    #[cfg(feature = "routing-token-tables")]
+    fn ingest_token(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let Some(wireexpr) = declare_token_wireexpr(declare) else {
+            return;
+        };
+        let Some(tokens) = self.tokens_table(tier) else {
+            return; // Client tier -> a later slice.
+        };
+        let changed = self.ingest_interest(
+            inbound,
+            tier,
+            reliable,
+            declare,
+            wireexpr,
+            tokens,
+            (),
+            |ke| build_declare_token(0, 0, Some(ke)),
+        );
+        log::debug!(
+            "router forward: mesh token ingest on face {inbound:?} tier {tier:?} -> {}",
+            match &changed {
+                Some(ke) => format!("REGISTERED {ke:?}"),
+                None => "not registered (unresolvable / no-change)".to_string(),
+            }
+        );
     }
 
     /// Respond to an inbound `Interest` solicitation — the zenoh-1.x
@@ -3981,6 +4082,16 @@ impl FaceForwarder for RouterForwarder {
                         } else {
                             self.withdraw_queryable(id, tier, *reliable, declare);
                         }
+                    }
+                    // §5.21 routing-token-tables (slice-1) — a sourced DeclareToken
+                    // on a MESH face (Router -> router_tokens, Peer ->
+                    // linkstatepeer_tokens) registers + re-floods within its tier.
+                    // Client-tier tokens + the sourced UndeclareToken withdraw are
+                    // later slices; both fall through to the `_ => {}` catch-all
+                    // (a Client-tier DeclToken fails this arm's guard).
+                    #[cfg(feature = "routing-token-tables")]
+                    DeclareOwnedVariant::CodecZenohDeclToken(_) if tier != FaceTier::Client => {
+                        self.ingest_token(id, tier, *reliable, declare);
                     }
                     _ => {}
                 },
@@ -7253,6 +7364,159 @@ mod tests {
         assert!(
             fwd.router_subs.borrow().interested("demo/data").is_empty(),
             "the departed source's interest is purged (no bubble to leak)"
+        );
+    }
+
+    // ── §5.21 routing-token-tables (slice-1): liveliness-TOKEN dual-tier INGEST ──
+
+    /// A sourced `DeclareToken` for `keyexpr` (id 0 = sourced, keyexpr inline —
+    /// the liveliness-token twin of [`declare_sub`]).
+    #[cfg(feature = "routing-token-tables")]
+    fn declare_token_msg(keyexpr: &str) -> NetworkMessage {
+        NetworkMessage::Declare(Box::new(
+            build_declare_token(0, 0, Some(keyexpr)).expect("build declare token"),
+        ))
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn router_face_token_lands_in_router_tokens_only() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
+        assert_eq!(
+            fwd.router_tokens.borrow().interested("live/data"),
+            vec![zid(0xAA)],
+            "the router-face token source is registered in router_tokens"
+        );
+        assert!(
+            fwd.linkstatepeer_tokens
+                .borrow()
+                .interested("live/data")
+                .is_empty(),
+            "no native peer token entry (the cross-tier bubble is a later slice)"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn peer_face_token_lands_in_linkstatepeer_tokens_only() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (b, _sink) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &b);
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
+        assert_eq!(
+            fwd.linkstatepeer_tokens.borrow().interested("live/data"),
+            vec![zid(0xBB)],
+        );
+        assert!(fwd
+            .router_tokens
+            .borrow()
+            .interested("live/data")
+            .is_empty());
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn client_face_token_is_not_ingested() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c, _sink) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &c);
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
+        assert!(
+            fwd.router_tokens
+                .borrow()
+                .interested("live/data")
+                .is_empty()
+                && fwd
+                    .linkstatepeer_tokens
+                    .borrow()
+                    .interested("live/data")
+                    .is_empty(),
+            "a client-face token is not ingested into either mesh tier (client slice deferred)"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn token_declare_re_floods_within_the_tier_only() {
+        // The token twin of `declare_re_floods_within_the_tier_only`: a sourced
+        // DeclareToken floods along the SOURCE's tree WITHIN its tier — to the
+        // same-tier tree child, never back to the inbound source, never to the
+        // other tier.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // same-tier tree child
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // other tier
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        sink_a.reset();
+        sink_c.reset();
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
+        assert_eq!(
+            fwd.router_tokens.borrow().interested("live/data"),
+            vec![zid(0xAA)],
+            "self learned A's token"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "re-flooded to the same-tier tree child C"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
+        assert_eq!(sink_p.frame_count(), 0, "not to the peer tier");
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn duplicate_token_does_not_re_flood() {
+        // The change-gate: a re-declared token from a KNOWN source is a no-op
+        // (`register` returns false), so it does NOT re-flood a second time.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_ROUTER);
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // first: re-floods
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // duplicate: gated
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a re-declare of a known token does not re-flood (the change-gate)"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn token_face_down_is_purged() {
+        // The face-down safety net (the ADJUST-2 purge extension): a departed
+        // native token source is drained from `router_tokens`, so register-only
+        // does not leak a gone source until the sourced-UndeclareToken codec lands.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
+        assert_eq!(
+            fwd.router_tokens.borrow().interested("live/data"),
+            vec![zid(0xAA)]
+        );
+        fwd.deregister(FaceId(0));
+        assert!(
+            fwd.router_tokens
+                .borrow()
+                .interested("live/data")
+                .is_empty(),
+            "the departed token source is purged (no leak in the register-only slice)"
         );
     }
 

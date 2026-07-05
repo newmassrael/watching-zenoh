@@ -798,7 +798,7 @@ routing-interest-pending-gc = []
 routing-namespace = ["wz-runtime-tokio?/routing-namespace"]
 routing-query-route-compute = []
 routing-route-cache = []
-routing-token-tables = []
+routing-token-tables = ["routing-router-hat", "wz-runtime-tokio?/routing-token-tables"]
 
 # ----- §5.22 plugin (6 atomic, all reserved) -----
 plugin-abi-compat = []

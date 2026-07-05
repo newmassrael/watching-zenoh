@@ -4128,6 +4128,19 @@ pub(crate) fn declare_queryable_wireexpr(declare: &DeclareOwned) -> Option<&Wire
     }
 }
 
+/// The keyexpr `Wireexpr` a `DeclareToken` declares a liveliness token for —
+/// `None` for a non-token Declare body. The liveliness-token twin of
+/// [`declare_subscriber_wireexpr`]; the `DeclareToken` carries its keyexpr
+/// inline (like `DeclareSubscriber`), returned raw (literal OR aliased) so the
+/// caller resolves it against the inbound face's alias table (B1b).
+#[cfg(feature = "routing-token-tables")]
+pub(crate) fn declare_token_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
+    match &declare.body {
+        DeclareOwnedVariant::CodecZenohDeclToken(t) => Some(&t.keyexpr),
+        _ => None,
+    }
+}
+
 impl FaceForwarder for LinkstateForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
         // Connect the face in the graph if its routing zid surfaced at the

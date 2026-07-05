@@ -834,6 +834,15 @@ routing-peer = [
 # (the A3 active site) and pulls this foundation. R311y132 flipped `router-hat-router`
 # reserved -> ACTIVE once the ACTIVATION E2E harness landed.
 routing-router-hat = ["routing-peer"]
+# §5.21 routing-token-tables — the router-tier liveliness-TOKEN propagation
+# plane (zenoh hat/router/token.rs), the TOKEN TWIN of the router_subs /
+# router_qabls declaration tables. Slice-1 = dual-tier NATIVE DeclareToken
+# ingest + within-tier re-flood (register-only; the sourced-UndeclareToken
+# withdraw awaits an UndeclToken ext_wire_expr codec, the qabl-plane pattern).
+# Composes only the RouterForwarder foundation: the DeclToken codec rides
+# routing-peer -> codec-declare already (like build_declare_subscriber under
+# routing-router-hat), so no declare-token app-surface dep is needed.
+routing-token-tables = ["routing-router-hat"]
 # ── §5.16 access-control composition knobs ───────────────────────────
 # Each independently elides ONE interceptor on the routing-peer admission
 # chain (interceptor/{access_control,downsampling,low_pass}.rs). The chain
