@@ -31,7 +31,7 @@ use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::undecl_kexpr::UndeclKexpr;
 use wz_codecs::undecl_queryable::UndeclQueryableOwned;
 use wz_codecs::undecl_subscriber::UndeclSubscriberOwned;
-use wz_codecs::undecl_token::UndeclToken;
+use wz_codecs::undecl_token::UndeclTokenOwned;
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
@@ -729,11 +729,41 @@ pub fn build_undeclare_token(token_id: u64) -> DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareOwnedVariant::CodecZenohUndeclToken(UndeclToken {
+        body: DeclareOwnedVariant::CodecZenohUndeclToken(UndeclTokenOwned {
             header: wire_const::D_MID_UNDECL_TOKEN,
             id: token_id,
+            // Z=0 id-only retraction: no ext_keyexpr. The keyexpr-carrying
+            // sourced form is build_undeclare_token_with_keyexpr (below).
+            extensions: None,
         }),
     }
+}
+
+/// Build a SOURCED `Declare(UndeclareToken)` that retracts a liveliness token
+/// identified by its LITERAL keyexpr — the token twin of
+/// [`build_undeclare_subscriber_with_keyexpr`] /
+/// [`build_undeclare_queryable_with_keyexpr`]. zenoh retracts a sourced token by
+/// keyexpr, not id (`id == 0`), carrying the keyexpr in the `ext_wire_expr`
+/// extension (zenoh `UndeclareToken { id, ext_wire_expr }`,
+/// `hat/router/token.rs:930-933`). The `id` is 0 and the inner declaration
+/// header sets `Z` (bit 7) to flag the ext chain; the keyexpr ext is built by the
+/// [`declare_ext_keyexpr`](crate::declare_ext_keyexpr) SSOT (identical wire to the
+/// subscriber/queryable retraction, only the inner MID differs — 0x07). Fallible
+/// only by that SSOT's profile-generic signature (the `alloc` owned carrier is
+/// unbounded, so a literal keyexpr is never length-rejected).
+pub fn build_undeclare_token_with_keyexpr(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
+    let ext = crate::declare_ext_keyexpr::build_ext_keyexpr(keyexpr)?;
+    Ok(DeclareOwned {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareOwnedVariant::CodecZenohUndeclToken(UndeclTokenOwned {
+            // Z (bit 7): the inner declaration carries an extension chain.
+            header: wire_const::D_MID_UNDECL_TOKEN | 0x80,
+            id: 0, // sourced tokens use no id; the keyexpr is the identity
+            extensions: Some(alloc::vec![ext]),
+        }),
+    })
 }
 
 /// R121i-c — build a `Declare(DeclFinal)` marker that terminates a
@@ -1800,6 +1830,60 @@ mod tests {
                 );
             }
             _ => panic!("decoded body must be UndeclSubscriber"),
+        }
+    }
+
+    /// The token twin of
+    /// [`build_undeclare_subscriber_with_keyexpr_emits_zenoh_pico_compatible_wire_bytes`]:
+    /// a sourced `UndeclareToken` (id 0, Z=1) carrying the retracted keyexpr in the
+    /// ext_keyexpr chain — the wire the router floods on a native token retraction.
+    /// Only the inner MID differs from the subscriber (0x07 vs 0x03).
+    #[test]
+    fn build_undeclare_token_with_keyexpr_emits_zenoh_pico_compatible_wire_bytes() {
+        let d = build_undeclare_token_with_keyexpr("live/tok").unwrap();
+        let wire = d.wire();
+        let mut expected = vec![
+            wire_const::N_MID_DECLARE, // 0x1E outer Declare envelope
+            0x87,                      // UndeclToken MID 0x07 | Z (ext chain present)
+            0x00,                      // VLE(id 0) — sourced tokens use no id
+            0x5f,                      // ext_keyexpr header: ENC_ZBUF 0x40 | M 0x10 | id 0x0f
+            0x0A,                      // ZBuf len VLE(10) = inner_header(1) + VLE(0)(1) + 8 suffix
+            0x03,                      // inner_header: is_local(2) | has_suffix(1)
+            0x00,                      // VLE(mapping id 0) — literal sentinel
+        ];
+        expected.extend_from_slice(b"live/tok");
+        assert_eq!(
+            wire, expected,
+            "sourced UndeclareToken + ext_keyexpr wire must match zenoh-pico",
+        );
+    }
+
+    /// The token twin of [`undeclare_subscriber_keyexpr_round_trips_through_the_wire`]:
+    /// the stamped ext_keyexpr survives the Declare encode -> decode, so a transit
+    /// linkstate peer recovers the retracted token keyexpr from the decoded body
+    /// (the wire path RouterForwarder::withdraw_token drives).
+    #[test]
+    fn undeclare_token_keyexpr_round_trips_through_the_wire() {
+        use crate::declare_ext_keyexpr::read_ext_keyexpr;
+        use sce_forge_runtime::codec::SceCursor;
+        use wz_codecs::declare::Declare;
+
+        let d = build_undeclare_token_with_keyexpr("live/tok").unwrap();
+        let bytes = d.wire();
+        let mut cursor = SceCursor::new(&bytes);
+        let decoded = Declare::decode(&mut cursor)
+            .and_then(|x| x.try_into_owned())
+            .expect("decode declare");
+        match &decoded.body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
+                assert_eq!(u.id, 0, "sourced retraction carries no id");
+                assert_eq!(
+                    read_ext_keyexpr(u.extensions.as_ref()),
+                    Some("live/tok"),
+                    "ext_keyexpr survived the wire round-trip",
+                );
+            }
+            _ => panic!("decoded body must be UndeclToken"),
         }
     }
 

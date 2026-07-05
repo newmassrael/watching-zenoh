@@ -11,20 +11,34 @@
      Wire shape (default state):
        byte 0   : header (MID 0x07 + Z@7)
        byte 1+  : id (VLE u32)
-       Z-gated  : ext_keyexpr ZBuf ext (non-default coverage carry)
+       Z-gated  : ext_keyexpr ZBuf ext entry — `_z_decl_ext_keyexpr`
+                  shape (`_Z_MSG_EXT_ENC_ZBUF | _Z_MSG_EXT_FLAG_M |
+                  0x0f` header + inner kelen-flag + id VLE + suffix
+                  bytes). The Z=1 form is the SOURCED cross-tier
+                  retraction's keyexpr carrier (zenoh
+                  `UndeclareToken { id, ext_wire_expr }`,
+                  hat/router/token.rs:930-933) — the token twin of
+                  undecl_subscriber's ext chain; the default wire omits
+                  it (Z=0).
 
-     R110d first contact: default state only (Z=0, id=0). Wire is
-     `[0x07, 0x00]` (2 bytes).
+     R110d first contact authored the Z=0 path only; the tlv-chain below
+     mirrors undecl_subscriber, so the Z=1 form now decodes/encodes.
+     Default wire is `[0x07, 0x00]` (2 bytes).
 
      Body byte-identical to upstream wire RFC. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="undecl_token">
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x07"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   max-depth="4" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>
 </scxml>

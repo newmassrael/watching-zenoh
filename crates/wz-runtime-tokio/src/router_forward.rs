@@ -314,8 +314,6 @@ use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::push::PushOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
-#[cfg(feature = "routing-token-tables")]
-use wz_session_core::declare_build::build_declare_token;
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable_reply,
     build_declare_queryable_reply_with_id, build_declare_queryable_with_id_info,
@@ -324,6 +322,8 @@ use wz_session_core::declare_build::{
     build_undeclare_queryable_with_keyexpr, build_undeclare_subscriber,
     build_undeclare_subscriber_with_keyexpr,
 };
+#[cfg(feature = "routing-token-tables")]
+use wz_session_core::declare_build::{build_declare_token, build_undeclare_token_with_keyexpr};
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
@@ -1380,12 +1380,12 @@ impl RouterForwarder {
     /// `ingest_subscription` wrapper: the wrapper's
     /// `advertise_native_cross_tier_sub` + `push_future_subscription` tail is the
     /// cross-tier / client future-push plane, a LATER token slice. A Client face
-    /// (no tier table) is likewise deferred, and an inbound SOURCED
-    /// `UndeclareToken` (`{id:0, ext_wire_expr}` from a peer router's graceful
-    /// withdraw) is dropped at the `forward()` catch-all until the `UndeclToken`
-    /// codec gains an `ext_wire_expr` extension (the qabl-plane pattern); the
-    /// face-down [`purge_detached_interest_tier`](Self::purge_detached_interest_tier)
-    /// drains a departed source's tokens in the meantime.
+    /// (no tier table) is likewise deferred. The retraction counterpart is
+    /// [`withdraw_token`](Self::withdraw_token): a peer router's graceful sourced
+    /// `UndeclareToken` (`{id:0, ext_wire_expr}`) withdraws by keyexpr (the
+    /// `UndeclToken` codec now carries the ext chain), and the face-down
+    /// [`purge_detached_interest_tier`](Self::purge_detached_interest_tier) drains
+    /// a departed source's tokens on an ungraceful departure.
     #[cfg(feature = "routing-token-tables")]
     fn ingest_token(
         &self,
@@ -1416,6 +1416,45 @@ impl RouterForwarder {
                 Some(ke) => format!("REGISTERED {ke:?}"),
                 None => "not registered (unresolvable / no-change)".to_string(),
             }
+        );
+    }
+
+    /// Withdraw a sourced `UndeclareToken` (§5.21 routing-token-tables) — the
+    /// liveliness-token twin of [`withdraw_subscription`](Self::withdraw_subscription)
+    /// and the removal counterpart of [`ingest_token`](Self::ingest_token). The
+    /// retracted keyexpr rides the `ext_wire_expr` extension chain (now that the
+    /// `UndeclToken` codec models it); resolve it, withdraw the SOURCE from the
+    /// inbound tier's token table, and within-tier re-flood a clean sourced
+    /// retraction via `build_undeclare_token_with_keyexpr`. Reuses the shared
+    /// [`withdraw_interest`](Self::withdraw_interest) core DIRECTLY (like
+    /// ingest_token reuses ingest_interest). NATIVE-only: the cross-tier token
+    /// withdraw (the negation of the cross-tier advertise) is a later slice, so
+    /// the change signal is discarded here. An id-keyed simple `UndeclareToken`
+    /// (the RAII drop's form, no ext) resolves no keyexpr and is a no-op — the
+    /// router source-routes tokens by keyexpr, never by id.
+    #[cfg(feature = "routing-token-tables")]
+    fn withdraw_token(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let exts = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => u.extensions.as_ref(),
+            _ => return,
+        };
+        let Some(tokens) = self.tokens_table(tier) else {
+            return; // Client tier -> a later slice.
+        };
+        let _ = self.withdraw_interest(
+            inbound,
+            tier,
+            reliable,
+            declare,
+            exts,
+            tokens,
+            build_undeclare_token_with_keyexpr,
         );
     }
 
@@ -4083,15 +4122,22 @@ impl FaceForwarder for RouterForwarder {
                             self.withdraw_queryable(id, tier, *reliable, declare);
                         }
                     }
-                    // §5.21 routing-token-tables (slice-1) — a sourced DeclareToken
-                    // on a MESH face (Router -> router_tokens, Peer ->
-                    // linkstatepeer_tokens) registers + re-floods within its tier.
-                    // Client-tier tokens + the sourced UndeclareToken withdraw are
-                    // later slices; both fall through to the `_ => {}` catch-all
-                    // (a Client-tier DeclToken fails this arm's guard).
+                    // §5.21 routing-token-tables — a sourced DeclareToken on a MESH
+                    // face (Router -> router_tokens, Peer -> linkstatepeer_tokens)
+                    // registers + re-floods within its tier; its retraction is the
+                    // UndeclareToken arm below. Client-tier tokens are a later slice
+                    // (a Client-tier DeclToken fails this arm's guard -> `_ => {}`).
                     #[cfg(feature = "routing-token-tables")]
                     DeclareOwnedVariant::CodecZenohDeclToken(_) if tier != FaceTier::Client => {
                         self.ingest_token(id, tier, *reliable, declare);
+                    }
+                    // A SOURCED UndeclareToken ({id:0, ext_wire_expr}) retracts a
+                    // mesh source's token by keyexpr — now decodable since the
+                    // UndeclToken codec carries the ext chain. Routes to
+                    // withdraw_token; a Client-tier retraction is a later slice.
+                    #[cfg(feature = "routing-token-tables")]
+                    DeclareOwnedVariant::CodecZenohUndeclToken(_) if tier != FaceTier::Client => {
+                        self.withdraw_token(id, tier, *reliable, declare);
                     }
                     _ => {}
                 },
@@ -7500,8 +7546,8 @@ mod tests {
     #[test]
     fn token_face_down_is_purged() {
         // The face-down safety net (the ADJUST-2 purge extension): a departed
-        // native token source is drained from `router_tokens`, so register-only
-        // does not leak a gone source until the sourced-UndeclareToken codec lands.
+        // native token source is drained from `router_tokens` on an UNGRACEFUL
+        // departure (a graceful retraction rides the sourced UndeclareToken arm).
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
@@ -7518,6 +7564,74 @@ mod tests {
                 .is_empty(),
             "the departed token source is purged (no leak in the register-only slice)"
         );
+    }
+
+    /// A SOURCED `UndeclareToken` retracting `keyexpr` (id 0, keyexpr in the
+    /// ext_wire_expr chain — decodable now that the UndeclToken codec models the
+    /// ext). The token twin of the `build_undeclare_subscriber_with_keyexpr` msg.
+    #[cfg(feature = "routing-token-tables")]
+    fn undeclare_token_msg(keyexpr: &str) -> NetworkMessage {
+        NetworkMessage::Declare(Box::new(
+            build_undeclare_token_with_keyexpr(keyexpr).expect("build undeclare token"),
+        ))
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn undeclare_token_withdraws_from_the_inbound_tier() {
+        // The codec round's native withdraw: a sourced UndeclareToken (keyexpr in
+        // the ext) drains the source from router_tokens. Proves the forward()
+        // UndeclareToken arm + withdraw_token + the regenerated ext codec.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
+        assert_eq!(
+            fwd.router_tokens.borrow().interested("live/data"),
+            vec![zid(0xAA)]
+        );
+        forward_one(&fwd, FaceId(0), undeclare_token_msg("live/data"));
+        assert!(
+            fwd.router_tokens
+                .borrow()
+                .interested("live/data")
+                .is_empty(),
+            "the sourced UndeclareToken withdrew the token source"
+        );
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn undeclare_token_re_floods_within_the_tier() {
+        // The retraction re-flood: after a DeclareToken re-floods to the tree
+        // child, a sourced UndeclareToken withdraws AND re-floods the retraction
+        // to the same child, never back to the inbound source. Proves the reflood
+        // carrier build_undeclare_token_with_keyexpr.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER);
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/data")); // register + re-flood
+        sink_a.reset();
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), undeclare_token_msg("live/data"));
+        assert!(
+            fwd.router_tokens
+                .borrow()
+                .interested("live/data")
+                .is_empty(),
+            "the token source is withdrawn"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the retraction re-flooded to the tree child C"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
     }
 
     // ── slice 1c: queryable dual-tier INGEST ─────────────────────────────

@@ -1015,7 +1015,11 @@ mod tests {
         ))));
         assert!(ing.blocked_tokens.contains(&2));
         assert!(!ing.apply(&mut wrap(DV::CodecZenohUndeclToken(
-            wz_codecs::undecl_token::UndeclToken { header: 0, id: 2 },
+            wz_codecs::undecl_token::UndeclTokenOwned {
+                header: 0,
+                id: 2,
+                extensions: None,
+            },
         ))));
         assert!(!ing.blocked_tokens.contains(&2));
         // A matching DeclareQueryable strips + passes (not blocked).

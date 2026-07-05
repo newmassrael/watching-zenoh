@@ -1,4 +1,4 @@
-// SCE-MAP: undecl_token:20
+// SCE-MAP: undecl_token:29
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -15,6 +15,14 @@ extern crate alloc;
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
+// RFC §synth-5-B B2/B3: bounded inline list storage for repeat / tlv-chain
+// fields — heap-free `heapless::Vec<T, N>` (re-exported by the runtime),
+// the Rust mirror of the C11 `T elems[MAX]; len` representation. Always
+// available (no `alloc` gate) so list-bearing codecs compile on the
+// pure no_std no-alloc MCU tier.
+use sce_forge_runtime::heapless::Vec as HeaplessVec;
+
+use super::ext_entry::ExtEntry;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
 // §6 codec). The kind-agnostic conformance harness only references a
@@ -22,9 +30,10 @@ use sce_forge_runtime::codec::VecSink;
 // trigger dead_code on every codec build.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
-pub struct UndeclToken {
+pub struct UndeclToken<'a> {
     pub header: u8,
     pub id: u64,
+    pub extensions: Option<HeaplessVec<ExtEntry<'a>, 4>>,
 }
 
 // RFC variant-default-uniformity: at least one field's
@@ -34,17 +43,18 @@ pub struct UndeclToken {
 // freshly-constructed instance carries the wire-MID for its own
 // dispatch tag. Fields without declared values fall through to
 // `Default::default()` (preserving derive(Default) semantics).
-impl Default for UndeclToken {
+impl<'a> Default for UndeclToken<'a> {
     fn default() -> Self {
         Self {
             header: 0x07u8,
             id: Default::default(),
+            extensions: Default::default(),
         }
     }
 }
 
 #[allow(dead_code)]
-impl UndeclToken {
+impl<'a> UndeclToken<'a> {
     /// Construct an instance with every field zero-initialized via
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -57,7 +67,7 @@ impl UndeclToken {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
+    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -77,9 +87,23 @@ impl UndeclToken {
             _v
         };
         let id = cursor.read_vle_u64()?;
+        let extensions = if (header & 0x80u8) != 0 {
+            let mut _vec: HeaplessVec<ExtEntry<'a>, 4> = HeaplessVec::new();
+            for _ in 0..4u32 {
+                    if cursor.remaining() == 0 { break; }
+                    let _entry = ExtEntry::decode(cursor)?;
+                    let _continue = _entry.z();
+                    _vec.push(_entry).map_err(|_| CodecError::TooManyElements)?;
+                    if !_continue { break; }
+                }
+            Some(_vec)
+        } else {
+            None
+        };
         Ok(Self {
             header,
             id,
+            extensions,
         })
     }
 
@@ -113,7 +137,7 @@ impl UndeclToken {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 10;
+    pub const MAX_ENCODED_BYTES: usize = 178;
 
     /// Encode `self` into the caller-owned sink. Returns
     /// `CodecError::BufferOverflow` from a bounded sink when the
@@ -131,6 +155,11 @@ impl UndeclToken {
         // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
         w.write_u8(self.header)?;
         w.write_vle_u64(self.id)?;
+        if let Some(_list) = &self.extensions {
+            for _e in _list {
+                _e.encode(w)?;
+            }
+        }
         Ok(())
     }
 
@@ -152,5 +181,92 @@ impl UndeclToken {
         self.encode(&mut _sce_sink)
             .expect("VecSink is infallible");
         _sce_v
+    }
+}
+
+// ── Owned projection (portable native form) ───────────────────────────
+// `UndeclToken<'a>` above is a zero-copy view borrowing the decode
+// buffer. Consumers that persist a decoded value beyond the buffer's
+// lifetime — including the self-contained bounded-collection that stores
+// elements by value — call `.try_into_owned()` for this lifetime-free
+// `UndeclTokenOwned`. The rkyv-style Archived(borrowed) ↔ native
+// (owned) split, both generated from the one SCXML source (SSOT).
+// `String` / `Bytes` fields project to the portable runtime newtypes
+// `SceString<N>` / `SceBytes<N>`: an unbounded `String` / `Vec<u8>` under
+// `alloc` (the on-wire protocol caps no payload, so the AP profile must
+// not either — `N` is advisory) and the heap-free `heapless::String<N>` /
+// `heapless::Vec<u8, N>` (the C11 `char[N]` analog) without it, where `N`
+// is the hard capacity. A leaf codec's owned form therefore still compiles
+// on a no-alloc MCU; only an unbounded owned `Vec` (list / embed / variant
+// body) keeps the `alloc` gate. `try_into_owned` stays the fallible
+// direction (one `?` per profile: the `alloc` copy cannot fail, the
+// no-alloc copy enforces `N`); `try_as_borrowed` re-borrows either
+// form infallibly via `.as_slice()` / `.as_str()`.
+#[cfg(feature = "alloc")]
+use super::ext_entry::ExtEntryOwned;
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct UndeclTokenOwned {
+    pub header: u8,
+    pub id: u64,
+    pub extensions: Option<Vec<ExtEntryOwned>>,
+}
+
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+impl UndeclTokenOwned {
+    // RFC §synth-5-B read-accessor parity with the borrowed view: pure
+    // bit getters over the copied carrier (rkyv Archived↔native getter
+    // parity), so alloc consumers read `{Codec}Owned` with the same API as
+    // the borrowed view and never re-derive the SCE wire bit layout (SSOT).
+    // Read-only — write accessors belong with an owned-encode path, which
+    // does not exist yet.
+    pub fn mid(&self) -> u8 {
+        self.header & 0x1F
+    }
+
+    pub fn z(&self) -> bool {
+        (self.header & 0x80) != 0
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<'a> UndeclToken<'a> {
+    /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
+    /// [`UndeclTokenOwned`]. Call at a decode boundary when the
+    /// decoded value must outlive the input buffer — stored in a long-lived
+    /// enum, moved across an async task, or inserted by value into a
+    /// bounded-collection. `String` / `Bytes` fields copy into the portable
+    /// `SceString<N>` / `SceBytes<N>`: an unbounded heap copy under `alloc`
+    /// (`N` advisory), else a fixed `heapless` copy capped at `N`. The
+    /// method is fallible for profile uniformity — without `alloc` an
+    /// over-`N` view raises `CodecError::TooManyElements` (the same bound
+    /// and error decode enforces); under `alloc` the copy never fails. The
+    /// borrowed zero-copy path is unaffected.
+    pub fn try_into_owned(self) -> Result<UndeclTokenOwned, CodecError> {
+        Ok(UndeclTokenOwned {
+            header: self.header,
+            id: self.id,
+            extensions: self.extensions.map(|_v| _v.into_iter().map(|_e| _e.try_into_owned()).collect::<Result<_, _>>()).transpose()?,
+        })
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl UndeclTokenOwned {
+    /// Re-borrow this owned value back into the zero-copy borrowed view —
+    /// the inverse of `try_into_owned`. `encode` lives only on the borrowed
+    /// view (the owned form is read-only), so an owned consumer reaches it
+    /// via `try_as_borrowed` then `encode` / `encode_to_vec`. Each
+    /// field is projected by reference — a cheap re-borrow, not a copy.
+    /// Fallible: a bounded `<sce:repeat>` / `<sce:tlv-chain>` list whose
+    /// owned `Vec` holds more than its declared `N` raises
+    /// `CodecError::TooManyElements` — the same bound decode enforces.
+    pub fn try_as_borrowed(&self) -> Result<UndeclToken<'_>, CodecError> {
+        Ok(UndeclToken {
+            header: self.header,
+            id: self.id,
+            extensions: self.extensions.as_ref().map(|_l| sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.as_borrowed()))).transpose()?,
+        })
     }
 }

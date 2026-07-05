@@ -47,7 +47,7 @@ pub enum DeclareVariant<'a> {
     CodecZenohDeclQueryable(DeclQueryable<'a>),
     CodecZenohUndeclQueryable(UndeclQueryable<'a>),
     CodecZenohDeclToken(DeclToken<'a>),
-    CodecZenohUndeclToken(UndeclToken),
+    CodecZenohUndeclToken(UndeclToken<'a>),
     CodecZenohDeclFinal(DeclFinal),
     Default {
         tag: u8,
@@ -327,6 +327,8 @@ use super::undecl_subscriber::UndeclSubscriberOwned;
 #[cfg(feature = "alloc")]
 use super::undecl_queryable::UndeclQueryableOwned;
 #[cfg(feature = "alloc")]
+use super::undecl_token::UndeclTokenOwned;
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclareOwned {
     pub header: u8,
@@ -373,7 +375,7 @@ pub enum DeclareOwnedVariant {
     CodecZenohDeclQueryable(DeclQueryableOwned),
     CodecZenohUndeclQueryable(UndeclQueryableOwned),
     CodecZenohDeclToken(DeclTokenOwned),
-    CodecZenohUndeclToken(UndeclToken),
+    CodecZenohUndeclToken(UndeclTokenOwned),
     CodecZenohDeclFinal(DeclFinal),
     Default {
         tag: u8,
@@ -395,7 +397,7 @@ impl<'a> DeclareVariant<'a> {
             DeclareVariant::CodecZenohDeclQueryable(_b) => DeclareOwnedVariant::CodecZenohDeclQueryable(_b.try_into_owned()?),
             DeclareVariant::CodecZenohUndeclQueryable(_b) => DeclareOwnedVariant::CodecZenohUndeclQueryable(_b.try_into_owned()?),
             DeclareVariant::CodecZenohDeclToken(_b) => DeclareOwnedVariant::CodecZenohDeclToken(_b.try_into_owned()?),
-            DeclareVariant::CodecZenohUndeclToken(_b) => DeclareOwnedVariant::CodecZenohUndeclToken(_b),
+            DeclareVariant::CodecZenohUndeclToken(_b) => DeclareOwnedVariant::CodecZenohUndeclToken(_b.try_into_owned()?),
             DeclareVariant::CodecZenohDeclFinal(_b) => DeclareOwnedVariant::CodecZenohDeclFinal(_b),
             DeclareVariant::Default { tag, body } => DeclareOwnedVariant::Default { tag, body },
         })
@@ -416,7 +418,7 @@ impl DeclareOwnedVariant {
             DeclareOwnedVariant::CodecZenohDeclQueryable(_b) => DeclareVariant::CodecZenohDeclQueryable(_b.try_as_borrowed()?),
             DeclareOwnedVariant::CodecZenohUndeclQueryable(_b) => DeclareVariant::CodecZenohUndeclQueryable(_b.try_as_borrowed()?),
             DeclareOwnedVariant::CodecZenohDeclToken(_b) => DeclareVariant::CodecZenohDeclToken(_b.as_borrowed()),
-            DeclareOwnedVariant::CodecZenohUndeclToken(_b) => DeclareVariant::CodecZenohUndeclToken(_b.clone()),
+            DeclareOwnedVariant::CodecZenohUndeclToken(_b) => DeclareVariant::CodecZenohUndeclToken(_b.try_as_borrowed()?),
             DeclareOwnedVariant::CodecZenohDeclFinal(_b) => DeclareVariant::CodecZenohDeclFinal(_b.clone()),
             DeclareOwnedVariant::Default { tag, body } => DeclareVariant::Default { tag: *tag, body: body.clone() },
         })
