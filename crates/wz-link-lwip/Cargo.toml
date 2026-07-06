@@ -79,6 +79,17 @@ heapless = "0.8"
 # profile would need a mutual-exclusion mechanism (documented carry).
 buffer-pool-session-rx-slim = []
 
+# R311y190 — loopback multicast egress routing on a bare-metal (no_std) build.
+# With it on, `LwipLink::route_multicast_over_loopback` emits the
+# `ip4_set_default_multicast_netif(netif_get_loopif())` call so a multicast TX
+# loops back into ip_input on-target (QEMU / real Cortex-M) — the no_std,
+# deploy-callable promotion of the `test-support`-only `lwip_test_link` routing.
+# The `netif_get_loopif` FFI is `#if LWIP_TESTMODE`, so a `loopif-multicast`
+# build MUST use a testmode port (e.g. `port/cross-test-mcast`) or it fails to
+# compile — the feature and the port are coupled by construction (self-guarding).
+# Off by default; signature-stable (Err(FeatureDisabled) no-op when off).
+loopif-multicast = []
+
 # R311lu — exposes the lwIP init-once test harness (`lwip_test_link`) to
 # sibling crates' tests. lwIP under NO_SYS is a process-global single-init
 # resource, so a downstream test binary (wz-session-lwip: the session_drive

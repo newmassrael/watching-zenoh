@@ -108,6 +108,15 @@ fn main() -> ! {
     hprintln!("R311mi: MCU multicast transport e2e starting");
 
     let link = LwipLink::init();
+    // R311y190 — with `loopback-multicast`, route multicast TX egress over the
+    // loop netif BEFORE the drive loop so `run_multicast_e2e` completes a REAL
+    // on-target IGMP-join + multicast-loopback roundtrip (the no_std promotion of
+    // lwip_test_link's host routing). The FFI is linked only when the port sets
+    // LWIP_TESTMODE (cross-test-mcast) — a mismatched build fails to compile. The
+    // group JOIN itself succeeds via the port's LWIP_LOOPIF_MULTICAST flag.
+    #[cfg(feature = "loopback-multicast")]
+    link.route_multicast_over_loopback()
+        .expect("loopback-multicast build routes multicast TX over the loop netif");
     let report = run_multicast_e2e(&link, SystickClockRef);
 
     let full_success = report.join_ok
@@ -117,18 +126,22 @@ fn main() -> ! {
         && report.saw_push
         && !report.saw_drop;
 
+    // The loopback-only SKIP concession applies ONLY to the plain-link build (the
+    // cross-compile + footprint artifact): on QEMU with no routed multicast netif
+    // the join fails and the host C1r lane is the runtime proof. With
+    // `loopback-multicast` the TX is routed over the loop netif, so a failed join
+    // is a REAL regression (the FAIL arm below), not an expected skip.
+    #[cfg(not(feature = "loopback-multicast"))]
     if !report.join_ok {
-        // Expected on a loopback-only environment (QEMU CI): no IGMP netif, so
-        // the multicast group join failed and the loop never ran. This bin is
-        // build + footprint-size only; the host C1r lane is the runtime proof.
-        // A real-IGMP-netif deploy reaches the PASS arm below.
         hprintln!(
             "R311mi SKIP: no multicast IGMP netif (loopback-only env; this is a \
              cross-compile + footprint artifact, not a CI boot — runtime proof \
-             is the host C1r lane)"
+             is the host C1r lane, or a `loopback-multicast` build)"
         );
         debug::exit(debug::EXIT_SUCCESS);
-    } else if full_success {
+    }
+
+    if full_success {
         hprintln!(
             "R311mi PASS: peer admitted + oversize Put fragmented + reassembled \
              into one Push over multicast loopback (active_peers={})",
@@ -136,10 +149,14 @@ fn main() -> ! {
         );
         debug::exit(debug::EXIT_SUCCESS);
     } else {
-        // Joined the group but the round trip degraded — a real regression.
+        // A degraded round trip — a real regression (join_ok surfaced so a
+        // `loopback-multicast` build that fails the join is not misread as
+        // "joined but degraded").
         hprintln!(
-            "R311mi FAIL: joined but degraded (outcome={:?} peer_admitted={} \
-             tx_fragmented={} saw_push={} saw_drop={} active_peers={})",
+            "R311mi FAIL: multicast roundtrip degraded (join_ok={} outcome={:?} \
+             peer_admitted={} tx_fragmented={} saw_push={} saw_drop={} \
+             active_peers={})",
+            report.join_ok,
             report.outcome,
             report.peer_admitted,
             report.tx_fragmented,

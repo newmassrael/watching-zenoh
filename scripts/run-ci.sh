@@ -4093,6 +4093,62 @@ layer_q_qemu_mcu_e2e() {
         fi
     done
 
+    # ── Q.6 — R311y190 multicast RUNTIME proof (deploy/mcu-multicast-e2e).
+    #
+    # The counterpart to Q.5's build+footprint-only lane: this BOOTS the MCU
+    # multicast bin on QEMU and asserts a REAL on-target IGMP-join + multicast-
+    # loopback roundtrip (join_ok + peer_admitted + oversize-Put fragmented +
+    # reassembled into one Push -> semihost EXIT_SUCCESS). Built with the
+    # `loopback-multicast` feature (routes multicast TX over the loop netif via
+    # LwipLink::route_multicast_over_loopback) against the TESTMODE
+    # `cross-test-mcast` lwIP port (LWIP_LOOPIF_MULTICAST + LWIP_TESTMODE) — a
+    # SEPARATE ELF + port from Q.5's footprint build, so the shared cross-test
+    # port + the Q.5 baseline stay byte-identical. mps2-class only (M3/M4/M7):
+    # the ~49 KB multicast rx pool does not fit nrf51's 16 KB SRAM (thumbv6m
+    # excluded, as in Q.5); an505/M33 carries the same cortex-m-rt Secure-state
+    # skip as Q.2. With `loopback-multicast` the bin has no loopback-only SKIP
+    # arm, so QEMU exit 0 == PASS (a failed join/roundtrip exits non-zero);
+    # run_qemu_case's 30s backstop bounds a runaway. This CLOSES the "MCU
+    # multicast is host-only / on-target evidence deferred" debt.
+    local mcast_port mcrun_lane mcmachine mccpu mctgt
+    mcast_port="$(realpath crates/lwip-sys/port/cross-test-mcast)"
+    declare -A mcrun_built=()
+    for mcrun_lane in \
+        "mps2-an385:cortex-m3:thumbv7m-none-eabi" \
+        "mps2-an386:cortex-m4:thumbv7em-none-eabihf" \
+        "mps2-an500:cortex-m7:thumbv7em-none-eabihf"; do
+        IFS=':' read -r mcmachine mccpu mctgt <<< "$mcrun_lane"
+        if ! grep -q "^${mctgt}$" <<< "$installed"; then
+            echo "  Q.6.${mcmachine} SKIP (rustup target ${mctgt} absent)"
+            continue
+        fi
+        # Build once per triple (an386 + an500 share thumbv7em-none-eabihf).
+        if [[ -z "${mcrun_built[$mctgt]:-}" ]]; then
+            if WZ_LWIP_PORT="$mcast_port" cargo build --release \
+                --manifest-path deploy/mcu-multicast-e2e/Cargo.toml \
+                --target "$mctgt" --features loopback-multicast \
+                --bin mcu-multicast-e2e --quiet; then
+                echo "  Q.6.${mctgt} build mcu-multicast-e2e (loopback-multicast) OK"
+                mcrun_built[$mctgt]=1
+                any_built=1
+            else
+                echo "  Q.6.${mctgt} build mcu-multicast-e2e (loopback-multicast) FAIL" >&2
+                fail=1
+                continue
+            fi
+        fi
+        if [[ "$has_qemu" -ne 1 ]]; then
+            echo "  Q.6.${mcmachine} run SKIP (qemu-system-arm not on PATH)"
+            continue
+        fi
+        if ! run_qemu_case \
+            "Q.6.${mcmachine} run mcu-multicast-e2e (loopback-multicast) via qemu-system-arm ${mcmachine}" \
+            "$mccpu" "$mcmachine" \
+            "deploy/mcu-multicast-e2e/target/${mctgt}/release/mcu-multicast-e2e"; then
+            fail=1
+        fi
+    done
+
     if [[ $any_built -eq 0 && $probe_built -eq 0 ]]; then
         echo "Layer Q SKIP (no Layer Q rustup targets installed)"
         return 0

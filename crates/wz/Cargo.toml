@@ -535,6 +535,15 @@ buffer-pool-session-rx-slim = [
     "wz-link-lwip?/buffer-pool-session-rx-slim",
     "wz-session-lwip?/buffer-pool-session-rx-slim",
 ]
+# R311y190 — loopback multicast egress routing (the §5.C link seam
+# `route_multicast_over_loopback`). Weak-forwards (`?/`) to the link tier + the
+# session shell so it only lights up for an lwIP-profile build. Pair with a
+# testmode lwIP port (`port/cross-test-mcast`) so an MCU multicast node runs a
+# real on-target IGMP-join + multicast-loopback roundtrip via config.
+loopif-multicast = [
+    "wz-link-lwip?/loopif-multicast",
+    "wz-session-lwip?/loopif-multicast",
+]
 runtime-no-std = []
 # R302b — runtime-tokio pulls the wz-runtime-tokio crate into the
 # build via `dep:` syntax. Bare `runtime-tokio` with no sub-feature

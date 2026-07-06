@@ -51,6 +51,17 @@ description = "R311mi composable-framework MCU multicast footprint artifact — 
 name = "mcu-multicast-e2e"
 path = "src/main.rs"
 
+[features]
+# R311y190 — the RUNTIME multicast toggle. Default (off) = the cross-compile +
+# footprint artifact (plain link, join_ok=false on QEMU loopback). WITH it +
+# WZ_LWIP_PORT=crates/lwip-sys/port/cross-test-mcast (LWIP_LOOPIF_MULTICAST +
+# LWIP_TESTMODE), main() routes multicast TX over the loop netif and requires a
+# REAL on-target IGMP-join + multicast-loopback roundtrip (join_ok + peer_admitted
+# + saw_push) to exit PASS — the on-target runtime proof, booted in CI Layer Q.
+# The feature + the testmode port are coupled by construction (a mismatch fails
+# to compile: the netif_get_loopif FFI is only emitted under LWIP_TESTMODE).
+loopback-multicast = ["wz-mcu-multicast-e2e/loopif-multicast"]
+
 [dependencies]
 # Cortex-M runtime + entry point. `critical-section-single-core` provides
 # the critical_section impl that wz-runtime-coop::sync + the session-core

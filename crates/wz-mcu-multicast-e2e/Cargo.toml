@@ -78,6 +78,15 @@ description = "MCU multicast transport e2e SSOT — run_multicast_e2e<C> drives 
 name = "wz_mcu_multicast_e2e"
 path = "src/lib.rs"
 
+[features]
+# R311y190 — loopback multicast egress routing (forwards `wz/loopif-multicast`
+# down to the wz-link-lwip `route_multicast_over_loopback` FFI seam). With this
+# on AND a testmode lwIP port (`crates/lwip-sys/port/cross-test-mcast`), the
+# deploy bin routes multicast TX over the loop netif so `run_multicast_e2e`
+# completes a REAL on-target IGMP-join + multicast-loopback roundtrip
+# (join_ok + peer_admitted + saw_push), not the build+footprint-only default.
+loopif-multicast = ["wz/loopif-multicast"]
+
 [dependencies]
 # The composable-framework boundary. `session-lwip` lights up
 # `wz::{session_lwip, link_lwip, runtime_coop}` together with the

@@ -80,6 +80,12 @@ transport-fragmentation = [
 # link-tier feature + session_rx_pool_mcu_minimal.scxml for the derivation.
 buffer-pool-session-rx-slim = ["wz-link-lwip/buffer-pool-session-rx-slim"]
 
+# R311y190 — loopback multicast egress routing (forwards the wz-link-lwip
+# `LwipLink::route_multicast_over_loopback` FFI seam). A session-lwip multicast
+# node built with this + a testmode port runs a real on-target IGMP-join +
+# multicast-loopback roundtrip. Off by default; requires a testmode lwIP port.
+loopif-multicast = ["wz-link-lwip/loopif-multicast"]
+
 # R311kx — keepalive TX emitter on the MCU session loop. Forwards to the
 # wz-session-core transport-keepalive capability (the shared
 # check_keepalive_deadline / keepalive_wake_deadline pair + the

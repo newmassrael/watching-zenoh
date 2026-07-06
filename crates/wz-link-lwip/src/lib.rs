@@ -277,6 +277,11 @@ pub enum LinkError {
     /// err_t — no `NETIF_FLAG_IGMP` netif is up, or the IGMP group pool
     /// (`MEMP_NUM_IGMP_GROUP`) is exhausted.
     MulticastJoinFailed(i8),
+    /// [`LwipLink::route_multicast_over_loopback`] was called in a build
+    /// WITHOUT the `loopif-multicast` feature (the loopback multicast egress
+    /// routing is compiled out). A typed no-op result — never a silent success —
+    /// per the feature-toggle-independent-signature rule.
+    FeatureDisabled,
 }
 
 /// Top-level link handle. Owns the `lwip_init` + netif state for the
@@ -315,6 +320,38 @@ impl LwipLink {
         // SAFETY: netif_poll_all walks lwIP's static loop_netif state;
         // no aliasing borrow exists in this single-thread model.
         unsafe { netif_poll_all() };
+    }
+
+    /// R311y190 — route multicast TX egress over the loopback netif so a
+    /// bare-metal multicast build (QEMU / a real Cortex-M with a loop netif) runs
+    /// a real IGMP-join + multicast-loopback roundtrip ON-TARGET. This is the
+    /// no_std, deploy-callable promotion of the routing that was previously
+    /// `test-support`-only in [`lwip_test_link`] — the exact
+    /// `ip4_set_default_multicast_netif(netif_get_loopif())` call, minus the std
+    /// `Mutex`/`Once` test scaffolding.
+    ///
+    /// Gated on `loopif-multicast`: the FFI symbols are emitted by bindgen ONLY
+    /// when the port sets `LWIP_TESTMODE` (`netif_get_loopif` is
+    /// `#if LWIP_TESTMODE && LWIP_HAVE_LOOPIF`), so the feature and a testmode
+    /// port (e.g. `port/cross-test-mcast`) are coupled BY CONSTRUCTION — a
+    /// `loopif-multicast` build against a non-testmode port fails to compile
+    /// (fail-fast, self-guarding; the illegal state is unrepresentable).
+    /// Signature-stable: the method is always present; with the feature off it is
+    /// a typed [`LinkError::FeatureDisabled`] no-op, never a silent success.
+    pub fn route_multicast_over_loopback(&self) -> Result<(), LinkError> {
+        #[cfg(feature = "loopif-multicast")]
+        {
+            use lwip_sys::{ip4_set_default_multicast_netif, netif_get_loopif};
+            // SAFETY: single-threaded NO_SYS=1 contract; netif_get_loopif returns
+            // lwIP's static loop_netif (valid for the process lifetime) and this
+            // is idempotent — the same call lwip_test_link runs on the host.
+            unsafe { ip4_set_default_multicast_netif(netif_get_loopif()) };
+            Ok(())
+        }
+        #[cfg(not(feature = "loopif-multicast"))]
+        {
+            Err(LinkError::FeatureDisabled)
+        }
     }
 
     /// Pump expired lwIP timers (ARP retransmit, TCP slow timer, etc.).
