@@ -120,6 +120,21 @@ const ZENOHD_CONFIG_FINGERPRINT: u64 = 3912446778783065544;
 const WZ_DATA_KEY: &str = "data/test/y";
 const WZ_SEED_VALUE: &str = "hello-from-wz-replica";
 
+/// R311wt (ALIGN-path cross-impl leg) — the WILDCARD keyexpr a foreign pico
+/// `z_pub` seeds into zenohd as a wildcard-update EVENT. A sub-wildcard of
+/// [`STORAGE_KEYEXPR`] (unambiguously wild, unambiguously routed to the
+/// storage's `data/test/**` subscription). zenohd's `process_sample` sees
+/// `is_wild()` → `register_wildcard_update` + inserts a `WildcardPut` log event
+/// keyed on the wildcard itself (service.rs:233-254). wz must pull THAT event
+/// off the aligner and register it in its own `wildcard_puts` registry — the
+/// cross-impl proof that align-path wildcard-EVENT registration interoperates
+/// with the real zenoh. Distinct from concrete-value convergence, which
+/// propagates as a plain `Put` (zenoh `determine_action` collapses a
+/// materialized concrete event's action, log.rs:181-202) and never touches the
+/// receiver's wildcard registry.
+const WC_KEYEXPR: &str = "data/test/wild/**";
+const WC_SEED_VALUE: &str = "wildcard-from-zenohd";
+
 /// Spawn a zenohd router with the storage-manager plugin loaded and one
 /// memory-backed storage on `STORAGE_KEYEXPR` with replication enabled (1s
 /// interval for a fast digest). Timestamping is enabled so an un-timestamped
@@ -336,6 +351,135 @@ async fn wz_replica_converges_to_zenohd_storage_manager() {
     assert!(
         got.contains(SEED_VALUE),
         "wz pulled zenohd's value (containing the seed marker) via cross-impl alignment; got {got:?}"
+    );
+}
+
+/// An in-process wz storage replica REGISTERS a zenohd wildcard-update EVENT it
+/// pulls over the aligner — the ALIGN-path twin of the LIVE-path pico leg
+/// (`wz_storage_wildcard_update_pico_interop`), and the cross-impl proof for the
+/// `Action::WildcardPut` receive arm of `process_alignment_reply`.
+///
+/// ## What it proves (distinct from the concrete-value ASK test above)
+///
+/// The ASK test proves a concrete Put/Delete converges. A wildcard update is
+/// DIFFERENT on the wire: zenohd's `determine_action` (log.rs:181-202) collapses
+/// a *materialized concrete* event's action back to a plain `Put` (the concrete
+/// key differs from the wildcard keyexpr), so a wildcard's EFFECT on real keys
+/// propagates — and converges — as ordinary `Put`s that never touch a receiver's
+/// wildcard registry. The ONE event that carries `Action::WildcardPut` is the
+/// wildcard-KEYED event (key == the wildcard keyexpr, service.rs:243-254), which
+/// zenohd inserts into its replication log and its aligner serves verbatim
+/// (`reply_events_metadata` → `reply_event_retrieval`'s `WildcardPut` arm reads
+/// the value from `wildcard_puts`, aligner_query.rs:256/320). wz must DECODE
+/// that event as `WildcardPut(ke)` (storage_aligner.rs:763) and, on the align
+/// path, call `materialize_wildcard` → `register_wildcard_update`
+/// (storage_state.rs:1344/577), landing the wildcard in its own `wildcard_puts`
+/// registry. `wildcard_registry_lens().0 >= 1` witnesses exactly that — the
+/// registration the materialized-value convergence alone does NOT exercise.
+///
+/// ## Divergence setup (empty backend, wildcard-only)
+///
+/// A foreign pico `z_pub` seeds ONLY a wildcard update ([`WC_KEYEXPR`]) into an
+/// otherwise-empty zenohd storage. No concrete keys exist, so zenohd's
+/// `get_matching_keys` materializes onto nothing (service.rs:257) — the log holds
+/// the single wildcard-keyed `WildcardPut` event and no concrete `Put`. That
+/// isolates the property under test: the registry can only become non-empty by
+/// wz registering the pulled wildcard EVENT, never as a side effect of a
+/// concrete Put (which would be a plain `Put` on the wire regardless).
+///
+/// Non-flaky by construction: convergence is poll-on-condition (the replica's
+/// `wildcard_puts` gains an entry), monotonic once pulled (a `BTreeMap` insert,
+/// never removed absent GC, which this test does not drive), with a generous
+/// budget over zenohd's 1s digest interval. ([[feedback-no-flaky-ever]])
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "binary-dep e2e (zenohd storage-manager replication); needs target/zenohd/{zenohd,libzenoh_plugin_storage_manager.so}; run via Layer Z / --ignored"]
+async fn wz_replica_registers_wildcard_event_from_zenohd_storage_manager() {
+    // The config wz uses MUST hash to the same fingerprint as the zenohd storage
+    // config — pin the cross-impl parity before any I/O (identical to the ASK
+    // test; the two only meet on @-digest/<zid>/<fp> if their fingerprints are
+    // EQUAL).
+    let config = ReplicationConfig::new(STORAGE_KEYEXPR, None, 1000, 5, 6, 30, 250);
+    assert_eq!(
+        config.fingerprint().value(),
+        ZENOHD_CONFIG_FINGERPRINT,
+        "wz's replication config fingerprint must equal the real zenohd's, or the \
+         two never meet on @-digest/<zid>/<fp>"
+    );
+
+    let port_res = PortReservation::pick();
+    let port = port_res.port();
+    let _zenohd = spawn_zenohd_storage_replica(port);
+    // Seed zenohd's storage with a WILDCARD update BEFORE wz joins (a foreign pico
+    // `z_pub` on a wildcard keyexpr is an ordinary Push with a wildcard KE; zenohd
+    // registers it as a wildcard update + logs a `WildcardPut` event). No concrete
+    // key is seeded, so the ONLY replicated event is the wildcard-keyed one.
+    let _seed = spawn_seeding_zpub(WC_KEYEXPR, WC_SEED_VALUE, port);
+    drop(port_res);
+
+    // ── Dial zenohd in-process and bring the wz session up.
+    let mut opened = connect_to_zenohd(port).await;
+    let timeouts = SessionTimeouts::spec_defaults();
+
+    // ── The wz REPLICA store: a separate, empty StorageState with no capture
+    //    subscriber, so it can only gain the wildcard update by pulling it off
+    //    zenohd's aligner.
+    let replica: Arc<StdMutex<StorageState<MemoryStorage>>> =
+        Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
+
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
+
+    let _digest_aligner = spawn_digest_aligner(&session, replica.clone(), config.clone())
+        .expect("wz wires its digest -> aligner pull");
+
+    let session_drive = session.clone();
+    let drive = drive_session_until_terminal(
+        &mut opened.inbound,
+        &opened.actions,
+        &mut opened.engine,
+        None,
+        &opened.clock,
+        &timeouts,
+        move |event| session_drive.dispatch_iteration_event(event),
+    );
+
+    let scenario = {
+        let replica = replica.clone();
+        async move {
+            // Poll until the wz replica registers the pulled wildcard EVENT: its
+            // wildcard_puts registry gains an entry. Monotonic; generous budget
+            // over zenohd's 1s digest interval.
+            for _ in 0..400 {
+                {
+                    let guard = replica.lock().unwrap();
+                    if guard.wildcard_registry_lens().0 >= 1 {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!(
+                "wz replica never registered a wildcard update (wildcard_puts stayed \
+                 empty) within ~20s"
+            );
+        }
+    };
+
+    tokio::select! {
+        _ = drive => panic!("wz drive loop ended unexpectedly (zenohd link lost?)"),
+        _ = scenario => {}
+    }
+
+    // ── Converged: the wz replica registered zenohd's wildcard-update EVENT in
+    //    its own wildcard_puts registry, pulled over the real zenoh replication
+    //    aligner and decoded as `Action::WildcardPut` (not collapsed to a plain
+    //    concrete Put). This is the align-path registration the concrete-value
+    //    convergence does not exercise.
+    let (puts, deletes) = replica.lock().unwrap().wildcard_registry_lens();
+    assert!(
+        puts >= 1,
+        "wz replica registered zenohd's WildcardPut event via cross-impl alignment; \
+         wildcard_puts len = {puts} (deletes = {deletes})"
     );
 }
 

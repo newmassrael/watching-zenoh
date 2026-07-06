@@ -353,8 +353,19 @@ fn retrieved_value(view: &dyn ReplyView) -> RetrievedValue {
 fn decode_reply(view: &dyn ReplyView) -> Option<DecodedReply> {
     let attachment = view.attachment()?;
     let reply = decode_alignment_reply(attachment).ok()?;
+    // The value rides the reply body for the two value-bearing retrieval
+    // actions, mirroring zenohd's answer side (aligner_query.rs:276-332): a
+    // `Put` value comes from storage, a `WildcardPut` value from the
+    // `wildcard_puts` registry. A `Delete` / `WildcardDelete` carries no value
+    // (the kernel applies it from the metadata alone). Omitting `WildcardPut`
+    // here strands the kernel's align-path `Action::WildcardPut` arm
+    // (storage_state.rs:1344), which only materializes when a value is present —
+    // so a real zenohd wildcard-update EVENT would never register on this
+    // replica.
     let value = match &reply {
-        AlignmentReply::Retrieval(meta) if matches!(meta.action(), Action::Put) => {
+        AlignmentReply::Retrieval(meta)
+            if matches!(meta.action(), Action::Put | Action::WildcardPut(_)) =>
+        {
             Some(retrieved_value(view))
         }
         _ => None,
@@ -978,6 +989,44 @@ mod tests {
         let (reply, value) = decode_reply(&view).expect("a Delete Retrieval reply decodes");
         assert!(matches!(reply, AlignmentReply::Retrieval(_)));
         assert!(value.is_none(), "a Delete Retrieval carries no value");
+    }
+
+    #[test]
+    fn decode_reply_wildcard_put_retrieval_carries_payload_and_encoding() {
+        use wz_session_core::storage_aligner::EventMetadata;
+        // A WildcardPut Retrieval carries its value in the reply body (zenohd
+        // reads it from the wildcard_puts registry, aligner_query.rs:320-324),
+        // exactly like a plain Put. decode_reply MUST extract it, or the kernel's
+        // align-path WildcardPut arm (storage_state.rs:1344, materializes only
+        // when a value is present) never registers the wildcard -- a real zenohd
+        // wildcard-update EVENT would then be silently dropped. Regression guard
+        // for the driver-side value gating that had matched Put alone.
+        let meta = EventMetadata::wildcard(
+            Some("demo/wild/**".into()),
+            TimestampHint {
+                time: 1,
+                zid: vec![0x01],
+            },
+            Action::WildcardPut("demo/wild/**".into()),
+        );
+        let attachment = encode_alignment_reply(&AlignmentReply::Retrieval(meta));
+        let view = reply_view(
+            "@zid/01/9/aligner",
+            &[5, 6],
+            Some(&attachment),
+            Some((7, Some("text/plain"))),
+        );
+        let (reply, value) = decode_reply(&view).expect("a WildcardPut Retrieval reply decodes");
+        assert!(matches!(reply, AlignmentReply::Retrieval(_)));
+        let value = value.expect("a WildcardPut Retrieval carries a value");
+        assert_eq!(value.payload, vec![5, 6]);
+        assert_eq!(
+            value.encoding,
+            Some(EncodingHint {
+                packed_id: 7,
+                schema: Some("text/plain".to_string()),
+            })
+        );
     }
 
     #[test]
