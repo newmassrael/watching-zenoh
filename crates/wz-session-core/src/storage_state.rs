@@ -132,7 +132,16 @@
 //!        is a cross-impl-leg follow-up, not a unit-testable path here (a wz peer
 //!        serves no wildcard event — retrieval_response returns `None` — so a
 //!        two-wz `drive_alignment` cannot exercise wildcard reception; the
-//!        receive half is covered by direct-reply unit tests).
+//!        receive half is covered by direct-reply unit tests). The LIVE capture
+//!        path — this same wildcard reception on `apply_sample`, NOT the align
+//!        path — IS now cross-impl-proven end to end by a foreign zenoh-pico
+//!        `z_put -k demo/**` in the wz-integration-tests e2e
+//!        `wz_storage_wildcard_update_pico_interop` (R311wt pico leg): a real
+//!        pico wildcard Push crosses a live TCP link, `apply_sample` detects
+//!        `is_wild`, registers it, and materializes the override onto a
+//!        pre-seeded concrete key. The wz<->zenohd ALIGN-path wildcard e2e above
+//!        (a wz replica pulling + applying a wildcard EVENT off a real zenohd
+//!        aligner) remains the separate, open cross-impl follow-up.
 //! - **`strip_prefix` and the mount-root `None` key** (R311y61/y64). With a
 //!   configured `strip_prefix` (`storage-mgr-strip-prefix`), the gate keys
 //!   on the STORED (stripped) key — `None` being the exact-prefix-match

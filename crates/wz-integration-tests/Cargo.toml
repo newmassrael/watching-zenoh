@@ -117,6 +117,22 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # dispatch, so this dev-dep build needs the pubkey method (rsa) + the auth-on
     # open seam. Same additive-unification note as access-extauth-usrpwd above.
     "access-extauth-pubkey",
+    # R311wt (pico cross-impl leg) — the storage wildcard-update LIVE-path
+    # interop e2e (tests/wz_storage_wildcard_update_pico_interop.rs) drives a
+    # foreign zenoh-pico `z_put -k demo/**` wildcard PUT into an IN-PROCESS wz
+    # StorageService and inspects its wildcard registry + materialized override.
+    # It needs the write-path override engine (apply_sample_wildcard_aware +
+    # wildcard_puts/deletes) AND the `wildcard_registry_lens` read seam, the
+    # latter gated on `storage-mgr-garbage-collection` (storage_state.rs:896) —
+    # which transitively enables `storage-mgr-wildcard-updates` +
+    # `storage-backend`, and exposes `StorageService::shared_state` for the
+    # concrete-key pre-seed. Adding `storage-mgr-wildcard-updates` alone is
+    # insufficient (the lens would not exist). Same additive-unification note as
+    # the storage-aligner pin above: under `cargo test --workspace` this feature
+    # unifies onto the shared wz-runtime-tokio build, so its GC/wildcard lib
+    # tests additionally run there (purely additive; the concrete-key paths the
+    # existing storage tests exercise stay equivalent).
+    "storage-mgr-garbage-collection",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
