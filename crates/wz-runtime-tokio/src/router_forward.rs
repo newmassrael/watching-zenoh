@@ -2309,10 +2309,12 @@ impl RouterForwarder {
         // EGRESS to any attached multicast group — UNCONDITIONAL, OUTSIDE the
         // sub-gated fan-out above (zenoh's flat `mcast_groups` append,
         // `hat/router/pubsub.rs:1334`): a Put with zero matched local subs still
-        // reaches the group. `inbound_is_mcast=false` — no inbound face is a
-        // multicast face until the INGRESS milestone lands the `mcast_faces` plane.
+        // reaches the group. The resolved `keyexpr` is threaded so the egress
+        // reliteralizes an aliased id-only push (the group shares no alias table).
+        // `inbound_is_mcast=false` — no inbound face is a multicast face until the
+        // INGRESS milestone lands the `mcast_faces` plane.
         #[cfg(feature = "transport-multicast")]
-        self.broadcast_to_mcast_groups(reliable, push, false);
+        self.broadcast_to_mcast_groups(reliable, push, &keyexpr, false);
     }
 
     /// Attach a multicast drive loop's outbound sender as an EGRESS group face
@@ -2337,18 +2339,40 @@ impl RouterForwarder {
     /// (`inbound_is_mcast` ⇒ return; mcast→mcast is the both-multicast deny). The
     /// group sink only ENQUEUES a [`MulticastTxItem::Push`]; the drive loop mints
     /// the group channel SN + frames it (the `multicast_tx` SSOT), so egress here
-    /// never mints an SN (double-mint would desync the group ring).
+    /// never mints an SN (double-mint would desync the group ring). The routed push
+    /// is RE-LITERALIZED against the resolved `keyexpr` first (a group leaf shares
+    /// no expr-id alias table — an aliased id-only push would be a group blackhole),
+    /// mirroring the client-leaf / mesh egress legs.
     #[cfg(feature = "transport-multicast")]
-    fn broadcast_to_mcast_groups(&self, reliable: bool, push: &PushOwned, inbound_is_mcast: bool) {
+    fn broadcast_to_mcast_groups(
+        &self,
+        reliable: bool,
+        push: &PushOwned,
+        keyexpr: &str,
+        inbound_is_mcast: bool,
+    ) {
         if inbound_is_mcast {
             return;
         }
         let groups = self.mcast_groups.borrow();
+        if groups.is_empty() {
+            return;
+        }
+        // Re-literalize ONCE against the `route_push`-resolved `keyexpr`: a
+        // multicast group is a downstream link with NO shared expr-id alias table
+        // (a group leaf never saw the inbound face's `DeclKexpr`), so an ALIASED
+        // (id-only) inbound push would egress an unresolvable wireexpr — a group
+        // blackhole. Every sibling egress leg to a no-shared-table downstream
+        // reliteralizes for the same reason (`deliver_to_client_subscribers`,
+        // `compute_self_publish_forward`); a literal push is forwarded verbatim.
+        let Ok(carrier) = reliteralize_push(push, keyexpr) else {
+            return;
+        };
         for group in groups.iter() {
             // Fire-and-forget: a dropped receiver = a dead multicast link, the
             // same contract the drive loop's own reply backing carries.
             let _ = group.tx.send(MulticastTxItem::Push {
-                push: Box::new(push.clone()),
+                push: Box::new(carrier.clone()),
                 reliable,
             });
         }
@@ -11073,7 +11097,7 @@ mod tests {
 
         // A Put whose source is NOT a multicast face broadcasts to the group,
         // UNCONDITIONALLY (no matching sub is registered on this forwarder).
-        fwd.broadcast_to_mcast_groups(true, &push, false);
+        fwd.broadcast_to_mcast_groups(true, &push, "demo/data", false);
         let item = rx.try_recv().expect("the routed Put reached the group");
         assert!(
             matches!(item, MulticastTxItem::Push { reliable: true, .. }),
@@ -11081,7 +11105,7 @@ mod tests {
         );
 
         // Echo guard: a Push whose source IS a multicast face is not re-broadcast.
-        fwd.broadcast_to_mcast_groups(true, &push, true);
+        fwd.broadcast_to_mcast_groups(true, &push, "demo/data", true);
         assert!(
             rx.try_recv().is_err(),
             "a multicast-sourced Push must not echo back to a group"
@@ -11115,9 +11139,65 @@ mod tests {
         let item = rx
             .try_recv()
             .expect("the routed Push reached the group via the route_push tail");
-        assert!(
-            matches!(item, MulticastTxItem::Push { reliable: true, .. }),
-            "broadcast as a reliable MulticastTxItem::Push"
+        let MulticastTxItem::Push { push, reliable } = item else {
+            panic!("expected a MulticastTxItem::Push");
+        };
+        assert!(reliable, "broadcast on the reliable channel");
+        // The group leaf shares NO alias table, so resolve the egressed keyexpr
+        // against an EMPTY table (the leaf's view): a literal push forwards verbatim
+        // and stays resolvable — a wrong/stale keyexpr would fail this.
+        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        assert_eq!(
+            resolve_wireexpr(&push.keyexpr.body, &empty).as_deref(),
+            Some("demo/data"),
+            "the group receives a resolvable literal keyexpr"
+        );
+    }
+
+    /// R311y189 — the reliteralization guard the literal-only tests structurally
+    /// missed (IMPL-review CONFIRMED): a router forwards an ALIASED (id-only) inbound
+    /// push to a multicast group. A group leaf shares NO expr-id alias table with the
+    /// router, so the egress MUST re-literalize — an aliased id would otherwise be an
+    /// unresolvable blackhole (the same reason every sibling egress leg literalizes,
+    /// `deliver_to_client_subscribers` / `compute_self_publish_forward`). Modeled by
+    /// resolving the egressed keyexpr against an EMPTY table (the leaf's view): it
+    /// must be the literal "demo/data", NOT the aliased id 7.
+    #[cfg(feature = "transport-multicast")]
+    #[test]
+    fn aliased_routed_push_is_reliteralized_for_the_mcast_group() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
+        fwd.register(FaceId(0), &a_p);
+        // The inbound face declares an expr-id alias 7 -> "demo/data" (the wire's
+        // bandwidth-efficient shape), populating the face's keyexpr_table.
+        let kexpr = NetworkMessage::Declare(Box::new(
+            wz_session_core::declare_build::build_declare_kexpr(7, "demo/data").expect("kexpr"),
+        ));
+        forward_one(&fwd, FaceId(0), kexpr);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        fwd.attach_mcast_group(tx);
+
+        // A pure-aliased push (id 7, no suffix): route_push resolves it via the face
+        // table, and the egress must re-literalize before enqueuing to the group.
+        let aliased =
+            wz_session_core::push_build::build_push_aliased(7, None, b"payload").expect("aliased");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(aliased)));
+
+        let item = rx
+            .try_recv()
+            .expect("the aliased routed Push reached the group");
+        let MulticastTxItem::Push { push, .. } = item else {
+            panic!("expected a MulticastTxItem::Push");
+        };
+        // The group leaf has NO alias table: resolve against an empty one. The
+        // aliased id 7 would resolve to None (blackhole); the reliteralized literal
+        // resolves to "demo/data".
+        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        assert_eq!(
+            resolve_wireexpr(&push.keyexpr.body, &empty).as_deref(),
+            Some("demo/data"),
+            "the mcast egress must re-literalize the aliased push (id 7 -> literal) \
+             or a group leaf with no alias table blackholes it"
         );
     }
 }
