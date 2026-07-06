@@ -859,6 +859,13 @@ routing-router-hat = ["routing-peer"]
 # routing-peer -> codec-declare already (like build_declare_subscriber under
 # routing-router-hat), so no declare-token app-surface dep is needed.
 routing-token-tables = ["routing-router-hat"]
+# §5.21 router-multicast-faces (slice-3 EGRESS run-mode) — the router forwards a
+# routed Push over a multicast group (zenoh mcast_groups / McastMux egress,
+# router.rs:181). Composes routing-router-hat (the RouterForwarder + the
+# route_push tail broadcast) with transport-multicast (the McastGroup egress
+# plane + the spawn_router_mcast_egress drive-loop host). Egress-first: the
+# mcast_faces INGRESS plane is the deferred milestone.
+router-multicast-faces = ["routing-router-hat", "transport-multicast"]
 # ── §5.16 access-control composition knobs ───────────────────────────
 # Each independently elides ONE interceptor on the routing-peer admission
 # chain (interceptor/{access_control,downsampling,low_pass}.rs). The chain

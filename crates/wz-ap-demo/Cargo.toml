@@ -218,6 +218,12 @@ router-hat-router = ["routing-router-hat"]
 # cross-impl leg exercises the plane; it stays independently toggleable (A3
 # active <=> its own cfg sites, distinct from router-hat-router's).
 routing-token-tables = ["router-hat-router", "wz/routing-token-tables"]
+# §5.21 router-multicast-faces (R311y188, slice-3 EGRESS run-mode) — compiles the
+# router's multicast egress host (spawn_router_mcast_egress + attach_mcast_group)
+# INSIDE the #[cfg(feature="router-hat-router")] run_router_hat fn. Pulls
+# router-hat-router (the run-mode) + the facade passthrough; the atom is
+# active <=> its own cfg site in run_router_hat (mirrors routing-token-tables).
+router-multicast-faces = ["router-hat-router", "wz/router-multicast-faces"]
 
 [lints]
 workspace = true

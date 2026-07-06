@@ -2087,6 +2087,35 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     // interceptors (admit-all), no autoconnect (dial only the configured set).
     let forwarder = RouterForwarder::new(Zid::from_slice(&params.zid));
 
+    // R311y188 — router-multicast-faces slice 3: the EGRESS run-mode host. A
+    // router built with `router-multicast-faces` attaches a data-plane multicast
+    // group as a TX egress face (zenoh `new_transport_multicast` -> McastMux into
+    // `mcast_groups`, router.rs:181): `spawn_router_mcast_egress` binds the group
+    // socket + drives the loop on a SEPARATE task and returns its `Send` sender,
+    // which the forwarder holds via `attach_mcast_group`. A routed Push then
+    // egresses to the group at the `route_push` tail. The group address is the
+    // demo default (a configurable group is a later concern — the demo hardcodes
+    // its zid prefix + tick cadence the same way). The `mcast_faces` INGRESS plane
+    // is the deferred milestone.
+    #[cfg(feature = "router-multicast-faces")]
+    {
+        use std::net::Ipv4Addr;
+        // The demo's default data-plane router multicast group. Distinct port from
+        // scouting (7446/7447) + the loopback e2e tests (7449/7450/7451).
+        const MCAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 225);
+        const MCAST_PORT: u16 = 7452;
+        let mcast_tx = wz::runtime_tokio::multicast_glue::spawn_router_mcast_egress(
+            MCAST_GROUP,
+            MCAST_PORT,
+            params.zid.clone(),
+        );
+        forwarder.attach_mcast_group(mcast_tx);
+        log::info!(
+            "wz-ap-demo router-hat: multicast egress group {MCAST_GROUP}:{MCAST_PORT} \
+             attached (router-multicast-faces); routed Push forwards to the group"
+        );
+    }
+
     let loop_fut = peer_loop(
         FaceSources {
             listener,

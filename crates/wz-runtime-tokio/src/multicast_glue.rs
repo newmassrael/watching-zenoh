@@ -441,6 +441,93 @@ where
     }
 }
 
+/// R311y188 — router-multicast-faces slice 3: spawn the EGRESS-only multicast
+/// group drive loop for a router run-mode and return its `Send` outbound sender.
+///
+/// The wz analog of zenoh `Router::new_transport_multicast` (`router.rs:181`): a
+/// router that forwards over a multicast group holds a `McastMux` egress face
+/// whose outbound is a group channel. Here the caller hands the returned
+/// [`UnboundedSender<MulticastTxItem>`] to
+/// [`attach_mcast_group`](crate::router_forward::RouterForwarder::attach_mcast_group);
+/// a routed `Push` then rides the channel into this loop, which mints the group
+/// channel SN + frames it to the group (the `multicast_tx` SSOT). The loop runs
+/// on a SEPARATE `tokio::spawn` task — only the sender (`Send` + `Clone`) crosses
+/// to the `!Send` `RouterForwarder`, so the router needs no single-task fold (the
+/// INGRESS `mcast_faces` plane is the deferred milestone; this loop's `on_event`
+/// is a no-op — a router egress face consumes no group ingress).
+///
+/// TX-only egress shape: an ephemeral-bound socket TARGETING the group (the
+/// publisher shape — joining for INGRESS would need `SO_REUSEADDR` + the ingress
+/// plane). The bind runs INSIDE the spawned task so this helper stays synchronous
+/// and returns the wired sender immediately; a bind failure logs and the task
+/// exits (the egress plane is simply absent — a dropped receiver is the
+/// fire-and-forget contract the forwarder's group sink already carries).
+#[cfg(feature = "transport-multicast")]
+pub fn spawn_router_mcast_egress(
+    group: core::net::Ipv4Addr,
+    port: u16,
+    zid: Vec<u8>,
+) -> UnboundedSender<MulticastTxItem> {
+    use core::net::{Ipv4Addr, SocketAddr};
+
+    use wz_session_core::multicast_dispatch::MulticastConfig;
+    use wz_session_core::multicast_params::MulticastParams;
+    use wz_session_core::WhatAmI;
+
+    use crate::runtime_impl::TokioTime;
+    use crate::UdpDriver;
+
+    // A router group serves many leaf subscribers; the bound is the multicast
+    // dispatcher's fixed peer-table capacity.
+    const MCAST_MAX_PEERS: usize = 32;
+    // The group profile (zenoh multicast defaults). The router advertises
+    // `WhatAmI::Router` in its JOIN beacon so leaves attribute the source tier.
+    let params = MulticastParams {
+        version: 0x09,
+        whatami: WhatAmI::Router,
+        zid,
+        lease_ms: 5_000,
+        join_interval_ms: 100,
+        seq_num_res: 0x02,
+        req_id_res: 0x02,
+        batch_size: 2_048,
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let sock = match tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await {
+            Ok(sock) => sock,
+            Err(e) => {
+                log::error!(
+                    "router multicast egress: ephemeral bind failed ({e}); egress group absent"
+                );
+                return;
+            }
+        };
+        let mut driver = UdpDriver::from_socket(sock, SocketAddr::from((group, port)));
+        let mut dispatcher =
+            MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
+        let clock = TokioTime::new();
+        drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 50,
+                // production: no iteration budget — the loop runs for the node's life.
+                max_iters: None,
+            },
+            &mut driver,
+            &clock,
+            // Egress-only: a router group face consumes no group ingress (the
+            // `mcast_faces` ingress plane is the deferred milestone).
+            |_| {},
+            &mut rx,
+        )
+        .await;
+    });
+    tx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

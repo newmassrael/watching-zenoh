@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use wz_runtime_tokio::multicast_glue::{
-    drive_multicast_session, multicast_put_literal, MulticastDriveConfig,
+    drive_multicast_session, multicast_put_literal, spawn_router_mcast_egress, MulticastDriveConfig,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::UdpDriver;
@@ -431,5 +431,88 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
         dispatcher_b.active_peers(),
         2,
         "B admitted both concurrent publishers from their JOIN beacons"
+    );
+}
+
+/// R311y188 — router-multicast-faces slice 3: the run-mode egress helper
+/// `spawn_router_mcast_egress` binds + drives the group loop on a SEPARATE task;
+/// a `MulticastTxItem::Push` on its returned sender (the sender a
+/// `RouterForwarder::attach_mcast_group` holds) reaches a group subscriber. The
+/// forwarder->sender half is the non-socket unit
+/// `routed_push_broadcasts_to_attached_mcast_group`; this is the sender->group
+/// socket half — the same `MulticastTxItem` seam, closed end to end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn router_egress_helper_reaches_group_subscriber() {
+    // Distinct group port from the sibling loopback tests (7449 / 7450) so the
+    // --ignored lane never contends on the same multicast bind.
+    const HELPER_PORT: u16 = 7451;
+
+    // Subscriber node: group-joined socket + observer-backed drive loop.
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, HELPER_PORT)
+        .await
+        .expect("bind multicast subscriber link");
+    let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_b = mc_params(0xBB);
+
+    let fired = Arc::new(AtomicUsize::new(0));
+    let mut observer = ApplicationLayerObserver::new();
+    {
+        let fired = fired.clone();
+        observer.subscribers.register(KEYEXPR, move |sample| {
+            assert_eq!(sample.keyexpr(), KEYEXPR);
+            assert_eq!(sample.payload(), PAYLOAD);
+            fired.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+
+    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let clock = TokioTime::new();
+    let drive_b = drive_multicast_session(
+        &mut dispatcher_b,
+        MulticastDriveConfig {
+            params: &params_b,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut driver_b,
+        &clock,
+        |event| observer.dispatch_event(event),
+        &mut rx_b,
+    );
+
+    // The router egress: the PRODUCTION helper spawns the group drive loop on its
+    // own task and returns the sender `RouterForwarder::attach_mcast_group` holds.
+    let tx = spawn_router_mcast_egress(GROUP, HELPER_PORT, vec![0xAA; 4]);
+
+    let fired_probe = fired.clone();
+    let scenario = async move {
+        // Give the helper's JOIN beacons time to admit it into B's peer table.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tx.send(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
+            .expect("queue publish on the egress helper's sender");
+        for _ in 0..100 {
+            if fired_probe.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("subscriber did not fire within the 3s budget");
+    };
+
+    tokio::select! {
+        _ = drive_b => panic!("subscriber drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "exactly one delivery via the egress helper"
+    );
+    assert_eq!(
+        dispatcher_b.active_peers(),
+        1,
+        "B admitted the egress helper from its JOIN beacon"
     );
 }

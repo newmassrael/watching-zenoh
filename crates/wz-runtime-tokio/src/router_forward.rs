@@ -11087,4 +11087,37 @@ mod tests {
             "a multicast-sourced Push must not echo back to a group"
         );
     }
+
+    /// R311y188 — router-multicast-faces slice 3: a REAL routed Push (driven
+    /// through `forward` -> `route_push`, not a direct `broadcast_to_mcast_groups`
+    /// call as slice 1's unit did) reaches an attached multicast group at the
+    /// `route_push` tail — UNCONDITIONALLY, with no subscriber registered for the
+    /// keyexpr (zenoh's flat `mcast_groups` append outside the sub-gated walk,
+    /// `hat/router/pubsub.rs:1334`). This closes the forwarder->sender half of the
+    /// egress composition; the sender->group socket half is the Layer M loopback
+    /// e2e `router_egress_helper_reaches_group_subscriber`.
+    #[cfg(feature = "transport-multicast")]
+    #[test]
+    fn routed_push_broadcasts_to_attached_mcast_group() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        // A peer inbound face so `route_push` resolves the inbound keyexpr (it
+        // early-returns on an unregistered face); NO subscriber is registered, so
+        // the sub-gated fan-out drops — only the unconditional group broadcast fires.
+        let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
+        fwd.register(FaceId(0), &a_p);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        fwd.attach_mcast_group(tx);
+
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+
+        let item = rx
+            .try_recv()
+            .expect("the routed Push reached the group via the route_push tail");
+        assert!(
+            matches!(item, MulticastTxItem::Push { reliable: true, .. }),
+            "broadcast as a reliable MulticastTxItem::Push"
+        );
+    }
 }
