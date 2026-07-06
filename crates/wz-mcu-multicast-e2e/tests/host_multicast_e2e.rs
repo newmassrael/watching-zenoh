@@ -6,9 +6,10 @@
 //! Runs the SAME [`run_multicast_e2e`] scenario the `deploy/mcu-multicast-e2e`
 //! footprint bin embodies, but on the host's real lwIP build with multicast
 //! loopback routed (the sanctioned `LWIP_LOOPIF_MULTICAST` + `LWIP_TESTMODE`
-//! affordance) and a frozen clock for full determinism. This is the RUNTIME
-//! PROOF the bin cannot provide via QEMU (the cross / deploy lwIP ports omit
-//! loopback multicast on purpose — see the crate docs): it asserts the full
+//! affordance) and a frozen clock for full determinism. Since R311y190 the
+//! deploy bin ALSO runs this round trip on-target (the `loopback-multicast`
+//! build boots on QEMU M3/M4/M7, run-ci Layer Q.6); this host lane is the
+//! frozen-clock, host-runtime counterpart: it asserts the full
 //! multicast feature profile composes end to end — a peer JOIN admitted
 //! (transport-multicast), an oversize Put split into a `T_MID_FRAGMENT` chain
 //! (transport-fragmentation TX), reassembled back into one `Push`

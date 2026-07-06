@@ -335,7 +335,13 @@ impl LwipLink {
     /// `#if LWIP_TESTMODE && LWIP_HAVE_LOOPIF`), so the feature and a testmode
     /// port (e.g. `port/cross-test-mcast`) are coupled BY CONSTRUCTION — a
     /// `loopif-multicast` build against a non-testmode port fails to compile
-    /// (fail-fast, self-guarding; the illegal state is unrepresentable).
+    /// (fail-fast, self-guarding). NOTE the compile-coupling enforces
+    /// `LWIP_TESTMODE` (for `netif_get_loopif`); the group JOIN additionally needs
+    /// `LWIP_LOOPIF_MULTICAST` on the port, which is NOT compile-enforced — a
+    /// testmode-but-non-loopif port would compile yet fail the join at runtime
+    /// (the caller's FAIL path catches it, never a false success). So
+    /// full-roundtrip correctness = this compile-coupling PLUS the runtime
+    /// assertion, not the coupling alone.
     /// Signature-stable: the method is always present; with the feature off it is
     /// a typed [`LinkError::FeatureDisabled`] no-op, never a silent success.
     pub fn route_multicast_over_loopback(&self) -> Result<(), LinkError> {

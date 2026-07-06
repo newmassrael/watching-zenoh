@@ -37,3 +37,8 @@
 #define MEMP_NUM_PBUF                   16
 #undef PBUF_POOL_SIZE
 #define PBUF_POOL_SIZE                  8
+/* IGMP report timers + the driver tick + ARP/IP-reass cyclic timers want more
+ * than cross-test's compile-check minimum of 4 concurrent sys_timeout slots;
+ * match the host port's 8 (completes the "size toward the host port" rationale). */
+#undef MEMP_NUM_SYS_TIMEOUT
+#define MEMP_NUM_SYS_TIMEOUT            8

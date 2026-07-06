@@ -38,18 +38,24 @@
 //!    R311mf Fragment RX arm reassembles + re-parses them back into the SAME
 //!    single `Push` the whole-`T_MID_FRAME` path would fan.
 //!
-//! ## Why the host owns the runtime proof (no QEMU boot)
+//! ## Runtime proof: the host lane AND the on-target QEMU lane (R311y190)
 //!
 //! Multicast self-loopback needs `LWIP_LOOPIF_MULTICAST` + `LWIP_TESTMODE` +
-//! `ip4_set_default_multicast_netif(netif_get_loopif())`, which the repo
-//! confines to the HOST lwIP port (the cross / deploy ports omit it — "real
-//! deploys join on their ethernet netif, not loopback"). So the host
-//! integration test, using [`wz_link_lwip::lwip_test_link`]'s routed link, is
-//! the sanctioned home for this round trip; the deploy bin passes a plain
-//! [`LwipLink::init`] link and is build + footprint-size only (it is a real
-//! multicast deploy artifact that boots on hardware with a real IGMP netif,
-//! out of QEMU-CI scope). The caller supplies the [`LwipLink`] precisely so
-//! this one function serves both.
+//! `ip4_set_default_multicast_netif(netif_get_loopif())`. The HOST lwIP port
+//! ships these, so the host integration test (using
+//! [`wz_link_lwip::lwip_test_link`]'s routed link + a frozen clock) is ONE home
+//! for this round trip. R311y190 added the SECOND home: the `loopback-multicast`
+//! deploy build routes the loop netif via the no_std
+//! [`LwipLink::route_multicast_over_loopback`] seam against the testmode
+//! `lwip-sys/port/cross-test-mcast` port, so the deploy bin runs the SAME round
+//! trip ON-TARGET (Cortex-M3/M4/M7 under QEMU, run-ci Layer Q.6). That is a
+//! LOOPBACK transport-plumbing proof on the real CPU — NOT real-network multicast
+//! (a production deploy joins on its ethernet netif; QEMU mps2 has no peer NIC,
+//! so loopback is the on-target CI ceiling). WITHOUT `loopback-multicast` the
+//! deploy bin passes a plain [`LwipLink::init`] link and stays build +
+//! footprint-size only (`join_ok=false` on QEMU). The caller supplies the
+//! [`LwipLink`] so this one function serves the host lane, the footprint
+//! artifact, AND the on-target QEMU proof.
 
 extern crate alloc;
 
@@ -150,9 +156,12 @@ pub struct MulticastE2eReport {
 /// `link` is the lwIP link the loop pumps. The host test passes a
 /// [`wz_link_lwip::lwip_test_link`] link (multicast TX routed over the
 /// IGMP-capable loop netif, so the self-loopback round trip is observable);
-/// the deploy bin passes a plain [`LwipLink::init`] link (no multicast
-/// routing — `join_ok` comes back false on a QEMU loopback environment, true
-/// on real hardware with an IGMP netif).
+/// the deploy bin's `loopback-multicast` build routes multicast over the loop
+/// netif too (via [`LwipLink::route_multicast_over_loopback`] on the testmode
+/// `cross-test-mcast` port), so `join_ok` + the round trip succeed ON-TARGET
+/// under QEMU (Layer Q.6); its plain [`LwipLink::init`] default build routes
+/// nothing, so `join_ok` comes back false on QEMU (footprint artifact) and true
+/// only on real hardware with an IGMP netif.
 ///
 /// `clock_source` is the monotonic time the [`CoopRuntime`] reads. The host
 /// test passes a frozen clock (no JOIN-interval / lease deadline ever

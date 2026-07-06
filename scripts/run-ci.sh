@@ -4105,8 +4105,9 @@ layer_q_qemu_mcu_e2e() {
     # SEPARATE ELF + port from Q.5's footprint build, so the shared cross-test
     # port + the Q.5 baseline stay byte-identical. mps2-class only (M3/M4/M7):
     # the ~49 KB multicast rx pool does not fit nrf51's 16 KB SRAM (thumbv6m
-    # excluded, as in Q.5); an505/M33 carries the same cortex-m-rt Secure-state
-    # skip as Q.2. With `loopback-multicast` the bin has no loopback-only SKIP
+    # excluded, as in Q.5); an505/M33 is omitted from the M3/M4/M7 loop below —
+    # the same cortex-m-rt Secure-state carry Q.2 explicitly KNOWN_SKIPs. With
+    # `loopback-multicast` the bin has no loopback-only SKIP
     # arm, so QEMU exit 0 == PASS (a failed join/roundtrip exits non-zero);
     # run_qemu_case's 30s backstop bounds a runaway. This CLOSES the "MCU
     # multicast is host-only / on-target evidence deferred" debt.
