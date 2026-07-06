@@ -1194,6 +1194,15 @@ layer_c1ax_cargo_test_routing_namespace() {
 #      `--no-default-features --features routing-token-tables` clippy arm proves
 #      standalone composition (it pulls routing-router-hat), so the token cfg sites
 #      are never a dead, unlinted stub.
+#   6. §5.21 router-multicast-faces (slice-1, EGRESS plane): the router's
+#      unconditional broadcast of a routed Push to attached multicast groups
+#      (mcast_groups egress, McastMux-faithful). The group plane is
+#      `#[cfg(feature="transport-multicast")]`-gated inside router_forward and
+#      NEVER compiled by the plain routing-router-hat arm above, so the
+#      `routing-router-hat,transport-multicast` arm RUNS the egress unit
+#      (mcast_group_receives_routed_push_and_echo_guards) + clippy-gates the mcast
+#      cfg sites. The atom stays RESERVED (gated on the existing transport-multicast
+#      feature, not router-multicast-faces).
 layer_c1ay_cargo_test_router_hat() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet \
@@ -1203,6 +1212,8 @@ layer_c1ay_cargo_test_router_hat() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,access-acl,access-downsampling,access-quota --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,routing-token-tables --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,transport-multicast --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-token-tables --quiet -- -D warnings)
 }
 

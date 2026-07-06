@@ -313,6 +313,13 @@ use wz_codecs::interest::InterestOwned;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::push::PushOwned;
 use wz_codecs::wireexpr::WireexprOwned;
+// R311wt-mc slice 1 — the EGRESS-only multicast group plane
+// (`router-multicast-faces`). Gated on `transport-multicast` (the existing §5.1
+// atom that makes `MulticastTxItem` + the drive loop available); the reserved
+// `router-multicast-faces` atom stays cfg-site-free until a run-mode wires
+// `attach_mcast_group` (a later slice, the reserved→active flip).
+#[cfg(feature = "transport-multicast")]
+use tokio::sync::mpsc::UnboundedSender;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable_reply,
@@ -334,6 +341,8 @@ use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
+#[cfg(feature = "transport-multicast")]
+use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::push_routing_context::set_push_source;
@@ -495,6 +504,21 @@ struct RouterFaceState {
     keyexpr_table: hashbrown::HashMap<u64, String>,
 }
 
+/// One EGRESS-only multicast group face — the wz analog of a zenoh
+/// `mcast_groups` entry (`dispatcher/tables.rs:79`) whose primitives is a
+/// `McastMux` (`mux.rs:245`). Holds the outbound sender of a multicast drive
+/// loop ([`multicast_glue::drive_multicast_session`](crate::multicast_glue));
+/// the router enqueues a [`MulticastTxItem::Push`] and the (SEPARATE-task) loop
+/// mints the group channel SN + frames it through the `multicast_tx` SSOT, so
+/// this `!Send` forwarder only needs a `Send` sender (no single-task fold — that
+/// is the INGRESS milestone). A group is a broadcast SINK: no zid, no ingress,
+/// never a delivery-lookup key (zenoh's per-peer `DummyPrimitives` ingress face
+/// lives in the separate `mcast_faces` plane, deferred).
+#[cfg(feature = "transport-multicast")]
+struct McastGroup {
+    tx: UnboundedSender<MulticastTxItem>,
+}
+
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
 /// (Router-tier) and `linkstatepeers_net` (Peer-tier) — from the face lifecycle
 /// and inbound `OAM_LINKSTATE` topology. The router counterpart to the
@@ -514,6 +538,17 @@ pub struct RouterForwarder {
     /// (the `RouterFaceState.tier` says which net), so the flood can scope to a
     /// single net by filtering this map.
     faces: RefCell<HashMap<FaceId, RouterFaceState>>,
+    /// EGRESS-only multicast group faces (zenoh `Tables.mcast_groups`,
+    /// `dispatcher/tables.rs:79`) — a SEPARATE collection from `faces`, mirroring
+    /// zenoh's separate `mcast_groups` Vec (the egress polymorphism is WHICH
+    /// collection a face lives in, not a `dyn EPrimitives`). A routed `Push` is
+    /// broadcast to every group UNCONDITIONALLY at the [`route_push`](Self::route_push)
+    /// tail — zenoh's flat append (`hat/router/pubsub.rs:1334`) sits OUTSIDE the
+    /// sub-gated graph walk, so a Put with zero matched local subs still reaches
+    /// the group. Empty until a run-mode [`attach_mcast_group`](Self::attach_mcast_group)s
+    /// a drive loop's sender (the reserved→active wiring, a later slice).
+    #[cfg(feature = "transport-multicast")]
+    mcast_groups: RefCell<Vec<McastGroup>>,
     /// Router-tier subscription interest (zenoh `HatTables.router_subs`).
     /// POPULATED by the subscription-INGEST slice (1b, this round): NATIVE
     /// Router sources keyed by their zid. The cross-tier self-bubble is NOT
@@ -783,6 +818,8 @@ impl RouterForwarder {
                 WhatAmI::Router,
             ))),
             faces: RefCell::new(HashMap::new()),
+            #[cfg(feature = "transport-multicast")]
+            mcast_groups: RefCell::new(Vec::new()),
             router_subs: RefCell::new(LinkstatepeerInterest::new()),
             linkstatepeer_subs: RefCell::new(LinkstatepeerInterest::new()),
             router_qabls: RefCell::new(LinkstatepeerInterest::new()),
@@ -2268,6 +2305,52 @@ impl RouterForwarder {
         // Client-sourced mesh re-injection (peer leg ungated, router leg master).
         if tier == FaceTier::Client {
             self.publish_client_push_into_meshes(reliable, push, &keyexpr, master);
+        }
+        // EGRESS to any attached multicast group — UNCONDITIONAL, OUTSIDE the
+        // sub-gated fan-out above (zenoh's flat `mcast_groups` append,
+        // `hat/router/pubsub.rs:1334`): a Put with zero matched local subs still
+        // reaches the group. `inbound_is_mcast=false` — no inbound face is a
+        // multicast face until the INGRESS milestone lands the `mcast_faces` plane.
+        #[cfg(feature = "transport-multicast")]
+        self.broadcast_to_mcast_groups(reliable, push, false);
+    }
+
+    /// Attach a multicast drive loop's outbound sender as an EGRESS group face
+    /// (the wz analog of zenoh `Router::new_transport_multicast`, `router.rs:181`,
+    /// pushing a `McastMux` face into `mcast_groups`). A routed `Push` is
+    /// thereafter broadcast to this group. The sender is `Send` + `Clone`, so the
+    /// drive loop stays a SEPARATE task from this `!Send` forwarder — the EGRESS
+    /// half needs no single-task fold (that is the INGRESS milestone). Called by
+    /// the router+multicast run-mode (a later slice); until then the plane is empty.
+    #[cfg(feature = "transport-multicast")]
+    pub fn attach_mcast_group(&self, tx: UnboundedSender<MulticastTxItem>) {
+        self.mcast_groups.borrow_mut().push(McastGroup { tx });
+    }
+
+    /// Broadcast a routed `Push` to every attached multicast group. UNCONDITIONAL
+    /// by design (zenoh appends `mcast_groups` to every data route outside the
+    /// graph walk, `hat/router/pubsub.rs:1334`), so it must NOT be folded into the
+    /// sub-gated [`self_publish_into_tier`](Self::self_publish_into_tier) /
+    /// [`forward_push_tier`](Self::forward_push_tier) (which drop when no local sub
+    /// matched). Echo guard (zenoh `egress_filter`, `hat/router/mod.rs:813`): a
+    /// Push whose source is itself a multicast face is NOT re-broadcast to a group
+    /// (`inbound_is_mcast` ⇒ return; mcast→mcast is the both-multicast deny). The
+    /// group sink only ENQUEUES a [`MulticastTxItem::Push`]; the drive loop mints
+    /// the group channel SN + frames it (the `multicast_tx` SSOT), so egress here
+    /// never mints an SN (double-mint would desync the group ring).
+    #[cfg(feature = "transport-multicast")]
+    fn broadcast_to_mcast_groups(&self, reliable: bool, push: &PushOwned, inbound_is_mcast: bool) {
+        if inbound_is_mcast {
+            return;
+        }
+        let groups = self.mcast_groups.borrow();
+        for group in groups.iter() {
+            // Fire-and-forget: a dropped receiver = a dead multicast link, the
+            // same contract the drive loop's own reply backing carries.
+            let _ = group.tx.send(MulticastTxItem::Push {
+                push: Box::new(push.clone()),
+                reliable,
+            });
         }
     }
 
@@ -10970,6 +11053,38 @@ mod tests {
             forwarded_response(&sink_a.frame_bytes(0)).request_id,
             95,
             "with the rid rewritten to the querier's"
+        );
+    }
+
+    /// R311wt-mc slice 1 — the EGRESS-only multicast group plane: an attached
+    /// group receives a routed Put as a `MulticastTxItem::Push` (carrying the
+    /// reliable flag), and the echo guard suppresses a multicast-sourced Push
+    /// (zenoh's both-multicast egress deny, `hat/router/mod.rs:813`). The
+    /// broadcast is UNCONDITIONAL — no subscriber is registered here, yet the
+    /// group still receives it (zenoh's flat append, `pubsub.rs:1334`).
+    #[cfg(feature = "transport-multicast")]
+    #[test]
+    fn mcast_group_receives_routed_push_and_echo_guards() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        fwd.attach_mcast_group(tx);
+        let push =
+            wz_session_core::push_build::build_push_literal("demo/data", b"payload").expect("push");
+
+        // A Put whose source is NOT a multicast face broadcasts to the group,
+        // UNCONDITIONALLY (no matching sub is registered on this forwarder).
+        fwd.broadcast_to_mcast_groups(true, &push, false);
+        let item = rx.try_recv().expect("the routed Put reached the group");
+        assert!(
+            matches!(item, MulticastTxItem::Push { reliable: true, .. }),
+            "broadcast as a reliable MulticastTxItem::Push"
+        );
+
+        // Echo guard: a Push whose source IS a multicast face is not re-broadcast.
+        fwd.broadcast_to_mcast_groups(true, &push, true);
+        assert!(
+            rx.try_recv().is_err(),
+            "a multicast-sourced Push must not echo back to a group"
         );
     }
 }
