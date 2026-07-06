@@ -446,6 +446,11 @@ storage-mgr-multi-storage-host = [
 ]
 # R311y58 — forward the wz-session-core strip_prefix/restore key-transform logic.
 storage-mgr-strip-prefix = ["wz-session-core/storage-mgr-strip-prefix"]
+# R311wt slice 2 — forward the wz-session-core write-path wildcard override
+# engine. Pure forward: the override lives entirely in the kernel
+# (StorageState::apply_sample), and the tokio `storage_service` driver already
+# calls apply_sample, so no new runtime code (same shape as strip-prefix).
+storage-mgr-wildcard-updates = ["wz-session-core/storage-mgr-wildcard-updates"]
 # R311y106 — §5.21 routing-namespace active flip: forward the per-participant
 # keyexpr namespace decorator. The egress seam lives in this crate's unicast
 # `Tp::send_network_message` arm; the ingress + reply-egress + decorator state

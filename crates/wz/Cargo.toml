@@ -857,7 +857,10 @@ storage-mgr-multi-storage-host = ["wz-runtime-tokio?/storage-mgr-multi-storage-h
 # restore_prefix key transforms); forward through wz-runtime-tokio to the
 # wz-session-core cfg site, not a no-op `= []`.
 storage-mgr-strip-prefix = ["wz-runtime-tokio?/storage-mgr-strip-prefix"]
-storage-mgr-wildcard-updates = []
+# R311wt slice 2 — storage-mgr-wildcard-updates is now a real cfg gate (the
+# write-path wildcard override engine); forward through wz-runtime-tokio to the
+# wz-session-core cfg site, not a no-op `= []`.
+storage-mgr-wildcard-updates = ["wz-runtime-tokio?/storage-mgr-wildcard-updates"]
 
 # ----- §5.25 ext-pubsub (10 atomic, all reserved) -----
 # R311y69 — ext-pubsub-advanced-cache + ext-pubsub-advanced-publisher are

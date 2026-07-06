@@ -343,6 +343,28 @@ pub fn keyexpr_intersect_patterns(a_chunks: &[&str], b_chunks: &[&str]) -> bool 
     intersect_chunks(a_chunks, b_chunks)
 }
 
+/// Whether `keyexpr` contains a wildcard chunk (`*`, `**`, or the `$*`
+/// dollar-star) — the single wildcard-PRESENCE predicate, the companion of the
+/// wildcard-MATCH predicates above. `*` (ASCII 0x2A) is the sole wildcard lead
+/// byte and, being ASCII, cannot occur inside a multi-byte UTF-8 sequence
+/// (continuation / lead bytes are all >= 0x80), so a raw byte scan is correct
+/// on arbitrary UTF-8. This is the SSOT for "is this a wildcard update / query"
+/// — callers must not re-open-code `.contains('*')` (the same scan
+/// [`crate::keyexpr_prefix::NonWildKeyExpr::new`] rejects on, and zenoh
+/// `is_wild`, `key_expr/borrowed.rs:133`). `const` so a static keyexpr literal
+/// can be classified at compile time.
+pub const fn is_wild(keyexpr: &str) -> bool {
+    let bytes = keyexpr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'*' {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Whether the registered/declared keyexpr `candidate` intersects a published
 /// target already split into `target_chunks` — the per-candidate membership test
 /// every keyexpr SCAN shares. A scan splits the published target ONCE, then
@@ -631,6 +653,17 @@ mod tests {
         assert!(keyexpr_pattern_matches(&["home", "temp"], "home/temp"));
         assert!(!keyexpr_pattern_matches(&["home", "temp"], "home/humid"));
         assert!(!keyexpr_pattern_matches(&["home", "temp"], "home/temp/x"));
+    }
+
+    #[test]
+    fn is_wild_detects_every_wildcard_marker_and_no_false_positive() {
+        assert!(is_wild("demo/**"));
+        assert!(is_wild("demo/*"));
+        assert!(is_wild("demo/*/x"));
+        assert!(is_wild("demo/$*"), "the dollar-star also leads with '*'");
+        assert!(!is_wild("demo/a"));
+        assert!(!is_wild("demo/a/b"));
+        assert!(!is_wild(""));
     }
 
     #[test]

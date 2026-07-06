@@ -701,6 +701,24 @@ storage-mgr-multi-storage-host = ["storage-backend"]
 # `storage_strip_prefix` is a thin adapter over that core rather than open-coding
 # the chunk boundary + `.contains('*')` a second time.
 storage-mgr-strip-prefix = ["alloc", "keyexpr-prefix"]
+# R311wt slice 2 — storage-mgr-wildcard-updates (§5.24): the write-path wildcard
+# override engine (StorageState `wildcard_puts`/`wildcard_deletes` registries +
+# the `apply_sample_wildcard_aware` / `overriding_wild_update` methods), the wz
+# mirror of zenoh's `process_sample` wildcard ingest+materialize+shadow-check
+# (storages_mgt/service.rs:213-494). cfg-ACTIVE. Composes `storage-backend` (the
+# registries hold `StoredData` + materialize onto backend keys) and the keyexpr
+# wildcard matcher (`keyexpr-wildcard-single`/`-double`): a `demo/**` update must
+# match multi-chunk keys, else `keyexpr_intersects_target` degrades to literal
+# equality and the wildcard silently materializes onto nothing. Deliberately does
+# NOT compose `storage-aligner`: the write-path override is a storage-manager
+# concern independent of replication (zenoh's `Action` param is reduced here to
+# the two phase-selection booleans it drives, so no digest/xxhash edge is pulled
+# in). Precedent: `adminspace-core` selects the wildcard matcher the same way.
+storage-mgr-wildcard-updates = [
+    "storage-backend",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+]
 
 # R311y22b — no [build-dependencies]: the statechart codegen moved to the
 # committed out/wz-session-core/*_sm.rs via the `xtask` codegen SSOT, so this

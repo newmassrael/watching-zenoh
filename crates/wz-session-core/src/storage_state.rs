@@ -65,12 +65,40 @@
 //!   retains every tombstone for correctness; the periodic GC is a
 //!   follow-up (it rides the same timer tier as the storage-history /
 //!   replication atoms).
-//! - **No wildcard-update overriding.** zenoh lets a wildcard Put/Delete
-//!   override later specific keys (`overriding_wild_update`,
-//!   service.rs:415-494). The minimal state treats a wildcard key as an
-//!   ordinary stored key; wildcard-update overriding is a dedicated
-//!   follow-up atom (it needs the `KeBoxTree` wildcard registry zenoh
-//!   keeps separately).
+//! - **Wildcard-update overriding** (`storage-mgr-wildcard-updates`, R311wt
+//!   slice 2). zenoh lets a wildcard Put/Delete override matching specific keys
+//!   (`overriding_wild_update`, service.rs:415-494). With the feature ON,
+//!   [`apply_sample`](StorageState::apply_sample) detects a wildcard keyexpr
+//!   ([`crate::keyexpr_match::is_wild`]), registers it in the
+//!   `wildcard_puts` / `wildcard_deletes` registries (the wz analog of zenoh's
+//!   two `KeBoxTree`s — a `BTreeMap` keyed on the full keyexpr, matched via the
+//!   [`keyexpr_intersects_target`] SSOT, not string equality), materializes it
+//!   onto every already-stored matching key, and shadow-checks every concrete
+//!   sample against the registries (the resurrection guard). With the feature
+//!   OFF the minimal state treats a wildcard key as an ordinary stored key
+//!   (verbatim prior behavior). Two named divergences from zenoh:
+//!     1. **Dispatch on the effective (override) kind, not the incoming kind.**
+//!        zenoh dispatches the backend op on `sample.kind()` (service.rs:332)
+//!        while pulling the value from `sample_to_store`, so an incoming Put
+//!        overridden by a newer Wildcard-Delete becomes an empty-payload PUT at
+//!        the wildcard-delete ts — even though zenoh's own replication log
+//!        records that event as a `Delete` (`determine_action`, log.rs:181-202).
+//!        wz dispatches on the override kind, so that case becomes a
+//!        [`process_delete`](StorageState::process_delete) (tombstone), which
+//!        AGREES with the log action and converges at the fingerprint layer
+//!        (the fingerprint hashes key+timestamp only, storage_aligner.rs:206);
+//!        the only observable difference is a query returns "absent" (wz,
+//!        correct for a deleted key) vs an empty value (zenoh's backend/log
+//!        inconsistency we deliberately do not reproduce).
+//!     2. **Local write-path only (slice 2).** The wildcard EVENT is not yet
+//!        propagated into the replication surface (wz's `latest` is ts-only and
+//!        cannot represent a `WildcardPut`/`WildcardDelete` event; zenoh inserts
+//!        it into `cache_latest`, service.rs:250-254). Materialized concrete
+//!        keys DO replicate as ordinary Put/Delete via `latest`, so the digest
+//!        surface is unchanged from today. The residual — an OFFLINE replica
+//!        catching up on a wildcard to override keys the origin lacked, and the
+//!        wildcard event's own log-key fingerprint — is the align-path slice
+//!        (`process_alignment_reply` wildcard arms, currently skipped).
 //! - **`strip_prefix` and the mount-root `None` key** (R311y61/y64). With a
 //!   configured `strip_prefix` (`storage-mgr-strip-prefix`), the gate keys
 //!   on the STORED (stripped) key — `None` being the exact-prefix-match
@@ -136,6 +164,32 @@ pub struct StorageState<B: StorageBackend> {
     /// the feature is off) stores keys verbatim.
     #[cfg(feature = "storage-mgr-strip-prefix")]
     strip_prefix: Option<String>,
+    /// Registered Wildcard Puts, keyed on the FULL (un-stripped) wildcard
+    /// keyexpr — the wz analog of zenoh's `wildcard_puts` `KeBoxTree`
+    /// (service.rs:88). A `BTreeMap` (no `KeBoxTree` in the no_std+alloc port)
+    /// matched via the [`keyexpr_intersects_target`] SSOT; a re-issued wildcard
+    /// upserts (zenoh `KeBoxTree.insert` semantics). Kept SEPARATE from
+    /// `wildcard_deletes` because a `WildcardPut` and a `WildcardDelete` on the
+    /// same keyexpr must coexist (their relative order matters across the
+    /// network, zenoh log.rs:69-86). `storage-mgr-wildcard-updates` (R311wt
+    /// slice 2).
+    #[cfg(feature = "storage-mgr-wildcard-updates")]
+    wildcard_puts: BTreeMap<String, WildcardUpdate>,
+    /// Registered Wildcard Deletes (zenoh `wildcard_deletes`, service.rs:87).
+    /// See [`wildcard_puts`](StorageState).
+    #[cfg(feature = "storage-mgr-wildcard-updates")]
+    wildcard_deletes: BTreeMap<String, WildcardUpdate>,
+}
+
+/// A registered wildcard update: the value + kind a wildcard Put/Delete carries,
+/// stored in the [`StorageState`] wildcard registries so a later concrete
+/// sample matching the wildcard can be overridden by it. zenoh `Update`
+/// (`storages_mgt/service.rs:50-54` — `{ kind, data: StoredData }`).
+#[cfg(feature = "storage-mgr-wildcard-updates")]
+#[derive(Debug, Clone)]
+struct WildcardUpdate {
+    kind: SampleKind,
+    data: StoredData,
 }
 
 impl<B: StorageBackend> StorageState<B> {
@@ -146,6 +200,10 @@ impl<B: StorageBackend> StorageState<B> {
             latest: BTreeMap::new(),
             #[cfg(feature = "storage-mgr-strip-prefix")]
             strip_prefix: None,
+            #[cfg(feature = "storage-mgr-wildcard-updates")]
+            wildcard_puts: BTreeMap::new(),
+            #[cfg(feature = "storage-mgr-wildcard-updates")]
+            wildcard_deletes: BTreeMap::new(),
         }
     }
 
@@ -162,6 +220,10 @@ impl<B: StorageBackend> StorageState<B> {
             backend,
             latest: BTreeMap::new(),
             strip_prefix,
+            #[cfg(feature = "storage-mgr-wildcard-updates")]
+            wildcard_puts: BTreeMap::new(),
+            #[cfg(feature = "storage-mgr-wildcard-updates")]
+            wildcard_deletes: BTreeMap::new(),
         }
     }
 
@@ -228,6 +290,13 @@ impl<B: StorageBackend> StorageState<B> {
     /// [`History::All`] mode the gate is SKIPPED (zenoh
     /// service.rs:319) — every version is appended by the backend. The
     /// newer-wins gate and the `latest` record key on the same stored key.
+    ///
+    /// This is the RAW gated write: wildcard-update override
+    /// (`storage-mgr-wildcard-updates`) is applied by
+    /// [`apply_sample`](Self::apply_sample) (and, in the align path, at the
+    /// alignment-reply call sites), NOT here — a direct caller of this method
+    /// bypasses the wildcard registries by design (zenoh keeps the override in
+    /// `process_sample` / the aligner, not in the backend write).
     pub fn process_put(
         &mut self,
         key: Option<&str>,
@@ -353,29 +422,295 @@ impl<B: StorageBackend> StorageState<B> {
         view: &dyn SampleView,
         fallback: impl FnOnce() -> TimestampHint,
     ) {
-        // Capture-side strip (zenoh `process_sample`, service.rs:308): an
-        // incoming `<prefix>/<rest>` is stored under `<rest>` (and `<prefix>`
-        // exactly under the `None` mount-root slot). A key not under the
-        // configured prefix is DROPPED (zenoh logs + returns). Without the
-        // strip feature every key is stored verbatim.
-        let Some(stored_key) = self.stored_key_for(view.keyexpr()) else {
-            return;
-        };
-        let timestamp = view.timestamp().cloned().unwrap_or_else(fallback);
-        match view.kind() {
-            SampleKind::Put => {
-                let encoding = view.encoding().cloned();
-                self.process_put(
-                    stored_key.as_deref(),
-                    view.payload().to_vec(),
-                    encoding,
-                    timestamp,
-                );
-            }
-            SampleKind::Del => {
-                self.process_delete(stored_key.as_deref(), timestamp);
+        // R311wt slice 2: with `storage-mgr-wildcard-updates` ON, route through
+        // the wildcard-aware capture path (detect + register + materialize a
+        // wildcard, shadow-check a concrete sample against the registries). OFF
+        // is byte-identical to the pre-slice-2 body, so signature stability AND
+        // the "wildcard stored as an ordinary key" divergence both hold trivially.
+        #[cfg(feature = "storage-mgr-wildcard-updates")]
+        {
+            self.apply_sample_wildcard_aware(view, fallback);
+        }
+        #[cfg(not(feature = "storage-mgr-wildcard-updates"))]
+        {
+            // Capture-side strip (zenoh `process_sample`, service.rs:308): an
+            // incoming `<prefix>/<rest>` is stored under `<rest>` (and `<prefix>`
+            // exactly under the `None` mount-root slot). A key not under the
+            // configured prefix is DROPPED (zenoh logs + returns). Without the
+            // strip feature every key is stored verbatim.
+            let Some(stored_key) = self.stored_key_for(view.keyexpr()) else {
+                return;
+            };
+            let timestamp = view.timestamp().cloned().unwrap_or_else(fallback);
+            match view.kind() {
+                SampleKind::Put => {
+                    let encoding = view.encoding().cloned();
+                    self.process_put(
+                        stored_key.as_deref(),
+                        view.payload().to_vec(),
+                        encoding,
+                        timestamp,
+                    );
+                }
+                SampleKind::Del => {
+                    self.process_delete(stored_key.as_deref(), timestamp);
+                }
             }
         }
+    }
+
+    /// The `storage-mgr-wildcard-updates` capture path (zenoh `process_sample`,
+    /// service.rs:213-370). A WILDCARD keyexpr is registered in the
+    /// `wildcard_puts` / `wildcard_deletes` registries (full, UN-stripped
+    /// keyexpr) BEFORE it is materialized onto every already-stored matching
+    /// key — the register-first order matters so the materialize loop's
+    /// shadow-check sees the just-registered wildcard (zenoh registers at
+    /// service.rs:234, materializes at :257). A CONCRETE keyexpr is stored after
+    /// a shadow-check against the registries ([`apply_one_with_override`]). The
+    /// `is_wild` test runs BEFORE `stored_key_for` so a wildcard is registered
+    /// even under a `strip_prefix` config that would otherwise drop it.
+    #[cfg(feature = "storage-mgr-wildcard-updates")]
+    fn apply_sample_wildcard_aware(
+        &mut self,
+        view: &dyn SampleView,
+        fallback: impl FnOnce() -> TimestampHint,
+    ) {
+        let full_key = view.keyexpr();
+        let kind = view.kind();
+        let timestamp = view.timestamp().cloned().unwrap_or_else(fallback);
+
+        if crate::keyexpr_match::is_wild(full_key) {
+            // Register the wildcard FIRST, in the FULL keyexpr space (zenoh keeps
+            // the un-stripped wildcard ke, log.rs:34-42), so the materialize loop
+            // and every later concrete sample shadow-check against it.
+            let payload = view.payload().to_vec();
+            let encoding = view.encoding().cloned();
+            self.register_wildcard_update(
+                full_key,
+                kind,
+                timestamp.clone(),
+                payload.clone(),
+                encoding.clone(),
+            );
+
+            // Materialize onto every ALREADY-STORED key the wildcard matches — a
+            // wildcard creates no key (zenoh `get_matching_keys`, service.rs:257
+            // + :628-658, scans live keys only). Match in FULL keyexpr space
+            // (restore the strip prefix per key, [`full_key_for`]); WRITE in the
+            // STORED key space (AV8 invariant).
+            let target_chunks: Vec<&str> = full_key.split('/').collect();
+            // Collect (stored, full) pairs so the restored full key computed for
+            // the match filter is reused by the override lookup below (one
+            // `full_key_for` per key, not two). The owned Vec releases the
+            // `&self` borrow before the `&mut self` apply loop.
+            let matching: Vec<(Option<String>, String)> = self
+                .backend
+                .get_all_entries()
+                .into_iter()
+                .filter_map(|(stored, _ts)| {
+                    let full = self.full_key_for(stored.as_deref())?;
+                    keyexpr_intersects_target(&full, &target_chunks).then_some((stored, full))
+                })
+                .collect();
+            for (stored, full) in matching {
+                self.apply_one_with_override(
+                    stored.as_deref(),
+                    &full,
+                    kind,
+                    timestamp.clone(),
+                    payload.clone(),
+                    encoding.clone(),
+                );
+            }
+        } else {
+            // Concrete sample: strip to the stored key (may DROP under strip),
+            // then apply through the shadow-check. The shadow-check consults the
+            // registries in the FULL keyexpr space (`full_key`), never the
+            // stored key (AV8).
+            let Some(stored_key) = self.stored_key_for(full_key) else {
+                return;
+            };
+            let payload = view.payload().to_vec();
+            let encoding = view.encoding().cloned();
+            self.apply_one_with_override(
+                stored_key.as_deref(),
+                full_key,
+                kind,
+                timestamp,
+                payload,
+                encoding,
+            );
+        }
+    }
+
+    /// Apply one sample to one stored key, first consulting the wildcard
+    /// registries: if `full_key` is overridden by a registered wildcard update,
+    /// the OVERRIDE's kind/value/timestamp is stored instead of the incoming
+    /// one (zenoh `process_sample`'s `sample_to_store` selection,
+    /// service.rs:274-291). `stored_key` is the backend key to write; `full_key`
+    /// is the FULL keyexpr the override lookup keys on (they differ only under a
+    /// `strip_prefix`).
+    ///
+    /// Divergence from zenoh (named, module doc #1): the backend op is dispatched
+    /// on the EFFECTIVE (override) kind, so an incoming Put overridden by a newer
+    /// Wildcard-Delete becomes a [`process_delete`](Self::process_delete)
+    /// (tombstone) rather than zenoh's empty-payload put — the tombstone agrees
+    /// with the log action zenoh's own `determine_action` records and converges
+    /// at the fingerprint layer.
+    #[cfg(feature = "storage-mgr-wildcard-updates")]
+    fn apply_one_with_override(
+        &mut self,
+        stored_key: Option<&str>,
+        full_key: &str,
+        kind: SampleKind,
+        timestamp: TimestampHint,
+        payload: Vec<u8>,
+        encoding: Option<EncodingHint>,
+    ) {
+        // Phase selection mirrors zenoh `overriding_wild_update` (service.rs:426
+        // delete phase ⇔ action ∈ {Put, Delete, WildcardDelete}; :471 put phase
+        // ⇔ action ∈ {Put, WildcardPut}). On the live path the incoming action
+        // is always a PLAIN Put/Delete (zenoh passes `kind.into()`,
+        // service.rs:275), so: Put → both phases, Delete → delete phase only.
+        let (run_delete_phase, run_put_phase) = match kind {
+            SampleKind::Put => (true, true),
+            SampleKind::Del => (true, false),
+        };
+        // tlnwu = None on the live write path (zenoh service.rs:275), so the
+        // resurrection guard's `lowest_event_ts` collapses to the incoming ts.
+        match self.overriding_wild_update(full_key, &timestamp, run_delete_phase, run_put_phase) {
+            Some(update) => match update.kind {
+                SampleKind::Put => {
+                    self.process_put(
+                        stored_key,
+                        update.data.payload,
+                        update.data.encoding,
+                        update.data.timestamp,
+                    );
+                }
+                SampleKind::Del => {
+                    // Override ts, NOT the incoming ts (AV3): tombstoning at the
+                    // older incoming ts would open a resurrection window.
+                    self.process_delete(stored_key, update.data.timestamp);
+                }
+            },
+            None => match kind {
+                SampleKind::Put => {
+                    self.process_put(stored_key, payload, encoding, timestamp);
+                }
+                SampleKind::Del => {
+                    self.process_delete(stored_key, timestamp);
+                }
+            },
+        }
+    }
+
+    /// Register a wildcard update in the kind-selected registry, keyed on the
+    /// FULL wildcard keyexpr (upsert = zenoh `KeBoxTree.insert`, service.rs:400-411).
+    /// zenoh `register_wildcard_update` (service.rs:384-412).
+    #[cfg(feature = "storage-mgr-wildcard-updates")]
+    fn register_wildcard_update(
+        &mut self,
+        wildcard_key: &str,
+        kind: SampleKind,
+        timestamp: TimestampHint,
+        payload: Vec<u8>,
+        encoding: Option<EncodingHint>,
+    ) {
+        let update = WildcardUpdate {
+            kind,
+            data: StoredData {
+                payload,
+                encoding,
+                timestamp,
+            },
+        };
+        match kind {
+            SampleKind::Put => {
+                self.wildcard_puts
+                    .insert(String::from(wildcard_key), update);
+            }
+            SampleKind::Del => {
+                self.wildcard_deletes
+                    .insert(String::from(wildcard_key), update);
+            }
+        }
+    }
+
+    /// The wildcard override lookup for a CONCRETE key: does a registered
+    /// wildcard update override `full_key`? Returns the overriding update
+    /// (owned; the caller then writes it via `&mut self`, so no `&self` borrow
+    /// can be held — zenoh clones for the same reason, service.rs:463/489).
+    /// Faithful port of zenoh `overriding_wild_update` (service.rs:414-494),
+    /// with `Action` reduced to the two phase-selection booleans it drives (so
+    /// this stays a `storage-backend`-only atom, independent of `storage-aligner`).
+    ///
+    /// Live-path caller: `timestamp_last_non_wildcard_update` is `None`, so
+    /// `lowest_event_ts` collapses to `incoming_ts` (zenoh service.rs:275/432).
+    #[cfg(feature = "storage-mgr-wildcard-updates")]
+    fn overriding_wild_update(
+        &self,
+        full_key: &str,
+        incoming_ts: &TimestampHint,
+        run_delete_phase: bool,
+        run_put_phase: bool,
+    ) -> Option<WildcardUpdate> {
+        // Delete phase FIRST, with an early return (zenoh service.rs:426-467): a
+        // Wildcard-Delete overrides a Put / Wildcard-Put; among the deletes
+        // matching this key with `ts >= incoming_ts`, keep the LOWEST-ts one (a
+        // Delete does not override another Delete, service.rs:442-454).
+        if run_delete_phase {
+            let mut lowest: Option<&WildcardUpdate> = None;
+            for (wildcard_ke, wu) in &self.wildcard_deletes {
+                let chunks: Vec<&str> = wildcard_ke.split('/').collect();
+                // `wu.ts >= incoming_ts` ⇔ NOT (incoming_ts strictly newer).
+                if keyexpr_intersects_target(full_key, &chunks)
+                    && !timestamp_strictly_newer(incoming_ts, &wu.data.timestamp)
+                {
+                    match lowest {
+                        None => lowest = Some(wu),
+                        // Keep the LOWEST ts: replace only if the current pick is
+                        // strictly newer than this candidate (service.rs:449).
+                        Some(cur)
+                            if timestamp_strictly_newer(
+                                &cur.data.timestamp,
+                                &wu.data.timestamp,
+                            ) =>
+                        {
+                            lowest = Some(wu)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(wu) = lowest {
+                return Some(wu.clone());
+            }
+        }
+
+        // Put phase (zenoh service.rs:471-491): a Wildcard-Put overrides a Put /
+        // Wildcard-Put; among the puts matching this key with `ts >= incoming_ts`,
+        // keep the LATEST-ts one. Seed the threshold to `incoming_ts` and update
+        // it as we go (running `>=` replace, service.rs:475-483).
+        if run_put_phase {
+            let mut latest_ts = incoming_ts.clone();
+            let mut latest: Option<&WildcardUpdate> = None;
+            for (wildcard_ke, wu) in &self.wildcard_puts {
+                let chunks: Vec<&str> = wildcard_ke.split('/').collect();
+                // `wu.ts >= latest_ts` ⇔ NOT (latest_ts strictly newer).
+                if keyexpr_intersects_target(full_key, &chunks)
+                    && !timestamp_strictly_newer(&latest_ts, &wu.data.timestamp)
+                {
+                    latest_ts = wu.data.timestamp.clone();
+                    latest = Some(wu);
+                }
+            }
+            if let Some(wu) = latest {
+                return Some(wu.clone());
+            }
+        }
+
+        None
     }
 
     /// Answer one inbound query from the stored set (the serve side of a
@@ -1156,6 +1491,332 @@ mod tests {
                 s.backend().get_all_entries().is_empty(),
                 "a wild strip_prefix drops the sample (strip returns Err)"
             );
+        }
+    }
+
+    // R311wt slice 2 — with `storage-mgr-wildcard-updates` OFF, a wildcard
+    // keyexpr is stored VERBATIM as an ordinary key (the pre-slice-2 divergence).
+    // This guards the OFF path's byte-identical behavior; the ON path is the
+    // `wildcard` mod below.
+    #[cfg(not(feature = "storage-mgr-wildcard-updates"))]
+    #[test]
+    fn wildcard_key_is_stored_literally_when_the_engine_is_off() {
+        use crate::sample::Sample;
+        let mut s = state();
+        s.apply_sample(
+            &Sample::new_put("demo/**", vec![42]).with_timestamp(ts(10, 1)),
+            || unreachable!(),
+        );
+        assert_eq!(
+            s.get(Some("demo/**"))
+                .expect("wildcard stored literally")
+                .payload,
+            vec![42],
+            "with the engine OFF a wildcard is an ordinary stored key"
+        );
+    }
+
+    // R311wt slice 2 — the write-path wildcard override engine.
+    #[cfg(feature = "storage-mgr-wildcard-updates")]
+    mod wildcard {
+        use super::*;
+        use crate::sample::Sample;
+
+        fn wput(s: &mut StorageState<MemoryStorage>, ke: &str, payload: Vec<u8>, t: u64, zid: u8) {
+            s.apply_sample(
+                &Sample::new_put(ke, payload).with_timestamp(ts(t, zid)),
+                || unreachable!(),
+            );
+        }
+        fn wdel(s: &mut StorageState<MemoryStorage>, ke: &str, t: u64, zid: u8) {
+            s.apply_sample(
+                &Sample::new_del(ke).with_timestamp(ts(t, zid)),
+                || unreachable!(),
+            );
+        }
+
+        #[test]
+        fn wildcard_put_materializes_onto_every_matching_live_key() {
+            let mut s = state();
+            s.process_put(Some("demo/a"), vec![1], None, ts(1, 1));
+            s.process_put(Some("demo/b"), vec![1], None, ts(1, 1));
+            s.process_put(Some("other/c"), vec![1], None, ts(1, 1));
+            // A wildcard PUT rewrites every matching live key to its value+ts.
+            wput(&mut s, "demo/**", vec![9], 5, 1);
+            assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![9]);
+            assert_eq!(s.get(Some("demo/b")).unwrap().payload, vec![9]);
+            assert_eq!(
+                s.get(Some("other/c")).unwrap().payload,
+                vec![1],
+                "a non-matching key is untouched"
+            );
+            // The wildcard itself is NOT stored as a literal key (the slice-2 fix).
+            assert!(s.get(Some("demo/**")).is_none());
+        }
+
+        #[test]
+        fn wildcard_delete_materializes_onto_every_matching_live_key() {
+            let mut s = state();
+            s.process_put(Some("demo/a"), vec![1], None, ts(1, 1));
+            s.process_put(Some("demo/b"), vec![1], None, ts(1, 1));
+            s.process_put(Some("other/c"), vec![1], None, ts(1, 1));
+            wdel(&mut s, "demo/**", 5, 1);
+            assert!(s.get(Some("demo/a")).is_none(), "matched key deleted");
+            assert!(s.get(Some("demo/b")).is_none(), "matched key deleted");
+            assert_eq!(
+                s.get(Some("other/c")).unwrap().payload,
+                vec![1],
+                "a non-matching key is untouched"
+            );
+        }
+
+        #[test]
+        fn concrete_put_survives_an_older_wildcard_delete() {
+            // Timeline (a): concrete Put demo/a@t3, then wildcard-delete
+            // demo/**@t2 (t2 < t3). demo/a survives. On the MATERIALIZE path the
+            // override lookup is entered with the wildcard's OWN ts (t2), so it
+            // finds itself and returns Delete@t2 — the protection here is the
+            // DOWNSTREAM newer-wins gate: process_delete's `accepts` rejects the
+            // @t2 delete because `latest[demo/a]=t3` is newer (zenoh
+            // guard_cache_if_latest, service.rs:536). (The resurrection guard's
+            // discriminating direction — a stale registered wildcard-delete NOT
+            // suppressing a newer CONCRETE put — is the separate
+            // `newer_concrete_put_survives_a_stale_registered_wildcard_delete`.)
+            let mut s = state();
+            s.process_put(Some("demo/a"), vec![7], None, ts(30, 1));
+            wdel(&mut s, "demo/**", 20, 1);
+            assert_eq!(
+                s.get(Some("demo/a")).unwrap().payload,
+                vec![7],
+                "an older wildcard-delete must not delete a newer key"
+            );
+        }
+
+        #[test]
+        fn out_of_order_concrete_put_under_a_registered_wildcard_delete_is_tombstoned() {
+            // Timeline (e)+(g), THE subtle core slice 2 finishes + the AV2
+            // divergence: wildcard-delete demo/**@t5 arrives while demo/a is
+            // ABSENT (registers wd@t5, materializes onto nothing), then a LATE
+            // concrete Put demo/a=Y@t3 (t3 < t5) arrives. The shadow-check
+            // overrides the put with the wildcard-delete: demo/a is TOMBSTONED
+            // (absent), NOT stored with an empty value (the named divergence
+            // from zenoh's empty-put; wz's tombstone agrees with the log action).
+            let mut s = state();
+            wdel(&mut s, "demo/**", 50, 1);
+            wput(&mut s, "demo/a", vec![9], 30, 1);
+            assert!(
+                s.get(Some("demo/a")).is_none(),
+                "the late older put is suppressed by the registered wildcard-delete \
+                 (absent, not an empty value)"
+            );
+            // AV3: the tombstone sits at the wildcard-delete ts (t5=50), NOT the
+            // incoming put ts (t3=30). An intermediate put@t40 is still rejected;
+            // only a put NEWER than t50 resurrects.
+            let r_mid = s.process_put(Some("demo/a"), vec![1], None, ts(40, 1));
+            assert_eq!(
+                r_mid,
+                StorageInsertionResult::Outdated,
+                "no resurrection window between the incoming ts and the wildcard ts"
+            );
+            let r_new = s.process_put(Some("demo/a"), vec![2], None, ts(60, 1));
+            assert_eq!(r_new, StorageInsertionResult::Inserted);
+            assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
+        }
+
+        #[test]
+        fn late_concrete_put_is_upgraded_to_a_registered_wildcard_put() {
+            // Timeline (c): wildcard-put demo/**=X@t4 arrives while demo/a is
+            // ABSENT (registers wp@t4), then concrete Put demo/a=Y@t3 (t3 < t4).
+            // The shadow-check upgrades the put to the wildcard's value+ts.
+            let mut s = state();
+            wput(&mut s, "demo/**", vec![0xAA], 40, 1);
+            assert!(
+                s.get(Some("demo/a")).is_none(),
+                "the wildcard-put creates no key (demo/a absent at materialize)"
+            );
+            wput(&mut s, "demo/a", vec![0xBB], 30, 1);
+            assert_eq!(
+                s.get(Some("demo/a")).unwrap().payload,
+                vec![0xAA],
+                "the late concrete put is upgraded to the newer wildcard-put value"
+            );
+        }
+
+        #[test]
+        fn wildcard_put_does_not_resurrect_a_tombstone() {
+            // A wildcard-put NEWER than a tombstone does NOT re-create the key
+            // (materialize scans live keys only; a tombstoned key is absent).
+            // zenoh get_matching_keys, service.rs:635 (get_all_entries drops
+            // deleted keys). Only a future concrete put would re-create it.
+            let mut s = state();
+            s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+            s.process_delete(Some("demo/a"), ts(50, 1)); // tombstone@50
+            wput(&mut s, "demo/**", vec![9], 70, 1); // newer wildcard-put
+            assert!(
+                s.get(Some("demo/a")).is_none(),
+                "a wildcard-put must not resurrect a tombstoned key via materialize"
+            );
+        }
+
+        #[test]
+        fn newer_wildcard_delete_overrides_a_wildcard_put_delete_phase_first() {
+            // Timeline (d): overlapping wildcard-put@t1 and wildcard-delete@t2
+            // (t2 > t1) on the same keyexpr, then concrete Put demo/a=Y@t0.
+            // The delete phase runs first and returns the (newer) wildcard-delete
+            // before the put phase — a WildcardDelete overrides a WildcardPut
+            // (zenoh core.rs:662-669 asymmetry; service.rs:426 delete-phase-first).
+            let mut s = state();
+            wput(&mut s, "demo/**", vec![0xAA], 10, 1);
+            wdel(&mut s, "demo/**", 20, 1);
+            wput(&mut s, "demo/a", vec![0xBB], 5, 1);
+            assert!(
+                s.get(Some("demo/a")).is_none(),
+                "the newer wildcard-delete wins over the wildcard-put"
+            );
+        }
+
+        #[test]
+        fn wildcard_delete_short_circuits_even_a_newer_wildcard_put_on_the_live_path() {
+            // Timeline (d) reverse (wildcard-put@t2 NEWER than wildcard-delete@t1):
+            // the delete phase still returns first (short-circuit, service.rs:460),
+            // so a concrete Put@t0 is DELETED@t1 even though a newer wildcard-put@t2
+            // exists. This is zenoh's LIVE-path limitation (convergence to the
+            // wildcard-put value is the align-path's job, slice 3) — wz reproduces
+            // it faithfully. Guarded so it is not later "fixed" into a divergence.
+            let mut s = state();
+            wdel(&mut s, "demo/**", 10, 1);
+            wput(&mut s, "demo/**", vec![0xAA], 20, 1);
+            wput(&mut s, "demo/a", vec![0xBB], 5, 1);
+            assert!(
+                s.get(Some("demo/a")).is_none(),
+                "the delete phase short-circuits before the newer put (zenoh live parity)"
+            );
+        }
+
+        #[test]
+        fn newer_concrete_put_survives_a_stale_registered_wildcard_delete() {
+            // The resurrection guard's DISCRIMINATING (data-loss) direction: a
+            // wildcard-delete demo/**@t2 registered FIRST (materializes onto
+            // nothing), then a NEWER concrete Put demo/a=X@t3 (t3 > t2). The stale
+            // wildcard-delete must NOT suppress the newer put — the delete-phase
+            // filter `wd.ts >= incoming` excludes wd@t2 (zenoh service.rs:441).
+            // Without the filter this silently tombstones a live newer write.
+            let mut s = state();
+            wdel(&mut s, "demo/**", 20, 1);
+            wput(&mut s, "demo/a", vec![7], 30, 1);
+            assert_eq!(
+                s.get(Some("demo/a")).unwrap().payload,
+                vec![7],
+                "a newer concrete put must survive a stale registered wildcard-delete"
+            );
+        }
+
+        #[test]
+        fn equal_ts_wildcard_delete_overrides_the_concrete_put() {
+            // The `>=` boundary: a wildcard-delete demo/**@t and a concrete Put
+            // demo/a@t at the SAME ts. zenoh's `wd.ts >= incoming` includes the
+            // tie, so the wildcard-delete wins. Pins the filter as `>=`, not `>`.
+            let mut s = state();
+            wdel(&mut s, "demo/**", 10, 1);
+            wput(&mut s, "demo/a", vec![7], 10, 1);
+            assert!(
+                s.get(Some("demo/a")).is_none(),
+                "an equal-ts wildcard-delete overrides the concrete put (>= tie)"
+            );
+        }
+
+        #[test]
+        fn latest_of_two_matching_wildcard_puts_wins() {
+            // Two DIFFERENT wildcards both matching demo/x: a single-`*` put@t10
+            // and a `**` put@t20. A later concrete Put demo/x@t5 is upgraded to
+            // the LATEST matching wildcard-put's value (t20). Exercises the
+            // put-phase multi-candidate running-latest select (dead with a single
+            // registry entry) AND a single-`*` wildcard (all other tests use `**`).
+            let mut s = state();
+            wput(&mut s, "demo/*", vec![0xAA], 10, 1);
+            wput(&mut s, "demo/**", vec![0xBB], 20, 1);
+            wput(&mut s, "demo/x", vec![0xCC], 5, 1);
+            assert_eq!(
+                s.get(Some("demo/x")).unwrap().payload,
+                vec![0xBB],
+                "the latest of two matching wildcard-puts wins"
+            );
+        }
+
+        #[test]
+        fn concrete_delete_is_shadow_checked_against_a_registered_wildcard_delete() {
+            // A concrete DELETE (not a put) also runs the shadow-check (the
+            // `Del => delete-phase-only` arm). wildcard-delete demo/**@t5 first,
+            // then a concrete del demo/a@t3 (t3 < t5): the tombstone sits at the
+            // OVERRIDE ts (t5), not the incoming t3 (AV3), so an @t4 put is still
+            // rejected.
+            let mut s = state();
+            wdel(&mut s, "demo/**", 50, 1);
+            wdel(&mut s, "demo/a", 30, 1);
+            let r_mid = s.process_put(Some("demo/a"), vec![1], None, ts(40, 1));
+            assert_eq!(
+                r_mid,
+                StorageInsertionResult::Outdated,
+                "the concrete delete is tombstoned at the wildcard-delete override ts (t50)"
+            );
+        }
+
+        #[test]
+        fn re_issued_wildcard_put_upserts_the_registry() {
+            // register_wildcard_update upserts by the full wildcard keyexpr
+            // (BTreeMap insert = zenoh KeBoxTree.insert): re-issuing demo/**@t20
+            // after demo/**@t10 REPLACES the entry. A concrete put demo/a@t5 is
+            // then upgraded to the LATEST (t20) value — a keep-older-on-reinsert
+            // mutation would surface 0x10 here.
+            let mut s = state();
+            wput(&mut s, "demo/**", vec![0x10], 10, 1);
+            wput(&mut s, "demo/**", vec![0x20], 20, 1);
+            wput(&mut s, "demo/a", vec![0xCC], 5, 1);
+            assert_eq!(
+                s.get(Some("demo/a")).unwrap().payload,
+                vec![0x20],
+                "the re-issued wildcard-put replaced the older registry entry"
+            );
+        }
+
+        // Strip-prefix composition (AV8): register + match in FULL keyexpr space,
+        // write in the STORED key space.
+        #[cfg(feature = "storage-mgr-strip-prefix")]
+        mod strip {
+            use super::*;
+
+            fn stripped(prefix: &str) -> StorageState<MemoryStorage> {
+                StorageState::with_strip_prefix(MemoryStorage::new(), Some(prefix.into()))
+            }
+
+            #[test]
+            fn wildcard_delete_materializes_the_under_mount_and_mount_root_keys() {
+                let mut s = stripped("home/kitchen");
+                // Under-mount key (stored relative as "temp") + the exact mount
+                // root (stored under the None slot).
+                s.apply_sample(
+                    &Sample::new_put("home/kitchen/temp", vec![21]).with_timestamp(ts(10, 1)),
+                    || unreachable!(),
+                );
+                s.apply_sample(
+                    &Sample::new_put("home/kitchen", vec![7]).with_timestamp(ts(10, 1)),
+                    || unreachable!(),
+                );
+                // A full-keyexpr wildcard-delete matches BOTH via the restored
+                // full key (home/kitchen/** ⊇ home/kitchen and home/kitchen/temp).
+                s.apply_sample(
+                    &Sample::new_del("home/kitchen/**").with_timestamp(ts(50, 1)),
+                    || unreachable!(),
+                );
+                assert!(
+                    s.get(Some("temp")).is_none(),
+                    "the under-mount stored key is deleted by the full-keyexpr wildcard"
+                );
+                assert!(
+                    s.backend().get(None).is_none(),
+                    "the mount-root None key is deleted by the full-keyexpr wildcard"
+                );
+            }
         }
     }
 
