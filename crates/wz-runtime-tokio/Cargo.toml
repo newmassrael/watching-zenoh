@@ -863,9 +863,11 @@ routing-token-tables = ["routing-router-hat"]
 # routed Push over a multicast group (zenoh mcast_groups / McastMux egress,
 # router.rs:181). Composes routing-router-hat (the RouterForwarder + the
 # route_push tail broadcast) with transport-multicast (the McastGroup egress
-# plane + the spawn_router_mcast_egress drive-loop host). Egress-first: the
-# mcast_faces INGRESS plane is the deferred milestone.
-router-multicast-faces = ["routing-router-hat", "transport-multicast"]
+# plane) + transport-link-udp (the concrete UdpDriver the run-mode host
+# `spawn_router_mcast_egress` binds — the McastGroup/attach/broadcast plane is
+# driver-generic, but the run-mode host needs a real UDP socket). Egress-first:
+# the mcast_faces INGRESS plane is the deferred milestone.
+router-multicast-faces = ["routing-router-hat", "transport-multicast", "transport-link-udp"]
 # ── §5.16 access-control composition knobs ───────────────────────────
 # Each independently elides ONE interceptor on the routing-peer admission
 # chain (interceptor/{access_control,downsampling,low_pass}.rs). The chain

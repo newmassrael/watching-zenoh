@@ -462,7 +462,14 @@ where
 /// and returns the wired sender immediately; a bind failure logs and the task
 /// exits (the egress plane is simply absent — a dropped receiver is the
 /// fire-and-forget contract the forwarder's group sink already carries).
-#[cfg(feature = "transport-multicast")]
+///
+/// Gated on `transport-link-udp` in ADDITION to `transport-multicast`: this
+/// helper builds a CONCRETE [`UdpDriver`](crate::UdpDriver) (itself
+/// `transport-link-udp`-gated), unlike [`drive_multicast_session`] which is
+/// generic over [`LinkDriver`]. So a `transport-multicast`-WITHOUT-`transport-link-udp`
+/// build (the "multicast-join-only" transport-axis subset) keeps compiling the
+/// generic multicast plane while this concrete-UDP run-mode host is elided.
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
 pub fn spawn_router_mcast_egress(
     group: core::net::Ipv4Addr,
     port: u16,
