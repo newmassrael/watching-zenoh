@@ -1740,6 +1740,14 @@ pub(crate) async fn run_peer(
     // in-run drop witness.
     let mut last_applied_deny: Option<String> = None;
     let mut last_dropped = 0usize;
+    // Fires the in-run client-queryable HOSTING witness once, on the positive edge
+    // of `client_qabls_seen` first rising — a peer that ingested a co-attached
+    // client's DeclareQueryable into `client_qabls` (the R311y177 hosting plane).
+    // IN-TICK, not the shutdown block: `client_qabls_seen()` is a LIVE count that the
+    // client's pre-shutdown face-down zeroes (deregister drains client_qabls), so a
+    // shutdown-latched read would miss it — the log line must be written while the
+    // client is still attached so it survives in the captured stderr.
+    let mut announced_client_qabl = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -1769,6 +1777,21 @@ pub(crate) async fn run_peer(
                     log::info!(
                         "wz-ap-demo peer: reciprocal mesh link confirmed ({} edge(s))",
                         forwarder.edge_count()
+                    );
+                }
+                // Client-queryable HOSTING witness: this peer ingested a co-attached
+                // client's DeclareQueryable into `client_qabls` (the R311y177 hosting
+                // plane) and self-advertised it into the mesh. Logged once, on the
+                // positive edge — the mid-run barrier a cross-impl e2e gates the
+                // QUERIER's spawn on, so a query flies only after this peer provably
+                // hosts the client queryable. In-tick, not shutdown-latched:
+                // `client_qabls_seen()` is a live count the client's teardown
+                // face-down zeroes (mirror of the reciprocal/ingest positive edges).
+                if !announced_client_qabl && forwarder.client_qabls_seen() > 0 {
+                    announced_client_qabl = true;
+                    log::info!(
+                        "wz-ap-demo peer: learned a client queryable ({} queryable(s))",
+                        forwarder.client_qabls_seen()
                     );
                 }
                 // c3c-3 debt A2 — a `--subscribe` peer declares its interest ONCE.

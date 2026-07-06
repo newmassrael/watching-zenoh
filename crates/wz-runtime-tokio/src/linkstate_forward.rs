@@ -1622,6 +1622,16 @@ impl LinkstateForwarder {
         for &face in client_faces {
             let qid = self.pending.borrow_mut().allocate(face, fan, deadline);
             let mut carrier = template.clone();
+            // A client queryable is a LEAF, not a routing-graph node: reset the Query's
+            // routing source node-id to 0 (mirror of the router's forward_request_to_clients,
+            // router_forward.rs:4174 + forward_request_to_face "0 for a client"). The shared
+            // `template` carries the MESH query tree root (out_node_id, forward_request:1559)
+            // for the mesh branches; forwarding that NON-ZERO routing source to a client (e.g.
+            // a pico z_queryable) is a protocol violation the client rejects by CLOSING its
+            // transport — surfaced by the peer qabl cross-impl leg (the green y177 units missed
+            // it because an in-process test face ignores the source ext). For a client-sourced
+            // query out_node_id is already 0, so this is a no-op there.
+            set_request_source(&mut carrier, 0);
             carrier.rid = qid;
             self.send_to_face(face, reliable, || {
                 NetworkMessage::Request(Box::new(carrier.clone()))
@@ -6262,6 +6272,47 @@ mod tests {
             forwarded_response(&sink_q.frame_bytes(0)).request_id,
             99,
             "the Reply carries the querier's own rid"
+        );
+    }
+
+    #[test]
+    fn a_mesh_sourced_query_to_a_client_queryable_carries_routing_source_zero() {
+        // Regression guard for the peer qabl cross-impl fidelity fix: the Request
+        // forwarded to a co-attached CLIENT queryable must carry routing source node-id
+        // 0 — a client is a LEAF, not a graph node. `forward_request` stamps a SHARED
+        // template with the query tree root (out_node_id, NON-ZERO for a MESH-sourced
+        // query) for the mesh branches; reusing that verbatim for the client branch
+        // ships a non-zero routing source that a real client (a pico z_queryable)
+        // rejects by CLOSING its transport (surfaced by wz_peer_qabl_pico_interop).
+        // The U2 test above uses a CLIENT querier (out_node_id 0), so it cannot catch
+        // this — here the querier is a MESH face with a link-back edge, so the source
+        // resolves NON-ZERO and the client branch's reset-to-0 is load-bearing.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S
+        let (querier, sink_q) = peer_face(zid(0x0A)); // a MESH querier (non-zero source)
+        let (queryable, sink_qa) = peer_face_whatami(zid(0x0C), 2); // a CLIENT queryable
+        fwd.register(FaceId(0), &querier);
+        fwd.register(FaceId(1), &queryable);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S-A: source resolves non-zero
+        client_declare_qabl(&fwd, FaceId(1), 1, "demo/q", true);
+        sink_q.reset();
+        sink_qa.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+
+        assert_eq!(
+            sink_qa.frame_count(),
+            1,
+            "the mesh-sourced Query is forwarded to the co-attached client queryable"
+        );
+        let forwarded = forwarded_request(&sink_qa.frame_bytes(0));
+        assert_eq!(
+            read_request_source(&forwarded),
+            0,
+            "the Request forwarded to a CLIENT queryable must carry routing source 0 (a \
+             client is not a graph node); reusing the mesh template's non-zero tree-root \
+             source is what closed a real pico client's transport"
         );
     }
 

@@ -4373,6 +4373,18 @@ layer_e6_peer_mesh() {
     else
         echo "E6 SKIP: wz_peer_future_push_pico_interop (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
     fi
+    # The client-QUERYABLE hosting CROSS-IMPL e2e (the query-plane twin of the
+    # future-push leg above): a pico z_queryable CLIENT of peer-A hosts demo/**; a pico
+    # z_querier CLIENT of peer-B queries demo/key; the Query crosses the wz peer mesh to
+    # peer-A's co-attached client queryable (the R311y177 hosting plane) and the reply
+    # returns in reverse. Same pico-CLI guard as the future-push leg (z_queryable +
+    # z_querier are already in build-zenoh-pico-cli.sh TARGETS).
+    if [[ -x target/zenoh-pico-cli/z_queryable && -x target/zenoh-pico-cli/z_querier ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_qabl_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    else
+        echo "E6 SKIP: wz_peer_qabl_pico_interop (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+    fi
 }
 
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
