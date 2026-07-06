@@ -354,7 +354,7 @@ fn decode_reply(view: &dyn ReplyView) -> Option<DecodedReply> {
     let attachment = view.attachment()?;
     let reply = decode_alignment_reply(attachment).ok()?;
     let value = match &reply {
-        AlignmentReply::Retrieval(meta) if meta.action() == Action::Put => {
+        AlignmentReply::Retrieval(meta) if matches!(meta.action(), Action::Put) => {
             Some(retrieved_value(view))
         }
         _ => None,

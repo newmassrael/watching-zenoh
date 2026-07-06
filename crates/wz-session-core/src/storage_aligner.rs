@@ -32,25 +32,29 @@
 //!   the Digest is also assembled from, so "is this the same event" agrees
 //!   between the digest and the aligner.
 //!
-//! ## Deliberate divergences (each documented)
+//! ## Wildcard support (R311wt slice-1: aligner ext) + remaining divergences
 //!
-//! - **No Wildcard actions.** zenoh's `Action` has four variants — `Put`,
-//!   `Delete`, `WildcardPut(ke)`, `WildcardDelete(ke)` (log.rs:43-49) —
-//!   because its storage applies wildcard updates (a `put test/** 1`
-//!   overriding a whole subtree). wz storage has no wildcard updates (the
-//!   [`crate::storage_state`] / storage-backend deferral), so a wz event is
-//!   only ever a `Put` or a `Delete`. Modelling only the two variants wz can
-//!   actually produce keeps illegal states unrepresentable; the wildcard
-//!   variants land if and when wz storage gains wildcard updates. A real
-//!   zenoh replica that sends a wildcard event is therefore a known
-//!   non-converging case until then — an honest residual the wire-interop
-//!   atom carries.
-//! - **No `timestamp_last_non_wildcard_update`.** zenoh's `EventMetadata`
-//!   carries this extra timestamp (log.rs:104) *solely* to order wildcard
-//!   updates against the non-wildcard events they override. With no wildcard
-//!   updates it always equals `timestamp` and carries no information, so wz
-//!   omits the redundant field (the wire-interop atom re-supplies it as
-//!   `Some(timestamp)` when emitting zenoh-compatible bytes).
+//! - **Wildcard actions — DECODED (slice-1), not yet PRODUCED/APPLIED.** zenoh's
+//!   `Action` has four variants — `Put`, `Delete`, `WildcardPut(ke)`,
+//!   `WildcardDelete(ke)` (log.rs:43-49) — because its storage applies wildcard
+//!   updates (a `put test/** 1` overriding a whole subtree). R311wt slice-1
+//!   gives wz's [`Action`] all four variants and round-trips them on the wire,
+//!   RETIRING the prior `UnsupportedAction` residual that dropped a whole reply
+//!   containing a wildcard event. wz does not yet PRODUCE a wildcard event (its
+//!   write path treats a wildcard key as literal) nor APPLY a decoded one (it is
+//!   skipped in [`crate::storage_state`]): the write-path override engine
+//!   (`storage-mgr-wildcard-updates`) is slice 2 and the align-path apply is
+//!   slice 3. Until then a decoded wildcard event is a known non-converging
+//!   residual — but the batched NON-wildcard events in the same reply now
+//!   converge (previously the whole reply was dropped).
+//! - **`timestamp_last_non_wildcard_update` — now a real field (slice-1).** zenoh's
+//!   `EventMetadata` carries this extra timestamp (log.rs:104) to order wildcard
+//!   updates against the non-wildcard events they override. R311wt slice-1
+//!   promotes it from the always-`Some(timestamp)` re-supply to a carried
+//!   `Option<TimestampHint>`: `Some(timestamp)` for a `Put`/`Delete` (still
+//!   byte-identical to the prior emission — a non-wildcard event's
+//!   last-non-wildcard is itself), `None` for a wildcard event. Slice 2/3
+//!   consume it for the override / resurrection ordering.
 //! - **`key: Option<String>`, mirroring `stripped_key: Option<OwnedKeyExpr>`
 //!   (R311y61/y64).** zenoh's `stripped_key` is an `Option` because a strip
 //!   that matches the prefix exactly yields `None` (the mount-root slot); with
@@ -69,12 +73,18 @@ use crate::storage_replication::{
 };
 
 /// The kind of a logged replication event. zenoh `log::Action` (log.rs:43-49),
-/// minus the two wildcard variants wz storage cannot produce (see the module
-/// divergence note).
+/// all four variants (R311wt slice-1 — the aligner ext for the
+/// `storage-mgr-wildcard-updates` atom).
 ///
-/// Fieldless (wz's two actions carry no key, unlike zenoh's wildcard variants
-/// which embed the wildcard keyexpr), so it is [`Copy`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// The two wildcard variants embed the (un-stripped) wildcard keyexpr they
+/// apply to — a `put test/** 1` / `delete test/**` overriding a whole subtree —
+/// so `Action` carries a `String` and is no longer `Copy` (zenoh
+/// `WildcardPut(OwnedKeyExpr)` / `WildcardDelete(OwnedKeyExpr)`, log.rs:46-49).
+/// Slice-1 DECODES + round-trips these off the wire (closing the prior
+/// `UnsupportedAction` residual that dropped a whole reply); wz does not yet
+/// PRODUCE or APPLY a wildcard event — the write-path override engine
+/// (`storage-mgr-wildcard-updates`) + the align-path apply are slices 2/3.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Action {
     /// A value was stored at the key.
     Put,
@@ -83,6 +93,14 @@ pub enum Action {
     /// older Put cannot resurrect the key (the [`crate::storage_state`]
     /// tombstone).
     Delete,
+    /// A wildcard Put over the embedded keyexpr (e.g. `test/**`) overriding
+    /// every matching key in the subtree (zenoh `Action::WildcardPut`). Carried
+    /// so the align path can round-trip a real zenoh replica's wildcard event;
+    /// the write-path materialization is slice 2.
+    WildcardPut(String),
+    /// A wildcard Delete over the embedded keyexpr (zenoh
+    /// `Action::WildcardDelete`) — deletes every matching key in the subtree.
+    WildcardDelete(String),
 }
 
 /// The metadata a replica exchanges during alignment to decide whether it is
@@ -98,6 +116,16 @@ pub enum Action {
 pub struct EventMetadata {
     key: Option<String>,
     timestamp: TimestampHint,
+    /// zenoh `EventMetadata::timestamp_last_non_wildcard_update` (log.rs:104):
+    /// the timestamp of the last NON-wildcard write at this key, used to order
+    /// a wildcard update against the concrete events it overrides (so a
+    /// later-arriving-but-logically-earlier delete still wins over a wildcard
+    /// put — the resurrection guard). `Some(timestamp)` for a `Put`/`Delete`
+    /// (a non-wildcard event's last-non-wildcard IS itself); `None` for a
+    /// `WildcardPut`/`WildcardDelete`. R311wt slice-1 promotes this from the
+    /// always-`Some(timestamp)` re-supply to a real carried field; slice 2/3
+    /// consume it for the override ordering.
+    timestamp_last_non_wildcard_update: Option<TimestampHint>,
     action: Action,
 }
 
@@ -108,6 +136,7 @@ impl EventMetadata {
     pub fn put(key: Option<String>, timestamp: TimestampHint) -> Self {
         Self {
             key,
+            timestamp_last_non_wildcard_update: Some(timestamp.clone()),
             timestamp,
             action: Action::Put,
         }
@@ -118,8 +147,28 @@ impl EventMetadata {
     pub fn delete(key: Option<String>, timestamp: TimestampHint) -> Self {
         Self {
             key,
+            timestamp_last_non_wildcard_update: Some(timestamp.clone()),
             timestamp,
             action: Action::Delete,
+        }
+    }
+
+    /// The metadata of a wildcard event (`WildcardPut`/`WildcardDelete`) over
+    /// `wildcard_ke`, accepted at `timestamp`. `key` is the stripped key the
+    /// event is logged under; `timestamp_last_non_wildcard_update` is `None`
+    /// (a wildcard is not a concrete write). R311wt slice-1 constructs these
+    /// only on DECODE (a peer's wildcard event round-tripped); wz does not yet
+    /// materialize them (slices 2/3).
+    pub fn wildcard(key: Option<String>, timestamp: TimestampHint, action: Action) -> Self {
+        debug_assert!(
+            matches!(action, Action::WildcardPut(_) | Action::WildcardDelete(_)),
+            "EventMetadata::wildcard requires a wildcard action"
+        );
+        Self {
+            key,
+            timestamp,
+            timestamp_last_non_wildcard_update: None,
+            action,
         }
     }
 
@@ -135,9 +184,18 @@ impl EventMetadata {
         &self.timestamp
     }
 
-    /// Whether the event was a Put or a Delete.
-    pub fn action(&self) -> Action {
-        self.action
+    /// The timestamp of the last non-wildcard write at this key (the wildcard
+    /// override-ordering key). See the field doc; `None` iff this is a wildcard
+    /// event.
+    pub fn timestamp_last_non_wildcard_update(&self) -> Option<&TimestampHint> {
+        self.timestamp_last_non_wildcard_update.as_ref()
+    }
+
+    /// Whether the event was a Put, Delete, WildcardPut, or WildcardDelete.
+    /// Returns a reference — `Action` carries the wildcard keyexpr and is no
+    /// longer `Copy` (R311wt slice-1).
+    pub fn action(&self) -> &Action {
+        &self.action
     }
 
     /// The [`Fingerprint`] identifying this event — the xxh3 of its
@@ -485,13 +543,16 @@ pub enum AlignmentFollowup {
 /// wz emits `stripped_key` faithfully as an `Option` (R311y64): `Some(key)`
 /// for an ordinary key, `None` for a strip-configured storage's exact-prefix
 /// mount-root value — the single `0` Option tag, no key bytes. It emits
-/// `timestamp_last_non_wildcard_update = Some(timestamp)` (re-supplying the
-/// field wz's kernel type omits — with no wildcard updates it always equals
-/// `timestamp`) and only `action` 0/1 (Put/Delete). On decode it discards
-/// `timestamp_last_non_wildcard_update` (wildcard-only), accepts a `None`
-/// stripped_key (round-tripping to `EventMetadata::key() == None`), and rejects
-/// an inbound wildcard action (2/3) with a typed error — the named
-/// non-converging residual until wz storage gains wildcard updates.
+/// `timestamp_last_non_wildcard_update` as the carried field (R311wt slice-1):
+/// `Some(timestamp)` for a Put/Delete (byte-identical to the prior always-Some
+/// re-supply — a non-wildcard event's last-non-wildcard is itself), `None` for
+/// a wildcard event. `action` is a u32 index for all four variants; the two
+/// wildcard variants (2/3) are FOLLOWED by their keyexpr `String`. On decode it
+/// reads the real `timestamp_last_non_wildcard_update` into the struct, accepts
+/// a `None` stripped_key (round-tripping to `EventMetadata::key() == None`), and
+/// round-trips a wildcard action (2/3) — retiring the prior `UnsupportedAction`
+/// residual; only an index `>= 4` is a typed error. (wz DECODES a wildcard
+/// event but does not yet PRODUCE or APPLY one — slices 2/3.)
 pub mod wire {
     use alloc::collections::{BTreeMap, BTreeSet};
     use alloc::string::String;
@@ -530,10 +591,10 @@ pub mod wire {
         /// A 0/1 tag byte (an `Option` discriminant or a `bool`) that was
         /// neither 0 nor 1.
         BadOptionTag(u8),
-        /// An `Action` variant index wz cannot represent: 2 (WildcardPut) or
-        /// 3 (WildcardDelete) — wz storage has no wildcard updates — or an
-        /// unknown index. The named non-converging residual for a real zenoh
-        /// wildcard event.
+        /// An `Action` variant index the decoder does not know: `>= 4`. Indices
+        /// 0-3 (Put / Delete / WildcardPut / WildcardDelete) all decode as of
+        /// R311wt slice-1 — the wildcard variants are round-tripped rather than
+        /// rejected (the prior residual, when they were dropped, is retired).
         UnsupportedAction(u32),
         /// A stripped_key whose bytes are not valid UTF-8.
         BadUtf8,
@@ -558,14 +619,15 @@ pub mod wire {
     /// byte-width arithmetic is self-documenting.
     const U64_BYTES: usize = 8; // one IntervalIdx / SubIntervalIdx / Fingerprint
     const PAIR_BYTES: usize = 16; // an (idx, value) or (idx, sub-len) pair = two u64s
-    /// Smallest a valid `EventMetadata` can decode from: a `None` stripped_key
-    /// tag(1) — no key-len, no key bytes — Timestamp(24), a `None`
-    /// tlnwu tag(1), action(4). A `Some` key (key-len + bytes) or a `Some`
-    /// tlnwu (a 24-byte Timestamp) only ADD to this. Because the `None`-key
-    /// event omits the 8-byte key length the previous `Some`-only minimum
-    /// carried, the floor shrinks (R311y64). This is the `check_len` fast-reject
-    /// lower bound, so it MUST stay a true lower bound or a valid run of minimal
-    /// events would be wrongly rejected.
+    /// A conservative lower bound on a valid `EventMetadata`'s encoded size —
+    /// the `check_len` fast-reject floor: `None` stripped_key tag(1) +
+    /// Timestamp(24) + tlnwu tag(1) + action(4). It MUST stay `<=` the true
+    /// minimum or a valid run of minimal events would be wrongly rejected.
+    /// Post-R311wt slice-1 no real event is actually this small (a Put/Delete
+    /// carries a `Some` tlnwu = +24; a wildcard carries `None` tlnwu but a
+    /// keyexpr String = +8 min), so 30 under-approximates every variant and
+    /// stays a safe conservative floor (R311y64 shrank it when the `None`-key
+    /// event dropped the 8-byte key length).
     const MIN_EVENT_BYTES: usize = 1 + 24 + 1 + 4;
 
     /// A [`TimestampHint`] as zenoh's bincode `Timestamp`: the NTP64 time word
@@ -583,15 +645,31 @@ pub mod wire {
         // zenoh's bincode `Option` (R311y64).
         push_option_string(out, e.key());
         push_timestamp(out, e.timestamp());
-        out.push(1); // timestamp_last_non_wildcard_update: Some(timestamp)
-        push_timestamp(out, e.timestamp());
-        push_u32(
-            out,
-            match e.action() {
-                Action::Put => 0,
-                Action::Delete => 1,
-            },
-        );
+        // timestamp_last_non_wildcard_update: the real Option field (R311wt
+        // slice-1). Some(ts) for a Put/Delete (byte-identical to the prior
+        // always-`Some(timestamp)` re-supply, since a non-wildcard event's
+        // last-non-wildcard IS itself), None for a wildcard event.
+        match e.timestamp_last_non_wildcard_update() {
+            Some(ts) => {
+                out.push(1);
+                push_timestamp(out, ts);
+            }
+            None => out.push(0),
+        }
+        // action: the u32 variant index; the wildcard variants are FOLLOWED by
+        // their keyexpr String (zenoh's bincode enum-with-payload, log.rs:46-49).
+        match e.action() {
+            Action::Put => push_u32(out, 0),
+            Action::Delete => push_u32(out, 1),
+            Action::WildcardPut(ke) => {
+                push_u32(out, 2);
+                push_string(out, ke);
+            }
+            Action::WildcardDelete(ke) => {
+                push_u32(out, 3);
+                push_string(out, ke);
+            }
+        }
     }
 
     /// Encode one [`EventMetadata`] to the zenoh bincode wire bytes.
@@ -668,18 +746,28 @@ pub mod wire {
                 None
             };
             let timestamp = self.read_timestamp()?;
-            // timestamp_last_non_wildcard_update: discarded (wildcard-only).
-            if self.read_option_tag()? {
-                let _ = self.read_timestamp()?;
-            }
+            // timestamp_last_non_wildcard_update: the real Option field (R311wt
+            // slice-1) — read into EventMetadata instead of discarded.
+            let timestamp_last_non_wildcard_update = if self.read_option_tag()? {
+                Some(self.read_timestamp()?)
+            } else {
+                None
+            };
+            // action: variants 2/3 (WildcardPut/WildcardDelete) carry the
+            // wildcard keyexpr String; slice-1 decodes them, closing the prior
+            // UnsupportedAction residual that dropped a whole reply. An index
+            // > 3 is still an unknown-variant error.
             let action = match self.read_u32()? {
                 0 => Action::Put,
                 1 => Action::Delete,
+                2 => Action::WildcardPut(self.read_string()?),
+                3 => Action::WildcardDelete(self.read_string()?),
                 other => return Err(AlignmentDecodeError::UnsupportedAction(other)),
             };
             Ok(EventMetadata {
                 key,
                 timestamp,
+                timestamp_last_non_wildcard_update,
                 action,
             })
         }
@@ -999,10 +1087,12 @@ pub mod wire {
             MEventMetadata {
                 stripped_key: e.key().map(|k| k.into()),
                 timestamp: mts(e.timestamp()),
-                timestamp_last_non_wildcard_update: Some(mts(e.timestamp())),
+                timestamp_last_non_wildcard_update: e.timestamp_last_non_wildcard_update().map(mts),
                 action: match e.action() {
                     Action::Put => MAction::Put,
                     Action::Delete => MAction::Delete,
+                    Action::WildcardPut(ke) => MAction::WildcardPut(ke.clone()),
+                    Action::WildcardDelete(ke) => MAction::WildcardDelete(ke.clone()),
                 },
             }
         }
@@ -1068,15 +1158,63 @@ pub mod wire {
         }
 
         #[test]
-        fn decode_rejects_a_wildcard_action_as_unsupported() {
-            // A real zenoh WildcardPut(=2) event: wz cannot represent it.
+        fn wildcard_action_round_trips_and_is_byte_identical_to_bincode() {
+            // R311wt slice-1: a WildcardDelete/WildcardPut event now DECODES +
+            // round-trips (closing the prior UnsupportedAction residual that
+            // dropped a whole reply). Its tlnwu is None (a wildcard is not a
+            // concrete write), and its bytes match real bincode 1.3 (the serde
+            // mirror) for the variant index (2/3) + trailing keyexpr String.
+            let wd = EventMetadata::wildcard(
+                Some("test/**".into()),
+                ts(5, vec![0x02]),
+                Action::WildcardDelete("test/**".into()),
+            );
+            assert_eq!(wd.timestamp_last_non_wildcard_update(), None);
+            assert_eq!(
+                decode_event_metadata(&encode_event_metadata(&wd)),
+                Ok(wd.clone())
+            );
+            assert_eq!(
+                encode_event_metadata(&wd),
+                bincode::serialize(&mirror_of(&wd)).unwrap(),
+                "a WildcardDelete matches bincode 1.3 (index 3 + keyexpr String, None tlnwu)"
+            );
+            // bincode -> wz direction explicitly: wz decodes the exact bytes a
+            // real zenoh replica (bincode 1.3) emits for a wildcard event.
+            assert_eq!(
+                decode_event_metadata(&bincode::serialize(&mirror_of(&wd)).unwrap()),
+                Ok(wd.clone()),
+                "wz decodes real bincode 1.3 WildcardDelete bytes"
+            );
+
+            let wp = EventMetadata::wildcard(
+                Some("a/**".into()),
+                ts(7, vec![0xAB]),
+                Action::WildcardPut("a/**".into()),
+            );
+            assert_eq!(
+                decode_event_metadata(&encode_event_metadata(&wp)),
+                Ok(wp.clone())
+            );
+            assert_eq!(
+                encode_event_metadata(&wp),
+                bincode::serialize(&mirror_of(&wp)).unwrap(),
+                "a WildcardPut matches bincode 1.3 (index 2 + keyexpr String)"
+            );
+        }
+
+        #[test]
+        fn decode_rejects_an_unknown_action_index() {
+            // An action index >= 4 is still an unknown variant (a Put has no
+            // trailing keyexpr String, so patching its action u32 to 4 yields a
+            // valid-length buffer with a bad action tag).
             let mut wz =
                 encode_event_metadata(&EventMetadata::put(Some("k".into()), ts(1, vec![0x01])));
             let n = wz.len();
-            wz[n - 4..].copy_from_slice(&2u32.to_le_bytes());
+            wz[n - 4..].copy_from_slice(&4u32.to_le_bytes());
             assert_eq!(
                 decode_event_metadata(&wz),
-                Err(AlignmentDecodeError::UnsupportedAction(2))
+                Err(AlignmentDecodeError::UnsupportedAction(4))
             );
         }
 
@@ -1419,12 +1557,12 @@ mod tests {
         let p = EventMetadata::put(Some("demo/a".into()), ts(100, 1));
         assert_eq!(p.key(), Some("demo/a"));
         assert_eq!(p.timestamp(), &ts(100, 1));
-        assert_eq!(p.action(), Action::Put);
+        assert_eq!(*p.action(), Action::Put);
 
         let d = EventMetadata::delete(Some("demo/a".into()), ts(101, 1));
         assert_eq!(d.key(), Some("demo/a"));
         assert_eq!(d.timestamp(), &ts(101, 1));
-        assert_eq!(d.action(), Action::Delete);
+        assert_eq!(*d.action(), Action::Delete);
     }
 
     #[test]

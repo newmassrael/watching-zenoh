@@ -981,7 +981,8 @@ pub mod group_membership;
 /// [`storage_replication::event_fingerprint`] SSOT, so an event's identity
 /// agrees between the digest and the aligner. Pure no_std logic — a faithful
 /// mirror of zenoh's `zenoh-plugin-storage-manager` `replication::log`
-/// metadata, minus the wildcard actions wz storage cannot produce. The
+/// metadata (all four `Action` variants round-trip on the wire as of R311wt
+/// slice-1; wz does not yet PRODUCE or APPLY a wildcard event — slices 2/3). The
 /// AlignmentQuery / AlignmentReply protocol + the answer / pull engines + the
 /// aligner driver are the follow-up atoms. Gated on `storage-aligner`
 /// (implies `storage-replication`).

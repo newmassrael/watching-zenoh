@@ -607,7 +607,11 @@ impl<B: StorageBackend> StorageState<B> {
     ///   payload (aligner_query.rs:298-316).
     #[cfg(feature = "storage-aligner")]
     fn retrieval_response(&self, meta: EventMetadata) -> Option<AlignmentResponse> {
-        match meta.action() {
+        // Clone the action to release the `&self`-into-`meta` borrow before an
+        // arm MOVES `meta` into the reply (R311wt slice-1: `action()` returns
+        // `&Action` now that a wildcard variant carries a keyexpr String; the
+        // clone is heap-free for the Put/Delete variants).
+        match meta.action().clone() {
             Action::Delete => Some(AlignmentResponse {
                 reply: AlignmentReply::Retrieval(meta),
                 value: None,
@@ -624,6 +628,9 @@ impl<B: StorageBackend> StorageState<B> {
                 // metadata was sent: skip, as zenoh does.
                 _ => None,
             },
+            // wz does not HOST a wildcard event to answer a retrieval for (it
+            // does not produce them); slice 3 adds wildcard hosting. Skip.
+            Action::WildcardPut(_) | Action::WildcardDelete(_) => None,
         }
     }
 
@@ -722,11 +729,18 @@ impl<B: StorageBackend> StorageState<B> {
                     if !self.is_missing(&meta) {
                         continue; // we already hold this event newer-or-equal
                     }
-                    match meta.action() {
+                    match meta.action().clone() {
                         Action::Put => missing_puts.push(meta),
                         Action::Delete => {
                             self.process_delete(meta.key(), meta.timestamp().clone());
                         }
+                        // A decoded wildcard event (a real zenoh replica's
+                        // WildcardPut/WildcardDelete): slice-1 no longer drops
+                        // the whole reply (the prior UnsupportedAction), but wz
+                        // cannot yet APPLY it — the write-path override engine
+                        // is slices 2/3. Skip it; the batched non-wildcard
+                        // events in this reply still converge.
+                        Action::WildcardPut(_) | Action::WildcardDelete(_) => {}
                     }
                 }
                 if missing_puts.is_empty() {
@@ -757,6 +771,9 @@ impl<B: StorageBackend> StorageState<B> {
                         Action::Delete => {
                             self.process_delete(meta.key(), meta.timestamp().clone());
                         }
+                        // Decoded but not-yet-applied wildcard event (slice
+                        // 2/3 add the materialization). Skip.
+                        Action::WildcardPut(_) | Action::WildcardDelete(_) => {}
                     }
                 }
                 AlignmentFollowup::Done
@@ -1326,12 +1343,12 @@ mod tests {
             assert_eq!(events.len(), 2);
 
             let a = events.iter().find(|e| e.key() == Some("demo/a")).unwrap();
-            assert_eq!(a.action(), Action::Put, "a live key is a Put event");
+            assert_eq!(*a.action(), Action::Put, "a live key is a Put event");
             assert_eq!(a.timestamp(), &ts(10, 1));
 
             let b = events.iter().find(|e| e.key() == Some("demo/b")).unwrap();
             assert_eq!(
-                b.action(),
+                *b.action(),
                 Action::Delete,
                 "a deleted key (gone from the backend) is a Delete tombstone event"
             );
@@ -1373,14 +1390,14 @@ mod tests {
                 .iter()
                 .find(|e| e.key().is_none())
                 .expect("the mount-root None-keyed event is present");
-            assert_eq!(root.action(), Action::Put);
+            assert_eq!(*root.action(), Action::Put);
             assert_eq!(root.timestamp(), &ts(10, 1));
             // The under-mount event carries the stripped "temp" key.
             let temp = events
                 .iter()
                 .find(|e| e.key() == Some("temp"))
                 .expect("the under-mount event is present");
-            assert_eq!(temp.action(), Action::Put);
+            assert_eq!(*temp.action(), Action::Put);
 
             // The digest covers the None-keyed event's fingerprint too: a digest
             // built from BOTH keys equals the snapshot's, and dropping the None
