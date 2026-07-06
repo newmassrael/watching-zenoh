@@ -1900,6 +1900,15 @@ layer_c1y_cargo_test_routing_peer() {
 #      `storage-mgr-wildcard-updates,storage-mgr-strip-prefix` line covers the
 #      full-key-register / stored-key-write strip composition (the wildcard::strip
 #      sub-mod). The atom pulls the keyexpr wildcard matcher, NOT storage-aligner.
+#      R311wt slice 3 — a `--features storage-aligner,storage-mgr-wildcard-updates
+#      --lib storage` line (+ clippy) covers the align-receive path applying a
+#      wildcard from a peer (the `aligner::wildcard_align` mod: WildcardDelete in
+#      the metadata round, WildcardPut deferred to Retrieval, initial-All Retrieval
+#      WildcardDelete, idempotence, and the named tlnwu-resurrection divergence).
+#      This is the storage-aligner ∩ storage-mgr-wildcard-updates intersection —
+#      the ONLY lane that compiles+runs wildcard_align (neither is default); the
+#      existing `--features storage-aligner` lines are the wildcard-OFF combo
+#      proving the align arms skip byte-identically.
 #   1. runs the storage_* lib tests (storage_service / storage_replication_service
 #      / storage_aligner_service) under `--features storage-aligner`, and the
 #      History::All tests under `--features storage-history`;
@@ -1940,6 +1949,8 @@ layer_c1z_cargo_test_storage_driver() {
         && cargo test -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-wildcard-updates --quiet \
+        && cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet \
+        && cargo clippy -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --all-targets --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-complete-flag --all-targets --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --features storage-backend,storage-mgr-strip-prefix,declare-subscriber,pubsub-allow-loop --lib storage_service --quiet \

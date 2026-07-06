@@ -90,15 +90,49 @@
 //!        the only observable difference is a query returns "absent" (wz,
 //!        correct for a deleted key) vs an empty value (zenoh's backend/log
 //!        inconsistency we deliberately do not reproduce).
-//!     2. **Local write-path only (slice 2).** The wildcard EVENT is not yet
-//!        propagated into the replication surface (wz's `latest` is ts-only and
-//!        cannot represent a `WildcardPut`/`WildcardDelete` event; zenoh inserts
-//!        it into `cache_latest`, service.rs:250-254). Materialized concrete
-//!        keys DO replicate as ordinary Put/Delete via `latest`, so the digest
-//!        surface is unchanged from today. The residual — an OFFLINE replica
-//!        catching up on a wildcard to override keys the origin lacked, and the
-//!        wildcard event's own log-key fingerprint — is the align-path slice
-//!        (`process_alignment_reply` wildcard arms, currently skipped).
+//!     2. **Resurrection-ordering on the ALIGN-receive path (R311wt slice 3,
+//!        divergence D-slice3-1).**
+//!        [`process_alignment_reply`](StorageState::process_alignment_reply) now
+//!        APPLIES a wildcard received from a peer — register + materialize via the
+//!        shared [`materialize_wildcard`](StorageState::materialize_wildcard) (a
+//!        WildcardDelete needs no payload and materializes in the metadata round;
+//!        a WildcardPut defers to the retrieval round for its value), closing the
+//!        common-case offline-replica DATA residual (a peer's wildcard now
+//!        overrides wz-local keys the origin lacked). A received CONCRETE Put or
+//!        Delete ALSO consults the registries
+//!        ([`apply_aligned_concrete`](StorageState::apply_aligned_concrete)),
+//!        mirroring zenoh's `needs_further_processing`
+//!        (aligner_reply.rs:255/337/431), so a wildcard registered on this replica
+//!        shadows a later concrete key aligned from a peer that never saw it (a
+//!        3-party mesh convergence path). wz materializes through the newer-wins
+//!        gate on `latest` (its ts-only per-key record), NOT zenoh's
+//!        stored-`timestamp_last_non_wildcard_update` resurrection sweep
+//!        (core.rs:628-635 / aligner_reply.rs:483-515), because wz keeps no
+//!        per-key tlnwu. Divergence (only wz<->zenohd, only overlapping
+//!        out-of-order wildcards): for a key whose ts a WildcardPut raised, an
+//!        out-of-order event logically prior to that put but later than the key's
+//!        last concrete write — a WildcardDelete OR a plain Delete — is RETAINED
+//!        by wz (ts-only gate) whereas zenoh's ALIGN path deletes it. This is not
+//!        a new class: zenoh is itself path-dependent here — its LIVE path also
+//!        RETAINS (materialize sets tlnwu=None via `Event::new`, log.rs:208-211,
+//!        so the out-of-order delete is ts-skipped), so no single faithful target
+//!        exists; wz matches zenoh's live-materialize behavior and stays
+//!        internally consistent (one gate, live + align). Every CONCRETE key
+//!        still converges at the (key, ts) fingerprint layer; only the wildcard's
+//!        own log-key fingerprint diverges from a zenohd peer (wz keeps no
+//!        wildcard-event log — AV5). wz DECODES the incoming event's tlnwu
+//!        (slice 1) but does not consume it on receive (the sweep would need the
+//!        STORED key's tlnwu) — it is carried for wire-fidelity, not load-bearing.
+//!        Registry pruning (dropping a wildcard-put superseded by a covering
+//!        wildcard-delete) is deferred to the slice-4 GC (harmless meanwhile: a
+//!        stale older-ts wildcard-put can never win the put-phase). A retrieved
+//!        WildcardPut whose payload the peer SKIPPED (value `None`) is a no-op
+//!        (it registers nothing) — matching the plain-Put skip; a wz<->zenohd
+//!        cross-impl e2e (a peer's wildcard propagating over the wire end to end)
+//!        is a cross-impl-leg follow-up, not a unit-testable path here (a wz peer
+//!        serves no wildcard event — retrieval_response returns `None` — so a
+//!        two-wz `drive_alignment` cannot exercise wildcard reception; the
+//!        receive half is covered by direct-reply unit tests).
 //! - **`strip_prefix` and the mount-root `None` key** (R311y61/y64). With a
 //!   configured `strip_prefix` (`storage-mgr-strip-prefix`), the gate keys
 //!   on the STORED (stripped) key — `None` being the exact-prefix-match
@@ -480,48 +514,12 @@ impl<B: StorageBackend> StorageState<B> {
         let timestamp = view.timestamp().cloned().unwrap_or_else(fallback);
 
         if crate::keyexpr_match::is_wild(full_key) {
-            // Register the wildcard FIRST, in the FULL keyexpr space (zenoh keeps
-            // the un-stripped wildcard ke, log.rs:34-42), so the materialize loop
-            // and every later concrete sample shadow-check against it.
+            // Register + materialize the wildcard (shared with the align-receive
+            // path, R311wt slice 3). The live path's wildcard ke is the full
+            // incoming keyexpr.
             let payload = view.payload().to_vec();
             let encoding = view.encoding().cloned();
-            self.register_wildcard_update(
-                full_key,
-                kind,
-                timestamp.clone(),
-                payload.clone(),
-                encoding.clone(),
-            );
-
-            // Materialize onto every ALREADY-STORED key the wildcard matches — a
-            // wildcard creates no key (zenoh `get_matching_keys`, service.rs:257
-            // + :628-658, scans live keys only). Match in FULL keyexpr space
-            // (restore the strip prefix per key, [`full_key_for`]); WRITE in the
-            // STORED key space (AV8 invariant).
-            let target_chunks: Vec<&str> = full_key.split('/').collect();
-            // Collect (stored, full) pairs so the restored full key computed for
-            // the match filter is reused by the override lookup below (one
-            // `full_key_for` per key, not two). The owned Vec releases the
-            // `&self` borrow before the `&mut self` apply loop.
-            let matching: Vec<(Option<String>, String)> = self
-                .backend
-                .get_all_entries()
-                .into_iter()
-                .filter_map(|(stored, _ts)| {
-                    let full = self.full_key_for(stored.as_deref())?;
-                    keyexpr_intersects_target(&full, &target_chunks).then_some((stored, full))
-                })
-                .collect();
-            for (stored, full) in matching {
-                self.apply_one_with_override(
-                    stored.as_deref(),
-                    &full,
-                    kind,
-                    timestamp.clone(),
-                    payload.clone(),
-                    encoding.clone(),
-                );
-            }
+            self.materialize_wildcard(full_key, kind, timestamp, payload, encoding);
         } else {
             // Concrete sample: strip to the stored key (may DROP under strip),
             // then apply through the shadow-check. The shadow-check consults the
@@ -539,6 +537,64 @@ impl<B: StorageBackend> StorageState<B> {
                 timestamp,
                 payload,
                 encoding,
+            );
+        }
+    }
+
+    /// Register a wildcard update FIRST (full, un-stripped keyexpr) then
+    /// MATERIALIZE it onto every already-stored key it matches — a wildcard
+    /// creates no key (zenoh `get_matching_keys`, service.rs:257 + :628-658,
+    /// scans live keys only). Match in FULL keyexpr space (restore the strip
+    /// prefix per key, [`full_key_for`](Self::full_key_for)); WRITE in the STORED
+    /// key space (AV8 invariant). The register-first order lets the materialize
+    /// loop's per-key shadow-check see the just-registered wildcard.
+    ///
+    /// Shared by the LIVE capture path
+    /// ([`apply_sample_wildcard_aware`](Self::apply_sample_wildcard_aware)) and,
+    /// R311wt slice 3, the ALIGN-receive path
+    /// ([`process_alignment_reply`](Self::process_alignment_reply)'s wildcard
+    /// arms), which pass the wildcard keyexpr carried in the incoming
+    /// `Action::WildcardPut` / `Action::WildcardDelete` (already the FULL keyexpr;
+    /// the event's stripped `key()` is NOT the wildcard's match key).
+    #[cfg(feature = "storage-mgr-wildcard-updates")]
+    fn materialize_wildcard(
+        &mut self,
+        wildcard_ke: &str,
+        kind: SampleKind,
+        timestamp: TimestampHint,
+        payload: Vec<u8>,
+        encoding: Option<EncodingHint>,
+    ) {
+        self.register_wildcard_update(
+            wildcard_ke,
+            kind,
+            timestamp.clone(),
+            payload.clone(),
+            encoding.clone(),
+        );
+
+        let target_chunks: Vec<&str> = wildcard_ke.split('/').collect();
+        // Collect (stored, full) pairs so the restored full key computed for the
+        // match filter is reused by the override lookup below (one
+        // `full_key_for` per key). The owned Vec releases the `&self` borrow
+        // before the `&mut self` apply loop.
+        let matching: Vec<(Option<String>, String)> = self
+            .backend
+            .get_all_entries()
+            .into_iter()
+            .filter_map(|(stored, _ts)| {
+                let full = self.full_key_for(stored.as_deref())?;
+                keyexpr_intersects_target(&full, &target_chunks).then_some((stored, full))
+            })
+            .collect();
+        for (stored, full) in matching {
+            self.apply_one_with_override(
+                stored.as_deref(),
+                &full,
+                kind,
+                timestamp.clone(),
+                payload.clone(),
+                encoding.clone(),
             );
         }
     }
@@ -711,6 +767,68 @@ impl<B: StorageBackend> StorageState<B> {
         }
 
         None
+    }
+
+    /// Apply a CONCRETE (non-wildcard) event received via alignment, first
+    /// consulting the wildcard registries (R311wt slice 3). zenoh runs
+    /// `needs_further_processing` → `is_overridden_by_wildcard_update`
+    /// (aligner_reply.rs:255/337/431) on EVERY received event, so a concrete
+    /// Put/Delete aligned from a peer that never saw a wildcard is still
+    /// overridden by a registered wildcard newer than it — the SAME override the
+    /// live capture path applies to a concrete sample
+    /// ([`apply_one_with_override`](Self::apply_one_with_override)). Without this
+    /// a wildcard registered on this replica (e.g. a wildcard-delete received
+    /// from replica A, materialized onto an empty backend) would NOT shadow a
+    /// later concrete key aligned from replica B — a mesh convergence gap.
+    /// Matched in FULL keyexpr space (restore the strip prefix), written in the
+    /// STORED key space (AV8).
+    #[cfg(all(feature = "storage-aligner", feature = "storage-mgr-wildcard-updates"))]
+    fn apply_aligned_concrete(
+        &mut self,
+        stored_key: Option<&str>,
+        kind: SampleKind,
+        timestamp: TimestampHint,
+        payload: Vec<u8>,
+        encoding: Option<EncodingHint>,
+    ) {
+        match self.full_key_for(stored_key) {
+            Some(full) => {
+                self.apply_one_with_override(stored_key, &full, kind, timestamp, payload, encoding)
+            }
+            // Degenerate empty-prefix mount-root: no full key to match a wildcard
+            // against, so the raw gated write is correct.
+            None => match kind {
+                SampleKind::Put => {
+                    self.process_put(stored_key, payload, encoding, timestamp);
+                }
+                SampleKind::Del => {
+                    self.process_delete(stored_key, timestamp);
+                }
+            },
+        }
+    }
+    /// Raw-gated form when the wildcard engine is OFF: byte-identical to the
+    /// pre-slice-3 concrete align write (no registries to consult).
+    #[cfg(all(
+        feature = "storage-aligner",
+        not(feature = "storage-mgr-wildcard-updates")
+    ))]
+    fn apply_aligned_concrete(
+        &mut self,
+        stored_key: Option<&str>,
+        kind: SampleKind,
+        timestamp: TimestampHint,
+        payload: Vec<u8>,
+        encoding: Option<EncodingHint>,
+    ) {
+        match kind {
+            SampleKind::Put => {
+                self.process_put(stored_key, payload, encoding, timestamp);
+            }
+            SampleKind::Del => {
+                self.process_delete(stored_key, timestamp);
+            }
+        }
     }
 
     /// Answer one inbound query from the stored set (the serve side of a
@@ -963,8 +1081,13 @@ impl<B: StorageBackend> StorageState<B> {
                 // metadata was sent: skip, as zenoh does.
                 _ => None,
             },
-            // wz does not HOST a wildcard event to answer a retrieval for (it
-            // does not produce them); slice 3 adds wildcard hosting. Skip.
+            // wz does not HOST a wildcard event to answer a retrieval for: it
+            // never PRODUCES a wildcard event (it has no wildcard-event log —
+            // AV5), only RECEIVES + applies one (slice 3). This is a permanent
+            // non-goal, not a pending slice — a wz replica re-advertises only the
+            // concrete keys a wildcard materialized onto, never the wildcard
+            // itself, so the wildcard's own log-key fingerprint stays divergent
+            // from a zenohd peer (the named AV5 residual). Skip.
             Action::WildcardPut(_) | Action::WildcardDelete(_) => None,
         }
     }
@@ -1067,14 +1190,40 @@ impl<B: StorageBackend> StorageState<B> {
                     match meta.action().clone() {
                         Action::Put => missing_puts.push(meta),
                         Action::Delete => {
-                            self.process_delete(meta.key(), meta.timestamp().clone());
+                            // R311wt slice 3: a received concrete Delete consults the
+                            // wildcard registries (a registered wildcard-delete newer
+                            // than it tombstones at the wildcard ts) — zenoh
+                            // needs_further_processing, aligner_reply.rs:255/431.
+                            self.apply_aligned_concrete(
+                                meta.key(),
+                                SampleKind::Del,
+                                meta.timestamp().clone(),
+                                Vec::new(),
+                                None,
+                            );
                         }
-                        // A decoded wildcard event (a real zenoh replica's
-                        // WildcardPut/WildcardDelete): slice-1 no longer drops
-                        // the whole reply (the prior UnsupportedAction), but wz
-                        // cannot yet APPLY it — the write-path override engine
-                        // is slices 2/3. Skip it; the batched non-wildcard
-                        // events in this reply still converge.
+                        // R311wt slice 3 (storage-mgr-wildcard-updates ON): apply
+                        // a wildcard event received from a peer. A WildcardDelete
+                        // needs no payload → materialize now; a WildcardPut needs
+                        // its value → defer to the Retrieval round like a plain Put
+                        // (zenoh process_event_metadata, aligner_reply.rs:265/293).
+                        // The materialize key is the FULL keyexpr in the Action,
+                        // NOT meta.key() (the stripped log key).
+                        #[cfg(feature = "storage-mgr-wildcard-updates")]
+                        Action::WildcardDelete(ke) => {
+                            self.materialize_wildcard(
+                                &ke,
+                                SampleKind::Del,
+                                meta.timestamp().clone(),
+                                Vec::new(),
+                                None,
+                            );
+                        }
+                        #[cfg(feature = "storage-mgr-wildcard-updates")]
+                        Action::WildcardPut(_) => missing_puts.push(meta),
+                        // storage-aligner WITHOUT storage-mgr-wildcard-updates: no
+                        // override engine to apply into, so skip (as slice 1 did).
+                        #[cfg(not(feature = "storage-mgr-wildcard-updates"))]
                         Action::WildcardPut(_) | Action::WildcardDelete(_) => {}
                     }
                 }
@@ -1093,21 +1242,64 @@ impl<B: StorageBackend> StorageState<B> {
                     match meta.action() {
                         Action::Put => {
                             if let Some(RetrievedValue { payload, encoding }) = value {
-                                self.process_put(
+                                // R311wt slice 3: a received concrete Put consults the
+                                // wildcard registries (a registered wildcard newer than
+                                // it overrides its value/kind) — zenoh
+                                // needs_further_processing, aligner_reply.rs:337/431.
+                                self.apply_aligned_concrete(
                                     meta.key(),
+                                    SampleKind::Put,
+                                    meta.timestamp().clone(),
                                     payload,
                                     encoding,
-                                    meta.timestamp().clone(),
                                 );
                             }
                             // A Put with no value = the peer skipped it (its
                             // data changed); nothing to apply.
                         }
                         Action::Delete => {
-                            self.process_delete(meta.key(), meta.timestamp().clone());
+                            self.apply_aligned_concrete(
+                                meta.key(),
+                                SampleKind::Del,
+                                meta.timestamp().clone(),
+                                Vec::new(),
+                                None,
+                            );
                         }
-                        // Decoded but not-yet-applied wildcard event (slice
-                        // 2/3 add the materialization). Skip.
+                        // R311wt slice 3: a WildcardPut retrieved WITH its payload
+                        // → materialize. A WildcardDelete reaches the Retrieval arm
+                        // ONLY on initial alignment (`AlignmentQuery::All` routes
+                        // straight here, answer_alignment_query All arm) — zenoh
+                        // register-only's there (aligner_reply.rs:355) assumes an
+                        // empty backend; wz materializes (a safe idempotent superset:
+                        // a no-op on an empty backend, correct if wz re-joins
+                        // non-empty). Use the FULL keyexpr in the Action.
+                        #[cfg(feature = "storage-mgr-wildcard-updates")]
+                        Action::WildcardPut(ke) => {
+                            if let Some(RetrievedValue { payload, encoding }) = value {
+                                self.materialize_wildcard(
+                                    ke,
+                                    SampleKind::Put,
+                                    meta.timestamp().clone(),
+                                    payload,
+                                    encoding,
+                                );
+                            }
+                            // A WildcardPut with no value = the peer skipped it;
+                            // nothing to apply (mirrors the plain-Put arm).
+                        }
+                        #[cfg(feature = "storage-mgr-wildcard-updates")]
+                        Action::WildcardDelete(ke) => {
+                            self.materialize_wildcard(
+                                ke,
+                                SampleKind::Del,
+                                meta.timestamp().clone(),
+                                Vec::new(),
+                                None,
+                            );
+                        }
+                        // storage-aligner WITHOUT storage-mgr-wildcard-updates: skip.
+                        #[cfg(not(feature = "storage-mgr-wildcard-updates"))]
                         Action::WildcardPut(_) | Action::WildcardDelete(_) => {}
                     }
                 }
@@ -2522,6 +2714,300 @@ mod tests {
                 local.get(Some("k/x")).map(|d| d.timestamp.clone()),
                 Some(hi)
             );
+        }
+
+        // R311wt slice 3 — applying wildcard-updates received via alignment.
+        // Gated on the storage-aligner (parent mod) ∩ storage-mgr-wildcard-updates
+        // intersection: these need the override engine to apply into.
+        #[cfg(feature = "storage-mgr-wildcard-updates")]
+        mod wildcard_align {
+            use super::*;
+            use crate::storage_aligner::{
+                AlignmentFollowup, AlignmentQuery, AlignmentReply, EventMetadata, RetrievedValue,
+            };
+
+            // A WildcardDelete / WildcardPut EventMetadata: the wildcard ke rides
+            // the Action (the FULL keyexpr wz materializes on); the stripped key
+            // mirrors zenoh's stored_key (ignored by wz's materialize).
+            fn wdel_meta(ke: &str, t: u64, sub: u64) -> EventMetadata {
+                EventMetadata::wildcard(
+                    Some(ke.into()),
+                    at(t, sub),
+                    Action::WildcardDelete(ke.into()),
+                )
+            }
+            fn wput_meta(ke: &str, t: u64, sub: u64) -> EventMetadata {
+                EventMetadata::wildcard(Some(ke.into()), at(t, sub), Action::WildcardPut(ke.into()))
+            }
+
+            #[test]
+            fn events_metadata_wildcard_delete_deletes_matching_local_keys() {
+                // (a) A WildcardDelete received in the metadata round materializes
+                // onto wz-local matching keys OLDER than it (keys the sender need
+                // not have — this closes the common-case offline-replica residual);
+                // a NEWER local key survives.
+                let mut s = StorageState::new(MemoryStorage::new());
+                s.process_put(Some("demo/a"), vec![1], None, at(5, 0));
+                s.process_put(Some("demo/b"), vec![1], None, at(5, 0));
+                s.process_put(Some("demo/c"), vec![1], None, at(50, 0));
+                let reply = AlignmentReply::EventsMetadata(vec![wdel_meta("demo/**", 10, 0)]);
+                let f = s.process_alignment_reply(&cfg(), reply, None);
+                assert_eq!(
+                    f,
+                    AlignmentFollowup::Done,
+                    "a WildcardDelete needs no payload fetch"
+                );
+                assert!(
+                    s.get(Some("demo/a")).is_none(),
+                    "older matching key deleted"
+                );
+                assert!(
+                    s.get(Some("demo/b")).is_none(),
+                    "older matching key deleted"
+                );
+                assert_eq!(
+                    s.get(Some("demo/c")).unwrap().payload,
+                    vec![1],
+                    "a key newer than the wildcard-delete survives"
+                );
+            }
+
+            #[test]
+            fn events_metadata_wildcard_put_is_deferred_then_retrieval_materializes() {
+                // (b) A WildcardPut is collected for a payload fetch in the metadata
+                // round, then the Retrieval round materializes it onto a matching key.
+                let mut s = StorageState::new(MemoryStorage::new());
+                s.process_put(Some("demo/a"), vec![1], None, at(5, 0));
+                let meta = wput_meta("demo/**", 20, 0);
+                match s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::EventsMetadata(vec![meta.clone()]),
+                    None,
+                ) {
+                    AlignmentFollowup::Query(AlignmentQuery::Events(evs)) => {
+                        assert_eq!(
+                            evs.len(),
+                            1,
+                            "the WildcardPut is collected for a payload fetch"
+                        );
+                    }
+                    other => panic!("expected an Events follow-up, got {other:?}"),
+                }
+                s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::Retrieval(meta),
+                    Some(RetrievedValue {
+                        payload: vec![0x42],
+                        encoding: None,
+                    }),
+                );
+                assert_eq!(
+                    s.get(Some("demo/a")).unwrap().payload,
+                    vec![0x42],
+                    "the older concrete key is upgraded to the wildcard-put value"
+                );
+            }
+
+            #[test]
+            fn retrieval_wildcard_delete_materializes_on_initial_alignment() {
+                // (d) B1: initial alignment (AlignmentQuery::All) routes a
+                // WildcardDelete straight to the Retrieval arm; wz MATERIALIZES it
+                // (not zenoh's register-only, which assumes an empty backend), so a
+                // non-empty backend is correctly swept.
+                let mut s = StorageState::new(MemoryStorage::new());
+                s.process_put(Some("demo/a"), vec![1], None, at(5, 0));
+                s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::Retrieval(wdel_meta("demo/**", 10, 0)),
+                    None,
+                );
+                assert!(
+                    s.get(Some("demo/a")).is_none(),
+                    "a Retrieval-arm WildcardDelete (initial align) deletes the matching key"
+                );
+            }
+
+            #[test]
+            fn received_wildcard_put_does_not_resurrect_a_tombstone_but_materializes_a_live_sibling(
+            ) {
+                // (c+P2) A received WildcardPut does NOT resurrect a local tombstone
+                // (materialize scans live keys only), AND a live sibling demo/b IS
+                // upgraded — the sibling makes this non-vacuous (a no-op align arm
+                // would leave demo/b=[1], failing the second assert).
+                let mut s = StorageState::new(MemoryStorage::new());
+                s.process_put(Some("demo/a"), vec![1], None, at(5, 0));
+                s.process_delete(Some("demo/a"), at(10, 0)); // tombstone
+                s.process_put(Some("demo/b"), vec![1], None, at(5, 0)); // live sibling
+                s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::Retrieval(wput_meta("demo/**", 20, 0)),
+                    Some(RetrievedValue {
+                        payload: vec![0x42],
+                        encoding: None,
+                    }),
+                );
+                assert!(
+                    s.get(Some("demo/a")).is_none(),
+                    "a received wildcard-put must not resurrect a tombstoned key"
+                );
+                assert_eq!(
+                    s.get(Some("demo/b")).unwrap().payload,
+                    vec![0x42],
+                    "the live sibling IS materialized (the arm actually ran)"
+                );
+            }
+
+            #[test]
+            fn registered_wildcard_delete_shadows_a_later_aligned_concrete_put() {
+                // BLOCKER guard (IMPL-A): a wildcard-delete received from peer A
+                // (materialized onto an EMPTY backend) must shadow a concrete
+                // demo/a@t5 later aligned from peer B that never saw the WD — the
+                // 3-party mesh path. zenoh needs_further_processing overrides the
+                // concrete event (aligner_reply.rs:255/337/431); wz's concrete align
+                // arm now consults the registries via apply_aligned_concrete. Before
+                // the fix, demo/a would be stored raw (present) — a convergence gap.
+                let mut s = StorageState::new(MemoryStorage::new());
+                // (1) receive WD demo/** @t10 (registers; backend empty, no key yet)
+                s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::EventsMetadata(vec![wdel_meta("demo/**", 10, 0)]),
+                    None,
+                );
+                // (2) align concrete Put demo/a @t5 (t5 < t10) from a peer lacking WD
+                let put = EventMetadata::put(Some("demo/a".into()), at(5, 0));
+                match s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::EventsMetadata(vec![put.clone()]),
+                    None,
+                ) {
+                    AlignmentFollowup::Query(AlignmentQuery::Events(_)) => {}
+                    other => panic!("expected an Events follow-up for the put, got {other:?}"),
+                }
+                s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::Retrieval(put),
+                    Some(RetrievedValue {
+                        payload: vec![0xAA],
+                        encoding: None,
+                    }),
+                );
+                assert!(
+                    s.get(Some("demo/a")).is_none(),
+                    "the registered wildcard-delete shadows the older aligned concrete put"
+                );
+            }
+
+            #[test]
+            fn out_of_order_plain_delete_after_a_wildcard_put_retains_the_key() {
+                // (P3) The plain-Delete instance of D-slice3-1: a WildcardPut@t20
+                // raises demo/a's ts, then an out-of-order plain Delete demo/a@t10
+                // (t5<t10<t20) is received. wz RETAINS demo/a (is_missing sees
+                // latest=t20 >= t10 → skip) — matching zenoh's live-materialize
+                // behavior; zenoh's align sweep would delete it via the stored tlnwu.
+                // Doc-pins the divergence's plain-delete arm (module divergence #2).
+                let mut s = StorageState::new(MemoryStorage::new());
+                s.process_put(Some("demo/a"), vec![1], None, at(5, 0));
+                s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::Retrieval(wput_meta("demo/**", 20, 0)),
+                    Some(RetrievedValue {
+                        payload: vec![0x42],
+                        encoding: None,
+                    }),
+                );
+                s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::EventsMetadata(vec![EventMetadata::delete(
+                        Some("demo/a".into()),
+                        at(10, 0),
+                    )]),
+                    None,
+                );
+                assert_eq!(
+                    s.get(Some("demo/a")).map(|d| d.payload.clone()),
+                    Some(vec![0x42]),
+                    "wz retains the key against an out-of-order plain-delete (zenoh-live); D-slice3-1"
+                );
+            }
+
+            #[test]
+            fn re_applying_a_received_wildcard_is_convergent() {
+                // (e) is_missing is always true for a wildcard event (its ke is
+                // never a concrete `latest` key), so wz re-applies it every round;
+                // re-application is idempotent/convergent.
+                let mut s = StorageState::new(MemoryStorage::new());
+                s.process_put(Some("demo/a"), vec![1], None, at(5, 0));
+                let reply = || AlignmentReply::EventsMetadata(vec![wdel_meta("demo/**", 10, 0)]);
+                s.process_alignment_reply(&cfg(), reply(), None);
+                assert!(s.get(Some("demo/a")).is_none());
+                s.process_alignment_reply(&cfg(), reply(), None);
+                assert!(
+                    s.get(Some("demo/a")).is_none(),
+                    "re-applying the same received wildcard is convergent"
+                );
+            }
+
+            #[test]
+            fn named_divergence_overlapping_out_of_order_wildcards_retain_the_key() {
+                // (h) NAMED DIVERGENCE D-slice3-1 guard: a WildcardPut@t20 raises
+                // demo/a's ts, then an OUT-OF-ORDER WildcardDelete@t10 (t5<t10<t20)
+                // arrives. wz RETAINS demo/a at the put value (ts-only gate) —
+                // matching zenoh's LIVE-materialize behavior. zenoh's ALIGN path
+                // would delete it (stored-tlnwu sweep), but zenoh is itself
+                // path-dependent here (module divergence #2). Commented so this is
+                // NOT later "fixed" into a divergence.
+                let mut s = StorageState::new(MemoryStorage::new());
+                s.process_put(Some("demo/a"), vec![1], None, at(5, 0));
+                s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::Retrieval(wput_meta("demo/**", 20, 0)),
+                    Some(RetrievedValue {
+                        payload: vec![0x42],
+                        encoding: None,
+                    }),
+                );
+                assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![0x42]);
+                s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::EventsMetadata(vec![wdel_meta("demo/**", 10, 0)]),
+                    None,
+                );
+                assert_eq!(
+                    s.get(Some("demo/a")).map(|d| d.payload.clone()),
+                    Some(vec![0x42]),
+                    "wz retains the key (zenoh-live behavior); named divergence D-slice3-1"
+                );
+            }
+
+            // P1 (AV8 on the align path): a received wildcard matches on its
+            // Action ke (FULL keyexpr), NOT meta.key() (the stripped log key).
+            #[cfg(feature = "storage-mgr-strip-prefix")]
+            #[test]
+            fn strip_align_wildcard_delete_matches_on_the_action_ke_not_meta_key() {
+                use crate::sample::Sample;
+                let mut s = StorageState::with_strip_prefix(
+                    MemoryStorage::new(),
+                    Some("home/kitchen".into()),
+                );
+                // A concrete key stored RELATIVE ("temp") under the mount.
+                s.apply_sample(
+                    &Sample::new_put("home/kitchen/temp", vec![21]).with_timestamp(at(5, 0)),
+                    || unreachable!(),
+                );
+                // A WildcardDelete whose Action ke is the FULL "home/kitchen/**"
+                // but whose meta.key() is a SENTINEL that matches nothing: proves
+                // the Action ke (not meta.key()) drives the materialize.
+                let meta = EventMetadata::wildcard(
+                    Some("SENTINEL/matches/nothing".into()),
+                    at(10, 0),
+                    Action::WildcardDelete("home/kitchen/**".into()),
+                );
+                s.process_alignment_reply(&cfg(), AlignmentReply::EventsMetadata(vec![meta]), None);
+                assert!(
+                    s.get(Some("temp")).is_none(),
+                    "the full-keyexpr Action ke (not meta.key()) drove the match + delete"
+                );
+            }
         }
     }
 }
