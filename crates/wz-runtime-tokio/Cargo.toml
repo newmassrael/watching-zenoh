@@ -451,6 +451,17 @@ storage-mgr-strip-prefix = ["wz-session-core/storage-mgr-strip-prefix"]
 # (StorageState::apply_sample), and the tokio `storage_service` driver already
 # calls apply_sample, so no new runtime code (same shape as strip-prefix).
 storage-mgr-wildcard-updates = ["wz-session-core/storage-mgr-wildcard-updates"]
+# R311wt slice 4 — storage-mgr-garbage-collection: forward the kernel sweep AND
+# add the periodic timer DRIVER (`storage_gc_service::GarbageCollector`, a
+# caller-driven spawn mirroring `DigestPublisher`). Unlike wildcard-updates this
+# is NOT a pure forward — it adds runtime code (the timer), so it pulls
+# `storage-backend` (the StorageService type + shared_state accessor), the same
+# shape as `storage-mgr-complete-flag`. The kernel dep transitively enables
+# wildcard-updates, so no redundant re-forward of it here.
+storage-mgr-garbage-collection = [
+    "wz-session-core/storage-mgr-garbage-collection",
+    "storage-backend",
+]
 # R311y106 — §5.21 routing-namespace active flip: forward the per-participant
 # keyexpr namespace decorator. The egress seam lives in this crate's unicast
 # `Tp::send_network_message` arm; the ingress + reply-egress + decorator state

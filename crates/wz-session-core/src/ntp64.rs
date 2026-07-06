@@ -66,6 +66,35 @@ impl Ntp64 {
         Self((secs << Self::FRAC_BITS) | frac)
     }
 
+    /// Build from a `Duration` SPAN (not a unix instant): the seconds in the
+    /// high 32 bits, the sub-second nanos scaled to NTP64 fraction units — the
+    /// same `(secs << 32) | frac` recipe as [`from_unix`](Ntp64::from_unix),
+    /// named for the span meaning. On any representable span it is byte-identical
+    /// to uhlc's `impl From<Duration> for NTP64` (`uhlc ntp64.rs:287-293`), so a
+    /// `lifespan` cutoff computed here matches zenoh's `NTP64::from(lifespan)`
+    /// (the storage GC `time_limit`, `storages_mgt/service.rs:674`). `as_secs()`
+    /// (`u64`) / `subsec_nanos()` (`u32`) match the `from_unix` parameters
+    /// exactly (no cast).
+    ///
+    /// A span whose seconds exceed the NTP64 high-word range (`> 2^32 - 1`, i.e.
+    /// ~136 years) is NOT representable: rather than let `from_unix`'s
+    /// `secs << 32` WRAP to a small (or zero) word — which as a GC lifespan would
+    /// make `now - lifespan ≈ now` and wrongly collect the WHOLE registry — this
+    /// SATURATES to `u64::MAX`, so a caller's `now.saturating_sub(..)` clamps the
+    /// cutoff to `0` and collects NOTHING (the safe direction). This diverges
+    /// from uhlc, which `assert!`-panics on such a span; a GC cutoff never sees
+    /// one (the default `lifespan` is 1 day), so this is defense-in-depth. Note
+    /// [`from_unix`](Ntp64::from_unix) keeps its own ~year-2106 unix-instant wrap
+    /// (a documented NTP64 limitation) — only a SPAN saturates here.
+    pub fn from_duration(span: core::time::Duration) -> Self {
+        let secs = span.as_secs();
+        // `secs << 32` overflows u64 iff `secs > u64::MAX >> 32` (= 2^32 - 1).
+        if secs > (u64::MAX >> Self::FRAC_BITS) {
+            return Self(u64::MAX);
+        }
+        Self::from_unix(secs, span.subsec_nanos())
+    }
+
     /// The whole-seconds part (`word >> 32`) — the unix epoch seconds.
     pub const fn whole_secs(self) -> u64 {
         self.0 >> Self::FRAC_BITS
@@ -130,6 +159,29 @@ mod tests {
             let expected = (secs << 32) | frac;
             assert_eq!(Ntp64::from_unix(secs, nanos).as_word(), expected);
         }
+    }
+
+    #[test]
+    fn from_duration_equals_from_unix_on_the_span_parts() {
+        // A Duration span packs identically to from_unix(secs, subsec_nanos) —
+        // the storage GC lifespan→NTP64 cutoff (byte-identical to zenoh's
+        // NTP64::from(lifespan)).
+        for span in [
+            core::time::Duration::from_secs(0),
+            core::time::Duration::from_secs(86_400), // the GC default lifespan
+            core::time::Duration::from_millis(1_500),
+            core::time::Duration::new(30, 123_456_789),
+        ] {
+            assert_eq!(
+                Ntp64::from_duration(span).as_word(),
+                Ntp64::from_unix(span.as_secs(), span.subsec_nanos()).as_word()
+            );
+        }
+        // 86400 s lifespan is a whole-second span: frac == 0, word == 86400<<32.
+        assert_eq!(
+            Ntp64::from_duration(core::time::Duration::from_secs(86_400)).as_word(),
+            86_400u64 << 32
+        );
     }
 
     #[test]

@@ -719,6 +719,18 @@ storage-mgr-wildcard-updates = [
     "keyexpr-wildcard-single",
     "keyexpr-wildcard-double",
 ]
+# R311wt slice 4 — storage-mgr-garbage-collection (§5.24): the periodic sweep of
+# the wildcard-update registries (StorageState::collect_garbage removes entries
+# older than `now - lifespan`), the wz mirror of zenoh's `GarbageCollectionEvent`
+# (storages_mgt/service.rs:661-713). cfg-ACTIVE. Composes
+# `storage-mgr-wildcard-updates` — MANDATORY: collect_garbage sweeps the
+# `wildcard_puts`/`wildcard_deletes` fields, which are themselves cfg-gated on
+# wildcard-updates, so GC cannot compile without them (and there is nothing to
+# collect without registries). Bounds ONLY the registry memory, NOT the `latest`
+# tombstone map (which stays unbounded — GCing it would drop tombstones a replica
+# needs for delete-convergence; the documented divergence). The periodic timer
+# DRIVER lives in wz-runtime-tokio (this is the no_std kernel sweep only).
+storage-mgr-garbage-collection = ["storage-mgr-wildcard-updates"]
 
 # R311y22b — no [build-dependencies]: the statechart codegen moved to the
 # committed out/wz-session-core/*_sm.rs via the `xtask` codegen SSOT, so this

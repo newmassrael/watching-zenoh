@@ -815,6 +815,20 @@ pub mod storage_aligner_service;
 #[cfg(feature = "storage-mgr-multi-storage-host")]
 pub mod storage_manager_service;
 
+/// R311wt slice 4 — the storage garbage-collection DRIVER (§5.24
+/// `storage-mgr-garbage-collection`): the tokio timer binding that periodically
+/// sweeps stale wildcard-update registry entries out of a storage. A
+/// [`storage_gc_service::GarbageCollector`] spawns a loop that, every
+/// `config.garbage_collection.period`, locks the shared
+/// [`storage_service::StorageService`] state and calls the kernel
+/// [`StorageState::collect_garbage`](wz_session_core::storage_state::StorageState::collect_garbage)
+/// with a wall-clock cutoff. Caller-driven + RAII-bound (dropping the collector
+/// aborts the loop), mirroring [`storage_replication_service::DigestPublisher`].
+/// Gated on `storage-mgr-garbage-collection` (which pulls the kernel sweep +
+/// `storage-backend` for the shared state).
+#[cfg(feature = "storage-mgr-garbage-collection")]
+pub mod storage_gc_service;
+
 /// R311qa — the multi-peer accept loop: the `routing-router` / `routing-peer`
 /// foundation. Binds once and holds N concurrent peer faces (bind -> accept
 /// loop -> per-face open + drive), the increment zenoh's role-agnostic

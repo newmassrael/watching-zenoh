@@ -831,6 +831,63 @@ impl<B: StorageBackend> StorageState<B> {
         }
     }
 
+    /// Collect stale wildcard-update registry entries — the periodic GC sweep
+    /// (`storage-mgr-garbage-collection`, R311wt slice 4). Removes every
+    /// registered wildcard Put / Delete whose timestamp is OLDER than
+    /// `now_ntp64 - lifespan`, bounding the memory the slice-2/3 registries would
+    /// otherwise accumulate. zenoh `GarbageCollectionEvent`
+    /// (`storages_mgt/service.rs:661-713`): `time_limit = now - lifespan`, remove
+    /// each entry with `timestamp.get_time() < time_limit`.
+    ///
+    /// `now_ntp64` is INJECTED (the kernel has no clock — the driver passes
+    /// [`crate::…wall_clock_ntp64`]), mirroring the `now: u64` seam of
+    /// [`answer_alignment_query`](Self::answer_alignment_query). The comparison
+    /// is on the raw NTP64 `time` WORD only (age; the zid tiebreak is irrelevant
+    /// — zenoh compares `get_time()` likewise), so an entry exactly AT the limit
+    /// is RETAINED (matching zenoh's strict `<` removal).
+    ///
+    /// # Two deliberate divergences from zenoh (both safer / faithful)
+    ///
+    /// - **`saturating_sub`**: zenoh's `NTP64` `Sub` is a plain u64 subtraction
+    ///   (`uhlc ntp64.rs:204-210`) that debug-panics / release-wraps on
+    ///   underflow — an unset-RTC boot (`now < lifespan`, e.g. an MCU before NTP
+    ///   sync) would wrap the cutoff to ~u64::MAX and WIPE both registries. wz
+    ///   saturates to `0`, so an un-set clock collects NOTHING (conservative).
+    ///   The complementary over-long-`lifespan` overflow is guarded in
+    ///   [`Ntp64::from_duration`](crate::ntp64::Ntp64::from_duration) (a span
+    ///   `> 2^32 - 1` s saturates to `u64::MAX`, so the cutoff clamps to `0` —
+    ///   collect nothing — rather than the `secs << 32` wrap wiping everything).
+    /// - **`latest` is NEVER swept.** zenoh time-GCs its `latest_updates` cache
+    ///   for a non-replicated storage (`service.rs:704-708` — via an inverted
+    ///   `retain` that keeps OLD and drops NEW, a latent zenoh bug). wz's
+    ///   [`latest`](StorageState) is the AUTHORITATIVE newer-wins record +
+    ///   tombstone map (not a disposable cache), so sweeping it would drop
+    ///   tombstones a replica needs for delete-convergence and resurrect deleted
+    ///   keys. GC therefore bounds ONLY the wildcard-registry memory, NOT the
+    ///   tombstone map (the documented "tombstones retained unbounded"
+    ///   divergence, module doc). Faithful for a replicated storage (zenoh does
+    ///   not time-GC a replicated log/cache either).
+    #[cfg(feature = "storage-mgr-garbage-collection")]
+    pub fn collect_garbage(&mut self, now_ntp64: u64, lifespan: core::time::Duration) {
+        let time_limit =
+            now_ntp64.saturating_sub(crate::ntp64::Ntp64::from_duration(lifespan).as_word());
+        self.wildcard_puts
+            .retain(|_, wu| wu.data.timestamp.time >= time_limit);
+        self.wildcard_deletes
+            .retain(|_, wu| wu.data.timestamp.time >= time_limit);
+    }
+
+    /// The `(wildcard_puts, wildcard_deletes)` registry sizes — the inspection
+    /// seam a GC driver / metrics surface reads to observe how much wildcard
+    /// metadata is held (and that a [`collect_garbage`](Self::collect_garbage)
+    /// sweep shrank it), without exposing the private registries. zenoh has no
+    /// direct analog (its GC is fire-and-forget); this is the observability the
+    /// [`crate::storage_state`] driver's periodic sweep test asserts against.
+    #[cfg(feature = "storage-mgr-garbage-collection")]
+    pub fn wildcard_registry_lens(&self) -> (usize, usize) {
+        (self.wildcard_puts.len(), self.wildcard_deletes.len())
+    }
+
     /// Answer one inbound query from the stored set (the serve side of a
     /// storage): reply every matching key — under `History::All` every
     /// version of it — each stamped with its OWN concrete keyexpr + value
@@ -1969,6 +2026,189 @@ mod tests {
                 vec![0x20],
                 "the re-issued wildcard-put replaced the older registry entry"
             );
+        }
+
+        // R311wt slice 4 — the garbage-collection sweep over the wildcard
+        // registries. NTP64-scaled timestamps (high 32 bits = seconds) so a
+        // realistic lifespan cutoff selects between entries.
+        #[cfg(feature = "storage-mgr-garbage-collection")]
+        mod gc {
+            use super::*;
+            use core::time::Duration;
+
+            // A wildcard registered at exactly `secs` seconds (NTP64 word).
+            fn tsecs(secs: u64, zid: u8) -> TimestampHint {
+                TimestampHint {
+                    time: secs << 32,
+                    zid: vec![zid],
+                }
+            }
+            // Register a wildcard-delete at `secs` (registers, backend empty).
+            fn reg_wdel(s: &mut StorageState<MemoryStorage>, ke: &str, secs: u64) {
+                s.apply_sample(
+                    &Sample::new_del(ke).with_timestamp(tsecs(secs, 1)),
+                    || unreachable!(),
+                );
+            }
+
+            #[test]
+            fn sweep_removes_old_registry_entries_and_retains_recent_ones() {
+                let mut s = state();
+                reg_wdel(&mut s, "old/**", 10); // ts = 10s
+                reg_wdel(&mut s, "new/**", 80); // ts = 80s
+                assert_eq!(s.wildcard_deletes.len(), 2);
+                // now = 100s, lifespan = 50s -> time_limit = 50s. old(10) < 50 ->
+                // collected; new(80) >= 50 -> retained.
+                s.collect_garbage(100u64 << 32, Duration::from_secs(50));
+                assert_eq!(s.wildcard_deletes.len(), 1);
+                assert!(
+                    s.wildcard_deletes.contains_key("new/**"),
+                    "the recent wildcard-delete is retained"
+                );
+                assert!(
+                    !s.wildcard_deletes.contains_key("old/**"),
+                    "the stale wildcard-delete is collected"
+                );
+            }
+
+            #[test]
+            fn sweep_covers_the_wildcard_puts_registry_too() {
+                let mut s = state();
+                wput(&mut s, "old/**", vec![1], 10, 1);
+                wput(&mut s, "new/**", vec![2], 80, 1);
+                // wput uses ts(t) = time=t (tiny), so use a tiny cutoff scale here.
+                assert_eq!(s.wildcard_puts.len(), 2);
+                // now = 100, lifespan_ntp64 for 0s = 0 -> time_limit = 100; both
+                // entries (t=10,80) < 100 -> both collected. Use a fractional
+                // cutoff instead: compare on the raw .time. time_limit must sit
+                // between 10 and 80, so pass now=80, lifespan=0 -> limit=80.
+                s.collect_garbage(80, Duration::from_secs(0));
+                assert_eq!(s.wildcard_puts.len(), 1);
+                assert!(
+                    s.wildcard_puts.contains_key("new/**"),
+                    "recent put retained"
+                );
+                assert!(
+                    !s.wildcard_puts.contains_key("old/**"),
+                    "stale put collected"
+                );
+            }
+
+            #[test]
+            fn entry_exactly_at_the_limit_is_retained() {
+                let mut s = state();
+                reg_wdel(&mut s, "edge/**", 50); // ts = 50s
+                                                 // now = 100s, lifespan = 50s -> time_limit = exactly 50s. zenoh
+                                                 // removes `ts < time_limit`; `ts == limit` is RETAINED.
+                s.collect_garbage(100u64 << 32, Duration::from_secs(50));
+                assert_eq!(
+                    s.wildcard_deletes.len(),
+                    1,
+                    "an entry exactly at the limit is retained (>= boundary)"
+                );
+            }
+
+            #[test]
+            fn unset_clock_now_below_lifespan_collects_nothing() {
+                let mut s = state();
+                reg_wdel(&mut s, "any/**", 10);
+                // now (5s) < lifespan (86400s): saturating_sub -> time_limit = 0,
+                // so nothing is collected (conservative; NOT zenoh's wrap-to-max
+                // wipe). An unset-RTC boot must not empty the registries.
+                s.collect_garbage(5u64 << 32, Duration::from_secs(86400));
+                assert_eq!(
+                    s.wildcard_deletes.len(),
+                    1,
+                    "an un-set clock collects nothing (saturating_sub to 0)"
+                );
+            }
+
+            #[test]
+            fn over_long_lifespan_collects_nothing_not_everything() {
+                // A lifespan whose seconds exceed the NTP64 high-word range
+                // (> 2^32-1 s) is unrepresentable. from_duration SATURATES to
+                // u64::MAX (not the `secs << 32` wrap that would yield a SMALL
+                // word and wipe the registry), so time_limit clamps to 0 and
+                // NOTHING is collected. Guards the inverted-comment defect.
+                let mut s = state();
+                reg_wdel(&mut s, "any/**", 10);
+                // 2^32 s would wrap `secs << 32` to 0 without the guard.
+                s.collect_garbage(100u64 << 32, Duration::from_secs(1u64 << 32));
+                assert_eq!(
+                    s.wildcard_deletes.len(),
+                    1,
+                    "an over-long lifespan collects nothing (from_duration saturates)"
+                );
+            }
+
+            // A wildcard-PUT registered at exactly `secs` seconds (NTP64 word),
+            // the put-side twin of reg_wdel — so one NTP64-scale cutoff sweeps
+            // both registries.
+            fn reg_wput(s: &mut StorageState<MemoryStorage>, ke: &str, secs: u64) {
+                s.apply_sample(
+                    &Sample::new_put(ke, vec![0xAA]).with_timestamp(tsecs(secs, 1)),
+                    || unreachable!(),
+                );
+            }
+
+            #[test]
+            fn one_cutoff_selectively_prunes_both_registries_at_once() {
+                // Both registries non-empty in a SINGLE sweep: one shared cutoff
+                // removes the stale entry from EACH and retains the recent one —
+                // pins the (puts, deletes) tuple order of wildcard_registry_lens
+                // in the kernel too (not just the driver's delete-only pin).
+                let mut s = state();
+                reg_wput(&mut s, "p_old/**", 10);
+                reg_wput(&mut s, "p_new/**", 80);
+                reg_wdel(&mut s, "d_old/**", 10);
+                reg_wdel(&mut s, "d_new/**", 80);
+                assert_eq!(s.wildcard_registry_lens(), (2, 2));
+                // now=100s, lifespan=50s -> limit=50s. old(10)<50 collected from
+                // BOTH registries; new(80)>=50 retained in BOTH — one call.
+                s.collect_garbage(100u64 << 32, Duration::from_secs(50));
+                assert_eq!(
+                    s.wildcard_registry_lens(),
+                    (1, 1),
+                    "both registries pruned to their recent entry (puts, deletes) order"
+                );
+                assert!(s.wildcard_puts.contains_key("p_new/**"), "recent put kept");
+                assert!(
+                    !s.wildcard_puts.contains_key("p_old/**"),
+                    "stale put collected"
+                );
+                assert!(
+                    s.wildcard_deletes.contains_key("d_new/**"),
+                    "recent delete kept"
+                );
+                assert!(
+                    !s.wildcard_deletes.contains_key("d_old/**"),
+                    "stale delete collected"
+                );
+            }
+
+            #[test]
+            fn gc_of_a_wildcard_delete_lets_a_later_concrete_be_stored() {
+                // Behavioral end-to-end: a wildcard-delete demo/**@t10 registered,
+                // then GC'd, then a concrete put demo/a@t5 that IS older than the
+                // WD (t5 < t10) — so if the WD were still registered it WOULD
+                // shadow (tombstone) the put. With the WD collected, the put is
+                // stored instead. This is the DISCRIMINATING form (a t > t10 put
+                // would survive regardless of GC and be vacuous): demo/a present
+                // proves the registry actually shrank end to end, not just a
+                // len() read.
+                let mut s = state();
+                reg_wdel(&mut s, "demo/**", 10);
+                s.collect_garbage(100u64 << 32, Duration::from_secs(50)); // WD(10s) collected
+                assert!(s.wildcard_deletes.is_empty());
+                // A concrete put OLDER than the (now-collected) WD is applied
+                // without being shadowed — the WD is gone from the registry.
+                wput(&mut s, "demo/a", vec![7], 5, 1);
+                assert_eq!(
+                    s.get(Some("demo/a")).map(|d| d.payload.clone()),
+                    Some(vec![7]),
+                    "with the wildcard-delete GC'd, the concrete put is not shadowed"
+                );
+            }
         }
 
         // Strip-prefix composition (AV8): register + match in FULL keyexpr space,

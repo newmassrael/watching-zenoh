@@ -1909,6 +1909,17 @@ layer_c1y_cargo_test_routing_peer() {
 #      the ONLY lane that compiles+runs wildcard_align (neither is default); the
 #      existing `--features storage-aligner` lines are the wildcard-OFF combo
 #      proving the align arms skip byte-identically.
+#      R311wt slice 4 — a `--features storage-mgr-garbage-collection --lib storage`
+#      kernel line (+ clippy) covers `collect_garbage` (the `wildcard::gc` mod:
+#      the age sweep, the `>=` boundary, the saturating-sub unset-clock guard, and
+#      the end-to-end registry-shrink), and a `-p wz-runtime-tokio
+#      --features storage-mgr-garbage-collection --lib storage_gc_service` line
+#      (+ clippy) covers the periodic `GarbageCollector` driver (a spawned sweep +
+#      the RAII abort-on-drop), then a `cargo build -p wz` facade build. The GC
+#      feature transitively pulls storage-mgr-wildcard-updates (the sweep touches
+#      those registries), so a single-feature line proves the dep implication; no
+#      strip combo (GC writes no stored keys) and no declare-subscriber (it
+#      declares nothing).
 #   1. runs the storage_* lib tests (storage_service / storage_replication_service
 #      / storage_aligner_service) under `--features storage-aligner`, and the
 #      History::All tests under `--features storage-history`;
@@ -1956,6 +1967,11 @@ layer_c1z_cargo_test_storage_driver() {
         && cargo test -p wz-runtime-tokio --features storage-backend,storage-mgr-strip-prefix,declare-subscriber,pubsub-allow-loop --lib storage_service --quiet \
         && cargo clippy -p wz-runtime-tokio --features storage-backend,storage-mgr-strip-prefix,declare-subscriber,pubsub-allow-loop --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-complete-flag --quiet \
+        && cargo test -p wz-session-core --features storage-mgr-garbage-collection --lib storage --quiet \
+        && cargo clippy -p wz-session-core --features storage-mgr-garbage-collection --all-targets --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features storage-mgr-garbage-collection --lib storage_gc_service --quiet \
+        && cargo clippy -p wz-runtime-tokio --features storage-mgr-garbage-collection --all-targets --quiet -- -D warnings \
+        && cargo build -p wz --features storage-mgr-garbage-collection --quiet \
         && cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet \
         && cargo test -p wz-runtime-tokio --features storage-aligner --test storage_aligner_convergence_e2e --quiet \
         && cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet \

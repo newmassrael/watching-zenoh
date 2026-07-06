@@ -233,13 +233,19 @@ where
         f(&guard)
     }
 
-    /// Clone the shared `Arc<Mutex<StorageState>>` so the replication digest
-    /// driver ([`crate::storage_replication_service`]) can digest the SAME
-    /// live stored data this storage captures. The replication seam: a
-    /// replica's published digest must reflect its storage's actual state, so
-    /// the digest publisher and the capture/answer service share one gate
-    /// rather than maintaining a second copy.
-    #[cfg(feature = "storage-replication")]
+    /// Clone the shared `Arc<Mutex<StorageState>>` so an external periodic
+    /// driver can act on the SAME live stored data this storage captures — the
+    /// digest publisher ([`crate::storage_replication_service`], which must
+    /// digest the actual state) and the garbage collector
+    /// ([`crate::storage_gc_service`], R311wt slice 4, which sweeps the same
+    /// wildcard registries). One shared gate rather than a second copy. Widened
+    /// from `storage-replication` to also cover `storage-mgr-garbage-collection`
+    /// (the GC driver is caller-spawned over this Arc, mirroring the digest
+    /// publisher — StorageService itself does not own the timer).
+    #[cfg(any(
+        feature = "storage-replication",
+        feature = "storage-mgr-garbage-collection"
+    ))]
     pub fn shared_state(&self) -> Arc<Mutex<StorageState<B>>> {
         Arc::clone(&self.state)
     }

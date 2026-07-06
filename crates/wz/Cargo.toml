@@ -847,7 +847,10 @@ storage-backend-volume-trait = []
 storage-mgr-complete-flag = ["wz-runtime-tokio?/storage-mgr-complete-flag"]
 storage-mgr-config = []
 storage-mgr-dynamic-volume-loading = []
-storage-mgr-garbage-collection = []
+# R311wt slice 4 — storage-mgr-garbage-collection is now a real cfg gate (the
+# periodic wildcard-registry sweep + its timer driver); forward through
+# wz-runtime-tokio to the wz-session-core cfg site, not a no-op `= []`.
+storage-mgr-garbage-collection = ["wz-runtime-tokio?/storage-mgr-garbage-collection"]
 # R311y57 — storage-mgr-multi-storage-host is now a real cfg gate (the
 # StorageManager hosting N named storages); forward to the wz-session-core cfg
 # site (via wz-runtime-tokio), not a no-op `= []` (the
