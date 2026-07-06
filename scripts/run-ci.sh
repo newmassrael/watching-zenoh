@@ -4223,6 +4223,19 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # (the z_sub check above covers it — the same build script emits both).
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_subscriber_from_pico_multicast -- --ignored --quiet) || return 1
+    # R311y193 — router-multicast-faces S4: a wz `--router-hat` egresses a routed,
+    # re-literalized Put over the data-plane multicast group to a foreign pico
+    # `z_sub -m peer` (the LAST slice, the atom's first cross-impl egress proof).
+    # Needs the DEMO built with router-multicast-faces (the mcast-attach block is
+    # cfg'd on THAT feature, `runner.rs:2100`; a `router-hat-router`-only build
+    # elides it). Layer M builds no demo of its own, so build it here; the build
+    # is already compile-proven by Layer C1ay (`--features router-multicast-faces`
+    # at line ~1220). ONE binary serves the `--router-hat` node + the
+    # `--connect --publish` publisher. Reached only past the pico-CLI presence
+    # guard above, so it never builds when the lane is SKIPping for a missing CLI.
+    (cd crates && cargo build -p wz-ap-demo --features router-multicast-faces --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_multicast_pico_interop -- --ignored --quiet) || return 1
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────

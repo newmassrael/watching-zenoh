@@ -469,10 +469,12 @@ fn emit_one_push(
 /// emit one Push + a cadence pause. Returning per cycle lets the caller's
 /// `select!` interleave the graceful-shutdown arm between cycles AND cancel
 /// mid-cycle (the future is dropped at a sleep `.await`, cancel-safe — the emit
-/// itself is synchronous, never half-sent). The aliased keyexpr mapping is
-/// declared once on first Established (`declared`); a post-reconnect connection
-/// would need declaration replay, so the reconnect showcase uses the literal
-/// path (`declare_id = None`).
+/// itself is synchronous, never half-sent). When `--declare-id` is supplied the
+/// aliased keyexpr mapping is declared once on first Established (`declared`) and
+/// re-sent on any post-reconnect face by the `session-reconnect` declaration
+/// replay set (`replay_declarations`), so the aliased path survives a reconnect;
+/// the demo's DEFAULT reconnect showcase passes no `--declare-id`
+/// (`declare_id = None` -> literal path).
 async fn publish_cycle<T>(
     session: &TokioSession,
     keyexpr: &str,
