@@ -4385,6 +4385,16 @@ layer_e6_peer_mesh() {
     else
         echo "E6 SKIP: wz_peer_qabl_pico_interop (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
     fi
+    # The TRANSIT-source client-delivery cross-impl e2e (3-peer line A->B->C, pico z_sub
+    # on the terminal C): proves peer-C delivers a multi-hop (non-zero-routing-source)
+    # mesh Push to a foreign pico client sub without the pico rejecting the ext_nodeid
+    # and closing (the DATA twin of the R311y179 query-source fix).
+    if [[ -x target/zenoh-pico-cli/z_sub ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_transit_push_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    else
+        echo "E6 SKIP: wz_peer_transit_push_pico_interop (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+    fi
 }
 
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───

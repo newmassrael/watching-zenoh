@@ -336,6 +336,7 @@ use wz_session_core::linkstate_oam::{
 };
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::reliteralize_push;
+use wz_session_core::push_routing_context::set_push_source;
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
 
 use crate::accept_loop::{FaceForwarder, FaceId};
@@ -2467,9 +2468,19 @@ impl RouterForwarder {
         // Re-literalize once (payload / encoding / attachment preserved, literal
         // keyexpr for the client leaf); the fan-out clones it per matching client.
         // `keyexpr` is resolved once by the [`route_push`](Self::route_push) head.
-        let Ok(carrier) = reliteralize_push(push, keyexpr) else {
+        let Ok(mut carrier) = reliteralize_push(push, keyexpr) else {
             return;
         };
+        // A client subscriber is a LEAF, not a routing-graph node: reset the Push's
+        // routing source node-id to 0 (set_push_source(_, 0) omits the ext, zenoh's
+        // omit-on-DEFAULT). reliteralize_push PRESERVES the inbound push's ext_nodeid;
+        // a Peer/Router-source (or bridged-master) Push carries a NON-ZERO source, and
+        // forwarding it to a client (e.g. a pico z_sub) is a protocol violation the
+        // client rejects by CLOSING its transport (its Push decoder has no case for the
+        // mandatory ext_nodeid id 0x03). Faithful to zenoh pubsub.rs (a client-sub
+        // data-route direction node-id is NodeId::default()=0). The DATA-plane twin of
+        // the R311y179 forward_request_to_client_queryables source-reset fix.
+        set_push_source(&mut carrier, 0);
         // Deliver to each Client-tier face subscribing a keyexpr that INTERSECTS
         // the published K, excluding the inbound face (never echo a client's own
         // Push back to it). Wildcard-aware via the SAME `keyexpr_intersects_target`
@@ -7418,6 +7429,45 @@ mod tests {
             sink_client.frame_count(),
             1,
             "the client subscriber got it (client delivery)"
+        );
+    }
+
+    #[test]
+    fn a_peer_sourced_push_delivered_to_a_client_subscriber_carries_source_zero() {
+        // Regression guard for the Push-plane client-delivery fidelity fix (the router
+        // twin of the linkstate guard + the R311y179 forward_request_to_clients
+        // source-reset): a Push delivered to a co-attached CLIENT subscriber must carry
+        // routing source 0 -- a client is a LEAF, not a graph node. reliteralize_push
+        // PRESERVES the inbound push's ext_nodeid; a Peer/Router-source (or bridged
+        // master) Push carries a NON-ZERO source that a real client (a pico z_sub)
+        // rejects by CLOSING its transport (its Push decoder mandatory-rejects the
+        // ext_nodeid id 0x03). Pre-fix the client carrier leaked the source verbatim.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // source peer
+        let (client, sink_client) = face(zid(0xDD), WIRE_CLIENT); // client subscriber
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5); // psid 5 = peer A
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/**")); // client subscribes
+        sink_client.reset();
+        let mut push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        wz_session_core::push_routing_context::set_push_source(&mut push, 5); // NON-ZERO peer source
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the client subscriber received the peer-sourced push"
+        );
+        assert_eq!(
+            wz_session_core::push_routing_context::read_push_source(&forwarded_push(
+                &sink_client.frame_bytes(0)
+            )),
+            0,
+            "the Push delivered to a CLIENT subscriber must carry routing source 0 (a \
+             client is not a graph node); leaking the non-zero source closes a real \
+             pico client's transport"
         );
     }
 

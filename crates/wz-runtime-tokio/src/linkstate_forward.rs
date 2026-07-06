@@ -2891,9 +2891,19 @@ impl LinkstateForwarder {
                 None => return,
             }
         };
-        let Ok(carrier) = reliteralize_push(push, &keyexpr) else {
+        let Ok(mut carrier) = reliteralize_push(push, &keyexpr) else {
             return;
         };
+        // A client subscriber is a LEAF, not a routing-graph node: reset the Push's
+        // routing source node-id to 0 (set_push_source(_, 0) omits the ext, zenoh's
+        // omit-on-DEFAULT). reliteralize_push PRESERVES the inbound push's ext_nodeid;
+        // at a 3+ hop TRANSIT node that source is NON-ZERO (compute_push_forward stamps
+        // out_node_id), and forwarding it to a client (e.g. a pico z_sub) is a protocol
+        // violation the client rejects by CLOSING its transport (its Push decoder has no
+        // case for the mandatory ext_nodeid id 0x03). Faithful to zenoh linkstate_peer
+        // pubsub.rs (a client-sub data-route direction node-id is NodeId::default()=0).
+        // The DATA-plane twin of the R311y179 forward_request_to_client_queryables fix.
+        set_push_source(&mut carrier, 0);
         let target_chunks: Vec<&str> = keyexpr.split('/').collect();
         let _ = self.fan_out(reliable, None, |id, _zid| {
             if id == inbound {
@@ -7991,6 +8001,62 @@ mod tests {
         assert_eq!(sink_a.frame_count(), 0, "A is the inbound face (excluded)");
         // Re-stamped with self's psid for the RESOLVED source B (its idx, 3).
         assert_eq!(forwarded_source(&sink_c.frame_bytes(0)), 3);
+    }
+
+    #[test]
+    fn a_transit_sourced_push_delivered_to_a_client_subscriber_carries_source_zero() {
+        // Regression guard for the Push-plane client-delivery fidelity fix (the DATA
+        // twin of a_mesh_sourced_query_to_a_client_queryable_carries_routing_source_zero):
+        // a Push delivered to a co-attached CLIENT subscriber must carry routing source 0
+        // -- a client is a LEAF, not a graph node. reliteralize_push PRESERVES the inbound
+        // push's ext_nodeid; at a TRANSIT node the inbound push carries a NON-ZERO mesh
+        // source, and forwarding that to a client (e.g. a pico z_sub) is a protocol
+        // violation the client rejects by CLOSING its transport. The mesh re-forward
+        // branch above correctly RE-STAMPS a non-zero source (idx 3); ONLY the
+        // client-delivery branch resets to 0.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S -> idx 0
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // mesh transit neighbour -> idx 1
+        let (client_sub, sink_cs) = peer_face_whatami(zid(0x0D), 2); // a CLIENT subscriber
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &client_sub);
+        // A teaches self that psid 7 = B (a transit source two hops out).
+        fwd.ingest_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0A, &[0, 7]),
+                entry(7, 5, 0x0B, &[1]),
+            ]),
+        );
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/**"); // co-attached client subscribes
+        sink_a.reset();
+        sink_cs.reset();
+
+        let mut push = data_push(); // demo/data
+        set_push_source(&mut push, 7); // NON-ZERO transit source (A's psid for B)
+                                       // Feed via forward() (not forward_push, the mesh-only leg) so the Push arm's
+                                       // deliver_to_client_subscribers branch (linkstate_forward.rs:4841) runs.
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(push))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+
+        assert_eq!(
+            sink_cs.frame_count(),
+            1,
+            "the co-attached client subscriber receives the transit-sourced push"
+        );
+        assert_eq!(
+            forwarded_source(&sink_cs.frame_bytes(0)),
+            0,
+            "the Push delivered to a CLIENT subscriber must carry routing source 0 (a \
+             client is not a graph node); leaking the non-zero transit source closes a \
+             real pico client's transport"
+        );
     }
 
     #[test]
