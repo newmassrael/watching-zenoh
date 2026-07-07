@@ -113,6 +113,11 @@ use crate::namespace::NamespaceIngress;
 /// Router holds no allocation per peer.
 const ZID_MAX: usize = 16;
 
+/// §5.21 router-multicast-faces (I3b) — the on-group Designated-Router election
+/// reads each peer's JOIN-advertised role; `WhatAmI` classifies Router members.
+#[cfg(feature = "multicast-declarations")]
+use wz_codecs::whatami::WhatAmI;
+
 /// §5.21 router-multicast-faces (I3a) — the per-peer keyexpr-alias table cap.
 /// A multicast peer is admitted on an UNAUTHENTICATED JOIN, so an adversarial
 /// LAN host could otherwise flood distinct-id `DeclKexpr` over UDP to grow
@@ -199,6 +204,12 @@ pub struct JoinBaseline {
     /// message (R311ks; zenoh-pico `entry->_lease = msg->_lease`,
     /// multicast/rx.c:393/456).
     pub lease_ms: u64,
+    /// §5.21 router-multicast-faces (I3b) — the announcer's node role, from the
+    /// JOIN's whatami wire field. `None` if the wire code is unrecognized. Read
+    /// by [`MulticastDispatcher::router_member_zids`] to build the on-group
+    /// Designated-Router election candidate set (Router members only).
+    #[cfg(feature = "multicast-declarations")]
+    pub whatami: Option<WhatAmI>,
 }
 
 /// Outcome of one [`MulticastDispatcher::ingest_frame_by_src`] admission
@@ -377,6 +388,13 @@ struct PeerSlot {
     /// peer here.
     #[cfg(feature = "multicast-declarations")]
     keyexpr_table: hashbrown::HashMap<u64, alloc::string::String>,
+    /// §5.21 router-multicast-faces (I3b) — this peer's node role, from its JOIN
+    /// whatami. Read by [`MulticastDispatcher::router_member_zids`] so the
+    /// router-hat's Designated-Router election counts only on-group ROUTER peers
+    /// (a Client/Peer publisher on the group is not a bridge candidate). Set on
+    /// admit/refresh from [`JoinBaseline::whatami`], cleared on [`Self::evict`].
+    #[cfg(feature = "multicast-declarations")]
+    whatami: Option<WhatAmI>,
 }
 
 impl PeerSlot {
@@ -397,6 +415,8 @@ impl PeerSlot {
             namespace_ingress: None,
             #[cfg(feature = "multicast-declarations")]
             keyexpr_table: hashbrown::HashMap::new(),
+            #[cfg(feature = "multicast-declarations")]
+            whatami: None,
         }
     }
 
@@ -463,6 +483,7 @@ impl PeerSlot {
         #[cfg(feature = "multicast-declarations")]
         {
             self.keyexpr_table.clear();
+            self.whatami = None;
         }
     }
 }
@@ -673,6 +694,26 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             .map(|p| p.engine.get_current_state())
     }
 
+    /// The zids of the live on-group peers that announced `whatami=Router` — the
+    /// I3b Designated-Router election candidate set the router-hat relays to its
+    /// `RouterForwarder`. Router members ONLY: a Client/Peer publisher on the
+    /// group is not a bridge candidate, so it never influences which router
+    /// bridges the group <-> mesh. Owned `Vec<Vec<u8>>` (the peer table is
+    /// bounded by `MAX_PEERS`) so the AP drive loop can snapshot-diff it across
+    /// ticks and relay to the forwarder only on a real membership change.
+    #[cfg(feature = "multicast-declarations")]
+    pub fn router_member_zids(&self) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+        self.peers
+            .iter()
+            .filter(|p| !p.is_free() && p.whatami == Some(WhatAmI::Router))
+            .filter_map(|p| {
+                p.zid
+                    .as_ref()
+                    .map(|(buf, len)| buf[..*len as usize].to_vec())
+            })
+            .collect()
+    }
+
     /// Bring the multicast session up: Idle -> LinkOpening
     /// (`open_multicast_link`). Returns the resulting session state. A
     /// `create` outside Idle is a no-op (the FSM has no `multicast.create`
@@ -773,6 +814,13 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             }
             self.peers[idx].zid = Some(copy_zid(zid));
             self.peers[idx].seed_from_join(baseline);
+            // §5.21 router-multicast-faces (I3b) — refresh the peer's role from
+            // its latest JOIN (a peer's whatami is stable, but this keeps the DR
+            // candidate set correct even across a same-slot zid reuse).
+            #[cfg(feature = "multicast-declarations")]
+            {
+                self.peers[idx].whatami = baseline.whatami;
+            }
             return JoinOutcome::Refreshed;
         }
         let idx = match self.peers.iter().position(PeerSlot::is_free) {
@@ -788,6 +836,12 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         self.peers[idx].zid = Some(copy_zid(zid));
         self.peers[idx].last_seen_ms = now_ms;
         self.peers[idx].seed_from_join(baseline);
+        // §5.21 router-multicast-faces (I3b) — record the newly-admitted peer's
+        // node role for the on-group Designated-Router election.
+        #[cfg(feature = "multicast-declarations")]
+        {
+            self.peers[idx].whatami = baseline.whatami;
+        }
         self.peers[idx]
             .engine
             .process_event(MulticastPeerEvent::PeerDiscovered);
@@ -1143,6 +1197,8 @@ mod tests {
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
             lease_ms: 5_000,
+            #[cfg(feature = "multicast-declarations")]
+            whatami: None,
         }
     }
 
@@ -1795,6 +1851,8 @@ mod tests {
             next_sn_reliable: 42,
             next_sn_best_effort: 7,
             lease_ms: 5_000,
+            #[cfg(feature = "multicast-declarations")]
+            whatami: None,
         };
         assert_eq!(
             d.ingest_join(ZID_A, SRC_A, baseline, 0),
@@ -1825,6 +1883,8 @@ mod tests {
             next_sn_reliable: 10,
             next_sn_best_effort: 100,
             lease_ms: 5_000,
+            #[cfg(feature = "multicast-declarations")]
+            whatami: None,
         };
         d.ingest_join(ZID_A, SRC_A, baseline, 0);
         assert_eq!(
@@ -1889,6 +1949,8 @@ mod tests {
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
             lease_ms: 5_000,
+            #[cfg(feature = "multicast-declarations")]
+            whatami: None,
         };
         d.ingest_join(ZID_A, SRC_A, baseline, 0);
         assert_eq!(
@@ -1916,6 +1978,8 @@ mod tests {
             next_sn_reliable: 1,
             next_sn_best_effort: 0,
             lease_ms: 5_000,
+            #[cfg(feature = "multicast-declarations")]
+            whatami: None,
         };
         assert_eq!(
             d.ingest_join(ZID_A, SRC_A, rejoin, 5),
@@ -1965,6 +2029,8 @@ mod tests {
             next_sn_reliable: 42,
             next_sn_best_effort: 0,
             lease_ms: 5_000,
+            #[cfg(feature = "multicast-declarations")]
+            whatami: None,
         };
         assert_eq!(
             d.ingest_join(ZID_A, SRC_A, baseline, 0),
@@ -2020,6 +2086,8 @@ mod tests {
             next_sn_reliable: 10,
             next_sn_best_effort: 100,
             lease_ms: 5_000,
+            #[cfg(feature = "multicast-declarations")]
+            whatami: None,
         };
         d.ingest_join(ZID_A, SRC_A, baseline, 0);
         assert!(matches!(
@@ -2116,6 +2184,8 @@ mod tests {
                 next_sn_reliable: 5,
                 next_sn_best_effort: 0,
                 lease_ms: 5_000,
+                #[cfg(feature = "multicast-declarations")]
+                whatami: None,
             };
             d.ingest_join(ZID_A, SRC_A, baseline, 0);
             let mut r = reasm();

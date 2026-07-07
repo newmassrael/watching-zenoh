@@ -236,13 +236,65 @@ pub async fn drive_multicast_session<D, T, F, const MAX_PEERS: usize>(
     cfg: MulticastDriveConfig<'_>,
     driver: &mut D,
     clock: &T,
-    mut on_event: F,
+    on_event: F,
     outbound: &mut UnboundedReceiver<MulticastTxItem>,
 ) -> MulticastOutcome
 where
     D: LinkDriver,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
+{
+    // §5.21 router-multicast-faces (I3b) — the base drive with NO membership
+    // relay (the common case: egress-only loops, peer loops, every test). Only
+    // the router INGRESS host needs the on-group router set, via
+    // [`drive_multicast_session_with_membership`].
+    drive_multicast_session_with_membership(
+        dispatcher,
+        cfg,
+        driver,
+        clock,
+        on_event,
+        outbound,
+        |_members: &[Vec<u8>]| {},
+    )
+    .await
+}
+
+/// The membership-aware variant of [`drive_multicast_session`]: the identical
+/// drive loop, plus — after each iteration — a snapshot-diff of the dispatcher's
+/// on-group ROUTER member set. On a real change it calls `on_members`; the router
+/// INGRESS host (`spawn_router_mcast_ingress`) uses this to relay the
+/// Designated-Router election candidate set to its `RouterForwarder`. Without
+/// `multicast-declarations` the membership accessor does not exist, so the
+/// snapshot block is elided and `on_members` is never called (the base
+/// [`drive_multicast_session`] passes a no-op closure).
+///
+/// Convergence note (I3b loop-safety): the relayed set is this node's CURRENT
+/// view of the group's routers. In the brief window after a router JOINs/leaves
+/// (bounded by the JOIN interval / lease) two on-group routers can transiently
+/// disagree on the member set and thus on the elected DR — a bounded,
+/// self-healing double-bridge, the SAME convergence exposure zenoh's own
+/// `shared_nodes` master election carries (recomputed at every topology event).
+/// Startup damping (promote-slow / demote-fast) is a named follow-up.
+#[allow(clippy::too_many_arguments)]
+pub async fn drive_multicast_session_with_membership<D, T, F, G, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    cfg: MulticastDriveConfig<'_>,
+    driver: &mut D,
+    clock: &T,
+    mut on_event: F,
+    outbound: &mut UnboundedReceiver<MulticastTxItem>,
+    #[cfg_attr(
+        not(feature = "multicast-declarations"),
+        allow(unused_mut, unused_variables)
+    )]
+    mut on_members: G,
+) -> MulticastOutcome
+where
+    D: LinkDriver,
+    T: TimeSource,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut(&[Vec<u8>]),
 {
     // Destructure into the same local names the loop body uses, so the body
     // is unchanged by the Introduce-Parameter-Object refactor.
@@ -285,6 +337,12 @@ where
     // Once every sender is dropped `recv()` would resolve `None` forever;
     // disarm the select arm instead of busy-looping on it.
     let mut outbound_open = true;
+
+    // §5.21 router-multicast-faces (I3b) — last relayed on-group ROUTER member
+    // set, for the snapshot-diff at the loop tail (relay to the forwarder only
+    // when the set actually changes).
+    #[cfg(feature = "multicast-declarations")]
+    let mut last_members: Vec<Vec<u8>> = Vec::new();
 
     let mut iter: usize = 0;
     loop {
@@ -438,6 +496,19 @@ where
                 dispatcher.sweep(now);
             }
         }
+        // §5.21 router-multicast-faces (I3b) — relay the on-group ROUTER member
+        // set to the forwarder when it changes (a JOIN admit in the RX arm or a
+        // lease evict in the sweep arm above can move it). Snapshot-diff so the
+        // forwarder is touched only on a real membership change. No-op without
+        // `multicast-declarations` (no accessor; the base drive passes a no-op).
+        #[cfg(feature = "multicast-declarations")]
+        {
+            let members = dispatcher.router_member_zids();
+            if members != last_members {
+                on_members(&members);
+                last_members = members;
+            }
+        }
     }
 }
 
@@ -581,7 +652,10 @@ pub fn spawn_router_mcast_ingress(
     group: core::net::Ipv4Addr,
     port: u16,
     zid: Vec<u8>,
-) -> UnboundedReceiver<crate::accept_loop::McastIngressItem> {
+) -> (
+    UnboundedReceiver<crate::accept_loop::McastIngressItem>,
+    UnboundedReceiver<Vec<Vec<u8>>>,
+) {
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::multicast_dispatch::MulticastConfig;
     use wz_session_core::multicast_params::MulticastParams;
@@ -609,6 +683,9 @@ pub fn spawn_router_mcast_ingress(
     };
 
     let (ingress_tx, ingress_rx) = tokio::sync::mpsc::unbounded_channel::<McastIngressItem>();
+    // §5.21 router-multicast-faces (I3b) — relay the on-group ROUTER member set
+    // (the Designated-Router election candidates) to the accept loop / forwarder.
+    let (members_tx, members_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Vec<u8>>>();
     tokio::spawn(async move {
         let mut driver = match UdpDriver::bind_multicast_v4(group, port).await {
             Ok(driver) => driver,
@@ -627,7 +704,7 @@ pub fn spawn_router_mcast_ingress(
         // outbound sender alive to keep its egress arm parked (a dropped receiver
         // would end the loop).
         let (_dummy_tx, mut dummy_rx) = tokio::sync::mpsc::unbounded_channel();
-        drive_multicast_session(
+        drive_multicast_session_with_membership(
             &mut dispatcher,
             MulticastDriveConfig {
                 params: &params,
@@ -659,10 +736,19 @@ pub fn spawn_router_mcast_ingress(
                 }
             },
             &mut dummy_rx,
+            // §5.21 router-multicast-faces (I3b) — on a membership change, relay
+            // the raw on-group ROUTER zid bytes to the forwarder (via the accept
+            // loop). The forwarder's `set_mcast_group_members` converts to `Zid`,
+            // keeping the routing-graph type off the accept-loop channel so a
+            // `routing-accept` build (which does not link `wz-routing-graph`) still
+            // compiles. A closed receiver (accept loop gone) is fire-and-forget.
+            |members: &[Vec<u8>]| {
+                let _ = members_tx.send(members.to_vec());
+            },
         )
         .await;
     });
-    ingress_rx
+    (ingress_rx, members_rx)
 }
 
 #[cfg(test)]

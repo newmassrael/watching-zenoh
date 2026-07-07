@@ -218,6 +218,17 @@ pub trait FaceForwarder {
     #[cfg(feature = "codec-push")]
     fn route_mcast_ingress(&self, _reliable: bool, _push: &PushOwned) {}
 
+    /// The on-group ROUTER member set changed (a JOIN admit / lease evict on the
+    /// router's multicast group) — the I3b Designated-Router election candidate
+    /// set, relayed from the multicast INGRESS loop. Default no-op: only the
+    /// router (which runs the ingress loop and holds the group egress) elects a
+    /// per-keyexpr DR to keep two group-sharing routers loop-free. `_members`
+    /// carries RAW zid bytes (the router override converts them to `Zid`) so this
+    /// trait — and the accept loop that relays them — stay free of
+    /// `wz-routing-graph`; a `routing-accept` build that never links the routing
+    /// graph still compiles.
+    fn set_mcast_group_members(&self, _members: &[Vec<u8>]) {}
+
     /// How often the loop should call [`tick`](Self::tick), or `None` (the
     /// default) to never tick. The extension point for a forwarder with a
     /// time-driven obligation: it returns `Some(period)` and the loop arms a timer.
@@ -404,6 +415,10 @@ enum Step {
     /// plane, I1) — route it via [`FaceForwarder::route_mcast_ingress`]. Only ever
     /// produced when [`FaceSources::mcast_ingress`] is `Some`.
     McastIngress(McastIngressItem),
+    /// The on-group ROUTER member set changed (I3b) — relay it to
+    /// [`FaceForwarder::set_mcast_group_members`] for the Designated-Router
+    /// election. Only ever produced when [`FaceSources::mcast_members`] is `Some`.
+    McastMembers(Vec<Vec<u8>>),
 }
 
 /// Await the forwarder's periodic tick, or park forever when no timer is armed
@@ -466,6 +481,28 @@ async fn recv_mcast_ingress(
         *rx = None;
     }
     std::future::pending::<McastIngressItem>().await
+}
+
+/// Await the next on-group ROUTER member update (I3b), or park forever when there
+/// is no membership channel (the ingress plane is off) — the membership twin of
+/// [`recv_mcast_ingress`], so the `select!` arm-set is fixed at compile time. On
+/// channel CLOSE the receiver is taken so later polls park rather than hot-loop.
+/// Cancel-safe (tokio `mpsc::UnboundedReceiver::recv`).
+async fn recv_mcast_members(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<Vec<Vec<u8>>>>,
+) -> Vec<Vec<u8>> {
+    let closed = if let Some(r) = rx.as_mut() {
+        match r.recv().await {
+            Some(item) => return item,
+            None => true,
+        }
+    } else {
+        false
+    };
+    if closed {
+        *rx = None;
+    }
+    std::future::pending::<Vec<Vec<u8>>>().await
 }
 
 /// The first locator a [`DialIntent`] carries that the TCP dial path
@@ -570,6 +607,13 @@ pub struct FaceSources {
     /// producer `spawn_router_mcast_ingress` is `codec-push`-gated), so the arm is
     /// inert but present (no `#[cfg]` on the `select!` branch).
     pub mcast_ingress: Option<tokio::sync::mpsc::UnboundedReceiver<McastIngressItem>>,
+    /// The multicast INGRESS on-group ROUTER member relay (I3b): the router-hat's
+    /// `spawn_router_mcast_ingress` loop sends its live Designated-Router election
+    /// candidate set here on each group membership change, and the drive loop
+    /// forwards it to [`FaceForwarder::set_mcast_group_members`]. `None` when the
+    /// ingress plane is off (the arm parks forever). The sibling of
+    /// `mcast_ingress` from the same helper.
+    pub mcast_members: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<Vec<u8>>>>,
 }
 
 /// Bind-once, hold-N: the shared multi-face drive core behind both
@@ -603,6 +647,7 @@ where
         dial_targets,
         mut dial_intents,
         mut mcast_ingress,
+        mut mcast_members,
     } = sources;
     tokio::pin!(shutdown);
 
@@ -658,6 +703,7 @@ where
             _ = forwarder_tick(&mut tick_timer) => Step::Tick,
             intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
             item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(item),
+            members = recv_mcast_members(&mut mcast_members) => Step::McastMembers(members),
         };
 
         match step {
@@ -772,6 +818,13 @@ where
                 forwarder.route_mcast_ingress(_item.reliable, &_item.push);
             }
 
+            // The on-group ROUTER set changed — refresh the forwarder's DR
+            // election candidates (I3b). No-op default for non-router forwarders;
+            // the arm parks when there is no membership channel.
+            Step::McastMembers(members) => {
+                forwarder.set_mcast_group_members(&members);
+            }
+
             Step::Accepted(Ok((accepted, peer))) => {
                 let id = FaceId(next_id);
                 next_id += 1;
@@ -840,6 +893,7 @@ where
             dial_intents: None,
             // accept-only: no multicast ingress plane.
             mcast_ingress: None,
+            mcast_members: None,
         },
         params,
         clock,
@@ -1339,6 +1393,7 @@ mod tests {
                 dial_targets: vec![acc_addr],
                 dial_intents: None,
                 mcast_ingress: None,
+                mcast_members: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -1411,6 +1466,7 @@ mod tests {
                 dial_targets: vec![],
                 dial_intents: Some(intent_rx),
                 mcast_ingress: None,
+                mcast_members: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -1483,6 +1539,7 @@ mod tests {
                 dial_targets: vec![acc_addr],
                 dial_intents: None,
                 mcast_ingress: None,
+                mcast_members: None,
             },
             peer_params(),
             TokioTime::new(),

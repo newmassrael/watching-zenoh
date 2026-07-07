@@ -874,11 +874,17 @@ routing-token-tables = ["routing-router-hat"]
 # fan). It rides the SAME `codec-push`-gated ingress host, so a narrow build
 # without `codec-push` elides the host and the aliasing is dormant (session-core
 # compiles it but nothing drives it) — the I1 narrow-build contract is unchanged.
+# R311y197 (I3b) — the runtime mirror of `wz-session-core/multicast-declarations`
+# (the per-peer keyexpr-alias + on-group-router-membership dispatch state). A
+# runtime-level feature so the `multicast_glue` membership relay + the
+# `drive_multicast_session_with_membership` snapshot gate on the crate's OWN
+# feature rather than a bare dependency feature.
+multicast-declarations = ["wz-session-core/multicast-declarations"]
 router-multicast-faces = [
     "routing-router-hat",
     "transport-multicast",
     "transport-link-udp",
-    "wz-session-core/multicast-declarations",
+    "multicast-declarations",
 ]
 # ── §5.16 access-control composition knobs ───────────────────────────
 # Each independently elides ONE interceptor on the routing-peer admission
