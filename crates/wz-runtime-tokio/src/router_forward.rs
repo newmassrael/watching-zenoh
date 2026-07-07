@@ -746,6 +746,22 @@ pub struct RouterForwarder {
     /// and, when self is the route master, BRIDGED to the other mesh (C4,
     /// [`bridge_push_cross_mesh`](RouterForwarder::bridge_push_cross_mesh)).
     data_seen: Cell<usize>,
+    /// I3c loop-safety witnesses (mcast-ingress DR plane). `mcast_ingress_federated`
+    /// / `_suppressed` count the two arms of the per-keyexpr DR gate at
+    /// [`route_push`](Self::route_push): federated when this router is the group DR
+    /// for the keyexpr, suppressed when it is not. The two-router e2e proof asserts
+    /// exactly ONE of two group-sharing routers federates a keyexpr (single bridge
+    /// = loop-free by construction). `mcast_member_peak` is the high-water on-group
+    /// ROUTER member count relayed via
+    /// [`set_mcast_group_members`](Self::set_mcast_group_members) — a non-zero peak
+    /// witnesses that the JOIN->router_member_zids->relay->set chain ran e2e (the
+    /// leg the I3b unit tests inject past).
+    #[cfg(feature = "router-multicast-faces")]
+    mcast_ingress_federated: Cell<usize>,
+    #[cfg(feature = "router-multicast-faces")]
+    mcast_ingress_suppressed: Cell<usize>,
+    #[cfg(feature = "router-multicast-faces")]
+    mcast_member_peak: Cell<usize>,
     /// Running total of unsolicited FUTURE `DeclareSubscriber` pushes emitted by
     /// [`push_future_subscription`](Self::push_future_subscription) — the y146
     /// proactive-push witness. Rises once per CLIENT face actually told a
@@ -871,6 +887,12 @@ impl RouterForwarder {
             timed_out: Cell::new(0),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
+            #[cfg(feature = "router-multicast-faces")]
+            mcast_ingress_federated: Cell::new(0),
+            #[cfg(feature = "router-multicast-faces")]
+            mcast_ingress_suppressed: Cell::new(0),
+            #[cfg(feature = "router-multicast-faces")]
+            mcast_member_peak: Cell::new(0),
             future_pushes: Cell::new(0),
             future_qabl_pushes: Cell::new(0),
             #[cfg(feature = "routing-token-tables")]
@@ -933,6 +955,29 @@ impl RouterForwarder {
     /// asserts on.
     pub fn data_seen(&self) -> usize {
         self.data_seen.get()
+    }
+
+    /// I3c — count of mcast-ingress Pushes this router FEDERATED into the mesh as
+    /// the group DR (the loop-safety witness: exactly one of two group-sharing
+    /// routers federates a given keyexpr).
+    #[cfg(feature = "router-multicast-faces")]
+    pub fn mcast_ingress_federated(&self) -> usize {
+        self.mcast_ingress_federated.get()
+    }
+
+    /// I3c — count of mcast-ingress Pushes this router SUPPRESSED (it was NOT the
+    /// group DR): the non-DR arm of the same per-keyexpr election.
+    #[cfg(feature = "router-multicast-faces")]
+    pub fn mcast_ingress_suppressed(&self) -> usize {
+        self.mcast_ingress_suppressed.get()
+    }
+
+    /// I3c — high-water on-group ROUTER member count (the DR election candidate set
+    /// relayed from the multicast ingress loop). `>= 1` witnesses that the
+    /// JOIN->router_member_zids->relay->set_mcast_group_members chain ran e2e.
+    #[cfg(feature = "router-multicast-faces")]
+    pub fn mcast_member_peak(&self) -> usize {
+        self.mcast_member_peak.get()
     }
 
     /// Total `Request(Query)` messages received across all faces — the query-plane
@@ -2353,10 +2398,26 @@ impl RouterForwarder {
         // mesh-hop copy re-egresses and loops; the DR election is the wz superset.
         // Bounded transient: during JOIN/lease convergence two routers can briefly
         // both bridge (self-healing; the two-router cross-impl e2e proof is I3c).
-        if tier == FaceTier::Client
-            && (!inbound_is_mcast || self.mcast_ingress_may_federate(&keyexpr))
-        {
-            self.publish_client_push_into_meshes(reliable, push, &keyexpr, master);
+        if tier == FaceTier::Client {
+            // `federate` is the pre-I3c condition, computed ONCE (behavior-identical:
+            // `!inbound_is_mcast || DR`; `mcast_ingress_may_federate` is `false`
+            // without `router-multicast-faces`, so a mcast-ingress never federates —
+            // the I1 behavior). The I3c witnesses only COUNT the two mcast-ingress
+            // arms; they change no routing.
+            let federate = !inbound_is_mcast || self.mcast_ingress_may_federate(&keyexpr);
+            #[cfg(feature = "router-multicast-faces")]
+            if inbound_is_mcast {
+                if federate {
+                    self.mcast_ingress_federated
+                        .set(self.mcast_ingress_federated.get() + 1);
+                } else {
+                    self.mcast_ingress_suppressed
+                        .set(self.mcast_ingress_suppressed.get() + 1);
+                }
+            }
+            if federate {
+                self.publish_client_push_into_meshes(reliable, push, &keyexpr, master);
+            }
         }
         // EGRESS to any attached multicast group — UNCONDITIONAL, OUTSIDE the
         // sub-gated fan-out above (zenoh's flat `mcast_groups` append,
@@ -4934,6 +4995,10 @@ impl FaceForwarder for RouterForwarder {
                 .iter()
                 .filter_map(|b| Zid::try_from(b.as_slice()).ok()),
         );
+        // I3c witness: high-water on-group ROUTER member count. A non-zero peak
+        // means this router saw a peer router on the group (the relay chain ran).
+        self.mcast_member_peak
+            .set(self.mcast_member_peak.get().max(slot.len()));
     }
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {

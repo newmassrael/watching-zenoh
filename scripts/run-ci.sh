@@ -4243,6 +4243,16 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # router-multicast-faces); reached only past the pico-CLI presence guard.
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_multicast_ingress_pico_interop -- --ignored --quiet) || return 1
+    # R311y198 — router-multicast-faces INGRESS I3c: TWO wz `--router-hat` processes
+    # share the data-plane group AND mesh-peer over TCP; a foreign pico `z_pub -m peer`
+    # injects a Put; an off-group `--peer` subscriber receives the DR-federated copy.
+    # Proves the per-keyexpr Designated-Router election converges cross-process (the
+    # JOIN->member-relay->election chain the I3b unit tests inject past) and is
+    # LOOP-SAFE (EXACTLY ONE of the two routers federates the group-ingress into the
+    # mesh). Reuses the demo built above (--features router-multicast-faces); reached
+    # only past the pico-CLI presence guard.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_multicast_ingress_federation_interop -- --ignored --quiet) || return 1
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────

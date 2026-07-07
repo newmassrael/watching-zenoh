@@ -2201,6 +2201,13 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     let mut announced_future_qabl_push = false;
     #[cfg(feature = "routing-token-tables")]
     let mut announced_future_token_push = false;
+    // I3c one-shot latches (mcast-ingress DR plane).
+    #[cfg(feature = "router-multicast-faces")]
+    let mut announced_mcast_members = false;
+    #[cfg(feature = "router-multicast-faces")]
+    let mut announced_mcast_federated = false;
+    #[cfg(feature = "router-multicast-faces")]
+    let mut announced_mcast_suppressed = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -2264,6 +2271,35 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
                 if !announced_mesh_sub && forwarder.mesh_subs_seen() > 0 {
                     announced_mesh_sub = true;
                     log::info!("wz-ap-demo router-hat: learned a mesh sub");
+                }
+                // I3c mcast-ingress DR witnesses (router-multicast-faces): the
+                // on-group ROUTER member relay + the two DR-gate arms. The
+                // membership witness is the loop-safety BARRIER a two-router e2e
+                // waits on (each router has the OTHER in its DR candidate set before
+                // any Put arrives, killing the startup double-DR transient); the
+                // federated/suppressed pair is the deterministic single-bridge proof
+                // (exactly ONE of two group-sharing routers federates a keyexpr).
+                #[cfg(feature = "router-multicast-faces")]
+                {
+                    if !announced_mcast_members && forwarder.mcast_member_peak() >= 1 {
+                        announced_mcast_members = true;
+                        log::info!(
+                            "wz-ap-demo router-hat: on-group router members converged ({})",
+                            forwarder.mcast_member_peak()
+                        );
+                    }
+                    if !announced_mcast_federated && forwarder.mcast_ingress_federated() > 0 {
+                        announced_mcast_federated = true;
+                        log::info!(
+                            "wz-ap-demo router-hat: federated a mcast-ingress push into the mesh (DR)"
+                        );
+                    }
+                    if !announced_mcast_suppressed && forwarder.mcast_ingress_suppressed() > 0 {
+                        announced_mcast_suppressed = true;
+                        log::info!(
+                            "wz-ap-demo router-hat: suppressed a mcast-ingress federation (not DR)"
+                        );
+                    }
                 }
                 // FUTURE-push witness (barrier-free discriminator for the
                 // pub-before-sub reverse leg): fires ONCE when this router has
@@ -2375,6 +2411,25 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
             "wz-ap-demo router-hat: pushed a future token ({} push(es))",
             forwarder.future_token_pushes_seen()
         );
+    }
+    // I3c mcast-ingress DR witnesses, LATCHED at teardown (emitted unconditionally
+    // on a non-zero peak / count so a test never races the 250 ms app tick). The
+    // peak member count proves the JOIN->relay->set chain ran; the federated /
+    // suppressed pair is the deterministic single-bridge loop-safety proof.
+    #[cfg(feature = "router-multicast-faces")]
+    {
+        if forwarder.mcast_member_peak() > 0 {
+            log::info!(
+                "wz-ap-demo router-hat: peak on-group router members {}",
+                forwarder.mcast_member_peak()
+            );
+        }
+        if forwarder.mcast_ingress_federated() > 0 {
+            log::info!("wz-ap-demo router-hat: federated a mcast-ingress push into the mesh (DR)");
+        }
+        if forwarder.mcast_ingress_suppressed() > 0 {
+            log::info!("wz-ap-demo router-hat: suppressed a mcast-ingress federation (not DR)");
+        }
     }
     Ok(())
 }
