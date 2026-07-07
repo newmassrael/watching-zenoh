@@ -65,11 +65,17 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+// `PushOwned` is the multicast INGRESS fold payload (the deferred `mcast_faces`
+// plane); gated on `codec-push` (which provides it) so the accept-only foundation
+// (`routing-accept` without `codec-push`, run-ci Layer C1w) stays minimal.
+#[cfg(feature = "codec-push")]
+use wz_codecs::push::PushOwned;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
@@ -203,6 +209,14 @@ pub trait FaceForwarder {
     /// the loop installs on each held session's drive loop. A routing
     /// forwarder inspects it for declarations / Puts to route.
     fn forward(&self, id: FaceId, event: IterationEvent<'_>);
+
+    /// A Push RECEIVED on the multicast INGRESS group (the deferred `mcast_faces`
+    /// plane, I1) — folded from the separate multicast drive-loop task into this
+    /// forwarder. A routing forwarder routes it as a mcast-sourced Push (delivered
+    /// to unicast subscribers, echo-guarded off the groups). Default no-op: only a
+    /// forwarder with a multicast ingress plane (the router) implements it.
+    #[cfg(feature = "codec-push")]
+    fn route_mcast_ingress(&self, _reliable: bool, _push: &PushOwned) {}
 
     /// How often the loop should call [`tick`](Self::tick), or `None` (the
     /// default) to never tick. The extension point for a forwarder with a
@@ -386,6 +400,10 @@ enum Step {
     /// dial the discovered peer unless a face to it is already held. Only ever
     /// produced when [`FaceSources::dial_intents`] is `Some`.
     Dial(DialIntent),
+    /// A Push arrived on the multicast INGRESS channel (the deferred `mcast_faces`
+    /// plane, I1) — route it via [`FaceForwarder::route_mcast_ingress`]. Only ever
+    /// produced when [`FaceSources::mcast_ingress`] is `Some`.
+    McastIngress(McastIngressItem),
 }
 
 /// Await the forwarder's periodic tick, or park forever when no timer is armed
@@ -424,6 +442,30 @@ async fn recv_dial_intent(rx: &mut Option<DialIntentReceiver>) -> DialIntent {
         *rx = None;
     }
     std::future::pending::<DialIntent>().await
+}
+
+/// Await the next multicast INGRESS [`McastIngressItem`], or park forever when
+/// there is no ingress channel (the `mcast_faces` plane is off) — the multicast
+/// twin of [`recv_dial_intent`], so the `select!` arm-set is fixed at compile
+/// time. On channel CLOSE (the multicast drive-loop task ended — every sender
+/// dropped) the receiver is taken so subsequent polls park rather than hot-loop
+/// on the closed channel. Cancel-safe (tokio `mpsc::UnboundedReceiver::recv`), so
+/// losing the race to a sibling arm never drops a buffered ingress Push.
+async fn recv_mcast_ingress(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<McastIngressItem>>,
+) -> McastIngressItem {
+    let closed = if let Some(r) = rx.as_mut() {
+        match r.recv().await {
+            Some(item) => return item,
+            None => true,
+        }
+    } else {
+        false
+    };
+    if closed {
+        *rx = None;
+    }
+    std::future::pending::<McastIngressItem>().await
 }
 
 /// The first locator a [`DialIntent`] carries that the TCP dial path
@@ -487,6 +529,24 @@ fn dial_decision(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, intent: &DialIntent)
 /// autoconnect) the dynamic dial-intent stream. Bundling the sources keeps the
 /// loop signature within the argument-count budget as the family grows, and
 /// names the real distinction between the two entry points.
+/// One Push RECEIVED on a multicast INGRESS group, folded from the (separate,
+/// `Send`) multicast drive-loop task to the `!Send` forwarder on the peer-loop
+/// task (the deferred `mcast_faces` plane, I1 — see
+/// [`spawn_router_mcast_ingress`](crate::multicast_glue::spawn_router_mcast_ingress)).
+/// The owned `PushOwned` crosses the task boundary; the forwarder routes it via
+/// [`FaceForwarder::route_mcast_ingress`]. The struct is always defined so the
+/// accept-loop's `select!` arm needs no `#[cfg]` (tokio's `select!` rejects
+/// attributes on branches); the `PushOwned` payload is gated on `codec-push`
+/// (which provides it), and the struct is inert without `codec-push` — nothing
+/// constructs it (`spawn_router_mcast_ingress` is `codec-push`-gated).
+pub struct McastIngressItem {
+    /// The received Push (owned so it can cross the task boundary).
+    #[cfg(feature = "codec-push")]
+    pub push: PushOwned,
+    /// The frame's reliability, preserved for the routed egress legs.
+    pub reliable: bool,
+}
+
 pub struct FaceSources {
     /// The bound TCP listener for inbound peers (accept source).
     pub listener: TcpListener,
@@ -500,6 +560,16 @@ pub struct FaceSources {
     /// when autoconnect is not enabled (an accept-only loop, or a peer-mesh node
     /// that did not opt in) — then the loop never dials on discovery.
     pub dial_intents: Option<DialIntentReceiver>,
+    /// The multicast INGRESS receiver (the deferred `mcast_faces` plane, I1): a
+    /// router-hat built with `router-multicast-faces` joins the group and folds
+    /// each received Push here, from the (separate, `Send`) multicast drive-loop
+    /// task to the `!Send` forwarder. `None` when the ingress plane is off — then
+    /// the loop's ingress arm parks forever and non-router / non-multicast builds
+    /// are byte-identical. Gated on `codec-push` (the fold payload
+    /// are byte-identical. The channel is always `None` without `codec-push` (its
+    /// producer `spawn_router_mcast_ingress` is `codec-push`-gated), so the arm is
+    /// inert but present (no `#[cfg]` on the `select!` branch).
+    pub mcast_ingress: Option<tokio::sync::mpsc::UnboundedReceiver<McastIngressItem>>,
 }
 
 /// Bind-once, hold-N: the shared multi-face drive core behind both
@@ -532,6 +602,7 @@ where
         listener,
         dial_targets,
         mut dial_intents,
+        mut mcast_ingress,
     } = sources;
     tokio::pin!(shutdown);
 
@@ -586,6 +657,7 @@ where
             }
             _ = forwarder_tick(&mut tick_timer) => Step::Tick,
             intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
+            item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(item),
         };
 
         match step {
@@ -687,6 +759,19 @@ where
                 }
             }
 
+            // A Push arrived on the multicast INGRESS group (the deferred
+            // `mcast_faces` plane, I1) — route it into the forwarder as a
+            // mcast-sourced Push (delivered to unicast subscribers, echo-guarded
+            // off the groups). Folded here, on the loop's single task, so the
+            // `!Send` forwarder is touched only from its own task. A no-ingress
+            // loop never reaches here (the arm parks on a `None` channel). The
+            // route call is `codec-push`-gated (the trait method takes `PushOwned`);
+            // without `codec-push` the channel is always `None` so this is dead.
+            Step::McastIngress(_item) => {
+                #[cfg(feature = "codec-push")]
+                forwarder.route_mcast_ingress(_item.reliable, &_item.push);
+            }
+
             Step::Accepted(Ok((accepted, peer))) => {
                 let id = FaceId(next_id);
                 next_id += 1;
@@ -753,6 +838,8 @@ where
             dial_targets: Vec::new(),
             // accept-only: no static dials and no autoconnect dial-intent stream.
             dial_intents: None,
+            // accept-only: no multicast ingress plane.
+            mcast_ingress: None,
         },
         params,
         clock,
@@ -1251,6 +1338,7 @@ mod tests {
                 listener: peer_listener,
                 dial_targets: vec![acc_addr],
                 dial_intents: None,
+                mcast_ingress: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -1322,6 +1410,7 @@ mod tests {
                 listener: peer_listener,
                 dial_targets: vec![],
                 dial_intents: Some(intent_rx),
+                mcast_ingress: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -1393,6 +1482,7 @@ mod tests {
                 listener: peer_listener,
                 dial_targets: vec![acc_addr],
                 dial_intents: None,
+                mcast_ingress: None,
             },
             peer_params(),
             TokioTime::new(),

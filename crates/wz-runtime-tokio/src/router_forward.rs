@@ -519,6 +519,19 @@ struct McastGroup {
     tx: UnboundedSender<MulticastTxItem>,
 }
 
+/// The synthetic FaceId for the single multicast INGRESS face (the deferred
+/// `mcast_faces` plane's first slice, I1). A group ingress is folded under ONE
+/// face rather than zenoh's per-peer `mcast_faces` (per-peer is the deferred I3
+/// milestone). Drawn from the TOP of the u64 range so it can never alias a
+/// unicast FaceId, which the accept loop assigns densely from 0
+/// (`accept_loop.rs` `next_id`). It is deliberately NOT inserted into
+/// [`faces`](RouterForwarder#structfield.faces): a mcast ingress has no send seam
+/// and no graph link (zenoh's per-peer `DummyPrimitives` ingress face analog,
+/// `router.rs:229`), so [`resolve_inbound_keyexpr`](RouterForwarder::resolve_inbound_keyexpr)
+/// special-cases it against an empty alias table (literal-only).
+#[cfg(feature = "transport-multicast")]
+const MCAST_INGRESS_FACE: FaceId = FaceId(u64::MAX);
+
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
 /// (Router-tier) and `linkstatepeers_net` (Peer-tier) — from the face lifecycle
 /// and inbound `OAM_LINKSTATE` topology. The router counterpart to the
@@ -2291,7 +2304,14 @@ impl RouterForwarder {
     /// election ⇒ `master == true`), so every gate below reduces to the pre-C4
     /// behavior and the single-router tests are unchanged. An unresolvable
     /// inbound alias drops the whole Push (each leg would independently drop it).
-    fn route_push(&self, inbound: FaceId, tier: FaceTier, reliable: bool, push: &PushOwned) {
+    fn route_push(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        push: &PushOwned,
+        inbound_is_mcast: bool,
+    ) {
         let Some(keyexpr) = self.resolve_inbound_keyexpr(inbound, push) else {
             return;
         };
@@ -2302,8 +2322,17 @@ impl RouterForwarder {
         self.bridge_push_cross_mesh(tier, reliable, push, &keyexpr, master);
         // Block 3 — local client delivery (master || source == Router).
         self.deliver_to_client_subscribers(inbound, tier, reliable, push, &keyexpr, master);
-        // Client-sourced mesh re-injection (peer leg ungated, router leg master).
-        if tier == FaceTier::Client {
+        // Client-sourced mesh re-injection (peer leg ungated, router leg master) —
+        // but NOT for a multicast INGRESS Push (I1): a single group-ingress face is
+        // NOT a linkstate mesh participant, so re-injecting mcast-received traffic
+        // into the mesh could echo-loop between two router-hats sharing one group
+        // (the echo guard keys on the IMMEDIATE inbound face, not the ultimate mcast
+        // origin, so a mesh-received copy re-egresses to the group). I1 delivers a
+        // mcast-ingress Push to LOCAL client subscribers only; faithful
+        // mesh-federation of mcast ingress is the deferred I3 per-peer `mcast_faces`
+        // milestone, where a real mesh face carries zenoh's spanning-tree loop
+        // prevention.
+        if tier == FaceTier::Client && !inbound_is_mcast {
             self.publish_client_push_into_meshes(reliable, push, &keyexpr, master);
         }
         // EGRESS to any attached multicast group — UNCONDITIONAL, OUTSIDE the
@@ -2311,10 +2340,12 @@ impl RouterForwarder {
         // `hat/router/pubsub.rs:1334`): a Put with zero matched local subs still
         // reaches the group. The resolved `keyexpr` is threaded so the egress
         // reliteralizes an aliased id-only push (the group shares no alias table).
-        // `inbound_is_mcast=false` — no inbound face is a multicast face until the
-        // INGRESS milestone lands the `mcast_faces` plane.
+        // `inbound_is_mcast` is the echo guard (zenoh `egress_filter` both-multicast
+        // deny, `hat/router/mod.rs:812`): a Push that ARRIVED on the multicast
+        // ingress face is NOT re-broadcast to a group — `false` on the unicast path
+        // here, `true` on the [`route_mcast_ingress`](Self::route_mcast_ingress) path.
         #[cfg(feature = "transport-multicast")]
-        self.broadcast_to_mcast_groups(reliable, push, &keyexpr, false);
+        self.broadcast_to_mcast_groups(reliable, push, &keyexpr, inbound_is_mcast);
     }
 
     /// Attach a multicast drive loop's outbound sender as an EGRESS group face
@@ -2386,6 +2417,16 @@ impl RouterForwarder {
     /// there; `resolve_wireexpr` is pure, so the two resolutions are identical.)
     /// `None` = the face is gone or the alias id is unknown (drop the Push).
     fn resolve_inbound_keyexpr(&self, inbound: FaceId, push: &PushOwned) -> Option<String> {
+        // The multicast INGRESS sentinel face carries NO per-peer alias table (I1
+        // single group-ingress face, literal-only): resolve against an EMPTY table
+        // — a literal (id==0) push yields its suffix; an aliased id-only push
+        // yields None and is dropped (per-peer alias tracking is the deferred I3
+        // milestone). The sentinel is not in `faces`, so this branch precedes the
+        // faces lookup below (which would otherwise return None and drop it).
+        #[cfg(feature = "transport-multicast")]
+        if inbound == MCAST_INGRESS_FACE {
+            return resolve_wireexpr(&push.keyexpr.body, &hashbrown::HashMap::new());
+        }
         let faces = self.faces.borrow();
         let s = faces.get(&inbound)?;
         resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table)
@@ -4743,6 +4784,28 @@ impl FaceForwarder for RouterForwarder {
         true
     }
 
+    /// Route a Push RECEIVED on the multicast INGRESS face (the deferred
+    /// `mcast_faces` plane, I1 — a single group-ingress face) to the router's LOCAL
+    /// unicast (client) subscribers, classified Client-tier like zenoh's mcast peer
+    /// (`WhatAmI::Client`, `new_peer_multicast` router.rs:226). The echo guard keeps
+    /// it OFF every multicast group (`inbound_is_mcast = true` — zenoh both-multicast
+    /// deny, `hat/router/mod.rs:812`), and `route_push` SKIPS the client->mesh
+    /// re-injection for a mcast-ingress source (the `!inbound_is_mcast` gate): a
+    /// single group-ingress face is not a mesh participant, so mesh-federating mcast
+    /// ingress could echo-loop between two group-sharing routers — faithful
+    /// mesh-federation is the deferred I3 per-peer `mcast_faces` milestone.
+    /// Literal-only: an aliased id-only push has no per-peer alias table on the
+    /// router and is dropped by
+    /// [`resolve_inbound_keyexpr`](Self::resolve_inbound_keyexpr) (per-peer alias
+    /// tracking + declarations are the deferred I3 milestone). The synthetic
+    /// [`MCAST_INGRESS_FACE`] id is disjoint from the dense unicast range, so the
+    /// Client-tier fan-out's source self-skip (`id == inbound`) excludes no real
+    /// subscriber.
+    #[cfg(feature = "transport-multicast")]
+    fn route_mcast_ingress(&self, reliable: bool, push: &PushOwned) {
+        self.route_push(MCAST_INGRESS_FACE, FaceTier::Client, reliable, push, true);
+    }
+
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             messages, reliable, ..
@@ -4830,7 +4893,7 @@ impl FaceForwarder for RouterForwarder {
                 // a no-op and the behavior is the pre-C4 route.
                 NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
-                    self.route_push(id, tier, *reliable, push);
+                    self.route_push(id, tier, *reliable, push, false);
                 }
                 // A declaration: ingest a DeclareSubscriber (1b) / DeclareQueryable
                 // (1c) into the inbound tier's subs/qabls table + re-flood within
@@ -11198,6 +11261,83 @@ mod tests {
             Some("demo/data"),
             "the mcast egress must re-literalize the aliased push (id 7 -> literal) \
              or a group leaf with no alias table blackholes it"
+        );
+    }
+
+    /// R311y194 — router-multicast-faces INGRESS slice (I1): a LITERAL Push
+    /// received on the multicast ingress face routes to a unicast (client) leaf
+    /// subscriber via `route_mcast_ingress` — the wz analog of zenoh routing a
+    /// `new_peer_multicast` DeMux ingress to local subs (`router.rs:213`). The
+    /// synthetic `MCAST_INGRESS_FACE` id is disjoint from the client's FaceId, so
+    /// the Client-tier source self-skip excludes no real subscriber.
+    #[cfg(feature = "transport-multicast")]
+    #[test]
+    fn mcast_ingress_literal_push_delivers_to_a_client_subscriber() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (cb, sink_cb) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &cb);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        sink_cb.reset();
+
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        fwd.route_mcast_ingress(true, &push);
+
+        assert_eq!(
+            sink_cb.frame_count(),
+            1,
+            "a literal mcast-ingress Push delivers once to the matching client sub"
+        );
+    }
+
+    /// R311y194 — echo guard (zenoh both-multicast deny, `hat/router/mod.rs:812`):
+    /// a Push RECEIVED on the multicast ingress face is NOT re-broadcast to an
+    /// attached multicast group (mcast->mcast is denied), so `route_mcast_ingress`
+    /// threads `inbound_is_mcast = true` into the group-broadcast tail.
+    #[cfg(feature = "transport-multicast")]
+    #[test]
+    fn mcast_ingress_push_is_echo_guarded_off_the_groups() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        fwd.attach_mcast_group(tx);
+
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        fwd.route_mcast_ingress(true, &push);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a multicast-ingress Push must not echo back out to a multicast group"
+        );
+    }
+
+    /// R311y194 — I1 is LITERAL-ONLY: an ALIASED (id-only) Push received on the
+    /// single group-ingress face has NO per-peer alias table on the router (the
+    /// deferred I3 per-peer `mcast_faces` plane), so `resolve_inbound_keyexpr`
+    /// resolves the sentinel against an EMPTY table -> None -> the Push is dropped
+    /// (never mis-resolved against a colliding peer expr-id). The literal test
+    /// above DOES deliver through the same entry, so this pins the aliased-drop,
+    /// not a dead entry.
+    #[cfg(feature = "transport-multicast")]
+    #[test]
+    fn mcast_ingress_drops_an_aliased_id_only_push() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (cb, sink_cb) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &cb);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        sink_cb.reset();
+
+        // An aliased push (id 7, no suffix): the sentinel ingress face has no alias
+        // table, so it resolves to None and is dropped (no delivery).
+        let aliased =
+            wz_session_core::push_build::build_push_aliased(7, None, b"payload").expect("aliased");
+        fwd.route_mcast_ingress(true, &aliased);
+
+        assert_eq!(
+            sink_cb.frame_count(),
+            0,
+            "an aliased id-only mcast-ingress Push has no per-peer alias table (I1) \
+             and is dropped, not mis-delivered"
         );
     }
 }

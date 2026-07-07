@@ -535,6 +535,136 @@ pub fn spawn_router_mcast_egress(
     tx
 }
 
+/// R311y194 — router-multicast-faces INGRESS slice (I1): spawn the multicast group
+/// RX drive loop for a router run-mode and return the channel of received Pushes.
+///
+/// The wz analog of zenoh `Router::new_peer_multicast` (`router.rs:213`), reduced
+/// to a SINGLE group-ingress face (per-peer `mcast_faces` + declarations are the
+/// deferred I3 milestone): the router JOINs the group (RX) and each admitted `Push`
+/// is folded — over the returned [`UnboundedReceiver<McastIngressItem>`] — into the
+/// peer-loop task, where the `!Send`
+/// [`RouterForwarder`](crate::router_forward::RouterForwarder) routes it via
+/// [`route_mcast_ingress`](crate::router_forward::RouterForwarder::route_mcast_ingress)
+/// (delivered to unicast subscribers, echo-guarded off the groups). INGRESS is
+/// LITERAL-ONLY at I1: an aliased id-only push has no per-peer alias table on the
+/// router and is dropped downstream by `resolve_inbound_keyexpr`.
+///
+/// SELF-ECHO is handled by construction, NOT by a link-layer src filter: the RX
+/// dispatch self-zid gate (`multicast_rx.rs:97`, `join.zid != params.zid`) drops
+/// this node's OWN looped-back JOIN, so its own address is never admitted as a peer
+/// and its own egress data frames (attributed by src) are dropped as unknown-peer —
+/// PROVIDED this loop and any egress loop advertise the SAME zid (the router's
+/// single zid). So a router that BOTH egresses and ingresses on the group never
+/// self-delivers.
+///
+/// The loop is RX-driven but [`drive_multicast_session`] is bidirectional, so a
+/// dummy (never-sent) outbound channel is held alive in the task to keep its egress
+/// arm parked — egress rides the SEPARATE [`spawn_router_mcast_egress`] helper.
+///
+/// Gated on `transport-link-udp` (it builds a concrete [`UdpDriver`], like the
+/// egress helper — R311y192) AND `routing-accept`: it returns a receiver for the
+/// accept-loop's [`FaceSources::mcast_ingress`](crate::accept_loop::FaceSources)
+/// channel, so it references [`crate::accept_loop`] (itself `routing-accept`-gated).
+/// A build lacking any of these (e.g. `transport-multicast + transport-link-udp`
+/// WITHOUT `routing-accept`, the interop-test feature set; or `routing-accept`
+/// WITHOUT `codec-push`, the minimal accept foundation) keeps the generic
+/// multicast plane while this accept-loop-coupled ingress host is elided.
+/// `codec-push` is required because it matches `NetworkMessage::Push` and folds a
+/// `PushOwned` (both `codec-push`-gated) into the accept-loop channel.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-link-udp",
+    feature = "routing-accept",
+    feature = "codec-push"
+))]
+pub fn spawn_router_mcast_ingress(
+    group: core::net::Ipv4Addr,
+    port: u16,
+    zid: Vec<u8>,
+) -> UnboundedReceiver<crate::accept_loop::McastIngressItem> {
+    use wz_session_core::driver_loop::DriverLoopOutcome;
+    use wz_session_core::multicast_dispatch::MulticastConfig;
+    use wz_session_core::multicast_params::MulticastParams;
+    use wz_session_core::network_message::NetworkMessage;
+    use wz_session_core::WhatAmI;
+
+    use crate::accept_loop::McastIngressItem;
+    use crate::runtime_impl::TokioTime;
+    use crate::UdpDriver;
+
+    // A router group serves many leaf peers; the bound is the dispatcher's fixed
+    // peer-table capacity.
+    const MCAST_MAX_PEERS: usize = 32;
+    // Same group profile as the egress beacon (zenoh multicast defaults) + the
+    // router's own zid — so the RX self-zid gate drops this node's own loopback.
+    let params = MulticastParams {
+        version: 0x09,
+        whatami: WhatAmI::Router,
+        zid,
+        lease_ms: 5_000,
+        join_interval_ms: 100,
+        seq_num_res: 0x02,
+        req_id_res: 0x02,
+        batch_size: 2_048,
+    };
+
+    let (ingress_tx, ingress_rx) = tokio::sync::mpsc::unbounded_channel::<McastIngressItem>();
+    tokio::spawn(async move {
+        let mut driver = match UdpDriver::bind_multicast_v4(group, port).await {
+            Ok(driver) => driver,
+            Err(e) => {
+                log::error!(
+                    "router multicast ingress: group bind/join failed ({e}); ingress absent"
+                );
+                return;
+            }
+        };
+        let mut dispatcher =
+            MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
+        let clock = TokioTime::new();
+        // Egress rides the separate `spawn_router_mcast_egress` helper; this loop is
+        // RX-only. `drive_multicast_session` is bidirectional, so hold a dummy
+        // outbound sender alive to keep its egress arm parked (a dropped receiver
+        // would end the loop).
+        let (_dummy_tx, mut dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+        drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 50,
+                // production: no iteration budget — the loop runs for the node's life.
+                max_iters: None,
+            },
+            &mut driver,
+            &clock,
+            // Fold each admitted Push to the peer-loop task. A closed receiver (peer
+            // loop gone) drops the item — fire-and-forget, matching the egress
+            // helper's group-sink contract. Declarations + non-Push messages are
+            // ignored (the deferred I3 declaration plane).
+            |event: IterationEvent<'_>| {
+                if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                    messages,
+                    reliable,
+                    ..
+                }) = event
+                {
+                    for msg in messages {
+                        if let NetworkMessage::Push(push) = msg {
+                            let _ = ingress_tx.send(McastIngressItem {
+                                push: (**push).clone(),
+                                reliable: *reliable,
+                            });
+                        }
+                    }
+                }
+            },
+            &mut dummy_rx,
+        )
+        .await;
+    });
+    ingress_rx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

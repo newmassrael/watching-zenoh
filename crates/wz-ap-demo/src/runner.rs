@@ -1684,6 +1684,8 @@ pub(crate) async fn run_peer(
             listener,
             dial_targets: dials,
             dial_intents,
+            // A peer node hosts no router multicast ingress plane.
+            mcast_ingress: None,
         },
         params,
         TokioTime::new(),
@@ -2116,6 +2118,36 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
         );
     }
 
+    // R311y194 — router-multicast-faces INGRESS slice (I1): the router also JOINs
+    // the group (RX) so a real multicast peer's Put routes to the router's unicast
+    // subscribers. `spawn_router_mcast_ingress` binds+joins on a SEPARATE task and
+    // returns the channel of received Pushes; peer_loop folds each into the `!Send`
+    // forwarder (`route_mcast_ingress`, echo-guarded off the groups). Egress (above)
+    // + ingress share the router's single zid, so the RX self-zid gate
+    // (`multicast_rx.rs:97`) drops this node's own loopback — no self-delivery. The
+    // per-peer `mcast_faces` plane + mcast-peer declarations are the deferred I3
+    // milestone; ingress is LITERAL-only here.
+    #[cfg(feature = "router-multicast-faces")]
+    let mcast_ingress = {
+        use std::net::Ipv4Addr;
+        // The demo default data-plane router multicast group (same as the egress
+        // group above — the router is one bidirectional member).
+        const MCAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 225);
+        const MCAST_PORT: u16 = 7452;
+        let rx = wz::runtime_tokio::multicast_glue::spawn_router_mcast_ingress(
+            MCAST_GROUP,
+            MCAST_PORT,
+            params.zid.clone(),
+        );
+        log::info!(
+            "wz-ap-demo router-hat: multicast ingress group {MCAST_GROUP}:{MCAST_PORT} \
+             joined (router-multicast-faces); received Push routes to unicast subscribers"
+        );
+        Some(rx)
+    };
+    #[cfg(not(feature = "router-multicast-faces"))]
+    let mcast_ingress = None;
+
     let loop_fut = peer_loop(
         FaceSources {
             listener,
@@ -2124,6 +2156,7 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
             // configured links, `default_autoconnect_matcher(Router)` is empty) —
             // so no dial-intent stream, exactly run_peer's `--autoconnect`-off arm.
             dial_intents: None,
+            mcast_ingress,
         },
         params,
         TokioTime::new(),
