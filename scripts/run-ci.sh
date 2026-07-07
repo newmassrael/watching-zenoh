@@ -4253,6 +4253,15 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # only past the pico-CLI presence guard.
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_multicast_ingress_federation_interop -- --ignored --quiet) || return 1
+
+    # R311y200 sub plane (S3) — cross-impl REACHABILITY: a stock pico `z_sub -m peer`
+    # subscribes on the group; the wz `--router-hat` ingests its DeclareSubscriber and
+    # advertises it into the unicast mesh (S1/S2); an OFF-group `--peer --publish` whose
+    # publish is subscription-gated reaches the pico ONLY via that advertisement. Proves
+    # cross-router reachability limit (a) against a foreign, unmodified pico subscriber.
+    # Reuses the demo built above (--features router-multicast-faces); past the pico guard.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_multicast_reach_pico_zsub -- --ignored --quiet) || return 1
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────

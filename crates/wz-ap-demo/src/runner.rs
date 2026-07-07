@@ -2213,6 +2213,9 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     let mut announced_mcast_federated = false;
     #[cfg(feature = "router-multicast-faces")]
     let mut announced_mcast_suppressed = false;
+    // S3 sub-plane reachability barrier latch.
+    #[cfg(feature = "router-multicast-faces")]
+    let mut announced_mcast_group_subs = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -2303,6 +2306,20 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
                         announced_mcast_suppressed = true;
                         log::info!(
                             "wz-ap-demo router-hat: suppressed a mcast-ingress federation (not DR)"
+                        );
+                    }
+                    // S3 reachability BARRIER: fires ONCE when this router has
+                    // INGESTED an on-group subscriber's DeclareSubscriber and
+                    // ADVERTISED it into the unicast mesh. A cross-impl test gates a
+                    // mesh-side PUBLISHER's readiness on this — the router provably
+                    // holds + advertised the on-group sub before the Put, so the Put
+                    // routes toward the router and egresses to the group (resolving
+                    // reachability limit (a)). The sub-plane twin of the members barrier.
+                    if !announced_mcast_group_subs && forwarder.group_subs_advertised_peak() >= 1 {
+                        announced_mcast_group_subs = true;
+                        log::info!(
+                            "wz-ap-demo router-hat: advertised on-group subscriber(s) into the mesh ({})",
+                            forwarder.group_subs_advertised_peak()
                         );
                     }
                 }

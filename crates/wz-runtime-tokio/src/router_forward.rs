@@ -778,6 +778,15 @@ pub struct RouterForwarder {
     mcast_ingress_suppressed: Cell<usize>,
     #[cfg(feature = "router-multicast-faces")]
     mcast_member_peak: Cell<usize>,
+    /// §5.21 sub plane (S2/S3) — high-water count of DISTINCT on-group subscriber
+    /// keyexprs this router has advertised into the unicast mesh via
+    /// [`set_mcast_group_subs`](Self::set_mcast_group_subs). A non-zero peak
+    /// witnesses that the group-sub INGEST -> relay -> mesh-advertise chain ran e2e
+    /// (a cross-impl reachability test gates a mesh-side PUBLISHER on this, proving
+    /// the router holds + advertised the on-group subscriber's interest before the
+    /// Put — the sub-plane twin of the I3b `mcast_member_peak` barrier).
+    #[cfg(feature = "router-multicast-faces")]
+    group_subs_advertised_peak: Cell<usize>,
     /// Running total of unsolicited FUTURE `DeclareSubscriber` pushes emitted by
     /// [`push_future_subscription`](Self::push_future_subscription) — the y146
     /// proactive-push witness. Rises once per CLIENT face actually told a
@@ -911,6 +920,8 @@ impl RouterForwarder {
             mcast_ingress_suppressed: Cell::new(0),
             #[cfg(feature = "router-multicast-faces")]
             mcast_member_peak: Cell::new(0),
+            #[cfg(feature = "router-multicast-faces")]
+            group_subs_advertised_peak: Cell::new(0),
             future_pushes: Cell::new(0),
             future_qabl_pushes: Cell::new(0),
             #[cfg(feature = "routing-token-tables")]
@@ -996,6 +1007,15 @@ impl RouterForwarder {
     #[cfg(feature = "router-multicast-faces")]
     pub fn mcast_member_peak(&self) -> usize {
         self.mcast_member_peak.get()
+    }
+
+    /// §5.21 sub plane (S2/S3) — high-water count of on-group subscriber keyexprs
+    /// advertised into the unicast mesh. `>= 1` witnesses that the group-sub
+    /// INGEST->relay->mesh-advertise chain ran e2e (the reachability barrier a
+    /// mesh-side publisher gates on before publishing).
+    #[cfg(feature = "router-multicast-faces")]
+    pub fn group_subs_advertised_peak(&self) -> usize {
+        self.group_subs_advertised_peak.get()
     }
 
     /// Total `Request(Query)` messages received across all faces — the query-plane
@@ -2513,12 +2533,18 @@ impl RouterForwarder {
         // egress-only build) ⇒ self is the DR ⇒ unconditional (the shipped
         // behavior; also `#[cfg]`-elided without `router-multicast-faces`).
         //
-        // Why NOT DR-gate local-client egress (IMPL Lens-C): it would STARVE a
-        // non-DR router's clients — the mesh is subscription-gated
-        // (`compute_self_publish_forward` drops when no unicast sub matches) and
-        // group subs are not yet propagated into the mesh (the per-peer
-        // `mcast_faces` sub plane is deferred), so the DR would never receive the
-        // Put to relay. Gating only mesh-sourced Puts avoids that data loss.
+        // Why NOT DR-gate local-client egress (the limit-(b) decision, R311y200 sub
+        // plane): a router is its OWN clients' bridge to the group, so it must always
+        // egress their Puts unconditionally. DR-gating local egress would BLACKHOLE
+        // under asymmetric / transient membership (the producer suppresses its local
+        // egress while the DR has not converged / never advertised the sub) — strictly
+        // LESS robust than zenoh, which never DR-gates and tolerates the duplicate. The
+        // residual is limit (b): a bounded, loop-safe DUPLICATE when two mesh-peered
+        // routers share a group (producer's local egress + the DR's mesh re-egress).
+        // Its safe elimination is effectively-once via (origin,SN)/HLC egress dedup —
+        // a routing-wide QoS follow-up, NOT the naive local-egress DR-gate. (Pre-S2
+        // this cited "group subs not yet propagated"; S2/R311y200 propagates them, but
+        // the bridge-your-own-clients reason is independent and stands.)
         //
         // CAVEAT (single-group): one member set covers all attached groups;
         // `run_router_hat` attaches exactly one, so this is exact. A future second
@@ -5130,6 +5156,12 @@ impl FaceForwarder for RouterForwarder {
             (added, removed)
         };
         *self.group_subs.borrow_mut() = new;
+        // S3 reachability witness: high-water of DISTINCT group subs advertised, so a
+        // cross-impl test can gate a mesh-side publisher on this router provably
+        // holding + advertising the on-group subscriber's interest.
+        let live = self.group_subs.borrow().len();
+        self.group_subs_advertised_peak
+            .set(self.group_subs_advertised_peak.get().max(live));
         for keyexpr in &added {
             self.advertise_group_cross_tier_sub(keyexpr);
         }
