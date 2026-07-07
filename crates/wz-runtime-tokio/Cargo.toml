@@ -227,6 +227,18 @@ adminspace-introspection-handlers = [
     "adminspace-core",
     "wz-session-core/adminspace-introspection-handlers",
 ]
+# adminspace-router-linkstate (§5.23) — the ROUTER-tier admin introspection legs
+# (`@/<zid>/router/linkstate/{routers,peers}` petgraph-DOT + `.../route/successor/**`),
+# hosted on the RouterForwarder's NEW self-dispatch admin queryable (register_local_
+# queryable + the route_request empty-route self-dispatch + the LinkstateNetView DOT/
+# successor render seam over its two nets). Requires routing-router-hat (the
+# RouterForwarder + its two LinkstateNetworks live there); composes adminspace-core
+# (the reply machinery) + the wz-session-core answerer (answer_router_admin_query).
+adminspace-router-linkstate = [
+    "adminspace-core",
+    "routing-router-hat",
+    "wz-session-core/adminspace-router-linkstate",
+]
 
 # ext-pubsub-serde-codec (§5.25) — pure forward of the Zenoh
 # Serialization Format codec from wz-session-core (no runtime wiring;

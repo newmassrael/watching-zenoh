@@ -92,6 +92,17 @@ adminspace-metrics = ["adminspace-core"]
 # (the reply machinery + the keyexpr matcher). publisher/querier are OMITTED (wz
 # maintains no such table; zenoh's empty-table loop emits nothing).
 adminspace-introspection-handlers = ["adminspace-core"]
+# adminspace-router-linkstate (§5.23) — the ROUTER-tier admin introspection legs
+# (`@/<zid>/router/linkstate/{routers,peers}` petgraph-DOT + `.../route/successor/**`)
+# inside `answer_router_admin_query` + the `admin_linkstate_*` / route-successor
+# key helpers. The wz analogue of zenoh's `routers_linkstate_data` /
+# `peers_linkstate_data` / `route_successor` handlers (net/runtime/adminspace.rs:
+# 741-919). Pure host-agnostic data-view: the answerer takes ALREADY-rendered DOT
+# strings + `(src,dst,successor)` hex triples IN (the router host renders them from
+# its two `LinkstateNetwork`s at the wz-runtime-tokio layer, so this stays no_std-
+# feasible and net-agnostic, exactly as `answer_admin_query` takes `config_json`).
+# Composes adminspace-core (the reply machinery + the keyexpr matcher).
+adminspace-router-linkstate = ["adminspace-core"]
 
 # ext-pubsub-serde-codec (§5.25) — the Zenoh Serialization Format codec
 # (z_serialize / z_deserialize), the leaf prerequisite for the advanced

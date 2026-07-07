@@ -549,20 +549,22 @@ pub struct LinkstateForwarder {
 /// `Rc` (Phase 2b's shared `WzConfig`). Factored to a `type` per
 /// `clippy::type_complexity` (the two nested trait-object args), as `query_sink`
 /// does for its `Send` variant.
-type LocalQueryHandler = Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut)>;
+pub(crate) type LocalQueryHandler = Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut)>;
 
 /// R311y44 (§5.23 Phase 2a) — a queryable HOSTED BY THIS NODE: its declared
 /// keyexpr + completeness + the reply-producing handler. A self-targeted Query is
-/// dispatched to the matching handler(s).
-struct LocalQueryable {
-    keyexpr: String,
-    complete: bool,
+/// dispatched to the matching handler(s). `pub(crate)` so the [`RouterForwarder`]
+/// (`router_forward.rs`) reuses the SAME type for its own self-host store (§5.23
+/// adminspace-router-linkstate) rather than duplicating it.
+pub(crate) struct LocalQueryable {
+    pub(crate) keyexpr: String,
+    pub(crate) complete: bool,
     /// `Rc<RefCell<…>>` so [`dispatch_local_queryables`](LinkstateForwarder::dispatch_local_queryables)
     /// can clone the handle out under a short borrow, drop the `local_queryables`
     /// borrow, and only THEN invoke — a handler may re-entrantly register /
     /// undeclare a local queryable (incl. self-undeclare) without panicking the
     /// outer `RefCell`. See that method's re-entrancy contract.
-    handler: Rc<RefCell<LocalQueryHandler>>,
+    pub(crate) handler: Rc<RefCell<LocalQueryHandler>>,
 }
 
 /// #3-c QUERY half (R311y168) — a self-query DEFERRED for redelivery: the busy
@@ -605,9 +607,9 @@ struct LocalSubscriber {
 /// threaded in Phase 2a (the §5.23 admin handler reads only the keyexpr); a
 /// future handler that needs them adds the plumbing. `is_local` / `source_info`
 /// fall through to the trait defaults (wire origin, no source info).
-struct LocalQueryView<'a> {
-    keyexpr: &'a str,
-    rid: u64,
+pub(crate) struct LocalQueryView<'a> {
+    pub(crate) keyexpr: &'a str,
+    pub(crate) rid: u64,
 }
 
 impl QueryView for LocalQueryView<'_> {

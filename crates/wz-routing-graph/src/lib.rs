@@ -52,6 +52,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroU16;
 
+use petgraph::dot::Dot;
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableUnGraph;
 use sce_forge_runtime::codec::{SceBytes, SceString};
@@ -1669,6 +1670,80 @@ impl LinkstateNetwork {
             .copied()
             .filter(|d| d.is_finite())
     }
+
+    /// Render the topology graph as GraphViz DOT — the wz mirror of zenoh
+    /// `Network::dot()` (`network.rs:246-248`,
+    /// `format!("{:?}", petgraph::dot::Dot::new(&self.graph))`), the body the
+    /// router adminspace `@/<zid>/<whatami>/linkstate/{routers,peers}` GET
+    /// replies with (§5.23).
+    ///
+    /// The zid label is INJECTED (`fmt`), not self-rendered, for two reasons.
+    /// (1) zenoh's `Node` has a CUSTOM `Debug` that prints only the zid
+    /// (`network.rs:64-68`), so a zenoh DOT node label is the bare zid; wz's
+    /// [`Node`] derives `Debug` (the whole struct, incl. a `HashMap` whose order
+    /// is non-deterministic), which would neither match zenoh nor render
+    /// stably. (2) a wz [`Zid`] `Display` is wire-order per-byte hex, while
+    /// zenoh prints the LE-`u128` form — the faithful recipe is
+    /// `zid_to_zenoh_hex`, a wz-session-core SSOT this crate sits BELOW, so the
+    /// adminspace host passes it in. The GRAMMAR reuses petgraph's `Dot::new`
+    /// (on a relabeled throwaway graph), so undirected `graph {`, `--` edges,
+    /// and edge `label` = the `f64` weight are faithful to zenoh's grammar. The
+    /// per-run zid values differ, and the node NUMBERING can too: this compacted
+    /// throwaway graph numbers `0..n` while zenoh renders its live `StableGraph`,
+    /// which retains index GAPS after a node removal — immaterial, since a DOT
+    /// node id is an arbitrary local handle and the zid LABEL carries identity.
+    pub fn dot_with(&self, fmt: impl Fn(&Zid) -> String) -> String {
+        // A node-label newtype whose `Debug` writes the (already zenoh-hex)
+        // string BARE, so petgraph wraps it as `label = "<hex>"` — matching
+        // zenoh's custom-`Debug` `Node` label. A plain `String` would `Debug`
+        // as `"\"<hex>\""` (double-quoted), so the newtype is required.
+        struct DotLabel(String);
+        impl std::fmt::Debug for DotLabel {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        let mut relabeled: StableUnGraph<DotLabel, f64> = StableUnGraph::default();
+        let mut remap: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+        for idx in self.graph.node_indices() {
+            let new = relabeled.add_node(DotLabel(fmt(&self.graph[idx].zid)));
+            remap.insert(idx, new);
+        }
+        for edge in self.graph.edge_indices() {
+            if let Some((a, b)) = self.graph.edge_endpoints(edge) {
+                let weight = *self.graph.edge_weight(edge).unwrap_or(&0.0);
+                relabeled.add_edge(remap[&a], remap[&b], weight);
+            }
+        }
+        format!("{:?}", Dot::new(&relabeled))
+    }
+
+    /// Every `(source, destination, successor)` triple in the topology — the wz
+    /// mirror of zenoh `Network::route_successors()` (`network.rs:1187-1193`):
+    /// the cartesian product of node pairs, each resolved through
+    /// [`next_hop`](Self::next_hop) (zenoh's `successor_entry` =
+    /// `trees[source].directions[destination]`). A pair with no direction
+    /// (`destination` == this node, or unreachable — the `compute_trees`
+    /// self-skip + reachability guard, matching zenoh `network.rs:1069`) is
+    /// omitted. The body the router adminspace
+    /// `@/<zid>/router/route/successor/**` GET enumerates (§5.23); the caller
+    /// renders each zid through `zid_to_zenoh_hex`.
+    pub fn route_successors(&self) -> Vec<(Zid, Zid, Zid)> {
+        let zids: Vec<Zid> = self
+            .graph
+            .node_indices()
+            .map(|i| self.graph[i].zid)
+            .collect();
+        let mut out = Vec::new();
+        for &source in &zids {
+            for &destination in &zids {
+                if let Some(successor) = self.next_hop(&source, &destination) {
+                    out.push((source, destination, successor));
+                }
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -2372,6 +2447,79 @@ mod tests {
         assert!(
             (199.0..=202.0).contains(&d_b),
             "two-hop distance, got {d_b}"
+        );
+    }
+
+    // A `self -- A -- B` line for the adminspace render tests below.
+    fn line_self_a_b() -> LinkstateNetwork {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
+        let l = net.add_link(zid(0xAA), WhatAmI::Router);
+        net.ingest_linkstate_list(
+            l,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(12, 5, Some(&zid(0xBB)), Some(2), &[11]), // B -> A
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10, 12]), // A -> self, B
+            ]),
+        );
+        net.compute_trees();
+        net
+    }
+
+    #[test]
+    fn route_successors_enumerates_next_hops_and_excludes_self_destinations() {
+        // zenoh `route_successors` = the cartesian product of node pairs mapped
+        // through `next_hop` (`network.rs:1187`). On self--A--B, self forwards
+        // toward B via A, so `(self, B, A)` is present. Every triple's successor
+        // must equal `next_hop(source, destination)`, and NO triple may have a
+        // destination == self (the `compute_trees` self-skip nulls
+        // `directions[self]`, so `next_hop(_, self)` is always `None`).
+        let net = line_self_a_b();
+        let succ = net.route_successors();
+        assert!(
+            succ.contains(&(zid(0x01), zid(0xBB), zid(0xAA))),
+            "self forwards toward B via A"
+        );
+        assert!(
+            succ.iter().all(|(s, d, h)| net.next_hop(s, d) == Some(*h)),
+            "every triple is exactly next_hop(source, destination)"
+        );
+        assert!(
+            !succ.iter().any(|(_, d, _)| *d == zid(0x01)),
+            "no successor entry targets self (directions[self] is None)"
+        );
+    }
+
+    #[test]
+    fn dot_with_injects_the_label_and_reuses_petgraph_grammar() {
+        // The DOT must be petgraph's undirected grammar (`graph {`, `--` edges)
+        // with the INJECTED zid label — NOT wz `Node`'s derived struct Debug
+        // (which would dump `Node { .. whatami .. }` and a non-deterministic
+        // `HashMap`). Structural asserts only: exact-string / edge-order compare
+        // would be flaky (the `links` HashMap + edge insertion order).
+        let net = line_self_a_b();
+        let dot = net.dot_with(|z| format!("z{}", z.as_slice()[0]));
+        assert!(dot.starts_with("graph {"), "undirected petgraph DOT: {dot}");
+        assert!(dot.contains("--"), "undirected edges present: {dot}");
+        // The injected labels for self (0x01), A (0xAA=170), B (0xBB=187).
+        for label in ["z1", "z170", "z187"] {
+            assert!(dot.contains(label), "injected label {label} present: {dot}");
+        }
+        // GAP-1 lock: no struct dump, no wz `Zid` Debug leaked into the label.
+        assert!(
+            !dot.contains("Node {"),
+            "no derived-struct node label: {dot}"
+        );
+        assert!(
+            !dot.contains("whatami"),
+            "no struct fields in the label: {dot}"
+        );
+        assert!(!dot.contains("Zid("), "no wz Zid Debug in the label: {dot}");
+        // The `DotLabel` newtype writes the label BARE — a plain `String` would
+        // Debug as `"\"z1\""`, so petgraph would emit an escaped `\"`. None here.
+        assert!(
+            !dot.contains("\\\""),
+            "labels are bare, not double-quoted: {dot}"
         );
     }
 

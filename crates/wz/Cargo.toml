@@ -833,6 +833,15 @@ adminspace-introspection-handlers = ["wz-runtime-tokio?/adminspace-introspection
 # R311y35 — adminspace-metrics is now a real cfg gate (the @/<zid>/<whatami>/metrics
 # OpenMetrics endpoint); forward to the runtime cfg site, not a no-op `= []`.
 adminspace-metrics = ["wz-runtime-tokio?/adminspace-metrics"]
+# R311y204 — adminspace-router-linkstate: the ROUTER-tier admin legs
+# (`@/<zid>/router/linkstate/{routers,peers}` + `.../route/successor/**`). A
+# router-hat-family atom (the RouterForwarder host lives under routing-router-hat),
+# so — like router-multicast-faces / routing-token-tables — the facade CO-SELECTS
+# routing-router-hat AND forwards the runtime cfg site (not a no-op `= []`).
+adminspace-router-linkstate = [
+    "routing-router-hat",
+    "wz-runtime-tokio?/adminspace-router-linkstate",
+]
 adminspace-plugins-handlers = []
 # R311y36 — adminspace-read is now a real cfg gate (the permissions.read GET
 # gate); forward to the runtime cfg site, not a no-op `= []`.

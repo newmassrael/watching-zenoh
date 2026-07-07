@@ -447,6 +447,152 @@ pub fn answer_admin_query(
     }
 }
 
+/// The ROUTER-tier admin `linkstate/routers` key `@/<zid>/<whatami>/linkstate/routers`
+/// (zenoh `net/runtime/adminspace.rs:171`). Router-only in zenoh; the wz router host
+/// (whatami `"router"`) is the sole caller.
+#[cfg(feature = "adminspace-router-linkstate")]
+fn admin_linkstate_routers_key(zid_hex: &str, whatami: &str) -> String {
+    let mut s = admin_root_key(zid_hex, whatami);
+    s.push_str("/linkstate/routers");
+    s
+}
+
+/// The admin `linkstate/peers` key `@/<zid>/<whatami>/linkstate/peers` (zenoh
+/// `adminspace.rs:181`). zenoh registers this for any non-Client linkstate node
+/// (a Router AND a plain linkstate peer); the wz router serves it from its
+/// peer-tier `linkstatepeers_net`. Peer-host serving is a NAMED deferral.
+#[cfg(feature = "adminspace-router-linkstate")]
+fn admin_linkstate_peers_key(zid_hex: &str, whatami: &str) -> String {
+    let mut s = admin_root_key(zid_hex, whatami);
+    s.push_str("/linkstate/peers");
+    s
+}
+
+/// The admin route-successor key PREFIX `@/<zid>/<whatami>/route/successor` — zenoh
+/// declares the handler on `.../route/successor/**` (`adminspace.rs:213`) and each
+/// reply hangs `/src/<src>/dst/<dst>` under this prefix (`:891,:909`). Router-only.
+#[cfg(feature = "adminspace-router-linkstate")]
+fn admin_route_successor_prefix(zid_hex: &str, whatami: &str) -> String {
+    let mut s = admin_root_key(zid_hex, whatami);
+    s.push_str("/route/successor");
+    s
+}
+
+/// One route-successor entry key `<prefix>/src/<src>/dst/<dst>` — the key zenoh
+/// replies each `SuccessorEntry` under (`adminspace.rs:909-913`). Both zids are
+/// already in zenoh `ZenohId` Display (hex) form.
+#[cfg(feature = "adminspace-router-linkstate")]
+fn route_successor_entry_key(prefix: &str, src_hex: &str, dst_hex: &str) -> String {
+    let mut s = String::with_capacity(prefix.len() + 10 + src_hex.len() + dst_hex.len());
+    s.push_str(prefix);
+    s.push_str("/src/");
+    s.push_str(src_hex);
+    s.push_str("/dst/");
+    s.push_str(dst_hex);
+    s
+}
+
+/// R311y204 (§5.23 `adminspace-router-linkstate`) — the pre-rendered ROUTER-tier
+/// topology view an [`answer_router_admin_query`] call replies from. The router
+/// host renders these at the wz-runtime-tokio layer (from its two
+/// `LinkstateNetwork`s via `dot_with(zid_to_zenoh_hex)` / `route_successors()`)
+/// and passes them IN — the SAME host-agnostic seam [`answer_admin_query`] uses
+/// for `config_json`, keeping this data-view net-agnostic + no_std-feasible.
+/// Every zid string is already zenoh `ZenohId` Display (hex) form.
+pub struct AdminRouterCtx<'a> {
+    /// This node's zid in zenoh hex form.
+    pub zid_hex: &'a str,
+    /// This node's role string — `"router"` for the router host.
+    pub whatami: &'a str,
+    /// The router-tier graph DOT (zenoh `info(Router)` = `routers_net.dot()`),
+    /// `None` to omit the `linkstate/routers` leg.
+    pub routers_dot: Option<&'a str>,
+    /// The peer-tier graph DOT (zenoh `info(Peer)` = `linkstatepeers_net.dot()`),
+    /// `None` to omit the `linkstate/peers` leg.
+    pub peers_dot: Option<&'a str>,
+    /// Every `(source, destination, successor)` triple (all zenoh-hex), the
+    /// enumeration zenoh's `route_successors()` produces from `routers_net`.
+    pub successors: &'a [(String, String, String)],
+    /// The admin GET permission (zenoh `permissions.read`): `false` answers
+    /// nothing, the same gate [`answer_admin_query`] applies.
+    pub read: bool,
+}
+
+/// R311y204 (§5.23 `adminspace-router-linkstate`) — the Session-independent
+/// ROUTER-tier admin answerer, the router-legs sibling of [`answer_admin_query`]:
+/// fires every router leg whose key INTERSECTS the GET keyexpr (zenoh's
+/// per-handler `if key_expr.intersects(key)` dispatch, `adminspace.rs:499-503`):
+/// `linkstate/routers` + `linkstate/peers` (TEXT_PLAIN petgraph DOT, zenoh
+/// `:754,:774`), and one `route/successor/src/<src>/dst/<dst>` reply per triple
+/// whose entry key intersects the GET (APPLICATION_JSON, the successor zid as a
+/// JSON string `"<hex>"`, zenoh `:884`). A narrowed `/src/X/dst/Y` GET intersects
+/// only its one entry, so the enumerate+intersect path subsumes zenoh's `route_
+/// successor(src,dst)` perf shortcut (`:896-904`) — same observable result, no
+/// separate parse. `read=false` answers NOTHING (the dispatch SSOT still emits the
+/// terminating Final). The reply path is the same `reply_keyed_encoded` the Session
+/// queryable uses. The signature is feature-toggle-independent; the reply BODY is
+/// `#[cfg]`-gated (the caller passes an empty/`None` ctx with the feature off).
+pub fn answer_router_admin_query(
+    view: &dyn crate::query_sink::QueryView,
+    out: &mut dyn crate::query_sink::ReplyOut,
+    ctx: &AdminRouterCtx,
+) {
+    if !ctx.read {
+        return;
+    }
+    // The reply legs are consumed ONLY under the feature; keep the signature
+    // stable and consume the params here when the feature is off.
+    #[cfg(not(feature = "adminspace-router-linkstate"))]
+    let _ = (view, out);
+    #[cfg(feature = "adminspace-router-linkstate")]
+    {
+        let ke = view.keyexpr();
+
+        // `linkstate/routers` (`@/<zid>/router/linkstate/routers`, text/plain DOT).
+        if let Some(dot) = ctx.routers_dot {
+            let key = admin_linkstate_routers_key(ctx.zid_hex, ctx.whatami);
+            let chunks: Vec<&str> = key.split('/').collect();
+            if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
+                out.reply_keyed_encoded(
+                    &key,
+                    dot.as_bytes(),
+                    Some(&crate::sample::EncodingHint::TEXT_PLAIN),
+                );
+            }
+        }
+
+        // `linkstate/peers` (`@/<zid>/router/linkstate/peers`, text/plain DOT).
+        if let Some(dot) = ctx.peers_dot {
+            let key = admin_linkstate_peers_key(ctx.zid_hex, ctx.whatami);
+            let chunks: Vec<&str> = key.split('/').collect();
+            if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
+                out.reply_keyed_encoded(
+                    &key,
+                    dot.as_bytes(),
+                    Some(&crate::sample::EncodingHint::TEXT_PLAIN),
+                );
+            }
+        }
+
+        // `route/successor/**` — ONE reply per (src,dst) triple whose entry key
+        // intersects the GET; body = the successor zid as a JSON string `"<hex>"`.
+        let prefix = admin_route_successor_prefix(ctx.zid_hex, ctx.whatami);
+        for (src_hex, dst_hex, successor_hex) in ctx.successors {
+            let key = route_successor_entry_key(&prefix, src_hex, dst_hex);
+            let chunks: Vec<&str> = key.split('/').collect();
+            if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
+                let mut body = String::new();
+                crate::json::escape_into(successor_hex, &mut body);
+                out.reply_keyed_encoded(
+                    &key,
+                    body.as_bytes(),
+                    Some(&crate::sample::EncodingHint::APPLICATION_JSON),
+                );
+            }
+        }
+    }
+}
+
 /// R311y51 (§5.23 `adminspace-write`) — the typed intent a recognized admin
 /// config-WRITE PUT decodes to. MVP affordance (NOT zenoh — see the
 /// [`admin_config_write_key`] fidelity caveat): only the bespoke `acl-deny`
@@ -1000,5 +1146,156 @@ mod tests {
         let mut out = RecordingReply::default();
         answer_admin_query(&view, &mut out, &admin_ctx(false), &[], &[], "{}");
         assert!(out.replies.is_empty(), "read=false yields no replies");
+    }
+
+    // R311y204 — the ROUTER-tier admin legs (adminspace-router-linkstate).
+    #[cfg(feature = "adminspace-router-linkstate")]
+    fn router_ctx<'a>(
+        read: bool,
+        routers_dot: Option<&'a str>,
+        peers_dot: Option<&'a str>,
+        successors: &'a [(String, String, String)],
+    ) -> AdminRouterCtx<'a> {
+        AdminRouterCtx {
+            zid_hex: "a1b2",
+            whatami: "router",
+            routers_dot,
+            peers_dot,
+            successors,
+            read,
+        }
+    }
+
+    #[cfg(feature = "adminspace-router-linkstate")]
+    #[test]
+    fn router_admin_keys_match_zenoh_form() {
+        // zenoh registers `.../linkstate/routers` (adminspace.rs:171),
+        // `.../linkstate/peers` (:181), and each successor under
+        // `.../route/successor/src/<src>/dst/<dst>` (:909-913).
+        assert_eq!(
+            admin_linkstate_routers_key("a1b2", "router"),
+            "@/a1b2/router/linkstate/routers"
+        );
+        assert_eq!(
+            admin_linkstate_peers_key("a1b2", "router"),
+            "@/a1b2/router/linkstate/peers"
+        );
+        assert_eq!(
+            admin_route_successor_prefix("a1b2", "router"),
+            "@/a1b2/router/route/successor"
+        );
+        assert_eq!(
+            route_successor_entry_key("@/a1b2/router/route/successor", "201", "c3d4"),
+            "@/a1b2/router/route/successor/src/201/dst/c3d4"
+        );
+    }
+
+    #[cfg(feature = "adminspace-router-linkstate")]
+    #[test]
+    fn router_admin_linkstate_get_replies_both_dots_text_plain() {
+        // A `@/a1b2/router/linkstate/**` GET replies BOTH graphs as their DOT
+        // bodies (passthrough — the answerer never re-renders; the host injected
+        // the zenoh-hex labels).
+        let view = admin_view("@/a1b2/router/linkstate/**");
+        let mut out = RecordingReply::default();
+        answer_router_admin_query(
+            &view,
+            &mut out,
+            &router_ctx(true, Some("graph { R }"), Some("graph { P }"), &[]),
+        );
+        assert_eq!(out.replies.len(), 2, "routers + peers DOT");
+        assert!(out
+            .replies
+            .iter()
+            .any(|(k, v)| k == "@/a1b2/router/linkstate/routers" && v == b"graph { R }"));
+        assert!(out
+            .replies
+            .iter()
+            .any(|(k, v)| k == "@/a1b2/router/linkstate/peers" && v == b"graph { P }"));
+    }
+
+    #[cfg(feature = "adminspace-router-linkstate")]
+    #[test]
+    fn router_admin_linkstate_routers_get_scopes_to_one_leg() {
+        // A narrowed GET on just `linkstate/routers` fires only that leg (the
+        // peers key does not intersect a 5-chunk `.../linkstate/routers` GET).
+        let view = admin_view("@/a1b2/router/linkstate/routers");
+        let mut out = RecordingReply::default();
+        answer_router_admin_query(
+            &view,
+            &mut out,
+            &router_ctx(true, Some("graph { R }"), Some("graph { P }"), &[]),
+        );
+        assert_eq!(out.replies.len(), 1);
+        assert_eq!(out.replies[0].0, "@/a1b2/router/linkstate/routers");
+    }
+
+    #[cfg(feature = "adminspace-router-linkstate")]
+    #[test]
+    fn router_admin_successor_get_enumerates_filters_and_json_string_body() {
+        let succ = vec![
+            ("201".to_string(), "c3d4".to_string(), "aaaa".to_string()),
+            ("201".to_string(), "e5f6".to_string(), "bbbb".to_string()),
+        ];
+        // A wildcard GET replies EVERY successor entry, body = the successor zid
+        // as a JSON string `"<hex>"` (zenoh `json!(successor)` serialize_str).
+        let mut out = RecordingReply::default();
+        answer_router_admin_query(
+            &admin_view("@/a1b2/router/route/successor/**"),
+            &mut out,
+            &router_ctx(true, None, None, &succ),
+        );
+        assert_eq!(out.replies.len(), 2, "one reply per successor triple");
+        assert!(out.replies.iter().any(|(k, v)| k
+            == "@/a1b2/router/route/successor/src/201/dst/c3d4"
+            && v == br#""aaaa""#));
+        assert!(out.replies.iter().any(|(k, v)| k
+            == "@/a1b2/router/route/successor/src/201/dst/e5f6"
+            && v == br#""bbbb""#));
+        // A narrowed `/src/201/dst/c3d4` GET hits ONLY that one entry — the
+        // enumerate+intersect path subsumes zenoh's `route_successor(src,dst)`
+        // perf shortcut (same observable result).
+        let mut out2 = RecordingReply::default();
+        answer_router_admin_query(
+            &admin_view("@/a1b2/router/route/successor/src/201/dst/c3d4"),
+            &mut out2,
+            &router_ctx(true, None, None, &succ),
+        );
+        assert_eq!(out2.replies.len(), 1);
+        assert_eq!(
+            out2.replies[0].0,
+            "@/a1b2/router/route/successor/src/201/dst/c3d4"
+        );
+        assert_eq!(
+            String::from_utf8(out2.replies[0].1.clone()).unwrap(),
+            r#""aaaa""#
+        );
+    }
+
+    #[cfg(feature = "adminspace-router-linkstate")]
+    #[test]
+    fn router_admin_read_false_and_none_legs_answer_nothing() {
+        // read=false gates ALL router legs (the deny still emits the Final at the
+        // dispatch SSOT).
+        let succ = vec![("201".to_string(), "c3d4".to_string(), "aaaa".to_string())];
+        let mut out = RecordingReply::default();
+        answer_router_admin_query(
+            &admin_view("@/a1b2/router/linkstate/**"),
+            &mut out,
+            &router_ctx(false, Some("graph { R }"), Some("graph { P }"), &succ),
+        );
+        assert!(out.replies.is_empty(), "read=false yields no replies");
+        // A `None` DOT leg is omitted even on a matching GET (the leg absent, not
+        // an empty body).
+        let mut out2 = RecordingReply::default();
+        answer_router_admin_query(
+            &admin_view("@/a1b2/router/linkstate/**"),
+            &mut out2,
+            &router_ctx(true, None, None, &[]),
+        );
+        assert!(
+            out2.replies.is_empty(),
+            "None routers_dot/peers_dot omit their legs"
+        );
     }
 }

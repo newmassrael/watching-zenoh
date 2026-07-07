@@ -236,6 +236,13 @@ router-multicast-faces = ["router-hat-router", "wz/router-multicast-faces"]
 # facade passthrough; the atom is active <=> its own cfg sites in run_router_hat +
 # main.rs arg parse (mirrors router-multicast-faces / routing-token-tables).
 router-connect-reconcile = ["router-hat-router", "wz/router-connect-reconcile"]
+# §5.23 adminspace-router-linkstate (R311y204) — compiles the demo router-hat's
+# admin-queryable registration + the per-GET LinkstateNetView render INSIDE
+# run_router_hat. Pulls router-hat-router (the run-mode — a bare `["wz/adminspace-
+# router-linkstate"]` passthrough would let the feature enable with run_router_hat
+# compiled out = silent NOP) + the facade forward; the atom is active <=> its own
+# cfg site in run_router_hat (mirrors router-connect-reconcile / router-multicast-faces).
+adminspace-router-linkstate = ["router-hat-router", "wz/adminspace-router-linkstate"]
 
 [lints]
 workspace = true

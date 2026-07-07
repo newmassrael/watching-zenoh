@@ -1231,8 +1231,12 @@ layer_c1ay_cargo_test_router_hat() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-token-tables --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,router-connect-reconcile --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features router-connect-reconcile --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,adminspace-router-linkstate --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat,adminspace-router-linkstate --quiet -- -D warnings \
         && cargo build -p wz-ap-demo --features router-multicast-faces --quiet \
-        && cargo build -p wz-ap-demo --features router-connect-reconcile --quiet)
+        && cargo build -p wz-ap-demo --features router-connect-reconcile --quiet \
+        && cargo build -p wz-ap-demo --features adminspace-router-linkstate --quiet)
 }
 
 # ─── Layer C1az — §5.26 rest-sse-subscribe: the SSE half of the REST bridge ─
@@ -1476,6 +1480,7 @@ layer_c1am_cargo_test_adminspace() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-read,adminspace-metrics,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-write,query-get --quiet -- -D warnings \
         && cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet \
+        && cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-introspection-handlers --quiet -- -D warnings)
 }
 
@@ -1509,6 +1514,8 @@ layer_c1an_cargo_test_adminspace_nodefault() {
     (cd crates \
         && cargo test -p wz-session-core --no-default-features --features adminspace-core --lib adminspace --quiet \
         && cargo clippy -p wz-session-core --no-default-features --features adminspace-core --all-targets --quiet -- -D warnings \
+        && cargo test -p wz-session-core --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet \
+        && cargo clippy -p wz-session-core --no-default-features --features adminspace-router-linkstate --all-targets --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --lib declare_adminspace --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet \
@@ -4635,6 +4642,29 @@ layer_e7b_router_connect_reconcile() {
         --test wz_router_hat_connect_reconcile wz_router_hat_reconcile_requires_feature -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E7c — adminspace-router-linkstate: router admin legs CROSS-NODE E2E ───
+#
+# The §5.23 `adminspace-router-linkstate` atom (R311y204) driven END TO END: a
+# querier behind R1 GETs R2's `@/<R2_zid>/router/**` admin subtree, routed
+# issuer -> R1 -> [router mesh] -> R2, self-dispatched at R2, with the replies
+# returning back down both hops. This proves the self-sourced-queryable mesh routing
+# the §5.21 router lacked: R2 registers its admin queryable at STARTUP (before R1
+# connects), so R1 can only route the GET after the re-advertise fold
+# (`re_advertise_self_cross_tier` picking up the `local_queryables` fold in
+# `derived_cross_tier_qabls_into`) federates it on join. The test asserts the LIVE
+# `linkstate/routers` DOT body names BOTH routers' zenoh-hex zids + a
+# `route/successor/src/<x>/dst/<y>` entry. wz<->wz only — the legs add no new wire
+# format (a standard reply GET, cross-impl-proven by adminspace-core), so no Layer Z
+# cross-impl arm is needed (a byte-parity wz<->zenohd DOT test could only assert
+# well-formedness — the DOT node labels are petgraph-Debug of wz `Node` vs zenoh
+# `Node` — a named verification-leg deferral, not a build). The `wz_router_hat_` fn
+# prefix keeps the default Layer E sweep's `--skip wz_router` from double-running it.
+layer_e7c_router_adminspace_linkstate() {
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,adminspace-router-linkstate --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_adminspace_linkstate_interop -- --ignored --quiet) || return 1
+}
+
 # ─── Layer E8 — router-hat CROSS-IMPL vs zenoh-pico (P4 §5.21) ───
 #
 # The dual-mesh RouterForwarder proven against a FOREIGN zenoh client: a wz
@@ -4855,6 +4885,7 @@ run_layer E6 layer_e6_peer_mesh || overall=1
 run_layer E6b layer_e6b_adminspace_introspection || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
+run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1
 run_layer E8 layer_e8_router_hat_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1

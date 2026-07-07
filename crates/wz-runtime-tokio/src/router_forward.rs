@@ -346,7 +346,9 @@ use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::push_routing_context::set_push_source;
+use wz_session_core::query::{QueryReply, QueryResponder};
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
+use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 use crate::accept_loop::{FaceForwarder, FaceId};
 use crate::future_interest::{FutureQablStore, FutureSubStore};
@@ -361,7 +363,8 @@ use crate::linkstate_forward::{
     declare_queryable_wireexpr, declare_subscriber_wireexpr, emit_current_interest_replies,
     is_tree_forward_target, peer_whatami_routing, peer_zid_routing, re_advertise_interest_into,
     resolve_governed_keyexpr, resolve_source_in, select_best_matching,
-    synthesize_drained_fan_finals, synthesize_expired_query_returns,
+    synthesize_drained_fan_finals, synthesize_expired_query_returns, LocalQueryHandler,
+    LocalQueryView, LocalQueryable,
 };
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{PendingQueries, QueryFan};
@@ -532,6 +535,46 @@ struct McastGroup {
 #[cfg(feature = "transport-multicast")]
 const MCAST_INGRESS_FACE: FaceId = FaceId(u64::MAX);
 
+/// A read-only, `Rc`-backed handle to one of a [`RouterForwarder`]'s two
+/// link-state graphs, exposing ONLY the adminspace render seam (§5.23
+/// `adminspace-router-linkstate`): the GraphViz DOT and the `route_successors`
+/// enumeration, each zid rendered to the zenoh `ZenohId` Display hex an admin
+/// client expects ([`zid_to_zenoh_hex`]). Handed to the router's admin-queryable
+/// handler so it renders LIVE per GET (no per-tick snapshot buffer) WITHOUT
+/// leaking a `borrow_mut` handle that could mutate routing state — the wz-fit
+/// resolution of the render-accessor-vs-Rc-clone question (a router net is
+/// already `Rc<RefCell<..>>`, unlike the peer's owned-snapshot `subscriptions()`).
+pub struct LinkstateNetView(Rc<RefCell<LinkstateNetwork>>);
+
+impl LinkstateNetView {
+    /// The graph as GraphViz DOT with zenoh-hex node labels — the wz mirror of
+    /// zenoh `info(..)` = `net.dot()` (`net/runtime/adminspace.rs:753,773`). The
+    /// zid formatter is injected because `dot_with` (in the lower `wz-routing-
+    /// graph` crate) cannot reach the [`zid_to_zenoh_hex`] SSOT itself.
+    pub fn dot(&self) -> String {
+        self.0.borrow().dot_with(|z| zid_to_zenoh_hex(z.as_slice()))
+    }
+
+    /// Every `(source, destination, successor)` triple, each zid in zenoh-hex —
+    /// the wz mirror of zenoh `route_successors()` (`net/protocol/network.rs:
+    /// 1187`). Rendered from THIS net (the router adminspace uses `routers_net`
+    /// for the `route/successor` legs, zenoh `hat/router/mod.rs:910`).
+    pub fn route_successors_hex(&self) -> Vec<(String, String, String)> {
+        self.0
+            .borrow()
+            .route_successors()
+            .into_iter()
+            .map(|(s, d, h)| {
+                (
+                    zid_to_zenoh_hex(s.as_slice()),
+                    zid_to_zenoh_hex(d.as_slice()),
+                    zid_to_zenoh_hex(h.as_slice()),
+                )
+            })
+            .collect()
+    }
+}
+
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
 /// (Router-tier) and `linkstatepeers_net` (Peer-tier) — from the face lifecycle
 /// and inbound `OAM_LINKSTATE` topology. The router counterpart to the
@@ -686,6 +729,21 @@ pub struct RouterForwarder {
     /// `UndeclareQueryable` no-ops in `withdraw_client_queryable` -> stale until face-down.
     /// The symmetric id-map fix (the wz-peer planes got it at R311y178) is a named follow-up.
     client_qabls: RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>,
+    /// Queryables HOSTED BY THIS ROUTER (§5.23 `adminspace-router-linkstate`) —
+    /// e.g. the built-in admin queryable on `@/<self-zid>/router/**`. The
+    /// router-idiom `derive-not-store` analogue of the peer
+    /// [`LinkstateForwarder`]'s `local_queryables`: the store FEEDS the cross-tier
+    /// derive ([`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info)
+    /// / [`derived_cross_tier_qabls_into`](Self::derived_cross_tier_qabls_into)), so
+    /// a self-hosted queryable advertises into BOTH meshes + re-advertises to
+    /// late-joining tree children UNIFORMLY with `client_qabls` and the multicast
+    /// group-sub aggregate (the proven self-sourced-into-derive precedents). A GET
+    /// whose only match is a self-hosted queryable self-dispatches to its handler
+    /// at the [`route_request`](Self::route_request) empty-route tail (self is
+    /// excluded from the routing targets). Always compiled (like `client_qabls`);
+    /// the `adminspace-router-linkstate` cfg gates only the demo registration + the
+    /// session-core answerer, so an unused registry is a harmless empty no-op.
+    local_queryables: RefCell<Vec<LocalQueryable>>,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
     /// `DeclareSubscriber`s wz has pushed back to them (zenoh's per-`FaceState`
@@ -904,6 +962,7 @@ impl RouterForwarder {
             client_tokens: RefCell::new(HashMap::new()),
             client_subs: RefCell::new(HashMap::new()),
             client_qabls: RefCell::new(HashMap::new()),
+            local_queryables: RefCell::new(Vec::new()),
             future_subs: RefCell::new(FutureSubStore::new()),
             future_qabls: RefCell::new(FutureQablStore::new()),
             #[cfg(feature = "routing-token-tables")]
@@ -3922,6 +3981,16 @@ impl RouterForwarder {
                 acc = Some(acc.map_or(*info, |a| a.merge(*info)));
             }
         }
+        // §5.23 adminspace-router-linkstate — a queryable HOSTED BY THIS router
+        // (e.g. `@/<self-zid>/router/**`) is a third self-sourced contributor,
+        // folded here EXACTLY like `client_qabls` (a self-host is a leaf in
+        // neither mesh) so it advertises + re-advertises through the same derive.
+        for lq in self.local_queryables.borrow().iter() {
+            if lq.keyexpr == keyexpr {
+                let info = QueryableInfo::local(lq.complete);
+                acc = Some(acc.map_or(info, |a| a.merge(info)));
+            }
+        }
         acc
     }
 
@@ -3939,6 +4008,14 @@ impl RouterForwarder {
         }
         for qabls in self.client_qabls.borrow().values() {
             set.extend(qabls.keys().cloned());
+        }
+        // §5.23 adminspace-router-linkstate — self-hosted queryables join the set
+        // (the twin of the `client_qabls` fold above), so `re_advertise_self_cross_
+        // tier` re-advertises them to late-joining tree children for FREE — the
+        // single change that lets a router that registered its admin queryable at
+        // startup still be reached by a peer/router that joins the mesh later.
+        for lq in self.local_queryables.borrow().iter() {
+            set.insert(lq.keyexpr.clone());
         }
         set.into_iter().collect()
     }
@@ -4115,6 +4192,15 @@ impl RouterForwarder {
     /// (downgrade if a contributor remains, else a full `UndeclareQueryable`
     /// retraction). NOT master-gated.
     fn advertise_client_cross_tier_qabl(&self, keyexpr: &str) {
+        self.advertise_cross_tier_qabl_both_meshes(keyexpr);
+    }
+
+    /// Flood self's MERGED cross-tier queryable advertisement for `keyexpr` into
+    /// BOTH meshes — the shared both-meshes flood for a self-sourced queryable that
+    /// is a leaf in NEITHER mesh (a client qabl OR a self-hosted admin queryable).
+    /// The merged [`QueryableInfo`] ([`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info))
+    /// already folds every self source, so both callers reuse this one flood.
+    fn advertise_cross_tier_qabl_both_meshes(&self, keyexpr: &str) {
         for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
             let Some(info) = self.derived_cross_tier_qabl_info(target, keyexpr) else {
                 continue;
@@ -4123,6 +4209,113 @@ impl RouterForwarder {
                 build_declare_queryable_with_info(ke, info)
             });
         }
+    }
+
+    /// Register a queryable HOSTED BY THIS router (§5.23 `adminspace-router-
+    /// linkstate`) — the router twin of the peer
+    /// [`LinkstateForwarder::register_local_queryable`](crate::linkstate_forward::LinkstateForwarder::register_local_queryable).
+    /// Stores the handler in [`local_queryables`](Self#structfield.local_queryables)
+    /// (so a matching GET self-dispatches at the `route_request` empty-route tail)
+    /// AND advertises the self-hosted queryable into BOTH meshes — a self-host is a
+    /// leaf in neither mesh (the `client_qabls` case), so a REMOTE router/peer
+    /// routes a matching GET toward this router, and a peer/router joining LATER
+    /// converges via `re_advertise_self_cross_tier` (the `local_queryables` fold in
+    /// [`derived_cross_tier_qabls_into`](Self::derived_cross_tier_qabls_into)). The
+    /// merged advertise already sees the just-pushed entry (registry mutated
+    /// first). `complete = true` for the admin queryable (it fully answers its own
+    /// `@/<zid>/router/**` subtree).
+    pub fn register_local_queryable(
+        &self,
+        keyexpr: &str,
+        complete: bool,
+        handler: LocalQueryHandler,
+    ) {
+        self.local_queryables.borrow_mut().push(LocalQueryable {
+            keyexpr: keyexpr.to_string(),
+            complete,
+            handler: Rc::new(RefCell::new(handler)),
+        });
+        self.advertise_cross_tier_qabl_both_meshes(keyexpr);
+    }
+
+    /// A read-only [`LinkstateNetView`] over the ROUTER-tier graph (`routers_net`)
+    /// — the adminspace host's DOT + `route/successor` render seam (§5.23).
+    pub fn routers_net_view(&self) -> LinkstateNetView {
+        LinkstateNetView(Rc::clone(&self.routers_net))
+    }
+
+    /// A read-only [`LinkstateNetView`] over the PEER-tier graph
+    /// (`linkstatepeers_net`) — the adminspace host's `linkstate/peers` render seam.
+    pub fn peers_net_view(&self) -> LinkstateNetView {
+        LinkstateNetView(Rc::clone(&self.linkstatepeers_net))
+    }
+
+    /// Self-dispatch a routed GET whose only match is a queryable HOSTED BY THIS
+    /// router (§5.23 `adminspace-router-linkstate`) — the router twin of the peer's
+    /// `dispatch_local_queryables`, reached from the [`route_request`](Self::route_request)
+    /// empty-route tail (self is excluded from the routing targets, so a GET
+    /// matching only a self-hosted queryable — e.g. `@/<self-zid>/router/**` —
+    /// arrives with `forwarded == 0`). Snapshots the matching handlers under a
+    /// SHORT borrow, DROPS it, then invokes each borrow-free (the re-entrancy
+    /// discipline the peer documents), accumulating replies via the SAME
+    /// `QueryResponder` / `QueryReply::into_response` SSOT the wire queryable path
+    /// uses, and emits them + the closing `ResponseFinal` (rid = the querier's) to
+    /// `inbound`. The admin handler renders topology data + replies and NEVER
+    /// self-queries, so — UNLIKE the peer — no self-query redelivery/`DeferredQuery`
+    /// path is needed. Returns `true` iff a local queryable matched (the caller
+    /// then skips the bare empty-route final). The reply's rid = the inbound
+    /// Request's rid, which at a transit router IS the qid it stamped on the
+    /// forward hop, so multi-hop route-back (`forward_response`) resolves it with
+    /// no new pending state here.
+    fn dispatch_router_local_queryables(
+        &self,
+        inbound: FaceId,
+        reliable: bool,
+        request: &RequestOwned,
+        keyexpr: &str,
+    ) -> bool {
+        let query_chunks: Vec<&str> = keyexpr.split('/').collect();
+        let target = read_request_target(request);
+        let matched: Vec<Rc<RefCell<LocalQueryHandler>>> = {
+            let locals = self.local_queryables.borrow();
+            locals
+                .iter()
+                .filter(|lq| keyexpr_intersects_target(&lq.keyexpr, &query_chunks))
+                .filter(|lq| !matches!(target, Some(QueryTarget::AllComplete)) || lq.complete)
+                .map(|lq| Rc::clone(&lq.handler))
+                .collect()
+        };
+        if matched.is_empty() {
+            return false;
+        }
+        let view = LocalQueryView {
+            keyexpr,
+            rid: request.rid,
+        };
+        let mut replies: Vec<QueryReply> = Vec::new();
+        {
+            let mut responder = QueryResponder::new(request.rid, keyexpr.to_string(), &mut replies);
+            for handler in &matched {
+                // The self-hosted admin handler renders net data + replies; it never
+                // re-queries its own keyexpr, so try_borrow_mut always succeeds and
+                // no self-query redelivery (the peer's DeferredQuery path) is needed.
+                if let Ok(mut h) = handler.try_borrow_mut() {
+                    (**h)(&view, &mut responder);
+                }
+            }
+        }
+        for reply in replies {
+            if let Ok(resp) = reply.into_response() {
+                self.send_to_face(inbound, reliable, || {
+                    NetworkMessage::Response(Box::new(resp.clone()))
+                });
+            }
+        }
+        let final_msg = wz_session_core::response_final_build::build_response_final(request.rid);
+        self.send_to_face(inbound, reliable, || {
+            NetworkMessage::ResponseFinal(final_msg.clone())
+        });
+        true
     }
 
     /// Withdraw a CLIENT-face `UndeclareQueryable` (the query twin of
@@ -4347,6 +4540,15 @@ impl RouterForwarder {
         };
 
         if forwarded == 0 {
+            // §5.23 adminspace-router-linkstate — a GET whose only match is a
+            // queryable HOSTED BY THIS router (self is excluded from the routing
+            // targets, so a self-hosted admin GET `@/<self-zid>/router/**` reaches
+            // the empty-route tail) self-dispatches to its handler, replying +
+            // emitting its own closing Final. Mirrors the peer's
+            // `finish_unrouted_request`. A non-admin empty route falls through.
+            if self.dispatch_router_local_queryables(inbound, reliable, request, &keyexpr) {
+                return;
+            }
             // zenoh route_query EMPTY route: no queryable matched, so PROMPT a
             // ResponseFinal back to the querier (its get() terminates at once). No
             // pending entry (nothing is awaited).
@@ -11894,6 +12096,44 @@ mod tests {
             !fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/k"),
             "removing the group sub clears the derive (no client / native holds it)"
         );
+    }
+
+    /// §5.23 adminspace-router-linkstate — a self-hosted admin queryable is a
+    /// self-sourced contributor to the cross-tier qabl derive (the query-plane
+    /// twin of the group_subs sub-plane fold above): registering it must make it
+    /// advertise into BOTH meshes AND fold into the tick re-advertise SSOT
+    /// (`derived_cross_tier_qabls_into`) so a router/peer joining LATER converges
+    /// on it. This is the fast, derive-level pin of the CROSS-NODE fold the
+    /// `--ignored` Layer E7c e2e proves over the wire (a `cargo test --lib` guard
+    /// against a regression that removes the `local_queryables` fold).
+    #[test]
+    fn local_queryable_folds_into_the_cross_tier_qabl_derive() {
+        use wz_session_core::query_sink::{QueryView, ReplyOut};
+        let fwd = RouterForwarder::new(zid(0x01));
+        let key = "@/self/router/**";
+        // Before registration: neither the derive set nor the merged info holds it.
+        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            assert!(!fwd
+                .derived_cross_tier_qabls_into(tier)
+                .contains(&key.to_string()));
+            assert!(fwd.derived_cross_tier_qabl_info(tier, key).is_none());
+        }
+        let handler: LocalQueryHandler = Box::new(|_v: &dyn QueryView, _o: &mut dyn ReplyOut| {});
+        fwd.register_local_queryable(key, true, handler);
+        // After: BOTH meshes carry it in the re-advertise SSOT + the merged info
+        // (the fold; without it a startup-registered admin qabl is unreachable by a
+        // late joiner).
+        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            assert!(
+                fwd.derived_cross_tier_qabls_into(tier)
+                    .contains(&key.to_string()),
+                "the self-hosted admin qabl folds into the {tier:?} re-advertise SSOT"
+            );
+            assert!(
+                fwd.derived_cross_tier_qabl_info(tier, key).is_some(),
+                "the {tier:?} derived merged info includes the self-hosted qabl"
+            );
+        }
     }
 
     /// §5.21 sub plane (S2) — union-refcount with a local client: a client sub AND a

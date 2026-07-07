@@ -2287,6 +2287,74 @@ pub(crate) async fn run_router_hat(
     #[cfg(not(feature = "router-connect-reconcile"))]
     let reconcile: Option<wz::runtime_tokio::accept_loop::ReconcileReceiver> = None;
 
+    // §5.23 adminspace-router-linkstate — host the router's built-in admin
+    // queryable on `@/<zid>/router/**`. The self-sourced qabl is advertised into
+    // BOTH meshes at register time (+ re-advertised to late joiners via the derive
+    // fold), so a GET from a DIRECTLY-attached OR a REMOTE (cross-node) querier
+    // routes to this router, self-dispatches at the route_request empty-route tail,
+    // and this handler renders LIVE from the two link-state nets per query:
+    // `linkstate/routers` + `route/successor/**` from `routers_net`,
+    // `linkstate/peers` from `linkstatepeers_net` (the wz mirror of zenoh's
+    // routers_linkstate_data / peers_linkstate_data / route_successor,
+    // net/runtime/adminspace.rs:741-919). Root `local_data` (self identity + the
+    // listen locator) rides the shared `answer_admin_query` SSOT; the router's
+    // `sessions[]` transport table, its config surface (replies "{}"), and its
+    // per-tier sub/qabl introspection are NAMED deferrals.
+    #[cfg(feature = "adminspace-router-linkstate")]
+    {
+        use wz::runtime_tokio::adminspace::{
+            admin_queryable_key, answer_admin_query, answer_router_admin_query, AdminAnswerCtx,
+            AdminRouterCtx,
+        };
+        use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
+        use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
+        let zid_hex = zid_to_zenoh_hex(&params.zid);
+        // SSOT-derive the role from `params.whatami` (= "router"), as run_peer does.
+        let whatami_str = params.whatami.to_str();
+        let version = env!("CARGO_PKG_VERSION").to_string();
+        // The admin `local_data` dial locator: the router sets no forwarder
+        // self-locator, but its listen address is a faithful `local_data` locator
+        // (withheld on an unspecified bind, the run_peer discipline).
+        let locators: Vec<String> = if local.ip().is_unspecified() {
+            Vec::new()
+        } else {
+            vec![format!("tcp/{local}")]
+        };
+        let queryable_key = admin_queryable_key(&zid_hex, whatami_str);
+        let routers_view = forwarder.routers_net_view();
+        let peers_view = forwarder.peers_net_view();
+        let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+            // Root local_data / config / metrics via the shared SSOT (config "{}" +
+            // sessions[] empty are named deferrals on the pure router).
+            let ctx = AdminAnswerCtx {
+                zid_hex: &zid_hex,
+                whatami: whatami_str,
+                version: &version,
+                locators: &locators,
+                read: true,
+            };
+            answer_admin_query(view, out, &ctx, &[], &[], "{}");
+            // The ROUTER-tier legs, rendered LIVE from the two nets per GET.
+            let routers_dot = routers_view.dot();
+            let peers_dot = peers_view.dot();
+            let successors = routers_view.route_successors_hex();
+            let rctx = AdminRouterCtx {
+                zid_hex: &zid_hex,
+                whatami: whatami_str,
+                routers_dot: Some(&routers_dot),
+                peers_dot: Some(&peers_dot),
+                successors: &successors,
+                read: true,
+            };
+            answer_router_admin_query(view, out, &rctx);
+        };
+        forwarder.register_local_queryable(&queryable_key, true, Box::new(handler));
+        log::info!(
+            "wz-ap-demo router-hat: adminspace router legs hosted at {queryable_key} \
+             (linkstate/routers, linkstate/peers, route/successor)"
+        );
+    }
+
     let loop_fut = peer_loop(
         FaceSources {
             listener,
