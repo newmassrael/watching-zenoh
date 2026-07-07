@@ -191,6 +191,12 @@ routing-peer = [
 # write applies, the pre-y51 path). The run_peer config-write handler holds the
 # cfg(feature="adminspace-write") site. Layer E6 builds the gate-ON binary.
 adminspace-write = ["wz/adminspace-write"]
+# R311y203 (§5.23 adminspace-introspection-handlers) — compiles the demo host's
+# per-app-tick introspection re-snapshot (forwarder.subscriptions/queryables
+# -> the shared AdminDeclaration buffer the --config-queryable handler replies from).
+# The atom is active <=> its cfg sites in wz-session-core answer_admin_query + this
+# crate's run_peer.
+adminspace-introspection-handlers = ["wz/adminspace-introspection-handlers"]
 # P4 §5.21 — the FOUNDATION feature (routing-accept precedent): forwards the facade
 # `routing-router-hat`, which pulls `routing-peer` transitively + compiles the
 # library `RouterForwarder`. It no longer gates a demo run-mode directly (the

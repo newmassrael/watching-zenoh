@@ -1830,6 +1830,51 @@ impl LinkstateForwarder {
         })
     }
 
+    /// Group an interest table's entries by keyexpr into `(keyexpr, source-zid-hex
+    /// list)` — the WHOLE-TABLE materialization the admin `subscriber`/`queryable`
+    /// introspection replies from. This mirrors zenoh's `get_subscriptions` /
+    /// `get_queryables`, which enumerate EVERY known declaration tagged by its source
+    /// (`net/routing/hat/mod.rs:211`), NOT only this node's own — a peer that has
+    /// learned a remote subscription lists it too. Each keyexpr's source zids become
+    /// the `peers` bucket of the admin `Sources` body (a peer-tier linkstate interest
+    /// table's sources are peers; the self-declared entry is registered under this
+    /// node's own zid). A fresh owned snapshot per call (the caller re-materializes it
+    /// each app-tick), never a retained side-table.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn group_interest_sources<V: Clone>(
+        table: &LinkstatepeerInterest<V>,
+    ) -> Vec<(String, Vec<String>)> {
+        let mut by_key: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (ke, zid, _) in table.entries() {
+            by_key
+                .entry(ke)
+                .or_default()
+                .push(wz_session_core::zid_hex::zid_to_zenoh_hex(zid.as_slice()));
+        }
+        by_key.into_iter().collect()
+    }
+
+    /// The declared subscribers this node knows (`@/<zid>/<whatami>/subscriber/**`
+    /// admin introspection, §5.23) — every keyexpr in the [`subs`](Self#structfield.subs)
+    /// interest table paired with the hex zids that declared it. See
+    /// [`group_interest_sources`](Self::group_interest_sources) for the whole-table /
+    /// Sources rationale.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    pub fn subscriptions(&self) -> Vec<(String, Vec<String>)> {
+        Self::group_interest_sources(&self.subs.borrow())
+    }
+
+    /// The declared queryables this node knows (`@/<zid>/<whatami>/queryable/**` admin
+    /// introspection, §5.23) — the [`qabls`](Self#structfield.qabls) twin of
+    /// [`subscriptions`](Self::subscriptions). The queryable body is the SAME `Sources`
+    /// struct zenoh serializes (`get_queryables`, `hat/mod.rs:252`), NOT the
+    /// per-declaration `QueryableInfoType`.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    pub fn queryables(&self) -> Vec<(String, Vec<String>)> {
+        Self::group_interest_sources(&self.qabls.borrow())
+    }
+
     /// Emit the unsolicited FUTURE `DeclareSubscriber` pushes a newly-learned
     /// subscription `new_ke` (sourced at `origin`, `None` for this node's own local
     /// subscriber) triggers: one per CLIENT face whose stored FUTURE interest

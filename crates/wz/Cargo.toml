@@ -827,7 +827,9 @@ adminspace-config-hotreload = []
 # cfg site, not stay a no-op `= []` (the [[feedback-facade-forward-separate-edit]]
 # dead-stub trap); mirrors the liveliness-history R311xy treatment above.
 adminspace-core = ["wz-runtime-tokio?/adminspace-core"]
-adminspace-introspection-handlers = []
+# R311y203 — adminspace-introspection-handlers active flip: the per-entity
+# subscriber/queryable admin introspection (`@/<zid>/<whatami>/subscriber|queryable/**`).
+adminspace-introspection-handlers = ["wz-runtime-tokio?/adminspace-introspection-handlers"]
 # R311y35 — adminspace-metrics is now a real cfg gate (the @/<zid>/<whatami>/metrics
 # OpenMetrics endpoint); forward to the runtime cfg site, not a no-op `= []`.
 adminspace-metrics = ["wz-runtime-tokio?/adminspace-metrics"]

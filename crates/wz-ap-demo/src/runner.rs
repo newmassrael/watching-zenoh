@@ -1530,6 +1530,21 @@ pub(crate) async fn run_peer(
     let pending_acl_deny: std::rc::Rc<std::cell::RefCell<Option<String>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
 
+    // §5.23 adminspace-introspection-handlers — the per-query materialization of the
+    // subs/queryables this node knows that the admin GET on
+    // `@/<zid>/peer/{subscriber,queryable}/**` replies from. The `--config-queryable`
+    // handler is stored INSIDE the forwarder (it cannot hold `&forwarder`, the
+    // pending_acl_deny rationale above), so the app-tick loop below — which DOES hold
+    // `&forwarder` — re-snapshots this shared buffer from
+    // `forwarder.subscriptions()/queryables()` each tick (a FULL
+    // re-materialization from the live interest table, never an incremental drifting
+    // side-table), and the handler reads it. Always allocated (`AdminDeclaration` is
+    // always-compiled, like `AdminSession`); refreshed ONLY under the feature, so a
+    // feature-off build leaves it empty and the introspection reply legs compile out.
+    let introspection: std::rc::Rc<
+        std::cell::RefCell<Vec<wz::runtime_tokio::adminspace::AdminDeclaration>>,
+    > = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+
     // `--config-queryable`: §5.23 Phase 2b — host this peer's adminspace on the
     // forwarder. A querier's GET for `@/<zid>/peer/config` routes to A's
     // forward_request, finds no remote queryable (the admin key is self-unique),
@@ -1554,6 +1569,10 @@ pub(crate) async fn run_peer(
         let queryable_key = admin_queryable_key(&zid_hex, whatami_str);
         let config_key = admin_config_key(&zid_hex, whatami_str);
         let shared = wz_config.clone();
+        // The introspection buffer the app-tick re-snapshots; the handler reads the
+        // node's own declared subs/qabls from it per query (empty when the feature is
+        // off — never refreshed — so the reply legs stay inert).
+        let introspection_h = introspection.clone();
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             let config_json = shared.borrow().to_admin_json();
             let ctx = AdminAnswerCtx {
@@ -1563,7 +1582,14 @@ pub(crate) async fn run_peer(
                 locators: &locators,
                 read: true,
             };
-            answer_admin_query(view, out, &ctx, &[], &config_json);
+            answer_admin_query(
+                view,
+                out,
+                &ctx,
+                &[],
+                &introspection_h.borrow(),
+                &config_json,
+            );
         };
         match forwarder.register_local_queryable(&queryable_key, true, Box::new(handler)) {
             Ok(_) => {
@@ -1820,7 +1846,50 @@ pub(crate) async fn run_peer(
                     } else if !declared {
                         declared = true;
                         let _ = forwarder.declare_subscription(key);
+                        // A deterministic barrier for an admin-introspection querier:
+                        // the sub is now in `forwarder.subs`, and the introspection
+                        // buffer is re-snapshotted at the end of THIS tick (below), so a
+                        // querier that waits on this log is guaranteed the admin view
+                        // already lists it.
+                        log::info!("wz-ap-demo peer: declared subscriber {key}");
                     }
+                }
+                // §5.23 adminspace-introspection-handlers — re-snapshot the subs/qabls
+                // this node knows into the admin introspection buffer each tick (a FULL
+                // re-materialization from the live interest table, never an incremental
+                // side-table). Ordered AFTER the declare above so the same tick that
+                // declares the --key subscriber also publishes it to the admin view. The
+                // queryable buffer is non-empty even here: `--config-queryable`
+                // registered the admin queryable itself (self-sourced), which
+                // `queryables()` lists — zenoh likewise self-lists its adminspace
+                // queryable. Each entity's source zids become the `peers` bucket of its
+                // admin `Sources` body (a peer-tier interest table's sources are peers).
+                #[cfg(feature = "adminspace-introspection-handlers")]
+                {
+                    use wz::runtime_tokio::adminspace::{
+                        AdminDeclaration, AdminEntityKind, AdminSources,
+                    };
+                    let sources = |peers: Vec<String>| AdminSources {
+                        routers: Vec::new(),
+                        peers,
+                        clients: Vec::new(),
+                    };
+                    let mut buf = introspection.borrow_mut();
+                    buf.clear();
+                    buf.extend(forwarder.subscriptions().into_iter().map(|(keyexpr, zids)| {
+                        AdminDeclaration {
+                            kind: AdminEntityKind::Subscriber,
+                            keyexpr,
+                            sources: sources(zids),
+                        }
+                    }));
+                    buf.extend(forwarder.queryables().into_iter().map(|(keyexpr, zids)| {
+                        AdminDeclaration {
+                            kind: AdminEntityKind::Queryable,
+                            keyexpr,
+                            sources: sources(zids),
+                        }
+                    }));
                 }
                 if let Some(key) = publish_key {
                     let _ = forwarder.publish(key, b"wz-mesh-data");

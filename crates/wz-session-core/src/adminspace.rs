@@ -206,6 +206,106 @@ pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
     s
 }
 
+/// The declaring-node buckets for an admin introspection entry — the wz analogue of
+/// zenoh's `hat::Sources` (`net/routing/hat/mod.rs:59`), which is the JSON body BOTH
+/// the `subscribers_data` and `queryables_data` handlers serialize
+/// (`serde_json::to_string(&sub.1)`, zenoh `adminspace.rs:793,843`). zids are in
+/// zenoh `ZenohId` Display (hex) form. Serialized field order matches zenoh's serde
+/// derive: `routers`, `peers`, `clients`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AdminSources {
+    /// Router nodes that declared the entity (empty for a plain peer's peer-tier
+    /// interest table).
+    pub routers: Vec<String>,
+    /// Peer nodes that declared the entity (self + mesh peers, for a peer-tier table).
+    pub peers: Vec<String>,
+    /// Client nodes that declared the entity.
+    pub clients: Vec<String>,
+}
+
+// Only the introspection reply block consumes `to_json`; gated so a build without the
+// feature (where `AdminSources` still compiles inside the always-present
+// `AdminDeclaration`) does not carry it as dead code.
+#[cfg(feature = "adminspace-introspection-handlers")]
+impl AdminSources {
+    /// Zenoh's `Sources` JSON: `{"routers":[..],"peers":[..],"clients":[..]}` (serde
+    /// field order), each bucket a JSON array of hex-zid strings. Built via the same
+    /// `json::push_str_array` SSOT [`AdminLocalData::to_json`] uses (quote + escape).
+    fn to_json(&self) -> String {
+        let mut out = String::from("{\"routers\":");
+        crate::json::push_str_array(&self.routers, &mut out);
+        out.push_str(",\"peers\":");
+        crate::json::push_str_array(&self.peers, &mut out);
+        out.push_str(",\"clients\":");
+        crate::json::push_str_array(&self.clients, &mut out);
+        out.push('}');
+        out
+    }
+}
+
+/// The kind of a per-entity admin introspection [`AdminDeclaration`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminEntityKind {
+    /// `@/<zid>/<whatami>/subscriber/<keyexpr>`.
+    Subscriber,
+    /// `@/<zid>/<whatami>/queryable/<keyexpr>`.
+    Queryable,
+}
+
+// `as_str` is consumed only by the introspection reply block (same rationale as
+// `AdminSources::to_json` above).
+#[cfg(feature = "adminspace-introspection-handlers")]
+impl AdminEntityKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            AdminEntityKind::Subscriber => "subscriber",
+            AdminEntityKind::Queryable => "queryable",
+        }
+    }
+}
+
+/// One declared entity the per-entity admin introspection handlers reply for
+/// (§5.23 `adminspace-introspection-handlers`) — the wz analogue of a
+/// `subscribers_data` / `queryables_data` loop item (zenoh
+/// `net/runtime/adminspace.rs:781,831`). Keyed `@/<zid>/<whatami>/<kind>/<keyexpr>`,
+/// body the entity's [`AdminSources`] (`{routers,peers,clients}`) — the SAME
+/// `Sources` body zenoh serializes for both kinds. ALWAYS compiled (like
+/// [`AdminSession`]) so [`answer_admin_query`]'s slice parameter is signature-stable
+/// across the feature toggle; only the reply BLOCK that consumes it is `#[cfg]`-gated.
+///
+/// PUBLISHER / QUERIER are deliberately ABSENT: wz maintains no publisher or querier
+/// table (`declare_publisher` / `declare_querier` return pure send/get handles with
+/// no wire record — `session/mod.rs:2196`), and zenoh's `publishers_data` /
+/// `queriers_data` loop over an empty table emits NOTHING, so omitting these is
+/// byte-identical to zenoh running with no declared publishers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminDeclaration {
+    /// Whether this is a subscriber or a queryable entry.
+    pub kind: AdminEntityKind,
+    /// The entity's declared keyexpr (may itself contain wildcards, e.g. `demo/**`).
+    pub keyexpr: String,
+    /// The nodes that declared this keyexpr (`{routers,peers,clients}`), the reply body.
+    pub sources: AdminSources,
+}
+
+/// The per-entity admin introspection key `@/<zid>/<whatami>/<kind>/<pattern>`
+/// (`kind` = `subscriber` / `queryable`), zenoh `adminspace.rs:786`. `pattern` is
+/// the entity's declared (canonical) keyexpr; it may itself contain wildcards (a
+/// subscriber on `demo/**` → `@/<zid>/<whatami>/subscriber/demo/**`), which the
+/// intersection matcher handles symmetrically. A grammar-invalid pattern yields an
+/// ill-formed target that [`keyexpr_match::keyexpr_intersects_target`] treats as
+/// no-match (silently skipped) — wz's no-panic posture, NOT zenoh's
+/// `.try_into().unwrap()`.
+#[cfg(feature = "adminspace-introspection-handlers")]
+fn admin_entity_key(zid_hex: &str, whatami: &str, kind: &str, pattern: &str) -> String {
+    let mut s = admin_root_key(zid_hex, whatami);
+    s.push('/');
+    s.push_str(kind);
+    s.push('/');
+    s.push_str(pattern);
+    s
+}
+
 /// R311y48 (§5.23 Phase 3b) — the admin config-WRITE keyexpr PATTERN
 /// `@/<zid>/<whatami>/config/**`. The PATTERN is faithful to zenoh, which declares
 /// its write-only config `DeclareSubscriber` on exactly this key
@@ -267,11 +367,17 @@ pub fn answer_admin_query(
     out: &mut dyn crate::query_sink::ReplyOut,
     ctx: &AdminAnswerCtx,
     sessions: &[AdminSession],
+    declarations: &[AdminDeclaration],
     config_json: &str,
 ) {
     if !ctx.read {
         return;
     }
+    // `declarations` is consumed ONLY by the `adminspace-introspection-handlers`
+    // reply block below; keep the parameter unconditional (signature stability) and
+    // consume it here when the feature is off.
+    #[cfg(not(feature = "adminspace-introspection-handlers"))]
+    let _ = declarations;
     let ke = view.keyexpr();
 
     // `local_data` (root key `@/<zid>/<whatami>`).
@@ -315,6 +421,29 @@ pub fn answer_admin_query(
             config_json.as_bytes(),
             Some(&crate::sample::EncodingHint::APPLICATION_JSON),
         );
+    }
+
+    // `subscriber` / `queryable` per-entity introspection (`@/<zid>/<whatami>/
+    // {subscriber,queryable}/<keyexpr>`) — under `adminspace-introspection-handlers`.
+    // ONE reply per declared entity whose entity key INTERSECTS the GET (the wz
+    // analogue of zenoh's `subscribers_data` / `queryables_data` per-item loop,
+    // `adminspace.rs:781,831`). The entity key is built from the entity's canonical
+    // declared keyexpr; an ill-formed key is silently skipped by the intersection
+    // matcher's well-formed guard (wz never replicates zenoh's `.unwrap()` panic).
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    for decl in declarations {
+        let entity_key =
+            admin_entity_key(ctx.zid_hex, ctx.whatami, decl.kind.as_str(), &decl.keyexpr);
+        let entity_chunks: Vec<&str> = entity_key.split('/').collect();
+        if crate::keyexpr_match::keyexpr_intersects_target(ke, &entity_chunks) {
+            // Body = the entity's `Sources` (`{routers,peers,clients}`) — the SAME
+            // struct zenoh serializes for BOTH subscriber and queryable admin replies.
+            out.reply_keyed_encoded(
+                &entity_key,
+                decl.sources.to_json().as_bytes(),
+                Some(&crate::sample::EncodingHint::APPLICATION_JSON),
+            );
+        }
     }
 }
 
@@ -723,6 +852,7 @@ mod tests {
             &mut out,
             &admin_ctx(true),
             &[],
+            &[],
             r#"{"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
         );
         assert_eq!(out.replies.len(), 1, "only the config handler fires");
@@ -738,7 +868,7 @@ mod tests {
         // A GET on the bare root fires ONLY local_data (config is 4 chunks).
         let view = admin_view("@/a1b2/peer");
         let mut out = RecordingReply::default();
-        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], "{}");
+        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], "{}");
         assert_eq!(out.replies.len(), 1, "only local_data fires");
         assert_eq!(out.replies[0].0, "@/a1b2/peer");
         assert_eq!(
@@ -747,12 +877,128 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn sub_decl(keyexpr: &str, peers: &[&str]) -> AdminDeclaration {
+        AdminDeclaration {
+            kind: AdminEntityKind::Subscriber,
+            keyexpr: String::from(keyexpr),
+            sources: AdminSources {
+                routers: Vec::new(),
+                peers: peers.iter().map(|p| String::from(*p)).collect(),
+                clients: Vec::new(),
+            },
+        }
+    }
+
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn qabl_decl(keyexpr: &str, peers: &[&str]) -> AdminDeclaration {
+        AdminDeclaration {
+            kind: AdminEntityKind::Queryable,
+            ..sub_decl(keyexpr, peers)
+        }
+    }
+
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[test]
+    fn answer_admin_query_subscriber_get_lists_each_with_sources_body() {
+        // A wildcard GET on `@/a1b2/peer/subscriber/**` replies ONE entry per declared
+        // subscriber, keyed by the sub's keyexpr, body the zenoh `Sources` struct
+        // `{"routers":[],"peers":[<declarers>],"clients":[]}` — NOT `null`. Neither root
+        // (3 chunks) nor config (4th chunk `config`) intersects a 5-chunk `subscriber/**`
+        // GET, so only the subs fire.
+        let view = admin_view("@/a1b2/peer/subscriber/**");
+        let mut out = RecordingReply::default();
+        let decls = [
+            sub_decl("demo/**", &["a1b2"]),
+            sub_decl("other/data", &["a1b2", "c3d4"]),
+        ];
+        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, "{}");
+        assert_eq!(out.replies.len(), 2, "one reply per declared subscriber");
+        assert!(out
+            .replies
+            .iter()
+            .any(|(k, v)| k == "@/a1b2/peer/subscriber/demo/**"
+                && v == br#"{"routers":[],"peers":["a1b2"],"clients":[]}"#));
+        // A keyexpr declared by two peers aggregates both zids into `peers`.
+        assert!(out
+            .replies
+            .iter()
+            .any(|(k, v)| k == "@/a1b2/peer/subscriber/other/data"
+                && v == br#"{"routers":[],"peers":["a1b2","c3d4"],"clients":[]}"#));
+    }
+
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[test]
+    fn answer_admin_query_subscriber_get_intersect_filters_by_keyexpr() {
+        // A NARROWED GET replies only the intersecting subscriber (zenoh's per-entity
+        // `query.intersects(entity_key)` gate) — `other/data` is excluded.
+        let view = admin_view("@/a1b2/peer/subscriber/demo/**");
+        let mut out = RecordingReply::default();
+        let decls = [
+            sub_decl("demo/**", &["a1b2"]),
+            sub_decl("other/data", &["a1b2"]),
+        ];
+        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, "{}");
+        assert_eq!(out.replies.len(), 1, "only the intersecting subscriber");
+        assert_eq!(out.replies[0].0, "@/a1b2/peer/subscriber/demo/**");
+    }
+
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[test]
+    fn answer_admin_query_queryable_get_serializes_sources() {
+        // A queryable entry ALSO replies the `Sources` body (zenoh serializes the same
+        // struct for `queryables_data`), at `@/<zid>/<whatami>/queryable/<keyexpr>`.
+        let view = admin_view("@/a1b2/peer/queryable/**");
+        let mut out = RecordingReply::default();
+        let decls = [qabl_decl("demo/q", &["a1b2"])];
+        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, "{}");
+        assert_eq!(out.replies.len(), 1);
+        assert_eq!(out.replies[0].0, "@/a1b2/peer/queryable/demo/q");
+        assert_eq!(
+            String::from_utf8(out.replies[0].1.clone()).unwrap(),
+            r#"{"routers":[],"peers":["a1b2"],"clients":[]}"#
+        );
+    }
+
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[test]
+    fn answer_admin_query_introspection_is_read_gated_and_kind_scoped() {
+        // read=false gates ALL replies (including introspection).
+        let mut out = RecordingReply::default();
+        let subs = [sub_decl("demo/**", &["a1b2"])];
+        answer_admin_query(
+            &admin_view("@/a1b2/peer/subscriber/**"),
+            &mut out,
+            &admin_ctx(false),
+            &[],
+            &subs,
+            "{}",
+        );
+        assert!(out.replies.is_empty(), "read=false gates all replies");
+        // A `subscriber/**` GET must NOT list a Queryable declaration (kind scoping):
+        // the queryable's entity key is `.../queryable/...`, disjoint from the GET.
+        let mut out2 = RecordingReply::default();
+        let qabls = [qabl_decl("demo/q", &["a1b2"])];
+        answer_admin_query(
+            &admin_view("@/a1b2/peer/subscriber/**"),
+            &mut out2,
+            &admin_ctx(true),
+            &[],
+            &qabls,
+            "{}",
+        );
+        assert!(
+            out2.replies.is_empty(),
+            "a subscriber GET must not list a queryable"
+        );
+    }
+
     #[test]
     fn answer_admin_query_read_false_answers_nothing() {
         // read=false: a deny answers NOTHING (the dispatch SSOT emits the Final).
         let view = admin_view("@/a1b2/peer/config");
         let mut out = RecordingReply::default();
-        answer_admin_query(&view, &mut out, &admin_ctx(false), &[], "{}");
+        answer_admin_query(&view, &mut out, &admin_ctx(false), &[], &[], "{}");
         assert!(out.replies.is_empty(), "read=false yields no replies");
     }
 }

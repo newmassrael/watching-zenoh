@@ -2548,7 +2548,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 locators: &locators,
                 read,
             };
-            answer_admin_query(view, out, &ctx, &sessions, &config_json);
+            // The pure-Session admin host does not enumerate declarations (its admin
+            // sink fires while the observer is locked mid-`iter_mut`, so it cannot
+            // re-read the declaration registries — the introspection materialization
+            // for this host is a NAMED follow-up). The forwarder-hosted demo admin
+            // (`--config-queryable`) is the wired introspection host for §5.23.
+            answer_admin_query(view, out, &ctx, &sessions, &[], &config_json);
         };
 
         self.declare_queryable(queryable_key, QueryableOptions::default(), handler)

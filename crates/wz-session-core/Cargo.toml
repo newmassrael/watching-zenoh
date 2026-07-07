@@ -84,6 +84,14 @@ adminspace-core = ["alloc", "keyexpr-wildcard-double", "pubsub-encoding"]
 # builder + the metrics keyexpr helper); composes adminspace-core. The wiring
 # (the metrics dispatch branch) lives in wz-runtime-tokio's adminspace-metrics.
 adminspace-metrics = ["adminspace-core"]
+# adminspace-introspection-handlers (§5.23) — the per-entity admin introspection
+# reply legs (`@/<zid>/<whatami>/{subscriber,queryable}/<keyexpr>`) inside
+# `answer_admin_query` + the `admin_entity_key` helper. The wz analogue of zenoh's
+# `subscribers_data`/`queryables_data` handlers; the `AdminDeclaration` slice the
+# reply consumes is always-compiled (signature stability). Composes adminspace-core
+# (the reply machinery + the keyexpr matcher). publisher/querier are OMITTED (wz
+# maintains no such table; zenoh's empty-table loop emits nothing).
+adminspace-introspection-handlers = ["adminspace-core"]
 
 # ext-pubsub-serde-codec (§5.25) — the Zenoh Serialization Format codec
 # (z_serialize / z_deserialize), the leaf prerequisite for the advanced

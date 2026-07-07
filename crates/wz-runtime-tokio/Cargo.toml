@@ -218,6 +218,15 @@ adminspace-core = ["query-queryable", "wz-session-core/adminspace-core"]
 # build-info body (text/plain). Composes adminspace-core (the dispatch + the
 # metrics_text builder).
 adminspace-metrics = ["adminspace-core", "wz-session-core/adminspace-metrics"]
+# adminspace-introspection-handlers (§5.23) — the per-entity subscriber/queryable
+# admin introspection. Composes adminspace-core (the reply machinery) + the
+# wz-session-core reply legs, and the caller-side live materialization: the
+# LinkstateForwarder `subscriptions()`/`queryables()` whole-table accessors (this
+# crate) that the demo host snapshots per app-tick.
+adminspace-introspection-handlers = [
+    "adminspace-core",
+    "wz-session-core/adminspace-introspection-handlers",
+]
 
 # ext-pubsub-serde-codec (§5.25) — pure forward of the Zenoh
 # Serialization Format codec from wz-session-core (no runtime wiring;

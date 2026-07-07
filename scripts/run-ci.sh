@@ -1474,7 +1474,9 @@ layer_c1am_cargo_test_adminspace() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-metrics,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-read,adminspace-metrics,query-get --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-write,query-get --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-write,query-get --quiet -- -D warnings \
+        && cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-introspection-handlers --quiet -- -D warnings)
 }
 
 # ─── Layer C1an — adminspace §5.23 SELF-SUFFICIENCY under --no-default-features ─
@@ -4561,6 +4563,27 @@ layer_e6_peer_mesh() {
     fi
 }
 
+# ─── Layer E6b — §5.23 adminspace-introspection-handlers E2E ───────────────────
+#
+# The per-entity admin introspection (R311y203) driven over the wire: a routing peer
+# A (--config-queryable --subscribe demo/data) answers a client B's
+# `@/<A_zid>/peer/subscriber/**` GET with the LIVE keyexpr of its declared subscriber
+# (the wz analogue of zenoh's `subscribers_data`). Needs its OWN demo binary built
+# with `--features routing-peer,adminspace-introspection-handlers` (a superset of the
+# E6 `adminspace-write` binary, but a distinct feature), so it rides its own lane
+# rather than clobbering E6's binary mid-lane. The e2e asserts the reply key carries
+# the ACTUAL declared keyexpr + the live Sources body, so a green reply cannot be a
+# static echo — it proves the live `forwarder.subscriptions()` enumeration. wz<->wz
+# loopback (the
+# introspection adds no wire format, so no cross-impl leg is needed). The
+# `wz_peer_` fn prefix keeps the default Layer E sweep's `--skip wz_peer` from
+# double-running it on an arbitrary-feature binary.
+layer_e6b_adminspace_introspection() {
+    (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-introspection-handlers --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_adminspace_introspection -- --ignored --quiet) || return 1
+}
+
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
 #
 # The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
@@ -4829,6 +4852,7 @@ run_layer E3 layer_e3_router_multi_peer || overall=1
 run_layer E4 layer_e4_router_reject || overall=1
 run_layer E5 layer_e5_router_forward || overall=1
 run_layer E6 layer_e6_peer_mesh || overall=1
+run_layer E6b layer_e6b_adminspace_introspection || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E8 layer_e8_router_hat_pico || overall=1
