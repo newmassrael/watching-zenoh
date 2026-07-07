@@ -2476,6 +2476,12 @@ impl RouterForwarder {
         if inbound_is_mcast {
             return;
         }
+        // `source_is_mesh` gates the I3b Designated-Router egress below, which is
+        // `router-multicast-faces`-only; a `transport-multicast` egress-only build
+        // (no ingress plane / DR election) has no use for it, so consume it here to
+        // avoid an unused-variable error under `-D warnings` (run-ci Layer C1ay).
+        #[cfg(not(feature = "router-multicast-faces"))]
+        let _ = source_is_mesh;
         // I3b Designated-Router gate — applied ONLY to MESH-sourced Puts
         // (`source_is_mesh`), NEVER to a local unicast client's produce. A mcast
         // group is a shared broadcast medium, so a router must always egress its
