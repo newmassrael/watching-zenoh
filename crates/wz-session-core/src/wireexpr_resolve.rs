@@ -15,6 +15,8 @@ use alloc::string::{String, ToString};
 
 use hashbrown::HashMap;
 
+#[cfg(feature = "codec-declare")]
+use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::wireexpr::WireexprOwnedVariant;
 
 /// Resolve a `Wireexpr` to its literal keyexpr string using a peer
@@ -66,5 +68,32 @@ pub fn resolve_wireexpr(
             }
             None => base,
         })
+    }
+}
+
+/// Absorb one keyexpr (un)declaration into a peer's `id -> literal` mapping
+/// table — the SSOT shared by the unicast router faces (each
+/// `LinkstateForwarder` / `RouterForwarder` per-face `keyexpr_table`) and the
+/// multicast per-peer ingress plane
+/// (`MulticastDispatcher::apply_declared_aliases`, §5.21 router-multicast-faces
+/// I3a). A `DeclKexpr` resolves its own (possibly itself-aliased) keyexpr
+/// against the table so far, then binds `id -> literal` (zenoh registers the
+/// mapping under the declaring face's resource table); an `UndeclKexpr` drops
+/// the binding. Any other declaration body is a no-op here. Before this moved
+/// to `wz-session-core` (R311y196) a byte-identical copy lived in
+/// `wz-runtime-tokio::linkstate_forward`; the multicast ingress plane needs the
+/// same absorb from the no_std session core, so the one definition lives here.
+#[cfg(feature = "codec-declare")]
+pub fn absorb_keyexpr_into(table: &mut HashMap<u64, String>, declare: &DeclareOwned) {
+    match &declare.body {
+        DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
+            if let Some(literal) = resolve_wireexpr(&d.keyexpr.body, table) {
+                table.insert(d.id, literal);
+            }
+        }
+        DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
+            table.remove(&u.id);
+        }
+        _ => {}
     }
 }

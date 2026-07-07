@@ -458,6 +458,22 @@ routing-routes = ["codec-push", "declare-subscriber", "session-unicast"]
 # the AP/router-side decorator capability, not a data-plane selector.
 routing-namespace = ["alloc", "keyexpr-prefix"]
 
+# R311y196 — multicast-declarations (§5.21 router-multicast-faces, I3a): the
+# per-peer keyexpr-alias ingress plane on the multicast dispatcher. Gives each
+# `MulticastDispatcher` peer slot an `id -> literal` `keyexpr_table` populated
+# from the `DeclKexpr` declarations it sends over the group, and the
+# `apply_declared_aliases` decorator (the id-only -> literal twin of the
+# routing-namespace `apply_namespace_ingress`) that rewrites the peer's aliased
+# `Push`es to literal BEFORE the observer fan — so the router-hat ingress face
+# routes an already-literal Push and the I1 literal-only restriction is lifted.
+# Pulls `alloc` (the per-peer `HashMap<u64,String>` + the owned `NetworkMessage`
+# batch), `codec-declare` (the `DeclKexpr`/`UndeclKexpr` variants absorbed via
+# the shared `absorb_keyexpr_into` SSOT), and `codec-push` (the `Push` keyexpr
+# rewritten). Fully cfg-gated (field + method + both `multicast_rx` call sites),
+# so a non-declarations build — including the no-alloc MCU multicast loop —
+# compiles neither the table nor the decorator: no per-peer alias state, no cost.
+multicast-declarations = ["session-multicast", "alloc", "codec-declare", "codec-push"]
+
 # R311dx — query-side dispatch gates for the migrated QueryableRegistry
 # (`wz-session-core::query`). `query-queryable` forwards to the
 # codec-request (Request/Query dispatch) + codec-response (reply-build)

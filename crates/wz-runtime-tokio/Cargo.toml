@@ -867,7 +867,19 @@ routing-token-tables = ["routing-router-hat"]
 # `spawn_router_mcast_egress` binds — the McastGroup/attach/broadcast plane is
 # driver-generic, but the run-mode host needs a real UDP socket). Egress-first:
 # the mcast_faces INGRESS plane is the deferred milestone.
-router-multicast-faces = ["routing-router-hat", "transport-multicast", "transport-link-udp"]
+#
+# R311y196 (I3a) — also pulls `wz-session-core/multicast-declarations`, the
+# per-peer keyexpr-alias ingress plane (each `MulticastDispatcher` peer slot
+# absorbs its `DeclKexpr`s + resolves its aliased `Push`es to literal before the
+# fan). It rides the SAME `codec-push`-gated ingress host, so a narrow build
+# without `codec-push` elides the host and the aliasing is dormant (session-core
+# compiles it but nothing drives it) — the I1 narrow-build contract is unchanged.
+router-multicast-faces = [
+    "routing-router-hat",
+    "transport-multicast",
+    "transport-link-udp",
+    "wz-session-core/multicast-declarations",
+]
 # ── §5.16 access-control composition knobs ───────────────────────────
 # Each independently elides ONE interceptor on the routing-peer admission
 # chain (interceptor/{access_control,downsampling,low_pass}.rs). The chain

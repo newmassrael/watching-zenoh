@@ -4418,22 +4418,11 @@ pub(crate) fn re_advertise_interest_into<V: Clone>(
 /// so it is resolved against `table` before recording; an unknown-alias declare
 /// is dropped. Link-local: each link negotiates its own aliases (not re-flooded).
 /// Only the two keyexpr-declaration bodies reach here; a defensive no-op otherwise.
-pub(crate) fn absorb_keyexpr_into(
-    table: &mut hashbrown::HashMap<u64, String>,
-    declare: &DeclareOwned,
-) {
-    match &declare.body {
-        DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
-            if let Some(literal) = resolve_wireexpr(&d.keyexpr.body, table) {
-                table.insert(d.id, literal);
-            }
-        }
-        DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
-            table.remove(&u.id);
-        }
-        _ => {}
-    }
-}
+// R311y196 — the keyexpr-absorb SSOT moved to `wz-session-core` so the no_std
+// multicast per-peer ingress plane (§5.21 router-multicast-faces I3a) and the
+// unicast router faces share ONE definition. Re-exported here so every existing
+// `absorb_keyexpr_into(..)` call site in this module is unchanged.
+pub(crate) use wz_session_core::wireexpr_resolve::absorb_keyexpr_into;
 
 /// Whether `zid` is one of `children` — the tree next hops a fan-out targets.
 /// The shared membership check the originate paths ([`publish`](LinkstateForwarder::publish)

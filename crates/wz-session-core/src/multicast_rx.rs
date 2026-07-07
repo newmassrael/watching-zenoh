@@ -136,6 +136,17 @@ where
                             // batch (per-peer via `src`) BEFORE the observer fan,
                             // the multicast INGRESS seam (the `ENamespace` mirror).
                             // No-op when no namespace is installed / feature off.
+                            // §5.21 router-multicast-faces (I3a) — resolve this
+                            // peer's aliased Push keyexprs against the DeclKexpr
+                            // declarations it sent over the group, per peer via
+                            // `src`, BEFORE the fan (the id-only -> literal mirror
+                            // of the namespace strip). Runs BEFORE the namespace
+                            // strip so a namespaced+aliased push is first made
+                            // literal, then the prefix is stripped from the
+                            // literal. No-op when the feature is off (MCU) or the
+                            // peer declared no aliases.
+                            #[cfg(feature = "multicast-declarations")]
+                            dispatcher.apply_declared_aliases(src, &mut outcome);
                             #[cfg(feature = "routing-namespace")]
                             dispatcher.apply_namespace_ingress(src, &mut outcome);
                             on_event(IterationEvent::Poll(&outcome));

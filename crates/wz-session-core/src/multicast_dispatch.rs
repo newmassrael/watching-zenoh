@@ -113,6 +113,20 @@ use crate::namespace::NamespaceIngress;
 /// Router holds no allocation per peer.
 const ZID_MAX: usize = 16;
 
+/// §5.21 router-multicast-faces (I3a) — the per-peer keyexpr-alias table cap.
+/// A multicast peer is admitted on an UNAUTHENTICATED JOIN, so an adversarial
+/// LAN host could otherwise flood distinct-id `DeclKexpr` over UDP to grow
+/// [`PeerSlot::keyexpr_table`] without bound (memory exhaustion) — the reassembly
+/// and peer-pool state are strictly bounded, and this table must be too. The cap
+/// gates only NEW growth: removals (`UndeclKexpr`) and re-declares of a known id
+/// never grow the table, so a full table stays drainable. 256 is generous for a
+/// legitimate repeated-keyexpr publisher (a peer with more distinct keyexprs
+/// would send literals, not aliases). The `namespace_ingress` twin carries the
+/// same unbounded pattern (pre-existing, `routing-namespace`) — a follow-up
+/// unifies the bound across both per-peer decorators.
+#[cfg(feature = "multicast-declarations")]
+const MAX_ALIASES_PER_PEER: usize = 256;
+
 /// Deploy-sourced multicast runtime knobs (§3.1 PeerSweep lease).
 ///
 /// The pool DIMENSION (`MAX_PEERS`) is the [`MulticastDispatcher`] const
@@ -347,6 +361,22 @@ struct PeerSlot {
     /// slot never inherits a dead peer's blocked-id state.
     #[cfg(feature = "routing-namespace")]
     namespace_ingress: Option<NamespaceIngress>,
+    /// §5.21 router-multicast-faces (I3a) — this peer's `id -> literal` keyexpr
+    /// alias table, populated from the `DeclKexpr` declarations it sends over
+    /// the group and read to resolve its aliased `Push`es to literal BEFORE the
+    /// observer fan ([`MulticastDispatcher::apply_declared_aliases`]). PER-PEER
+    /// because a multicast group multiplexes many senders whose wire ids
+    /// collide (peer A's id 5 != peer B's id 5) — the same `src`/slot key every
+    /// other multicast correlation already uses (SN gate, lease, reassembly
+    /// chains, namespace ingress). CLEARED on [`Self::evict`] so a recycled slot
+    /// never inherits a dead peer's aliases. The keyexpr-alias twin of
+    /// `namespace_ingress`; zenoh keeps the equivalent per-peer resource table
+    /// on each `mcast_faces` `FaceState` (`router.rs` `new_peer_multicast`), but
+    /// wz has no per-peer router face upstream of the RX dispatch, so — exactly
+    /// as `namespace_ingress` documents — the faithful adaptation keys it per
+    /// peer here.
+    #[cfg(feature = "multicast-declarations")]
+    keyexpr_table: hashbrown::HashMap<u64, alloc::string::String>,
 }
 
 impl PeerSlot {
@@ -365,6 +395,8 @@ impl PeerSlot {
             rx_sn_best_effort: 0,
             #[cfg(feature = "routing-namespace")]
             namespace_ingress: None,
+            #[cfg(feature = "multicast-declarations")]
+            keyexpr_table: hashbrown::HashMap::new(),
         }
     }
 
@@ -422,6 +454,15 @@ impl PeerSlot {
         #[cfg(feature = "routing-namespace")]
         {
             self.namespace_ingress = None;
+        }
+        // §5.21 router-multicast-faces (I3a) — drop this peer's keyexpr aliases
+        // with the slot so a recycled index can never resolve a new peer's
+        // id-only Push against a dead peer's declaration (the same recycle-safety
+        // the SN / namespace reset above gives; wz reclaims where zenoh leaks the
+        // mcast_faces shell).
+        #[cfg(feature = "multicast-declarations")]
+        {
+            self.keyexpr_table.clear();
         }
     }
 }
@@ -516,6 +557,86 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 .namespace_ingress
                 .get_or_insert_with(|| NamespaceIngress::new(ns.clone()));
             crate::namespace::strip_outcome(ingress, outcome);
+        }
+    }
+
+    /// §5.21 router-multicast-faces (I3a) — resolve this peer's inbound aliased
+    /// keyexprs against its per-peer `id -> literal` declaration table, IN PLACE,
+    /// BEFORE the batch is fanned to the observer. The keyexpr-alias twin of
+    /// [`apply_namespace_ingress`](Self::apply_namespace_ingress): the inbound
+    /// batch came from ONE peer (`src`), so a `DeclKexpr` / `UndeclKexpr` it
+    /// carries mutates THAT peer's table (`absorb_keyexpr_into`, the shared
+    /// unicast+multicast SSOT) and every `Push` in the batch has its (possibly
+    /// id-only) keyexpr rewritten to the resolved literal — so the downstream
+    /// router-ingress face (which holds NO per-peer alias table) routes an
+    /// already-literal `Push`, exactly as the literal-only I1 plane required. An
+    /// id-only `Push` whose alias this peer never declared resolves to `None` and
+    /// is left untouched (the empty-table sentinel resolution then drops it,
+    /// identical to I1). Declarations stay in the batch (the ingress fold ignores
+    /// non-`Push` messages); only the `Push` keyexprs are rewritten.
+    ///
+    /// Feature-gated end to end (this method, the [`PeerSlot`] table field, and
+    /// both call sites in `multicast_rx`) so a non-declarations build — INCLUDING
+    /// the no-alloc MCU multicast loop, which never enables the feature —
+    /// compiles neither the table nor this method: no per-peer alias state, no
+    /// call cost. Only an already-admitted Frame (or a completed fragment chain)
+    /// reaches here, so a live slot matches `src`; a `src` with no matching slot
+    /// returns without touching the batch.
+    #[cfg(feature = "multicast-declarations")]
+    pub fn apply_declared_aliases(
+        &mut self,
+        src: SocketAddr,
+        outcome: &mut crate::driver_loop::DriverLoopOutcome,
+    ) {
+        use crate::network_message::NetworkMessage;
+        let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
+            return;
+        };
+        let Some(slot) = self.peers.iter_mut().find(|p| p.matches_src(src)) else {
+            return;
+        };
+        for msg in messages.iter_mut() {
+            match msg {
+                NetworkMessage::Declare(declare) => {
+                    // Bound the per-peer alias table against an unauthenticated
+                    // multicast peer flooding distinct-id DeclKexpr (memory
+                    // exhaustion). Reject ONLY new growth past the cap — a removal
+                    // (UndeclKexpr) or a re-declare of a known id never grows the
+                    // table, so it always flows (a full table must stay drainable).
+                    let grows_past_cap = slot.keyexpr_table.len() >= MAX_ALIASES_PER_PEER
+                        && matches!(
+                            &declare.body,
+                            wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclKexpr(d)
+                                if !slot.keyexpr_table.contains_key(&d.id)
+                        );
+                    if !grows_past_cap {
+                        crate::wireexpr_resolve::absorb_keyexpr_into(
+                            &mut slot.keyexpr_table,
+                            declare,
+                        );
+                    }
+                }
+                NetworkMessage::Push(push) => {
+                    if let Some(literal) = crate::wireexpr_resolve::resolve_wireexpr(
+                        &push.keyexpr.body,
+                        &slot.keyexpr_table,
+                    ) {
+                        // Re-literalize the keyexpr AND the header's N
+                        // (suffix-present, 0x20) bit IN SYNC. A pure-aliased Push
+                        // carried the N bit CLEAR; rewriting only `keyexpr` to a
+                        // suffix-bearing literal while leaving N clear forwards
+                        // verbatim through `reliteralize_push`'s already-literal
+                        // shortcut and drops the subscriber's decoder into an
+                        // offset-shifted read. `set_push_keyexpr_literal` is the
+                        // SSOT that sets both (the same the unicast forwarder uses
+                        // on its literal egress). On a codec error the Push is left
+                        // unchanged (id-only -> dropped by the sentinel resolution,
+                        // as an undeclared alias would be).
+                        let _ = crate::push_build::set_push_keyexpr_literal(push, &literal);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -933,6 +1054,19 @@ pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, con
         },
     );
     if let Some(o) = completed {
+        // §5.21 router-multicast-faces (I3a) — resolve this peer's aliased Push
+        // keyexprs on the REASSEMBLED batch too (per-peer via `src`), symmetric
+        // with the whole-Frame seam in `multicast_rx::dispatch_multicast_inbound`
+        // so a fragmented aliased push is not silently dropped for lack of
+        // attribution. The table was populated by the peer's earlier whole-frame
+        // DeclKexpr; here the completed chain carries only the resolvable Push.
+        // Runs BEFORE the namespace strip (id-only -> literal, then prefix strip).
+        #[cfg(feature = "multicast-declarations")]
+        let o = {
+            let mut o = o;
+            dispatcher.apply_declared_aliases(src, &mut o);
+            o
+        };
         // §5.21 routing-namespace — strip the REASSEMBLED batch (per-peer via
         // `src`) BEFORE the observer fan, symmetric with the whole-Frame seam in
         // `multicast_rx::dispatch_multicast_inbound`. The shadow keeps `o`
@@ -2221,5 +2355,239 @@ mod tests {
             assert_eq!(r.active_chains(), 2, "one chain per peer slot");
             assert!(cap.drops.is_empty(), "no cross-peer chain interference");
         }
+    }
+
+    /// §5.21 router-multicast-faces (I3a) — a peer's `DeclKexpr` populates its
+    /// per-peer alias table so a subsequent id-only `Push` is rewritten to the
+    /// declared literal BEFORE the fan; the downstream literal-only sentinel
+    /// face then resolves it against an EMPTY table. Lifts the I1 literal-only
+    /// restriction, per peer.
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn declared_alias_resolves_inbound_push_to_literal() {
+        use crate::declare_build::build_declare_kexpr;
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::network_message::NetworkMessage;
+        use crate::push_build::build_push_aliased;
+        use crate::wireexpr_resolve::resolve_wireexpr;
+        use alloc::boxed::Box;
+        use alloc::string::{String, ToString};
+        use alloc::vec;
+
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+
+        // Peer A declares id 5 -> "demo/keyexpr", then publishes an id-only Push(5).
+        let mut outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![
+                NetworkMessage::Declare(Box::new(build_declare_kexpr(5, "demo/keyexpr").unwrap())),
+                NetworkMessage::Push(Box::new(build_push_aliased(5, None, b"payload").unwrap())),
+            ],
+            has_ext: false,
+            extensions: vec![],
+        };
+        d.apply_declared_aliases(SRC_A, &mut outcome);
+
+        let DriverLoopOutcome::FramePayload { messages, .. } = &outcome else {
+            unreachable!()
+        };
+        let NetworkMessage::Push(push) = &messages[1] else {
+            panic!("expected the Push at index 1");
+        };
+        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        assert_eq!(
+            resolve_wireexpr(&push.keyexpr.body, &empty),
+            Some("demo/keyexpr".to_string()),
+            "declared alias must rewrite the id-only Push to its literal keyexpr",
+        );
+        // The header N (suffix-present) bit MUST be set in sync with the now
+        // suffix-bearing literal keyexpr — else `reliteralize_push`'s
+        // already-literal shortcut forwards a malformed Push (N clear, suffix
+        // present) that desyncs the subscriber's decoder.
+        assert_ne!(
+            push.header & 0x20,
+            0,
+            "re-literalized Push must carry the header N bit (keyexpr/header in sync)",
+        );
+    }
+
+    /// §5.21 router-multicast-faces (I3a) — an id-only `Push` with NO prior
+    /// `DeclKexpr` from that peer is left untouched (unresolvable against an
+    /// empty table), exactly as the I1 literal-only plane dropped it: aliasing
+    /// lifts the restriction ONLY for genuinely-declared ids.
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn undeclared_alias_stays_unresolved() {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::network_message::NetworkMessage;
+        use crate::push_build::build_push_aliased;
+        use crate::wireexpr_resolve::resolve_wireexpr;
+        use alloc::boxed::Box;
+        use alloc::string::String;
+        use alloc::vec;
+
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+
+        let mut outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(
+                build_push_aliased(7, None, b"payload").unwrap(),
+            ))],
+            has_ext: false,
+            extensions: vec![],
+        };
+        d.apply_declared_aliases(SRC_A, &mut outcome);
+
+        let DriverLoopOutcome::FramePayload { messages, .. } = &outcome else {
+            unreachable!()
+        };
+        let NetworkMessage::Push(push) = &messages[0] else {
+            panic!("expected a Push");
+        };
+        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        assert_eq!(
+            resolve_wireexpr(&push.keyexpr.body, &empty),
+            None,
+            "an undeclared alias must stay id-only (dropped by the sentinel resolution, as in I1)",
+        );
+    }
+
+    /// §5.21 router-multicast-faces (I3a) — evicting a peer (Close / lease)
+    /// clears its alias table, so a recycled slot never resolves a new peer's
+    /// id-only `Push` against a dead peer's declaration (wz reclaims where zenoh
+    /// leaks the mcast_faces shell).
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn evict_clears_peer_aliases() {
+        use crate::declare_build::build_declare_kexpr;
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::network_message::NetworkMessage;
+        use crate::push_build::build_push_aliased;
+        use crate::wireexpr_resolve::resolve_wireexpr;
+        use alloc::boxed::Box;
+        use alloc::string::String;
+        use alloc::vec;
+
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+
+        // Peer A declares id 5, then departs (Close -> evict).
+        let mut decl = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(
+                build_declare_kexpr(5, "demo/keyexpr").unwrap(),
+            ))],
+            has_ext: false,
+            extensions: vec![],
+        };
+        d.apply_declared_aliases(SRC_A, &mut decl);
+        assert!(d.close_by_src(SRC_A), "peer A must evict");
+
+        // Peer A rejoins the recycled slot and publishes the SAME id 5 — with no
+        // fresh DeclKexpr it must NOT resolve against the dead declaration.
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        let mut outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(
+                build_push_aliased(5, None, b"payload").unwrap(),
+            ))],
+            has_ext: false,
+            extensions: vec![],
+        };
+        d.apply_declared_aliases(SRC_A, &mut outcome);
+
+        let DriverLoopOutcome::FramePayload { messages, .. } = &outcome else {
+            unreachable!()
+        };
+        let NetworkMessage::Push(push) = &messages[0] else {
+            panic!("expected a Push");
+        };
+        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        assert_eq!(
+            resolve_wireexpr(&push.keyexpr.body, &empty),
+            None,
+            "the recycled slot must NOT inherit peer A's id-5 alias",
+        );
+    }
+
+    /// §5.21 router-multicast-faces (I3a) — the per-peer alias table is capped:
+    /// an unauthenticated multicast peer cannot flood distinct-id DeclKexpr to
+    /// exhaust memory. Growth past the cap is rejected while an in-cap alias
+    /// keeps resolving (the table stays usable + drainable).
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn per_peer_alias_table_is_capped() {
+        use crate::declare_build::build_declare_kexpr;
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::network_message::NetworkMessage;
+        use crate::push_build::build_push_aliased;
+        use crate::wireexpr_resolve::resolve_wireexpr;
+        use alloc::boxed::Box;
+        use alloc::string::{String, ToString};
+        use alloc::{format, vec};
+
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+
+        // Fill the cap with distinct-id DeclKexpr (ids 1..=MAX_ALIASES_PER_PEER).
+        let mut fill = vec![];
+        for id in 1..=MAX_ALIASES_PER_PEER as u64 {
+            fill.push(NetworkMessage::Declare(Box::new(
+                build_declare_kexpr(id, &format!("demo/{id}")).unwrap(),
+            )));
+        }
+        let mut b0 = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: fill,
+            has_ext: false,
+            extensions: vec![],
+        };
+        d.apply_declared_aliases(SRC_A, &mut b0);
+
+        // One id PAST the cap (new growth) + Pushes for the over-cap id and an
+        // in-cap id. Growth is rejected; the in-cap alias still resolves.
+        let over = MAX_ALIASES_PER_PEER as u64 + 1;
+        let mut b1 = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 1,
+            messages: vec![
+                NetworkMessage::Declare(Box::new(
+                    build_declare_kexpr(over, "demo/overflow").unwrap(),
+                )),
+                NetworkMessage::Push(Box::new(build_push_aliased(over, None, b"x").unwrap())),
+                NetworkMessage::Push(Box::new(build_push_aliased(1, None, b"x").unwrap())),
+            ],
+            has_ext: false,
+            extensions: vec![],
+        };
+        d.apply_declared_aliases(SRC_A, &mut b1);
+
+        let DriverLoopOutcome::FramePayload { messages, .. } = &b1 else {
+            unreachable!()
+        };
+        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        let NetworkMessage::Push(p_over) = &messages[1] else {
+            panic!("expected the over-cap Push at index 1");
+        };
+        assert_eq!(
+            resolve_wireexpr(&p_over.keyexpr.body, &empty),
+            None,
+            "an alias declared past the per-peer cap must be rejected (unresolved)",
+        );
+        let NetworkMessage::Push(p_in) = &messages[2] else {
+            panic!("expected the in-cap Push at index 2");
+        };
+        assert_eq!(
+            resolve_wireexpr(&p_in.keyexpr.body, &empty),
+            Some("demo/1".to_string()),
+            "an in-cap alias must still resolve after the cap is reached",
+        );
     }
 }
