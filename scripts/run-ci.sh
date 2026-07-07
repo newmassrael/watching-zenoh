@@ -1205,6 +1205,18 @@ layer_c1ax_cargo_test_routing_namespace() {
 #      (R311y188) flipped the atom ACTIVE: the `cargo build -p wz-ap-demo --features
 #      router-multicast-faces` step compiles the run_router_hat mcast host
 #      (spawn_router_mcast_egress + attach_mcast_group) — the atom's A3 cfg site.
+#   7. §5.21 router-connect-reconcile (R311y202): the runtime dynamic connect-list
+#      reconcile (zenoh `update_peers`) + peer auto-reconnect (`closed_session`) — a
+#      reconcile channel on the shared face_drive_loop that dials a newly-listed
+#      connect endpoint (address dedup) AND `schedule_redial` re-dials a dropped
+#      still-desired peer. The reconcile state + Step::Reconcile handler + the redial
+#      arms are `#[cfg(feature="router-connect-reconcile")]`-gated in accept_loop,
+#      NEVER compiled by the plain routing-router-hat arm above, so the
+#      `routing-router-hat,router-connect-reconcile` clippy arm lints the reconcile
+#      cfg sites (+ the `--no-default-features` narrow-combo arm), and the
+#      `cargo build -p wz-ap-demo --features router-connect-reconcile` step compiles
+#      the `--connect-after` run-mode host (the atom's A3 cfg site). The wz<->wz E2E
+#      runs in Layer E7b.
 layer_c1ay_cargo_test_router_hat() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet \
@@ -1217,7 +1229,10 @@ layer_c1ay_cargo_test_router_hat() {
         && cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,transport-multicast --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-token-tables --quiet -- -D warnings \
-        && cargo build -p wz-ap-demo --features router-multicast-faces --quiet)
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,router-connect-reconcile --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features router-connect-reconcile --quiet -- -D warnings \
+        && cargo build -p wz-ap-demo --features router-multicast-faces --quiet \
+        && cargo build -p wz-ap-demo --features router-connect-reconcile --quiet)
 }
 
 # ─── Layer C1az — §5.26 rest-sse-subscribe: the SSE half of the REST bridge ─
@@ -4565,6 +4580,38 @@ layer_e7_router_hat() {
         --test wz_router_hat_mesh -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E7b — router-connect-reconcile: runtime connect-list reconcile E2E ───
+#
+# The §5.21 `router-connect-reconcile` atom (R311y202) driven END TO END over real
+# transport: a router-hat learns a NEW connect endpoint at RUNTIME (via the
+# `--connect-after` operator affordance) and dials it, federating with a peer it
+# never had on its startup `--connect` list — the wz port of zenoh's `update_peers`
+# (orchestrator.rs:413). TWO binaries: the positive tests run first against the
+# feature-on build, THEN the feature-off binary is rebuilt (over the same
+# target/debug/wz-ap-demo path) for the negative test — the ORDERING, not any
+# non-clobber property, is what keeps each test on the binary it needs:
+#   - POSITIVE (feature ON): `router-hat-router,router-connect-reconcile` — R1 with
+#     no `--connect` reconcile-dials R2 at runtime, converging its router tier to 2.
+#   - NEGATIVE (feature OFF): the `router-hat-router`-only binary treats
+#     `--connect-after` as inert (warns + ignores), the feature-gate lockstep.
+# Cross-impl is not needed (the reconcile adds no new wire format — the dial reuses
+# the cross-impl-proven session handshake), so a wz<->wz loopback covers the whole
+# new control path. The `wz_router_hat_` fn prefix keeps the default Layer E sweep's
+# `--skip wz_router` from double-running these on an arbitrary-feature binary.
+layer_e7b_router_connect_reconcile() {
+    # POSITIVE (feature ON): both the connect-added reconcile (slice 1) and the peer
+    # auto-reconnect redial-on-drop (slice 2) against the reconcile binary; skip the
+    # feature-off negative (it needs the no-reconcile binary below).
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,router-connect-reconcile --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_connect_reconcile -- --ignored --skip requires_feature --quiet) || return 1
+    # NEGATIVE (feature OFF): --connect-after inert on the router-hat-router-only
+    # binary (rebuilt here so it never shares the reconcile build).
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_connect_reconcile wz_router_hat_reconcile_requires_feature -- --ignored --quiet) || return 1
+}
+
 # ─── Layer E8 — router-hat CROSS-IMPL vs zenoh-pico (P4 §5.21) ───
 #
 # The dual-mesh RouterForwarder proven against a FOREIGN zenoh client: a wz
@@ -4783,6 +4830,7 @@ run_layer E4 layer_e4_router_reject || overall=1
 run_layer E5 layer_e5_router_forward || overall=1
 run_layer E6 layer_e6_peer_mesh || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
+run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E8 layer_e8_router_hat_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1

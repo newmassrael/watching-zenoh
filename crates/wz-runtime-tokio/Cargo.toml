@@ -859,6 +859,17 @@ routing-router-hat = ["routing-peer"]
 # routing-peer -> codec-declare already (like build_declare_subscriber under
 # routing-router-hat), so no declare-token app-surface dep is needed.
 routing-token-tables = ["routing-router-hat"]
+# §5.21 router-connect-reconcile — the runtime dynamic connect-list reconcile
+# (zenoh `net/runtime/orchestrator.rs:413` `update_peers`) + peer auto-reconnect
+# (the `closed_session` 1194 Peer/Router re-dial). The shared `face_drive_loop`
+# gains (1) a reconcile channel that dials each newly-listed connect endpoint not
+# already being dialed (ADD-ONLY, address dedup — a config endpoint has no zid
+# until the handshake; the Client close-removed branch is NOT ported, it would
+# blackhole a router mesh) and (2) `schedule_redial`/`dial_face_after`, which
+# re-dial a dropped/failed still-desired outbound peer with a fixed backoff
+# (retry-until-success). Composes only the RouterForwarder foundation (both live on
+# the shared accept/peer loop under the router-hat run mode).
+router-connect-reconcile = ["routing-router-hat"]
 # §5.21 router-multicast-faces (slice-3 EGRESS run-mode) — the router forwards a
 # routed Push over a multicast group (zenoh mcast_groups / McastMux egress,
 # router.rs:181). Composes routing-router-hat (the RouterForwarder + the

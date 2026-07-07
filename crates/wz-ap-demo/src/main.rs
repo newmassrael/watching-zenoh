@@ -248,7 +248,32 @@ fn main() -> ExitCode {
             let dial_targets: Vec<String> = parse_pair(rest, "--connect")
                 .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
                 .unwrap_or_default();
-            return run_router_hat_mode(router_hat_listen, dial_targets);
+            // `--connect-after <ms>:<addr>[,<addr>...]` (router-connect-reconcile):
+            // schedule a runtime connect-list ADD `<ms>` after startup. Split on the
+            // FIRST `:` so the `<addr>` `host:port` colon is preserved.
+            #[cfg(feature = "router-connect-reconcile")]
+            let connect_after: Option<(u64, Vec<String>)> = parse_pair(rest, "--connect-after")
+                .and_then(|s| {
+                    let (ms, addrs) = s.split_once(':')?;
+                    let ms: u64 = ms.trim().parse().ok()?;
+                    let addrs: Vec<String> =
+                        addrs.split(',').map(|t| t.trim().to_string()).collect();
+                    Some((ms, addrs))
+                });
+            #[cfg(not(feature = "router-connect-reconcile"))]
+            let connect_after: Option<(u64, Vec<String>)> = {
+                // Feature off: the flag is inert. Surface an explicit hint (keeping
+                // the catalog claim and the binary in lockstep) rather than silently
+                // ignoring it.
+                if parse_pair(rest, "--connect-after").is_some() {
+                    eprintln!(
+                        "wz-ap-demo: --connect-after requires the \
+                         `router-connect-reconcile` feature; ignoring"
+                    );
+                }
+                None
+            };
+            return run_router_hat_mode(router_hat_listen, dial_targets, connect_after);
         }
         #[cfg(not(feature = "router-hat-router"))]
         {
@@ -807,7 +832,11 @@ fn run_peer_mode(
 /// [`run_peer_mode`] — bind + dial the `--connect` router set + hold faces — but
 /// the node announces Router and hosts no application I/O (a pure router).
 #[cfg(feature = "router-hat-router")]
-fn run_router_hat_mode(listen: String, dial_targets: Vec<String>) -> ExitCode {
+fn run_router_hat_mode(
+    listen: String,
+    dial_targets: Vec<String>,
+    connect_after: Option<(u64, Vec<String>)>,
+) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
         Ok(rt) => rt,
@@ -816,7 +845,11 @@ fn run_router_hat_mode(listen: String, dial_targets: Vec<String>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match runtime.block_on(crate::runner::run_router_hat(&listen, &dial_targets)) {
+    match runtime.block_on(crate::runner::run_router_hat(
+        &listen,
+        &dial_targets,
+        connect_after,
+    )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wz-ap-demo: {e}");

@@ -224,6 +224,12 @@ routing-token-tables = ["router-hat-router", "wz/routing-token-tables"]
 # router-hat-router (the run-mode) + the facade passthrough; the atom is
 # active <=> its own cfg site in run_router_hat (mirrors routing-token-tables).
 router-multicast-faces = ["router-hat-router", "wz/router-multicast-faces"]
+# §5.21 router-connect-reconcile (R311y202) — compiles the `--connect-after`
+# runtime connect-list reconcile affordance INSIDE run_router_hat (the reconcile
+# channel wiring + the app-tick fire). Pulls router-hat-router (the run-mode) + the
+# facade passthrough; the atom is active <=> its own cfg sites in run_router_hat +
+# main.rs arg parse (mirrors router-multicast-faces / routing-token-tables).
+router-connect-reconcile = ["router-hat-router", "wz/router-connect-reconcile"]
 
 [lints]
 workspace = true

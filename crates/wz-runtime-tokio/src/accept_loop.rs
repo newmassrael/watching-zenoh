@@ -153,6 +153,32 @@ pub type DialIntentSender = tokio::sync::mpsc::UnboundedSender<DialIntent>;
 /// The accept loop's receiving end, drained in the loop's `select!` (A5c).
 pub type DialIntentReceiver = tokio::sync::mpsc::UnboundedReceiver<DialIntent>;
 
+/// A runtime connect-list reconcile request (`router-connect-reconcile`): the NEW
+/// full desired outbound connect-set, delivered to [`face_drive_loop`] when the
+/// operator changes the connect endpoints at runtime. The wz analogue of zenoh's
+/// `update_peers` (`net/runtime/orchestrator.rs:413`), which re-reads
+/// `connect().endpoints().get(whatami)` on the config `"connect/endpoints"` change
+/// event and, for a Peer/Router, `spawn_peer_connector`s each newly-listed peer it
+/// does not already hold a link to. wz carries the resolved TCP `SocketAddr`s (the
+/// same numeric-TCP scope as the static [`FaceSources::dial_targets`]); the loop
+/// dials each address it is not already dialing (address dedup — a config endpoint
+/// has no zid pre-handshake, so the gossip zid dedup [`holds_zid`] cannot apply).
+/// ADD-ONLY, faithful to the router branch (`orchestrator.rs:449-467`): a removed
+/// endpoint is NOT torn down (the Client close-removed branch `427-448` is
+/// deliberately router-inapplicable — closing a live federation face on a
+/// static-list edit would blackhole the mesh).
+///
+/// The sending end lives in the run-mode host (`run_router_hat`), written when the
+/// operator affordance fires; the channel is UNBOUNDED (the producer is a sync
+/// timer callback that must not await) and reconcile events are rare (operator
+/// cadence), so unbounded growth is a non-issue.
+pub type ReconcileSender = tokio::sync::mpsc::UnboundedSender<Vec<SocketAddr>>;
+/// The accept loop's receiving end of the reconcile channel, drained in the loop's
+/// `select!`. `None` when `router-connect-reconcile` is not wired (every non-router
+/// loop, and a router built without the feature) — then the arm parks forever and
+/// the loop is byte-for-byte the prior behaviour.
+pub type ReconcileReceiver = tokio::sync::mpsc::UnboundedReceiver<Vec<SocketAddr>>;
+
 /// Observable lifecycle events the accept loop emits to its caller (the demo
 /// logs them; tests count them). The faces table is internal; these events are
 /// the observation seam — `FaceUp`/`FaceDown` bracket exactly the interval a
@@ -371,6 +397,95 @@ async fn dial_face(
     (id, peer, result)
 }
 
+/// The fixed backoff between a dropped/failed desired-peer dial and its re-dial
+/// (`router-connect-reconcile` peer auto-reconnect). zenoh uses a configurable
+/// `ConnectionRetryConf` exponential period (`orchestrator.rs:788`); wz takes the
+/// simple fixed 1 s of the client `ReconnectPolicy` default — the per-endpoint
+/// retry-config surface is a deferred concern, not this atom.
+#[cfg(feature = "router-connect-reconcile")]
+const RECONNECT_BACKOFF_MS: u64 = 1000;
+
+/// Dial a peer after a fixed backoff — the delayed twin of [`dial_face`] used by the
+/// `router-connect-reconcile` peer auto-reconnect (the wz analogue of zenoh's
+/// `peer_connector_retry` sleep-then-connect loop, `orchestrator.rs:820`). A dropped
+/// or failed outbound dial to a still-desired peer is re-scheduled through this so
+/// the retry does not hot-loop on an unreachable peer; it completes into the SAME
+/// `opening` -> [`Step::Opened`] path as an immediate dial, so a successful re-dial
+/// is held + registered identically, and a failed one surfaces as `FaceFailed` and
+/// is re-scheduled again (retry-until-success-or-removed-from-`desired`).
+#[cfg(feature = "router-connect-reconcile")]
+async fn dial_face_after(
+    id: FaceId,
+    peer: SocketAddr,
+    backoff_ms: u64,
+    params: SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+) -> OpenResult {
+    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+    dial_face(id, peer, params, clock, tick_interval_ms).await
+}
+
+/// Schedule a re-dial of a dropped/failed outbound peer IF it is still desired
+/// (`router-connect-reconcile` peer auto-reconnect — the wz analogue of zenoh's
+/// `closed_session` Peer/Router arm, `orchestrator.rs:1210`, gated on
+/// `peers.contains(endpoint)` `:1225`). Re-keys the dial-address index to the fresh
+/// [`FaceId`] BEFORE the backoff so the address stays CLAIMED across the drop->redial
+/// gap (a concurrent reconcile then dedups against it instead of opening a second
+/// link). A peer no longer in `desired` (removed from the connect list) is dropped,
+/// not re-dialed — the removal is honoured for RECONNECTION even though the router
+/// never actively closes a live face (the close-removed asymmetry, faithful to
+/// zenoh's Client-only teardown branch).
+///
+/// A re-dial is NOT counted in `summary.dialed` — that counter is the number of
+/// distinct configured/reconciled peers dialed, not TCP connect attempts, so a
+/// permanently-unreachable peer does not inflate it without bound. `announce`
+/// controls the log level: the FIRST re-dial after a drop (an operator-visible peer
+/// flap) logs at `info`; subsequent retries against a still-unreachable peer log at
+/// `debug`, so a down configured peer does not emit a 1 Hz `info` storm (the retry
+/// cadence is bounded by [`RECONNECT_BACKOFF_MS`]).
+#[cfg(feature = "router-connect-reconcile")]
+#[allow(clippy::too_many_arguments)]
+fn schedule_redial(
+    addr: SocketAddr,
+    desired: &std::collections::HashSet<SocketAddr>,
+    dialed_targets: &mut BTreeMap<FaceId, SocketAddr>,
+    opening: &mut FuturesUnordered<OpenFuture>,
+    next_id: &mut u64,
+    announce: bool,
+    params: &SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+) {
+    if !desired.contains(&addr) {
+        return;
+    }
+    let id = FaceId(*next_id);
+    *next_id += 1;
+    // Reserve the address under the new id before the backoff so a reconcile that
+    // arrives during the wait does not also dial it (the drop->redial dedup gap).
+    dialed_targets.insert(id, addr);
+    if announce {
+        log::info!(
+            "reconcile: re-dialing desired peer {addr} in {RECONNECT_BACKOFF_MS}ms (face {})",
+            id.0
+        );
+    } else {
+        log::debug!(
+            "reconcile: retrying re-dial of desired peer {addr} in {RECONNECT_BACKOFF_MS}ms (face {})",
+            id.0
+        );
+    }
+    opening.push(Box::pin(dial_face_after(
+        id,
+        addr,
+        RECONNECT_BACKOFF_MS,
+        params.clone(),
+        clock,
+        tick_interval_ms,
+    )));
+}
+
 /// Drive one Established face to terminal, then drain it. The per-iteration
 /// observer threads each inbound event to `forwarder.forward(face.id, …)` — the
 /// data-plane seam: the hold-only [`NoOpForwarder`] discards it (this atom just
@@ -434,6 +549,14 @@ enum Step {
     /// group's interest into the unicast mesh. Only ever produced when
     /// [`FaceSources::mcast_group_subs`] is `Some`.
     McastGroupSubs(Vec<String>),
+    /// A runtime connect-list reconcile arrived (`router-connect-reconcile`) — the
+    /// NEW full desired outbound connect-set; dial each newly-listed address not
+    /// already being dialed (ADD-ONLY, the wz analogue of zenoh's `update_peers`
+    /// Peer/Router branch). Only ever produced when [`FaceSources::reconcile`] is
+    /// `Some`; the variant is always present so the `select!` arm carries no
+    /// attribute (tokio's `select!` rejects branch attributes), and its handler body
+    /// is `#[cfg]`-gated — inert without the feature.
+    Reconcile(Vec<SocketAddr>),
 }
 
 /// Await the forwarder's periodic tick, or park forever when no timer is armed
@@ -540,6 +663,28 @@ async fn recv_mcast_group_subs(
         *rx = None;
     }
     std::future::pending::<Vec<String>>().await
+}
+
+/// Await the next runtime connect-list reconcile ([`ReconcileReceiver`]), or park
+/// forever when there is no reconcile channel (`router-connect-reconcile` not wired)
+/// — the reconcile twin of [`recv_dial_intent`], so the `select!` arm-set is fixed
+/// at compile time. On channel CLOSE (the host dropped the sender) the receiver is
+/// taken so later polls park rather than hot-loop. Cancel-safe (tokio
+/// `mpsc::UnboundedReceiver::recv`), so losing the race to a sibling arm never drops
+/// a buffered reconcile request.
+async fn recv_reconcile(rx: &mut Option<ReconcileReceiver>) -> Vec<SocketAddr> {
+    let closed = if let Some(r) = rx.as_mut() {
+        match r.recv().await {
+            Some(set) => return set,
+            None => true,
+        }
+    } else {
+        false
+    };
+    if closed {
+        *rx = None;
+    }
+    std::future::pending::<Vec<SocketAddr>>().await
 }
 
 /// The first locator a [`DialIntent`] carries that the TCP dial path
@@ -658,6 +803,16 @@ pub struct FaceSources {
     /// is off (the arm parks forever). The sibling of `mcast_members` from the same
     /// helper.
     pub mcast_group_subs: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<String>>>,
+    /// The runtime connect-list reconcile stream (`router-connect-reconcile`): the
+    /// run-mode host (`run_router_hat`) sends the NEW full desired outbound
+    /// connect-set here when the operator changes the connect endpoints at runtime,
+    /// and the loop dials each newly-listed address it is not already dialing (the
+    /// wz analogue of zenoh's `update_peers`, `orchestrator.rs:413`). `None` when
+    /// `router-connect-reconcile` is not wired (every non-router loop, and a router
+    /// built without the feature) — then the arm parks forever and the loop is
+    /// byte-for-byte the prior behaviour. Always-present (no `#[cfg]` on the field)
+    /// so the `select!` arm needs no attribute, exactly like the mcast fields above.
+    pub reconcile: Option<ReconcileReceiver>,
 }
 
 /// Bind-once, hold-N: the shared multi-face drive core behind both
@@ -693,6 +848,7 @@ where
         mut mcast_ingress,
         mut mcast_members,
         mut mcast_group_subs,
+        mut reconcile,
     } = sources;
     tokio::pin!(shutdown);
 
@@ -705,6 +861,28 @@ where
     // now that the dedups read it). `peak_concurrent` and the held-count read its
     // cardinality.
     let mut faces: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
+    // The address index of the OUTBOUND dials (`router-connect-reconcile`): every
+    // dialed face's `FaceId -> SocketAddr`, populated at each dial-push (startup
+    // seed, gossip `Step::Dial`, reconcile-add) and pruned when the face leaves.
+    // A runtime reconcile dedups additions against this (dial `addr` iff `addr` is
+    // not already an in-flight/held dial) — the address dedup the zid-keyed `faces`
+    // map structurally cannot do (a config endpoint carries no zid until the
+    // handshake completes, and a star router keeps N faces regardless of zid).
+    // Accepted faces are never indexed here (their `SocketAddr` is the remote's
+    // ephemeral source port, never a connect-list target), so a reconcile never
+    // touches an inbound peer. Maintained only when the feature is compiled.
+    #[cfg(feature = "router-connect-reconcile")]
+    let mut dialed_targets: BTreeMap<FaceId, SocketAddr> = BTreeMap::new();
+    // The DESIRED outbound connect-set (`router-connect-reconcile` peer auto-
+    // reconnect): the addresses the node WANTS to hold a dial to — seeded from the
+    // static `dial_targets` and updated by each runtime reconcile (grows on add,
+    // shrinks on remove). A dropped/failed dial is re-dialed iff its address is still
+    // in this set (the zenoh `closed_session` `peers.contains(endpoint)` gate,
+    // `orchestrator.rs:1225`); a removed address simply leaves the set and is not
+    // reconnected (the router never actively closes a live face — the close-removed
+    // asymmetry). Maintained only when the feature is compiled.
+    #[cfg(feature = "router-connect-reconcile")]
+    let mut desired: std::collections::HashSet<SocketAddr> = dial_targets.iter().copied().collect();
     let mut next_id: u64 = 0;
     let mut summary = AcceptLoopSummary::default();
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
@@ -728,6 +906,10 @@ where
         let id = FaceId(next_id);
         next_id += 1;
         summary.dialed += 1;
+        // Index the static dial so a later reconcile does not re-dial an address
+        // already seeded here (dedup includes still-in-flight opens).
+        #[cfg(feature = "router-connect-reconcile")]
+        dialed_targets.insert(id, peer);
         opening.push(Box::pin(dial_face(
             id,
             peer,
@@ -750,6 +932,7 @@ where
             item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(item),
             members = recv_mcast_members(&mut mcast_members) => Step::McastMembers(members),
             subs = recv_mcast_group_subs(&mut mcast_group_subs) => Step::McastGroupSubs(subs),
+            set = recv_reconcile(&mut reconcile) => Step::Reconcile(set),
         };
 
         match step {
@@ -789,6 +972,12 @@ where
                                         "dropping redundant face {} to an already-held peer",
                                         id.0
                                     );
+                                    // The dropped face never enters `faces`; drop its
+                                    // dial-address index too so a later reconcile does
+                                    // not treat the abandoned id as a live dial (no-op
+                                    // for an accepted face, which is not indexed).
+                                    #[cfg(feature = "router-connect-reconcile")]
+                                    dialed_targets.remove(&id);
                                     continue;
                                 }
                             }
@@ -807,6 +996,28 @@ where
                         driving.push(drive_face(face, opened, forwarder));
                     }
                     Err(cause) => {
+                        // The dial/accept never established. Drop its dial-address
+                        // index; if it was a still-DESIRED outbound dial, re-schedule
+                        // it with backoff (peer auto-reconnect — retry a configured
+                        // peer that is momentarily unreachable, zenoh's
+                        // `peer_connector_retry` loop). A failed ACCEPT is not indexed,
+                        // so `schedule_redial`'s `desired` gate is a no-op for it.
+                        #[cfg(feature = "router-connect-reconcile")]
+                        if let Some(addr) = dialed_targets.remove(&id) {
+                            // A failed dial/redial — retry (debug level, not a fresh
+                            // operator-visible flap).
+                            schedule_redial(
+                                addr,
+                                &desired,
+                                &mut dialed_targets,
+                                &mut opening,
+                                &mut next_id,
+                                false,
+                                &params,
+                                clock,
+                                tick_interval_ms,
+                            );
+                        }
                         on_event(&AcceptEvent::FaceFailed { id, peer, cause });
                     }
                 }
@@ -814,6 +1025,28 @@ where
 
             Step::Driven((face, outcome)) => {
                 faces.remove(&face.id);
+                // A held face left. Drop its dial-address index; if it was a
+                // still-DESIRED outbound dial, re-schedule it with backoff — the peer
+                // auto-reconnect (zenoh's `closed_session` Peer/Router re-dial of a
+                // dropped configured peer, `orchestrator.rs:1210`). A dropped ACCEPTED
+                // face is not indexed, so `schedule_redial`'s gate is a no-op for it
+                // (a router does not dial a peer that connected inbound).
+                #[cfg(feature = "router-connect-reconcile")]
+                if let Some(addr) = dialed_targets.remove(&face.id) {
+                    // An established face dropped — announce the first re-dial at info
+                    // (an operator-visible peer flap); its retries fall to debug.
+                    schedule_redial(
+                        addr,
+                        &desired,
+                        &mut dialed_targets,
+                        &mut opening,
+                        &mut next_id,
+                        true,
+                        &params,
+                        clock,
+                        tick_interval_ms,
+                    );
+                }
                 forwarder.deregister(face.id);
                 on_event(&AcceptEvent::FaceDown(face, outcome));
             }
@@ -830,6 +1063,10 @@ where
                         let id = FaceId(next_id);
                         next_id += 1;
                         summary.dialed += 1;
+                        // Index the gossip dial so a reconcile does not re-dial the
+                        // same address (and vice-versa).
+                        #[cfg(feature = "router-connect-reconcile")]
+                        dialed_targets.insert(id, addr);
                         opening.push(Box::pin(dial_face(
                             id,
                             addr,
@@ -876,6 +1113,56 @@ where
             // for non-router forwarders; the arm parks when there is no sub channel.
             Step::McastGroupSubs(subs) => {
                 forwarder.set_mcast_group_subs(&subs);
+            }
+
+            // A runtime connect-list reconcile arrived (`router-connect-reconcile`):
+            // dial each newly-listed connect endpoint not already being dialed. This
+            // is the wz analogue of zenoh's `update_peers` Peer/Router branch
+            // (`orchestrator.rs:449-467`) — ADD-ONLY. A removed endpoint is
+            // deliberately NOT torn down (the Client close-removed branch `427-448`
+            // is router-inapplicable: closing a live federation face on a static-list
+            // edit would blackhole the mesh). Dedup is by ADDRESS against
+            // `dialed_targets` (a config endpoint carries no zid until the handshake,
+            // so the gossip `holds_zid` zid dedup cannot apply, and the address set
+            // covers still-in-flight opens the zid set never would). The arm parks
+            // when `reconcile` is `None`, so a non-router / feature-off loop never
+            // reaches here; the body is `#[cfg]`-gated so a feature-off build compiles
+            // none of the reconcile dial logic.
+            Step::Reconcile(_desired_set) => {
+                #[cfg(feature = "router-connect-reconcile")]
+                {
+                    // Adopt the new full desired connect-set: the peer auto-reconnect
+                    // re-dial gate (`schedule_redial`) reads it, so an added endpoint
+                    // is both dialed now AND reconnected if it later drops, and a
+                    // removed endpoint stops being reconnected (its live face is NOT
+                    // closed — the add-only / close-removed asymmetry).
+                    desired = _desired_set.iter().copied().collect();
+                    // The addresses already being dialed (in-flight or held) — dial
+                    // only the desired endpoints NOT among them (the address dedup;
+                    // `desired` is already a set, so there are no intra-request dups).
+                    let already: std::collections::HashSet<SocketAddr> =
+                        dialed_targets.values().copied().collect();
+                    for addr in desired.iter().copied() {
+                        if already.contains(&addr) {
+                            continue;
+                        }
+                        let id = FaceId(next_id);
+                        next_id += 1;
+                        summary.dialed += 1;
+                        dialed_targets.insert(id, addr);
+                        log::debug!(
+                            "reconcile: dialing newly-listed connect endpoint {addr} (face {})",
+                            id.0
+                        );
+                        opening.push(Box::pin(dial_face(
+                            id,
+                            addr,
+                            params.clone(),
+                            clock,
+                            tick_interval_ms,
+                        )));
+                    }
+                }
             }
 
             Step::Accepted(Ok((accepted, peer))) => {
@@ -948,6 +1235,8 @@ where
             mcast_ingress: None,
             mcast_members: None,
             mcast_group_subs: None,
+            // accept-only: no runtime connect-list reconcile.
+            reconcile: None,
         },
         params,
         clock,
@@ -1449,6 +1738,7 @@ mod tests {
                 mcast_ingress: None,
                 mcast_members: None,
                 mcast_group_subs: None,
+                reconcile: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -1523,6 +1813,7 @@ mod tests {
                 mcast_ingress: None,
                 mcast_members: None,
                 mcast_group_subs: None,
+                reconcile: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -1597,6 +1888,7 @@ mod tests {
                 mcast_ingress: None,
                 mcast_members: None,
                 mcast_group_subs: None,
+                reconcile: None,
             },
             peer_params(),
             TokioTime::new(),

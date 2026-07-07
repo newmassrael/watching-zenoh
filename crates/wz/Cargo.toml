@@ -787,7 +787,9 @@ transport-unicast = ["wz-runtime-tokio?/transport-unicast"]
 # ============================================================
 
 # ----- §5.21 router (16 atomic; router-hat-router active, rest reserved) -----
-router-connect-reconcile = []
+# R311y202 — router-connect-reconcile active flip: the runtime dynamic connect-list
+# reconcile (`update_peers`) + peer auto-reconnect, gated on the router-hat run mode.
+router-connect-reconcile = ["routing-router-hat", "wz-runtime-tokio?/router-connect-reconcile"]
 router-face-management = []
 router-hat-multihat = []
 # R311y132 — the router-hat run-mode active flip: the atom toggle layered on the

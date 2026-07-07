@@ -1688,6 +1688,9 @@ pub(crate) async fn run_peer(
             mcast_ingress: None,
             mcast_members: None,
             mcast_group_subs: None,
+            // The runtime connect-list reconcile is a router-hat affordance
+            // (`--router-hat --connect-after`); a plain peer node does not host it.
+            reconcile: None,
         },
         params,
         TokioTime::new(),
@@ -2027,7 +2030,11 @@ pub(crate) async fn run_peer(
 /// asserts on teardown output without racing the 250 ms tick). Runs until the
 /// graceful-shutdown signal (SIGTERM / SIGINT).
 #[cfg(feature = "router-hat-router")]
-pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io::Result<()> {
+pub(crate) async fn run_router_hat(
+    listen: &str,
+    dial_targets: &[String],
+    connect_after: Option<(u64, Vec<String>)>,
+) -> io::Result<()> {
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
@@ -2064,6 +2071,36 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
             }
         }
     }
+
+    // The runtime connect-list reconcile affordance (`router-connect-reconcile`):
+    // `--connect-after <ms>:<addr>[,<addr>...]` schedules a runtime ADD of the
+    // listed connect endpoints `<ms>` after the mesh comes up — the operator-driven
+    // trigger that mirrors zenoh re-reading `connect/endpoints` on a config change
+    // and `update_peers`-dialing the newly-listed members. Parsed to `SocketAddr`
+    // here (the same numeric-TCP scope + fail-fast as the static dials above).
+    #[cfg(feature = "router-connect-reconcile")]
+    let connect_after_addrs: Option<(u64, Vec<std::net::SocketAddr>)> = match connect_after {
+        Some((ms, targets)) => {
+            let mut addrs = Vec::with_capacity(targets.len());
+            for t in &targets {
+                match t.parse::<std::net::SocketAddr>() {
+                    Ok(a) => addrs.push(a),
+                    Err(e) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "wz-ap-demo router-hat: invalid --connect-after target {t:?}: {e}"
+                            ),
+                        ));
+                    }
+                }
+            }
+            Some((ms, addrs))
+        }
+        None => None,
+    };
+    #[cfg(not(feature = "router-connect-reconcile"))]
+    let _ = connect_after;
 
     log::info!(
         "wz-ap-demo router-hat: listening on {local}; dialing {} configured \
@@ -2156,6 +2193,31 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     #[cfg(not(feature = "router-multicast-faces"))]
     let (mcast_ingress, mcast_members, mcast_group_subs) = (None, None, None);
 
+    // The runtime connect-list reconcile channel (`router-connect-reconcile`): the
+    // loop drains `FaceSources::reconcile`; the host holds the sender and fires it
+    // from the app-tick once the `--connect-after` deadline elapses. Compute the
+    // one-shot schedule (deadline + the NEW full desired set = the initial dials
+    // PLUS the added endpoints) BEFORE `dials` moves into `FaceSources` — the loop's
+    // add-dedup skips the already-dialed initials and slice-2 redial reads the full
+    // set as the desired gate. Created only when the feature is compiled.
+    #[cfg(feature = "router-connect-reconcile")]
+    let (reconcile_tx, reconcile_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Vec<std::net::SocketAddr>>();
+    #[cfg(feature = "router-connect-reconcile")]
+    let reconcile_schedule: Option<(tokio::time::Instant, Vec<std::net::SocketAddr>)> =
+        connect_after_addrs.map(|(ms, mut addrs)| {
+            let mut full = dials.clone();
+            full.append(&mut addrs);
+            (
+                tokio::time::Instant::now() + Duration::from_millis(ms),
+                full,
+            )
+        });
+    #[cfg(feature = "router-connect-reconcile")]
+    let reconcile = Some(reconcile_rx);
+    #[cfg(not(feature = "router-connect-reconcile"))]
+    let reconcile: Option<wz::runtime_tokio::accept_loop::ReconcileReceiver> = None;
+
     let loop_fut = peer_loop(
         FaceSources {
             listener,
@@ -2167,6 +2229,7 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
             mcast_ingress,
             mcast_members,
             mcast_group_subs,
+            reconcile,
         },
         params,
         TokioTime::new(),
@@ -2182,6 +2245,9 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     // witnesses. The topology flood + spanning-tree recompute + query-timeout reap
     // run on the FaceForwarder seam (peer_loop drives the tick), NOT here.
     let mut app_tick = tokio::time::interval(Duration::from_millis(APP_TICK_MS));
+    // One-shot latch for the `--connect-after` reconcile fire (below).
+    #[cfg(feature = "router-connect-reconcile")]
+    let mut reconcile_fired = false;
     // High-water node counts per tier (teardown collapses the live graphs toward
     // self, so the peak is the meaningful converged-size witness — the run_peer
     // peak_nodes discipline, per net).
@@ -2220,6 +2286,23 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
         tokio::select! {
             done = &mut loop_fut => break done,
             _ = app_tick.tick() => {
+                // `--connect-after` reconcile fire: once the deadline elapses, send
+                // the NEW full desired connect-set on the reconcile channel; the loop
+                // dials the added endpoint(s) (add-dedup skips the initial dials). One
+                // shot, latched. Fires within one app-tick of the deadline — the test
+                // gates on the resulting FaceUp event, not on the exact instant.
+                #[cfg(feature = "router-connect-reconcile")]
+                if let Some((deadline, full_set)) = reconcile_schedule.as_ref() {
+                    if !reconcile_fired && tokio::time::Instant::now() >= *deadline {
+                        reconcile_fired = true;
+                        log::info!(
+                            "wz-ap-demo router-hat: --connect-after fired; reconciling \
+                             connect-list to {} endpoint(s)",
+                            full_set.len()
+                        );
+                        let _ = reconcile_tx.send(full_set.clone());
+                    }
+                }
                 let routers = forwarder.routers_net_node_count();
                 let peers = forwarder.linkstatepeers_net_node_count();
                 peak_routers = peak_routers.max(routers);
