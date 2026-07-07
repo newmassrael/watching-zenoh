@@ -229,6 +229,16 @@ pub trait FaceForwarder {
     /// graph still compiles.
     fn set_mcast_group_members(&self, _members: &[Vec<u8>]) {}
 
+    /// The on-group SUBSCRIBER keyexpr aggregate changed (a DeclareSubscriber /
+    /// UndeclareSubscriber over the router's multicast group, or a lease evict) —
+    /// the §5.21 sub plane, relayed from the multicast INGRESS loop as a DEDUPED
+    /// literal set. Default no-op: only the router (which runs the ingress loop)
+    /// advertises the group's interest into the unicast mesh, so a mesh-side
+    /// publisher routes matching Puts toward it and they reach the on-group
+    /// subscriber (cross-router reachability). Carries owned `String`s (no codec /
+    /// routing-graph type) so this trait and the accept loop stay dependency-free.
+    fn set_mcast_group_subs(&self, _subs: &[String]) {}
+
     /// How often the loop should call [`tick`](Self::tick), or `None` (the
     /// default) to never tick. The extension point for a forwarder with a
     /// time-driven obligation: it returns `Some(period)` and the loop arms a timer.
@@ -419,6 +429,11 @@ enum Step {
     /// [`FaceForwarder::set_mcast_group_members`] for the Designated-Router
     /// election. Only ever produced when [`FaceSources::mcast_members`] is `Some`.
     McastMembers(Vec<Vec<u8>>),
+    /// The on-group SUBSCRIBER keyexpr aggregate changed (sub plane, S2) — relay
+    /// it to [`FaceForwarder::set_mcast_group_subs`] so the router advertises the
+    /// group's interest into the unicast mesh. Only ever produced when
+    /// [`FaceSources::mcast_group_subs`] is `Some`.
+    McastGroupSubs(Vec<String>),
 }
 
 /// Await the forwarder's periodic tick, or park forever when no timer is armed
@@ -503,6 +518,28 @@ async fn recv_mcast_members(
         *rx = None;
     }
     std::future::pending::<Vec<Vec<u8>>>().await
+}
+
+/// Await the next on-group SUBSCRIBER aggregate update (sub plane, S2), or park
+/// forever when there is no sub channel (the ingress plane is off) — the
+/// subscriber twin of [`recv_mcast_members`], so the `select!` arm-set is fixed at
+/// compile time. On channel CLOSE the receiver is taken so later polls park rather
+/// than hot-loop. Cancel-safe (tokio `mpsc::UnboundedReceiver::recv`).
+async fn recv_mcast_group_subs(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<Vec<String>>>,
+) -> Vec<String> {
+    let closed = if let Some(r) = rx.as_mut() {
+        match r.recv().await {
+            Some(item) => return item,
+            None => true,
+        }
+    } else {
+        false
+    };
+    if closed {
+        *rx = None;
+    }
+    std::future::pending::<Vec<String>>().await
 }
 
 /// The first locator a [`DialIntent`] carries that the TCP dial path
@@ -614,6 +651,13 @@ pub struct FaceSources {
     /// ingress plane is off (the arm parks forever). The sibling of
     /// `mcast_ingress` from the same helper.
     pub mcast_members: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<Vec<u8>>>>,
+    /// The multicast INGRESS on-group SUBSCRIBER relay (sub plane, S2): the
+    /// router-hat's `spawn_router_mcast_ingress` loop sends the deduped group-
+    /// subscriber keyexpr aggregate here on each change, and the drive loop forwards
+    /// it to [`FaceForwarder::set_mcast_group_subs`]. `None` when the ingress plane
+    /// is off (the arm parks forever). The sibling of `mcast_members` from the same
+    /// helper.
+    pub mcast_group_subs: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<String>>>,
 }
 
 /// Bind-once, hold-N: the shared multi-face drive core behind both
@@ -648,6 +692,7 @@ where
         mut dial_intents,
         mut mcast_ingress,
         mut mcast_members,
+        mut mcast_group_subs,
     } = sources;
     tokio::pin!(shutdown);
 
@@ -704,6 +749,7 @@ where
             intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
             item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(item),
             members = recv_mcast_members(&mut mcast_members) => Step::McastMembers(members),
+            subs = recv_mcast_group_subs(&mut mcast_group_subs) => Step::McastGroupSubs(subs),
         };
 
         match step {
@@ -825,6 +871,13 @@ where
                 forwarder.set_mcast_group_members(&members);
             }
 
+            // The on-group SUBSCRIBER aggregate changed — advertise/withdraw the
+            // group's interest into the unicast mesh (sub plane, S2). No-op default
+            // for non-router forwarders; the arm parks when there is no sub channel.
+            Step::McastGroupSubs(subs) => {
+                forwarder.set_mcast_group_subs(&subs);
+            }
+
             Step::Accepted(Ok((accepted, peer))) => {
                 let id = FaceId(next_id);
                 next_id += 1;
@@ -894,6 +947,7 @@ where
             // accept-only: no multicast ingress plane.
             mcast_ingress: None,
             mcast_members: None,
+            mcast_group_subs: None,
         },
         params,
         clock,
@@ -1394,6 +1448,7 @@ mod tests {
                 dial_intents: None,
                 mcast_ingress: None,
                 mcast_members: None,
+                mcast_group_subs: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -1467,6 +1522,7 @@ mod tests {
                 dial_intents: Some(intent_rx),
                 mcast_ingress: None,
                 mcast_members: None,
+                mcast_group_subs: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -1540,6 +1596,7 @@ mod tests {
                 dial_intents: None,
                 mcast_ingress: None,
                 mcast_members: None,
+                mcast_group_subs: None,
             },
             peer_params(),
             TokioTime::new(),

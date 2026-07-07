@@ -132,6 +132,19 @@ use wz_codecs::whatami::WhatAmI;
 #[cfg(feature = "multicast-declarations")]
 const MAX_ALIASES_PER_PEER: usize = 256;
 
+/// The per-peer `remote_subs` cap (§5.21 router-multicast-faces, sub plane) — the
+/// `DeclareSubscriber` twin of [`MAX_ALIASES_PER_PEER`]. A multicast group is an
+/// UNAUTHENTICATED broadcast medium, so a peer's declared-subscription table must
+/// be bounded against a flood of distinct-id `DeclSubscriber` (memory exhaustion).
+/// The cap gates ONLY new growth: an `UndeclSubscriber` removal or a re-declare of
+/// a known id never grows the table, so a full table stays drainable. 256 matches
+/// `MAX_ALIASES_PER_PEER` — a follow-up unifies the per-peer decorator bounds
+/// (aliases / subs / namespace ingress). The AGGREGATE mesh-advertised set is
+/// separately bounded by `MAX_PEERS * MAX_SUBS_PER_PEER` (the mesh-bloat concern
+/// is a named S2 follow-up).
+#[cfg(feature = "multicast-declarations")]
+const MAX_SUBS_PER_PEER: usize = 256;
+
 /// Deploy-sourced multicast runtime knobs (§3.1 PeerSweep lease).
 ///
 /// The pool DIMENSION (`MAX_PEERS`) is the [`MulticastDispatcher`] const
@@ -395,6 +408,25 @@ struct PeerSlot {
     /// admit/refresh from [`JoinBaseline::whatami`], cleared on [`Self::evict`].
     #[cfg(feature = "multicast-declarations")]
     whatami: Option<WhatAmI>,
+    /// §5.21 router-multicast-faces (sub plane, S1) — this peer's
+    /// `sub-id -> literal keyexpr` remote-subscription table, populated from the
+    /// `DeclareSubscriber` / `UndeclareSubscriber` declarations it sends over the
+    /// group ([`MulticastDispatcher::apply_declared_subscriptions`]) and unioned by
+    /// [`MulticastDispatcher::group_sub_keyexprs`] into the group's aggregate
+    /// subscriber interest advertised into the unicast mesh (S2). Keyed by the wire
+    /// SUB id (NOT the keyexpr) because a wz `UndeclSubscriber` carries only the id
+    /// (no keyexpr), so the removal must correlate by id — the id-keyed-withdraw
+    /// discipline the unicast client-queryable withdraw plane also uses. PER-PEER
+    /// because a multicast group multiplexes many senders whose wire sub ids
+    /// collide (peer A's id 5 != peer B's id 5) — the same `src`/slot key every
+    /// other multicast correlation uses (SN gate, lease, reassembly chains,
+    /// namespace ingress, keyexpr aliases). The keyexpr is resolved to LITERAL
+    /// against this peer's `keyexpr_table` at ingest (an aliased id-only sub
+    /// declaration is stored as its literal). CLEARED on [`Self::evict`] so a
+    /// recycled slot never inherits a dead peer's subscriptions — wz reclaims where
+    /// zenoh LEAKS the `mcast_faces` shell (`router.rs:239`, write-only Vec).
+    #[cfg(feature = "multicast-declarations")]
+    remote_subs: hashbrown::HashMap<u64, alloc::string::String>,
 }
 
 impl PeerSlot {
@@ -417,6 +449,8 @@ impl PeerSlot {
             keyexpr_table: hashbrown::HashMap::new(),
             #[cfg(feature = "multicast-declarations")]
             whatami: None,
+            #[cfg(feature = "multicast-declarations")]
+            remote_subs: hashbrown::HashMap::new(),
         }
     }
 
@@ -484,6 +518,12 @@ impl PeerSlot {
         {
             self.keyexpr_table.clear();
             self.whatami = None;
+            // §5.21 router-multicast-faces (sub plane) — drop this peer's declared
+            // subscriptions with the slot so a recycled index can never advertise a
+            // dead peer's interest into the mesh, and the next `group_sub_keyexprs`
+            // union no longer counts them (the derive-not-store withdraw path — the
+            // forwarder union-refcount then withdraws a keyexpr no live peer holds).
+            self.remote_subs.clear();
         }
     }
 }
@@ -661,6 +701,86 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         }
     }
 
+    /// §5.21 router-multicast-faces (sub plane, S1) — ingest this peer's
+    /// `DeclareSubscriber` / `UndeclareSubscriber` declarations from the batch into
+    /// its per-peer `sub-id -> literal keyexpr` [`remote_subs`](PeerSlot::remote_subs)
+    /// table, per peer via `src`. The subscription twin of
+    /// [`apply_declared_aliases`](Self::apply_declared_aliases): the inbound batch
+    /// came from ONE peer, so a `DeclSubscriber` records THAT peer's interest and an
+    /// id-only `UndeclSubscriber` (wz undeclare bodies carry no keyexpr) is
+    /// correlated by id and removed. The sub keyexpr is resolved to LITERAL against
+    /// this peer's `keyexpr_table` (populated by the prior `apply_declared_aliases`
+    /// pass in the SAME batch), so an aliased id-only sub declaration is stored as
+    /// its literal; an unresolvable alias (one the peer never declared) is DROPPED —
+    /// mirroring the literal-only Push ingress (a keyexpr the router cannot resolve
+    /// is one it could never match, and storing it would advertise a garbage keyexpr
+    /// into the mesh at S2). READ-ONLY on the batch: unlike `apply_declared_aliases`
+    /// (which rewrites Push keyexprs) this only POPULATES the per-peer table that
+    /// [`group_sub_keyexprs`](Self::group_sub_keyexprs) unions for the mesh-advertise
+    /// plane — the declarations stay in the batch untouched.
+    ///
+    /// ORDERING: runs AFTER `apply_declared_aliases` (which absorbs the batch's
+    /// `DeclKexpr` into `keyexpr_table`, so an aliased sub resolves) and BEFORE
+    /// `apply_namespace_ingress`. The alias table is namespace-INCLUSIVE (absorbed
+    /// pre-strip), so resolving here keeps the stored keyexpr consistent with the
+    /// table. In a routing-namespace build the stored keyexpr is therefore
+    /// namespace-inclusive; de-namespacing the ingested sub for the combined
+    /// routing-namespace x router-multicast-faces advertise is a NAMED follow-up
+    /// (the sub plane's reachability + cross-impl target is the no-namespace case).
+    ///
+    /// Feature-gated end to end (this method, the `PeerSlot.remote_subs` field, and
+    /// both call sites) so a non-declarations build — INCLUDING the no-alloc MCU
+    /// multicast loop, which never enables the feature — compiles neither the table
+    /// nor this method: no per-peer sub state, no call cost. A `src` with no live
+    /// slot returns without touching state.
+    #[cfg(feature = "multicast-declarations")]
+    pub fn apply_declared_subscriptions(
+        &mut self,
+        src: SocketAddr,
+        outcome: &crate::driver_loop::DriverLoopOutcome,
+    ) {
+        use crate::network_message::NetworkMessage;
+        let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
+            return;
+        };
+        let Some(slot) = self.peers.iter_mut().find(|p| p.matches_src(src)) else {
+            return;
+        };
+        for msg in messages.iter() {
+            let NetworkMessage::Declare(declare) = msg else {
+                continue;
+            };
+            match &declare.body {
+                wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                    // Resolve the (possibly aliased) sub keyexpr against this peer's
+                    // alias table. An id-only alias the peer never declared resolves
+                    // to `None` -> DROP (an unresolvable keyexpr can never be
+                    // matched; storing it would advertise garbage into the mesh).
+                    let Some(literal) = crate::wireexpr_resolve::resolve_wireexpr(
+                        &d.keyexpr.body,
+                        &slot.keyexpr_table,
+                    ) else {
+                        continue;
+                    };
+                    // Bound the per-peer sub table against an unauthenticated peer
+                    // flooding distinct-id DeclSubscriber. Reject ONLY new growth
+                    // past the cap; a re-declare of a known id (overwrite) or a
+                    // removal never grows it, so a full table stays drainable (the
+                    // `MAX_ALIASES_PER_PEER` idiom).
+                    let grows_past_cap = slot.remote_subs.len() >= MAX_SUBS_PER_PEER
+                        && !slot.remote_subs.contains_key(&d.id);
+                    if !grows_past_cap {
+                        slot.remote_subs.insert(d.id, literal);
+                    }
+                }
+                wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => {
+                    slot.remote_subs.remove(&u.id);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The session-level FSM state (§3.1 lifecycle observability).
     pub fn session_state(&self) -> SessionFsmMulticastState {
         self.session.get_current_state()
@@ -712,6 +832,35 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                     .map(|(buf, len)| buf[..*len as usize].to_vec())
             })
             .collect()
+    }
+
+    /// §5.21 router-multicast-faces (sub plane, S1) — the DEDUPED union of every
+    /// live peer's declared-subscription keyexprs
+    /// ([`remote_subs`](PeerSlot::remote_subs)): the group's aggregate subscriber
+    /// interest the router-hat relays to its `RouterForwarder` to advertise into the
+    /// unicast mesh (S2), so a mesh-side publisher routes a matching Put toward this
+    /// router and it reaches the on-group subscriber (resolving the cross-router
+    /// reachability limit (a)). whatami-AGNOSTIC — UNLIKE
+    /// [`router_member_zids`](Self::router_member_zids), which filters to Router for
+    /// the DR election: a Client/Peer subscriber's interest MUST be advertised too
+    /// (the DR-candidate set and the subscriber set are different sets). Owned
+    /// `Vec<String>` (bounded by `MAX_PEERS * MAX_SUBS_PER_PEER`) so the AP drive
+    /// loop can snapshot-diff it across ticks and relay only real membership
+    /// changes; the forwarder union-refcounts the aggregate (advertise on first,
+    /// withdraw on last), so the returned set is DEDUPED (a keyexpr subscribed by
+    /// several peers is one entry — its mesh advertisement is one bubble).
+    #[cfg(feature = "multicast-declarations")]
+    pub fn group_sub_keyexprs(&self) -> alloc::vec::Vec<alloc::string::String> {
+        let mut set: hashbrown::HashSet<alloc::string::String> = hashbrown::HashSet::new();
+        for p in self.peers.iter() {
+            if p.is_free() {
+                continue;
+            }
+            for ke in p.remote_subs.values() {
+                set.insert(ke.clone());
+            }
+        }
+        set.into_iter().collect()
     }
 
     /// Bring the multicast session up: Idle -> LinkOpening
@@ -811,6 +960,26 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             #[cfg(feature = "routing-namespace")]
             if !self.peers[idx].matches_zid(zid) {
                 self.peers[idx].namespace_ingress = None;
+            }
+            // §5.21 router-multicast-faces — the SAME in-place recycle hazard for the
+            // per-peer DECLARATION state (I3a keyexpr aliases + the S2 remote-sub
+            // table): a re-JOIN from the SAME address with a DIFFERENT zid is a NEW
+            // peer reusing the slot before the old peer's lease expired, so drop the
+            // dead peer's aliases + subscriptions (the in-place twin of evict()'s
+            // clear, which covers only the lease/Close recycle). Conditional on a zid
+            // CHANGE, exactly like the namespace guard above (a same-zid beacon keeps
+            // the live peer's legitimate declarations). WITHOUT this: the recycled
+            // slot would resolve the new peer's aliased Pushes against the dead peer's
+            // DeclKexpr table (mis-resolution / group blackhole), AND keep advertising
+            // the dead peer's group subscription into the unicast mesh (a phantom
+            // interest that never withdraws until the slot itself lease-evicts) — both
+            // violating evict()'s "a recycled index can never inherit / advertise a
+            // dead peer's ..." invariant on the in-place path (the keyexpr_table leak
+            // predates S2 — the I3a R311y196 in-place gap — surfaced with remote_subs).
+            #[cfg(feature = "multicast-declarations")]
+            if !self.peers[idx].matches_zid(zid) {
+                self.peers[idx].keyexpr_table.clear();
+                self.peers[idx].remote_subs.clear();
             }
             self.peers[idx].zid = Some(copy_zid(zid));
             self.peers[idx].seed_from_join(baseline);
@@ -1119,6 +1288,11 @@ pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, con
         let o = {
             let mut o = o;
             dispatcher.apply_declared_aliases(src, &mut o);
+            // §5.21 router-multicast-faces (sub plane, S1) — ingest a fragmented
+            // DeclareSubscriber on the reassembled batch too, symmetric with the
+            // whole-Frame seam, so a sub declaration split across fragments still
+            // populates the peer's remote-sub table.
+            dispatcher.apply_declared_subscriptions(src, &o);
             o
         };
         // §5.21 routing-namespace — strip the REASSEMBLED batch (per-peer via
@@ -2658,6 +2832,343 @@ mod tests {
             resolve_wireexpr(&p_in.keyexpr.body, &empty),
             Some("demo/1".to_string()),
             "an in-cap alias must still resolve after the cap is reached",
+        );
+    }
+
+    // ---- §5.21 router-multicast-faces (sub plane, S1) — per-peer sub ingest ----
+
+    /// A JOIN baseline carrying an explicit `whatami` (the sub-plane tests need a
+    /// Client-role peer to prove the sub union is whatami-agnostic).
+    #[cfg(feature = "multicast-declarations")]
+    fn sn0_whatami(w: WhatAmI) -> JoinBaseline {
+        JoinBaseline {
+            whatami: Some(w),
+            ..sn0()
+        }
+    }
+
+    /// A literal `DeclareSubscriber(id, ke)` network message.
+    #[cfg(feature = "multicast-declarations")]
+    fn decl_sub_literal(id: u64, ke: &str) -> crate::network_message::NetworkMessage {
+        use crate::network_message::NetworkMessage;
+        use alloc::boxed::Box;
+        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
+        NetworkMessage::Declare(Box::new(DeclareOwned {
+            header: 0,
+            interest_id: None,
+            extensions: None,
+            body: DV::CodecZenohDeclSubscriber(wz_codecs::decl_subscriber::DeclSubscriberOwned {
+                header: 0,
+                id,
+                keyexpr: crate::wireexpr_build::literal_wireexpr(ke).unwrap(),
+            }),
+        }))
+    }
+
+    /// An ALIASED `DeclareSubscriber(id)` whose keyexpr references the declared
+    /// alias `alias_id` (Sender/Local mapping) with an optional trailing suffix.
+    #[cfg(feature = "multicast-declarations")]
+    fn decl_sub_aliased(
+        id: u64,
+        alias_id: u64,
+        suffix: Option<&str>,
+    ) -> crate::network_message::NetworkMessage {
+        use crate::network_message::NetworkMessage;
+        use alloc::boxed::Box;
+        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
+        use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+        use wz_codecs::wireexpr_local::WireexprLocalOwned;
+        let keyexpr = WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                id: alias_id,
+                suffix_len: suffix.map(|s| s.len() as u64),
+                suffix: suffix.map(|s| crate::codec_owned::owned_string::<128>(s).unwrap()),
+            }),
+        };
+        NetworkMessage::Declare(Box::new(DeclareOwned {
+            header: 0,
+            interest_id: None,
+            extensions: None,
+            body: DV::CodecZenohDeclSubscriber(wz_codecs::decl_subscriber::DeclSubscriberOwned {
+                header: 0,
+                id,
+                keyexpr,
+            }),
+        }))
+    }
+
+    /// An id-only `UndeclareSubscriber(id)` (wz undeclare bodies carry no keyexpr).
+    #[cfg(feature = "multicast-declarations")]
+    fn undecl_sub(id: u64) -> crate::network_message::NetworkMessage {
+        use crate::network_message::NetworkMessage;
+        use alloc::boxed::Box;
+        use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
+        NetworkMessage::Declare(Box::new(DeclareOwned {
+            header: 0,
+            interest_id: None,
+            extensions: None,
+            body: DV::CodecZenohUndeclSubscriber(
+                wz_codecs::undecl_subscriber::UndeclSubscriberOwned {
+                    header: 0,
+                    id,
+                    extensions: None,
+                },
+            ),
+        }))
+    }
+
+    /// Drive a message batch through the two ingress passes the RX seam runs (alias
+    /// resolution then sub ingest), attributed to `src` — the whole-Frame seam
+    /// mirror.
+    #[cfg(feature = "multicast-declarations")]
+    fn drive_batch<const N: usize>(
+        d: &mut MulticastDispatcher<N>,
+        src: SocketAddr,
+        msgs: alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    ) {
+        use crate::driver_loop::DriverLoopOutcome;
+        let mut outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: msgs,
+            has_ext: false,
+            extensions: alloc::vec![],
+        };
+        d.apply_declared_aliases(src, &mut outcome);
+        d.apply_declared_subscriptions(src, &outcome);
+    }
+
+    /// A literal `DeclareSubscriber` is recorded in the peer's remote-sub table and
+    /// surfaces in the group aggregate.
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn mcast_sub_ingest_records_literal_sub() {
+        use alloc::string::ToString;
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        drive_batch(&mut d, SRC_A, alloc::vec![decl_sub_literal(3, "demo/data")]);
+        assert_eq!(d.group_sub_keyexprs(), alloc::vec!["demo/data".to_string()]);
+    }
+
+    /// An ALIASED `DeclareSubscriber` resolves against the peer's `keyexpr_table`
+    /// (populated by the prior alias pass in the same batch) and is stored as its
+    /// literal — proving the ordering (sub ingest AFTER alias absorb).
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn mcast_sub_ingest_resolves_alias() {
+        use crate::declare_build::build_declare_kexpr;
+        use alloc::boxed::Box;
+        use alloc::string::ToString;
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        // DeclKexpr 7 -> "demo/data", then a sub aliased on id 7 (no suffix).
+        drive_batch(
+            &mut d,
+            SRC_A,
+            alloc::vec![
+                crate::network_message::NetworkMessage::Declare(Box::new(
+                    build_declare_kexpr(7, "demo/data").unwrap(),
+                )),
+                decl_sub_aliased(3, 7, None),
+            ],
+        );
+        assert_eq!(
+            d.group_sub_keyexprs(),
+            alloc::vec!["demo/data".to_string()],
+            "an aliased sub must be stored as its resolved literal",
+        );
+    }
+
+    /// An id-only `UndeclareSubscriber` removes the correlated sub (the wz undeclare
+    /// carries no keyexpr, so the id keying is load-bearing).
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn mcast_sub_undeclare_removes() {
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        drive_batch(&mut d, SRC_A, alloc::vec![decl_sub_literal(3, "demo/data")]);
+        assert_eq!(d.group_sub_keyexprs().len(), 1);
+        drive_batch(&mut d, SRC_A, alloc::vec![undecl_sub(3)]);
+        assert!(
+            d.group_sub_keyexprs().is_empty(),
+            "an id-only undeclare must remove the correlated sub",
+        );
+    }
+
+    /// Evicting a peer drops its subs from the aggregate, and a recycled slot never
+    /// inherits a dead peer's subscriptions (the derive-not-store withdraw path —
+    /// wz reclaims where zenoh leaks the mcast_faces shell).
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn mcast_sub_evict_clears_and_recycles() {
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        drive_batch(&mut d, SRC_A, alloc::vec![decl_sub_literal(3, "demo/data")]);
+        assert_eq!(d.group_sub_keyexprs().len(), 1);
+        assert!(d.close_by_src(SRC_A), "peer A must evict");
+        assert!(
+            d.group_sub_keyexprs().is_empty(),
+            "evict drops the peer's subs from the aggregate",
+        );
+        // A new peer takes the recycled slot and declares nothing — it must not
+        // inherit peer A's sub.
+        assert_eq!(d.ingest_join(ZID_B, SRC_A, sn0(), 1), JoinOutcome::Admitted);
+        assert!(
+            d.group_sub_keyexprs().is_empty(),
+            "a recycled slot inherits no dead peer's subscription",
+        );
+    }
+
+    /// §5.21 router-multicast-faces (IMPL-review C-1/C-2) — the IN-PLACE recycle the
+    /// `evict()` clear does NOT cover: a NEW peer reusing the SAME src with a
+    /// DIFFERENT zid (before the old peer's lease expires) must not inherit the dead
+    /// peer's group subscriptions (a phantom mesh advertisement that never withdraws)
+    /// NOR its keyexpr aliases (a mis-resolution / group blackhole). The multicast
+    /// mirror of the namespace `namespace_ingress = None` in-place guard.
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn mcast_in_place_rejoin_with_new_zid_drops_dead_peer_declarations() {
+        use crate::declare_build::build_declare_kexpr;
+        use alloc::boxed::Box;
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        // Peer Z_A declares alias id 7 -> "demo/aliased" AND subscribes "demo/data".
+        drive_batch(
+            &mut d,
+            SRC_A,
+            alloc::vec![
+                crate::network_message::NetworkMessage::Declare(Box::new(
+                    build_declare_kexpr(7, "demo/aliased").unwrap(),
+                )),
+                decl_sub_literal(3, "demo/data"),
+            ],
+        );
+        assert_eq!(d.group_sub_keyexprs().len(), 1);
+
+        // Peer Z_B re-JOINs the SAME src (a DIFFERENT zid, NO evict — the in-place
+        // recycle). It must not inherit Z_A's per-peer declaration state.
+        assert_eq!(
+            d.ingest_join(ZID_B, SRC_A, sn0(), 1),
+            JoinOutcome::Refreshed
+        );
+        assert!(
+            d.group_sub_keyexprs().is_empty(),
+            "the recycled slot must not advertise the dead peer's subscription (C-1)"
+        );
+        // Z_A's alias id 7 must NOT resolve for Z_B: an id-7 aliased sub is now
+        // unresolvable (empty table) -> dropped, not mis-resolved to "demo/aliased".
+        drive_batch(&mut d, SRC_A, alloc::vec![decl_sub_aliased(9, 7, None)]);
+        assert!(
+            d.group_sub_keyexprs().is_empty(),
+            "the dead peer's alias id 7 must not resolve for the recycled peer (C-2)"
+        );
+    }
+
+    /// The sub union is whatami-AGNOSTIC: a Client-role peer's sub is advertised
+    /// even though it is NOT a Designated-Router candidate — the DR-candidate set
+    /// (`router_member_zids`, Router-only) and the subscriber set are different.
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn mcast_sub_union_is_whatami_agnostic() {
+        use alloc::string::ToString;
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, sn0_whatami(WhatAmI::Client), 0),
+            JoinOutcome::Admitted
+        );
+        drive_batch(&mut d, SRC_A, alloc::vec![decl_sub_literal(3, "demo/data")]);
+        assert_eq!(
+            d.group_sub_keyexprs(),
+            alloc::vec!["demo/data".to_string()],
+            "a Client subscriber's sub is advertised (whatami-agnostic)",
+        );
+        assert!(
+            d.router_member_zids().is_empty(),
+            "a Client peer is NOT a DR candidate — the two sets differ",
+        );
+    }
+
+    /// Two peers subscribing the SAME keyexpr collapse to ONE aggregate entry (the
+    /// forwarder union-refcounts, so the relayed set is deduped).
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn mcast_sub_union_dedups_across_peers() {
+        use alloc::string::ToString;
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_B, SRC_B, sn0(), 0), JoinOutcome::Admitted);
+        drive_batch(
+            &mut d,
+            SRC_A,
+            alloc::vec![decl_sub_literal(3, "demo/shared")],
+        );
+        drive_batch(
+            &mut d,
+            SRC_B,
+            alloc::vec![decl_sub_literal(9, "demo/shared")],
+        );
+        assert_eq!(
+            d.group_sub_keyexprs(),
+            alloc::vec!["demo/shared".to_string()],
+            "the same keyexpr from two peers is one aggregate bubble",
+        );
+    }
+
+    /// The per-peer sub table is capped: an unauthenticated peer cannot flood
+    /// distinct-id `DeclSubscriber` to exhaust memory; removals still flow.
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn mcast_sub_table_is_capped() {
+        use alloc::format;
+        use alloc::string::ToString;
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        let mut fill = alloc::vec![];
+        for id in 1..=MAX_SUBS_PER_PEER as u64 {
+            fill.push(decl_sub_literal(id, &format!("demo/{id}")));
+        }
+        drive_batch(&mut d, SRC_A, fill);
+        assert_eq!(d.group_sub_keyexprs().len(), MAX_SUBS_PER_PEER);
+        // One id past the cap is rejected (new growth).
+        drive_batch(
+            &mut d,
+            SRC_A,
+            alloc::vec![decl_sub_literal(
+                MAX_SUBS_PER_PEER as u64 + 1,
+                "demo/overflow"
+            )],
+        );
+        assert_eq!(
+            d.group_sub_keyexprs().len(),
+            MAX_SUBS_PER_PEER,
+            "an over-cap sub is rejected",
+        );
+        assert!(
+            !d.group_sub_keyexprs()
+                .contains(&"demo/overflow".to_string()),
+            "the over-cap keyexpr is not stored",
+        );
+        // A removal still flows even at the cap (the table stays drainable).
+        drive_batch(&mut d, SRC_A, alloc::vec![undecl_sub(1)]);
+        assert_eq!(
+            d.group_sub_keyexprs().len(),
+            MAX_SUBS_PER_PEER - 1,
+            "a removal flows at the cap",
+        );
+    }
+
+    /// A sub declared on an alias the peer NEVER declared resolves to `None` and is
+    /// DROPPED (never stored / advertised) — mirroring the literal-only Push drop.
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn mcast_sub_unresolvable_alias_dropped() {
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        // Alias id 9 was never declared via DeclKexpr -> unresolvable -> dropped.
+        drive_batch(&mut d, SRC_A, alloc::vec![decl_sub_aliased(3, 9, None)]);
+        assert!(
+            d.group_sub_keyexprs().is_empty(),
+            "an unresolvable aliased sub is dropped, not stored id-only",
         );
     }
 }

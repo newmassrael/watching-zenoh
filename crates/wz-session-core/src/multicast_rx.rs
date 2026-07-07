@@ -147,6 +147,16 @@ where
                             // peer declared no aliases.
                             #[cfg(feature = "multicast-declarations")]
                             dispatcher.apply_declared_aliases(src, &mut outcome);
+                            // §5.21 router-multicast-faces (sub plane, S1) — ingest
+                            // this peer's DeclareSubscriber / UndeclareSubscriber into
+                            // its per-peer remote-sub table (read-only on the batch),
+                            // AFTER the alias pass (so an aliased sub resolves against
+                            // the peer's now-populated keyexpr_table) and BEFORE the
+                            // namespace strip (the alias table is namespace-inclusive).
+                            // No-op when the feature is off (MCU) or the peer sent no
+                            // sub declaration.
+                            #[cfg(feature = "multicast-declarations")]
+                            dispatcher.apply_declared_subscriptions(src, &outcome);
                             #[cfg(feature = "routing-namespace")]
                             dispatcher.apply_namespace_ingress(src, &mut outcome);
                             on_event(IterationEvent::Poll(&outcome));

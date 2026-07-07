@@ -256,6 +256,7 @@ where
         on_event,
         outbound,
         |_members: &[Vec<u8>]| {},
+        |_subs: &[String]| {},
     )
     .await
 }
@@ -277,7 +278,7 @@ where
 /// `shared_nodes` master election carries (recomputed at every topology event).
 /// Startup damping (promote-slow / demote-fast) is a named follow-up.
 #[allow(clippy::too_many_arguments)]
-pub async fn drive_multicast_session_with_membership<D, T, F, G, const MAX_PEERS: usize>(
+pub async fn drive_multicast_session_with_membership<D, T, F, G, H, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
     driver: &mut D,
@@ -289,12 +290,23 @@ pub async fn drive_multicast_session_with_membership<D, T, F, G, const MAX_PEERS
         allow(unused_mut, unused_variables)
     )]
     mut on_members: G,
+    // §5.21 router-multicast-faces (sub plane, S2) — the group-subscription twin of
+    // `on_members`: relay the DEDUPED union of on-group subscriber keyexprs to the
+    // forwarder on each change, so it advertises them into the unicast mesh (a
+    // mesh-side publisher then routes toward this router — cross-router
+    // reachability). Elided (never called) without `multicast-declarations`.
+    #[cfg_attr(
+        not(feature = "multicast-declarations"),
+        allow(unused_mut, unused_variables)
+    )]
+    mut on_group_subs: H,
 ) -> MulticastOutcome
 where
     D: LinkDriver,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
     G: FnMut(&[Vec<u8>]),
+    H: FnMut(&[String]),
 {
     // Destructure into the same local names the loop body uses, so the body
     // is unchanged by the Introduce-Parameter-Object refactor.
@@ -343,6 +355,12 @@ where
     // when the set actually changes).
     #[cfg(feature = "multicast-declarations")]
     let mut last_members: Vec<Vec<u8>> = Vec::new();
+    // §5.21 router-multicast-faces (sub plane, S2) — last relayed group-subscriber
+    // keyexpr set, for the snapshot-diff at the loop tail (relay to the forwarder
+    // only when the aggregate actually changes). Kept SORTED before comparison so a
+    // reorder of the deduped `group_sub_keyexprs()` union is not a spurious change.
+    #[cfg(feature = "multicast-declarations")]
+    let mut last_group_subs: Vec<String> = Vec::new();
 
     let mut iter: usize = 0;
     loop {
@@ -509,6 +527,21 @@ where
                 last_members = members;
             }
         }
+        // §5.21 router-multicast-faces (sub plane, S2) — relay the group-subscriber
+        // keyexpr aggregate to the forwarder when it changes (a DeclareSubscriber /
+        // UndeclareSubscriber in the RX arm or a lease evict in the sweep arm can
+        // move it). SORTED before the diff so a reordered dedup union is not a
+        // spurious relay. No-op without `multicast-declarations` (no accessor; the
+        // base drive passes a no-op closure).
+        #[cfg(feature = "multicast-declarations")]
+        {
+            let mut subs = dispatcher.group_sub_keyexprs();
+            subs.sort_unstable();
+            if subs != last_group_subs {
+                on_group_subs(&subs);
+                last_group_subs = subs;
+            }
+        }
     }
 }
 
@@ -642,6 +675,24 @@ pub fn spawn_router_mcast_egress(
 /// multicast plane while this accept-loop-coupled ingress host is elided.
 /// `codec-push` is required because it matches `NetworkMessage::Push` and folds a
 /// `PushOwned` (both `codec-push`-gated) into the accept-loop channel.
+/// The three `Send` relay channels [`spawn_router_mcast_ingress`] hands the accept
+/// loop: (1) the received-Push stream ([`McastIngressItem`](crate::accept_loop::McastIngressItem)),
+/// (2) the on-group ROUTER member set (I3b Designated-Router election candidates),
+/// and (3) the group-SUBSCRIBER keyexpr aggregate (sub plane, S2 — advertised into
+/// the unicast mesh). Named to keep the ingress-host signature under
+/// `clippy::type_complexity`.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-link-udp",
+    feature = "routing-accept",
+    feature = "codec-push"
+))]
+type RouterMcastIngressChannels = (
+    UnboundedReceiver<crate::accept_loop::McastIngressItem>,
+    UnboundedReceiver<Vec<Vec<u8>>>,
+    UnboundedReceiver<Vec<String>>,
+);
+
 #[cfg(all(
     feature = "transport-multicast",
     feature = "transport-link-udp",
@@ -652,10 +703,7 @@ pub fn spawn_router_mcast_ingress(
     group: core::net::Ipv4Addr,
     port: u16,
     zid: Vec<u8>,
-) -> (
-    UnboundedReceiver<crate::accept_loop::McastIngressItem>,
-    UnboundedReceiver<Vec<Vec<u8>>>,
-) {
+) -> RouterMcastIngressChannels {
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::multicast_dispatch::MulticastConfig;
     use wz_session_core::multicast_params::MulticastParams;
@@ -686,6 +734,10 @@ pub fn spawn_router_mcast_ingress(
     // §5.21 router-multicast-faces (I3b) — relay the on-group ROUTER member set
     // (the Designated-Router election candidates) to the accept loop / forwarder.
     let (members_tx, members_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Vec<u8>>>();
+    // §5.21 router-multicast-faces (sub plane, S2) — relay the deduped group-
+    // subscriber keyexpr aggregate to the accept loop / forwarder, so it advertises
+    // the group's interest into the unicast mesh (cross-router reachability).
+    let (group_subs_tx, group_subs_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
     tokio::spawn(async move {
         let mut driver = match UdpDriver::bind_multicast_v4(group, port).await {
             Ok(driver) => driver,
@@ -745,10 +797,18 @@ pub fn spawn_router_mcast_ingress(
             |members: &[Vec<u8>]| {
                 let _ = members_tx.send(members.to_vec());
             },
+            // §5.21 router-multicast-faces (sub plane, S2) — on a group-subscriber
+            // change, relay the deduped keyexpr aggregate to the forwarder (via the
+            // accept loop). `set_mcast_group_subs` diffs it and advertises/withdraws
+            // the group's interest into the unicast mesh. Fire-and-forget on a closed
+            // receiver (accept loop gone), matching the member relay.
+            |subs: &[String]| {
+                let _ = group_subs_tx.send(subs.to_vec());
+            },
         )
         .await;
     });
-    (ingress_rx, members_rx)
+    (ingress_rx, members_rx, group_subs_rx)
 }
 
 #[cfg(test)]

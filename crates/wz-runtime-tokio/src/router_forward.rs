@@ -576,6 +576,22 @@ pub struct RouterForwarder {
     /// are elided there and egress stays unconditional (the shipped behavior).
     #[cfg(feature = "router-multicast-faces")]
     mcast_group_members: RefCell<Vec<Zid>>,
+    /// The DEDUPED keyexpr set the attached multicast group's SUBSCRIBERS declared
+    /// (§5.21 sub plane, S2), relayed live from the ingress drive loop via
+    /// [`set_mcast_group_subs`](Self::set_mcast_group_subs). A THIRD self-advertise
+    /// contributor alongside local client subs and opposite-mesh natives
+    /// ([`self_advertises_sub_into`](Self::self_advertises_sub_into)): while a
+    /// keyexpr is in this set, self advertises interest in it into BOTH meshes (a
+    /// self-sourced `DeclareSubscriber`, exactly as a local client sub does — zenoh
+    /// registers a `mcast_faces` Client-face sub under the router's OWN zid,
+    /// `pubsub.rs:245`), so a mesh-side publisher routes matching Puts toward this
+    /// router and they reach the on-group subscriber via the unconditional group
+    /// egress. Kept as a DISTINCT set (not merged into `client_subs`) because the
+    /// group-sub lifecycle differs — it is withdrawn on async lease-evict, relayed
+    /// as a wholesale REPLACE from the dispatch SSOT, not on a synchronous unicast
+    /// UndeclareSubscriber. Empty (and elided) without `router-multicast-faces`.
+    #[cfg(feature = "router-multicast-faces")]
+    group_subs: RefCell<HashSet<String>>,
     /// Router-tier subscription interest (zenoh `HatTables.router_subs`).
     /// POPULATED by the subscription-INGEST slice (1b, this round): NATIVE
     /// Router sources keyed by their zid. The cross-tier self-bubble is NOT
@@ -865,6 +881,8 @@ impl RouterForwarder {
             mcast_groups: RefCell::new(Vec::new()),
             #[cfg(feature = "router-multicast-faces")]
             mcast_group_members: RefCell::new(Vec::new()),
+            #[cfg(feature = "router-multicast-faces")]
+            group_subs: RefCell::new(HashSet::new()),
             router_subs: RefCell::new(LinkstatepeerInterest::new()),
             linkstatepeer_subs: RefCell::new(LinkstatepeerInterest::new()),
             router_qabls: RefCell::new(LinkstatepeerInterest::new()),
@@ -3344,7 +3362,25 @@ impl RouterForwarder {
     /// master-gated (every router advertises; only the DELIVERY bridge is gated).
     fn self_advertises_sub_into(&self, target: FaceTier, keyexpr: &str) -> bool {
         self.any_client_subscribes(keyexpr)
+            || self.group_subscribes(keyexpr)
             || self.contributor_subs_source_count(target, keyexpr) > 0
+    }
+
+    /// Whether a multicast-group SUBSCRIBER holds `keyexpr` — the THIRD
+    /// self-advertise contributor (§5.21 sub plane, S2), alongside local client
+    /// subs and opposite-mesh natives. A group sub makes self advertise interest
+    /// into the mesh exactly as a local client sub does (zenoh treats a
+    /// `mcast_faces` Client-face sub as a router-owned sub). Without
+    /// `router-multicast-faces` there is no ingress plane / group-sub relay, so this
+    /// is always `false` and `self_advertises_sub_into` reduces to the pre-sub-plane
+    /// client-|-native derive (byte-identical for non-router / egress-only builds).
+    #[cfg(feature = "router-multicast-faces")]
+    fn group_subscribes(&self, keyexpr: &str) -> bool {
+        self.group_subs.borrow().contains(keyexpr)
+    }
+    #[cfg(not(feature = "router-multicast-faces"))]
+    fn group_subscribes(&self, _keyexpr: &str) -> bool {
+        false
     }
 
     /// The number of OPPOSITE-mesh NATIVE sub sources for the EXACT `keyexpr` that
@@ -3370,6 +3406,13 @@ impl RouterForwarder {
         let mut set: HashSet<String> = HashSet::new();
         for keys in self.client_subs.borrow().values() {
             set.extend(keys.iter().cloned());
+        }
+        // §5.21 sub plane (S2) — the group-subscriber aggregate is a third source
+        // in the tick re-advertise (a late-joining tree child converges on self's
+        // cross-tier bubble for a group sub too, exactly as for a client sub).
+        #[cfg(feature = "router-multicast-faces")]
+        for keyexpr in self.group_subs.borrow().iter() {
+            set.insert(keyexpr.clone());
         }
         if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.subs_table(src)) {
             for (keyexpr, _peer, ()) in table.borrow().entries() {
@@ -3411,6 +3454,15 @@ impl RouterForwarder {
     /// the advertisement is re-derived on the tick for late joiners. A single
     /// router has no router tree children, so the router-mesh flood is a no-op.
     fn advertise_client_cross_tier_sub(&self, keyexpr: &str) {
+        // A group sub (§5.21 sub plane, S2) is a THIRD self-advertise contributor
+        // that already flooded BOTH meshes, so the first client is NOT the false->true
+        // flip edge — skip to preserve the flood-only-on-flip invariant (the mirror of
+        // `advertise_group_cross_tier_sub`'s `!any_client_subscribes` early-out; the
+        // withdraw side already negates the full 3-contributor derive). No-op without
+        // `router-multicast-faces` (the `group_subscribes` cfg stub is `false`).
+        if self.group_subscribes(keyexpr) {
+            return;
+        }
         for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
             // Flip false->true for this target IFF no native already covers it
             // (before this client, self_advertises_sub_into(target) == native-only,
@@ -3441,6 +3493,48 @@ impl RouterForwarder {
         }
     }
 
+    /// A group SUBSCRIBER keyexpr just appeared in the aggregate (§5.21 sub plane,
+    /// S2): flood self's cross-tier ADVERTISEMENT into each mesh nothing else
+    /// already covers — a self-sourced `DeclareSubscriber` (node_id 0), so a
+    /// mesh-side publisher routes `keyexpr` toward this router and it reaches the
+    /// on-group subscriber via the unconditional group egress. The group-sub twin of
+    /// [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub);
+    /// it additionally skips a keyexpr a local CLIENT already advertises (a group
+    /// sub is not necessarily the FIRST contributor, unlike the first-client case).
+    /// Called from [`set_mcast_group_subs`](Self::set_mcast_group_subs) on the
+    /// aggregate's false->true edge for `keyexpr`.
+    #[cfg(feature = "router-multicast-faces")]
+    fn advertise_group_cross_tier_sub(&self, keyexpr: &str) {
+        if self.any_client_subscribes(keyexpr) {
+            return; // a local client already advertises the bubble into both meshes.
+        }
+        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            if self.contributor_subs_source_count(target, keyexpr) == 0 {
+                self.flood_self_sourced(target, keyexpr, |ke| {
+                    build_declare_subscriber(0, 0, Some(ke))
+                });
+            }
+        }
+    }
+
+    /// A group SUBSCRIBER keyexpr just left the aggregate (§5.21 sub plane, S2):
+    /// flood self's cross-tier WITHDRAWAL into each mesh self NO LONGER advertises
+    /// into — the exact negation of
+    /// [`advertise_group_cross_tier_sub`](Self::advertise_group_cross_tier_sub),
+    /// reusing [`self_advertises_sub_into`](Self::self_advertises_sub_into) (which
+    /// now excludes the just-removed group sub) so a mesh whose client or native
+    /// still holds `keyexpr` keeps the advertisement (the R311y120 black-hole
+    /// guard). Called from [`set_mcast_group_subs`](Self::set_mcast_group_subs)
+    /// AFTER `keyexpr` is removed from `group_subs`.
+    #[cfg(feature = "router-multicast-faces")]
+    fn withdraw_group_cross_tier_sub(&self, keyexpr: &str) {
+        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            if !self.self_advertises_sub_into(target, keyexpr) {
+                self.flood_self_sourced(target, keyexpr, build_undeclare_subscriber_with_keyexpr);
+            }
+        }
+    }
+
     /// A NATIVE sub for `keyexpr` in `native_tier` just registered: flood self's
     /// cross-tier ADVERTISEMENT into the OPPOSITE mesh IFF it flipped that mesh's
     /// derive false->true — i.e. this is the SOLE native source for the exact
@@ -3454,7 +3548,11 @@ impl RouterForwarder {
         let sole = self
             .subs_table(native_tier)
             .is_some_and(|t| t.borrow().source_count(keyexpr) == 1);
-        if sole && !self.any_client_subscribes(keyexpr) {
+        // `!group_subscribes` keeps the flip-edge invariant when a §5.21 group sub
+        // (S2) already advertised `keyexpr` into `target` (else a redundant flood);
+        // the withdraw side already negates the full 3-contributor derive. No-op
+        // without `router-multicast-faces` (the `group_subscribes` cfg stub is `false`).
+        if sole && !self.any_client_subscribes(keyexpr) && !self.group_subscribes(keyexpr) {
             self.flood_self_sourced(target, keyexpr, |ke| {
                 build_declare_subscriber(0, 0, Some(ke))
             });
@@ -5005,6 +5103,39 @@ impl FaceForwarder for RouterForwarder {
         // means this router saw a peer router on the group (the relay chain ran).
         self.mcast_member_peak
             .set(self.mcast_member_peak.get().max(slot.len()));
+    }
+
+    /// Replace the group-SUBSCRIBER keyexpr aggregate with the live deduped view the
+    /// router-hat's ingress loop relays (§5.21 sub plane, S2), diffing old-vs-new to
+    /// advertise the group's interest into the unicast mesh on a keyexpr's
+    /// false->true edge and withdraw it on true->false. A wholesale REPLACE (like
+    /// [`set_mcast_group_members`](Self::set_mcast_group_members)'s clear+extend) so
+    /// the forwarder snapshot can never drift from the dispatch SSOT
+    /// ([`MulticastDispatcher::group_sub_keyexprs`], the derive-not-store union).
+    /// The new set is committed BEFORE the diff walk so the withdraw predicate
+    /// ([`self_advertises_sub_into`](Self::self_advertises_sub_into)) sees the
+    /// post-removal state (a removed keyexpr no longer counts its own group sub, so
+    /// it withdraws iff no client / native still holds it). The `FaceForwarder`
+    /// default is a no-op — only the router advertises a group's interest.
+    #[cfg(feature = "router-multicast-faces")]
+    fn set_mcast_group_subs(&self, subs: &[String]) {
+        let new: HashSet<String> = subs.iter().cloned().collect();
+        // Diff against the current set, then COMMIT the new set (move — no clone),
+        // so `withdraw_group_cross_tier_sub`'s `self_advertises_sub_into` check sees
+        // the removed keyexpr already gone from `group_subs`.
+        let (added, removed) = {
+            let old = self.group_subs.borrow();
+            let added: Vec<String> = new.difference(&old).cloned().collect();
+            let removed: Vec<String> = old.difference(&new).cloned().collect();
+            (added, removed)
+        };
+        *self.group_subs.borrow_mut() = new;
+        for keyexpr in &added {
+            self.advertise_group_cross_tier_sub(keyexpr);
+        }
+        for keyexpr in &removed {
+            self.withdraw_group_cross_tier_sub(keyexpr);
+        }
     }
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
@@ -11663,6 +11794,139 @@ mod tests {
             rx.try_recv().is_ok(),
             "a non-DR router MUST still egress its OWN local client's Put to the group \
              (DR gate is mesh-sourced-only; else the client starves)"
+        );
+    }
+
+    /// §5.21 router-multicast-faces (sub plane, S2) — a group SUBSCRIBER keyexpr
+    /// relayed via `set_mcast_group_subs` is ADVERTISED into the unicast mesh as a
+    /// self-sourced `DeclareSubscriber` (so a mesh-side publisher routes matching
+    /// Puts toward this router and they reach the on-group subscriber — the
+    /// cross-router reachability limit (a) resolved); removing the last group sub
+    /// floods the WITHDRAWAL. The wz analog of zenoh registering a `mcast_faces`
+    /// Client-face sub under the router's own zid (`pubsub.rs:245`).
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn mcast_group_sub_advertises_and_withdraws_into_mesh() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // a linkstatepeer tree child
+        fwd.register(FaceId(0), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xCC, 5);
+        fwd.tick();
+        sink_c.reset();
+
+        fwd.set_mcast_group_subs(&["demo/data".to_string()]);
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "a group sub is advertised into the mesh (self-sourced sub to the child)"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => {}
+            other => panic!("expected a DeclareSubscriber advertisement, got {other:?}"),
+        }
+        sink_c.reset();
+
+        fwd.set_mcast_group_subs(&[]);
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "removing the last group sub withdraws the advertisement from the mesh"
+        );
+        match forwarded_declare(&sink_c.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {}
+            other => panic!("expected an UndeclareSubscriber withdrawal, got {other:?}"),
+        }
+    }
+
+    /// §5.21 sub plane (S2) — a group sub is the THIRD `self_advertises_sub_into`
+    /// contributor (alongside local client subs and opposite-mesh natives) AND folds
+    /// into the tick re-advertise SSOT (`derived_cross_tier_subs_into`) so a late
+    /// joiner converges on the group's bubble. Derive-level pin of the fold.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn mcast_group_sub_folds_into_self_advertise_derive() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        assert!(!fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/k"));
+        fwd.set_mcast_group_subs(&["demo/k".to_string()]);
+        assert!(
+            fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/k"),
+            "a group sub makes self advertise interest (the third contributor)"
+        );
+        assert!(
+            fwd.derived_cross_tier_subs_into(FaceTier::LinkstatePeers)
+                .contains(&"demo/k".to_string()),
+            "the tick re-advertise SSOT includes the group sub (late-joiner convergence)"
+        );
+        fwd.set_mcast_group_subs(&[]);
+        assert!(
+            !fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/k"),
+            "removing the group sub clears the derive (no client / native holds it)"
+        );
+    }
+
+    /// §5.21 sub plane (S2) — union-refcount with a local client: a client sub AND a
+    /// group sub for the same keyexpr; removing the group sub must NOT withdraw the
+    /// mesh advertisement while the client still holds it (the R311y120 black-hole
+    /// guard — `withdraw_group_cross_tier_sub` reuses `self_advertises_sub_into`).
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn mcast_group_sub_union_refcounts_with_a_local_client() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (cli, _s) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &cli);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/k")); // a local client sub
+        assert!(fwd.any_client_subscribes("demo/k"));
+        fwd.set_mcast_group_subs(&["demo/k".to_string()]);
+        fwd.set_mcast_group_subs(&[]); // group sub leaves; client still holds it
+        assert!(
+            fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/k"),
+            "a client sub keeps the advertisement after the group sub leaves (no black-hole)"
+        );
+    }
+
+    /// §5.21 sub plane (S2) — re-relaying the SAME group-sub aggregate is a no-op
+    /// (the diff is empty), so an unchanged set never re-floods the mesh.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn mcast_group_sub_reset_is_idempotent() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER);
+        fwd.register(FaceId(0), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xCC, 5);
+        fwd.tick();
+        fwd.set_mcast_group_subs(&["demo/k".to_string()]);
+        sink_c.reset();
+        fwd.set_mcast_group_subs(&["demo/k".to_string()]);
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "an unchanged group-sub set does not re-advertise"
+        );
+    }
+
+    /// §5.21 sub plane (S2) — flip-edge invariant across contributor classes: a group
+    /// sub advertises a keyexpr into the mesh; a LATER local client for the SAME
+    /// keyexpr must NOT re-flood (group is already the `true` contributor, so the
+    /// client is not the false->true edge). Regression for the IMPL-review should-fix
+    /// (`advertise_client_cross_tier_sub` now skips when `group_subscribes`).
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn mcast_group_sub_advertise_is_flip_edge_idempotent_with_a_later_client() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // a linkstatepeer flood target
+        fwd.register(FaceId(0), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xCC, 5);
+        fwd.tick();
+        let (cli, _s) = face(zid(0xDD), WIRE_CLIENT);
+        fwd.register(FaceId(1), &cli);
+
+        fwd.set_mcast_group_subs(&["demo/k".to_string()]); // group advertises (1 frame to C)
+        sink_c.reset();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/k")); // a LATER client for the same K
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a later client for an already-group-advertised keyexpr does not re-flood"
         );
     }
 

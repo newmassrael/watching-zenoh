@@ -1687,6 +1687,7 @@ pub(crate) async fn run_peer(
             // A peer node hosts no router multicast ingress plane.
             mcast_ingress: None,
             mcast_members: None,
+            mcast_group_subs: None,
         },
         params,
         TokioTime::new(),
@@ -2129,28 +2130,31 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
     // per-peer `mcast_faces` plane + mcast-peer declarations are the deferred I3
     // milestone; ingress is LITERAL-only here.
     #[cfg(feature = "router-multicast-faces")]
-    let (mcast_ingress, mcast_members) = {
+    let (mcast_ingress, mcast_members, mcast_group_subs) = {
         use std::net::Ipv4Addr;
         // The demo default data-plane router multicast group (same as the egress
         // group above — the router is one bidirectional member).
         const MCAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 225);
         const MCAST_PORT: u16 = 7452;
-        // I3b — the ingress loop returns BOTH the received-Push channel and the
-        // on-group ROUTER member relay (the Designated-Router election candidates
-        // that keep the group egress + mcast-ingress federation loop-safe).
-        let (rx, members_rx) = wz::runtime_tokio::multicast_glue::spawn_router_mcast_ingress(
-            MCAST_GROUP,
-            MCAST_PORT,
-            params.zid.clone(),
-        );
+        // I3b — the ingress loop returns the received-Push channel and the on-group
+        // ROUTER member relay (the Designated-Router election candidates that keep
+        // the group egress + mcast-ingress federation loop-safe). S2 adds the third
+        // channel: the group-SUBSCRIBER keyexpr aggregate, advertised into the mesh
+        // so a mesh-side publisher reaches an on-group subscriber (reachability).
+        let (rx, members_rx, group_subs_rx) =
+            wz::runtime_tokio::multicast_glue::spawn_router_mcast_ingress(
+                MCAST_GROUP,
+                MCAST_PORT,
+                params.zid.clone(),
+            );
         log::info!(
             "wz-ap-demo router-hat: multicast ingress group {MCAST_GROUP}:{MCAST_PORT} \
              joined (router-multicast-faces); received Push routes to unicast subscribers"
         );
-        (Some(rx), Some(members_rx))
+        (Some(rx), Some(members_rx), Some(group_subs_rx))
     };
     #[cfg(not(feature = "router-multicast-faces"))]
-    let (mcast_ingress, mcast_members) = (None, None);
+    let (mcast_ingress, mcast_members, mcast_group_subs) = (None, None, None);
 
     let loop_fut = peer_loop(
         FaceSources {
@@ -2162,6 +2166,7 @@ pub(crate) async fn run_router_hat(listen: &str, dial_targets: &[String]) -> io:
             dial_intents: None,
             mcast_ingress,
             mcast_members,
+            mcast_group_subs,
         },
         params,
         TokioTime::new(),
