@@ -4236,6 +4236,13 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     (cd crates && cargo build -p wz-ap-demo --features router-multicast-faces --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_multicast_pico_interop -- --ignored --quiet) || return 1
+    # R311y195 — router-multicast-faces INGRESS I2 (the reverse of S4): a real pico
+    # `z_pub -m peer` (LITERAL) publishes over the group; the wz `--router-hat`
+    # RECEIVES it on its ingress group face and routes it to a wz unicast
+    # subscriber. Reuses the demo built just above (--features
+    # router-multicast-faces); reached only past the pico-CLI presence guard.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_multicast_ingress_pico_interop -- --ignored --quiet) || return 1
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────
