@@ -47,6 +47,7 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
@@ -157,15 +158,36 @@ async fn unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx() {
     // Both sides driven continuously (None) so the RX reassembly pool lives
     // across the whole fragment chain. select! drops the drives when the
     // scenario observes the delivery.
-    let drive_acc = drive_session_until_terminal(
-        &mut opened_acc.inbound,
-        &opened_acc.actions,
-        &mut opened_acc.engine,
-        None,
-        &opened_acc.clock,
-        &timeouts,
-        |event| observer.dispatch_event(event),
-    );
+    // Count the RX-observed fragment chunks so the acceptor PROVES the
+    // publisher's TX actually took the split branch — `negotiated_batch_mtu()
+    // == 64` alone only proves the fragmentation INPUT, not that
+    // `emit_frame_or_fragments` emitted a multi-chunk chain. This catches a
+    // CODE regression that collapses the split (marker / SN / chunk logic)
+    // while `transport-fragmentation` is ON — the count drops to 0 (a single
+    // un-fragmented send arrives as a Frame, not a Fragment) and the assert
+    // fires. It does NOT guard the feature being DISABLED (this whole file is
+    // `#![cfg(feature = "transport-fragmentation")]`, so it compiles out then,
+    // silently absent rather than failing). It is the host-lane logic backstop
+    // for the binary-dep wz->pico e2e (`wz_fragment_tx_to_pico_zsub`, R311y206),
+    // whose pico-as-receiver exposes no wz-side chunk count.
+    let frag_chunks = Arc::new(AtomicUsize::new(0));
+    let drive_acc = {
+        let frag_chunks = frag_chunks.clone();
+        drive_session_until_terminal(
+            &mut opened_acc.inbound,
+            &opened_acc.actions,
+            &mut opened_acc.engine,
+            None,
+            &opened_acc.clock,
+            &timeouts,
+            move |event| {
+                if let IterationEvent::Poll(DriverLoopOutcome::Fragment { .. }) = &event {
+                    frag_chunks.fetch_add(1, Ordering::SeqCst);
+                }
+                observer.dispatch_event(event)
+            },
+        )
+    };
     let drive_init = drive_session_until_terminal(
         &mut opened_init.inbound,
         &opened_init.actions,
@@ -203,5 +225,11 @@ async fn unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx() {
         fired.load(Ordering::SeqCst),
         1,
         "exactly one reassembled delivery from the oversize fragmented Put"
+    );
+    assert!(
+        frag_chunks.load(Ordering::SeqCst) >= 2,
+        "the publisher's oversize Put must leave TX as a multi-chunk \
+         T_MID_FRAGMENT chain at MTU 64 (acceptor RX saw {} fragment chunks)",
+        frag_chunks.load(Ordering::SeqCst)
     );
 }

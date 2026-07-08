@@ -444,8 +444,29 @@ pub(crate) fn frame_wire_body(frame: &[u8], sn: u64) -> &[u8] {
 /// *before* the SN block is reserved, and guarantees every emitted fragment is
 /// `<= mtu` whatever its SN. The few unused payload bytes per fragment are
 /// negligible against a multi-KB body.
+///
+/// The FIRST fragment additionally carries the 1-byte [`FRAGMENT_FIRST_EXT_HEADER`]
+/// after its `VLE(sn)`. It still fits `<= mtu`: the first-fragment wire is
+/// `1(header) + vle_width(sn) + 1(ext) + (mtu - BUDGET)` = `mtu - 9 +
+/// vle_width(sn)`, and a ring-masked SN's real `vle_width` is `<= 9` (a
+/// 63-bit `seq_num_res` is the widest ring), so the ext rides the slack between
+/// the reserved max VLE width (10) and the real width — no chunk resize needed.
 #[cfg(feature = "transport-fragmentation")]
 const FRAG_HEADER_BUDGET: usize = 1 + 10;
+
+/// The `FRAGMENT_FIRST` transport extension header byte written after `VLE(sn)`
+/// on the FIRST fragment of a chain: ext-id `0x02`, encoding `unit` (`0b00`,
+/// no body), non-mandatory (M=0), sole ext (Z=0) → `0x02`. zenoh
+/// `fragment::ext::First = zextunit!(0x2, false)`
+/// (`commons/zenoh-protocol/src/transport/fragment.rs`); zenoh-pico
+/// `_Z_MSG_EXT_ID_FRAGMENT_FIRST` (`include/zenoh-pico/protocol/ext.h`). A peer
+/// that negotiated protocol patch >= 1 (which wz always advertises, see
+/// [`crate::session_actions::default_init_patch_ext_entry`]) REQUIRES this
+/// marker on the chain's first fragment and silently drops the whole chain
+/// without it (zenoh-pico `src/transport/unicast/rx.c`, "First fragment
+/// received without the start marker").
+#[cfg(feature = "transport-fragmentation")]
+const FRAGMENT_FIRST_EXT_HEADER: u8 = 0x02;
 
 /// Per-fragment payload capacity at this `mtu`. Floored at 1 so a pathological
 /// `mtu <= FRAG_HEADER_BUDGET` still terminates (one body byte per fragment)
@@ -490,7 +511,13 @@ pub fn fragment_body(
     loop {
         let end = core::cmp::min(off + chunk, body.len());
         let more = end < body.len();
-        out.push(build_fragment_wire(sn, &body[off..end], reliable, more));
+        out.push(build_fragment_wire(
+            sn,
+            &body[off..end],
+            reliable,
+            more,
+            off == 0,
+        ));
         off = end;
         if !more {
             break;
@@ -501,15 +528,29 @@ pub fn fragment_body(
 }
 
 /// Encode one `T_MID_FRAGMENT` wire frame: a `[flags | T_MID_FRAGMENT]`
-/// transport-message header byte (R/M ride the header) followed by the
+/// transport-message header byte (R/M/Z ride the header) followed by the
 /// `wz_codecs::fragment` codec body (`VLE(sn) + tail payload`). The body is
 /// the byte-verified SSOT — `layer3_fragment.rs` checks `Fragment::encode`
 /// against zenoh-pico `_z_fragment_encode`, and `inbound.rs` decodes the
 /// symmetric shape — so production TX shares it rather than re-deriving the
 /// VLE wire. Mirrors zenoh-pico, where `_z_transport_message_encode` writes the
 /// header and the fragment codec writes the body.
+///
+/// `first` (the chain's leading fragment) sets the header `Z` bit and inserts
+/// the [`FRAGMENT_FIRST_EXT_HEADER`] (`0x02`) ext byte between `VLE(sn)` and
+/// the payload — the chain-start marker a protocol-patch >= 1 peer requires
+/// (see [`FRAGMENT_FIRST_EXT_HEADER`]). Composed here rather than in the
+/// fragment codec, symmetric with `inbound.rs`'s hand-rolled `T_MID_FRAGMENT`
+/// Z-gated ext-chain decode (the codec stays a pure `VLE(sn) + tail` SSOT; the
+/// transport-level R/M/Z flags + ext chain live at this frame-composer layer).
 #[cfg(feature = "transport-fragmentation")]
-fn build_fragment_wire(sn: u64, payload: &[u8], reliable: bool, more: bool) -> Vec<u8> {
+fn build_fragment_wire(
+    sn: u64,
+    payload: &[u8],
+    reliable: bool,
+    more: bool,
+    first: bool,
+) -> Vec<u8> {
     let mut flags = 0u8;
     if reliable {
         flags |= wire_const::FLAG_T_FRAGMENT_R;
@@ -517,9 +558,27 @@ fn build_fragment_wire(sn: u64, payload: &[u8], reliable: bool, more: bool) -> V
     if more {
         flags |= wire_const::FLAG_T_FRAGMENT_M;
     }
-    let mut wire = Vec::with_capacity(FRAG_HEADER_BUDGET + payload.len());
+    if first {
+        // Z: a Fragment ext chain (the FRAGMENT_FIRST marker) follows the body.
+        flags |= wire_const::FLAG_T_Z;
+    }
+    let mut wire = Vec::with_capacity(FRAG_HEADER_BUDGET + payload.len() + usize::from(first));
     wire.push(flags | wire_const::T_MID_FRAGMENT);
-    {
+    if first {
+        // First fragment wire body: VLE(sn) + FRAGMENT_FIRST ext (0x02) +
+        // payload. The codec writes VLE(sn) with an empty payload (raw tail,
+        // no length prefix — `Fragment::encode` is `write_vle_u64 + write_bytes`)
+        // so the SN wire form stays the byte-verified SSOT; the ext byte + the
+        // real payload are appended after.
+        {
+            let mut sink = VecSink::new(&mut wire);
+            wz_codecs::fragment::Fragment { sn, payload: &[] }
+                .encode(&mut sink)
+                .expect("VecSink is infallible");
+        }
+        wire.push(FRAGMENT_FIRST_EXT_HEADER);
+        wire.extend_from_slice(payload);
+    } else {
         let mut sink = VecSink::new(&mut wire);
         wz_codecs::fragment::Fragment { sn, payload }
             .encode(&mut sink)
@@ -544,10 +603,11 @@ fn build_fragment_wire(sn: u64, payload: &[u8], reliable: bool, more: bool) -> V
 /// oversize frame's already-minted `sn` IS the first fragment SN, and
 /// each further fragment mints the channel's next — the drive loop owns
 /// `tx_sn` exclusively, so the chain stays ring-consecutive by
-/// construction and no SN is ever skipped (contrast the unicast
-/// shared-counter path, which discards the oversize frame's SN and
-/// reserves a fresh contiguous block). The follow-on mints advance
-/// `tx_sn`, so the next JOIN beacon advertises the post-chain `next_*`.
+/// construction and no SN is ever skipped. The unicast
+/// `emit_frame_or_fragments` twin mirrors this SN policy (R311y206 made it
+/// reuse the oversize frame's `sn` as the first fragment SN + reserve only the
+/// `count - 1` follow-ons, closing the prior 1-SN gap). The follow-on mints
+/// advance `tx_sn`, so the next JOIN beacon advertises the post-chain `next_*`.
 ///
 /// Without `transport-fragmentation` the frame passes through whatever
 /// its size (zenoh-pico "Sending the message required fragmentation
@@ -922,6 +982,77 @@ mod fragment_tests {
             reassembled, body,
             "fragment payloads must concatenate back to the original body",
         );
+    }
+
+    /// R311y206 — the FIRST fragment of a chain carries the `FRAGMENT_FIRST`
+    /// marker (header `Z` bit + a `0x02` ext byte after `VLE(sn)`, before the
+    /// payload); no subsequent fragment does. zenoh-pico silently drops a
+    /// marker-less chain on a protocol-patch >= 1 session (which wz always
+    /// advertises), so this is the interop-load-bearing bit the binary-dep
+    /// wz->pico e2e (`wz_fragment_tx_to_pico_zsub`) exercises over a real
+    /// socket — pinned here on a host lane so a `first`-handling regression
+    /// fails WITHOUT the pico CLI. Also asserts the marked first fragment
+    /// stays `<= mtu` (the ext rides the VLE-reserve slack).
+    #[test]
+    fn fragment_body_marks_only_the_first_fragment() {
+        let body: Vec<u8> = (0..200u32).map(|i| (i * 7) as u8).collect();
+        let mtu = 64usize;
+        let base_sn = 7u64; // VLE width 1 -> the ext byte lands at wire[2].
+        let frames = fragment_body(&body, true, mtu, base_sn, crate::sn::mask_from_res(0x02));
+        assert!(
+            frames.len() >= 2,
+            "200B at mtu 64 must be a multi-fragment chain"
+        );
+
+        // First fragment: Z bit set + the 0x02 ext byte right after VLE(sn).
+        let first = &frames[0];
+        assert!(
+            first.len() <= mtu,
+            "the marked first fragment still fits mtu"
+        );
+        assert_ne!(
+            first[0] & wire_const::FLAG_T_Z,
+            0,
+            "first fragment header must set Z (ext chain present)"
+        );
+        assert_eq!(
+            first[2],
+            super::FRAGMENT_FIRST_EXT_HEADER,
+            "first fragment carries the 0x02 FRAGMENT_FIRST ext after VLE(sn)"
+        );
+        let InboundFrame::Fragment {
+            has_ext,
+            sn,
+            payload,
+            ..
+        } = parse_inbound(first).expect("parse first fragment")
+        else {
+            panic!("first frame is not a Fragment");
+        };
+        assert!(has_ext, "first fragment decodes with the ext chain present");
+        assert_eq!(sn, base_sn, "first fragment SN is the base");
+        // chunk = mtu - FRAG_HEADER_BUDGET = 64 - 11 = 53; the decoded payload
+        // (ext already stripped by parse_inbound) is the leading body chunk.
+        assert_eq!(
+            &payload[..],
+            &body[..53],
+            "first fragment payload is the leading chunk, ext stripped"
+        );
+
+        // Every subsequent fragment: no Z, no ext.
+        for (i, frame) in frames.iter().enumerate().skip(1) {
+            assert_eq!(
+                frame[0] & wire_const::FLAG_T_Z,
+                0,
+                "fragment {i} (not first) must NOT set Z"
+            );
+            let InboundFrame::Fragment { has_ext, .. } =
+                parse_inbound(frame).expect("parse fragment")
+            else {
+                panic!("frame {i} is not a Fragment");
+            };
+            assert!(!has_ext, "fragment {i} (not first) has no ext chain");
+        }
     }
 
     /// R311kb — a chain whose reserved block crosses the ring seam walks

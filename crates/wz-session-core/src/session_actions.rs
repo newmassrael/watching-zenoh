@@ -2455,15 +2455,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// The FRAME body is the tail after the 1-byte header + `VLE(sn)`;
     /// slice it rather than re-encoding (`vle_width` = base-128 width of
-    /// `sn`). The discarded oversize FRAME consumed `sn`; the fragment
-    /// chain reserves a fresh contiguous counter block via a single
-    /// atomic fetch-add — `fragment_body` projects it onto the ring of
-    /// `sn_mask` (R311kb) — so the chunk SNs stay ring-consecutive even
-    /// if a concurrent sender mints outbound SNs (the reassembly
-    /// dispatcher aborts a non-consecutive chain). The one skipped SN
-    /// per oversize message never reaches the wire and stays far inside
-    /// the peer's SN half-window (bounded: 1 per oversize message, vs
-    /// the fragment chain consuming `count` SNs itself).
+    /// `sn`). The oversize FRAME's already-minted `sn` IS the first
+    /// fragment's SN; the chain reserves only the `count - 1` follow-on SNs
+    /// (`fragment_body` projects the walk onto the ring of `sn_mask`, R311kb),
+    /// so the chunk SNs are ring-consecutive from `sn` with NO skipped SN
+    /// (R311y206 — matching zenoh `pipeline.rs` + the
+    /// `multicast_frame_or_fragments` twin; the pre-y206 code discarded `sn`
+    /// and reserved a fresh block, leaving a 1-SN wire gap). The caller's `sn`
+    /// mint and this follow-on reserve both run inside the one `tx_mutex`
+    /// hold, so the split reservation is atomic w.r.t. a concurrent sender
+    /// (the reassembly dispatcher aborts a non-consecutive chain).
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -2495,8 +2496,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if frame.len() > mtu {
                 let body = crate::frame_encode::frame_wire_body(frame, sn);
                 let count = crate::frame_encode::fragment_count(body.len(), mtu) as u64;
-                let base = self.outbound_frame_sn.fetch_add(count, Ordering::SeqCst);
-                for frag in crate::frame_encode::fragment_body(body, reliable, mtu, base, sn_mask) {
+                // The oversize frame's already-minted `sn` IS the first
+                // fragment's SN; reserve only the `count - 1` follow-on SNs so
+                // the chain is ring-consecutive from `sn` (zenoh
+                // `io/zenoh-transport/.../pipeline.rs` reuses the frame SN slot;
+                // the `multicast_frame_or_fragments` twin does the same). The
+                // prior code re-minted a fresh `fetch_add(count)` block,
+                // discarding `sn` and leaving a 1-SN gap on the wire — tolerated
+                // wz<->wz by the peer's half-window SN check but a real
+                // divergence from the reference (R311y206).
+                for _ in 1..count {
+                    self.outbound_frame_sn.fetch_add(1, Ordering::SeqCst);
+                }
+                for frag in crate::frame_encode::fragment_body(body, reliable, mtu, sn, sn_mask) {
                     self.send_wire(&frag, reliability);
                 }
                 return;
