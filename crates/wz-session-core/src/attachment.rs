@@ -104,6 +104,40 @@ pub fn serialize_kv_attachment(pairs: &[(&[u8], &[u8])]) -> alloc::vec::Vec<u8> 
     out
 }
 
+/// Parse a `ze_serializer` attachment kv-sequence blob (the inverse of
+/// [`serialize_kv_attachment`]) into owned `(key, value)` byte-string pairs.
+/// This is the wz decode twin for the reverse cross-impl direction: a foreign
+/// zenoh / zenoh-pico publisher (e.g. pico's `z_pub_attachment`,
+/// `vendor/zenoh-pico/examples/unix/c11/z_pub_attachment.c:109-117`) emits the
+/// kv-sequence, and a wz subscriber recovers the structured pairs from the
+/// delivered `Sample`'s opaque attachment.
+///
+/// Reads `VLE(pair_count)` then, per pair, two length-prefixed strings — the
+/// exact decode `z_sub_attachment.c`'s loop performs
+/// (`ze_deserializer_deserialize_sequence_length` +
+/// `ze_deserializer_deserialize_string` × 2 per element). Faithful to the pico
+/// decoder, it reads EXACTLY `pair_count` pairs and ignores any trailing bytes
+/// (pico does not check for full consumption). Returns `None` on a truncated /
+/// malformed blob (a length prefix that overruns the buffer), never panicking
+/// and never over-allocating on a bogus count — a short blob claiming many
+/// pairs fails on the first read that runs out. Composed from the
+/// [`crate::vle`] SSOT (`read_zbuf` = `ze_deserializer_deserialize_string`),
+/// the read twin of the [`crate::vle::write_zbuf`] `serialize_kv_attachment`
+/// builds from.
+pub fn deserialize_kv_attachment(
+    blob: &[u8],
+) -> Option<alloc::vec::Vec<(alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)>> {
+    let mut cursor = sce_forge_runtime::codec::SceCursor::new(blob);
+    let count = cursor.read_vle_u64().ok()?;
+    let mut pairs = alloc::vec::Vec::new();
+    for _ in 0..count {
+        let key = crate::vle::read_zbuf(&mut cursor)?;
+        let value = crate::vle::read_zbuf(&mut cursor)?;
+        pairs.push((key, value));
+    }
+    Some(pairs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +241,71 @@ mod tests {
         assert_eq!(&blob[..5], &[0x01, 0x01, b'k', 0xC8, 0x01]);
         assert_eq!(blob.len(), 5 + 200);
         assert!(blob[5..].iter().all(|&b| b == 0xEE));
+    }
+
+    /// deserialize_kv_attachment recovers the pairs from the exact locked
+    /// single-pair wire bytes — the reverse of the serialize byte-lock, i.e.
+    /// what a wz subscriber gets from a foreign publisher's attachment.
+    #[test]
+    fn deserialize_kv_attachment_reads_locked_single_pair() {
+        let pairs = deserialize_kv_attachment(&[0x01, 0x02, b'h', b'i', 0x02, b'y', b'o']).unwrap();
+        assert_eq!(pairs, [(b"hi".to_vec(), b"yo".to_vec())]);
+    }
+
+    /// serialize -> deserialize round-trips for the representative shapes:
+    /// two pairs, a zero-length value, an empty list, and a multi-byte length.
+    #[test]
+    fn kv_attachment_serialize_deserialize_round_trips() {
+        let big = alloc::vec![0xEE_u8; 200];
+        let cases: &[&[(&[u8], &[u8])]] = &[
+            &[(b"source", b"C"), (b"index", b"0")],
+            &[(b"a", b"bb"), (b"ccc", b"")],
+            &[],
+            &[(b"k", &big)],
+        ];
+        for pairs in cases {
+            let blob = serialize_kv_attachment(pairs);
+            let back = deserialize_kv_attachment(&blob).expect("well-formed blob decodes");
+            let expected: alloc::vec::Vec<(alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                .collect();
+            assert_eq!(back, expected, "round-trip for {pairs:?}");
+        }
+    }
+
+    /// A truncated blob (claims a pair whose value length overruns the buffer)
+    /// yields `None`, never a panic, a partial pair, an over-allocation, or an
+    /// unbounded loop.
+    #[test]
+    fn deserialize_kv_attachment_none_on_truncation() {
+        // count=1, key len=1 'k', value len=5 but only 1 byte present -> the
+        // value's `read_zbuf` overruns the buffer.
+        assert_eq!(
+            deserialize_kv_attachment(&[0x01, 0x01, b'k', 0x05, b'x']),
+            None
+        );
+        // An unterminated count VLE (three continuation-flagged bytes, no
+        // terminator) fails at the `read_vle_u64` for the COUNT, before the
+        // pair loop is ever entered.
+        assert_eq!(deserialize_kv_attachment(&[0xFF, 0xFF, 0xFF]), None);
+        // The load-bearing no-OOM / bounded-loop case: a VALID large count
+        // (200 = VLE `0xC8 0x01`) followed by NO pair bytes. The loop is capped
+        // by the buffer, not by `count`, so the first pair's key `read_zbuf`
+        // runs out and `?` bails to `None` — no per-`count` pre-allocation, no
+        // unbounded spin (contrast pico's `malloc(sizeof(kv) * count)`).
+        assert_eq!(deserialize_kv_attachment(&[0xC8, 0x01]), None);
+        // An empty blob has not even the count VLE.
+        assert_eq!(deserialize_kv_attachment(&[]), None);
+    }
+
+    /// Faithful to pico's decoder: reads EXACTLY `count` pairs and ignores
+    /// trailing bytes (z_sub_attachment.c does not check for full consumption).
+    #[test]
+    fn deserialize_kv_attachment_ignores_trailing_bytes() {
+        // count=1, ("hi","yo"), then a stray trailing byte 0xAB.
+        let pairs =
+            deserialize_kv_attachment(&[0x01, 0x02, b'h', b'i', 0x02, b'y', b'o', 0xAB]).unwrap();
+        assert_eq!(pairs, [(b"hi".to_vec(), b"yo".to_vec())]);
     }
 }
