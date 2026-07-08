@@ -1480,8 +1480,11 @@ layer_c1al_cargo_test_unixpipe() {
 #      empty). The count is asserted (grep '1 passed') so a future default-set
 #      change that cfg-outs the test reddens the lane instead of passing green.
 #      Clippy floors the ex-XOR combo on BOTH crates (the guard lives in
-#      wz-session-core). The integrated 2-link-over-TCP reconnect-over-aggregate
-#      e2e is slice-2 (per-link auto-re-add), not this lane.
+#      wz-session-core).
+#   6. R311y212 slice-2 — the per-link AUTO-RE-ADD e2e (session_multilink_readd_e2e):
+#      A's production peer_loop re-dials + re-JOINs a dropped dialed link (the
+#      harness kills one of B's accepted links), proving a flapped aggregated link
+#      comes back onto the SAME session with no manual re-dial.
 layer_c1ba_cargo_clippy_transport_multilink() {
     local ML_FEATURES="transport-multilink,transport-link-tcp,codec-push,codec-close,session-unicast-open,session-unicast-accept,pubsub-put"
     # The deploy-active e2e drives the production `peer_loop` accept/dial path, so
@@ -1490,11 +1493,18 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet \
+        `# R311y212 slice-2 — the per-link AUTO-RE-ADD e2e: A's production peer_loop` \
+        `# (max_links=2, dials B twice) re-dials + re-JOINs a link the harness kills` \
+        `# on B, so a dropped dialed link comes back onto the SAME session. The count` \
+        `# guard (grep ' 1 passed') reddens the lane if a feature-set edit ever` \
+        `# cfg-outs the '#![cfg(all(...))]'-gated file to 0 tests (silent green).` \
+        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet 2>&1 | tee /dev/stderr | grep -q ' 1 passed' \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
         && cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-multilink --quiet -- -D warnings \
         `# R311y205 whole-session F4 — the send_wire/select_link cfg-skew net: a` \
         `# transport-multilink build carrying ONLY a control codec (codec-close)` \

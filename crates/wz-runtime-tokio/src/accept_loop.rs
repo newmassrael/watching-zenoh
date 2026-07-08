@@ -503,12 +503,40 @@ async fn dial_face_multilink(
     (id, peer, result)
 }
 
-/// The fixed backoff between a dropped/failed desired-peer dial and its re-dial
-/// (`router-connect-reconcile` peer auto-reconnect). zenoh uses a configurable
-/// `ConnectionRetryConf` exponential period (`orchestrator.rs:788`); wz takes the
-/// simple fixed 1 s of the client `ReconnectPolicy` default — the per-endpoint
-/// retry-config surface is a deferred concern, not this atom.
-#[cfg(feature = "router-connect-reconcile")]
+/// R311y212 (transport-multilink per-link auto-re-add) — the backoff + 0x4 re-dial
+/// twin: [`dial_face_after`]'s delay composed with [`dial_face_multilink`]'s
+/// 0x4-negotiating establishment. Because the re-dial reaches the SAME peer (the
+/// retained `SocketAddr`), it captures the SAME REMOTE ephemeral multilink pubkey
+/// the survivor is bound to, so `join_link`'s `authorize_link` config-equality
+/// (the candidate's captured-peer key vs the session's bound-peer key) passes —
+/// the identity is the PEER's key, not this node's. It re-tags its traffic class
+/// via `pref` (the DEAD link's retained pref, not `multilink_pref(new_id)` — the
+/// fresh id's parity may differ). Completes into the same `opening` ->
+/// [`Step::Opened`] -> JOIN path as an immediate multilink dial, so a successful
+/// re-dial aggregates onto the surviving shared core (`join_link`) and a failed
+/// one surfaces `Err` -> the Err arm re-schedules it (retry-until-success).
+#[cfg(feature = "transport-multilink")]
+async fn dial_face_multilink_after(
+    id: FaceId,
+    peer: SocketAddr,
+    backoff_ms: u64,
+    pref: LinkReliabilityPref,
+    params: SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+) -> OpenResult {
+    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+    dial_face_multilink(id, peer, pref, params, clock, tick_interval_ms).await
+}
+
+/// The fixed backoff between a dropped/failed dial and its re-dial. Shared by
+/// two substrates: `router-connect-reconcile` peer auto-reconnect (a dropped
+/// DESIRED peer) and `transport-multilink` per-link auto-re-add (R311y212 — a
+/// dropped aggregated link re-JOINed onto the surviving session). zenoh uses a
+/// configurable `ConnectionRetryConf` exponential period (`orchestrator.rs:788`);
+/// wz takes the simple fixed 1 s of the client `ReconnectPolicy` default — the
+/// per-endpoint retry-config surface is a deferred concern, not this atom.
+#[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
 const RECONNECT_BACKOFF_MS: u64 = 1000;
 
 /// Dial a peer after a fixed backoff — the delayed twin of [`dial_face`] used by the
@@ -590,6 +618,58 @@ fn schedule_redial(
         clock,
         tick_interval_ms,
     )));
+}
+
+/// R311y212 (transport-multilink) — schedule a re-dial + re-JOIN of a dropped
+/// aggregated link this node DIALED (the multilink twin of [`schedule_redial`],
+/// its own substrate, NOT gated on `router-connect-reconcile`). Unlike the peer
+/// auto-reconnect there is no `desired` connect-list gate — every retained
+/// multilink dial endpoint is permanently wanted (a per-link retry policy is a
+/// deferred slice). Re-keys the retained endpoint to a fresh [`FaceId`] BEFORE
+/// the backoff (so the re-add is tracked across the drop->redial gap and the Err
+/// arm can retry it), carrying the DEAD link's `pref` so the re-added link
+/// restores its traffic class. `announce` controls the log level: the first
+/// re-add after a drop logs at `info` (an operator-visible link flap), retries at
+/// `debug`. The re-dial completes into the SAME `opening` -> [`Step::Opened`] JOIN
+/// path, so it aggregates onto the surviving shared core with SN continuity.
+#[cfg(feature = "transport-multilink")]
+#[allow(clippy::too_many_arguments)]
+fn schedule_multilink_redial(
+    addr: SocketAddr,
+    pref: LinkReliabilityPref,
+    ml_dial_endpoints: &mut BTreeMap<FaceId, (SocketAddr, LinkReliabilityPref)>,
+    opening: &mut FuturesUnordered<OpenFuture>,
+    next_id: &mut u64,
+    announce: bool,
+    params: &SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+) {
+    let id = FaceId(*next_id);
+    *next_id += 1;
+    // Re-key the retained endpoint to the fresh id BEFORE the backoff, so the
+    // re-add is tracked (a failed re-dial's Err arm finds it and retries).
+    ml_dial_endpoints.insert(id, (addr, pref));
+    if announce {
+        log::info!(
+            "multilink: re-adding dropped link to {addr} in {RECONNECT_BACKOFF_MS}ms (face {})",
+            id.0
+        );
+    } else {
+        log::debug!(
+            "multilink: retrying re-add to {addr} in {RECONNECT_BACKOFF_MS}ms (face {})",
+            id.0
+        );
+    }
+    opening.push(Box::pin(dial_face_multilink_after(
+        id,
+        addr,
+        RECONNECT_BACKOFF_MS,
+        pref,
+        params.clone(),
+        clock,
+        tick_interval_ms,
+    )) as OpenFuture);
 }
 
 /// Drive one Established face to terminal, then drain it. The per-iteration
@@ -1069,6 +1149,16 @@ where
     let mut ml_faces: BTreeMap<FaceId, (Vec<u8>, Arc<SessionLinkActions>)> = BTreeMap::new();
     #[cfg(feature = "transport-multilink")]
     let mut ml_rejected: BTreeSet<FaceId> = BTreeSet::new();
+    // R311y212 (transport-multilink per-link auto-re-add) — the retained dial
+    // endpoint (+ traffic-class pref) for every aggregated link THIS node dialed,
+    // keyed by FaceId. Its own substrate (not `router-connect-reconcile`'s
+    // `dialed_targets`, which is removed at the JOIN and dial-vs-accept-gated on a
+    // different feature): a dialed link keeps its entry across the JOIN so that on
+    // a PARTIAL loss it can be re-dialed + re-JOINed onto the surviving session. An
+    // ACCEPTED link has no entry (no re-dial owner — the peer re-dials it).
+    #[cfg(feature = "transport-multilink")]
+    let mut ml_dial_endpoints: BTreeMap<FaceId, (SocketAddr, LinkReliabilityPref)> =
+        BTreeMap::new();
     let mut summary = AcceptLoopSummary::default();
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
     // R311y205 (transport-multilink) — an aggregating loop drives three distinct
@@ -1126,6 +1216,13 @@ where
         } else {
             Box::pin(dial_face(id, peer, params.clone(), clock, tick_interval_ms)) as OpenFuture
         });
+        // R311y212 — retain the dial endpoint so a partial-loss re-add can re-dial
+        // this link (aggregating dials only; a single-link seed is not re-added
+        // through this substrate).
+        #[cfg(feature = "transport-multilink")]
+        if max_links > 1 {
+            ml_dial_endpoints.insert(id, (peer, multilink_pref(id)));
+        }
     }
 
     loop {
@@ -1213,6 +1310,12 @@ where
                                             );
                                             #[cfg(feature = "router-connect-reconcile")]
                                             dialed_targets.remove(&id);
+                                            // R311y212 — a REJECTED dialed link is not
+                                            // re-added; drop its retained endpoint so it
+                                            // does not leak past the ml_rejected drain
+                                            // (which `continue`s in Step::Driven before
+                                            // the death-handler leak-guard is reached).
+                                            ml_dial_endpoints.remove(&id);
                                             ml_rejected.insert(id);
                                             driving
                                                 .push(Box::pin(drain_rejected_face(face, opened))
@@ -1227,6 +1330,10 @@ where
                                             );
                                             #[cfg(feature = "router-connect-reconcile")]
                                             dialed_targets.remove(&id);
+                                            // R311y212 — see the MAX_LINKS arm: drop the
+                                            // rejected link's retained endpoint so it does
+                                            // not leak past the ml_rejected drain.
+                                            ml_dial_endpoints.remove(&id);
                                             ml_rejected.insert(id);
                                             driving
                                                 .push(Box::pin(drain_rejected_face(face, opened))
@@ -1300,28 +1407,57 @@ where
                             .push(Box::pin(drive_face(face, opened, forwarder)) as DriveFuture<'_>);
                     }
                     Err(cause) => {
-                        // The dial/accept never established. Drop its dial-address
-                        // index; if it was a still-DESIRED outbound dial, re-schedule
-                        // it with backoff (peer auto-reconnect — retry a configured
-                        // peer that is momentarily unreachable, zenoh's
-                        // `peer_connector_retry` loop). A failed ACCEPT is not indexed,
-                        // so `schedule_redial`'s `desired` gate is a no-op for it.
+                        // R311y212 — a failed retained MULTILINK dial (a re-add or an
+                        // initial aggregating dial that never connected) is
+                        // re-scheduled: retry-until-success. Handled FIRST and
+                        // mutually exclusive with the router-connect-reconcile redial
+                        // below (a multilink dial handled here is removed from
+                        // `ml_dial_endpoints`, and `ml_handled` gates the other arm),
+                        // so a both-features build never double-dials one id.
+                        #[cfg(feature = "transport-multilink")]
+                        let ml_handled = if max_links > 1 {
+                            if let Some((addr, pref)) = ml_dial_endpoints.remove(&id) {
+                                schedule_multilink_redial(
+                                    addr,
+                                    pref,
+                                    &mut ml_dial_endpoints,
+                                    &mut opening,
+                                    &mut next_id,
+                                    false,
+                                    &params,
+                                    clock,
+                                    tick_interval_ms,
+                                );
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        #[cfg(not(feature = "transport-multilink"))]
+                        let ml_handled = false;
+                        // Drop its dial-address index; if it was a still-DESIRED
+                        // outbound dial, re-schedule with backoff (peer auto-reconnect,
+                        // zenoh's `peer_connector_retry`). A failed ACCEPT is not
+                        // indexed, so the `desired` gate is a no-op for it.
                         #[cfg(feature = "router-connect-reconcile")]
-                        if let Some(addr) = dialed_targets.remove(&id) {
-                            // A failed dial/redial — retry (debug level, not a fresh
-                            // operator-visible flap).
-                            schedule_redial(
-                                addr,
-                                &desired,
-                                &mut dialed_targets,
-                                &mut opening,
-                                &mut next_id,
-                                false,
-                                &params,
-                                clock,
-                                tick_interval_ms,
-                            );
+                        if !ml_handled {
+                            if let Some(addr) = dialed_targets.remove(&id) {
+                                schedule_redial(
+                                    addr,
+                                    &desired,
+                                    &mut dialed_targets,
+                                    &mut opening,
+                                    &mut next_id,
+                                    false,
+                                    &params,
+                                    clock,
+                                    tick_interval_ms,
+                                );
+                            }
                         }
+                        let _ = ml_handled;
                         on_event(&AcceptEvent::FaceFailed { id, peer, cause });
                     }
                 }
@@ -1343,6 +1479,10 @@ where
                         continue;
                     }
                     if let Some((peer_zid, handle)) = ml_faces.remove(&face.id) {
+                        // R311y212 — drop this link's retained dial endpoint (Some
+                        // iff THIS node dialed it); a partial-loss re-add re-inserts
+                        // a fresh id, a total-collapse leaves it removed (no re-add).
+                        let dead = ml_dial_endpoints.remove(&face.id);
                         // Remove THIS link from the shared aggregation set. For the
                         // primary its FSM `release_link` already did so (idempotent
                         // here); for a transplanted secondary that `release_link`
@@ -1359,10 +1499,40 @@ where
                                 forwarder.deregister(primary_id);
                                 on_event(&AcceptEvent::FaceDown(primary_face, outcome));
                             }
-                        } else {
+                        } else if let Some((addr, pref)) = dead {
+                            // R311y212 — PARTIAL loss of a link THIS node DIALED:
+                            // re-dial + re-JOIN it onto the surviving shared core so
+                            // the aggregate returns to strength. The survivor is
+                            // uninterrupted and the shared SN stays continuous (no
+                            // core reset; `del_link` above freed a max_links slot, and
+                            // the re-dial re-presents the OnceLock pubkey so join_link
+                            // config-equality passes). The 1s backoff means the
+                            // del_link always lands first.
                             log::debug!(
-                                "multilink: link {} left; peer {:02x?} session survives on {} \
-                                 link(s)",
+                                "multilink: dialed link {} left; peer {:02x?} survives on {} \
+                                 link(s), re-adding",
+                                face.id.0,
+                                peer_zid,
+                                remaining
+                            );
+                            schedule_multilink_redial(
+                                addr,
+                                pref,
+                                &mut ml_dial_endpoints,
+                                &mut opening,
+                                &mut next_id,
+                                true,
+                                &params,
+                                clock,
+                                tick_interval_ms,
+                            );
+                        } else {
+                            // A dropped link this node ACCEPTED (no retained
+                            // endpoint) — the peer owns its re-dial; just note the
+                            // survival (failover holds on the survivor meanwhile).
+                            log::debug!(
+                                "multilink: accepted link {} left; peer {:02x?} session survives \
+                                 on {} link(s)",
                                 face.id.0,
                                 peer_zid,
                                 remaining
@@ -1371,6 +1541,14 @@ where
                         continue;
                     }
                 }
+                // R311y212 — leak-guard: a dialed multilink link that fell through
+                // the JOIN branch (zid-less, or died before Establishing) is torn
+                // down single-link here and never hit the `dead` removal above; drop
+                // its retained endpoint so the map does not leak. A link that DID go
+                // through the multilink branch `continue`d already (its entry removed
+                // via `dead`), so this is a no-op for it.
+                #[cfg(feature = "transport-multilink")]
+                ml_dial_endpoints.remove(&face.id);
                 faces.remove(&face.id);
                 // A held face left. Drop its dial-address index; if it was a
                 // still-DESIRED outbound dial, re-schedule it with backoff — the peer
@@ -1439,6 +1617,12 @@ where
                             Box::pin(dial_face(id, addr, params.clone(), clock, tick_interval_ms))
                                 as OpenFuture
                         });
+                        // R311y212 — retain the discovered-peer dial endpoint for
+                        // partial-loss re-add (aggregating dials only).
+                        #[cfg(feature = "transport-multilink")]
+                        if max_links > 1 {
+                            ml_dial_endpoints.insert(id, (addr, multilink_pref(id)));
+                        }
                     }
                     DialDecision::AlreadyHeld => {
                         // R311y205 (transport-multilink) — the aggregation relax of
@@ -1467,6 +1651,9 @@ where
                                         tick_interval_ms,
                                     ))
                                         as OpenFuture);
+                                    // R311y212 — retain the aggregation-relax dial
+                                    // endpoint for partial-loss re-add.
+                                    ml_dial_endpoints.insert(id, (addr, multilink_pref(id)));
                                     continue;
                                 }
                             }
