@@ -4587,6 +4587,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn reset_for_reopen(&self) {
         #[cfg(feature = "session-reconnect")]
         {
+            // R311y211 — reconnect×multilink coherence guard (replaces the y205
+            // `transport-multilink` × `session-reconnect` compile_error). This
+            // makes `reset_for_reopen` a TOTAL function — safe to call in ANY
+            // link-set state: when a survivor link is live the CORRECT action is
+            // to PRESERVE it (skip the shared-core reset), because zeroing the
+            // shared `rx_sn` / `outbound_frame_sn` would corrupt the survivor's
+            // per-channel SN gate mid-stream (the exact hazard the XOR named).
+            // It is not a bug to assert away: preserving a live survivor is the
+            // right output for that input. Production reaches this skip arm only
+            // as a safety net — a partial loss survives via `del_link` (SN
+            // intact, no reset), and a whole-collapse is a fresh-core rebuild
+            // (the accept loop drops the aggregate at `remaining == 0`, so the
+            // next dial is a fresh primary); the single-link `ReconnectingSession`
+            // supervisor runs on an EMPTY link set (`link_count == 0`), so the
+            // guard is transparent to it. The coexistence unit test drives this
+            // arm directly (`reset_for_reopen_preserves_shared_sn_while_a_link_
+            // is_live`). The `live_link_count()` read is lock-atomic per call.
+            #[cfg(feature = "transport-multilink")]
+            if self.live_link_count() > 0 {
+                return;
+            }
             // F2 — close the data-send gate for the whole re-dial +
             // re-handshake window (release_link already closed it when the
             // FSM saw the loss; this also covers a reset without a prior

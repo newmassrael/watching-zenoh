@@ -1445,12 +1445,14 @@ layer_c1al_cargo_test_unixpipe() {
 #
 # R311y205 (transport-multilink slice-1): the §5.1 multi-link aggregation feature
 # (the 0x4 Z_EXT_MULTILINK establishment ext + the shared-SessionCore link set +
-# reliability-segregated send). It is AP-only (rsa/std) and MUTUALLY EXCLUSIVE
-# with session-reconnect (the reset_for_reopen shared-SN corruption gate) — so,
-# UNLIKE the sibling transport-link-* lanes (C1aj quic-datagram / C1al unixpipe),
-# every invocation here is --no-default-features: the runtime-tokio default set
-# carries session-reconnect, which would (correctly) trip the mutual-exclusion
-# compile_error. Mirroring those §5.1 lanes, this one:
+# reliability-segregated send). It is AP-only (rsa/std). R311y211 REMOVED the
+# former transport-multilink × session-reconnect compile_error: the
+# reset_for_reopen shared-SN corruption is now a RUNTIME guard (the shared-core
+# reset is skipped while a survivor link is live). The standalone §5.1 invocations
+# below stay --no-default-features (they prove multilink composes WITHOUT
+# session-reconnect — the runtime-tokio default set carries session-reconnect), and
+# invocation 5 adds the ex-XOR coexistence proof on default + transport-multilink.
+# This lane:
 #   1. runs the wz<->wz slice-1 e2e (session_multilink_e2e: 2 loopback-TCP links
 #      aggregated into ONE session with reliability segregation + failover, the
 #      0x4 handshake + config-equality join, the INVALID/MAX_LINKS rejects, and
@@ -1470,7 +1472,16 @@ layer_c1al_cargo_test_unixpipe() {
 #      set (-D warnings);
 #   4. clippy-gates the LIB under --no-default-features --features
 #      transport-multilink ALONE (proves the feature composes standalone — the
-#      transport-unicast dependency + the codec-union select_link gate).
+#      transport-unicast dependency + the codec-union select_link gate);
+#   5. R311y211 — runs the reconnect×multilink COEXISTENCE unit test on the FULL
+#      default feature set + transport-multilink (the combo the y205 XOR forbade),
+#      pinning the reset_for_reopen GUARD MECHANICS on a synthetically-populated
+#      link set (SN preserved while a link is live; re-seeded once the set is
+#      empty). The count is asserted (grep '1 passed') so a future default-set
+#      change that cfg-outs the test reddens the lane instead of passing green.
+#      Clippy floors the ex-XOR combo on BOTH crates (the guard lives in
+#      wz-session-core). The integrated 2-link-over-TCP reconnect-over-aggregate
+#      e2e is slice-2 (per-link auto-re-add), not this lane.
 layer_c1ba_cargo_clippy_transport_multilink() {
     local ML_FEATURES="transport-multilink,transport-link-tcp,codec-push,codec-close,session-unicast-open,session-unicast-accept,pubsub-put"
     # The deploy-active e2e drives the production `peer_loop` accept/dial path, so
@@ -1491,7 +1502,18 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         `# seam (those TX paths route through send_wire_this_link). Same class the` \
         `# C1m lane caught for send_wire on a bare transport-multicast MCU build.` \
         && cargo clippy -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-close --lib --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,transport-keepalive --lib --quiet -- -D warnings)
+        && cargo clippy -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,transport-keepalive --lib --quiet -- -D warnings \
+        `# R311y211 invocation 5 — the ex-XOR coexistence proof: default features` \
+        `# (which carry session-reconnect) + transport-multilink now COMPILE and the` \
+        `# reset_for_reopen runtime guard preserves the survivor's shared SN. The` \
+        `# 'grep 1 passed' asserts the test actually RAN ('cargo test <substring>'` \
+        `# exits 0 on ZERO matches, so a future cfg-out would otherwise pass green);` \
+        `# 'tee /dev/stderr' keeps the full cargo output in the CI log.` \
+        && cargo test -p wz-runtime-tokio --features transport-multilink --lib reset_for_reopen_preserves_shared_sn_while_a_link_is_live --quiet 2>&1 | tee /dev/stderr | grep -q ' 1 passed' \
+        && cargo clippy -p wz-runtime-tokio --features transport-multilink --lib --quiet -- -D warnings \
+        `# the guard lives in wz-session-core; clippy-floor the ex-XOR combo THERE` \
+        `# too (invocation 5's runtime-tokio clippy would not lint the guard body).` \
+        && cargo clippy -p wz-session-core --features transport-multilink,session-reconnect --lib --quiet -- -D warnings)
 }
 
 # ─── Layer C1am — adminspace §5.23: @/<zid>/<whatami> built-in admin queryable ─

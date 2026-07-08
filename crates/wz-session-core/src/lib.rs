@@ -41,22 +41,18 @@ extern crate alloc;
 #[cfg(any(test, feature = "transport-multilink"))]
 extern crate std;
 
-// R311y205 (transport-multilink slice-1, MF-B) — `transport-multilink` and
-// `session-reconnect` are MUTUALLY EXCLUSIVE until the reconnect×multilink
-// coherence slice. `reset_for_reopen` (gated `session-reconnect`,
-// session_actions.rs) zeroes the SHARED `SessionCore.rx_sn` +
-// `outbound_frame_sn` on a re-dial; in a live 2-link aggregate that would
-// corrupt the surviving link's per-channel SN gate (a single link's death /
-// reopen must del_link, not reset the shared core). Slice 1 does NOT compose
-// the two — enforce it at compile time rather than silently corrupt. The gate
-// is placed in the session kernel so EVERY consumer (tokio / coop / lwip) that
-// unifies both features is caught. See the multilink slice-1 spec
-// ("reset_for_reopen resets shared state DIRECTLY").
-#[cfg(all(feature = "transport-multilink", feature = "session-reconnect"))]
-compile_error!(
-    "transport-multilink and session-reconnect are mutually exclusive until the \
-     reconnect×multilink coherence slice; see multilink spec"
-);
+// R311y211 (reconnect×multilink coherence slice-1) — the y205
+// `transport-multilink` × `session-reconnect` `compile_error!` XOR is REMOVED.
+// The single real hazard it guarded — `reset_for_reopen` (gated
+// `session-reconnect`, session_actions.rs) zeroing the SHARED `SessionCore`
+// `rx_sn` / `outbound_frame_sn`, which in a live aggregate would corrupt the
+// surviving link's per-channel SN gate — is now a RUNTIME invariant inside
+// `reset_for_reopen`: when `transport-multilink` is also compiled the shared-
+// core reset is skipped while `live_link_count() > 0` (a survivor must keep
+// its SN mid-stream). The coherent whole-collapse is a fresh-core rebuild (the
+// accept loop drops the aggregate at `remaining == 0`, so the next dial is a
+// fresh primary), and a partial loss survives via `del_link`, not a reset — so
+// the two features compose. See `SessionLinkActions::reset_for_reopen`.
 
 // R311lt — re-export the wz-codecs transport-MID constants so runtime crates
 // that drive a loop's raw-byte MID classification (the AP `multicast_glue`

@@ -2899,6 +2899,61 @@ mod reconnect_tx_tests {
         );
     }
 
+    /// R311y211 — reconnect×multilink coherence: with the y205
+    /// `transport-multilink` × `session-reconnect` compile_error removed,
+    /// `reset_for_reopen` must PRESERVE the shared outbound SN while a link is
+    /// live (a surviving aggregate member keeps its per-channel gate mid-
+    /// stream — resetting it would corrupt the survivor) and re-seed it only
+    /// once the aggregate is empty (the single-link / fresh-rebuild path). This
+    /// pins the runtime invariant that replaced the compile-time XOR.
+    #[cfg(all(feature = "transport-multilink", feature = "session-reconnect"))]
+    #[test]
+    fn reset_for_reopen_preserves_shared_sn_while_a_link_is_live() {
+        use wz_runtime_core::Runtime;
+
+        let mask = wz_session_core::sn::mask_from_res(0x02);
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.initial_sn = 42;
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+
+        // Register the bundle's own link into the aggregation set and mark it
+        // live -> a surviving aggregate member (`live_link_count() == 1`).
+        actions.register_first_link(actions.link.clone());
+        TokioRuntime::with_mutex_mut(&actions.link.transport_available, |g| *g = true);
+        assert_eq!(actions.live_link_count(), 1);
+
+        // Advance the shared outbound SN mid-stream: 42, 43, 44 -> counter 45.
+        assert_eq!(actions.next_outbound_frame_sn(mask), 42);
+        assert_eq!(actions.next_outbound_frame_sn(mask), 43);
+        assert_eq!(actions.next_outbound_frame_sn(mask), 44);
+
+        // GUARD: a reset while a link is live is a no-op on the shared core ->
+        // the SN continues from 45 (NOT re-seeded to 42) and the link stays
+        // live (the F2 gate is not closed).
+        actions.reset_for_reopen();
+        assert_eq!(
+            actions.live_link_count(),
+            1,
+            "the survivor stays live across a guarded reset"
+        );
+        assert_eq!(
+            actions.next_outbound_frame_sn(mask),
+            45,
+            "a live-link reset must PRESERVE the shared outbound SN (guard no-op)"
+        );
+
+        // The aggregate collapses: `del_link` empties the set. A subsequent
+        // reset IS the legal fresh-rebuild path and DOES re-seed the SN.
+        assert_eq!(actions.del_link(&actions.link), 0);
+        assert_eq!(actions.live_link_count(), 0);
+        actions.reset_for_reopen();
+        assert_eq!(
+            actions.next_outbound_frame_sn(mask),
+            42,
+            "with the aggregate empty the reset re-seeds the SN (fresh-rebuild)"
+        );
+    }
+
     /// `SwappableLink` delegates to whatever sink `swap` installed last —
     /// the transport-replacement seam the A4b supervisor swaps after
     /// re-dial (pico replacing `_z_session_t._tp` under the transport
