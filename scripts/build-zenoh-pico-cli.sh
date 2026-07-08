@@ -40,7 +40,7 @@ INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
 # only a few extra add_dependencies(examples ...) targets in the
 # CMake build; the wz-codec coverage matrix decides which round
 # adopts each new external CLI.
-TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness)
+TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment)
 
 if [[ ! -e "$VENDOR_DIR/.git" && ! -f "$VENDOR_DIR/CMakeLists.txt" ]]; then
     echo "build-zenoh-pico-cli: vendor/zenoh-pico/ not initialized." >&2
