@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-#![cfg(all(feature = "pubsub-encoding", feature = "pubsub-attachment"))]
+#![cfg(all(
+    feature = "pubsub-encoding",
+    feature = "pubsub-attachment",
+    feature = "pubsub-timestamp"
+))]
 
 //! R311y207 — host-lane WIRE proof that a `Put`'s body metadata (encoding +
 //! attachment) propagates over a real loopback TCP link and surfaces on the
@@ -17,10 +21,11 @@
 //! field on the wire fails here on every CI run, no pico needed.
 //!
 //! Scope of the guarantee: this catches a CODE regression in the wire
-//! metadata encode/decode while `pubsub-encoding` / `pubsub-attachment` are ON.
-//! It does NOT guard those features being DISABLED (the file is
-//! `#![cfg(all(...))]` and compiles out then). The wz->pico e2e's assertion is
-//! a positive value (`with encoding: text/plain`), so it self-detects a
+//! metadata encode/decode while `pubsub-encoding` / `pubsub-attachment` /
+//! `pubsub-timestamp` are ON (the file `#![cfg(all(...))]`-gates on all three,
+//! since it asserts each dimension). It does NOT guard those features being
+//! DISABLED (the file compiles out then). The wz->pico e2e's assertion is a
+//! positive value (`with encoding: text/plain`), so it self-detects a
 //! feature-drop there (a dropped encoding prints the default `zenoh/bytes`).
 
 use std::sync::{Arc, Mutex as StdMutex};
@@ -38,7 +43,7 @@ use wz_runtime_tokio::session_open::{
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
-use wz_session_core::sample::EncodingHint;
+use wz_session_core::sample::{EncodingHint, TimestampHint};
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
@@ -46,6 +51,8 @@ const KEYEXPR: &str = "demo/meta";
 // text/plain = zenoh encoding id 4 -> wz packed_id 8 (id << 1, no schema).
 const TEXT_PLAIN_PACKED_ID: u32 = 8;
 const ATTACHMENT: &[u8] = b"wz-meta-blob";
+// A distinctive ntp64 `time` word carried by the explicit timestamp.
+const TS_TIME: u64 = 0x0102_0304_0506_0708;
 
 /// The delivered sample's metadata, captured from the acceptor's subscriber
 /// callback (a named struct keeps the shared cell off clippy's
@@ -54,12 +61,14 @@ const ATTACHMENT: &[u8] = b"wz-meta-blob";
 struct CapturedMeta {
     encoding: Option<EncodingHint>,
     attachment: Option<Vec<u8>>,
+    timestamp: Option<TimestampHint>,
     fired: usize,
 }
 
 /// A metadata-bearing `Session::publish` (encoding text/plain + an attachment
-/// blob) reaches the peer over a real TCP link and both fields survive the
-/// wire encode/decode round-trip onto the delivered `Sample`.
+/// blob + an explicit timestamp) reaches the peer over a real TCP link and all
+/// three fields survive the wire encode/decode round-trip onto the delivered
+/// `Sample`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unicast_put_metadata_propagates_over_the_wire() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -108,6 +117,7 @@ async fn unicast_put_metadata_propagates_over_the_wire() {
             let mut c = captured.lock().unwrap();
             c.encoding = sample.encoding().cloned();
             c.attachment = sample.attachment().map(<[u8]>::to_vec);
+            c.timestamp = sample.timestamp().cloned();
             c.fired += 1;
         });
     }
@@ -150,7 +160,11 @@ async fn unicast_put_metadata_propagates_over_the_wire() {
                         packed_id: TEXT_PLAIN_PACKED_ID,
                         schema: None,
                     })
-                    .with_attachment(ATTACHMENT.to_vec()),
+                    .with_attachment(ATTACHMENT.to_vec())
+                    .with_timestamp(TimestampHint {
+                        time: TS_TIME,
+                        zid: vec![0xAB],
+                    }),
             )
             .expect("metadata publish builds and routes through the send seam");
         for _ in 0..100 {
@@ -183,5 +197,13 @@ async fn unicast_put_metadata_propagates_over_the_wire() {
         c.attachment.as_deref(),
         Some(ATTACHMENT),
         "the attachment blob must survive the wire ext 0x43 encode/decode"
+    );
+    let ts = c
+        .timestamp
+        .as_ref()
+        .expect("the explicit timestamp must survive the wire (T-flag 0x20 + MsgPut.timestamp)");
+    assert_eq!(
+        ts.time, TS_TIME,
+        "the recovered ntp64 time word must match the published one"
     );
 }
