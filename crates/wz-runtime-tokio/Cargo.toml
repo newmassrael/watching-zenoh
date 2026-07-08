@@ -1127,6 +1127,14 @@ access-extauth-usrpwd = ["session-extauth", "wz-session-core/access-extauth-usrp
 # `rand`. Implies session-extauth (the dispatch kernel + the AuthMethod trait +
 # the vle::read_zbuf SSOT it consumes from wz-session-core).
 access-extauth-pubkey = ["session-extauth", "dep:rsa", "dep:rand"]
+# transport-multilink — the §5.1 multi-link aggregation feature (the 0x4
+# Z_EXT_MULTILINK establishment ext). Forwards the no_std `extmultilink` 0x4
+# dispatch in wz-session-core AND pulls `access-extauth-pubkey` (dep:rsa +
+# dep:rand + the concrete `PubKeyMethod`), the ephemeral-RSA crypto this crate
+# injects into the (rsa-free) session-core dispatch. The `multilink` glue module
+# (process-wide ephemeral RSA-512 keypair + the open/accept dispatch
+# constructors) is gated here.
+transport-multilink = ["wz-session-core/transport-multilink", "access-extauth-pubkey", "transport-unicast"]
 # R311cf/R311fd — keyexpr domain. The other 7 keyexpr-* features are
 # cluster-wide behaviors with no single anchor cfg site (follow-up
 # cascade per-site wire-up).

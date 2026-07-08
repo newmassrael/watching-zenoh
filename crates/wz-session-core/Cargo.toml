@@ -421,6 +421,17 @@ session-extauth = ["alloc"]
 # `extauth_usrpwd` module (the UsrPwdMethod + HMAC-SHA3-256 + OpenSyn codec);
 # implies session-extauth (the dispatch kernel it plugs into) and pulls `sha3`.
 access-extauth-usrpwd = ["session-extauth", "dep:sha3"]
+# transport-multilink — the Z_EXT_MULTILINK (0x4) establishment extension
+# (catalog §5.1 transport, zenoh `establishment/ext/multilink.rs`). Gates the
+# `extmultilink` module: the UN-wrapped 0x4 envelope + the single-method
+# dispatch that drives one `AuthMethod` (the ephemeral-pubkey handshake) through
+# the four establishment stages, mapping each `AuthSubExt` DIRECTLY to a 0x4
+# `ExtEntryOwned` (zenoh's `.transmute()`, id 0x1 -> 0x4, NO inner method-id).
+# rsa-FREE here — the concrete `PubKeyMethod` is injected from wz-runtime-tokio
+# (where `rsa` / std live), exactly as `AuthDispatch` holds `Box<dyn AuthMethod>`.
+# Implies session-extauth (the `AuthMethod` trait + `AuthSubExt` + the
+# `extauth` / `ext_chain` codec SSOTs the 0x4 dispatch reuses).
+transport-multilink = ["session-extauth"]
 
 # Round A — multicast session FSM (docs/session-fsm.md §3.1 session-level
 # lifecycle + §3.2 per-peer membership). Gates the two SCE-generated

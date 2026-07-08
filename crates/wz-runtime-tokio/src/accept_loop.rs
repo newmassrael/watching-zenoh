@@ -93,6 +93,24 @@ use crate::session_open::{
 };
 use wz_session_core::locator::{parse_locator, Proto};
 
+// R311y205 (transport-multilink) — the aggregation seam wired into the live
+// accept/dial path: when `WzConfig.max_links > 1` a face is opened via the
+// `_with_multilink` establishment variants (so the 0x4 ext negotiates + the peer
+// ephemeral pubkey is captured), and a SECOND+ physical link to an already-held
+// peer zid is aggregated onto the first's shared `SessionCore` via
+// [`join_link`] instead of registering a redundant face. Every symbol here is
+// feature-gated, so a non-multilink build compiles the accept loop UNCHANGED.
+#[cfg(feature = "transport-multilink")]
+use crate::config::LinkReliabilityPref;
+#[cfg(feature = "transport-multilink")]
+use crate::multilink::{join_link, JoinOutcome};
+#[cfg(feature = "transport-multilink")]
+use crate::session_open::{
+    accept_and_open_session_with_multilink, initiate_and_open_session_with_multilink,
+};
+#[cfg(feature = "transport-multilink")]
+use std::collections::BTreeSet;
+
 /// Backoff applied after an `accept()` error before re-arming the accept —
 /// zenoh's `TCP_ACCEPT_THROTTLE_TIME` (100ms, `io/zenoh-links/zenoh-link-tcp/src/
 /// lib.rs`). The dominant accept-error cause is fd exhaustion (EMFILE/ENFILE):
@@ -346,6 +364,16 @@ type OpenResult = (FaceId, SocketAddr, Result<OpenedSession, OpenError>);
 /// `Send` bound — the whole loop is single-task `!Send` (see the module doc).
 type OpenFuture = Pin<Box<dyn Future<Output = OpenResult>>>;
 
+/// R311y205 (transport-multilink) — the `driving` set's boxed element type in an
+/// aggregating build. [`drive_face`], [`drive_joined_face`] and
+/// [`drain_rejected_face`] are distinct `async fn` opaque types, so a
+/// `max_links > 1` loop needs one boxed `dyn Future` to hold them all in the same
+/// [`FuturesUnordered`] (the same reason [`OpenFuture`] boxes). A non-multilink
+/// build has only `drive_face`, so its `driving` set stays the unboxed
+/// `impl Future` — byte-identical to today (this alias is feature-gated).
+#[cfg(feature = "transport-multilink")]
+type DriveFuture<'f> = Pin<Box<dyn Future<Output = (Face, DriverOutcome)> + 'f>>;
+
 /// Bring one accepted link up to Established. Tagged with `(id, peer)` so the
 /// loop can route the result without threading state through
 /// [`FuturesUnordered`]. Production semantics: `max_iters = None` (the
@@ -386,6 +414,84 @@ async fn dial_face(
             initiate_and_open_session(
                 DialedLink::Tcp(stream),
                 params,
+                clock,
+                None,
+                tick_interval_ms,
+            )
+            .await
+        }
+        Err(e) => Err(OpenError::Dial(e)),
+    };
+    (id, peer, result)
+}
+
+/// R311y205 (transport-multilink) — the per-link traffic-class preference the
+/// loop tags each aggregated physical link with, spreading the classes across
+/// the links so [`SessionCore::select_link`](wz_session_core::session_actions)
+/// can segregate the reliable channel onto one link and the best-effort channel
+/// onto another (the slice-1 reliability-segregation the deploy proves). A simple
+/// deterministic spread by open order — even [`FaceId`] -> `Reliable`, odd ->
+/// `BestEffort` — so a 2-link aggregation (the slice-1 shape) lands one link of
+/// each class; full per-priority ranges are the deferred slice-3 refinement. The
+/// pref is fixed at open (the `_with_multilink` variant stages it before the
+/// handshake), and only the SENDER's prefs decide which link carries each Put.
+#[cfg(feature = "transport-multilink")]
+fn multilink_pref(id: FaceId) -> LinkReliabilityPref {
+    if id.0 % 2 == 0 {
+        LinkReliabilityPref::Reliable
+    } else {
+        LinkReliabilityPref::BestEffort
+    }
+}
+
+/// R311y205 (transport-multilink) — [`open_face`] negotiating the 0x4
+/// Z_EXT_MULTILINK aggregation ext: the accept-side open used when `max_links > 1`
+/// so the acceptor reflects the ext + captures the initiator's ephemeral pubkey
+/// (the key a second link is bound to the logical session by) and this link is
+/// tagged with `pref`. Byte-identical to [`open_face`] otherwise; the loop
+/// branches on `max_links` at the accept site.
+#[cfg(feature = "transport-multilink")]
+async fn open_face_multilink(
+    id: FaceId,
+    peer: SocketAddr,
+    accepted: DialedLink,
+    pref: LinkReliabilityPref,
+    params: SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+) -> OpenResult {
+    let result = accept_and_open_session_with_multilink(
+        accepted,
+        params,
+        pref,
+        clock,
+        None,
+        tick_interval_ms,
+    )
+    .await;
+    (id, peer, result)
+}
+
+/// R311y205 (transport-multilink) — [`dial_face`] negotiating the 0x4
+/// Z_EXT_MULTILINK aggregation ext: the dial-side open used when `max_links > 1`
+/// so the initiator offers the ext + captures the responder's ephemeral pubkey
+/// and this link is tagged with `pref`. Byte-identical to [`dial_face`] otherwise;
+/// the loop branches on `max_links` at each dial site.
+#[cfg(feature = "transport-multilink")]
+async fn dial_face_multilink(
+    id: FaceId,
+    peer: SocketAddr,
+    pref: LinkReliabilityPref,
+    params: SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+) -> OpenResult {
+    let result = match TcpStream::connect(peer).await {
+        Ok(stream) => {
+            initiate_and_open_session_with_multilink(
+                DialedLink::Tcp(stream),
+                params,
+                pref,
                 clock,
                 None,
                 tick_interval_ms,
@@ -512,6 +618,50 @@ async fn drive_face(
     .await;
     opened.drain_to_close().await;
     (face, outcome)
+}
+
+/// R311y205 (transport-multilink) — drive an AGGREGATED secondary link to
+/// terminal. Like [`drive_face`], but the RX admits against the `joined` handle's
+/// SHARED `SessionCore` (its per-channel rx-SN gate is the primary's, so the
+/// aggregated data plane is one continuous sequence), while `opened.engine` runs
+/// this physical link's own FSM / lease. The secondary shares the primary's
+/// forwarder face (no second `register`), so its inbound events are still tagged
+/// with THIS link's [`FaceId`] for the observer. On teardown the loop
+/// (`Step::Driven`) removes it from the shared set via the tracked `joined`
+/// handle — the secondary's own FSM `release_link` del_links only its throwaway
+/// core, so the loop does the effective removal.
+#[cfg(feature = "transport-multilink")]
+async fn drive_joined_face(
+    face: Face,
+    mut opened: OpenedSession,
+    joined: Arc<SessionLinkActions>,
+    forwarder: &dyn FaceForwarder,
+) -> (Face, DriverOutcome) {
+    let timeouts = SessionTimeouts::spec_defaults();
+    let outcome = drive_session_until_terminal(
+        &mut opened.inbound,
+        &joined,
+        &mut opened.engine,
+        None,
+        &opened.clock,
+        &timeouts,
+        |event| forwarder.forward(face.id, event),
+    )
+    .await;
+    opened.drain_to_close().await;
+    (face, outcome)
+}
+
+/// R311y205 (transport-multilink) — flush + drop a REJECTED aggregation link. Its
+/// MAX_LINKS / INVALID link-only close was already staged on `opened.actions` by
+/// [`join_link`]; this drains so the close reaches the peer before the socket
+/// closes. The link never entered the faces table nor the forwarder, so
+/// `Step::Driven` drops its `FaceId` silently. Returns `Terminated` so it shares
+/// the `driving` set's item type with [`drive_face`].
+#[cfg(feature = "transport-multilink")]
+async fn drain_rejected_face(face: Face, opened: OpenedSession) -> (Face, DriverOutcome) {
+    opened.drain_to_close().await;
+    (face, DriverOutcome::Terminated)
 }
 
 /// One [`select!`](tokio::select) outcome, decoded so the borrow of each
@@ -813,6 +963,17 @@ pub struct FaceSources {
     /// byte-for-byte the prior behaviour. Always-present (no `#[cfg]` on the field)
     /// so the `select!` arm needs no attribute, exactly like the mcast fields above.
     pub reconcile: Option<ReconcileReceiver>,
+    /// R311y205 (transport-multilink) — the max number of physical links this loop
+    /// aggregates into ONE logical unicast session per peer zid (from
+    /// [`WzConfig.max_links`](crate::config::WzConfig)). `1` (or the field absent
+    /// in a non-multilink build) = the single-link path, byte-identical to today:
+    /// a second link to a held zid is dropped by the `dedups_faces_by_zid` rule as
+    /// before. `> 1` turns on aggregation — the accept/dial sites open with the
+    /// `_with_multilink` variants and `Step::Opened` joins a second link onto the
+    /// first's shared core rather than registering a redundant face. Feature-gated
+    /// so the struct — and every non-multilink caller — is unchanged without it.
+    #[cfg(feature = "transport-multilink")]
+    pub max_links: usize,
 }
 
 /// Bind-once, hold-N: the shared multi-face drive core behind both
@@ -849,6 +1010,8 @@ where
         mut mcast_members,
         mut mcast_group_subs,
         mut reconcile,
+        #[cfg(feature = "transport-multilink")]
+        max_links,
     } = sources;
     tokio::pin!(shutdown);
 
@@ -884,9 +1047,37 @@ where
     #[cfg(feature = "router-connect-reconcile")]
     let mut desired: std::collections::HashSet<SocketAddr> = dial_targets.iter().copied().collect();
     let mut next_id: u64 = 0;
+    // R311y205 (transport-multilink) — the per-peer aggregation registry (active
+    // only when `max_links > 1`). `ml_sessions` maps a peer zid to its logical
+    // session: the (primary FaceId, primary Face) reported on FaceUp/FaceDown and
+    // registered with the forwarder, plus a STABLE shared-core handle used as
+    // [`join_link`]'s primary arg. That handle survives individual link deaths
+    // (its `SessionCore` is the shared one, alive while any link remains), so a
+    // link joining AFTER the primary's own link died still resolves the session —
+    // it is NOT re-derived from a per-link entry that teardown removes. `ml_faces`
+    // tracks EVERY aggregated physical link (primary and secondary) by its FaceId
+    // to its (peer zid, core-bound actions handle): the handle whose shared
+    // `SessionCore` a `del_link` on the link's teardown targets (the primary's own
+    // actions; a secondary's `joined` transplant handle). `ml_rejected` holds the
+    // FaceIds of over-limit / mismatch links draining their reject close, dropped
+    // silently when their drive ends. All feature-gated, so a non-multilink loop
+    // allocates none of them.
+    #[cfg(feature = "transport-multilink")]
+    let mut ml_sessions: BTreeMap<Vec<u8>, (FaceId, Face, Arc<SessionLinkActions>)> =
+        BTreeMap::new();
+    #[cfg(feature = "transport-multilink")]
+    let mut ml_faces: BTreeMap<FaceId, (Vec<u8>, Arc<SessionLinkActions>)> = BTreeMap::new();
+    #[cfg(feature = "transport-multilink")]
+    let mut ml_rejected: BTreeSet<FaceId> = BTreeSet::new();
     let mut summary = AcceptLoopSummary::default();
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
+    // R311y205 (transport-multilink) — an aggregating loop drives three distinct
+    // future shapes (face / joined / rejected), so `driving` holds boxed futures;
+    // a non-multilink loop keeps the unboxed single-shape set, byte-identical.
+    #[cfg(not(feature = "transport-multilink"))]
     let mut driving = FuturesUnordered::new();
+    #[cfg(feature = "transport-multilink")]
+    let mut driving: FuturesUnordered<DriveFuture<'_>> = FuturesUnordered::new();
 
     // Arm the forwarder's periodic tick (e.g. the linkstate peer's self-flood
     // cadence — its protocol obligation, now driven by the loop so EVERY caller
@@ -910,6 +1101,11 @@ where
         // already seeded here (dedup includes still-in-flight opens).
         #[cfg(feature = "router-connect-reconcile")]
         dialed_targets.insert(id, peer);
+        // R311y205 (transport-multilink) — a `max_links > 1` node dials with the
+        // 0x4-negotiating variant so its outbound links aggregate (the pref tags
+        // this link's traffic class); the `#[cfg(not)]` arm is the byte-identical
+        // single-link seed.
+        #[cfg(not(feature = "transport-multilink"))]
         opening.push(Box::pin(dial_face(
             id,
             peer,
@@ -917,6 +1113,19 @@ where
             clock,
             tick_interval_ms,
         )));
+        #[cfg(feature = "transport-multilink")]
+        opening.push(if max_links > 1 {
+            Box::pin(dial_face_multilink(
+                id,
+                peer,
+                multilink_pref(id),
+                params.clone(),
+                clock,
+                tick_interval_ms,
+            )) as OpenFuture
+        } else {
+            Box::pin(dial_face(id, peer, params.clone(), clock, tick_interval_ms)) as OpenFuture
+        });
     }
 
     loop {
@@ -950,6 +1159,93 @@ where
                             peer,
                             peer_zid: opened.peer_zid(),
                         };
+                        // R311y205 (transport-multilink) — aggregation JOIN. When
+                        // `max_links > 1` and this established link's peer zid
+                        // already has a logical session, aggregate this physical
+                        // link onto that session's shared `SessionCore` (the wz
+                        // analogue of zenoh's `init_existing_transport_unicast`
+                        // add-link path) instead of registering a second face — the
+                        // replacement for the `dedups_faces_by_zid` drop in the
+                        // aggregating case. The FIRST link to a peer records the
+                        // session and falls through to the normal register+drive
+                        // (it IS the session's primary face). A zid-less link cannot
+                        // aggregate, so it falls through and is held single-link.
+                        #[cfg(feature = "transport-multilink")]
+                        if max_links > 1 {
+                            if let Some(peer_zid) = face.peer_zid.clone() {
+                                // The session's STABLE shared-core handle (held in
+                                // `ml_sessions`, alive across link deaths), used as
+                                // join_link's primary arg — NOT a per-link entry that
+                                // teardown removes, so a join after the original
+                                // primary link died still resolves the session.
+                                let existing = ml_sessions
+                                    .get(&peer_zid)
+                                    .map(|(_, _, core_handle)| core_handle.clone());
+                                if let Some(core_handle) = existing {
+                                    // A second+ link to a held peer: try to aggregate.
+                                    match join_link(&core_handle, &opened.actions, max_links) {
+                                        JoinOutcome::Joined(joined) => {
+                                            log::debug!(
+                                                "multilink: aggregated link {} onto peer {:02x?} \
+                                                 (live links now {})",
+                                                id.0,
+                                                peer_zid,
+                                                core_handle.live_link_count()
+                                            );
+                                            ml_faces.insert(id, (peer_zid, joined.clone()));
+                                            // Drop its dial-address index — a joined
+                                            // link is not a standalone reconnectable
+                                            // dial (no-op for an accepted link).
+                                            #[cfg(feature = "router-connect-reconcile")]
+                                            dialed_targets.remove(&id);
+                                            driving.push(Box::pin(drive_joined_face(
+                                                face, opened, joined, forwarder,
+                                            ))
+                                                as DriveFuture<'_>);
+                                        }
+                                        JoinOutcome::OverLimit => {
+                                            log::debug!(
+                                                "multilink: link {} over max_links ({}) for peer \
+                                                 {:02x?}; rejected MAX_LINKS",
+                                                id.0,
+                                                max_links,
+                                                peer_zid
+                                            );
+                                            #[cfg(feature = "router-connect-reconcile")]
+                                            dialed_targets.remove(&id);
+                                            ml_rejected.insert(id);
+                                            driving
+                                                .push(Box::pin(drain_rejected_face(face, opened))
+                                                    as DriveFuture<'_>);
+                                        }
+                                        JoinOutcome::InvalidPubkey => {
+                                            log::debug!(
+                                                "multilink: link {} pubkey mismatch for peer \
+                                                 {:02x?}; rejected INVALID",
+                                                id.0,
+                                                peer_zid
+                                            );
+                                            #[cfg(feature = "router-connect-reconcile")]
+                                            dialed_targets.remove(&id);
+                                            ml_rejected.insert(id);
+                                            driving
+                                                .push(Box::pin(drain_rejected_face(face, opened))
+                                                    as DriveFuture<'_>);
+                                        }
+                                    }
+                                    continue;
+                                }
+                                // The FIRST link to this peer becomes the session's
+                                // primary; record it (with a stable shared-core
+                                // handle for future joins), then fall through to
+                                // register it as the representative face.
+                                ml_sessions.insert(
+                                    peer_zid.clone(),
+                                    (id, face.clone(), opened.actions.clone()),
+                                );
+                                ml_faces.insert(id, (peer_zid, opened.actions.clone()));
+                            }
+                        }
                         // Face-establishment zid-dedup, but ONLY when the forwarder
                         // keys routing state on the zid ([`FaceForwarder::dedups_faces_by_zid`]
                         // — the linkstate peer, whose graph self-edge is zid-keyed).
@@ -993,7 +1289,15 @@ where
                         // it for the borrowed FaceUp event; the original moves
                         // into the drive future.
                         on_event(&AcceptEvent::FaceUp(face.clone()));
+                        // R311y205 (transport-multilink) — box the drive future in
+                        // an aggregating build so it shares `driving` with the
+                        // joined / rejected drives; unboxed + byte-identical
+                        // otherwise.
+                        #[cfg(not(feature = "transport-multilink"))]
                         driving.push(drive_face(face, opened, forwarder));
+                        #[cfg(feature = "transport-multilink")]
+                        driving
+                            .push(Box::pin(drive_face(face, opened, forwarder)) as DriveFuture<'_>);
                     }
                     Err(cause) => {
                         // The dial/accept never established. Drop its dial-address
@@ -1024,6 +1328,49 @@ where
             }
 
             Step::Driven((face, outcome)) => {
+                // R311y205 (transport-multilink) — aggregation teardown. A rejected
+                // (MAX_LINKS/INVALID) link finished draining its close: drop it
+                // silently (it never entered `faces` nor the forwarder). Otherwise,
+                // if this is a tracked aggregated link, remove it from the shared
+                // set; the whole session tears down (deregister + FaceDown on its
+                // primary face) only when the LAST link departs — while ≥1 link
+                // remains the session survives and the forwarder keeps routing over
+                // it (failover). A link not tracked here (a zid-less single-link
+                // face) falls through to the normal single-link teardown below.
+                #[cfg(feature = "transport-multilink")]
+                if max_links > 1 {
+                    if ml_rejected.remove(&face.id) {
+                        continue;
+                    }
+                    if let Some((peer_zid, handle)) = ml_faces.remove(&face.id) {
+                        // Remove THIS link from the shared aggregation set. For the
+                        // primary its FSM `release_link` already did so (idempotent
+                        // here); for a transplanted secondary that `release_link`
+                        // touched only its throwaway core, so this is the effective
+                        // removal from the shared core.
+                        let remaining = handle.del_link(&handle.link);
+                        if remaining == 0 {
+                            if let Some((primary_id, primary_face, _core)) =
+                                ml_sessions.remove(&peer_zid)
+                            {
+                                faces.remove(&primary_id);
+                                #[cfg(feature = "router-connect-reconcile")]
+                                dialed_targets.remove(&primary_id);
+                                forwarder.deregister(primary_id);
+                                on_event(&AcceptEvent::FaceDown(primary_face, outcome));
+                            }
+                        } else {
+                            log::debug!(
+                                "multilink: link {} left; peer {:02x?} session survives on {} \
+                                 link(s)",
+                                face.id.0,
+                                peer_zid,
+                                remaining
+                            );
+                        }
+                        continue;
+                    }
+                }
                 faces.remove(&face.id);
                 // A held face left. Drop its dial-address index; if it was a
                 // still-DESIRED outbound dial, re-schedule it with backoff — the peer
@@ -1067,6 +1414,10 @@ where
                         // same address (and vice-versa).
                         #[cfg(feature = "router-connect-reconcile")]
                         dialed_targets.insert(id, addr);
+                        // R311y205 (transport-multilink) — a `max_links > 1` node
+                        // dials the discovered peer with the 0x4-negotiating variant
+                        // (aggregation), else the byte-identical single-link dial.
+                        #[cfg(not(feature = "transport-multilink"))]
                         opening.push(Box::pin(dial_face(
                             id,
                             addr,
@@ -1074,12 +1425,58 @@ where
                             clock,
                             tick_interval_ms,
                         )));
+                        #[cfg(feature = "transport-multilink")]
+                        opening.push(if max_links > 1 {
+                            Box::pin(dial_face_multilink(
+                                id,
+                                addr,
+                                multilink_pref(id),
+                                params.clone(),
+                                clock,
+                                tick_interval_ms,
+                            )) as OpenFuture
+                        } else {
+                            Box::pin(dial_face(id, addr, params.clone(), clock, tick_interval_ms))
+                                as OpenFuture
+                        });
                     }
-                    DialDecision::AlreadyHeld => log::debug!(
-                        "autoconnect: already hold a face to peer {:02x?}; \
-                         skipping redundant dial",
-                        intent.zid
-                    ),
+                    DialDecision::AlreadyHeld => {
+                        // R311y205 (transport-multilink) — the aggregation relax of
+                        // the "already held -> skip" dedup: when `max_links > 1` and
+                        // the held peer's session still has room, a second dialed
+                        // link to it is opened to AGGREGATE rather than suppressed.
+                        #[cfg(feature = "transport-multilink")]
+                        if max_links > 1 {
+                            let room = ml_sessions
+                                .get(&intent.zid)
+                                .map(|(_, _, core_handle)| core_handle.link_count() < max_links)
+                                .unwrap_or(false);
+                            if room {
+                                if let Some(addr) = first_dialable_addr(&intent.locators) {
+                                    let id = FaceId(next_id);
+                                    next_id += 1;
+                                    summary.dialed += 1;
+                                    #[cfg(feature = "router-connect-reconcile")]
+                                    dialed_targets.insert(id, addr);
+                                    opening.push(Box::pin(dial_face_multilink(
+                                        id,
+                                        addr,
+                                        multilink_pref(id),
+                                        params.clone(),
+                                        clock,
+                                        tick_interval_ms,
+                                    ))
+                                        as OpenFuture);
+                                    continue;
+                                }
+                            }
+                        }
+                        log::debug!(
+                            "autoconnect: already hold a face to peer {:02x?}; \
+                             skipping redundant dial",
+                            intent.zid
+                        );
+                    }
                     DialDecision::NoLocator => log::debug!(
                         "autoconnect: discovered peer advertised no TCP-dialable \
                          locator ({:?}); skipping dial",
@@ -1169,6 +1566,11 @@ where
                 let id = FaceId(next_id);
                 next_id += 1;
                 summary.accepted += 1;
+                // R311y205 (transport-multilink) — a `max_links > 1` acceptor opens
+                // with the 0x4-negotiating variant so an inbound peer's second link
+                // can aggregate (the ext captures its ephemeral pubkey); the
+                // `#[cfg(not)]` arm is the byte-identical single-link accept.
+                #[cfg(not(feature = "transport-multilink"))]
                 opening.push(Box::pin(open_face(
                     id,
                     peer,
@@ -1177,6 +1579,27 @@ where
                     clock,
                     tick_interval_ms,
                 )));
+                #[cfg(feature = "transport-multilink")]
+                opening.push(if max_links > 1 {
+                    Box::pin(open_face_multilink(
+                        id,
+                        peer,
+                        accepted,
+                        multilink_pref(id),
+                        params.clone(),
+                        clock,
+                        tick_interval_ms,
+                    )) as OpenFuture
+                } else {
+                    Box::pin(open_face(
+                        id,
+                        peer,
+                        accepted,
+                        params.clone(),
+                        clock,
+                        tick_interval_ms,
+                    )) as OpenFuture
+                });
             }
 
             Step::Accepted(Err(e)) => {
@@ -1237,6 +1660,10 @@ where
             mcast_group_subs: None,
             // accept-only: no runtime connect-list reconcile.
             reconcile: None,
+            // accept-only: single-link (a multilink node aggregates via `peer_loop`,
+            // the full mesh entry that carries `max_links`); byte-identical to today.
+            #[cfg(feature = "transport-multilink")]
+            max_links: 1,
         },
         params,
         clock,
@@ -1739,6 +2166,8 @@ mod tests {
                 mcast_members: None,
                 mcast_group_subs: None,
                 reconcile: None,
+                #[cfg(feature = "transport-multilink")]
+                max_links: 1,
             },
             peer_params(),
             TokioTime::new(),
@@ -1814,6 +2243,8 @@ mod tests {
                 mcast_members: None,
                 mcast_group_subs: None,
                 reconcile: None,
+                #[cfg(feature = "transport-multilink")]
+                max_links: 1,
             },
             peer_params(),
             TokioTime::new(),
@@ -1889,6 +2320,8 @@ mod tests {
                 mcast_members: None,
                 mcast_group_subs: None,
                 reconcile: None,
+                #[cfg(feature = "transport-multilink")]
+                max_links: 1,
             },
             peer_params(),
             TokioTime::new(),

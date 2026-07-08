@@ -412,6 +412,18 @@ pub mod extauth_pubkey;
 #[cfg(feature = "access-extauth-pubkey")]
 pub use rsa;
 
+/// R311y205 (transport-multilink IMPL-1) — the AP-side ephemeral-RSA glue for
+/// the §5.1 multi-link aggregation feature: the process-wide ephemeral RSA-512
+/// keypair ([`multilink::multilink_keypair`]) + the open / accept
+/// [`MultiLinkDispatch`](wz_session_core::extmultilink::MultiLinkDispatch)
+/// constructors. Injects the concrete (std-only) `PubKeyMethod` into the
+/// rsa-free session-kernel 0x4 dispatch — the wz analogue of zenoh's
+/// `MultiLink::make`. Gated on `transport-multilink` (which forwards
+/// `access-extauth-pubkey`). Not yet wired into the live establishment path
+/// (IMPL-2).
+#[cfg(feature = "transport-multilink")]
+pub mod multilink;
+
 /// R311y — per-runtime synchronization primitive aliases (`Mutex<T>`,
 /// `RwLock<T>`) implementing the R311w option (a) decision lock on
 /// §5.P Mutex/RwLock shape. The tokio profile binds the aliases to

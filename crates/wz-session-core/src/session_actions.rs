@@ -30,6 +30,7 @@ use hashbrown::HashMap;
 // profile uses the native `core::sync::atomic::AtomicU64`. The session_glue
 // origin used portable-atomic unconditionally because the tokio crate always
 // carries it; here it splits across the two session-core profiles.
+use core::ops::Deref;
 #[cfg(not(feature = "no_std"))]
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(feature = "no_std")]
@@ -194,12 +195,21 @@ pub struct BatchTx {
     pub count: usize,
 }
 
-pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
-    /// R::LinkSink — the per-profile owning handle to the link write
-    /// seam (tokio `Arc<dyn BoxedLinkDriver + Send + Sync>`, lwIP MCU
-    /// `Rc<dyn BoxedLinkDriver>`). The generic action methods reach the
-    /// pure `&dyn BoxedLinkDriver` through [`Self::link_driver`].
-    pub driver: R::LinkSink,
+/// R311y205 (transport-multilink IMPL-2a) — the SHARED session kernel: the
+/// ~30 fields that are one-per-logical-session regardless of how many physical
+/// links carry it (SN generators, RX-SN gate, negotiated caps, peer identity,
+/// id-spaces, declaration cache, namespace, the TX-order `tx_mutex`). Split out
+/// of the former flat `SessionLinkActions` so a later multilink slice can share
+/// ONE core across N per-link [`LinkState`]s on separate drive loops; the 5
+/// per-link fields moved to [`LinkState`]. `SessionCore` holds NO reference to
+/// a `LinkState`, so it is shareable independently of any one link. At N=1
+/// (every build today) [`SessionLinkActions`] holds one `SessionCore` + one
+/// `LinkState` behind the per-profile [`R::Shared`](crate::link::SessionRuntime::Shared)
+/// pointer (Arc/Rc — see the `SessionLinkActions` doc): behavior / wire /
+/// data-plane identical to the pre-split flat struct, though NOT
+/// footprint-identical (the split adds two refcounted allocations per session —
+/// a known MCU zero-cost debt, faithfulness-over-cost).
+pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// R311y9 — per-session wire byte/message counters (`transport-stats`).
     /// Interior-mutable atomics, incremented at the [`Self::send_wire`] (TX)
     /// and [`crate::drive::dispatch_link_event`] (RX) seams; read via
@@ -213,49 +223,6 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// `params.cookie` on the OpenSyn outbound, implementing the
     /// RFC §5.M echo contract on the Initiator side.
     pub inbound_cookie: R::Mutex<Option<Vec<u8>>>,
-    /// R311la — monotonic timestamp in milliseconds of the most recent
-    /// successfully parsed inbound transport message of ANY kind
-    /// (Frame, Fragment, KeepAlive, handshake, Close — everything but
-    /// `Unknown`). Stamped once at the [`Self::handle_inbound`] success
-    /// chokepoint, the zenoh-pico `_received` parity point
-    /// (unicast/rx.c:88 marks the flag for every decoded message; the
-    /// lease task expires only when nothing arrived in the window,
-    /// lease.c:141-149). The former R72b shape
-    /// (`last_inbound_keepalive_at`, stamped in the KeepAlive arm
-    /// alone) expired a peer that sent only data frames — and the
-    /// R311kx TX suppression guarantees a busy peer sends no
-    /// KeepAlives, so a sustained data flow was killed after one lease
-    /// window. Consumers reach this through the
-    /// [`crate::drive::lease_wake_deadline`] baseline
-    /// (`max(established_at, this)`); an absent stamp falls back to
-    /// Established entry per session-fsm §2.5.
-    ///
-    /// Storage is `u64` milliseconds since the
-    /// [`SessionLinkActions::clock`] epoch (R294: migrated from
-    /// `std::time::Instant`). The lease comparator becomes a pure
-    /// `u64` subtract `now_ms.saturating_sub(stamp_ms) >= lease_ms`;
-    /// no `Duration` arithmetic, MCU-friendly (16-byte Duration
-    /// halved to 8-byte u64), and the storage form matches the
-    /// [`TimeSource::now_monotonic_ms`] contract that wz callers
-    /// will use across AP + Phase W targets.
-    pub last_inbound_at: R::Mutex<Option<u64>>,
-    /// R84 — monotonic timestamp in milliseconds captured when the
-    /// session FSM enters the `Established` state. Populated by the
-    /// `record_established_at()` Lua action wired to the
-    /// `Established.onentry` block in `session_fsm_unicast.scxml`.
-    /// Consumers (specifically `check_lease_deadline`) fall back to
-    /// this stamp when `last_inbound_at` is `None` so a peer that
-    /// never sends anything after handshake still reaches
-    /// `lease.expired -> Closing` per session-fsm §2.5 ("lease counts
-    /// from Established entry"); the prior R77 behaviour was
-    /// `NoBaseline` indefinitely in that case.
-    ///
-    /// Storage form and clock semantics match
-    /// `last_inbound_at` — both are `u64` ms since the
-    /// shared [`SessionLinkActions::clock`] epoch (R294 migration
-    /// from `std::time::Instant`); the lease comparator subtracts
-    /// them as pure `u64` arithmetic.
-    pub established_at: R::Mutex<Option<u64>>,
     /// R311kv — the lease window the peer advertised in its OPEN body
     /// (milliseconds; `parse_inbound` already projected the wire T-flag
     /// seconds form back, R311ku). Captured by [`Self::handle_inbound`]
@@ -269,20 +236,6 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// the multicast per-peer sweep (R311ks). `None` pre-OPEN: the local
     /// window governs alone.
     pub peer_open_lease_ms: R::Mutex<Option<u64>>,
-    /// R311kw — monotonic timestamp in milliseconds of the most recent
-    /// outbound wire emit on this link. Stamped by the [`Self::send_wire`]
-    /// seam every TX path funnels through (handshake t_msg, CLOSE, Frame /
-    /// Fragment, batch flush), the deadline-model equivalent of zenoh-pico's
-    /// `_z_transport_common_t._transmitted` flag (transport.h:176; set on
-    /// every send in common/tx.c:98/153, consumed by the keepalive tasks in
-    /// unicast/lease.c:183/196 + multicast/lease.c:171 to suppress a
-    /// KeepAlive when the line already spoke). pico resets the flag each
-    /// `lease/Z_TRANSPORT_LEASE_EXPIRE_FACTOR` tick; wz stores the stamp and
-    /// the keepalive emitter compares `now - stamp >= lease/factor` — the
-    /// same store-raw / compare-at-check split as the R311ks multicast
-    /// per-peer sweep. `None` until the first emit; storage form and clock
-    /// epoch match `last_inbound_at` (u64 ms, R294 scale).
-    pub last_outbound_at: R::Mutex<Option<u64>>,
     /// R294 — monotonic clock shared with the surrounding
     /// drive_session loop. `TokioTime` is `Copy + Clone` (R263), so
     /// every field that needs a `now_monotonic_ms()` read holds a
@@ -520,21 +473,6 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// the drive loop.
     #[cfg(feature = "routing-namespace")]
     pub namespace_ingress: R::Mutex<Option<NamespaceIngress>>,
-    /// F2 — is the transport currently accepting data sends? `true` at
-    /// construction (the bundle is built over a live link sink; the
-    /// pre-handshake window keeps today's emit semantics), `false` when
-    /// the FSM releases the link (`release_link`, Closing/Closed entry)
-    /// or the reconnect supervisor tears the transport down for re-dial
-    /// ([`Self::reset_for_reopen`]), `true` again when Established
-    /// (re-)enters (`record_established_at`). The
-    /// [`Self::dispatch_network_message`] chokepoint gates on it so a
-    /// data send inside the RECONNECTING window rejects typed
-    /// ([`SendWireError::TransportUnavailable`]) instead of silently
-    /// vanishing into a dead writer channel — zenoh-pico's tx path fails
-    /// on the dead transport's mutex/NULL
-    /// (`_Z_ERR_TRANSPORT_NOT_AVAILABLE`); the handshake / CLOSE
-    /// transport messages bypass the chokepoint and stay ungated.
-    pub transport_available: R::Mutex<bool>,
     /// R239 — monotonic outbound `Request.request_id` allocator.
     /// Mirrors zenoh-pico's `_z_session_t._query_id` slot
     /// (`vendor/zenoh-pico/src/session/query.c:99` —
@@ -614,6 +552,252 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// because `SourceInfo.eid` is a `u32` — no truncating `as u32` cast.
     /// `Relaxed`; first call returns `0`.
     pub next_outbound_entity_id: AtomicU32,
+
+    /// R311y205 (transport-multilink IMPL-2b-iii) — the aggregation link set: the
+    /// `R::Shared<LinkState>` of every physical link that carries this ONE logical
+    /// session (the wz mirror of zenoh's `TransportUnicastUniversal.links`). Each
+    /// entry is the SAME pointer the link's own [`SessionLinkActions`] binding
+    /// holds as `self.link`, so a per-link F2 / lease write through the binding is
+    /// seen here, and vice-versa. EMPTY for a non-aggregating session (feature-off
+    /// builds omit the field; feature-on single-link sessions never push into it)
+    /// — [`Self::select_link`] then returns `None` and `send_wire` keeps its
+    /// single-link `self.link` path. The reliability-routed send selects a target
+    /// from this set; the session-send gate is the OR over these links'
+    /// `transport_available`, so the session survives until the set empties.
+    ///
+    /// A `std::sync::Mutex`, NOT the runtime `R::Mutex<T>` GAT: the latter's
+    /// `where T: Send` naming-bound cannot be discharged for the opaque
+    /// `R::Shared<LinkState>` element in generic-`R` struct WF (coop's
+    /// `LinkState` is genuinely `!Send` — an `Rc` driver — so no unconditional
+    /// bound is sound), whereas `std::sync::Mutex<T>` carries no naming-bound and
+    /// is `Send + Sync` structurally on the only runtime that enables this
+    /// feature (std `TokioRuntime`, `R::Shared = Arc`). AP-only + rsa-gated, so
+    /// std is always present (see `lib.rs`).
+    #[cfg(feature = "transport-multilink")]
+    pub links: std::sync::Mutex<alloc::vec::Vec<R::Shared<LinkState<R>>>>,
+    /// R311y205 (transport-multilink IMPL-2b-ii) — the 0x4 Z_EXT_MULTILINK
+    /// establishment dispatch, installed by the AP layer at session bring-up when
+    /// `max_links > 1` (the `install_auth_dispatch` discipline). `None` = this
+    /// session does not negotiate multilink (feature-on max_links=1, or a link
+    /// whose deploy did not enable aggregation) → the handshake emits NO 0x4 ext,
+    /// byte-identical to a non-multilink handshake. Holds the rsa-free
+    /// [`MultiLinkDispatch`](crate::extmultilink::MultiLinkDispatch) driving one
+    /// ephemeral-pubkey method injected from the AP crate.
+    #[cfg(feature = "transport-multilink")]
+    pub multilink: R::Mutex<Option<crate::extmultilink::MultiLinkDispatch>>,
+    /// R311y205 (transport-multilink IMPL-2b-ii) — the peer's ephemeral multilink
+    /// pubkey, captured (as its canonical encoded ZPublicKey bytes) from the 0x4
+    /// handshake and bound into this session's identity. The join gate compares a
+    /// second link's captured pubkey against this (byte-equality IS config-
+    /// equality on the ephemeral key, the wz analogue of zenoh's
+    /// `init_existing_transport_unicast` pubkey check); a mismatch is an INVALID
+    /// close, a match authorizes `add_link`. `None` until the 0x4 handshake
+    /// completes (or on a non-multilink session).
+    #[cfg(feature = "transport-multilink")]
+    pub multilink_pubkey: R::Mutex<Option<alloc::vec::Vec<u8>>>,
+}
+
+/// R311y205 (transport-multilink IMPL-2a) — the PER-LINK state: exactly the 5
+/// fields that belong to ONE physical link, not the logical session. Split out
+/// of the former flat `SessionLinkActions`: `driver` is the per-link write seam
+/// (reliability-segregated + per-link keepalive TX), the three stamps are the
+/// per-link lease + keepalive baselines (a shared stamp would let a live link
+/// keep a dead standby link's lease fresh so it is never reaped), and
+/// `transport_available` is the per-link F2 send gate. A later multilink slice
+/// gives each physical link its own `LinkState` while N of them share ONE
+/// [`SessionCore`]; at N=1 (every build today) one `LinkState` pairs with one
+/// `SessionCore` inside [`SessionLinkActions`] (both behind the `R::Shared`
+/// pointer), behavior / wire / data-plane identical to the pre-split struct.
+/// Parameterised by `R` only — none of the 5 fields name the clock `T`.
+pub struct LinkState<R: SessionRuntime> {
+    /// R::LinkSink — the per-profile owning handle to the link write
+    /// seam (tokio `Arc<dyn BoxedLinkDriver + Send + Sync>`, lwIP MCU
+    /// `Rc<dyn BoxedLinkDriver>`). The generic action methods reach the
+    /// pure `&dyn BoxedLinkDriver` through [`SessionLinkActions::link_driver`].
+    pub driver: R::LinkSink,
+    /// R311la — monotonic timestamp in milliseconds of the most recent
+    /// successfully parsed inbound transport message of ANY kind
+    /// (Frame, Fragment, KeepAlive, handshake, Close — everything but
+    /// `Unknown`). Stamped once at the [`SessionLinkActions::handle_inbound`]
+    /// success chokepoint, the zenoh-pico `_received` parity point
+    /// (unicast/rx.c:88 marks the flag for every decoded message; the
+    /// lease task expires only when nothing arrived in the window,
+    /// lease.c:141-149). The former R72b shape
+    /// (`last_inbound_keepalive_at`, stamped in the KeepAlive arm
+    /// alone) expired a peer that sent only data frames — and the
+    /// R311kx TX suppression guarantees a busy peer sends no
+    /// KeepAlives, so a sustained data flow was killed after one lease
+    /// window. Consumers reach this through the
+    /// [`crate::drive::lease_wake_deadline`] baseline
+    /// (`max(established_at, this)`); an absent stamp falls back to
+    /// Established entry per session-fsm §2.5.
+    ///
+    /// Storage is `u64` milliseconds since the
+    /// [`SessionCore::clock`] epoch (R294: migrated from
+    /// `std::time::Instant`). The lease comparator becomes a pure
+    /// `u64` subtract `now_ms.saturating_sub(stamp_ms) >= lease_ms`;
+    /// no `Duration` arithmetic, MCU-friendly (16-byte Duration
+    /// halved to 8-byte u64), and the storage form matches the
+    /// [`TimeSource::now_monotonic_ms`] contract that wz callers
+    /// will use across AP + Phase W targets.
+    pub last_inbound_at: R::Mutex<Option<u64>>,
+    /// R84 — monotonic timestamp in milliseconds captured when the
+    /// session FSM enters the `Established` state. Populated by the
+    /// `record_established_at()` Lua action wired to the
+    /// `Established.onentry` block in `session_fsm_unicast.scxml`.
+    /// Consumers (specifically `check_lease_deadline`) fall back to
+    /// this stamp when `last_inbound_at` is `None` so a peer that
+    /// never sends anything after handshake still reaches
+    /// `lease.expired -> Closing` per session-fsm §2.5 ("lease counts
+    /// from Established entry"); the prior R77 behaviour was
+    /// `NoBaseline` indefinitely in that case.
+    ///
+    /// Storage form and clock semantics match
+    /// `last_inbound_at` — both are `u64` ms since the
+    /// shared [`SessionCore::clock`] epoch (R294 migration
+    /// from `std::time::Instant`); the lease comparator subtracts
+    /// them as pure `u64` arithmetic.
+    pub established_at: R::Mutex<Option<u64>>,
+    /// R311kw — monotonic timestamp in milliseconds of the most recent
+    /// outbound wire emit on this link. Stamped by the
+    /// [`SessionLinkActions::send_wire`] seam every TX path funnels through
+    /// (handshake t_msg, CLOSE, Frame / Fragment, batch flush), the
+    /// deadline-model equivalent of zenoh-pico's
+    /// `_z_transport_common_t._transmitted` flag (transport.h:176; set on
+    /// every send in common/tx.c:98/153, consumed by the keepalive tasks in
+    /// unicast/lease.c:183/196 + multicast/lease.c:171 to suppress a
+    /// KeepAlive when the line already spoke). pico resets the flag each
+    /// `lease/Z_TRANSPORT_LEASE_EXPIRE_FACTOR` tick; wz stores the stamp and
+    /// the keepalive emitter compares `now - stamp >= lease/factor` — the
+    /// same store-raw / compare-at-check split as the R311ks multicast
+    /// per-peer sweep. `None` until the first emit; storage form and clock
+    /// epoch match `last_inbound_at` (u64 ms, R294 scale).
+    pub last_outbound_at: R::Mutex<Option<u64>>,
+    /// F2 — is the transport currently accepting data sends? `true` at
+    /// construction (the bundle is built over a live link sink; the
+    /// pre-handshake window keeps today's emit semantics), `false` when
+    /// the FSM releases the link (`release_link`, Closing/Closed entry)
+    /// or the reconnect supervisor tears the transport down for re-dial
+    /// ([`SessionLinkActions::reset_for_reopen`]), `true` again when Established
+    /// (re-)enters (`record_established_at`). The
+    /// [`SessionLinkActions::dispatch_network_message`] chokepoint gates on it
+    /// so a data send inside the RECONNECTING window rejects typed
+    /// ([`SendWireError::TransportUnavailable`]) instead of silently
+    /// vanishing into a dead writer channel — zenoh-pico's tx path fails
+    /// on the dead transport's mutex/NULL
+    /// (`_Z_ERR_TRANSPORT_NOT_AVAILABLE`); the handshake / CLOSE
+    /// transport messages bypass the chokepoint and stay ungated.
+    pub transport_available: R::Mutex<bool>,
+    /// R311y205 (transport-multilink IMPL-2b-iii) — this physical link's traffic-
+    /// class preference, set at dial / accept config time. The reliability-routed
+    /// send seam ([`SessionCore::select_link`]) picks the [`Reliable`]-pref link
+    /// for the reliable channel and the [`BestEffort`]-pref link for the
+    /// best-effort channel (the wz mirror of zenoh's per-channel `select` over
+    /// `(reliability, priority)`); [`Any`] links are the failover pool. Additive
+    /// per-link field, so it changes no accessor signature.
+    ///
+    /// [`Reliable`]: LinkReliabilityPref::Reliable
+    /// [`BestEffort`]: LinkReliabilityPref::BestEffort
+    /// [`Any`]: LinkReliabilityPref::Any
+    ///
+    /// Interior-mutable so the AP dial / accept path sets it at bring-up (through
+    /// the shared `R::Shared<LinkState>` handle, before the drive loop spins) via
+    /// [`SessionLinkActions::set_link_reliability_pref`] — the same
+    /// config-at-bringup discipline as `set_lowlatency_offer`. `Default` (`Any`)
+    /// until set.
+    #[cfg(feature = "transport-multilink")]
+    pub reliability_pref: R::Mutex<LinkReliabilityPref>,
+}
+
+/// R311y205 (transport-multilink IMPL-2b-iii) — the traffic-class preference a
+/// physical link carries into the aggregation core, so the reliability-routed
+/// send seam ([`SessionCore::select_link`]) can segregate the reliable channel
+/// onto one link and the best-effort channel onto another (the wz mirror of
+/// zenoh's per-channel `select`). Defined in the no_std session kernel (where
+/// [`LinkState`] stores it) and re-exported by the AP config surface
+/// (`wz_runtime_tokio::config::LinkReliabilityPref`), so the two agree by
+/// construction. [`Any`](Self::Any) — the default — expresses NO preference
+/// (the homogeneous single-link / failover pool).
+#[cfg(feature = "transport-multilink")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkReliabilityPref {
+    /// Prefer this link for the RELIABLE channel.
+    Reliable,
+    /// Prefer this link for the BEST-EFFORT channel.
+    BestEffort,
+    /// No preference — eligible for either channel (the failover default).
+    #[default]
+    Any,
+}
+
+/// R311y205 (transport-multilink IMPL-2b-iii) — the illegal-state-unrepresentable
+/// witness that a second link passed the aggregation config-equality gate. Its
+/// single field is PRIVATE, so a `PubkeyBound` can be minted ONLY inside this
+/// module — exclusively by [`SessionLinkActions::authorize_link`], which returns
+/// `Some` only when the candidate link's captured ephemeral pubkey byte-matches
+/// the session's bound pubkey. [`SessionLinkActions::add_link`] takes it by value,
+/// so a link that failed (or skipped) the pubkey check cannot be attached to a
+/// shared core: the type system, not a runtime assertion, forbids it.
+#[cfg(feature = "transport-multilink")]
+pub struct PubkeyBound(());
+
+impl<R: SessionRuntime> LinkState<R> {
+    /// Resolve the runtime-owned link sink (`R::LinkSink`) to the pure
+    /// `&dyn BoxedLinkDriver` write seam. `R::LinkSink` is opaque in
+    /// generic-`R` code — the tokio profile binds it to `Arc<dyn
+    /// BoxedLinkDriver + Send + Sync>`, the lwIP MCU profile to `Rc<dyn
+    /// BoxedLinkDriver>` — so the action methods cannot call
+    /// `send_blocking` on `self.driver` directly; this accessor erases
+    /// the per-profile refcount wrapper through [`R::link_driver`]. Reached
+    /// from [`SessionLinkActions::link_driver`], which forwards to this.
+    fn link_driver(&self) -> &dyn BoxedLinkDriver {
+        R::link_driver(&self.driver)
+    }
+}
+
+/// R311il / R311y205 — the runtime-agnostic session action bundle one logical
+/// FSM instance drives. Consumers hold it as
+/// [`R::ActionsHandle<T>`](crate::link::SessionRuntime::ActionsHandle) (tokio
+/// `Arc<SessionLinkActions>`, lwIP MCU `Rc<SessionLinkActions>`).
+///
+/// Since the transport-multilink IMPL-2a struct-split it is the pairing of the
+/// shared [`SessionCore`] and one [`LinkState`]; it [`Deref`]s to `SessionCore`
+/// so the core-field accesses in the inherent methods (and in external
+/// consumers, through the handle's own `Deref`) resolve transparently, while
+/// the 5 per-link fields are reached explicitly through `self.link`.
+///
+/// R311y205 (transport-multilink IMPL-2b-i) — both halves are held behind the
+/// per-profile [`R::Shared`](crate::link::SessionRuntime::Shared) pointer
+/// (tokio `Arc`, lwIP `Rc`), NOT embedded by value. This is the core-sharing
+/// mechanism the whole aggregation feature rests on: N physical links each hold
+/// their own `SessionLinkActions` binding, all cloning ONE `R::Shared<SessionCore>`
+/// (so they share the SN generator + per-channel rx-SN gate + peer identity +
+/// caches) while each carries its own `R::Shared<LinkState>` (driver + per-link
+/// lease stamps + F2 gate). The same one `R::Shared<LinkState>` is also placed
+/// in the shared core's link set (`SessionCore::links`) so the reliability-routed
+/// send seam can select it; cloning the pointer keeps the binding's view and the
+/// core's view of a link IDENTICAL (a `del_link` / `transport_available` write
+/// through either is seen by both). ONE type shape at every N — at N=1 (every
+/// build today, and every MCU build always) both are refcount-1 pointers,
+/// behavior / wire / data-plane identical to the pre-split flat struct.
+pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
+    /// Shared session kernel — SN/rx_sn/caps/identity/id-spaces/caches. Cloned
+    /// (refcount) across every link that aggregates into this logical session.
+    pub core: R::Shared<SessionCore<R, T>>,
+    /// This binding's physical link. The SAME `R::Shared<LinkState>` is held in
+    /// [`SessionCore::links`] under the multilink feature, so the link's F2 gate
+    /// / lease stamps are one instance the binding and the send router share.
+    pub link: R::Shared<LinkState<R>>,
+}
+
+impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
+    type Target = SessionCore<R, T>;
+    #[inline]
+    fn deref(&self) -> &SessionCore<R, T> {
+        // R311y205 (IMPL-2b-i) — `core` is an `R::Shared<SessionCore>`; the
+        // pointer's own `Deref` resolves it to the shared kernel (auto-deref).
+        &self.core
+    }
 }
 
 /// R121f1 — wire-spec-mandatory Patch extension entry for the Init
@@ -774,62 +958,86 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // naming a concrete pointer. `alloc::sync::Arc` here would wall the
         // bundle off ARMv6-M (no `target_has_atomic = "ptr"`).
         R::wrap_actions(Self {
-            driver,
-            #[cfg(feature = "transport-stats")]
-            stats: crate::stats::TransportStats::default(),
-            params,
-            trace: R::new_mutex(ActionTrace::default()),
-            inbound_cookie: R::new_mutex(None::<Vec<u8>>),
-            last_inbound_at: R::new_mutex(None::<u64>),
-            established_at: R::new_mutex(None::<u64>),
-            peer_open_lease_ms: R::new_mutex(None::<u64>),
-            last_outbound_at: R::new_mutex(None::<u64>),
-            transport_available: R::new_mutex(true),
-            clock,
-            inbound_peer_zid: R::new_mutex(None::<Vec<u8>>),
-            remote_peer_zid: R::new_mutex(None::<Vec<u8>>),
-            peer_whatami: R::new_mutex(None::<u8>),
-            inbound_opensyn_cookie: R::new_mutex(None::<Vec<u8>>),
-            // R121f1 — default ext chains seed both Init roles with the
-            // patch-extension entry that zenoh-pico's accept-side
-            // size-negotiation requires. See
-            // [`default_init_patch_ext_entry`] for the wire-spec
-            // citation and the foreign-interop failure mode this
-            // closes.
-            init_syn_ext: R::new_mutex(vec![default_init_patch_ext_entry()]),
-            init_ack_ext: R::new_mutex(vec![default_init_patch_ext_entry()]),
-            open_syn_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
-            open_ack_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
-            // R3b — empty dispatch (no auth ext, admits all = zenoh
-            // `Auth::default()`); the AP layer installs the configured one.
-            #[cfg(feature = "session-extauth")]
-            auth: R::new_mutex(AuthDispatch::default()),
-            // transport-lowlatency — false until the AP layer offers it
-            // (`set_lowlatency_offer`) and the peer's offer is ANDed in.
-            #[cfg(feature = "transport-lowlatency")]
-            is_lowlatency: R::new_mutex(false),
-            #[cfg(feature = "transport-compression")]
-            is_compression: R::new_mutex(false),
-            #[cfg(feature = "transport-shm")]
-            is_shm: R::new_mutex(false),
-            inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
-            outbound_frame_sn: AtomicU64::new(initial_frame_sn),
-            rx_sn: R::new_mutex(crate::sn::RxSn::default()),
-            tx_mutex: R::new_mutex(BatchTx::default()),
-            outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
-            #[cfg(feature = "session-reconnect")]
-            declaration_cache: R::new_mutex(Vec::<CachedDeclaration>::new()),
-            // §5.21 routing-namespace — `None` until the AP layer installs the
-            // namespace via `set_namespace` at bring-up (the `is_lowlatency`
-            // config-default pattern). Zero footprint when the feature is off.
-            #[cfg(feature = "routing-namespace")]
-            namespace_egress: R::new_mutex(None::<OwnedNonWildKeyExpr>),
-            #[cfg(feature = "routing-namespace")]
-            namespace_ingress: R::new_mutex(None::<NamespaceIngress>),
-            next_outbound_request_id: AtomicU64::new(0),
-            next_outbound_token_id: AtomicU64::new(0),
-            next_outbound_interest_id: AtomicU64::new(0),
-            next_outbound_entity_id: AtomicU32::new(0),
+            // R311y205 (IMPL-2a) — the 5 per-link fields are grouped into
+            // `LinkState`, the rest into the shared `SessionCore`. IMPL-2b-i —
+            // each half is wrapped in the per-profile `R::Shared` pointer (tokio
+            // `Arc`, lwIP `Rc`) so N links can share ONE core; at N=1 both are
+            // refcount-1 pointers, behavior-identical to the pre-split struct.
+            // Every field initializer expression is verbatim.
+            link: R::share(LinkState {
+                driver,
+                last_inbound_at: R::new_mutex(None::<u64>),
+                established_at: R::new_mutex(None::<u64>),
+                last_outbound_at: R::new_mutex(None::<u64>),
+                transport_available: R::new_mutex(true),
+                #[cfg(feature = "transport-multilink")]
+                reliability_pref: R::new_mutex(LinkReliabilityPref::default()),
+            }),
+            core: R::share(SessionCore {
+                #[cfg(feature = "transport-stats")]
+                stats: crate::stats::TransportStats::default(),
+                params,
+                trace: R::new_mutex(ActionTrace::default()),
+                inbound_cookie: R::new_mutex(None::<Vec<u8>>),
+                peer_open_lease_ms: R::new_mutex(None::<u64>),
+                clock,
+                inbound_peer_zid: R::new_mutex(None::<Vec<u8>>),
+                remote_peer_zid: R::new_mutex(None::<Vec<u8>>),
+                peer_whatami: R::new_mutex(None::<u8>),
+                inbound_opensyn_cookie: R::new_mutex(None::<Vec<u8>>),
+                // R121f1 — default ext chains seed both Init roles with the
+                // patch-extension entry that zenoh-pico's accept-side
+                // size-negotiation requires. See
+                // [`default_init_patch_ext_entry`] for the wire-spec
+                // citation and the foreign-interop failure mode this
+                // closes.
+                init_syn_ext: R::new_mutex(vec![default_init_patch_ext_entry()]),
+                init_ack_ext: R::new_mutex(vec![default_init_patch_ext_entry()]),
+                open_syn_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
+                open_ack_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
+                // R3b — empty dispatch (no auth ext, admits all = zenoh
+                // `Auth::default()`); the AP layer installs the configured one.
+                #[cfg(feature = "session-extauth")]
+                auth: R::new_mutex(AuthDispatch::default()),
+                // transport-lowlatency — false until the AP layer offers it
+                // (`set_lowlatency_offer`) and the peer's offer is ANDed in.
+                #[cfg(feature = "transport-lowlatency")]
+                is_lowlatency: R::new_mutex(false),
+                #[cfg(feature = "transport-compression")]
+                is_compression: R::new_mutex(false),
+                #[cfg(feature = "transport-shm")]
+                is_shm: R::new_mutex(false),
+                inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
+                outbound_frame_sn: AtomicU64::new(initial_frame_sn),
+                rx_sn: R::new_mutex(crate::sn::RxSn::default()),
+                tx_mutex: R::new_mutex(BatchTx::default()),
+                outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
+                #[cfg(feature = "session-reconnect")]
+                declaration_cache: R::new_mutex(Vec::<CachedDeclaration>::new()),
+                // §5.21 routing-namespace — `None` until the AP layer installs the
+                // namespace via `set_namespace` at bring-up (the `is_lowlatency`
+                // config-default pattern). Zero footprint when the feature is off.
+                #[cfg(feature = "routing-namespace")]
+                namespace_egress: R::new_mutex(None::<OwnedNonWildKeyExpr>),
+                #[cfg(feature = "routing-namespace")]
+                namespace_ingress: R::new_mutex(None::<NamespaceIngress>),
+                next_outbound_request_id: AtomicU64::new(0),
+                next_outbound_token_id: AtomicU64::new(0),
+                next_outbound_interest_id: AtomicU64::new(0),
+                next_outbound_entity_id: AtomicU32::new(0),
+                // R311y205 (IMPL-2b-iii) — the aggregation link set starts
+                // EMPTY. A single-link session (every non-aggregating open,
+                // incl feature-on max_links=1) never registers a link here, so
+                // `send_wire` keeps its single-link `self.link` path; the
+                // multilink join populates it (link 1 at register, link 2+ at
+                // add_link) only when a session actually aggregates.
+                #[cfg(feature = "transport-multilink")]
+                links: std::sync::Mutex::new(Vec::new()),
+                #[cfg(feature = "transport-multilink")]
+                multilink: R::new_mutex(None),
+                #[cfg(feature = "transport-multilink")]
+                multilink_pubkey: R::new_mutex(None),
+            }),
         })
     }
 }
@@ -844,8 +1052,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the per-profile refcount wrapper through [`R::link_driver`]. The
     /// returned reference borrows `self`, so the seam call composes
     /// inline (`self.link_driver().send_blocking(&wire, reliability)`).
+    /// R311y205 (IMPL-2a) — forwards to [`LinkState::link_driver`] now that the
+    /// `driver` field lives on the per-link `self.link`.
     fn link_driver(&self) -> &dyn BoxedLinkDriver {
-        R::link_driver(&self.driver)
+        self.link.link_driver()
     }
 
     /// R311y9 — public snapshot of this session's transport byte/message
@@ -876,6 +1086,52 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// keepalive emitter. A build with no active wire-emit body must
     /// not carry the dead seam (CI denies warnings on the minimal MCU
     /// lanes).
+    // R311y205 — codec-close / transport-keepalive are NOT in this union: the
+    // close + keepalive + link-close TX paths route through
+    // [`Self::send_wire_this_link`] (per-link control, not reliability-routed),
+    // so a build that enables ONLY codec-close / transport-keepalive (e.g. a
+    // bare `transport-multicast` MCU lane) has no `send_wire` caller and must
+    // not compile the dead seam. `emit_on_link` keeps the full union (both
+    // send_wire and send_wire_this_link funnel through it).
+    #[cfg(any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-interest",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-final",
+        feature = "liveliness-token",
+        feature = "transport-batching",
+    ))]
+    fn send_wire(&self, bytes: &[u8], reliability: Reliability) {
+        // R311y205 (transport-multilink IMPL-2b-iii) — reliability-routed data
+        // send: an AGGREGATING session (`select_link` -> Some) emits on the
+        // reliability-pref link (else first alive = failover) from the shared
+        // link set — the wz mirror of zenoh's per-channel `select`; a SINGLE-link
+        // session (empty set -> None) and every NON-feature build emit on this
+        // binding's own `self.link`, byte-identical to today. Keepalive / close
+        // are per-link and bypass routing ([`Self::send_wire_this_link`]).
+        #[cfg(feature = "transport-multilink")]
+        if let Some(target) = self.select_link(reliability) {
+            self.emit_on_link(&target, bytes, reliability);
+            return;
+        }
+        self.emit_on_link(&self.link, bytes, reliability);
+    }
+
+    /// R311y205 (transport-multilink IMPL-2b-iii) — emit a wire batch on ONE
+    /// specific link: stamp THAT link's `last_outbound_at` (per-link keepalive
+    /// suppression baseline), apply compression, and hand the bytes to its
+    /// driver. The single seam both the reliability-routed [`Self::send_wire`]
+    /// (data) and the per-link [`Self::send_wire_this_link`] (keepalive / close)
+    /// funnel through, so every TX path stamps the link it actually used. At N=1
+    /// `link` is always `&self.link`, byte-identical to the pre-split emit.
     #[cfg(any(
         feature = "codec-init-body",
         feature = "codec-open-body",
@@ -894,9 +1150,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "transport-batching",
         feature = "transport-keepalive",
     ))]
-    fn send_wire(&self, bytes: &[u8], reliability: Reliability) {
+    fn emit_on_link(&self, link: &LinkState<R>, bytes: &[u8], reliability: Reliability) {
         let now = self.clock.now_monotonic_ms();
-        R::with_mutex_mut(&self.last_outbound_at, |slot| *slot = Some(now));
+        R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
         // transport-compression — once compression is negotiated, every
         // post-establishment batch is lz4-wrapped here (the wz analogue of
         // zenoh's finalize-then-write-to-link). The is_established() gate keeps
@@ -913,12 +1169,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // transport-stats — count the ACTUAL wire bytes (post-compression).
             #[cfg(feature = "transport-stats")]
             self.stats.inc_tx(wrapped.len());
-            self.link_driver().send_blocking(&wrapped, reliability);
+            link.link_driver().send_blocking(&wrapped, reliability);
             return;
         }
         #[cfg(feature = "transport-stats")]
         self.stats.inc_tx(bytes.len());
-        self.link_driver().send_blocking(bytes, reliability);
+        link.link_driver().send_blocking(bytes, reliability);
+    }
+
+    /// R311y205 (transport-multilink IMPL-2b-iii) — emit on THIS binding's own
+    /// link, bypassing reliability routing. Keepalive and CLOSE are per-link
+    /// control (zenoh keepalives each link on its own timer; a link-only close
+    /// targets that link), so they must reach the physical link the drive loop
+    /// monitors — NOT the reliability-selected data link. At N=1 identical to
+    /// [`Self::send_wire`].
+    #[cfg(any(feature = "codec-close", feature = "transport-keepalive",))]
+    fn send_wire_this_link(&self, bytes: &[u8], reliability: Reliability) {
+        self.emit_on_link(&self.link, bytes, reliability);
     }
 
     /// R121d — derive the SessionInitParams the Accepting side
@@ -1183,6 +1450,340 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 chain.push(ext);
             }
         });
+    }
+
+    // ─────────────── R311y205 transport-multilink (IMPL-2b-ii) ───────────────
+
+    /// Install the 0x4 Z_EXT_MULTILINK establishment dispatch, injected by the AP
+    /// layer at session bring-up when `max_links > 1` (the
+    /// [`Self::install_auth_dispatch`] discipline). Its presence is the
+    /// "this session negotiates multilink" switch: an installed dispatch makes the
+    /// four send sites emit the 0x4 ext and the recv seam consume it; without it
+    /// the handshake is byte-identical to a non-multilink open. The concrete
+    /// ephemeral-pubkey method is std-only (`rsa`), so it is built in the AP crate
+    /// and handed in through the rsa-free [`MultiLinkDispatch`](crate::extmultilink::MultiLinkDispatch).
+    #[cfg(feature = "transport-multilink")]
+    pub fn install_multilink_dispatch(&self, dispatch: crate::extmultilink::MultiLinkDispatch) {
+        R::with_mutex_mut(&self.multilink, |slot| *slot = Some(dispatch));
+    }
+
+    /// Refresh the responder challenge nonce on the installed multilink dispatch —
+    /// a FRESH cryptographically-random `nonce` per accepted handshake (the pubkey
+    /// responder replay-defense contract, [`Self::refresh_auth_challenge_nonce`]
+    /// for the 0x4 ext). No-op when no dispatch is installed (max_links=1).
+    #[cfg(feature = "transport-multilink")]
+    pub fn refresh_multilink_challenge_nonce(&self, nonce: u64) {
+        R::with_mutex_mut(&self.multilink, |slot| {
+            if let Some(d) = slot.as_mut() {
+                d.set_challenge_nonce(nonce);
+            }
+        });
+    }
+
+    /// Run `f` against the installed multilink dispatch (the recv-stage driver at
+    /// [`crate::drive::dispatch_link_event`] feeds a parsed handshake frame's ext
+    /// chain into the matching 0x4 demux stage, beside the auth demux).
+    /// `None` when no dispatch is installed (max_links=1) — the peer's 0x4 ext, if
+    /// any, is then ignored (this node did not negotiate multilink).
+    #[cfg(feature = "transport-multilink")]
+    pub fn with_multilink<U>(
+        &self,
+        f: impl FnOnce(&mut crate::extmultilink::MultiLinkDispatch) -> U,
+    ) -> Option<U> {
+        R::with_mutex_mut(&self.multilink, |slot| slot.as_mut().map(f))
+    }
+
+    /// Latch the peer's captured ephemeral multilink pubkey (encoded ZPublicKey
+    /// bytes) out of the installed dispatch into [`SessionCore::multilink_pubkey`]
+    /// — the session-identity slot the aggregation join gate compares against.
+    /// Called from the recv seam after each 0x4 demux stage; idempotent (the
+    /// dispatch surfaces the key only once the capturing stage has run, and the
+    /// same key re-latches identically).
+    #[cfg(feature = "transport-multilink")]
+    pub fn capture_multilink_pubkey(&self) {
+        let captured = R::with_mutex_mut(&self.multilink, |slot| {
+            slot.as_ref().and_then(|d| d.captured_peer_pubkey())
+        });
+        if let Some(bytes) = captured {
+            R::with_mutex_mut(&self.multilink_pubkey, |slot| *slot = Some(bytes));
+        }
+    }
+
+    /// The peer's captured ephemeral multilink pubkey (encoded ZPublicKey bytes),
+    /// or `None` before the 0x4 handshake latched it (or on a non-multilink
+    /// session). The join gate's config-equality key.
+    #[cfg(feature = "transport-multilink")]
+    pub fn multilink_pubkey(&self) -> Option<Vec<u8>> {
+        R::with_mutex_mut(&self.multilink_pubkey, |slot| slot.clone())
+    }
+
+    /// Set this binding's link reliability preference at bring-up (before the
+    /// drive loop spins), through the shared `R::Shared<LinkState>` handle — the
+    /// `set_lowlatency_offer` config-at-bringup discipline. Read by
+    /// [`Self::select_link`] to segregate the reliable / best-effort channels.
+    #[cfg(feature = "transport-multilink")]
+    pub fn set_link_reliability_pref(&self, pref: LinkReliabilityPref) {
+        R::with_mutex_mut(&self.link.reliability_pref, |s| *s = pref);
+    }
+
+    /// Run the multilink dispatch's send stage for `role` and install the
+    /// resulting 0x4 [`Z_EXT_MULTILINK`](crate::extmultilink::MULTILINK_EXT_ID)
+    /// ext into that role's ext chain, IDEMPOTENTLY (a re-handshake never
+    /// duplicates it) — the 0x4 twin of [`Self::stage_auth_send`]. NO dispatch
+    /// installed (max_links=1) ⇒ no 0x4 ext staged, so the handshake stays
+    /// byte-identical to a non-multilink open.
+    #[cfg(all(
+        feature = "transport-multilink",
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn stage_multilink_send(
+        &self,
+        role: ExtChainRole,
+        produce: impl FnOnce(
+            &mut crate::extmultilink::MultiLinkDispatch,
+        ) -> Result<Option<ExtEntryOwned>, crate::auth_dispatch::AuthError>,
+    ) {
+        let ext = R::with_mutex_mut(&self.multilink, |slot| {
+            slot.as_mut().and_then(|d| produce(d).ok().flatten())
+        });
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            chain.retain(|e| e.ext_id() != crate::extmultilink::MULTILINK_EXT_ID);
+            if let Some(ext) = ext {
+                chain.push(ext);
+            }
+        });
+    }
+
+    // ─────────── R311y205 transport-multilink aggregation (IMPL-2b-iii) ──────
+
+    /// Reliability-routed link selection — the wz mirror of zenoh's per-channel
+    /// `select` (`unicast/universal/tx.rs`): pick, among the ALIVE links of the
+    /// aggregation set, the one preferring `reliability`'s channel; failing that,
+    /// the first alive link (homogeneous / failover). `None` when the set is
+    /// EMPTY (a single-link, non-aggregating session — [`Self::send_wire`] then
+    /// uses `self.link`) OR when every link is dead (the send then falls through
+    /// to `self.link`, whose F2 gate rejects it typed). Reads each link's
+    /// `transport_available` (liveness) + `reliability_pref` under their mutexes.
+    ///
+    /// R311y205 (slice-1 MF-E) — gated on the EXACT codec union of its sole caller
+    /// [`Self::send_wire`]: codec-close + transport-keepalive are EXCLUDED (those
+    /// TX paths route through `send_wire_this_link`, not `send_wire`, so a build
+    /// with ONLY codec-close / transport-keepalive has no `select_link` caller and
+    /// must not carry the dead seam — the same cfg-skew class run-ci caught for
+    /// `send_wire`). It names [`Reliability`] (codec-union-gated import), so a
+    /// `transport-multilink`-only build with no data-send codec omits it too.
+    #[cfg(all(
+        feature = "transport-multilink",
+        any(
+            feature = "codec-init-body",
+            feature = "codec-open-body",
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-interest",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-final",
+            feature = "liveliness-token",
+            feature = "transport-batching",
+        )
+    ))]
+    fn select_link(&self, reliability: Reliability) -> Option<R::Shared<LinkState<R>>> {
+        let links = self.links.lock().expect("multilink set mutex");
+        if links.is_empty() {
+            return None;
+        }
+        let want = match reliability {
+            Reliability::Reliable => LinkReliabilityPref::Reliable,
+            Reliability::BestEffort => LinkReliabilityPref::BestEffort,
+        };
+        let mut first_alive: Option<&R::Shared<LinkState<R>>> = None;
+        let mut preferred: Option<&R::Shared<LinkState<R>>> = None;
+        for l in links.iter() {
+            if !R::with_mutex_mut(&l.transport_available, |g| *g) {
+                continue;
+            }
+            if first_alive.is_none() {
+                first_alive = Some(l);
+            }
+            if preferred.is_none() && R::with_mutex_mut(&l.reliability_pref, |p| *p) == want {
+                preferred = Some(l);
+            }
+        }
+        preferred.or(first_alive).cloned()
+    }
+
+    /// Register the FIRST physical link of a session that is about to aggregate —
+    /// idempotent: pushes `link` into the (previously empty) shared set so
+    /// [`Self::select_link`] can route across it once a second link joins. Called
+    /// at the multilink JOIN when link 2 arrives (link 1 was driving single-link
+    /// with an empty set until then). A no-op if the set already holds links.
+    #[cfg(feature = "transport-multilink")]
+    pub fn register_first_link(&self, link: R::Shared<LinkState<R>>) {
+        let mut links = self.links.lock().expect("multilink set mutex");
+        if links.is_empty() {
+            links.push(link);
+        }
+    }
+
+    /// Attach a SECOND+ link's [`LinkState`] to this shared core's aggregation
+    /// set. The [`PubkeyBound`] witness — constructible ONLY by
+    /// [`Self::authorize_link`]'s config-equality check — proves the link
+    /// presented the SAME ephemeral multilink pubkey, so a mismatched /
+    /// unauthenticated link is unrepresentable as an `add_link` argument (the
+    /// illegal-state-unrepresentable gate). Returns the new live link count.
+    #[cfg(feature = "transport-multilink")]
+    pub fn add_link(&self, link: R::Shared<LinkState<R>>, _bound: PubkeyBound) -> usize {
+        let mut links = self.links.lock().expect("multilink set mutex");
+        links.push(link);
+        links.len()
+    }
+
+    /// Config-equality gate: authorize a second link IFF its captured ephemeral
+    /// multilink pubkey is byte-equal to this session's bound pubkey
+    /// ([`SessionCore::multilink_pubkey`]) — the wz analogue of zenoh's
+    /// `init_existing_transport_unicast` pubkey check. `Some(PubkeyBound)` (the
+    /// [`Self::add_link`] witness) on match; `None` on mismatch (the caller then
+    /// closes the link INVALID) or when no pubkey is bound yet.
+    #[cfg(feature = "transport-multilink")]
+    pub fn authorize_link(&self, candidate_pubkey: &[u8]) -> Option<PubkeyBound> {
+        let bound = R::with_mutex_mut(&self.multilink_pubkey, |slot| slot.clone());
+        match bound {
+            Some(b) if b.as_slice() == candidate_pubkey => Some(PubkeyBound(())),
+            _ => None,
+        }
+    }
+
+    /// Remove a link from the aggregation set on its loss / close (`del_link`),
+    /// matched by pointer identity of the shared `LinkState`. Returns the number
+    /// of links REMAINING — the whole-session teardown fires only when this hits
+    /// `0` (the session survives while ≥1 link is in the set).
+    #[cfg(feature = "transport-multilink")]
+    pub fn del_link(&self, link: &R::Shared<LinkState<R>>) -> usize {
+        let target: *const LinkState<R> = &**link;
+        let mut links = self.links.lock().expect("multilink set mutex");
+        links.retain(|l| {
+            let p: *const LinkState<R> = &**l;
+            !core::ptr::eq(p, target)
+        });
+        links.len()
+    }
+
+    /// Total links in the aggregation set (alive or not). `0` for a single-link
+    /// (non-aggregating) session. The multilink join's `max_links` room check
+    /// reads this.
+    #[cfg(feature = "transport-multilink")]
+    pub fn link_count(&self) -> usize {
+        self.links.lock().expect("multilink set mutex").len()
+    }
+
+    /// The number of links currently ALIVE (`transport_available`). The session-
+    /// send gate is `> 0` (the OR over links) — a session with an empty or all-
+    /// dead set is down. Distinct from [`Self::link_count`] (which counts dead
+    /// links too, e.g. a link mid-teardown before `del_link`).
+    #[cfg(feature = "transport-multilink")]
+    pub fn live_link_count(&self) -> usize {
+        self.links
+            .lock()
+            .expect("multilink set mutex")
+            .iter()
+            .filter(|l| R::with_mutex_mut(&l.transport_available, |g| *g))
+            .count()
+    }
+
+    /// The session-level send gate: is ANY link able to carry a data send? For an
+    /// AGGREGATING session it is the OR over the link set's `transport_available`
+    /// (the session is up while ≥1 link is live — a dead link fails over); for a
+    /// SINGLE-link session (empty set) it is this binding's own `self.link` F2
+    /// gate, byte-identical to the pre-multilink behavior. Read on the data send
+    /// hot path ([`Self::dispatch_network_message`]) — gated on the SAME codec
+    /// union as its sole caller so a minimal subset build (no data-send codec)
+    /// does not carry it as dead code under `-D warnings`.
+    #[cfg(all(
+        feature = "transport-multilink",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-final",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn session_send_available(&self) -> bool {
+        if self.link_count() > 0 {
+            return self.live_link_count() > 0;
+        }
+        R::with_mutex_mut(&self.link.transport_available, |g| *g)
+    }
+
+    /// Non-multilink builds have no aggregation set — the send gate is always this
+    /// binding's own link F2 gate. Same codec-union gate as the multilink variant.
+    #[cfg(all(
+        not(feature = "transport-multilink"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-final",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    #[inline]
+    fn session_send_available(&self) -> bool {
+        R::with_mutex_mut(&self.link.transport_available, |g| *g)
+    }
+
+    /// The number of 0x4 Z_EXT_MULTILINK entries staged across this session's four
+    /// establishment ext chains — the byte-level "did this handshake negotiate
+    /// multilink?" probe. `0` for a non-multilink (max_links=1) open, whose
+    /// handshake is byte-identical to today (no dispatch installed ⇒
+    /// [`Self::stage_multilink_send`] stages nothing); `> 0` once a multilink send
+    /// stage has run. Reads only the staged chains, no wire capture.
+    #[cfg(feature = "transport-multilink")]
+    pub fn staged_multilink_ext_count(&self) -> usize {
+        let count_in = |slot: &R::Mutex<Vec<ExtEntryOwned>>| {
+            R::with_mutex_mut(slot, |chain| {
+                chain
+                    .iter()
+                    .filter(|e| e.ext_id() == crate::extmultilink::MULTILINK_EXT_ID)
+                    .count()
+            })
+        };
+        count_in(&self.init_syn_ext)
+            + count_in(&self.init_ack_ext)
+            + count_in(&self.open_syn_ext)
+            + count_in(&self.open_ack_ext)
+    }
+
+    /// Emit a LINK-ONLY close (`FLAG_T_CLOSE_S` = 0) on THIS binding's link with
+    /// `reason` — the aggregation-reject path. Unlike the whole-session close
+    /// ([`Self::send_close_with_reason`], S=1), S=0 tells the peer to drop just
+    /// THIS physical link while the logical session survives on its others (zenoh
+    /// `close` with S unset). The reject reasons use zenoh's close-reason wire
+    /// codes ([`CLOSE_REASON_MAX_LINKS`] / [`CLOSE_REASON_INVALID`]), NOT the wz
+    /// [`CloseReason`] enum (whose discriminants differ), so the frame is
+    /// cross-impl faithful. Emitted on the REJECTED link's own (throwaway) actions
+    /// before it is dropped.
+    #[cfg(all(feature = "transport-multilink", feature = "codec-close"))]
+    pub fn send_link_close(&self, reason: u8) {
+        let bytes = crate::handshake_encode::encode_close(reason, /*session=*/ false);
+        self.send_wire_this_link(&bytes, Reliability::Reliable);
     }
 
     /// transport-lowlatency — the AP layer's "this deploy offers lowlatency
@@ -1561,7 +2162,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the monotonic epoch with the drive loop's clock.
         if !matches!(frame, InboundFrame::Unknown { .. }) {
             let now = self.clock.now_monotonic_ms();
-            R::with_mutex_mut(&self.last_inbound_at, |slot| {
+            R::with_mutex_mut(&self.link.last_inbound_at, |slot| {
                 *slot = Some(now);
             });
         }
@@ -1701,7 +2302,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // re-Established) a data send must reject typed rather than
         // vanish into a dead writer channel. Single gate — every
         // network-message send routes through this chokepoint.
-        if !R::with_mutex_mut(&self.transport_available, |g| *g) {
+        // R311y205 (transport-multilink) — for an AGGREGATING session the gate is
+        // the OR over the link set's `transport_available`: the session accepts
+        // sends while ANY link is alive (a dead reliable link fails over to a live
+        // one), so a per-link death must not reject a send the surviving links can
+        // still carry. A single-link session (and every non-feature build) gates
+        // on `self.link` exactly as before.
+        if !self.session_send_available() {
             return Err(SendWireError::TransportUnavailable);
         }
         // transport-lowlatency — the lean send path (zenoh
@@ -3140,7 +3747,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// do not surface a PoisonError equivalent — the trait normalises
     /// the AP side to match.
     pub fn is_established(&self) -> bool {
-        R::with_mutex_mut(&self.established_at, |slot| slot.is_some())
+        R::with_mutex_mut(&self.link.established_at, |slot| slot.is_some())
     }
 
     /// R311kx — the governing lease window in milliseconds:
@@ -3824,8 +4431,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
             R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
-            let bytes = encode_close(reason as u8);
-            self.send_wire(&bytes, Reliability::Reliable);
+            let bytes = encode_close(reason as u8, /*session=*/ true);
+            // R311y205 (transport-multilink) — CLOSE is per-link (targets the
+            // link this path is tearing down), not reliability-routed.
+            self.send_wire_this_link(&bytes, Reliability::Reliable);
         }
         #[cfg(not(feature = "codec-close"))]
         let _ = reason;
@@ -3859,7 +4468,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.flush_open_batch();
             R::with_mutex_mut(&self.trace, |t| t.send_keep_alive += 1);
             let bytes = crate::handshake_encode::encode_keep_alive();
-            self.send_wire(&bytes, Reliability::Reliable);
+            // R311y205 (transport-multilink) — a keepalive is PER-LINK: it must
+            // ride the physical link this drive loop monitors (so that link's
+            // `last_outbound_at` is stamped and its peer's lease stays fresh), not
+            // the reliability-routed data link. `send_wire_this_link` bypasses the
+            // aggregation selector.
+            self.send_wire_this_link(&bytes, Reliability::Reliable);
         }
     }
 
@@ -3965,15 +4579,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // re-handshake window (release_link already closed it when the
             // FSM saw the loss; this also covers a reset without a prior
             // terminal). record_established_at re-opens it.
-            R::with_mutex_mut(&self.transport_available, |g| *g = false);
+            R::with_mutex_mut(&self.link.transport_available, |g| *g = false);
             R::with_mutex_mut(&self.inbound_cookie, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| *slot = None);
-            R::with_mutex_mut(&self.last_inbound_at, |slot| *slot = None);
-            R::with_mutex_mut(&self.established_at, |slot| *slot = None);
+            R::with_mutex_mut(&self.link.last_inbound_at, |slot| *slot = None);
+            R::with_mutex_mut(&self.link.established_at, |slot| *slot = None);
             // R311kw — the outbound stamp is per-transport: the replacement
             // link starts with no TX history (pico's fresh transport
             // initializes `_transmitted = 0`, unicast/transport.c:65).
-            R::with_mutex_mut(&self.last_outbound_at, |slot| *slot = None);
+            R::with_mutex_mut(&self.link.last_outbound_at, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_zid, |slot| *slot = None);
             R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot = None);
             R::with_mutex_mut(&self.peer_whatami, |slot| *slot = None);
@@ -4215,6 +4829,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
     pub fn new(actions: R::ActionsHandle<T>) -> Self {
         Self { inner: actions }
     }
+
+    /// R311y205 (transport-multilink IMPL-2a) — the per-link [`LinkState`] this
+    /// binding drives. The action methods that touch a per-link field
+    /// (`release_link`, `record_established_at`) reach it through here, while
+    /// the shared [`SessionCore`] fields (trace / staging slots) resolve through
+    /// the handle's transparent `Deref`. This is the `{ core, link }` seam: at
+    /// N=1 both live in the one shared handle; a later multilink slice makes the
+    /// link per-binding (each of N drive loops carries its own `LinkState` over
+    /// one shared `SessionCore`), an AP-only concern — the change is localized
+    /// to this accessor's backing storage.
+    #[inline]
+    fn link(&self) -> &LinkState<R> {
+        &self.inner.link
+    }
 }
 
 /// R311il — the 18 `session_fsm_unicast.scxml` `<sce:action>` operations
@@ -4261,6 +4889,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // R3b — initiator usrpwd offer (Unit) staged into the InitSyn chain.
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::InitSyn, |d| d.open_init_syn());
+            // R311y205 (transport-multilink IMPL-2b-ii) — the initiator's 0x4
+            // Z_EXT_MULTILINK offer (its ephemeral pubkey), staged UN-wrapped into
+            // the InitSyn chain iff a multilink dispatch is installed (max_links >
+            // 1); no dispatch ⇒ no 0x4 ext (byte-identical handshake).
+            #[cfg(feature = "transport-multilink")]
+            a.stage_multilink_send(ExtChainRole::InitSyn, |d| d.open_init_syn());
             // transport-lowlatency / -compression / -shm — the initiator offers
             // each negotiated capability (a unit ext) in InitSyn iff this deploy
             // enabled it; `stage_capability` self-clears a stale ext when the
@@ -4304,6 +4938,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // the OpenSyn chain; HMACs over the nonce captured from InitAck.
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::OpenSyn, |d| d.open_open_syn());
+            // R311y205 (transport-multilink IMPL-2b-ii) — the initiator's 0x4
+            // OpenSyn challenge re-encryption, staged iff multilink is negotiated.
+            #[cfg(feature = "transport-multilink")]
+            a.stage_multilink_send(ExtChainRole::OpenSyn, |d| d.open_open_syn());
             // RFC §5.M echo contract: prefer the cookie captured from a
             // peer InitAck via handle_inbound; fall back to params.cookie
             // for tests that drive OpenSyn without an inbound parse cycle.
@@ -4335,6 +4973,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // handshake before this fires (replay defense).
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::InitAck, |d| d.accept_init_ack());
+            // R311y205 (transport-multilink IMPL-2b-ii) — the responder's 0x4
+            // InitAck (its ephemeral pubkey + the encrypted challenge), staged iff
+            // multilink is negotiated. The AP accept path refreshes the nonce
+            // before this fires.
+            #[cfg(feature = "transport-multilink")]
+            a.stage_multilink_send(ExtChainRole::InitAck, |d| d.accept_init_ack());
             // transport-lowlatency / -compression / -shm — the acceptor REFLECTS
             // each capability in InitAck iff it is STILL offering after the
             // InitSyn `&=` merge (which ran at InitSyn arrival, before this send):
@@ -4396,6 +5040,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // chain (reached only after accept_recv_open_syn verified the HMAC).
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::OpenAck, |d| d.accept_open_ack());
+            // R311y205 (transport-multilink IMPL-2b-ii) — the responder's 0x4
+            // OpenAck Unit confirmation, staged iff multilink is negotiated.
+            #[cfg(feature = "transport-multilink")]
+            a.stage_multilink_send(ExtChainRole::OpenAck, |d| d.accept_open_ack());
             // Accepting side OpenAck: cookie is consumed by the time we
             // get here (it travelled inbound on OpenSyn and was already
             // MAC-verified); the OpenAck shape omits it (parent.A=1
@@ -4423,8 +5071,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 t.send_close_frame_with_reason += 1;
                 reason
             });
-            let bytes = encode_close(reason);
-            a.send_wire(&bytes, Reliability::Reliable);
+            // R311y205 (transport-multilink) — the FSM `Closing` close is a
+            // whole-SESSION close (S=1), and per-link (rides the link whose drive
+            // loop reached Closing), not reliability-routed.
+            let bytes = encode_close(reason, /*session=*/ true);
+            a.send_wire_this_link(&bytes, Reliability::Reliable);
         }
     }
 
@@ -4433,7 +5084,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         R::with_mutex_mut(&a.trace, |t| t.release_link += 1);
         // F2 — the link is going away: close the data-send gate so a
         // straggling send rejects typed instead of racing the teardown.
-        R::with_mutex_mut(&a.transport_available, |g| *g = false);
+        // R311y205 (IMPL-2a) — the gate is per-link (`self.link()`).
+        R::with_mutex_mut(&self.link().transport_available, |g| *g = false);
+        // R311y205 (slice-1 MF-C) — remove THIS link's `LinkState` from the
+        // shared aggregation set so `link_count()` reflects the LIVE topology
+        // and a `max_links` slot recovers after a link dies (the join room check
+        // reads `link_count()`, which would otherwise keep counting the dead
+        // link forever). A no-op for a single-link (empty-set) session — releasing
+        // the sole link stays the existing teardown path, N=1 behavior unchanged.
+        #[cfg(feature = "transport-multilink")]
+        a.del_link(&a.link);
         a.link_driver().close_blocking();
     }
 
@@ -4449,10 +5109,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // drive_session_until_terminal) so the lease comparator's u64
         // subtract stays on one scale. Read outside the slot closure.
         let now = a.clock.now_monotonic_ms();
-        R::with_mutex_mut(&a.established_at, |slot| *slot = Some(now));
+        // R311y205 (IMPL-2a) — the established stamp + F2 gate are per-link.
+        R::with_mutex_mut(&self.link().established_at, |slot| *slot = Some(now));
         // F2 — Established (re-)entry re-opens the data-send gate (the
         // supervisor replays cached declarations right after this fires).
-        R::with_mutex_mut(&a.transport_available, |g| *g = true);
+        R::with_mutex_mut(&self.link().transport_available, |g| *g = true);
     }
 
     fn start_lease_monitor(&mut self) {

@@ -1054,6 +1054,17 @@ impl OpenedSession {
         self.actions.peer_zid()
     }
 
+    /// R311y205 (transport-multilink IMPL-2b-ii) — the peer's captured ephemeral
+    /// multilink pubkey (encoded ZPublicKey bytes), latched during the 0x4
+    /// handshake, or `None` if this session did not negotiate multilink
+    /// (max_links=1). The aggregation join reads it at `FaceUp` to bind a second
+    /// link to the SAME logical session (config-equality against the first link's
+    /// captured key).
+    #[cfg(feature = "transport-multilink")]
+    pub fn multilink_pubkey(&self) -> Option<Vec<u8>> {
+        self.actions.multilink_pubkey()
+    }
+
     /// R311y9 — public snapshot of this session's transport byte/message
     /// counters (`transport-stats`). Delegates to
     /// [`SessionLinkActions::stats_report`](wz_session_core::session_actions::SessionLinkActions::stats_report);
@@ -1528,6 +1539,37 @@ pub async fn initiate_and_open_session_with_auth(
     .await
 }
 
+/// R311y205 (transport-multilink) — [`initiate_and_open_session`] negotiating the
+/// 0x4 Z_EXT_MULTILINK aggregation ext (the deploy set `max_links > 1`): installs
+/// the OPEN-side ephemeral-pubkey dispatch (so the InitSyn / OpenSyn carry the 0x4
+/// ext and the initiator captures the responder's ephemeral pubkey) and tags this
+/// physical link's `reliability_pref` before the handshake drives. The additive
+/// multilink-on sibling of the bare open. Initiator side; the acceptor mirrors via
+/// [`accept_and_open_session_with_multilink`].
+#[cfg(feature = "transport-multilink")]
+pub async fn initiate_and_open_session_with_multilink(
+    connected: DialedLink,
+    params: SessionInitParams,
+    reliability_pref: crate::config::LinkReliabilityPref,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let actions = new_session_actions(outbound, params, clock);
+    actions.install_multilink_dispatch(crate::multilink::open_multilink_dispatch());
+    actions.set_link_reliability_pref(reliability_pref);
+    initiator_open(
+        inbound,
+        actions,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
 /// transport-lowlatency — [`initiate_and_open_session`] with the lowlatency
 /// capability offered on the session actions before the handshake drives, so the
 /// InitSyn carries the Z_EXT_LOWLATENCY unit ext. The initiator side; the
@@ -1752,6 +1794,45 @@ pub async fn accept_and_open_session_with_auth(
     // from AP OS entropy here because the no_std session core cannot.
     let nonce = crate::session_glue::nonce_from_os_entropy().map_err(OpenError::AuthEntropy)?;
     actions.refresh_auth_challenge_nonce(nonce);
+
+    engine.process_event(E::InboundStart);
+    drive_open_loop(
+        inbound,
+        actions,
+        engine,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// R311y205 (transport-multilink) — [`accept_and_open_session`] negotiating the
+/// 0x4 Z_EXT_MULTILINK aggregation ext: installs the ACCEPT-side ephemeral-pubkey
+/// dispatch (key-lookup disabled — accept any initiator key), draws a FRESH
+/// per-handshake challenge nonce from OS entropy at the seam (the responder
+/// replay-defense, by construction), and tags this link's `reliability_pref`. The
+/// responder reflects the 0x4 ext in InitAck / OpenAck iff the peer offered it and
+/// captures the initiator's ephemeral pubkey. Accept-side twin of
+/// [`initiate_and_open_session_with_multilink`].
+#[cfg(feature = "transport-multilink")]
+pub async fn accept_and_open_session_with_multilink(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    reliability_pref: crate::config::LinkReliabilityPref,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    actions.install_multilink_dispatch(crate::multilink::accept_multilink_dispatch());
+    actions.set_link_reliability_pref(reliability_pref);
+    // Fresh challenge nonce per accepted handshake (the pubkey responder replay
+    // defense) — drawn from AP OS entropy here because the no_std core cannot.
+    let nonce = crate::session_glue::nonce_from_os_entropy().map_err(OpenError::AuthEntropy)?;
+    actions.refresh_multilink_challenge_nonce(nonce);
 
     engine.process_event(E::InboundStart);
     drive_open_loop(

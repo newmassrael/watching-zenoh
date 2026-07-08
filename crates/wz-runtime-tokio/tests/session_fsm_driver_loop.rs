@@ -97,7 +97,7 @@ async fn r76_rx_keepalive_side_effect_only_populates_lease_slot() {
     drive_to_sent_init_syn(&mut engine);
     let pre_state = engine.get_current_state();
     assert!(
-        actions.last_inbound_at.lock().unwrap().is_none(),
+        actions.link.last_inbound_at.lock().unwrap().is_none(),
         "keepalive slot empty before Rx"
     );
 
@@ -114,7 +114,7 @@ async fn r76_rx_keepalive_side_effect_only_populates_lease_slot() {
         "KeepAlive must not advance FSM"
     );
     assert!(
-        actions.last_inbound_at.lock().unwrap().is_some(),
+        actions.link.last_inbound_at.lock().unwrap().is_some(),
         "KeepAlive must populate lease-timestamp slot via handle_inbound"
     );
 }

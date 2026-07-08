@@ -26,8 +26,37 @@ extern crate alloc;
 // test code, independently proves the no_std footing). Mirrors the
 // established wz-codecs sibling-crate convention
 // (`wz-codecs/src/lib.rs` `#[cfg(test)] extern crate std;`).
-#[cfg(test)]
+//
+// R311y205 (transport-multilink IMPL-2b-iii) — the AP-only `transport-multilink`
+// feature ALSO links std: the aggregation link set is a
+// `std::sync::Mutex<Vec<R::Shared<LinkState>>>` (session_actions.rs). Unlike the
+// runtime `R::Mutex<T>` GAT — whose `where T: Send` naming-bound is unprovable
+// for the opaque `R::Shared<_>` element in generic-`R` code — `std::sync::Mutex<T>`
+// carries no naming-bound, so the field is well-formed for every `R` while
+// still being `Send + Sync` on the only runtime that ever enables this feature
+// (the std `TokioRuntime`; `R::Shared = Arc`). The feature is rsa-gated (std) and
+// AP-only, so it is NEVER built on a bare-metal target — every MCU / default
+// build stays strictly `#![no_std]`, and the Layer G cross-compile (feature-off)
+// proves it.
+#[cfg(any(test, feature = "transport-multilink"))]
 extern crate std;
+
+// R311y205 (transport-multilink slice-1, MF-B) — `transport-multilink` and
+// `session-reconnect` are MUTUALLY EXCLUSIVE until the reconnect×multilink
+// coherence slice. `reset_for_reopen` (gated `session-reconnect`,
+// session_actions.rs) zeroes the SHARED `SessionCore.rx_sn` +
+// `outbound_frame_sn` on a re-dial; in a live 2-link aggregate that would
+// corrupt the surviving link's per-channel SN gate (a single link's death /
+// reopen must del_link, not reset the shared core). Slice 1 does NOT compose
+// the two — enforce it at compile time rather than silently corrupt. The gate
+// is placed in the session kernel so EVERY consumer (tokio / coop / lwip) that
+// unifies both features is caught. See the multilink slice-1 spec
+// ("reset_for_reopen resets shared state DIRECTLY").
+#[cfg(all(feature = "transport-multilink", feature = "session-reconnect"))]
+compile_error!(
+    "transport-multilink and session-reconnect are mutually exclusive until the \
+     reconnect×multilink coherence slice; see multilink spec"
+);
 
 // R311lt — re-export the wz-codecs transport-MID constants so runtime crates
 // that drive a loop's raw-byte MID classification (the AP `multicast_glue`
@@ -781,6 +810,19 @@ pub mod extshm;
 /// the live handshake wiring are follow-on atoms.
 #[cfg(feature = "session-extauth")]
 pub mod auth_dispatch;
+
+/// SSOT for the Z_EXT_MULTILINK establishment ext (`transport-multilink`) — the
+/// wz mirror of zenoh `establishment/ext/multilink.rs`. The 0x4 ext is UN-wrapped
+/// (NOT muxed through [`auth_dispatch`]): the single-method
+/// [`extmultilink::MultiLinkDispatch`] drives ONE `AuthMethod` (the ephemeral
+/// pubkey handshake, injected rsa-free from wz-runtime-tokio) across the four
+/// establishment stages and maps each `AuthSubExt` DIRECTLY to a 0x4
+/// `ExtEntryOwned` via the shared [`auth_dispatch::AuthSubExt::into_ext_entry`]
+/// SSOT (zenoh's `.transmute()`, id 0x1 -> 0x4, NO inner method-id frame). Gated
+/// on `transport-multilink` (which forwards `session-extauth`); the aggregation
+/// core (`MultiLinkSink` + the add-link decision) is a follow-on atom.
+#[cfg(feature = "transport-multilink")]
+pub mod extmultilink;
 
 /// The usrpwd auth method — the wz mirror of zenoh `establishment/ext/auth/
 /// usrpwd.rs`. A username/password challenge-response [`auth_dispatch::AuthMethod`]

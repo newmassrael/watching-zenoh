@@ -2811,7 +2811,7 @@ mod reconnect_tx_tests {
         // `reset_for_reopen_clears_handshake_scoped_state_only`.
         {
             use wz_runtime_core::Runtime;
-            TokioRuntime::with_mutex_mut(&actions.transport_available, |g| *g = true);
+            TokioRuntime::with_mutex_mut(&actions.link.transport_available, |g| *g = true);
         }
         let replayed = actions
             .replay_declarations()
@@ -2846,8 +2846,8 @@ mod reconnect_tx_tests {
             .expect("declare keyexpr");
 
         // Stamp the handshake-scoped slots the open path would populate.
-        TokioRuntime::with_mutex_mut(&actions.established_at, |slot| *slot = Some(42));
-        TokioRuntime::with_mutex_mut(&actions.last_inbound_at, |slot| *slot = Some(43));
+        TokioRuntime::with_mutex_mut(&actions.link.established_at, |slot| *slot = Some(42));
+        TokioRuntime::with_mutex_mut(&actions.link.last_inbound_at, |slot| *slot = Some(43));
         TokioRuntime::with_mutex_mut(&actions.inbound_cookie, |slot| *slot = Some(vec![1, 2]));
         TokioRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| *slot = Some(vec![9; 4]));
         assert!(actions.is_established());
@@ -2859,7 +2859,7 @@ mod reconnect_tx_tests {
             "reset must drop Established so declare gates hold until re-handshake"
         );
         assert!(TokioRuntime::with_mutex_mut(
-            &actions.last_inbound_at,
+            &actions.link.last_inbound_at,
             |slot| slot.is_none()
         ));
         assert!(TokioRuntime::with_mutex_mut(
@@ -2886,7 +2886,7 @@ mod reconnect_tx_tests {
         // probe send happens post-re-handshake in production, so re-open
         // the F2 transport gate first (Established re-entry does this via
         // `record_established_at`).
-        TokioRuntime::with_mutex_mut(&actions.transport_available, |g| *g = true);
+        TokioRuntime::with_mutex_mut(&actions.link.transport_available, |g| *g = true);
         let pre_reset_first_frame = driver.frame_bytes(0);
         actions
             .send_push_literal("home/x", b"p", true)

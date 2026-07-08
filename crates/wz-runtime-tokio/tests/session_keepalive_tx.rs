@@ -53,7 +53,7 @@ fn fresh_setup() -> (
 fn last_outbound_at_starts_empty() {
     let (actions, _engine) = fresh_setup();
     assert!(
-        actions.last_outbound_at.lock().unwrap().is_none(),
+        actions.link.last_outbound_at.lock().unwrap().is_none(),
         "no TX has happened at construction"
     );
 }
@@ -68,7 +68,7 @@ fn close_emit_stamps_last_outbound_at() {
     let (actions, _engine) = fresh_setup();
     actions.send_close_with_reason(CloseReason::Generic);
     assert!(
-        actions.last_outbound_at.lock().unwrap().is_some(),
+        actions.link.last_outbound_at.lock().unwrap().is_some(),
         "CLOSE emit must stamp the outbound slot (pico sets _transmitted on every t_msg send)"
     );
 }
@@ -84,7 +84,7 @@ fn handshake_emit_stamps_last_outbound_at() {
     engine.process_event(E::LinkOpened);
     assert_eq!(engine.get_current_state(), S::SentInitSyn);
     assert!(
-        actions.last_outbound_at.lock().unwrap().is_some(),
+        actions.link.last_outbound_at.lock().unwrap().is_some(),
         "InitSyn emit must stamp the outbound slot"
     );
 }
@@ -216,12 +216,22 @@ mod keepalive_emitter {
         let wire = rec.snapshot().sends.last().unwrap().0.clone();
 
         let (receiver_actions, _engine2) = fresh_setup();
-        assert!(receiver_actions.last_inbound_at.lock().unwrap().is_none());
+        assert!(receiver_actions
+            .link
+            .last_inbound_at
+            .lock()
+            .unwrap()
+            .is_none());
         receiver_actions
             .handle_inbound(&wire)
             .expect("emitted KeepAlive must parse");
         assert!(
-            receiver_actions.last_inbound_at.lock().unwrap().is_some(),
+            receiver_actions
+                .link
+                .last_inbound_at
+                .lock()
+                .unwrap()
+                .is_some(),
             "inbound KeepAlive resets the receiver's lease window"
         );
     }

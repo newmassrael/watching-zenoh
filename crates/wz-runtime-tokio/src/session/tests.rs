@@ -30,6 +30,7 @@ fn mark_session_established(session: &TokioSession) {
     // R311nf — `actions()` is now infallible on `TokioSession` (= `Session<_,_,Unicast>`).
     *session
         .actions()
+        .link
         .established_at
         .lock()
         .expect("established_at poisoned in test fixture") =
@@ -5217,7 +5218,7 @@ fn declare_liveliness_subscriber_rolls_back_slot_on_wire_emit_failure() {
     // Flip the pub transport-availability flag off so the next wire emit
     // returns Err(TransportUnavailable) at the F2 gate, before any encode
     // or driver write.
-    *session.actions().transport_available.lock().unwrap() = false;
+    *session.actions().link.transport_available.lock().unwrap() = false;
     let result = session.declare_liveliness_subscriber(
         "live/**",
         LivelinessSubscriberOptions::default(),
@@ -5249,7 +5250,7 @@ fn liveliness_get_rolls_back_pending_on_wire_emit_failure() {
     // liveliness_get enforces the Established gate; satisfy it, THEN fail
     // the emit at the transport-availability gate.
     mark_session_established(&session);
-    *session.actions().transport_available.lock().unwrap() = false;
+    *session.actions().link.transport_available.lock().unwrap() = false;
     let result = session.liveliness_get("live/**", LivelinessGetOptions::default(), |_| {}, |_| {});
     assert!(result.is_err(), "wire-emit failure must surface as Err");
     assert_eq!(
@@ -5275,7 +5276,7 @@ fn liveliness_get_rolls_back_pending_on_wire_emit_failure() {
 #[test]
 fn query_rolls_back_pending_on_wire_emit_failure() {
     let (session, driver) = build_session();
-    *session.actions().transport_available.lock().unwrap() = false;
+    *session.actions().link.transport_available.lock().unwrap() = false;
     let result = session.query("home/temp", QueryOptions::get(), |_| {}, |_| {});
     assert!(result.is_err(), "wire-emit failure must surface as Err");
     assert_eq!(
@@ -5295,7 +5296,7 @@ fn query_rolls_back_pending_on_wire_emit_failure() {
 #[test]
 fn query_aliased_rolls_back_pending_on_wire_emit_failure() {
     let (session, driver) = build_session();
-    *session.actions().transport_available.lock().unwrap() = false;
+    *session.actions().link.transport_available.lock().unwrap() = false;
     let result = session.query_aliased(1, None, "home/temp", QueryOptions::get(), |_| {}, |_| {});
     assert!(result.is_err(), "wire-emit failure must surface as Err");
     assert_eq!(

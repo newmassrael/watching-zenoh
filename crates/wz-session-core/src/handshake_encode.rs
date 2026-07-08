@@ -201,13 +201,24 @@ pub fn encode_open(
 
 /// Build the wire bytes for a Close frame. Body is the wz `Close`
 /// (single reason byte), verified byte-identical to zenoh-pico's
-/// `_z_close_encode` by `tests/layer3_close.rs`. The
-/// `_Z_FLAG_T_CLOSE_S` flag selects graceful session close (we
-/// always set it — link-only close is a transport-layer concern
-/// that the link driver handles directly).
+/// `_z_close_encode` by `tests/layer3_close.rs`.
+///
+/// `session` selects the `_Z_FLAG_T_CLOSE_S` flag: `true` = graceful WHOLE-
+/// SESSION close (S=1, the peer tears the logical transport down), the shape
+/// every pre-multilink caller uses. `false` = LINK-ONLY close (S=0) — the
+/// R311y205 transport-multilink case where one physical link of an aggregated
+/// session is dropped (over the `max_links` limit, or a per-link teardown)
+/// while the logical session survives on its other links. zenoh distinguishes
+/// these with the same S flag (`close.rs`); pico's `_z_close_encode` carries it.
+/// The [`send_close_with_reason`](crate::session_actions::SessionLinkActions::send_close_with_reason)
+/// wrapper passes `session = true`, so every existing call site is byte-identical.
 #[cfg(feature = "codec-close")]
-pub fn encode_close(reason: u8) -> Vec<u8> {
-    let parent_flags = wire_const::FLAG_T_CLOSE_S;
+pub fn encode_close(reason: u8, session: bool) -> Vec<u8> {
+    let parent_flags = if session {
+        wire_const::FLAG_T_CLOSE_S
+    } else {
+        0
+    };
     let mut wire = Vec::with_capacity(1 + Close::MAX_ENCODED_BYTES);
     wire.push(parent_flags | wire_const::T_MID_CLOSE);
     let mut sink = VecSink::new(&mut wire);

@@ -308,6 +308,59 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                                 return DriverLoopOutcome::AuthRejected(e);
                             }
                         }
+                        // R311y205 (transport-multilink IMPL-2b-ii) — feed the
+                        // admitted handshake frame's ext chain into the matching
+                        // 0x4 Z_EXT_MULTILINK demux stage, BESIDE the auth demux
+                        // above (the 0x4 ext is UN-wrapped, not muxed through
+                        // auth). `with_multilink` is `None` when no dispatch is
+                        // installed (max_links=1) — the peer's 0x4 ext, if any, is
+                        // then ignored. A challenge failure rejects the session
+                        // exactly like an auth reject; a success latches the peer's
+                        // captured ephemeral pubkey (the join gate's identity key).
+                        #[cfg(feature = "transport-multilink")]
+                        {
+                            let ml: Option<Result<(), crate::auth_dispatch::AuthError>> =
+                                match &frame {
+                                    #[cfg(feature = "codec-init-body")]
+                                    InboundFrame::Init {
+                                        is_ack: false,
+                                        extensions,
+                                        ..
+                                    } => actions
+                                        .with_multilink(|d| d.accept_recv_init_syn(extensions)),
+                                    #[cfg(feature = "codec-init-body")]
+                                    InboundFrame::Init {
+                                        is_ack: true,
+                                        extensions,
+                                        ..
+                                    } => {
+                                        actions.with_multilink(|d| d.open_recv_init_ack(extensions))
+                                    }
+                                    #[cfg(feature = "codec-open-body")]
+                                    InboundFrame::Open {
+                                        is_ack: false,
+                                        extensions,
+                                        ..
+                                    } => actions
+                                        .with_multilink(|d| d.accept_recv_open_syn(extensions)),
+                                    #[cfg(feature = "codec-open-body")]
+                                    InboundFrame::Open {
+                                        is_ack: true,
+                                        extensions,
+                                        ..
+                                    } => {
+                                        actions.with_multilink(|d| d.open_recv_open_ack(extensions))
+                                    }
+                                    _ => None,
+                                };
+                            if let Some(Err(e)) = ml {
+                                engine.process_event(E::FramingError);
+                                return DriverLoopOutcome::AuthRejected(e);
+                            }
+                            // Latch the peer's captured ephemeral pubkey (no-op
+                            // when no dispatch / no key captured yet).
+                            actions.capture_multilink_pubkey();
+                        }
                         engine.process_event(event);
                         DriverLoopOutcome::AdvancedFsm
                     }
@@ -487,8 +540,8 @@ fn max_stamp(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<u64> {
-    let inbound = R::with_mutex_mut(&actions.last_inbound_at, |g| *g);
-    let established = R::with_mutex_mut(&actions.established_at, |g| *g);
+    let inbound = R::with_mutex_mut(&actions.link.last_inbound_at, |g| *g);
+    let established = R::with_mutex_mut(&actions.link.established_at, |g| *g);
     max_stamp(established, inbound).map(|b| b.saturating_add(actions.adopted_lease_ms()))
 }
 
@@ -507,8 +560,8 @@ pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
 pub fn keepalive_wake_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<u64> {
-    let outbound = R::with_mutex_mut(&actions.last_outbound_at, |g| *g);
-    let established = R::with_mutex_mut(&actions.established_at, |g| *g);
+    let outbound = R::with_mutex_mut(&actions.link.last_outbound_at, |g| *g);
+    let established = R::with_mutex_mut(&actions.link.established_at, |g| *g);
     let interval = (actions.adopted_lease_ms() / crate::lease::LEASE_EXPIRE_FACTOR).max(1);
     max_stamp(established, outbound).map(|b| b.saturating_add(interval))
 }
@@ -533,7 +586,7 @@ pub fn check_keepalive_deadline<R: SessionRuntime, T: TimeSource>(
     now_ms: u64,
 ) -> crate::lease::KeepAliveCheckOutcome {
     use crate::lease::KeepAliveCheckOutcome as K;
-    if !actions.is_established() || !R::with_mutex_mut(&actions.transport_available, |g| *g) {
+    if !actions.is_established() || !R::with_mutex_mut(&actions.link.transport_available, |g| *g) {
         return K::Inactive;
     }
     match keepalive_wake_deadline(actions) {

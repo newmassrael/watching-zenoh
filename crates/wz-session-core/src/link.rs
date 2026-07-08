@@ -112,6 +112,41 @@ pub trait SessionRuntime: Runtime + Sized {
     /// refcount contract both profiles satisfy.
     type LinkSink: Clone;
 
+    /// R311y205 (transport-multilink IMPL-2b-i) — a per-profile shareable
+    /// pointer to an arbitrary owned value `U`: `Arc<U>` on the tokio AP
+    /// profile (atomic refcount, `Send + Sync` when `U` is), `Rc<U>` on the
+    /// single-task lwIP MCU profile (plain loads / stores, ARMv6-M-safe). The
+    /// multilink aggregation core holds its shared session kernel behind this
+    /// (`SessionLinkActions::core: R::Shared<SessionCore>`) so N physical links
+    /// can share ONE [`SessionCore`] (the SN / rx-SN / identity kernel) while
+    /// each keeps its own [`LinkState`] — the wz mirror of zenoh's
+    /// `TransportUnicastUniversal` (one shared `priority_tx`/`rx` Arc + a
+    /// per-link `links` collection). The same per-profile pointer split as
+    /// [`ActionsHandle`](Self::ActionsHandle) and [`LinkSink`](Self::LinkSink):
+    /// each profile carries exactly the auto-traits + refcount discipline its
+    /// concurrency model needs — no atomics the MCU never uses. At N=1 (every
+    /// build today) it is a refcount-1 pointer, behavior-identical to embedding
+    /// `U` by value.
+    ///
+    /// The `Deref` bound lets generic-`R` code reach `&U` through the opaque
+    /// pointer without naming `Arc` / `Rc`; `Clone` is the share-by-refcount
+    /// contract the aggregation join ([`add_link`]) uses to place one link's
+    /// [`LinkState`] both in its own binding and in the shared core's link set.
+    ///
+    /// [`SessionCore`]: crate::session_actions::SessionCore
+    /// [`LinkState`]: crate::session_actions::LinkState
+    /// [`add_link`]: crate::session_actions::SessionCore
+    type Shared<U>: Clone + core::ops::Deref<Target = U>;
+
+    /// Wrap an owned value in the per-profile [`Shared`](Self::Shared) pointer
+    /// (tokio `Arc::new`, lwIP `Rc::new`). Generic-`R` code (the
+    /// [`SessionLinkActions`] constructor + the multilink join) shares a
+    /// `SessionCore` / `LinkState` through this without naming the concrete
+    /// pointer type.
+    ///
+    /// [`SessionLinkActions`]: crate::session_actions::SessionLinkActions
+    fn share<U>(value: U) -> Self::Shared<U>;
+
     /// Per-profile shared handle to the [`SessionLinkActions`] bundle one
     /// logical FSM instance drives. The tokio AP profile binds
     /// `Arc<SessionLinkActions<Self, T>>` because the handle is cloned into

@@ -58,6 +58,19 @@ use crate::time::{ClockSource, CoopTime};
 impl<C: ClockSource> SessionRuntime for CoopRuntime<C> {
     type LinkSink = Rc<dyn BoxedLinkDriver>;
 
+    // R311y205 (transport-multilink IMPL-2b-i) — the MCU shareable pointer is
+    // `Rc`, not `Arc`: the single-task sync drive loop shares the aggregation
+    // core only within its own task, never across threads, so the refcount needs
+    // no atomics — the same seam that unblocks the no-alloc M0+ session reach
+    // (`alloc::sync::Arc` requires `target_has_atomic = "ptr"`, absent on
+    // ARMv6-M; `Rc` lowers to plain loads / stores). The MCU profile is
+    // rsa-AP-only and always N=1, so this is only ever a refcount-1 pointer here.
+    type Shared<U> = Rc<U>;
+
+    fn share<U>(value: U) -> Self::Shared<U> {
+        Rc::new(value)
+    }
+
     // R311ja — the MCU action handle is `Rc`, not `Arc`: the single-task
     // sync drive loop shares the bundle only with its own FSM binding, never
     // across threads, so the refcount needs no atomics. This is the seam

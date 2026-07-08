@@ -82,7 +82,13 @@ pub enum AuthSubExt {
 impl AuthSubExt {
     /// Build the wire `ExtEntry` for this sub-ext under method `id` (the kernel's
     /// mux step). The header carries `id` plus the encoding marker.
-    fn into_ext_entry(self, id: u8) -> Result<ExtEntryOwned, AuthError> {
+    ///
+    /// `pub(crate)` so the UN-wrapped [`extmultilink`](crate::extmultilink)
+    /// 0x4 dispatch reuses the SAME sub-ext -> `ExtEntryOwned` mapping (zenoh's
+    /// `.transmute()`, id 0x1 -> 0x4): passing `MULTILINK_EXT_ID` produces the
+    /// 0x4 ext DIRECTLY (Unit -> header `0x04`, Zbuf -> `0x44`), with NO inner
+    /// method-id frame — the anti-mux path. One mapping SSOT, two callers.
+    pub(crate) fn into_ext_entry(self, id: u8) -> Result<ExtEntryOwned, AuthError> {
         Ok(match self {
             AuthSubExt::Unit => ExtEntryOwned {
                 header: id,
@@ -105,7 +111,11 @@ impl AuthSubExt {
 
     /// Project a demuxed wire `ExtEntry` body back into an `AuthSubExt` (the
     /// kernel's demux step). `None` for an encoding this kernel does not carry.
-    fn from_body(body: &ExtEntryOwnedVariant) -> Option<AuthSubExt> {
+    ///
+    /// `pub(crate)` so the UN-wrapped [`extmultilink`](crate::extmultilink)
+    /// 0x4 dispatch reuses the SAME body -> sub-ext projection when demuxing the
+    /// peer's 0x4 ext (parallel to this kernel's `find_method_sub_ext`).
+    pub(crate) fn from_body(body: &ExtEntryOwnedVariant) -> Option<AuthSubExt> {
         match body {
             ExtEntryOwnedVariant::CodecZenohExtUnit(_) => Some(AuthSubExt::Unit),
             ExtEntryOwnedVariant::CodecZenohExtZint(z) => Some(AuthSubExt::Z64(z.value)),
@@ -195,6 +205,22 @@ pub trait AuthMethod: Send {
     /// nonce-free method — ignores it). See the [`UsrPwdMethod::responder`]
     /// security contract: a fixed / reused nonce is a replay hole.
     fn set_challenge_nonce(&mut self, _nonce: u64) {}
+
+    /// R311y205 (transport-multilink IMPL-2b-ii) — the peer's captured ephemeral
+    /// public key, in its canonical encoded ZPublicKey byte form, or `None` if
+    /// this method captures no peer key (e.g. usrpwd) or has not yet reached the
+    /// stage that captures it. The 0x4 multilink dispatch surfaces this
+    /// ([`crate::extmultilink::MultiLinkDispatch::captured_peer_pubkey`]) so the
+    /// aggregation join can bind a second link to the same logical session by
+    /// byte-equality of the ephemeral key (the wz analogue of zenoh's
+    /// `init_existing_transport_unicast` pubkey config-equality). Byte-stable: the
+    /// SAME peer key always encodes identically, so equality of the encoded bytes
+    /// IS equality of the key. Default `None` (a non-pubkey method). Reached only
+    /// under `transport-multilink`; the default keeps the trait total for the
+    /// usrpwd / auth methods that never override it.
+    fn captured_peer_key_bytes(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// The composable auth dispatch — holds the negotiated methods and mux/demuxes

@@ -954,14 +954,17 @@ api-compat-pico = []
 # ----- §5.1 transport additions (4 atomic: 3 active, 1 reserved) -----
 # R311y8/y9/y10 built the LAYER-1 trio active, each forwarding the
 # wz-runtime-tokio backend: quic-datagram (implies transport-link-quic for the
-# shared cert + quinn stack), transport-stats, unixpipe. multilink stays
-# reserved/P4 (auth_pubkey RSA + multi-link aggregation). R311y13 FIXED the
+# shared cert + quinn stack), transport-stats, unixpipe. R311y13 FIXED the
 # transport-stats facade forward below — R311y9 shipped it as a dead `= []` stub
 # (the wz-runtime-tokio side forwarded, but this facade flag did not), so the
 # feature was unreachable through the published facade until this fix.
+# R311y205 (transport-multilink IMPL-1) replaced the multilink `= []` dead stub
+# with the same optional-dep-forward form — the §5.1 multi-link aggregation
+# feature (0x4 ext + ephemeral-RSA pubkey handshake) is now reachable through
+# the published facade (foundation slice; establishment wiring is IMPL-2).
 transport-link-quic-datagram = ["transport-link-quic", "wz-runtime-tokio?/transport-link-quic-datagram"]
 transport-link-unixpipe = ["transport-link-tcp", "wz-runtime-tokio?/transport-link-unixpipe"]
-transport-multilink = []
+transport-multilink = ["wz-runtime-tokio?/transport-multilink"]
 transport-stats = ["wz-runtime-tokio?/transport-stats"]
 
 # ============================================================

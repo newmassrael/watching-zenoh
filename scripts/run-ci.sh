@@ -1441,6 +1441,59 @@ layer_c1al_cargo_test_unixpipe() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixpipe --quiet -- -D warnings)
 }
 
+# ─── Layer C1ba — transport-multilink §5.1: N-link aggregation clippy floor ─
+#
+# R311y205 (transport-multilink slice-1): the §5.1 multi-link aggregation feature
+# (the 0x4 Z_EXT_MULTILINK establishment ext + the shared-SessionCore link set +
+# reliability-segregated send). It is AP-only (rsa/std) and MUTUALLY EXCLUSIVE
+# with session-reconnect (the reset_for_reopen shared-SN corruption gate) — so,
+# UNLIKE the sibling transport-link-* lanes (C1aj quic-datagram / C1al unixpipe),
+# every invocation here is --no-default-features: the runtime-tokio default set
+# carries session-reconnect, which would (correctly) trip the mutual-exclusion
+# compile_error. Mirroring those §5.1 lanes, this one:
+#   1. runs the wz<->wz slice-1 e2e (session_multilink_e2e: 2 loopback-TCP links
+#      aggregated into ONE session with reliability segregation + failover, the
+#      0x4 handshake + config-equality join, the INVALID/MAX_LINKS rejects, and
+#      the no-0x4 regression floor + the positive-0x4 control);
+#   1b. runs the DEPLOY-ACTIVE e2e (session_multilink_deploy_e2e): a real
+#      `peer_loop` with `max_links = 2` aggregating two links THROUGH the
+#      production accept/dial path (not direct join_link) — aggregation,
+#      reliability segregation, MAX_LINKS reject, and link-death failover on the
+#      loop's own handlers, plus the dial-side aggregation. This lane adds
+#      `routing-peer` to the aggregation set (the accept_loop/peer_loop module is
+#      `routing-accept`-gated, which `routing-peer` forwards); it stays
+#      --no-default-features (routing-peer does not pull session-reconnect, so the
+#      mutual-exclusion gate is not tripped);
+#   2. runs the multilink lib unit tests (the 0x4 dispatch round-trip, the MF-A
+#      absent-0x4 single-link fallback, the join_link reject path) on both crates;
+#   3. clippy-gates the LIB + the e2e test targets under the aggregation feature
+#      set (-D warnings);
+#   4. clippy-gates the LIB under --no-default-features --features
+#      transport-multilink ALONE (proves the feature composes standalone — the
+#      transport-unicast dependency + the codec-union select_link gate).
+layer_c1ba_cargo_clippy_transport_multilink() {
+    local ML_FEATURES="transport-multilink,transport-link-tcp,codec-push,codec-close,session-unicast-open,session-unicast-accept,pubsub-put"
+    # The deploy-active e2e drives the production `peer_loop` accept/dial path, so
+    # it needs the `routing-accept`/`routing-peer` loop module compiled in.
+    local ML_DEPLOY_FEATURES="$ML_FEATURES,routing-peer"
+    (cd crates \
+        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
+        && cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-multilink --quiet -- -D warnings \
+        `# R311y205 whole-session F4 — the send_wire/select_link cfg-skew net: a` \
+        `# transport-multilink build carrying ONLY a control codec (codec-close)` \
+        `# or ONLY transport-keepalive must NOT compile a dead send_wire/select_link` \
+        `# seam (those TX paths route through send_wire_this_link). Same class the` \
+        `# C1m lane caught for send_wire on a bare transport-multicast MCU build.` \
+        && cargo clippy -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-close --lib --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,transport-keepalive --lib --quiet -- -D warnings)
+}
+
 # ─── Layer C1am — adminspace §5.23: @/<zid>/<whatami> built-in admin queryable ─
 #
 # R311y34 (adminspace-core) + R311y35 (adminspace-metrics) + R311y36 (adminspace-read):
@@ -4848,6 +4901,7 @@ run_layer C1aw layer_c1aw_cargo_test_ext_pubsub_group_membership || overall=1
 run_layer C1ax layer_c1ax_cargo_test_routing_namespace || overall=1
 run_layer C1ay layer_c1ay_cargo_test_router_hat || overall=1
 run_layer C1az layer_c1az_cargo_test_rest_sse || overall=1
+run_layer C1ba layer_c1ba_cargo_clippy_transport_multilink || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

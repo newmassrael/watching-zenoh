@@ -165,6 +165,17 @@ impl Runtime for TokioRuntime {
 impl SessionRuntime for TokioRuntime {
     type LinkSink = Arc<dyn BoxedLinkDriver + Send + Sync>;
 
+    // R311y205 (transport-multilink IMPL-2b-i) — the AP shareable pointer is
+    // `Arc`: the multilink aggregation core is shared across the per-link drive
+    // loops the multi-thread runtime may move between worker threads, so the
+    // refcount must be atomic (`Send + Sync` when the value is). The MCU profile
+    // binds `Rc` instead (single-task, no atomics → M0+).
+    type Shared<U> = Arc<U>;
+
+    fn share<U>(value: U) -> Self::Shared<U> {
+        Arc::new(value)
+    }
+
     // R311ja — the AP action handle is `Arc`: the multi-thread runtime
     // clones it into spawned query / reply tasks that may move across
     // worker threads, so the refcount must be atomic (`Send + Sync`). The

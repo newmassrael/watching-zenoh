@@ -2284,6 +2284,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // `SessionLinkActions<R, T>`, so a `Send` handle needs a `Send + Sync`
         // link sink and a `'static` clock.
         <R as SessionRuntime>::LinkSink: Send + Sync,
+        // R311y205 (transport-multilink IMPL-2b-i) — propagated from
+        // `declare_subscriber`: the `R::Shared<_>`-held bundle must be `Send +
+        // Sync` for the retraction closure (transparent on concrete `TokioRuntime`).
+        wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
         T: 'static,
     {
         let base = self
@@ -2772,6 +2776,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // `Send`. `T: 'static` so the captured `SessionLinkActions<R, T>`
         // outlives the `'static` retraction box.
         <R as SessionRuntime>::LinkSink: Send + Sync,
+        // R311y205 (transport-multilink IMPL-2b-i) — the actions bundle sits
+        // behind the opaque `R::Shared<_>` GAT; the `Subscriber<R>` handle's
+        // `Drop` retraction closure captures it, so it needs `SessionLinkActions:
+        // Send + Sync` (concrete `TokioRuntime` `Shared = Arc` satisfies it
+        // transparently). Propagated from `announce_subscriber`.
+        wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
         T: 'static,
     {
         let keyexpr_string = keyexpr.into();
@@ -2820,6 +2830,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ) -> Result<Option<SubscriberRetraction>, SubscribeError>
     where
         <R as SessionRuntime>::LinkSink: Send + Sync,
+        // R311y205 (transport-multilink IMPL-2b-i) — the shared session kernel +
+        // per-link state are held behind the opaque `R::Shared<_>` GAT, whose
+        // auto-traits generic-`R` code cannot infer (exactly like `LinkSink`
+        // above). The type-erased retraction closure captures the actions handle
+        // (`Arc<SessionLinkActions>`), so it needs `SessionLinkActions: Send +
+        // Sync`; concrete-`R` (`TokioRuntime`, `Shared = Arc`) satisfies it
+        // transparently. One bound spells the whole bundle, mirroring the
+        // `LinkSink: Send + Sync` proxy already here.
+        wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
         T: 'static,
     {
         #[cfg(feature = "declare-subscriber")]

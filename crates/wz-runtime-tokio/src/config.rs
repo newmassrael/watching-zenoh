@@ -54,7 +54,7 @@ use wz_session_core::session_init_params::SessionInitParams;
 /// field is private so every mutation routes through
 /// [`Self::reconfigure_interceptors`] (the re-apply seam), never a bare
 /// field write that would silently desync the config from the forwarder.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct WzConfig {
     /// This node's role, read-at-open from the handshake. Mirrored for
@@ -71,7 +71,61 @@ pub struct WzConfig {
     /// [`Self::reconfigure_interceptors`] so the forwarder stays in sync.
     #[cfg(feature = "routing-peer")]
     interceptors: InterceptorConfig,
+    /// R311y205 (transport-multilink) — the EMBEDDER-facing max number of physical
+    /// links this node aggregates into ONE logical unicast session (zenoh
+    /// `TransportManager` `unicast.max_links`). Default `1` = single-link,
+    /// byte-identical to today. `active <=> cfg-toggle`: the field only exists
+    /// under `transport-multilink`, and even then stays INERT unless set `> 1`
+    /// (`1` = the single-link degenerate path).
+    ///
+    /// NOTE (slice-1): this is the PUBLIC config surface; the aggregation
+    /// activation knob the loop actually reads is
+    /// [`FaceSources::max_links`](crate::accept_loop::FaceSources) — `peer_loop`
+    /// takes a `FaceSources`, not a `WzConfig`, and reads `max_links` there (the
+    /// zid-registry join at `Step::Opened`). A multilink-capable runner mapping
+    /// `WzConfig.max_links -> FaceSources.max_links` arrives with the S2 slice
+    /// (today's default-`session-reconnect` runners cannot enable
+    /// `transport-multilink` — the XOR `compile_error!`). Until then this field
+    /// is set by an embedder that builds `FaceSources` directly (as the
+    /// slice-1 deploy e2e does).
+    #[cfg(feature = "transport-multilink")]
+    pub max_links: usize,
 }
+
+impl Default for WzConfig {
+    /// The base config — `whatami = Peer`, `batch_size = 0`, `lease_ms = 0`, no
+    /// interceptors, `max_links = 1`. A hand-written impl (not derived) so the
+    /// `transport-multilink` `max_links` defaults to `1` (the single-link
+    /// degenerate path), not the `usize` `Default` of `0`; every other field
+    /// keeps its type `Default`, so the derived and hand-written impls agree on
+    /// the pre-multilink fields.
+    fn default() -> Self {
+        Self {
+            whatami: WhatAmI::default(),
+            batch_size: 0,
+            lease_ms: 0,
+            #[cfg(feature = "routing-peer")]
+            interceptors: InterceptorConfig::default(),
+            #[cfg(feature = "transport-multilink")]
+            max_links: 1,
+        }
+    }
+}
+
+/// R311y205 (transport-multilink) — the per-link reliability preference the
+/// dial / accept path attaches to a physical link so the aggregation core
+/// segregates traffic classes across the aggregated links (the wz analogue of
+/// zenoh's per-channel `select`): the reliable channel prefers the `Reliable`
+/// link, the best-effort channel the `BestEffort` link, `Any` (default) the
+/// failover pool.
+///
+/// IMPL-2b — re-exported from the no_std session kernel, where
+/// [`LinkState`](wz_session_core::session_actions::LinkState) actually stores it
+/// (the reliability-routed `select_link` reads it), so the AP config surface and
+/// the kernel agree by construction (ONE type, no conversion at the
+/// `set_link_reliability_pref` seam).
+#[cfg(feature = "transport-multilink")]
+pub use wz_session_core::session_actions::LinkReliabilityPref;
 
 impl WzConfig {
     /// A config with default (empty) settings — `whatami = Peer`,
