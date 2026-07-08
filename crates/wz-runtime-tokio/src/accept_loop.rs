@@ -222,6 +222,21 @@ pub enum AcceptEvent {
     /// sleep). Surfaced so the caller can log it rather than the loop swallowing
     /// it.
     AcceptError(io::Error),
+    /// R311y213 (transport-multilink) — a second+ physical link was AGGREGATED onto
+    /// an EXISTING logical session (the `join_link` success at the multilink
+    /// accept/dial site). Distinct from [`FaceUp`](Self::FaceUp), which is a NEW
+    /// session's first link: a joined link does NOT enter the faces table nor bump
+    /// `established`/`peak_concurrent` (it rides `ml_faces` + the shared core), so
+    /// without this event the aggregation is invisible to the loop's `on_event`
+    /// consumer — the join success would `continue` before any event fired, leaving
+    /// a 2-link session byte-indistinguishable from single-link at the caller's log
+    /// level. `live_links` is the session's link count after the join. Present only
+    /// under `transport-multilink` (the aggregation path itself is feature-gated).
+    #[cfg(feature = "transport-multilink")]
+    LinkAggregated {
+        peer_zid: Vec<u8>,
+        live_links: usize,
+    },
 }
 
 /// The forwarding seam the [`accept_loop`] threads its held faces through —
@@ -1282,13 +1297,23 @@ where
                                     // A second+ link to a held peer: try to aggregate.
                                     match join_link(&core_handle, &opened.actions, max_links) {
                                         JoinOutcome::Joined(joined) => {
+                                            let live_links = core_handle.live_link_count();
                                             log::debug!(
                                                 "multilink: aggregated link {} onto peer {:02x?} \
                                                  (live links now {})",
                                                 id.0,
                                                 peer_zid,
-                                                core_handle.live_link_count()
+                                                live_links
                                             );
+                                            // Surface the aggregation to the loop's
+                                            // event consumer — a joined link never
+                                            // reaches the FaceUp emit below (the arm
+                                            // `continue`s), so this is the ONLY
+                                            // on_event a caller sees for the join.
+                                            on_event(&AcceptEvent::LinkAggregated {
+                                                peer_zid: peer_zid.clone(),
+                                                live_links,
+                                            });
                                             ml_faces.insert(id, (peer_zid, joined.clone()));
                                             // Drop its dial-address index — a joined
                                             // link is not a standalone reconnectable

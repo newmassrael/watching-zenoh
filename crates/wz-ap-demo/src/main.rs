@@ -203,6 +203,28 @@ fn main() -> ExitCode {
             // when both are set.
             let put_key = parse_pair(rest, "--put-key");
             let put_payload = parse_pair(rest, "--put-payload");
+            // R311y213 (transport-multilink) — `--max-links <N>` sets the aggregated-
+            // link budget (the unicast.max_links analogue): `> 1` aggregates N physical
+            // links to a peer zid into ONE logical session (achieved by dialing the
+            // same peer N times, e.g. `--connect a,a`, or a mutual connect). Non-numeric
+            // or `0` warns and falls back to `1` (single-link), mirroring --max-payload's
+            // graceful-degrade rather than aborting the run.
+            #[cfg(feature = "transport-multilink")]
+            let max_links: usize = parse_pair(rest, "--max-links")
+                .map(|s| match s.trim().parse::<usize>() {
+                    Ok(n) if n >= 1 => n,
+                    Ok(_) => {
+                        eprintln!("wz-ap-demo: --max-links must be >= 1; using 1 (single-link)");
+                        1
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "wz-ap-demo: --max-links '{s}' is not a number; using 1 (single-link)"
+                        );
+                        1
+                    }
+                })
+                .unwrap_or(1);
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -216,6 +238,8 @@ fn main() -> ExitCode {
                     config_write_permit,
                     put_key,
                     put_payload,
+                    #[cfg(feature = "transport-multilink")]
+                    max_links,
                 },
                 InterceptorOpts {
                     acl_deny,

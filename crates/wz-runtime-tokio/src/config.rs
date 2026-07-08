@@ -78,16 +78,30 @@ pub struct WzConfig {
     /// under `transport-multilink`, and even then stays INERT unless set `> 1`
     /// (`1` = the single-link degenerate path).
     ///
-    /// NOTE (slice-1): this is the PUBLIC config surface; the aggregation
-    /// activation knob the loop actually reads is
-    /// [`FaceSources::max_links`](crate::accept_loop::FaceSources) — `peer_loop`
-    /// takes a `FaceSources`, not a `WzConfig`, and reads `max_links` there (the
-    /// zid-registry join at `Step::Opened`). A multilink-capable runner mapping
-    /// `WzConfig.max_links -> FaceSources.max_links` arrives with the S2 slice
-    /// (today's default-`session-reconnect` runners cannot enable
-    /// `transport-multilink` — the XOR `compile_error!`). Until then this field
-    /// is set by an embedder that builds `FaceSources` directly (as the
-    /// slice-1 deploy e2e does).
+    /// This is a faithful structural mirror of zenoh, not a divergence. zenoh splits
+    /// `max_links` across two layers: the CONFIG surface `unicast.max_links`
+    /// (`commons/zenoh-config`, `TransportUnicastConf`) is UNCONDITIONAL and defaults
+    /// to `1`, while the COMPILE-TIME gate lives in the transport-manager's INTERNAL
+    /// field (`io/zenoh-transport/src/unicast/manager.rs`, under `#[cfg(feature =
+    /// "transport_multilink")]`), which is populated from the config value inside a
+    /// `#[cfg]` block and activates the multilink establishment at `> 1`
+    /// (`MultiLink::make(.., max_links > 1)`). wz collapses those two layers into this
+    /// ONE `WzConfig` field and gates IT — faithful to zenoh's manager-layer gate,
+    /// defaulting to `1` like the config surface.
+    ///
+    /// R311y213 — the `WzConfig.max_links -> FaceSources.max_links` mapping is now
+    /// live in the reference peer runner (`wz-ap-demo`'s `run_peer`), which sets this
+    /// field via [`Self::with_max_links`] from `--max-links` and hands the SAME
+    /// `WzConfig` instance to both the aggregation loop and the `--config-queryable`
+    /// admin handler, so there is ONE budget source, not a second (a structural
+    /// no-desync; `to_admin_json` does not yet render `max_links`, so it is not
+    /// GET-observable). `peer_loop` reads the activation
+    /// knob off [`FaceSources::max_links`](crate::accept_loop::FaceSources) (the
+    /// zid-registry join at `Step::Opened`); the runner bridges the two. (Until
+    /// R311y213 this note claimed no such runner could exist because a
+    /// `transport-multilink` × `session-reconnect` `compile_error!` XOR blocked the
+    /// default reconnect runners; that XOR was removed in R311y211, making the
+    /// mapping runner reachable.)
     #[cfg(feature = "transport-multilink")]
     pub max_links: usize,
 }
@@ -324,6 +338,19 @@ impl WzConfig {
     #[cfg(feature = "routing-peer")]
     pub fn with_interceptors(mut self, interceptors: InterceptorConfig) -> Self {
         self.interceptors = interceptors;
+        self
+    }
+
+    /// R311y213 (transport-multilink) — set the aggregated-link budget (the
+    /// `unicast.max_links` analogue), consumed at setup. The builder twin of the
+    /// `pub max_links` field, mirroring [`Self::with_interceptors`]: the reference
+    /// peer runner chains it onto `from_init_params(..).with_interceptors(..)` so the
+    /// ONE `WzConfig` it hands to both the aggregation loop and the admin surface
+    /// carries the effective budget (no post-construction field poke that could
+    /// desync a shared config). `1` = single-link (the `Default`).
+    #[cfg(feature = "transport-multilink")]
+    pub fn with_max_links(mut self, max_links: usize) -> Self {
+        self.max_links = max_links;
         self
     }
 

@@ -1151,6 +1151,18 @@ fn log_face_event(node_label: &str, event: &wz::runtime_tokio::accept_loop::Acce
         AcceptEvent::AcceptError(e) => {
             log::warn!("wz-ap-demo {node_label}: accept error (continuing): {e}")
         }
+        // R311y213 (transport-multilink) — a second+ physical link aggregated onto
+        // an existing session (the demo-owned witness that N-link aggregation
+        // actually happened; a joined link never fires FaceUp, so this is the only
+        // event a caller sees for the join). Present only under transport-multilink.
+        #[cfg(feature = "transport-multilink")]
+        AcceptEvent::LinkAggregated {
+            peer_zid,
+            live_links,
+        } => log::info!(
+            "wz-ap-demo {node_label}: link AGGREGATED to zid {} (live links now {live_links})",
+            zid_hex(Some(peer_zid.as_slice()))
+        ),
     }
 }
 
@@ -1279,6 +1291,14 @@ pub(crate) struct PeerOpts {
     pub put_key: Option<String>,
     /// R311y48 — the payload bytes the [`put_key`](Self::put_key) Put carries.
     pub put_payload: Option<String>,
+    /// R311y213 (transport-multilink) — the aggregated-link budget for this peer
+    /// (`--max-links`, the `unicast.max_links` analogue). `1` = single-link; `> 1`
+    /// aggregates that many physical links to a peer zid into ONE logical session.
+    /// Present only under `transport-multilink`; `run_peer` routes it through the
+    /// shared [`WzConfig`](wz::runtime_tokio::config::WzConfig) into
+    /// `FaceSources.max_links`.
+    #[cfg(feature = "transport-multilink")]
+    pub max_links: usize,
 }
 
 #[cfg(feature = "routing-peer")]
@@ -1299,6 +1319,8 @@ pub(crate) async fn run_peer(
     let config_write_permit = opts.config_write_permit;
     let put_key = opts.put_key.as_deref();
     let put_payload = opts.put_payload.as_deref();
+    #[cfg(feature = "transport-multilink")]
+    let max_links = opts.max_links;
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
@@ -1503,10 +1525,18 @@ pub(crate) async fn run_peer(
     // OBSERVE a runtime change and the single-instance-ness is a structural
     // property, not a wire-observable one. Live-reconfigure-over-wire visibility
     // (interceptor config in the JSON) is a deferred §5.23 layer.
-    let wz_config = std::rc::Rc::new(std::cell::RefCell::new(
-        wz::runtime_tokio::config::WzConfig::from_init_params(&params)
-            .with_interceptors(interceptor_config),
-    ));
+    let cfg = wz::runtime_tokio::config::WzConfig::from_init_params(&params)
+        .with_interceptors(interceptor_config);
+    // R311y213 — route --max-links through the shared WzConfig (the config SSOT) so
+    // the ONE instance handed to BOTH the aggregation loop (below, via
+    // FaceSources.max_links) AND the --config-queryable admin handler is the single
+    // budget source — never a config-vs-reality desync (the shared instance is
+    // structural; to_admin_json does not yet render max_links). Shadowing (not a
+    // `mut` binding) keeps the non-multilink build free of an unused_mut under
+    // warnings=deny.
+    #[cfg(feature = "transport-multilink")]
+    let cfg = cfg.with_max_links(max_links);
+    let wz_config = std::rc::Rc::new(std::cell::RefCell::new(cfg));
     {
         let cfg = wz_config.borrow();
         log::info!(
@@ -1515,6 +1545,19 @@ pub(crate) async fn run_peer(
         );
         cfg.install_interceptors(&forwarder);
     }
+    // R311y213 — echo the effective aggregation budget. `to_admin_json` above omits
+    // max_links (it renders acl/read-at-open fields only), so this is the operator's
+    // confirmation that --max-links took effect: `> 1` aggregates N links per peer
+    // into one logical session, `1` is the single-link path.
+    #[cfg(feature = "transport-multilink")]
+    log::info!(
+        "wz-ap-demo peer: transport-multilink max_links = {max_links} ({})",
+        if max_links > 1 {
+            "aggregating"
+        } else {
+            "single-link"
+        }
+    );
 
     // R311y48 (§5.23 Phase 3b) — the config-write INTENT slot. A remote PUT to
     // `.../config/acl-deny` parses to a deny keyexpr that the config-write
@@ -1717,6 +1760,12 @@ pub(crate) async fn run_peer(
             // The runtime connect-list reconcile is a router-hat affordance
             // (`--router-hat --connect-after`); a plain peer node does not host it.
             reconcile: None,
+            // R311y213 — the aggregation budget, routed from --max-links through the
+            // shared WzConfig (the config SSOT, so the loop and the admin GET agree).
+            // `1` = single-link (byte-identical to pre-multilink); `> 1` aggregates
+            // that many physical links to a peer zid into ONE logical session.
+            #[cfg(feature = "transport-multilink")]
+            max_links: wz_config.borrow().max_links,
         },
         params,
         TokioTime::new(),
@@ -2367,6 +2416,11 @@ pub(crate) async fn run_router_hat(
             mcast_members,
             mcast_group_subs,
             reconcile,
+            // A router-hat holds ONE link per peer; router-tier aggregation is
+            // unwired (zenoh's unicast.max_links applies to routers too, but wz's
+            // multilink demo path is the --peer mesh mode, run_peer).
+            #[cfg(feature = "transport-multilink")]
+            max_links: 1,
         },
         params,
         TokioTime::new(),

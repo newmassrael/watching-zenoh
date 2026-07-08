@@ -348,19 +348,55 @@ if [[ -z "$repo_root" ]]; then
 fi
 cd "$repo_root"
 
+# ─── production logging: complete, clean, leveled ──────────────────
+# Force cargo/rustc to line-oriented, color-free, progress-bar-free output so a
+# captured log is clean text in EVERY sink (tty / redirect / pipe): a `\r`
+# progress-bar rewrite or ANSI colour escape corrupts a persisted log and
+# defeats post-hoc grep. A caller's explicit value wins (the `:-` override).
+export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-never}"
+export CARGO_TERM_PROGRESS_WHEN="${CARGO_TERM_PROGRESS_WHEN:-never}"
+
+# Self-tee ALL stdout+stderr to a persistent per-run logfile, so the FULL run is
+# always on disk INDEPENDENT of how the caller captures our output — no external
+# redirect/pipe buffering can drop a layer. (This is the fix for the failure mode
+# where a truncated external capture lost the early layers, hiding which lane
+# failed.) The EXIT trap closes our fds and waits for tee so the tail — including
+# the final verdict — is flushed before we exit: zero omission. The tee also
+# writes to the original stdout, so console + hook output is unchanged, and the
+# real exit code is preserved. Opt out with RUNCI_NO_SELF_LOG=1.
+if [[ "${RUNCI_NO_SELF_LOG:-0}" != "1" ]]; then
+    RUNCI_LOG_DIR="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}"
+    mkdir -p "$RUNCI_LOG_DIR"
+    RUNCI_LOG_FILE="${RUNCI_LOG_FILE:-$RUNCI_LOG_DIR/run-ci-$(date +%Y%m%d-%H%M%S)-$$.log}"
+    exec > >(tee "$RUNCI_LOG_FILE") 2>&1
+    RUNCI_TEE_PID=$!
+    trap 'rc=$?; exec >&- 2>&-; wait "${RUNCI_TEE_PID:-}" 2>/dev/null || true; exit $rc' EXIT
+    echo "run-ci: full log -> $RUNCI_LOG_FILE"
+fi
+
 # ─── layer runner helpers ──────────────────────────────────────────
+# Every lane's start/verdict is a leveled, timestamped line (INFO / ERROR) that
+# keeps the historical `Layer <name> pass` / `Layer <name> FAIL` tokens (so
+# existing greps + the pre-push hook still match) while adding a wall-clock
+# stamp, a duration, and — on failure — the lane name to FAILED_LAYERS for the
+# unmissable end-of-run summary. The pass/fail verdict is still the exit code.
+FAILED_LAYERS=()
+_runci_ts() { date +'%Y-%m-%dT%H:%M:%S%z'; }
 run_layer() {
     local name="$1"
     shift
     if [[ -n "$ONLY_LAYER" && "$ONLY_LAYER" != "$name" ]]; then
         return 0
     fi
-    echo "──── Layer $name ────"
+    echo "[$(_runci_ts)] INFO  ──── Layer $name ────"
+    local start=$SECONDS
     if "$@"; then
-        echo "Layer $name pass"
+        echo "[$(_runci_ts)] INFO  Layer $name pass ($((SECONDS - start))s)"
         return 0
     else
-        echo "Layer $name FAIL" >&2
+        local rc=$?
+        echo "[$(_runci_ts)] ERROR Layer $name FAIL (rc=$rc, $((SECONDS - start))s)" >&2
+        FAILED_LAYERS+=("$name")
         return 1
     fi
 }
@@ -4676,6 +4712,32 @@ layer_e6b_adminspace_introspection() {
         --test wz_peer_adminspace_introspection -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E6c — transport-multilink: demo-binary N-link aggregation E2E ───────
+#
+# R311y213 (S2 slice-3) — the §5.1 multilink aggregation driven from a REAL binary
+# for the first time (the library `session_multilink_deploy_e2e`/`_readd_e2e` drive
+# `peer_loop` directly with a test forwarder; Layer C1ba is library-only and never
+# builds wz-ap-demo). A `wz-ap-demo --peer --max-links 2` built `--features
+# transport-multilink` dials a peer TWICE (`--connect B,B`) and aggregates its two
+# outbound links into ONE logical session, while the accept-side peer aggregates the
+# two inbound links; both log the demo-owned `link AGGREGATED ... (live links now 2)`
+# witness (the R311y213 AcceptEvent::LinkAggregated, rendered by log_face_event), and
+# the subscriber receives the published data over the aggregated session. The
+# `cargo clippy --features transport-multilink -D warnings` step is the genuinely-new
+# demo-cfg-site gate (the atom active <=> its run_peer/main.rs cfg sites compile
+# clean). NAMED BOUND: this proves aggregation reachability+observability, NOT per-link
+# auto-re-add (wired by the same knob, proven at library level by
+# session_multilink_readd_e2e; a 2-process black-box demo cannot sever a single link).
+# The `wz_peer_` fn prefix keeps the default Layer E sweep's `--skip wz_peer` from
+# double-running it on an arbitrary-feature binary. wz<->wz loopback (no pico/zenohd
+# prereq), so no SKIP guard.
+layer_e6c_peer_multilink() {
+    (cd crates && cargo build -p wz-ap-demo --features transport-multilink --quiet) || return 1
+    (cd crates && cargo clippy -p wz-ap-demo --features transport-multilink --quiet -- -D warnings) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_multilink_aggregate -- --ignored --quiet) || return 1
+}
+
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
 #
 # The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
@@ -4969,6 +5031,7 @@ run_layer E4 layer_e4_router_reject || overall=1
 run_layer E5 layer_e5_router_forward || overall=1
 run_layer E6 layer_e6_peer_mesh || overall=1
 run_layer E6b layer_e6b_adminspace_introspection || overall=1
+run_layer E6c layer_e6c_peer_multilink || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1
@@ -4980,8 +5043,13 @@ run_layer Qz layer_qz_zephyr_boot || overall=1
 run_layer M layer_m_scouting_multicast || overall=1
 run_layer Z layer_z_zenohd_interop || overall=1
 
+echo ""
 if [[ $overall -eq 0 ]]; then
-    echo ""
-    echo "run-ci: all required layers pass"
+    echo "[$(_runci_ts)] INFO  run-ci: all required layers pass"
+else
+    # Name every failed lane so the verdict is unmissable regardless of how large
+    # the log is or how it was captured — no hunting for a buried FAIL line.
+    echo "[$(_runci_ts)] ERROR run-ci: ${#FAILED_LAYERS[@]} layer(s) FAILED: ${FAILED_LAYERS[*]}" >&2
 fi
+[[ -n "${RUNCI_LOG_FILE:-}" ]] && echo "run-ci: full log -> $RUNCI_LOG_FILE"
 exit $overall

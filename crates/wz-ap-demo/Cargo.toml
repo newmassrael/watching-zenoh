@@ -184,6 +184,20 @@ routing-peer = [
     # applies (the inert mirror), and the wire-observable ACL flip cannot happen.
     "wz/config-mutate-runtime",
 ]
+# R311y213 (transport-multilink S2 slice-3) — opt-in N-link aggregation for the
+# `--peer` mesh mode: the demo binary now reaches the §5.1 multilink path
+# (`--peer <listen> --connect <a>,<a> --max-links 2` aggregates N physical links
+# into ONE logical unicast session per peer zid, with per-link auto-re-add on
+# loss). Pulls `routing-peer` (the run-mode that hosts the wiring — a bare
+# `["wz/transport-multilink"]` passthrough would let the feature enable with
+# `run_peer` compiled out = silent NOP, the routing-token-tables / router-multicast-
+# faces convention) + the facade forward. Named `transport-multilink` to match
+# `wz/transport-multilink` (every atom-forward feature mirrors its `wz/<atom>` name;
+# the sole rename `ws` carries its own justification). NOT in `default`
+# (preset-ap-client is single-link client scope), so the footprint baseline and every
+# other lane build unchanged; only `--features transport-multilink` compiles the
+# aggregation wiring. The atom is active <=> its cfg sites in run_peer + main.rs.
+transport-multilink = ["routing-peer", "wz/transport-multilink"]
 # R311y51 (§5.23 adminspace-write) — the permissions.write GATE on the config-write
 # host. SEPARATE from routing-peer (a distinct toggle) so both gate arms stay
 # compiled: `--features routing-peer,adminspace-write` = gate ON (run_peer consults
