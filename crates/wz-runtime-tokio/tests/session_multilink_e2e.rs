@@ -51,6 +51,7 @@ use wz_runtime_tokio::session_open::{
 use wz_runtime_tokio_test_support::fixture_params_with_zid;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::qos::Priority;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 8192;
@@ -113,6 +114,10 @@ async fn open_multilink_link(
             fixture_params_with_zid(acc_zid),
             acc_pref,
             qos,
+            // R311y219 — a full-range band; these tests assert reliability
+            // segregation / qos NEGOTIATION, not priority routing, so the band
+            // is inert (no prioritized send exercises select_link's band tier).
+            (Priority::Control, Priority::Background),
             TokioTime::new(),
             Some(ITER_CAP),
             DEFAULT_OPEN_TICK_MS,
@@ -127,6 +132,7 @@ async fn open_multilink_link(
             fixture_params_with_zid(init_zid),
             init_pref,
             qos,
+            (Priority::Control, Priority::Background),
             TokioTime::new(),
             Some(ITER_CAP),
             DEFAULT_OPEN_TICK_MS,

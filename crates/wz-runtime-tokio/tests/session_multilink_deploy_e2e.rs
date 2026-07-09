@@ -52,6 +52,7 @@ use wz_runtime_tokio::session_open::{
 use wz_runtime_tokio_test_support::fixture_params_with_zid;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::qos::Priority;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 8192;
@@ -125,13 +126,16 @@ async fn dial_multilink(
     addr: std::net::SocketAddr,
     init_zid: u8,
     pref: LinkReliabilityPref,
+    qos: bool,
+    band: (Priority, Priority),
 ) -> OpenedSession {
     let stream = TcpStream::connect(addr).await.expect("dial peer");
     initiate_and_open_session_with_multilink(
         DialedLink::Tcp(stream),
         fixture_params_with_zid(init_zid),
         pref,
-        false,
+        qos,
+        band,
         TokioTime::new(),
         Some(ITER_CAP),
         DEFAULT_OPEN_TICK_MS,
@@ -139,6 +143,10 @@ async fn dial_multilink(
     .await
     .expect("dialed link reaches Established (multilink)")
 }
+
+/// The full-priority band (`Control..=Background`) — the inert band the qos=false
+/// deploy tests pass (no prioritized send exercises `select_link`'s band tier).
+const FULL_BAND: (Priority, Priority) = (Priority::Control, Priority::Background);
 
 /// Drive one manual link's steady state on a spawned task, admitting RX against
 /// `actions` (the joined handle for a transplanted secondary, its own for the
@@ -229,8 +237,22 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
     let harness = async move {
         // Node A (manual traffic generator): dial B twice with distinct traffic-
         // class prefs, aggregate the two OUTBOUND links, and retain a send handle.
-        let a1 = dial_multilink(b_addr, 0x0A, LinkReliabilityPref::Reliable).await;
-        let a2 = dial_multilink(b_addr, 0x0A, LinkReliabilityPref::BestEffort).await;
+        let a1 = dial_multilink(
+            b_addr,
+            0x0A,
+            LinkReliabilityPref::Reliable,
+            false,
+            FULL_BAND,
+        )
+        .await;
+        let a2 = dial_multilink(
+            b_addr,
+            0x0A,
+            LinkReliabilityPref::BestEffort,
+            false,
+            FULL_BAND,
+        )
+        .await;
         let a1_actions = a1.actions.clone();
         let a_joined = match join_link(&a1.actions, &a2.actions, 2) {
             JoinOutcome::Joined(h) => h,
@@ -286,7 +308,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
         // Assertion 3 — a THIRD inbound link over max_links is rejected MAX_LINKS.
         // B must never aggregate it (stays at 2 live links) nor register a second
         // session. Drive it so B can accept + reject it; B closes it MAX_LINKS.
-        let a3 = dial_multilink(b_addr, 0x0A, LinkReliabilityPref::Any).await;
+        let a3 = dial_multilink(b_addr, 0x0A, LinkReliabilityPref::Any, false, FULL_BAND).await;
         let a3_actions = a3.actions.clone();
         let a3_task = spawn_drive(a3, a3_actions);
         // Give B time to accept + reject the third link, then confirm it never
@@ -357,7 +379,14 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
         // to 2). This exercises the join-after-link-death path — whichever face was
         // the primary, the session is resolved from its STABLE core handle, never a
         // per-link entry that teardown removed.
-        let a4 = dial_multilink(b_addr, 0x0A, LinkReliabilityPref::Reliable).await;
+        let a4 = dial_multilink(
+            b_addr,
+            0x0A,
+            LinkReliabilityPref::Reliable,
+            false,
+            FULL_BAND,
+        )
+        .await;
         let a4_actions = a4.actions.clone();
         let a4_task = spawn_drive(a4, a4_actions);
         assert!(
@@ -471,4 +500,151 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
     })
     .await
     .expect("the dial-side aggregation gate completes within 40s");
+}
+
+/// R311y219 (transport-multilink + transport-qos) — the DEPLOY-active priority-band
+/// segregation gate: the PRIORITY twin of the assertion-2 reliability segregation in
+/// [`deploy_active_two_links_aggregate_segregate_reject_survive`]. With QoS
+/// negotiated on a 2-link aggregate, an EXPRESS (Control-priority) Put and a LOW
+/// (Background-priority) Put ride DIFFERENT physical links — proving
+/// [`SessionCore::select_link`]'s priority (full) tier is reachable through the
+/// production `_with_multilink` open path, not just the y217 recording-driver unit.
+///
+/// B is a real [`peer_loop`] (`qos = true`, `max_links = 2`); A is a manual generator
+/// whose two outbound links are opened UNIFORM-Reliable (a 2-link aggregate can
+/// segregate on ONE axis, and QoS makes it priority — reliability is deliberately NOT
+/// the discriminant here) with DISTINCT priority bands (link 1 HIGH
+/// `[Control..=InteractiveLow]`, link 2 LOW `[DataHigh..=Background]`) applied by the
+/// real `initiate_and_open_session_with_multilink` band plumbing. A then sends a
+/// Control Put and a Background Put; B's [`CapturingForwarder`] observes them on
+/// DISTINCT faces (`assert_eq!(faces.len(), 2)`).
+///
+/// `is_qos()` is asserted FIRST: a non-negotiated session forces every Frame to
+/// `Priority::DEFAULT` (the `dispatch_network_message` clamp), which would route both
+/// Puts to one conduit/link and pass the face check for the WRONG reason. Both Puts
+/// are RELIABLE, so with uniform-Reliable links the priority band is the SOLE
+/// discriminant.
+///
+/// NAMED BOUND (coverage): this composes the SHARED band-plumbing entrypoint
+/// (`initiate_and_open_session_with_multilink` — the same one the loop's dial path
+/// uses) + `select_link` over real TCP, proving distinct-priority Puts SEGREGATE
+/// onto two distinct physical links. It does NOT prove (a) the specific band->link
+/// mapping (the y217 recording-driver unit, `multilink.rs`), nor (b) the production
+/// loop's PER-ID auto-assignment (`multilink_priority_range` / `multilink_pref_for`
+/// at the dial/accept sites) driving a ROUTING decision — A is a manual generator
+/// passing EXPLICIT bands, so those helpers are proven here only by the accept_loop
+/// unit tests; the loop-auto-assigned routing observed over the wire needs a
+/// prioritized publish path and is deferred to y219b.
+#[cfg(feature = "transport-qos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deploy_active_qos_priority_segregates_across_links() {
+    let b_state: Arc<StdMutex<CapState>> = Arc::new(StdMutex::new(CapState::default()));
+    let b_fwd = CapturingForwarder {
+        state: b_state.clone(),
+    };
+    let b_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind B");
+    let b_addr = b_listener.local_addr().expect("B addr");
+    let (b_shut_tx, b_shut_rx) = watch::channel(false);
+
+    // B: a real peer_loop with QoS ON and max_links = 2 (accept-only observer). Its
+    // own links get the deploy-assigned uniform-Reliable pref + parity bands too, but
+    // B only RECEIVES here, so what B observes is decided entirely by A's select_link.
+    let b_loop = peer_loop(
+        FaceSources {
+            listener: b_listener,
+            dial_targets: vec![],
+            dial_intents: None,
+            mcast_ingress: None,
+            mcast_members: None,
+            mcast_group_subs: None,
+            reconcile: None,
+            max_links: 2,
+            qos: true,
+        },
+        fixture_params_with_zid(0x0B),
+        TokioTime::new(),
+        DEFAULT_OPEN_TICK_MS,
+        shutdown_on(b_shut_rx.clone()),
+        |_e: &AcceptEvent| {},
+        &b_fwd,
+    );
+
+    let b_state_h = b_state.clone();
+    let harness = async move {
+        // A dials B TWICE, both UNIFORM-Reliable + qos, with DISTINCT bands (HIGH /
+        // LOW). The band comes from the real `_with_multilink` entrypoint — the SAME
+        // code path the deploy accept/dial sites drive.
+        const HIGH: (Priority, Priority) = (Priority::Control, Priority::InteractiveLow);
+        const LOW: (Priority, Priority) = (Priority::DataHigh, Priority::Background);
+        let a1 = dial_multilink(b_addr, 0x0A, LinkReliabilityPref::Reliable, true, HIGH).await;
+        let a2 = dial_multilink(b_addr, 0x0A, LinkReliabilityPref::Reliable, true, LOW).await;
+        let a1_actions = a1.actions.clone();
+        let a_joined = match join_link(&a1.actions, &a2.actions, 2) {
+            JoinOutcome::Joined(h) => h,
+            _ => panic!("A must aggregate its two outbound links"),
+        };
+        let a_send = a_joined.clone();
+        let _a1_task = spawn_drive(a1, a1_actions.clone());
+        let _a2_task = spawn_drive(a2, a_joined.clone());
+
+        // B aggregated the two inbound links into ONE session.
+        assert!(
+            poll_state(&b_state_h, Duration::from_secs(8), |s| s
+                .primary
+                .as_ref()
+                .is_some_and(|a| a.live_link_count() == 2))
+            .await,
+            "B aggregated 2 inbound links into ONE logical session (live_link_count == 2)"
+        );
+
+        // QoS negotiated on the aggregate — asserted BEFORE the sends so the
+        // DEFAULT-clamp (which would collapse the priority split) cannot false-green.
+        assert!(
+            a_send.is_qos(),
+            "A negotiated QoS on the aggregate (a non-qos session clamps every Frame to \
+             DEFAULT, which would route both Puts to one link)"
+        );
+
+        // An EXPRESS (Control) Put and a LOW (Background) Put — BOTH reliable, so with
+        // uniform-Reliable links the priority band is the SOLE discriminant.
+        // select_link routes Control -> the HIGH-band link, Background -> the LOW-band.
+        a_send
+            .send_push_literal_qos("test/express", b"E", true, Priority::Control)
+            .expect("express (Control) Put routes onto the high-band link");
+        a_send
+            .send_push_literal_qos("test/low", b"L", true, Priority::Background)
+            .expect("low (Background) Put routes onto the low-band link");
+
+        // Both arrive at B, on DISTINCT faces — priority SEGREGATION across the 2
+        // physical links (the priority twin of assertion 2's reliability segregation).
+        assert!(
+            poll_state(&b_state_h, Duration::from_secs(8), |s| s.deliveries.len()
+                >= 2)
+            .await,
+            "both the express and low Puts reached B: {:?}",
+            b_state_h.lock().unwrap().deliveries
+        );
+        let faces: std::collections::BTreeSet<u64> = b_state_h
+            .lock()
+            .unwrap()
+            .deliveries
+            .iter()
+            .map(|d| d.0)
+            .collect();
+        assert_eq!(
+            faces.len(),
+            2,
+            "priority SEGREGATION: the express (Control) and low (Background) Puts arrived on \
+             DIFFERENT physical faces (both reliable, so priority is the sole discriminant): {:?}",
+            b_state_h.lock().unwrap().deliveries
+        );
+
+        let _ = b_shut_tx.send(true);
+    };
+
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let (_summary, _) = tokio::join!(b_loop, harness);
+    })
+    .await
+    .expect("the deploy-active priority-segregation gate completes within 40s");
 }

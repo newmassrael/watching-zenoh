@@ -41,6 +41,12 @@ use wz_session_core::scout_static::synth_static_locators;
 // R3b — the Z_EXT_AUTH dispatch installed by the auth-on open variants.
 #[cfg(feature = "session-extauth")]
 use wz_session_core::auth_dispatch::AuthDispatch;
+// R311y219 (transport-multilink) — `Priority` (unconditional) types the per-face
+// QoS-priority `band` the `_with_multilink` entrypoints apply via
+// `set_link_priority_range`; imported gated so a non-multilink build keeps the use
+// set unchanged.
+#[cfg(feature = "transport-multilink")]
+use wz_session_core::qos::Priority;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
 use crate::link_pipeline::{
@@ -1568,11 +1574,13 @@ pub async fn initiate_and_open_session_with_auth(
 /// multilink-on sibling of the bare open. Initiator side; the acceptor mirrors via
 /// [`accept_and_open_session_with_multilink`].
 #[cfg(feature = "transport-multilink")]
+#[allow(clippy::too_many_arguments)]
 pub async fn initiate_and_open_session_with_multilink(
     connected: DialedLink,
     params: SessionInitParams,
     reliability_pref: crate::config::LinkReliabilityPref,
     qos: bool,
+    band: (Priority, Priority),
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
@@ -1589,6 +1597,19 @@ pub async fn initiate_and_open_session_with_multilink(
     }
     #[cfg(not(feature = "transport-qos"))]
     let _ = qos;
+    // R311y219 — pin this aggregated link to its deploy-assigned QoS-priority band
+    // so `select_link` routes each priority conduit to one link (the priority tier
+    // of zenoh's per-channel select). Applied ONLY under a negotiated QoS offer; the
+    // band type + setter are `all(multilink,qos)`-gated, so the whole block elides
+    // without `transport-qos` and `band` is consumed as a no-op (signature-stable).
+    #[cfg(feature = "transport-qos")]
+    if qos {
+        actions.set_link_priority_range(Some(
+            wz_session_core::session_actions::LinkPriorityRange::new(band.0, band.1),
+        ));
+    }
+    #[cfg(not(feature = "transport-qos"))]
+    let _ = band;
     initiator_open(
         inbound,
         actions,
@@ -1880,11 +1901,13 @@ pub async fn accept_and_open_session_with_auth(
 /// captures the initiator's ephemeral pubkey. Accept-side twin of
 /// [`initiate_and_open_session_with_multilink`].
 #[cfg(feature = "transport-multilink")]
+#[allow(clippy::too_many_arguments)]
 pub async fn accept_and_open_session_with_multilink(
     accepted: DialedLink,
     params: SessionInitParams,
     reliability_pref: crate::config::LinkReliabilityPref,
     qos: bool,
+    band: (Priority, Priority),
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
@@ -1901,6 +1924,17 @@ pub async fn accept_and_open_session_with_multilink(
     }
     #[cfg(not(feature = "transport-qos"))]
     let _ = qos;
+    // R311y219 — pin this aggregated link to its deploy-assigned QoS-priority band
+    // (see the initiate twin). Applied ONLY under a negotiated QoS offer; the block
+    // elides without `transport-qos` and `band` is consumed as a no-op.
+    #[cfg(feature = "transport-qos")]
+    if qos {
+        actions.set_link_priority_range(Some(
+            wz_session_core::session_actions::LinkPriorityRange::new(band.0, band.1),
+        ));
+    }
+    #[cfg(not(feature = "transport-qos"))]
+    let _ = band;
     // Fresh challenge nonce per accepted handshake (the pubkey responder replay
     // defense) — drawn from AP OS entropy here because the no_std core cannot.
     let nonce = crate::session_glue::nonce_from_os_entropy().map_err(OpenError::AuthEntropy)?;

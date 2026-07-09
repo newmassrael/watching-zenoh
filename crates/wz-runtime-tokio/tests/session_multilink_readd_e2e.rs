@@ -187,6 +187,11 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
                 fixture_params_with_zid(0x0B),
                 LinkReliabilityPref::Any,
                 false,
+                // R311y219 — qos=false, so the band is inert (no priority routing).
+                (
+                    wz_session_core::qos::Priority::Control,
+                    wz_session_core::qos::Priority::Background,
+                ),
                 TokioTime::new(),
                 Some(ITER_CAP),
                 DEFAULT_OPEN_TICK_MS,

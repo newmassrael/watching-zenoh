@@ -1588,6 +1588,11 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         `# (both-offer -> is_qos true; qos=false control -> false).` \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet \
+        `# R311y219 — qos x multilink PRIORITY segregation over the DEPLOY path: the` \
+        `# transport-qos deploy build activates the #[cfg(transport-qos)] priority` \
+        `# test (an EXPRESS + a LOW Put ride DISTINCT physical links; the reliability` \
+        `# tests stay green with the band inert). Runs BOTH deploy tests with qos on.` \
+        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES,transport-qos" --test session_multilink_deploy_e2e --quiet \
         `# R311y212 slice-2 — the per-link AUTO-RE-ADD e2e: A's production peer_loop` \
         `# (max_links=2, dials B twice) re-dials + re-JOINs a link the harness kills` \
         `# on B, so a dropped dialed link comes back onto the SAME session. The count` \
@@ -1595,6 +1600,13 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         `# cfg-outs the '#![cfg(all(...))]'-gated file to 0 tests (silent green).` \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet 2>&1 | tee /dev/stderr | grep -q ' 1 passed' \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
+        `# R311y219a — the per-face priority-band + reliability-axis POLICY unit` \
+        `# tests live in accept_loop::tests (gated transport-multilink) inside the` \
+        `# routing-accept/peer-gated module, so they need BOTH multilink AND the` \
+        `# module gate to compile+run. No prior --lib lane combined them, so they` \
+        `# were CI-invisible; ML_DEPLOY_FEATURES has both. The ' 2 passed' guard` \
+        `# reddens the lane if a feature-set edit ever cfg-outs them to a silent 0.` \
+        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --lib --quiet -- multilink_priority_range multilink_pref_for 2>&1 | tee /dev/stderr | grep -q ' 2 passed' \
         && cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet -- -D warnings \
@@ -1607,6 +1619,9 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         `# must still compile (the FaceSources.qos bridge cfg-elides cleanly).` \
         && cargo clippy -p wz-ap-demo --features transport-qos --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet -- -D warnings \
+        `# R311y219 — clippy the deploy e2e with qos on (the #[cfg(transport-qos)]` \
+        `# priority-segregation test compiled) under -D warnings.` \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES,transport-qos" --test session_multilink_deploy_e2e --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-multilink --quiet -- -D warnings \
         `# R311y205 whole-session F4 — the send_wire/select_link cfg-skew net: a` \
