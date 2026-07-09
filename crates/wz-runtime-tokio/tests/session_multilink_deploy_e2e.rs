@@ -69,6 +69,14 @@ struct CapState {
     deliveries: Vec<(u64, bool, u64)>,
     registered: usize,
     deregistered: usize,
+    /// The face ids passed to `register` (the primary of each session).
+    registered_ids: Vec<u64>,
+    /// R311y219b — the (joined_id, primary_id) pairs the loop passes to
+    /// `register_joined` at each aggregation JOIN. An observation-only forwarder
+    /// records them (and keeps `forward` observing the PHYSICAL id, so the per-face
+    /// segregation witness is unaffected — the joined->primary resolution is the
+    /// REAL LinkstateForwarder's concern, tested directly in its lib units).
+    joined_calls: Vec<(u64, u64)>,
 }
 
 /// A production [`FaceForwarder`] whose only job is observation — it keys no
@@ -79,7 +87,7 @@ struct CapturingForwarder {
 }
 
 impl FaceForwarder for CapturingForwarder {
-    fn register(&self, _id: FaceId, actions: &Arc<SessionLinkActions>) {
+    fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
         let mut s = self.state.lock().unwrap();
         // The FIRST link to a peer is the session's primary and the only face
         // registered; capture its shared-core handle once.
@@ -87,10 +95,19 @@ impl FaceForwarder for CapturingForwarder {
             s.primary = Some(actions.clone());
         }
         s.registered += 1;
+        s.registered_ids.push(id.0);
     }
 
     fn deregister(&self, _id: FaceId) {
         self.state.lock().unwrap().deregistered += 1;
+    }
+
+    fn register_joined(&self, joined_id: FaceId, primary_id: FaceId) {
+        self.state
+            .lock()
+            .unwrap()
+            .joined_calls
+            .push((joined_id.0, primary_id.0));
     }
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
@@ -596,6 +613,43 @@ async fn deploy_active_qos_priority_segregates_across_links() {
             .await,
             "B aggregated 2 inbound links into ONE logical session (live_link_count == 2)"
         );
+
+        // R311y219b WIRING — the aggregation JOIN told the forwarder to map the
+        // joined (secondary) link onto the PRIMARY registered face
+        // (`register_joined`), so a routing forwarder delivers its inbound instead
+        // of dropping it at the faces.get gate. The joined id is NEVER `register`ed
+        // (it shares the primary's face); the primary IS. (The forwarder RESOLUTION
+        // itself — the delivery — is proven directly in the LinkstateForwarder lib
+        // unit `joined_link_inbound_delivers_...`; here we only prove the loop wires
+        // the mapping.) Barrier on `joined_calls` ITSELF (not the `live_link_count`
+        // barrier above): `register_joined` is written AFTER `join_link` bumps the
+        // link count, under a DIFFERENT lock, so gating on the count could observe
+        // the pre-`register_joined` window and panic the `.first()` — poll the
+        // asserted predicate so the read below is unreachable-empty by construction.
+        assert!(
+            poll_state(&b_state_h, Duration::from_secs(8), |s| !s
+                .joined_calls
+                .is_empty())
+            .await,
+            "the aggregation JOIN wired register_joined(secondary -> primary)"
+        );
+        {
+            let s = b_state_h.lock().unwrap();
+            let (joined_id, primary_id) = *s
+                .joined_calls
+                .first()
+                .expect("joined_calls is non-empty (just polled)");
+            assert!(
+                s.registered_ids.contains(&primary_id),
+                "register_joined's primary is the session's REGISTERED face: {:?}",
+                s.registered_ids
+            );
+            assert!(
+                !s.registered_ids.contains(&joined_id),
+                "the joined (secondary) link is NOT registered as its own face: {:?}",
+                s.registered_ids
+            );
+        }
 
         // QoS negotiated on the aggregate — asserted BEFORE the sends so the
         // DEFAULT-clamp (which would collapse the priority split) cannot false-green.

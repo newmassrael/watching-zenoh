@@ -449,6 +449,20 @@ pub struct LinkstateForwarder {
     /// depth >= 2 and does not re-trigger the drain. `Cell` by the single-task
     /// contract.
     forward_depth: Cell<u32>,
+    /// R311y219b (transport-multilink) — joined aggregated link FaceId -> the
+    /// session's PRIMARY registered FaceId. A second+ physical link aggregated onto
+    /// a peer's session (`join_link`) is not `register`ed as its own face, so its
+    /// inbound reaches [`forward`](FaceForwarder::forward) tagged with its own id,
+    /// which is absent from [`faces`](Self#structfield.faces). [`forward`] resolves
+    /// that id through this map to the primary BEFORE the delivery gates
+    /// (`forward_push` / `dispatch_local_subscribers` early-return on
+    /// `faces.get(inbound)=None`), so the aggregate presents ONE logical face to
+    /// routing (the faithful zenoh model: an aggregated transport is one FaceState) —
+    /// closing the joined-face delivery gap. Populated by
+    /// [`register_joined`](FaceForwarder::register_joined) at the loop's JOIN,
+    /// cleared by [`deregister_joined`](FaceForwarder::deregister_joined) on the
+    /// joined link's death.
+    joined_faces: RefCell<HashMap<FaceId, FaceId>>,
     /// D2c — a spanning-tree recompute is pending (the coalescing flag). The
     /// topology-change handlers ([`forward`](FaceForwarder::forward)'s inbound
     /// link-state, [`deregister`](FaceForwarder::deregister)'s face loss) SET this
@@ -695,6 +709,7 @@ impl LinkstateForwarder {
             sub_redelivery: RefCell::new(VecDeque::new()),
             query_redelivery: RefCell::new(VecDeque::new()),
             forward_depth: Cell::new(0),
+            joined_faces: RefCell::new(HashMap::new()),
             trees_dirty: Cell::new(false),
             trees_delay,
             recomputes: Cell::new(0),
@@ -904,6 +919,15 @@ impl crate::interceptor::InterceptorSink for LinkstateForwarder {
 }
 
 impl LinkstateForwarder {
+    /// R311y219b — map a JOINED aggregated link's own FaceId to the session's PRIMARY
+    /// registered face (via [`joined_faces`](Self#structfield.joined_faces)); returns
+    /// `id` unchanged for a primary / single-link / non-aggregating face (absent from
+    /// the map). Called once at the top of [`forward`](FaceForwarder::forward) so the
+    /// joined link's inbound is served against the primary's face table.
+    fn resolve_joined_face(&self, id: FaceId) -> FaceId {
+        self.joined_faces.borrow().get(&id).copied().unwrap_or(id)
+    }
+
     /// A decoded topology `LinkStateList` arrived on `face`: ingest it against
     /// that face's graph link. Returns the ingest `Changes` the caller re-floods
     /// onward ([`propagate`](Self::propagate)). Does NOT recompute the spanning
@@ -4806,6 +4830,21 @@ impl FaceForwarder for LinkstateForwarder {
         true
     }
 
+    /// R311y219b — record a joined aggregated link's id -> the session's PRIMARY
+    /// registered face, so [`forward`](Self::forward) resolves the joined link's
+    /// inbound onto the primary's face table (one logical face per aggregate). No
+    /// self-flood / graph change: the joined link is NOT a new routing neighbour
+    /// (the primary already IS the graph link to this peer), only a second physical
+    /// carrier for the same session.
+    fn register_joined(&self, joined_id: FaceId, primary_id: FaceId) {
+        self.joined_faces.borrow_mut().insert(joined_id, primary_id);
+    }
+
+    /// R311y219b — the joined link died: forget its id -> primary mapping.
+    fn deregister_joined(&self, joined_id: FaceId) {
+        self.joined_faces.borrow_mut().remove(&joined_id);
+    }
+
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             messages, reliable, ..
@@ -4813,6 +4852,20 @@ impl FaceForwarder for LinkstateForwarder {
         else {
             return;
         };
+        // R311y219b (transport-multilink) — resolve a JOINED aggregated link's own
+        // FaceId to the session's PRIMARY registered face BEFORE any delivery / route
+        // / ACL logic below, so the joined link's data + control are served against
+        // the primary's face table (`faces`, keyexpr aliases, graph link, ACL
+        // subject) — the aggregate is ONE logical face (the faithful zenoh model),
+        // and no Put/Declare on the secondary link is dropped at the
+        // `faces.get(inbound)=None` gate. Identity (no-op) for a primary / single-
+        // link face (absent from `joined_faces`); the raw physical id is preserved
+        // for observation-only forwarders, which never populate the map. INVARIANT:
+        // merging both links' inbound into the primary's ONE `keyexpr_table` cannot
+        // collide because a faithful peer mints DeclareKeyexpr mapping ids per-SESSION
+        // (both links share one session), not per-link; literal keyexprs (id 0) are
+        // table-independent regardless.
+        let id = self.resolve_joined_face(id);
         // #3-c (R311y167) — track re-entrancy so the self-echo drain runs ONCE, at
         // the outermost `forward`. A local subscriber handler that re-drives a Put
         // to itself calls back into `forward` (this same method) at depth >= 2,
@@ -8300,6 +8353,67 @@ mod tests {
             sink_b.frame_count(),
             1,
             "the admitted Put relays to the interested child"
+        );
+    }
+
+    /// R311y219b — the JOINED-FACE DELIVERY fix: a Put arriving on an aggregated
+    /// (joined) link's OWN FaceId — which is never `register`ed, since the joined
+    /// link shares the session's primary face — is DROPPED at the `faces.get`
+    /// delivery gate UNTIL [`register_joined`](FaceForwarder::register_joined) maps
+    /// it to the primary. This is the gap y219's priority routing first exposes (a
+    /// non-DEFAULT priority Put deliberately rides the secondary link). FaceId(0) is
+    /// the registered primary; FaceId(1) is the joined secondary. Direct, RED-before
+    /// / GREEN-after-`register_joined` proof of the resolve at `forward`'s top.
+    #[test]
+    fn joined_link_inbound_delivers_to_primary_face_local_subscriber_after_register_joined() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (primary, _sink) = peer_face(zid(0x0A));
+        // Only the PRIMARY link is registered (the aggregate's one logical face);
+        // the joined FaceId(1) is deliberately never `register`ed.
+        fwd.register(FaceId(0), &primary);
+        let delivered: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let d = delivered.clone();
+            fwd.register_local_subscriber(
+                "demo/data",
+                Box::new(move |s: &dyn SampleView| d.borrow_mut().push(s.keyexpr().to_string())),
+            )
+            .expect("register the local subscriber");
+        }
+        let put = || DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+
+        // BEFORE register_joined: a Put on the un-mapped joined FaceId(1) hits
+        // `faces.get(1) == None` and is DROPPED before delivery (the pre-fix gap).
+        fwd.forward(FaceId(1), IterationEvent::Poll(&put()));
+        assert!(
+            delivered.borrow().is_empty(),
+            "an un-mapped joined-link Put is dropped at the delivery gate (the gap)"
+        );
+
+        // AFTER register_joined(1 -> 0): the SAME Put resolves to the primary face
+        // and is delivered to the local subscriber (the fix).
+        fwd.register_joined(FaceId(1), FaceId(0));
+        fwd.forward(FaceId(1), IterationEvent::Poll(&put()));
+        assert_eq!(
+            delivered.borrow().as_slice(),
+            &["demo/data".to_string()],
+            "the joined-link Put is delivered to the primary face's subscriber after register_joined"
+        );
+
+        // deregister_joined drops the mapping -> the gate drops it again (no stale
+        // mis-resolve after the joined link dies).
+        fwd.deregister_joined(FaceId(1));
+        delivered.borrow_mut().clear();
+        fwd.forward(FaceId(1), IterationEvent::Poll(&put()));
+        assert!(
+            delivered.borrow().is_empty(),
+            "after deregister_joined the mapping is gone -> the joined-link Put drops again"
         );
     }
 

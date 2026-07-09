@@ -344,6 +344,26 @@ pub trait FaceForwarder {
     fn dedups_faces_by_zid(&self) -> bool {
         false
     }
+
+    /// R311y219b (transport-multilink) — a SECOND+ physical link aggregated onto a
+    /// peer's logical session (`join_link`) is NOT `register`ed as its own face (it
+    /// shares the primary's), so its inbound events reach [`forward`](Self::forward)
+    /// tagged with the JOINED link's own [`FaceId`] — which is not in the routing
+    /// forwarder's face table. Without a mapping back to the PRIMARY registered face,
+    /// the routing forwarder drops the joined link's data/control at its
+    /// `faces.get(inbound)` delivery gate (the joined-face delivery gap: latent since
+    /// y205 because DEFAULT priority always routed to the first-alive = primary link,
+    /// first hit by y219 priority routing which deliberately routes onto the secondary
+    /// link). `joined_id` is the aggregated link's FaceId; `primary_id` is the
+    /// session's registered face. Default no-op: only a forwarder with a face table
+    /// (the routing peer/router) needs the mapping; the hold-only [`NoOpForwarder`]
+    /// and observation-only test forwarders ignore it (and keep observing per
+    /// physical link, so per-link witnesses are unaffected).
+    fn register_joined(&self, _joined_id: FaceId, _primary_id: FaceId) {}
+
+    /// The joined link left the aggregate (its own death): drop the joined->primary
+    /// mapping so a later [`FaceId`] reuse cannot mis-resolve. Default no-op.
+    fn deregister_joined(&self, _joined_id: FaceId) {}
 }
 
 /// The hold-only [`FaceForwarder`]: the `routing-router` foundation holds
@@ -1391,10 +1411,12 @@ where
                                 // join_link's primary arg — NOT a per-link entry that
                                 // teardown removes, so a join after the original
                                 // primary link died still resolves the session.
-                                let existing = ml_sessions
-                                    .get(&peer_zid)
-                                    .map(|(_, _, core_handle)| core_handle.clone());
-                                if let Some(core_handle) = existing {
+                                let existing = ml_sessions.get(&peer_zid).map(
+                                    |(primary_id, _, core_handle)| {
+                                        (*primary_id, core_handle.clone())
+                                    },
+                                );
+                                if let Some((primary_id, core_handle)) = existing {
                                     // A second+ link to a held peer: try to aggregate.
                                     match join_link(&core_handle, &opened.actions, max_links) {
                                         JoinOutcome::Joined(joined) => {
@@ -1416,6 +1438,15 @@ where
                                                 live_links,
                                             });
                                             ml_faces.insert(id, (peer_zid, joined.clone()));
+                                            // R311y219b — tell the forwarder this
+                                            // joined link's inbound (which arrives
+                                            // tagged with its OWN id, never
+                                            // `register`ed) maps to the PRIMARY
+                                            // registered face, so a routing forwarder
+                                            // delivers its data/control instead of
+                                            // dropping it at the faces.get gate. A
+                                            // no-op for observation-only forwarders.
+                                            forwarder.register_joined(id, primary_id);
                                             // Drop its dial-address index — a joined
                                             // link is not a standalone reconnectable
                                             // dial (no-op for an accepted link).
@@ -1607,6 +1638,14 @@ where
                         continue;
                     }
                     if let Some((peer_zid, handle)) = ml_faces.remove(&face.id) {
+                        // R311y219b — this link died: drop its joined->primary mapping
+                        // so a later FaceId reuse cannot mis-resolve its successor's
+                        // inbound onto a stale primary. A no-op for observation-only
+                        // forwarders. This fires for BOTH a joined secondary (removes
+                        // its real entry) AND the primary (which reaches here too, but
+                        // is never a `joined_faces` KEY — it is `register`ed, not
+                        // joined — so its removal is a harmless no-op).
+                        forwarder.deregister_joined(face.id);
                         // R311y212 — drop this link's retained dial endpoint (Some
                         // iff THIS node dialed it); a partial-loss re-add re-inserts
                         // a fresh id, a total-collapse leaves it removed (no re-add).
