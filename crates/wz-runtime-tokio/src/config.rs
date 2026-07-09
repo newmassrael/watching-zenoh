@@ -118,11 +118,12 @@ pub struct WzConfig {
     /// sessions); wz stages it per-session via the `*_with_qos` open entrypoints,
     /// a superset (one qos session + one non-qos session under one node), while
     /// each individual session still negotiates faithfully. Like `max_links`, this
-    /// field is the config surface: the library entrypoints take the offer
-    /// directly, and the reference peer runner bridges `WzConfig.qos -> the
-    /// `*_with_qos` entrypoint` (the demo `--qos` reader arrives with the
-    /// priority-select demo in R311y216(b), the `max_links -> FaceSources` bridge
-    /// precedent). `to_admin_json` does not render it (as with `max_links`).
+    /// field is the config surface: the single-link `*_with_qos` entrypoints take
+    /// the offer directly, while the reference peer runner bridges `WzConfig.qos ->
+    /// FaceSources.qos -> the `*_with_multilink` entrypoints` (R311y218 delivered
+    /// the demo `--qos` reader over the multilink path; per-face priority-band
+    /// segregation is R311y219). `to_admin_json` does not render it (as with
+    /// `max_links`).
     #[cfg(feature = "transport-qos")]
     pub qos: bool,
 }

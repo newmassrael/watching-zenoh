@@ -885,8 +885,10 @@ pub struct LinkState<R: SessionRuntime> {
     /// link carries, so [`SessionCore::select_link`] pins each `(priority,
     /// reliability)` conduit to ONE link (the priority tier of zenoh's per-channel
     /// `select`). `None` (the default until set) = no priority preference: the
-    /// link is a reliability-only / failover candidate, never a `full` priority
-    /// match. Set at bring-up via
+    /// link is a reliability-only PARTIAL-tier candidate (still the primary route
+    /// for its reliability class when no band covers the priority — NOT the
+    /// `any`/first-alive failover tier), never a `full` priority match. Set at
+    /// bring-up via
     /// [`SessionLinkActions::set_link_priority_range`], the same
     /// config-at-bringup discipline as [`Self::reliability_pref`]. Additive
     /// per-link field; changes no accessor signature.
@@ -1779,7 +1781,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the drive loop spins), through the shared `R::Shared<LinkState>` handle —
     /// the `set_link_reliability_pref` config-at-bringup discipline. Read by
     /// [`Self::select_link`] to pin each `(priority, reliability)` conduit to one
-    /// link. `None` clears the band (reliability-only / failover candidate).
+    /// link. `None` clears the band (reliability-only, partial-tier candidate).
     #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
     pub fn set_link_priority_range(&self, range: Option<LinkPriorityRange>) {
         R::with_mutex_mut(&self.link.priority_range, |s| *s = range);

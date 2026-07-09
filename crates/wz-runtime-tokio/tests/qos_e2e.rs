@@ -34,8 +34,9 @@
 //!      the `&=` leaves NoQoS) TX-clamps the priority to DEFAULT, so the Frame is
 //!      byte-identical to a pre-QoS Frame (no Z flag, no ext_qos).
 //!   3. `qos_config_field_selects_offer` — the `WzConfig.qos` config surface a
-//!      caller reads to pick the `*_with_qos` entrypoint (the demo `--qos` reader
-//!      arrives with the priority-select demo in R311y216(b)).
+//!      caller reads to pick a qos open entrypoint (the demo `--qos` reader landed
+//!      in R311y218, bridging `WzConfig.qos -> FaceSources.qos` over the multilink
+//!      path; per-face priority segregation is R311y219).
 //!
 //! ## Non-flakiness
 //!
@@ -280,10 +281,10 @@ async fn qos_prioritized_put_rides_ext_qos_and_negotiates_by_and() {
 }
 
 /// Test 3 — the `WzConfig.qos` config surface round-trips: a config-driven caller
-/// reads `cfg.qos` to select the `*_with_qos` entrypoint. Default is off
-/// (byte-identical to pre-QoS); the demo `--qos` reader bridging this field to the
-/// entrypoint arrives with the priority-select demo in R311y216(b) (the
-/// `max_links -> FaceSources` bridge precedent).
+/// reads `cfg.qos` to select a qos open entrypoint. Default is off (byte-identical
+/// to pre-QoS); the demo `--qos` reader (R311y218) bridges this field `WzConfig.qos
+/// -> FaceSources.qos -> the *_with_multilink entrypoints` (the `max_links ->
+/// FaceSources` bridge precedent); per-face priority segregation is R311y219.
 #[test]
 fn qos_config_field_selects_offer() {
     let on = WzConfig::new().with_qos(true);
