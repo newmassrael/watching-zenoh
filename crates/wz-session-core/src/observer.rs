@@ -794,6 +794,7 @@ mod tests {
         // mirrors.
         pub(super) fn make_outcome(messages: Vec<NetworkMessage>) -> DriverLoopOutcome {
             DriverLoopOutcome::FramePayload {
+                priority: crate::qos::Priority::DEFAULT,
                 reliable: true,
                 sn: 0,
                 messages,

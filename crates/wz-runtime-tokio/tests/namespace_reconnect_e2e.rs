@@ -94,6 +94,7 @@ fn reset_for_reopen_clears_namespace_correlation_keeps_prefix() {
     actions.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
 
     let decl_sub = |id, ke: &str| DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
         reliable: true,
         sn: 0,
         has_ext: false,
@@ -110,6 +111,7 @@ fn reset_for_reopen_clears_namespace_correlation_keeps_prefix() {
         }))],
     };
     let undecl_sub = |id| DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
         reliable: true,
         sn: 0,
         has_ext: false,

@@ -5685,6 +5685,7 @@ mod tests {
         reliable: bool,
     ) {
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable,
             sn: 0,
             messages: vec![message],

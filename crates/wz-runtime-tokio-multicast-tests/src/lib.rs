@@ -168,6 +168,7 @@ mod tests {
         // builder so the fixture cannot drift from the wire shape.
         let push = build_push_literal("demo/mc", b"wire-rx").expect("push fixture");
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: std::vec![NetworkMessage::Push(Box::new(push))],

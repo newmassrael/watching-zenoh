@@ -63,13 +63,18 @@ pub enum DriverLoopOutcome {
         messages: Vec<NetworkMessage>,
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
-        // R311y215 — the DELIVERED-frame priority (app-observability of the
-        // decoded ext_qos) is deferred to R311y216, where the priority-select
-        // witness that consumes it lands. The FUNCTIONAL RX priority — the
-        // per-priority SN-conduit gate (admit_rx_frame_sn) and the reassembly
-        // chain key ([`DriverLoopOutcome::Fragment`] + [`RxSnRejected`]) — is
-        // complete in y215; the Frame's priority is decoded (InboundFrame::Frame)
-        // and gates its conduit, it is simply not surfaced on FramePayload yet.
+        /// R311y221 — the DELIVERED-frame priority band (the decoded ext_qos),
+        /// surfaced for app-observability of the received QoS. `Priority::DEFAULT`
+        /// under a non-QoS session, the lowlatency lean-rx path, and the multicast
+        /// plane (whose per-priority conduits stay deferred, R311y215 step 8). The
+        /// FUNCTIONAL RX priority — the per-priority SN-conduit gate
+        /// (`admit_rx_frame_sn`) and the reassembly chain key — was complete in
+        /// y215; y221 threads the SAME decoded band onto the delivered outcome so a
+        /// transit re-forward (`forward_push`) can preserve it end-to-end instead
+        /// of re-banding to DEFAULT. Unconditional (not `#[cfg]`-gated): the
+        /// variant is ungated and `qos::Priority` is always compiled, so a gated
+        /// field would feature-skew every consumer match (signature-stability).
+        priority: crate::qos::Priority,
     },
     /// `parse_inbound` rejected the wire bytes, OR the Frame envelope
     /// parsed but `parse_frame_payload` could not decode an authored
@@ -249,8 +254,19 @@ pub enum IterationEvent<'a> {
 /// [`crate::multicast_dispatch::ingest_multicast_fragment`] completion
 /// closures (one re-entry SSOT). `reassembly` implies `codec-frame`, so
 /// the payload parser is in scope.
+///
+/// R311y221 — `priority` is the reassembled chain's band (keyed on
+/// `(peer, reliable, priority)` at ingest): the unicast caller passes the
+/// chain's real decoded priority, the multicast caller passes DEFAULT (its
+/// per-priority conduits stay deferred, R311y215 step 8), so the synthesized
+/// whole-frame outcome carries the same band the un-fragmented path would.
 #[cfg(feature = "reassembly")]
-pub fn reassembled_frame_outcome(reliable: bool, sn: u64, msg: &[u8]) -> DriverLoopOutcome {
+pub fn reassembled_frame_outcome(
+    reliable: bool,
+    sn: u64,
+    priority: crate::qos::Priority,
+    msg: &[u8],
+) -> DriverLoopOutcome {
     match crate::network_message::parse_frame_payload(msg) {
         Ok(messages) => DriverLoopOutcome::FramePayload {
             reliable,
@@ -258,6 +274,7 @@ pub fn reassembled_frame_outcome(reliable: bool, sn: u64, msg: &[u8]) -> DriverL
             messages,
             has_ext: false,
             extensions: Vec::new(),
+            priority,
         },
         Err(codec_err) => DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err)),
     }

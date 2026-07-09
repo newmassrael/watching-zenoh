@@ -77,6 +77,12 @@ struct CapState {
     /// segregation witness is unaffected — the joined->primary resolution is the
     /// REAL LinkstateForwarder's concern, tested directly in its lib units).
     joined_calls: Vec<(u64, u64)>,
+    /// R311y221 — the delivered band per received Push, read off the new
+    /// `FramePayload.priority` field. The app-observability witness: a prioritized
+    /// Put must surface at B with its REAL decoded band (not DEFAULT), proving the
+    /// unicast Frame producer (`drive.rs`) threads the decoded ext_qos onto the
+    /// delivered outcome rather than re-clamping to DEFAULT.
+    band_deliveries: Vec<Priority>,
 }
 
 /// A production [`FaceForwarder`] whose only job is observation — it keys no
@@ -115,6 +121,7 @@ impl FaceForwarder for CapturingForwarder {
             reliable,
             sn,
             messages,
+            priority,
             ..
         }) = event
         {
@@ -122,11 +129,12 @@ impl FaceForwarder for CapturingForwarder {
                 .iter()
                 .any(|m| matches!(m, NetworkMessage::Push(_)))
             {
-                self.state
-                    .lock()
-                    .unwrap()
-                    .deliveries
-                    .push((id.0, *reliable, *sn));
+                let mut s = self.state.lock().unwrap();
+                s.deliveries.push((id.0, *reliable, *sn));
+                // R311y221 — record the delivered band alongside the per-face
+                // segregation witness (a separate vec, so the committed
+                // `deliveries` tuple and its assertions are untouched).
+                s.band_deliveries.push(*priority);
             }
         }
     }
@@ -691,6 +699,26 @@ async fn deploy_active_qos_priority_segregates_across_links() {
             "priority SEGREGATION: the express (Control) and low (Background) Puts arrived on \
              DIFFERENT physical faces (both reliable, so priority is the sole discriminant): {:?}",
             b_state_h.lock().unwrap().deliveries
+        );
+
+        // R311y221 app-observability — B's delivered `FramePayload.priority` carries
+        // each Put's REAL decoded band, NOT DEFAULT. `select_link` (asserted above via
+        // the face split) proves the band reached the RIGHT link; this proves the band
+        // is also SURFACED to the application on receipt. A DEFAULT-clamp regression in
+        // the unicast Frame producer would collapse both bands to `Priority::DEFAULT`
+        // here even while the face split (driven by the TX-side pin) still passed —
+        // so this is the direct witness that `drive.rs` threads the decoded ext_qos.
+        let bands: std::collections::BTreeSet<Priority> = b_state_h
+            .lock()
+            .unwrap()
+            .band_deliveries
+            .iter()
+            .copied()
+            .collect();
+        assert!(
+            bands.contains(&Priority::Control) && bands.contains(&Priority::Background),
+            "app-observability: both delivered bands surface on FramePayload.priority \
+             (Control for the express Put, Background for the low Put), not DEFAULT: {bands:?}"
         );
 
         let _ = b_shut_tx.send(true);

@@ -6071,6 +6071,7 @@ fn dispatch_iteration_event_fans_and_drains_in_one_call() {
         body: make_decl_subscriber(4, "home/temp"),
     };
     let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
         reliable: true,
         sn: 0,
         messages: vec![wz_session_core::network_message::NetworkMessage::Declare(
@@ -6123,6 +6124,7 @@ fn dispatch_iteration_event_with_runs_hook_under_lock_then_drains() {
         body: make_decl_subscriber(8, "home/temp"),
     };
     let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
         reliable: true,
         sn: 0,
         messages: vec![wz_session_core::network_message::NetworkMessage::Declare(
@@ -6514,6 +6516,7 @@ fn query_frame_outcome(
     request: wz_codecs::request::RequestOwned,
 ) -> wz_session_core::driver_loop::DriverLoopOutcome {
     wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
         reliable: true,
         sn: 0,
         messages: vec![wz_session_core::network_message::NetworkMessage::Request(

@@ -149,6 +149,11 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                             messages,
                             has_ext: false,
                             extensions: Vec::new(),
+                            // R311y221 — the lowlatency lean wire carries no Frame
+                            // envelope and no ext_qos (zenoh lowlatency tracks no
+                            // SN / no per-priority conduit), so the delivered band
+                            // is DEFAULT.
+                            priority: crate::qos::Priority::DEFAULT,
                         },
                         Err(codec_err) => {
                             engine.process_event(E::FramingError);
@@ -423,6 +428,11 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                                     messages,
                                     has_ext,
                                     extensions,
+                                    // R311y221 — the true decoded band (already
+                                    // in scope from the InboundFrame::Frame
+                                    // destructure above; gates the RX conduit at
+                                    // `admit_rx_frame_sn`). DEFAULT under non-QoS.
+                                    priority,
                                 },
                                 Err(codec_err) => {
                                     engine.process_event(E::FramingError);
@@ -753,7 +763,11 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
             sn_mask,
             now_ms,
             |msg| {
-                completed = Some(reassembled_frame_outcome(*reliable, *sn, msg));
+                // R311y221 — the reassembled whole-frame carries the chain's
+                // band (the `(peer, reliable, priority)` key above), so a
+                // fragmented prioritized Put delivers on the same band a
+                // single-frame Put would.
+                completed = Some(reassembled_frame_outcome(*reliable, *sn, *priority, msg));
             },
         )
     });

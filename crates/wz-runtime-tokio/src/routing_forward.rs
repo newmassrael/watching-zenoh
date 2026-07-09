@@ -128,6 +128,7 @@ mod tests {
     // tests forward the same bytes the e2e does, with no test-only Push shape.
     fn push_frame(push: PushOwned, reliable: bool) -> DriverLoopOutcome {
         DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(push))],
@@ -138,6 +139,7 @@ mod tests {
 
     fn declare_frame(declare: wz_codecs::declare::DeclareOwned) -> DriverLoopOutcome {
         DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(declare))],

@@ -1172,11 +1172,12 @@ impl LinkstateForwarder {
         gossip_gate: Option<WhatAmIMatcher>,
         build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
     ) -> Result<usize, CodecError> {
-        // R311y220 — the DEFAULT-priority, non-express fan-out: every existing caller
-        // (flood_link_added / flood_self_links_changed / propagate / forward_push /
-        // publish / ...) routes through here byte-identically to the prior hard-coded
-        // `send_network_message(msg, reliable, false)`. Only `publish_qos` carries an
-        // application-chosen band, via `fan_out_qos` directly.
+        // R311y220 — the DEFAULT-priority, non-express fan-out: every control-plane
+        // caller (flood_link_added / flood_self_links_changed / propagate / publish /
+        // ...) routes through here byte-identically to the prior hard-coded
+        // `send_network_message(msg, reliable, false)`. The band-carrying callers go
+        // to `fan_out_qos` directly: `publish_qos` (an origin send) and, R311y221,
+        // `forward_push` (a transit re-forward preserving the received band).
         self.fan_out_qos(reliable, Priority::DEFAULT, false, gossip_gate, build)
     }
 
@@ -1185,12 +1186,20 @@ impl LinkstateForwarder {
     /// `express` through [`send_network_message_qos`](wz_session_core::session_actions)
     /// so an aggregated QoS multilink session pins the fan-out onto the priority-band
     /// link (`select_link`). [`Self::fan_out`] is the `(Priority::DEFAULT,
-    /// express = false)` specialization that every control-plane + transit caller
-    /// takes; `publish_qos` is the only caller that passes a non-DEFAULT band. SCOPE
-    /// BOUND: a NON-origin re-forward (`forward_push`) routes through the DEFAULT
-    /// `fan_out`, so a transit hop re-bands its relay to DEFAULT — the received
-    /// frame's priority is not preserved onward until the deferred
-    /// `FramePayload.priority` work threads it through the inbound handler.
+    /// express = false)` specialization that every control-plane caller takes;
+    /// `publish_qos` (an origin send) and `forward_push` (a transit re-forward,
+    /// R311y221) are the callers that pass a non-DEFAULT band. TRANSIT PRESERVATION
+    /// (R311y221): a NON-origin re-forward on THIS (mesh / linkstate-peer) plane now
+    /// routes through `fan_out_qos` on the received `FramePayload.priority`, so the
+    /// band survives a relay hop end-to-end — the mirror of zenoh `route_data`
+    /// copying `msg.ext_qos` onto egress (`net/routing/dispatcher/pubsub.rs`),
+    /// restricted to the priority sub-field wz decodes (express / congestion-control
+    /// are not carried on `FramePayload`). NAMED FOLLOW-UP (dormant):
+    /// the router-tier re-forward (`RouterForwarder::forward_push_tier` -> the
+    /// DEFAULT `fan_out_tier`, which has no `_qos` twin yet) and the switchboard
+    /// `RouteTable::forward_push` (`routing.rs`, the old `send_network_message`
+    /// path) STILL re-band a transit to DEFAULT; both need the same threading when
+    /// router multilink lands (max_links = 1 today, so the band pin is inert there).
     fn fan_out_qos(
         &self,
         reliable: bool,
@@ -1385,7 +1394,7 @@ impl LinkstateForwarder {
     /// invisible to a client. The CONTROL plane (a sourced subscription flood)
     /// needs no hop-limit — it is bounded by the [`LinkstatepeerInterest`] register
     /// change-gate (re-flood only on a NEW interest), the state-convergent bound.
-    fn forward_push(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
+    fn forward_push(&self, inbound: FaceId, reliable: bool, priority: Priority, push: &PushOwned) {
         // The inbound face's zid + graph link (source resolution) AND the Push's
         // keyexpr resolved against THIS face's link-local alias table (c3c-3 B1) —
         // taken in one SCOPED borrow so the `fan_out` below holds the only live
@@ -1421,8 +1430,13 @@ impl LinkstateForwarder {
 
         // Forward to the interested children in the source's tree — never to the
         // inbound face, nor back toward the source's own neighbour (the shared
-        // re-forward predicate).
-        let _ = self.fan_out(reliable, None, |id, zid| {
+        // re-forward predicate). R311y221 — route through `fan_out_qos` on the
+        // frame's received `priority` (express stays false — a FramePayload carries
+        // no express bit), so an aggregated QoS multilink relay pins the re-forward
+        // onto the band link (`select_link`) and re-encodes ext_qos = the received
+        // band. DEFAULT under a non-QoS session (the `dispatch_push` clamp), so this
+        // is byte-identical to the prior `fan_out` on every non-QoS transit.
+        let _ = self.fan_out_qos(reliable, priority, false, None, |id, zid| {
             Ok(
                 is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
                     .then(|| NetworkMessage::Push(Box::new(carrier.clone()))),
@@ -4904,7 +4918,10 @@ impl FaceForwarder for LinkstateForwarder {
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
-            messages, reliable, ..
+            messages,
+            reliable,
+            priority,
+            ..
         }) = event
         else {
             return;
@@ -4972,7 +4989,12 @@ impl FaceForwarder for LinkstateForwarder {
                 // tree (loop-free), excluding the inbound face.
                 NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
-                    self.forward_push(id, *reliable, push);
+                    // R311y221 — preserve the received band on the transit
+                    // re-forward: a relay hop re-emits on the SAME priority the
+                    // frame arrived with (the priority sub-field of the ext_qos
+                    // zenoh route_data copies onto egress, pubsub.rs), instead of
+                    // re-clamping to DEFAULT.
+                    self.forward_push(id, *reliable, *priority, push);
                     // R311y46 (§5.23 Phase 3a) — local-delivery: a Put matching a
                     // LOCALLY-hosted subscriber fires its handler. forward_push
                     // excludes self, so this is the self/local-delivery seam (in
@@ -5864,6 +5886,7 @@ mod tests {
     fn client_declare_sub(fwd: &LinkstateForwarder, face: FaceId, id: u64, keyexpr: &str) {
         let declare = build_declare_subscriber(id, 0, Some(keyexpr)).expect("build sub");
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(declare))],
@@ -5879,6 +5902,7 @@ mod tests {
     fn client_undeclare_sub(fwd: &LinkstateForwarder, face: FaceId, id: u64) {
         let declare = build_undeclare_subscriber(id);
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(declare))],
@@ -5939,6 +5963,7 @@ mod tests {
         sink_sub.reset();
 
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -6229,6 +6254,7 @@ mod tests {
 
         // The client publishes demo/data via the Push dispatch.
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -6272,6 +6298,7 @@ mod tests {
         sink_cs.reset();
 
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data from client C
@@ -6324,6 +6351,7 @@ mod tests {
             },
         );
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(declare))],
@@ -6339,6 +6367,7 @@ mod tests {
     fn client_undeclare_qabl(fwd: &LinkstateForwarder, face: FaceId, id: u64) {
         let declare = build_undeclare_queryable(id);
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(declare))],
@@ -6863,6 +6892,7 @@ mod tests {
     /// interest-answer test driver (the peer twin of the router's `forward_one`).
     fn forward_one(fwd: &LinkstateForwarder, face: FaceId, msg: NetworkMessage) {
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![msg],
@@ -7810,7 +7840,12 @@ mod tests {
 
         let aliased = wz_session_core::push_build::build_push_aliased(7, None, b"v")
             .expect("build aliased push");
-        fwd.forward_push(FaceId(0), true, &aliased);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &aliased,
+        );
 
         assert_eq!(
             sink_b.frame_count(),
@@ -7846,7 +7881,12 @@ mod tests {
 
         let aliased = wz_session_core::push_build::build_push_aliased(7, None, b"v")
             .expect("build aliased push");
-        fwd.forward_push(FaceId(0), true, &aliased);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &aliased,
+        );
         assert_eq!(
             sink_b.frame_count(),
             0,
@@ -7870,7 +7910,12 @@ mod tests {
 
         let aliased = wz_session_core::push_build::build_push_aliased(9, None, b"v")
             .expect("build aliased push"); // id 9 never declared on this link
-        fwd.forward_push(FaceId(0), true, &aliased);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &aliased,
+        );
         assert_eq!(
             sink_b.frame_count(),
             0,
@@ -7900,7 +7945,12 @@ mod tests {
 
         let aliased = wz_session_core::push_build::build_push_aliased(7, Some("/data"), b"v")
             .expect("build composed-aliased push");
-        fwd.forward_push(FaceId(0), true, &aliased);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &aliased,
+        );
 
         assert_eq!(
             sink_b.frame_count(),
@@ -8064,7 +8114,12 @@ mod tests {
         sink_a.reset();
         sink_b.reset();
 
-        fwd.forward_push(FaceId(0), true, &data_push());
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &data_push(),
+        );
 
         assert_eq!(
             sink_b.frame_count(),
@@ -8100,7 +8155,12 @@ mod tests {
         sink_a.reset();
         sink_b.reset();
 
-        fwd.forward_push(FaceId(0), true, &data_push());
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &data_push(),
+        );
         assert_eq!(sink_a.frame_count(), 0, "not back toward the source");
         assert_eq!(
             sink_b.frame_count(),
@@ -8141,7 +8201,12 @@ mod tests {
 
         let mut push = data_push();
         set_push_source(&mut push, 7); // node_id 7 = A's psid for B
-        fwd.forward_push(FaceId(0), true, &push);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &push,
+        );
 
         assert_eq!(sink_c.frame_count(), 1, "C is self's child in B's tree");
         assert_eq!(sink_a.frame_count(), 0, "A is the inbound face (excluded)");
@@ -8183,6 +8248,7 @@ mod tests {
                                        // Feed via forward() (not forward_push, the mesh-only leg) so the Push arm's
                                        // deliver_to_client_subscribers branch (linkstate_forward.rs:4841) runs.
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(push))],
@@ -8297,6 +8363,7 @@ mod tests {
         assert_eq!(fwd.data_seen(), 0);
 
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))],
@@ -8349,6 +8416,7 @@ mod tests {
         });
 
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -8392,6 +8460,7 @@ mod tests {
         });
 
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -8438,6 +8507,7 @@ mod tests {
             .expect("register the local subscriber");
         }
         let put = || DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -8500,6 +8570,7 @@ mod tests {
         sink_b.reset();
 
         let put = || DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -8574,6 +8645,7 @@ mod tests {
         sink_b.reset();
 
         let put = || DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -8681,6 +8753,7 @@ mod tests {
         sink_b.reset();
 
         let put = || DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -8752,6 +8825,7 @@ mod tests {
         sink_b.reset();
 
         let put = || DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))],
@@ -8807,6 +8881,7 @@ mod tests {
 
         let denied = build_declare_subscriber(0, 0, Some("admin/sub")).expect("build");
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(denied))],
@@ -8827,6 +8902,7 @@ mod tests {
         // An allowed keyexpr registers as usual (no extra deny).
         let allowed = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build");
         let outcome2 = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(allowed))],
@@ -8875,6 +8951,7 @@ mod tests {
 
         let denied = build_declare_queryable(0, 0, Some("admin/q")).expect("build");
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(denied))],
@@ -8895,6 +8972,7 @@ mod tests {
         // An allowed keyexpr registers the queryable as usual.
         let allowed = build_declare_queryable(0, 0, Some("demo/q")).expect("build");
         let outcome2 = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(allowed))],
@@ -8955,6 +9033,7 @@ mod tests {
         fwd.forward(
             FaceId(0),
             IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                priority: wz_session_core::qos::Priority::DEFAULT,
                 reliable: true,
                 sn: 0,
                 messages: vec![NetworkMessage::Request(Box::new(denied))],
@@ -8976,6 +9055,7 @@ mod tests {
         fwd.forward(
             FaceId(0),
             IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                priority: wz_session_core::qos::Priority::DEFAULT,
                 reliable: true,
                 sn: 0,
                 messages: vec![NetworkMessage::Request(Box::new(allowed))],
@@ -9094,6 +9174,7 @@ mod tests {
         });
 
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -9141,6 +9222,7 @@ mod tests {
         });
 
         let mk = || DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -9220,6 +9302,7 @@ mod tests {
         // (1) demo/secret — downsampler stamps the rule timer, ACL then denies.
         let secret = build_push_literal("demo/secret", b"x").expect("build");
         let o1 = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(secret))],
@@ -9231,6 +9314,7 @@ mod tests {
         // (2) demo/data — allowed by the ACL, but inside the interval the timer the
         // denied demo/secret already stamped causes the downsampler to drop it.
         let o2 = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
@@ -9285,6 +9369,7 @@ mod tests {
 
         let big = build_push_literal("demo/data", &[0u8; 32]).expect("build");
         let o1 = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(big))],
@@ -9307,6 +9392,7 @@ mod tests {
         // A small Put (under the limit) still relays.
         let small = build_push_literal("demo/data", b"hi").expect("build"); // 2 bytes
         let o2 = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(small))],
@@ -9342,7 +9428,12 @@ mod tests {
 
         let mut push = data_push();
         set_push_source(&mut push, 7); // resolves via A's link to self's zid
-        fwd.forward_push(FaceId(0), true, &push);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &push,
+        );
         assert_eq!(sink_a.frame_count(), 0, "not echoed to the inbound face");
         assert_eq!(
             sink_b.frame_count(),
@@ -9368,7 +9459,12 @@ mod tests {
 
         let mut push = data_push();
         set_push_source(&mut push, 123); // not in A's link mapping
-        fwd.forward_push(FaceId(0), true, &push);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &push,
+        );
         assert_eq!(sink_a.frame_count(), 0);
         assert_eq!(
             sink_b.frame_count(),
@@ -9451,7 +9547,12 @@ mod tests {
 
         let mut push = data_push();
         set_push_hoplimit(&mut push, 5);
-        fwd.forward_push(FaceId(0), true, &push);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &push,
+        );
         assert_eq!(sink_b.frame_count(), 1, "forwarded to the interested child");
         assert_eq!(
             forwarded_hoplimit(&sink_b.frame_bytes(0)),
@@ -9479,7 +9580,12 @@ mod tests {
 
         let mut push = data_push();
         set_push_hoplimit(&mut push, 1); // budget exhausted
-        fwd.forward_push(FaceId(0), true, &push);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &push,
+        );
         assert_eq!(
             sink_b.frame_count(),
             0,
@@ -9509,7 +9615,12 @@ mod tests {
 
         let push = data_push(); // carries no hop ext
         assert_eq!(read_push_hoplimit(&push), None, "un-stamped");
-        fwd.forward_push(FaceId(0), true, &push);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &push,
+        );
         assert_eq!(sink_b.frame_count(), 1);
         assert_eq!(
             forwarded_hoplimit(&sink_b.frame_bytes(0)),
@@ -9547,7 +9658,12 @@ mod tests {
             let mut push = data_push();
             set_push_source(&mut push, 0); // self-originated from the inbound C
             set_push_hoplimit(&mut push, hop);
-            fwd.forward_push(FaceId(1), true, &push); // inbound = C (the source)
+            fwd.forward_push(
+                FaceId(1),
+                true,
+                wz_session_core::qos::Priority::DEFAULT,
+                &push,
+            ); // inbound = C (the source)
             if sink_a.frame_count() == before {
                 break; // forward_push dropped it — the budget is exhausted
             }
@@ -9679,7 +9795,12 @@ mod tests {
         sink_b.reset();
         sink_c.reset();
 
-        fwd.forward_push(FaceId(0), true, &data_push()); // Push from A (source A)
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &data_push(),
+        ); // Push from A (source A)
         assert_eq!(
             sink_c.frame_count(),
             1,
@@ -9717,7 +9838,12 @@ mod tests {
         sink_b.reset();
         sink_c.reset();
 
-        fwd.forward_push(FaceId(0), true, &data_push());
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &data_push(),
+        );
         assert_eq!(
             sink_b.frame_count(),
             1,
@@ -9725,6 +9851,67 @@ mod tests {
         );
         assert_eq!(sink_c.frame_count(), 0, "NOT to the uninterested child C");
         assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
+    }
+
+    /// R311y221 — a relay hop preserves the band the frame arrived with: S relays
+    /// a Push from A to the interested child B through `forward_push`, and with B
+    /// QoS-negotiated the egress frame carries `ext_qos` = the RECEIVED band, not a
+    /// DEFAULT re-clamp (the faithful mirror of zenoh's `route_data` copying
+    /// `msg.ext_qos` onto egress, `net/routing/dispatcher/pubsub.rs`). Before the
+    /// y221 fix the transit routed through the DEFAULT `fan_out`, so the RealTime
+    /// assertion below would read DEFAULT and fail.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn forward_push_preserves_the_received_band_on_transit() {
+        use crate::session_glue::{parse_inbound, InboundFrame};
+
+        // Decode the band off a forwarded frame (the RX projection wz decodes
+        // feature-agnostically from `ext_qos`, `inbound.rs`).
+        fn egress_band(frame: &[u8]) -> Priority {
+            let InboundFrame::Frame { priority, .. } =
+                parse_inbound(frame).expect("parse forwarded frame")
+            else {
+                panic!("forwarded bytes are not a Frame");
+            };
+            priority
+        }
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S (relay)
+        let (face_a, _sink_a) = peer_face(zid(0x0A)); // source
+        let (face_b, sink_b) = peer_face(zid(0x0B)); // interested child
+                                                     // B must be QoS-negotiated, else the per-face send clamps every
+                                                     // Frame to DEFAULT (`dispatch_push`) and the band cannot be observed.
+        face_b.set_qos_offer(true);
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S-A
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S-B
+        declare_interest(&fwd, FaceId(1), "demo/data");
+
+        // A RealTime Put relayed through S must reach B still banded RealTime.
+        sink_b.reset();
+        fwd.forward_push(FaceId(0), true, Priority::RealTime, &data_push());
+        assert_eq!(sink_b.frame_count(), 1, "relayed to the interested child B");
+        assert_eq!(
+            egress_band(&sink_b.frame_bytes(0)),
+            Priority::RealTime,
+            "transit PRESERVES the received band — not re-clamped to DEFAULT"
+        );
+
+        // Negative control: a DEFAULT transit stays DEFAULT (byte-identical to the
+        // pre-y221 `fan_out` path).
+        sink_b.reset();
+        fwd.forward_push(FaceId(0), true, Priority::DEFAULT, &data_push());
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the DEFAULT transit still relays to B"
+        );
+        assert_eq!(
+            egress_band(&sink_b.frame_bytes(0)),
+            Priority::DEFAULT,
+            "a DEFAULT transit stays DEFAULT"
+        );
     }
 
     #[test]
@@ -9741,7 +9928,12 @@ mod tests {
         sink_a.reset();
         sink_b.reset();
 
-        fwd.forward_push(FaceId(0), true, &data_push());
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &data_push(),
+        );
         assert_eq!(sink_b.frame_count(), 0, "no subscriber -> no forward");
         assert_eq!(sink_a.frame_count(), 0, "not back to the source either");
     }
@@ -9768,7 +9960,12 @@ mod tests {
         sink_b.reset();
         sink_c.reset();
 
-        fwd.forward_push(FaceId(0), true, &data_push());
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &data_push(),
+        );
         assert_eq!(sink_b.frame_count(), 1, "B (interested subtree) forwarded");
         assert_eq!(sink_c.frame_count(), 1, "C (interested subtree) forwarded");
         assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
@@ -9798,7 +9995,12 @@ mod tests {
         sink_c.reset();
 
         let push = build_push_literal("demo/a", b"payload").expect("push demo/a");
-        fwd.forward_push(FaceId(0), true, &push);
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &push,
+        );
         assert_eq!(sink_b.frame_count(), 1, "B subscribed demo/a -> receives");
         assert_eq!(
             sink_c.frame_count(),
@@ -9825,7 +10027,12 @@ mod tests {
         sink_a.reset();
         sink_b.reset();
 
-        fwd.forward_push(FaceId(0), true, &data_push());
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &data_push(),
+        );
         assert_eq!(sink_b.frame_count(), 1, "B (far subscriber) receives");
         assert_eq!(
             sink_a.frame_count(),
@@ -9993,6 +10200,7 @@ mod tests {
 
         let declare = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build");
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(declare))],
@@ -10101,6 +10309,7 @@ mod tests {
 
         let undeclare = build_undeclare_subscriber_with_keyexpr("demo/sub").expect("build");
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(undeclare))],
@@ -10309,6 +10518,7 @@ mod tests {
         ]);
         let oam = build_linkstate_oam_owned(&join).expect("build oam");
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Oam(oam)],
@@ -10844,6 +11054,7 @@ mod tests {
         // Feed an id-only (no-ext) UndeclareQueryable through the forward() dispatch.
         let undecl = wz_session_core::declare_build::build_undeclare_queryable(7);
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(undecl))],
@@ -10956,6 +11167,7 @@ mod tests {
                 .expect("build request");
         set_request_source(&mut request, 7); // node_id 7 = A's psid for B (the querier)
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Request(Box::new(request))],
@@ -11418,6 +11630,7 @@ mod tests {
         let push =
             wz_session_core::push_build::build_push_literal(keyexpr, payload).expect("build push");
         DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(push))],
@@ -11433,6 +11646,7 @@ mod tests {
         let request = wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
             .expect("build request");
         DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Request(Box::new(request))],
@@ -13085,6 +13299,7 @@ mod tests {
     /// `forward()` inbound path (decode + dispatch), exercising the full hop.
     fn feed_message(fwd: &LinkstateForwarder, face: FaceId, msg: NetworkMessage) {
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![msg],

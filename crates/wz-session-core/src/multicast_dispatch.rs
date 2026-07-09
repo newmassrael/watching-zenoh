@@ -1281,7 +1281,15 @@ pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, con
         sn_mask,
         now_ms,
         |msg| {
-            completed = Some(reassembled_frame_outcome(reliable, sn, msg));
+            // Multicast QoS conduits are deferred (R311y215 step 8): the chain
+            // key is DEFAULT (above), so the reassembled outcome carries DEFAULT
+            // too — consistent with the single-conduit multicast SN gate.
+            completed = Some(reassembled_frame_outcome(
+                reliable,
+                sn,
+                crate::qos::Priority::DEFAULT,
+                msg,
+            ));
         },
     );
     if let Some(o) = completed {
@@ -1477,6 +1485,7 @@ mod tests {
         assert_eq!(d.ingest_join(ZID_B, SRC_B, sn0(), 0), JoinOutcome::Admitted);
 
         let frame = |msg| DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![msg],
@@ -1547,6 +1556,7 @@ mod tests {
         let mut d = running_dispatcher::<4>(5_000);
         assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
         let mut o = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(
@@ -1589,6 +1599,7 @@ mod tests {
 
         // Peer A blocks id=3 (an out-of-namespace DeclareSubscriber) in its ingress.
         let mut a = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(DeclareOwned {
@@ -1617,6 +1628,7 @@ mod tests {
         // carries no inherited block from the dead peer A. (A stale, un-reset
         // ingress would consume A's block and wrongly drop this -> len 0.)
         let mut c = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(DeclareOwned {
@@ -1654,6 +1666,7 @@ mod tests {
         use alloc::vec;
         use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         crate::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![crate::network_message::NetworkMessage::Declare(Box::new(
@@ -1683,6 +1696,7 @@ mod tests {
         use alloc::vec;
         use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant as DV};
         crate::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![crate::network_message::NetworkMessage::Declare(Box::new(
@@ -2632,6 +2646,7 @@ mod tests {
 
         // Peer A declares id 5 -> "demo/keyexpr", then publishes an id-only Push(5).
         let mut outcome = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![
@@ -2685,6 +2700,7 @@ mod tests {
         assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
 
         let mut outcome = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(
@@ -2730,6 +2746,7 @@ mod tests {
 
         // Peer A declares id 5, then departs (Close -> evict).
         let mut decl = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(
@@ -2745,6 +2762,7 @@ mod tests {
         // fresh DeclKexpr it must NOT resolve against the dead declaration.
         assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
         let mut outcome = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(
@@ -2796,6 +2814,7 @@ mod tests {
             )));
         }
         let mut b0 = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: fill,
@@ -2808,6 +2827,7 @@ mod tests {
         // in-cap id. Growth is rejected; the in-cap alias still resolves.
         let over = MAX_ALIASES_PER_PEER as u64 + 1;
         let mut b1 = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 1,
             messages: vec![
@@ -2937,6 +2957,7 @@ mod tests {
     ) {
         use crate::driver_loop::DriverLoopOutcome;
         let mut outcome = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: msgs,

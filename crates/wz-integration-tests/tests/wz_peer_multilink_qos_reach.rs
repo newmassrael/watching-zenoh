@@ -52,10 +52,14 @@
 //!     whether or not the joined->primary resolution is present. The deterministic y219b
 //!     guard is the library unit test
 //!     `joined_link_inbound_delivers_to_primary_face_local_subscriber_after_register_joined`.
-//!   - Only the ORIGIN hop is banded: `publish_qos(RealTime)` sets the band at A; a
-//!     transit re-forward (`forward_push`, no priority param) would relay at DEFAULT
-//!     until the deferred `FramePayload.priority` work. This 2-peer topology is
-//!     single-hop, so the bound does not affect the witnesses above.
+//!   - This 2-peer topology is single-hop, so it does not exercise TRANSIT band
+//!     preservation. As of R311y221 a mesh/linkstate-peer relay DOES preserve the
+//!     received band on re-forward (`forward_push` threads `FramePayload.priority`
+//!     into `fan_out_qos`); the deterministic witness is the library unit test
+//!     `forward_push_preserves_the_received_band_on_transit`. The router-tier
+//!     (`forward_push_tier`) + switchboard (`RouteTable::forward_push`) transit
+//!     twins still re-band to DEFAULT — a named follow-up dormant behind router
+//!     multilink (max_links = 1 today).
 //!
 //! Requires the binary built `--features transport-qos,transport-multilink` (pulls
 //! `routing-peer`, so `--peer` / `--publish` / `--subscribe` / `--qos` /

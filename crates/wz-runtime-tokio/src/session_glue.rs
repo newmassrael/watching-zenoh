@@ -2359,6 +2359,72 @@ mod rx_sn_gate_tests {
             "the clear is per-channel: best-effort rejection keeps the reliable chain"
         );
     }
+
+    /// R311y221 — the unicast FRAGMENTED delivery preserves the chain's band
+    /// end-to-end through the PRODUCTION caller (`report_outcome_reassembling` ->
+    /// `reassembled_frame_outcome(*priority, ..)`, drive.rs), not just the leaf
+    /// synthesizer in isolation. A two-fragment reliable chain at a non-DEFAULT
+    /// band completes, and the synthesized whole-frame `FramePayload` must carry
+    /// that band. Guards the exact wiring the leaf-only test cannot reach: a
+    /// regression passing `Priority::DEFAULT` at the drive.rs call site would
+    /// deliver a fragmented prioritized Put at DEFAULT while an un-fragmented one
+    /// keeps its band, and this asserts against that.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn reassembly_caller_delivers_the_chain_band_end_to_end() {
+        use std::cell::Cell;
+        use wz_session_core::drive::report_outcome_reassembling;
+        use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+        use wz_session_core::qos::Priority;
+        use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+
+        let (actions, _driver) =
+            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+        *actions.inbound_peer_zid.lock().unwrap() = Some(vec![0x0A; 4]);
+        let mut reasm: ReassemblyDispatcher<4, 4096> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+
+        // Capture the band of the whole-frame the PRODUCTION caller synthesizes
+        // (Cell so the FnMut sink's borrow does not conflict with the read below).
+        let delivered: Cell<Option<Priority>> = Cell::new(None);
+        let mut sink = |e: IterationEvent<'_>| {
+            if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { priority, .. }) = e {
+                delivered.set(Some(*priority));
+            }
+        };
+
+        // Two fragments (more=1 then more=0) reassemble to [0x00, 0xAA, 0xBB],
+        // which parse_frame_payload accepts as one Unknown network record (the
+        // R74 minimal-parse fixture) so the completion actually builds a
+        // FramePayload. Both fragments ride the InteractiveHigh conduit.
+        let f0 = DriverLoopOutcome::Fragment {
+            reliable: true,
+            sn: 20,
+            more: true,
+            payload: vec![0x00, 0xAA],
+            has_ext: false,
+            extensions: Vec::new(),
+            priority: Priority::InteractiveHigh,
+        };
+        let f1 = DriverLoopOutcome::Fragment {
+            reliable: true,
+            sn: 21,
+            more: false,
+            payload: vec![0xBB],
+            has_ext: false,
+            extensions: Vec::new(),
+            priority: Priority::InteractiveHigh,
+        };
+        report_outcome_reassembling(&f0, &mut reasm, &actions, 0, &mut sink);
+        report_outcome_reassembling(&f1, &mut reasm, &actions, 0, &mut sink);
+
+        assert_eq!(
+            delivered.get(),
+            Some(Priority::InteractiveHigh),
+            "the reassembled whole-frame is delivered on the chain's band via the \
+             drive.rs caller (report_outcome_reassembling), not DEFAULT"
+        );
+    }
 }
 
 /// R311jp — TX batching end-to-end: a `batch_start` window coalesces N
@@ -2720,6 +2786,7 @@ mod reconnect_tx_tests {
             ),
         };
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Declare(Box::new(declare))],

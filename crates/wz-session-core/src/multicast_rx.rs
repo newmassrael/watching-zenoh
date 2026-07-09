@@ -132,6 +132,13 @@ where
                                 messages,
                                 has_ext,
                                 extensions,
+                                // Multicast QoS conduits are deferred (R311y215
+                                // step 8): the single-conduit SN gate
+                                // (`ingest_frame_by_src`) does not isolate by
+                                // priority, so the delivered band is DEFAULT (the
+                                // decoded wire priority is intentionally dropped
+                                // by the `..` above, not surfaced).
+                                priority: crate::qos::Priority::DEFAULT,
                             };
                             // §5.21 routing-namespace — strip this peer's inbound
                             // batch (per-peer via `src`) BEFORE the observer fan,

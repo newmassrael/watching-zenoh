@@ -1341,6 +1341,7 @@ mod tests {
         });
         let push = push_with_keyexpr("topic/a");
         let outcome = DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: false,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(push))],

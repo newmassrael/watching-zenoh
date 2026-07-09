@@ -573,6 +573,7 @@ mod tests {
         use std::boxed::Box;
         use std::vec;
         crate::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(push))],

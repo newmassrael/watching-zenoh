@@ -56,6 +56,7 @@ fn put_push(keyexpr: &str, payload: &[u8]) -> PushOwned {
 
 fn frame_event(push: PushOwned) -> DriverLoopOutcome {
     DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
         reliable: true,
         sn: 0,
         messages: vec![NetworkMessage::Push(Box::new(push))],
