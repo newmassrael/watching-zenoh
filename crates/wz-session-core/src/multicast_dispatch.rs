@@ -1255,7 +1255,13 @@ pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, con
             // The rejected channel's in-progress chain must never complete
             // from mixed generations (pico clears the dbuf + state on an
             // out-of-order fragment, multicast/rx.c).
-            reasm.abort_channel(&multicast_chain_key(peer_idx), reliable);
+            // Multicast QoS conduits are deferred (R311y215 step 8), so the
+            // chain key uses DEFAULT priority.
+            reasm.abort_channel(
+                &multicast_chain_key(peer_idx),
+                crate::qos::Priority::DEFAULT,
+                reliable,
+            );
             return;
         }
         FragmentIngest::UnknownPeer | FragmentIngest::SessionNotRunning => return,
@@ -1269,6 +1275,8 @@ pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, con
             sn,
             more: u8::from(more),
             payload,
+            // Multicast QoS conduits are deferred (R311y215 step 8): DEFAULT.
+            priority: crate::qos::Priority::DEFAULT,
         },
         sn_mask,
         now_ms,
@@ -1325,8 +1333,9 @@ pub fn abort_peer_chains<const SLOTS: usize, const CAP: usize>(
     peer_idx: usize,
 ) {
     let key = multicast_chain_key(peer_idx);
-    reasm.abort_channel(&key, true);
-    reasm.abort_channel(&key, false);
+    // Multicast QoS conduits are deferred (R311y215 step 8): DEFAULT.
+    reasm.abort_channel(&key, crate::qos::Priority::DEFAULT, true);
+    reasm.abort_channel(&key, crate::qos::Priority::DEFAULT, false);
 }
 
 /// Copy a peer ZID into the fixed `([u8; ZID_MAX], len)` key form, clamping

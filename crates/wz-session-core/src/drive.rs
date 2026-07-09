@@ -231,6 +231,17 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                                 crate::extlowlatency::peer_offered_lowlatency(extensions),
                             );
                         }
+                        // transport-qos — the same `&=` merge for the Z_EXT_QOS
+                        // offer on every admitted Init frame (zenoh "both sides
+                        // QoS or NoQoS", both recv_init_syn and recv_init_ack),
+                        // BEFORE the InitAck reflect. `peer_offered_qos` accepts
+                        // the unit OR the z64 QoSLink form at id 0x1.
+                        #[cfg(all(feature = "transport-qos", feature = "codec-init-body"))]
+                        if let InboundFrame::Init { extensions, .. } = &frame {
+                            actions.negotiate_qos_against_peer(crate::extqos::peer_offered_qos(
+                                extensions,
+                            ));
+                        }
                         // session-extcompression — the same `&=` merge for the
                         // Z_EXT_COMPRESSION offer on every admitted Init frame
                         // (zenoh `is_compression &= other_ext.is_some()`, both
@@ -372,16 +383,38 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                             payload,
                             has_ext,
                             extensions,
+                            priority,
                         } => {
+                            // R311y215 (SN-safety F5) — a non-DEFAULT ext_qos on
+                            // a session that did NOT negotiate QoS is a wire-spec
+                            // violation (a peer must not prioritize without a
+                            // negotiated `is_qos`); drop it rather than admit
+                            // prioritized traffic onto a non-QoS transport. Under
+                            // a non-QoS session `priority` is always DEFAULT, so
+                            // this never fires; a QoS session accepts every
+                            // priority on its own conduit.
+                            #[cfg(feature = "transport-qos")]
+                            if !actions.is_qos() && priority != crate::qos::Priority::DEFAULT {
+                                return DriverLoopOutcome::RxSnRejected {
+                                    priority,
+                                    reliable,
+                                    sn,
+                                };
+                            }
                             // R311ke — per-channel RX SN gate (pico
                             // `_z_sn_precedes`, unicast/rx.c:108-131): a stale
                             // / duplicate / reordered frame drops before its
-                            // payload reaches the application layer. The typed
-                            // outcome lets `report_outcome_reassembling` clear
-                            // the channel's in-progress chain (dbuf-clear
+                            // payload reaches the application layer. R311y215 —
+                            // the gate is per-(priority, reliable) conduit. The
+                            // typed outcome lets `report_outcome_reassembling`
+                            // clear the channel's in-progress chain (dbuf-clear
                             // parity) and observers count the drop.
-                            if !actions.admit_rx_frame_sn(reliable, sn) {
-                                return DriverLoopOutcome::RxSnRejected { reliable, sn };
+                            if !actions.admit_rx_frame_sn(priority, reliable, sn) {
+                                return DriverLoopOutcome::RxSnRejected {
+                                    priority,
+                                    reliable,
+                                    sn,
+                                };
                             }
                             match parse_frame_payload(&payload) {
                                 Ok(messages) => DriverLoopOutcome::FramePayload {
@@ -413,17 +446,33 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                             payload,
                             has_ext,
                             extensions,
+                            priority,
                         } => {
-                            // R311ke — fragments ride the same per-channel SN
-                            // counter as frames (pico gates them through the
-                            // same `_z_sn_precedes`, rx.c:160-176), so the gate
-                            // must see them too or a frame following a fragment
-                            // chain would compare against a stale baseline. The
-                            // chain-level ring-consecutive check stays in the
+                            // R311y215 (SN-safety F5) — as with Frame, drop a
+                            // prioritized fragment on a non-QoS session.
+                            #[cfg(feature = "transport-qos")]
+                            if !actions.is_qos() && priority != crate::qos::Priority::DEFAULT {
+                                return DriverLoopOutcome::RxSnRejected {
+                                    priority,
+                                    reliable,
+                                    sn,
+                                };
+                            }
+                            // R311ke — fragments ride the same per-(priority,
+                            // reliable) conduit SN counter as frames (pico gates
+                            // them through the same `_z_sn_precedes`,
+                            // rx.c:160-176), so the gate must see them too or a
+                            // frame following a fragment chain would compare
+                            // against a stale baseline. The chain-level
+                            // ring-consecutive check stays in the
                             // ReassemblyDispatcher (a forward GAP passes here
                             // and aborts there, exactly pico's two-stage check).
-                            if !actions.admit_rx_frame_sn(reliable, sn) {
-                                return DriverLoopOutcome::RxSnRejected { reliable, sn };
+                            if !actions.admit_rx_frame_sn(priority, reliable, sn) {
+                                return DriverLoopOutcome::RxSnRejected {
+                                    priority,
+                                    reliable,
+                                    sn,
+                                };
                             }
                             DriverLoopOutcome::Fragment {
                                 reliable,
@@ -432,6 +481,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                                 payload,
                                 has_ext,
                                 extensions,
+                                priority,
                             }
                         }
                         #[cfg(feature = "codec-init-body")]
@@ -653,10 +703,15 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
     // reassembly chain (pico clears the dbuf + state on an out-of-order
     // FRAME or FRAGMENT, rx.c:112-113/166-168): a continuation superseded
     // by the rejection must never complete a chain from mixed generations.
-    if let DriverLoopOutcome::RxSnRejected { reliable, .. } = outcome {
+    if let DriverLoopOutcome::RxSnRejected {
+        priority, reliable, ..
+    } = outcome
+    {
         R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
             let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
-            reasm.abort_channel(zid, *reliable);
+            // R311y215 (SN-safety F4) — clear only the (peer, reliable, priority)
+            // chain the rejected frame's conduit owns, not a sibling priority's.
+            reasm.abort_channel(zid, *priority, *reliable);
         });
         return;
     }
@@ -665,6 +720,7 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
         sn,
         more,
         payload,
+        priority,
         ..
     } = outcome
     else {
@@ -691,6 +747,8 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
                 sn: *sn,
                 more: u8::from(*more),
                 payload: payload.as_slice(),
+                // R311y215 — key the chain by (peer, reliable, priority).
+                priority: *priority,
             },
             sn_mask,
             now_ms,

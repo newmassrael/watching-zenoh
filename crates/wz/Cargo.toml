@@ -751,6 +751,15 @@ transport-link-ws = ["wz-runtime-tokio?/transport-link-ws"]
 # zextunit!(0x5,false)); weak-forwards the runtime-tokio lowlatency gate. AP-only
 # (no lwip forward). The functional alternative to transport-fragmentation.
 transport-lowlatency = ["wz-runtime-tokio?/transport-lowlatency"]
+
+# transport-qos (R311y215, extqos) — per-priority SN conduits + is_qos Init
+# negotiation + Frame ext_qos wire. Opt-in (not in any preset yet); the
+# priority-select follow-on (R311y216) + a wz<->zenohd priority-range interop
+# (S4) light it up. Forwards to whichever runtime facade is active.
+transport-qos = [
+    "wz-runtime-tokio?/transport-qos",
+    "wz-runtime-coop?/transport-qos",
+]
 # R311mc — transport-multicast additionally weak-forwards to wz-session-lwip:
 # the MCU multicast drive loop (run_multicast_session) + its observer-staging
 # sinks (MulticastReplyQueue) live in wz-session-lwip's OWN transport-multicast

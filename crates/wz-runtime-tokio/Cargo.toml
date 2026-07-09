@@ -566,6 +566,10 @@ transport-fragmentation = ["wz-session-core/transport-fragmentation", "reassembl
 # session-extauth is AP-only). No new dependency.
 transport-lowlatency = ["wz-session-core/transport-lowlatency"]
 
+# transport-qos (R311y215) — forwards the session-core QoS conduit gate
+# (per-priority SN conduits + is_qos Init negotiation + Frame ext_qos wire).
+transport-qos = ["wz-session-core/transport-qos"]
+
 # transport-compression / session-extcompression — forward the session-core
 # lz4 batch wrap + the Z_EXT_COMPRESSION (0x6) handshake. AP/unicast (no MCU
 # forward, as session-extauth / transport-lowlatency are AP-only). NO new dep

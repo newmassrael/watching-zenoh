@@ -157,6 +157,14 @@ pub enum InboundFrame {
         payload: Vec<u8>,
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
+        /// R311y215 — the QoS priority projected from the `ext_qos` transport
+        /// extension (id `0x1`, z64), [`Priority::DEFAULT`](crate::qos::Priority)
+        /// when the frame carries none (a pre-QoS / DEFAULT-priority frame). wz
+        /// decodes this feature-agnostically; whether a non-DEFAULT priority is
+        /// HONORED (per-priority RX conduit) or dropped (an un-negotiated QoS
+        /// frame — SN-safety F5) is decided at the [`crate::drive`] admit seam
+        /// against the session's negotiated `is_qos`.
+        priority: crate::qos::Priority,
     },
     /// `_Z_MID_T_FRAGMENT` (0x06). One fragment of a fragmented
     /// established-session message. Body mirrors `T_MID_FRAME` (VLE `sn`,
@@ -177,9 +185,36 @@ pub enum InboundFrame {
         payload: Vec<u8>,
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
+        /// R311y215 — the QoS priority projected from the fragment's `ext_qos`
+        /// (id `0x1`, z64), present on EVERY fragment of a QoS chain so the
+        /// reassembly dispatcher can key the chain by (peer, reliable, priority).
+        /// [`Priority::DEFAULT`](crate::qos::Priority) for a pre-QoS chain.
+        priority: crate::qos::Priority,
     },
     /// MID outside the handshake/close/keepalive set.
     Unknown { mid: u8 },
+}
+
+/// R311y215 — project the QoS priority carried by a decoded Frame/Fragment ext
+/// chain: the z64 `ext_qos` extension (id `0x1`, `crate::extqos::QOS_EXT_ID`)
+/// packs the priority in the low 3 bits (zenoh transport `QoSType`,
+/// `transport/mod.rs:268-286`). Returns [`Priority::DEFAULT`](crate::qos::Priority)
+/// when no such ext is present — a pre-QoS frame, byte-identical to today. The
+/// scan is feature-agnostic (wz reads whatever the peer sent); honoring vs
+/// dropping a non-DEFAULT priority is the [`crate::drive`] admit seam's call.
+#[cfg(feature = "codec-frame")]
+fn ext_qos_priority(extensions: &[ExtEntryOwned]) -> crate::qos::Priority {
+    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+    for ext in extensions {
+        // id 0x1 in the Frame/Fragment ext space is QoS (0x2 First / 0x3 Drop
+        // are Fragment-only unit exts); the z64 body carries the priority.
+        if ext.ext_id() == 0x01 {
+            if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
+                return crate::qos::Priority::from_wire((z.value & 0x07) as u8);
+            }
+        }
+    }
+    crate::qos::Priority::DEFAULT
 }
 
 /// Parse a single transport-message frame from `bytes`.
@@ -298,12 +333,14 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             cursor
                 .advance(remaining)
                 .map_err(InboundParseError::Codec)?;
+            let priority = ext_qos_priority(&extensions);
             Ok(InboundFrame::Frame {
                 reliable: (flags & wire_const::FLAG_T_FRAME_R) != 0,
                 sn,
                 payload,
                 has_ext,
                 extensions,
+                priority,
             })
         }
         #[cfg(feature = "reassembly")]
@@ -326,6 +363,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             cursor
                 .advance(remaining)
                 .map_err(InboundParseError::Codec)?;
+            let priority = ext_qos_priority(&extensions);
             Ok(InboundFrame::Fragment {
                 reliable: (flags & wire_const::FLAG_T_FRAGMENT_R) != 0,
                 sn,
@@ -333,6 +371,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 payload,
                 has_ext,
                 extensions,
+                priority,
             })
         }
         #[cfg(feature = "codec-keep-alive")]

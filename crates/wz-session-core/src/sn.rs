@@ -176,6 +176,88 @@ impl RxSn {
     }
 }
 
+/// R311y215 (transport-qos) — the inbound Frame/Fragment SN gates: ONE
+/// [`RxSn`] per `Priority` conduit when `transport-qos` compiles (zenoh's
+/// per-(priority,reliability) `TransportPriorityRx`,
+/// `io/zenoh-transport/src/unicast/universal/rx.rs`), else the single R311ke
+/// conduit. The RX mirror of [`crate::session_actions::FrameTxConduits`]: the
+/// array SHAPE is compile-time behind the feature (no runtime `is_qos` heap
+/// sizing on an MCU no-alloc build), and a non-QoS session admits only
+/// `conduit[Priority::DEFAULT]` (the send seam forces `priority = Data` when
+/// `!is_qos()`, so no peer ever fills the others). Every conduit is seeded from
+/// the one OpenSyn/OpenAck `initial_sn` — zenoh seeds each priority Rx from the
+/// single announced origin (SN-safety S2/S3).
+///
+/// The per-(priority,reliability) split is what makes a QoS session's RX gate
+/// INDEPENDENT across priorities: a `high` frame at SN=5 and a `low` frame at
+/// SN=3 both admit (they gate on SEPARATE conduits), where the pre-QoS single
+/// gate would drop the second as out-of-window. That independence is the
+/// property the priority-select multilink (R311y216) relies on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+// Without `transport-qos` the struct is a single `RxSn` field whose `Default`
+// is trivially derivable (clippy::derivable_impls); under the feature the
+// `[RxSn; NUM]` array has no generic `Default` derive, so the seed-all-conduits
+// default is written by hand below.
+#[cfg_attr(not(feature = "transport-qos"), derive(Default))]
+pub struct RxConduits {
+    #[cfg(feature = "transport-qos")]
+    conduits: [RxSn; crate::qos::Priority::NUM],
+    #[cfg(not(feature = "transport-qos"))]
+    conduit: RxSn,
+}
+
+#[cfg(feature = "transport-qos")]
+impl Default for RxConduits {
+    fn default() -> Self {
+        Self {
+            conduits: core::array::from_fn(|_| RxSn::default()),
+        }
+    }
+}
+
+impl RxConduits {
+    /// The `(priority)` conduit — `conduits[priority]` under `transport-qos`,
+    /// the single conduit otherwise (priority ignored, no cfg-skew — mirrors
+    /// [`crate::session_actions::FrameTxConduits::select`]).
+    #[inline]
+    fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut RxSn {
+        #[cfg(feature = "transport-qos")]
+        {
+            &mut self.conduits[_priority as usize]
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        {
+            &mut self.conduit
+        }
+    }
+
+    /// Seed EVERY conduit one before `initial_sn` (the OpenSyn/OpenAck origin),
+    /// so the first frame at exactly `initial_sn` passes [`RxSn::admit`] on any
+    /// priority (SN-safety S2/S3 — all conduits share the one announced origin).
+    pub fn seed(&mut self, mask: u64, initial_sn: u64) {
+        #[cfg(feature = "transport-qos")]
+        for c in &mut self.conduits {
+            c.seed(mask, initial_sn);
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        self.conduit.seed(mask, initial_sn);
+    }
+
+    /// Admit one inbound frame SN on its `(priority, reliable)` conduit — the
+    /// half-window [`RxSn::admit`] against THAT conduit's last accepted SN.
+    /// Under a non-QoS session `priority` is `DEFAULT` and there is one conduit,
+    /// so behavior is identical to the pre-QoS single gate.
+    pub fn admit(
+        &mut self,
+        priority: crate::qos::Priority,
+        mask: u64,
+        reliable: bool,
+        sn: u64,
+    ) -> bool {
+        self.select_mut(priority).admit(mask, reliable, sn)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +389,47 @@ mod tests {
         // RX seeding contract: baseline = decrement(advertised next) admits
         // the first minted SN.
         assert!(precedes(mask, decrement(mask, advertised), 0));
+    }
+
+    /// R311y215 — the per-priority RX conduits gate INDEPENDENTLY: a
+    /// high-priority frame at SN=5 and a low-priority frame at a LOWER SN=3 both
+    /// admit, because they gate on SEPARATE conduits. The pre-QoS single gate
+    /// would drop the SN=3 frame as out-of-window after admitting SN=5 — this
+    /// independence is the non-hollow core of the QoS transport (and the
+    /// invariant the R311y216 priority-select multilink relies on).
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn rx_conduits_gate_independently_per_priority() {
+        use crate::qos::Priority;
+        let mask = mask_from_res(0x02);
+        let mut rx = RxConduits::default();
+        // Seed all conduits from one origin: baseline = decrement(1) = 0.
+        rx.seed(mask, 1);
+        // High conduit admits a forward SN=5, advancing ONLY its own baseline.
+        assert!(rx.admit(Priority::RealTime, mask, true, 5));
+        // Low conduit still admits the LOWER SN=3 off its own baseline (0) — a
+        // shared gate would have advanced to 5 and dropped 3 as stale.
+        assert!(
+            rx.admit(Priority::Background, mask, true, 3),
+            "the low conduit gates on its own baseline, independent of high"
+        );
+        // Within each conduit the half-window gate still holds.
+        assert!(
+            !rx.admit(Priority::RealTime, mask, true, 5),
+            "high duplicate is stale"
+        );
+        assert!(
+            !rx.admit(Priority::Background, mask, true, 3),
+            "low duplicate is stale"
+        );
+        assert!(
+            rx.admit(Priority::Background, mask, true, 4),
+            "low advances on its own ring"
+        );
+        // reliable vs best-effort stay independent WITHIN a priority too.
+        assert!(
+            rx.admit(Priority::RealTime, mask, false, 2),
+            "the high best-effort channel is seeded + gates apart from high reliable"
+        );
     }
 }

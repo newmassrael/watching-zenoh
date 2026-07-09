@@ -191,6 +191,24 @@ transport-lowlatency = ["alloc", "codec-frame", "session-unicast"]
 # bare transport-lowlatency rx primitive). NO handshake codecs forced.
 transport-compression = ["alloc", "dep:lz4_flex"]
 
+# transport-qos (R311y215, extqos) — the zenoh QoS transport: per-(priority,
+# reliability) SN conduits + the `is_qos` Init negotiation + the Frame `ext_qos`
+# priority wire. When ON, `outbound_frame_sn` / `rx_sn` become per-`Priority`
+# conduit arrays sized `Priority::NUM` (zenoh `universal/transport.rs`
+# `if is_qos { Priority::NUM } else { 1 }`), each Frame carrying a non-DEFAULT
+# priority rides its own SN ring (gated independently on RX) so a multilink
+# priority-select can pin one conduit to one link WITHOUT the cross-link
+# stale-drop the single-ring model suffers. When OFF the SN state keeps the
+# R311y214 2-wide (reliable/best_effort) shape — the array SHAPE is compile-time
+# behind this feature, never runtime-`is_qos`-sized (an MCU no-alloc build must
+# not size a heap array by a negotiated bool). Needs `codec-frame` (the ext_qos
+# rides the Frame), `session-unicast` (the establishment FSM the is_qos ext
+# negotiates on), `alloc` (the ext chain). The Init offer / `&=` merge is
+# additively gated on `codec-init-body` at its use sites (bare build carries no
+# dead seam, the transport-lowlatency discipline). is_qos && is_lowlatency is
+# refused at offer-injection (zenoh `manager.rs:264`).
+transport-qos = ["alloc", "codec-frame", "session-unicast"]
+
 # R311y9 — per-session transport byte/message counters. Additive instrumentation
 # (4 AtomicUsize + 2 single-site increments at the send_wire/dispatch_link_event
 # seams + a public snapshot accessor); zero extra deps. Off by default; the

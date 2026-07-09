@@ -759,12 +759,22 @@ pub mod extauth;
 #[cfg(any(
     feature = "transport-lowlatency",
     feature = "session-extcompression",
-    feature = "transport-shm"
+    feature = "transport-shm",
+    feature = "transport-qos"
 ))]
 pub mod unit_ext;
 
 #[cfg(feature = "transport-lowlatency")]
 pub mod extlowlatency;
+
+/// SSOT for the Z_EXT_QOS establishment ext (`transport-qos`) — the wz mirror
+/// of zenoh `init::ext::QoS` (`zextunit!(0x1,false)`). The codec layer (the 0x1
+/// unit ext + the peer-offer projector that also tolerates the z64 `QoSLink`
+/// form a priority-configured zenohd sends); the per-session `is_qos` state, the
+/// `&=` negotiation, the per-priority SN conduits, and the Frame ext_qos wire
+/// live in `session_actions` / `drive` / `inbound` / `frame_encode`.
+#[cfg(feature = "transport-qos")]
+pub mod extqos;
 
 /// SSOT for the transport-level batch COMPRESSION wrap (`transport-compression`)
 /// — the wz mirror of zenoh's per-batch lz4 codec (batch.rs). `compress_batch` /

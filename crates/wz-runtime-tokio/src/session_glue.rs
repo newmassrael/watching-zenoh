@@ -1109,16 +1109,19 @@ mod tests {
         params.initial_sn = 42;
         let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
         assert_eq!(
-            actions.next_outbound_frame_sn(true, mask),
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
             42,
             "first SN must equal params.initial_sn"
         );
         assert_eq!(
-            actions.next_outbound_frame_sn(true, mask),
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
             43,
             "subsequent SNs must increment by 1"
         );
-        assert_eq!(actions.next_outbound_frame_sn(true, mask), 44);
+        assert_eq!(
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
+            44
+        );
     }
 
     /// R311kb — the mint wraps at the ring seam: an `initial_sn` at the
@@ -1130,13 +1133,19 @@ mod tests {
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = mask;
         let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
-        assert_eq!(actions.next_outbound_frame_sn(true, mask), mask);
         assert_eq!(
-            actions.next_outbound_frame_sn(true, mask),
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
+            mask
+        );
+        assert_eq!(
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
             0,
             "the mint must wrap mask -> 0 on the negotiated ring"
         );
-        assert_eq!(actions.next_outbound_frame_sn(true, mask), 1);
+        assert_eq!(
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
+            1
+        );
     }
 
     /// R311y214 — the reliable and best-effort channels are INDEPENDENT
@@ -1156,31 +1165,65 @@ mod tests {
 
         // Both channels start at the announced origin.
         assert_eq!(
-            actions.next_outbound_frame_sn(true, mask),
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
             42,
             "reliable #1"
         );
         assert_eq!(
-            actions.next_outbound_frame_sn(false, mask),
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, false, mask),
             42,
             "best-effort #1 is independent — starts at initial_sn, not 43"
         );
         // Interleave: each channel advances only itself.
         assert_eq!(
-            actions.next_outbound_frame_sn(true, mask),
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
             43,
             "reliable #2"
         );
         assert_eq!(
-            actions.next_outbound_frame_sn(true, mask),
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
             44,
             "reliable #3"
         );
         assert_eq!(
-            actions.next_outbound_frame_sn(false, mask),
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, false, mask),
             43,
             "best-effort #2 — a best-effort mint never advanced the reliable ring"
         );
+    }
+
+    /// R311y215 — the `is_qos` transport capability negotiates by AND of both
+    /// sides (zenoh "either side NoQoS -> NoQoS"): a local offer ANDed with the
+    /// peer's Init `ext_qos` offer. And it is mutually exclusive with
+    /// `is_lowlatency` (zenoh `manager.rs:264`): a QoS offer staged after a
+    /// lowlatency offer is refused at the offer-injection seam.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn is_qos_negotiates_by_and_and_is_lowlatency_exclusive() {
+        let params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        assert!(!actions.is_qos(), "default: QoS not offered");
+        assert!(actions.set_qos_offer(true), "offer applied");
+        actions.negotiate_qos_against_peer(true);
+        assert!(actions.is_qos(), "both sides QoS -> is_qos");
+        actions.negotiate_qos_against_peer(false);
+        assert!(
+            !actions.is_qos(),
+            "either side NoQoS -> NoQoS (the &= fold)"
+        );
+
+        // Exclusivity: a lowlatency offer refuses a later QoS offer.
+        #[cfg(feature = "transport-lowlatency")]
+        {
+            let p2 = wz_runtime_tokio_test_support::fixture_session_init_params();
+            let (a2, _d2) = crate::test_fixtures::recording_actions_with_params(p2);
+            a2.set_lowlatency_offer(true);
+            assert!(
+                !a2.set_qos_offer(true),
+                "is_qos && is_lowlatency incompatible -> the QoS offer is refused"
+            );
+            assert!(!a2.is_qos(), "the refused QoS offer left is_qos false");
+        }
     }
 
     // ── R311hw / R311hx (R311hz refactor) — codec & declare behavioural
@@ -2030,6 +2073,7 @@ mod fragment_tx_tests {
                     sn,
                     more: u8::from(more),
                     payload: &payload,
+                    priority: wz_session_core::qos::Priority::DEFAULT,
                 },
                 wz_session_core::sn::mask_from_res(0x02),
                 0,
@@ -2221,19 +2265,19 @@ mod rx_sn_gate_tests {
             .handle_inbound(&craft_openack_wire(5))
             .expect("parse OpenAck");
         assert!(
-            !actions.admit_rx_frame_sn(true, 4),
+            !actions.admit_rx_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, 4),
             "a frame BEFORE the announced initial_sn is stale"
         );
         assert!(
-            actions.admit_rx_frame_sn(true, 5),
+            actions.admit_rx_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, 5),
             "the first frame at exactly initial_sn passes (decrement seed)"
         );
         assert!(
-            !actions.admit_rx_frame_sn(true, 5),
+            !actions.admit_rx_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, 5),
             "and the duplicate of it is stale"
         );
         assert!(
-            actions.admit_rx_frame_sn(false, 5),
+            actions.admit_rx_frame_sn(wz_session_core::qos::Priority::DEFAULT, false, 5),
             "the best-effort channel was seeded too and gates independently"
         );
     }
@@ -2262,6 +2306,7 @@ mod rx_sn_gate_tests {
             payload: vec![0x01],
             has_ext: false,
             extensions: Vec::new(),
+            priority: wz_session_core::qos::Priority::DEFAULT,
         };
         report_outcome_reassembling(&begin, &mut reasm, &actions, 0, &mut sink);
         assert_eq!(reasm.active_chains(), 1, "chain armed");
@@ -2270,6 +2315,7 @@ mod rx_sn_gate_tests {
         let rejected = DriverLoopOutcome::RxSnRejected {
             reliable: true,
             sn: 9,
+            priority: wz_session_core::qos::Priority::DEFAULT,
         };
         report_outcome_reassembling(&rejected, &mut reasm, &actions, 0, &mut sink);
         assert_eq!(
@@ -2283,6 +2329,7 @@ mod rx_sn_gate_tests {
         let rejected_be = DriverLoopOutcome::RxSnRejected {
             reliable: false,
             sn: 9,
+            priority: wz_session_core::qos::Priority::DEFAULT,
         };
         report_outcome_reassembling(&rejected_be, &mut reasm, &actions, 0, &mut sink);
         assert_eq!(
@@ -2967,9 +3014,18 @@ mod reconnect_tx_tests {
         assert_eq!(actions.live_link_count(), 1);
 
         // Advance the shared outbound SN mid-stream: 42, 43, 44 -> counter 45.
-        assert_eq!(actions.next_outbound_frame_sn(true, mask), 42);
-        assert_eq!(actions.next_outbound_frame_sn(true, mask), 43);
-        assert_eq!(actions.next_outbound_frame_sn(true, mask), 44);
+        assert_eq!(
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
+            42
+        );
+        assert_eq!(
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
+            43
+        );
+        assert_eq!(
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
+            44
+        );
 
         // GUARD: a reset while a link is live is a no-op on the shared core ->
         // the SN continues from 45 (NOT re-seeded to 42) and the link stays
@@ -2981,7 +3037,7 @@ mod reconnect_tx_tests {
             "the survivor stays live across a guarded reset"
         );
         assert_eq!(
-            actions.next_outbound_frame_sn(true, mask),
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
             45,
             "a live-link reset must PRESERVE the shared outbound SN (guard no-op)"
         );
@@ -2992,7 +3048,7 @@ mod reconnect_tx_tests {
         assert_eq!(actions.live_link_count(), 0);
         actions.reset_for_reopen();
         assert_eq!(
-            actions.next_outbound_frame_sn(true, mask),
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
             42,
             "with the aggregate empty the reset re-seeds the SN (fresh-rebuild)"
         );

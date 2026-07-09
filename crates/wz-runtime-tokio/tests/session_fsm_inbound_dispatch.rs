@@ -218,6 +218,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
         payload: Vec::new(),
         has_ext: false,
         extensions: Vec::new(),
+        priority: wz_runtime_tokio::session_glue::Priority::DEFAULT,
     };
     assert_eq!(
         inbound_to_fsm_event(&frame),
@@ -247,6 +248,7 @@ fn parse_inbound_decodes_frame_with_sn_and_payload() {
             payload,
             has_ext,
             extensions,
+            ..
         } => {
             assert!(reliable, "FLAG_T_FRAME_R must surface as reliable=true");
             assert_eq!(sn, 1);

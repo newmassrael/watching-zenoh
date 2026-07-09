@@ -63,6 +63,13 @@ pub enum DriverLoopOutcome {
         messages: Vec<NetworkMessage>,
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
+        // R311y215 — the DELIVERED-frame priority (app-observability of the
+        // decoded ext_qos) is deferred to R311y216, where the priority-select
+        // witness that consumes it lands. The FUNCTIONAL RX priority — the
+        // per-priority SN-conduit gate (admit_rx_frame_sn) and the reassembly
+        // chain key ([`DriverLoopOutcome::Fragment`] + [`RxSnRejected`]) — is
+        // complete in y215; the Frame's priority is decoded (InboundFrame::Frame)
+        // and gates its conduit, it is simply not surfaced on FramePayload yet.
     },
     /// `parse_inbound` rejected the wire bytes, OR the Frame envelope
     /// parsed but `parse_frame_payload` could not decode an authored
@@ -87,7 +94,14 @@ pub enum DriverLoopOutcome {
     /// was superseded never completes from mixed generations. TCP's
     /// in-order delivery cannot produce this; UDP unicast can.
     #[cfg(feature = "codec-frame")]
-    RxSnRejected { reliable: bool, sn: u64 },
+    RxSnRejected {
+        /// R311y215 — the QoS priority conduit the rejected frame gated on, so
+        /// the drive helper clears the in-progress reassembly chain on the RIGHT
+        /// (peer, reliable, priority) key (SN-safety F4). DEFAULT under non-QoS.
+        priority: crate::qos::Priority,
+        reliable: bool,
+        sn: u64,
+    },
     /// R311kc — the InitAck's size parameters exceeded our InitSyn
     /// advertisement (the zenoh-pico
     /// `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` rejection,
@@ -132,6 +146,10 @@ pub enum DriverLoopOutcome {
         payload: Vec<u8>,
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
+        /// R311y215 — the QoS priority projected from this fragment's `ext_qos`,
+        /// carried up so the drive loop keys the reassembly chain by (peer,
+        /// reliable, priority). DEFAULT for a pre-QoS chain.
+        priority: crate::qos::Priority,
     },
 }
 

@@ -20,6 +20,8 @@ use alloc::vec::Vec;
 use sce_forge_runtime::codec::{CodecError, SceSink, VecSink};
 use wz_codecs::wire_const;
 
+use crate::qos::Priority;
+
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{Declare, DeclareOwned};
 use wz_codecs::interest::{Interest, InterestOwned};
@@ -48,6 +50,50 @@ pub(crate) fn frame_flags(reliable: bool) -> u8 {
     }
 }
 
+/// R311y215 — the `ext_qos` transport-extension header byte written after
+/// `VLE(sn)` on a QoS Frame / Fragment: ext-id `0x1`, encoding `z64` (`0b01 <<
+/// 5` = `0x20`), MANDATORY (`M`, `0x10`) → `0x31`. zenoh
+/// `frame::ext::QoS = fragment::ext::QoS = zextz64!(0x1, true)`
+/// (`commons/zenoh-protocol/src/transport/{frame,fragment}.rs`); the ext-header
+/// bit layout is `id[0:3] | M[4] | enc[5:6] | Z[7]`
+/// (`commons/zenoh-protocol/src/common/extension.rs:60-68`), matching the wz
+/// `ExtEntry` codec. The z64 body is a single `VLE(priority)` (the transport
+/// `QoSType` packs the priority in the low 3 bits, the rest reserved —
+/// congestion/express are network-QoS, not transport;
+/// `transport/mod.rs:268-286`). Mandatory means a peer that does not understand
+/// QoS must reject the frame rather than skip the ext — but a peer only sees
+/// this ext when it negotiated `is_qos` in the first place, so the M bit is a
+/// belt-and-braces faithfulness detail (RANK1) rather than a live divergence.
+#[cfg(feature = "transport-qos")]
+const QOS_EXT_HEADER: u8 = 0x31;
+
+/// R311y215 — the on-wire byte width of one `ext_qos` extension: the `0x31`
+/// header + a single-byte `VLE(priority)` (priority is `0..=7`, always `< 0x80`,
+/// so the VLE is one byte). The fragment chunk-budget subtracts this on every
+/// fragment when QoS rides the chain (see [`fragment_chunk_size`]).
+#[cfg(feature = "transport-fragmentation")]
+const QOS_EXT_WIRE_BYTES: usize = 2;
+
+/// R311y215 — append one `ext_qos` extension (`[header][VLE(priority)]`) to
+/// `buf`. `chained` sets the ext-chain continuation `Z` bit (`0x80`) so a
+/// further extension (the Fragment `FRAGMENT_FIRST` marker, id `0x2`) can follow
+/// — zenoh writes the exts in id-ascending order (`0x1` QoS, then `0x2` First),
+/// each carrying the continuation bit while another follows
+/// (`zenoh-codec/src/transport/fragment.rs` `write`). The z64 body reuses the
+/// codec's `write_vle_u64` primitive rather than a hand-rolled VLE.
+#[cfg(feature = "transport-qos")]
+fn write_qos_ext(buf: &mut Vec<u8>, priority: Priority, chained: bool) {
+    let header = if chained {
+        QOS_EXT_HEADER | wire_const::FLAG_T_Z
+    } else {
+        QOS_EXT_HEADER
+    };
+    buf.push(header);
+    let mut sink = VecSink::new(buf);
+    sink.write_vle_u64(priority.wire_byte() as u64)
+        .expect("VecSink is infallible");
+}
+
 /// R311jq — write the FRAME prefix (header byte + `VLE(sn)`) into `buf`.
 /// The single home of the prefix wire format, shared by the
 /// immediate-path [`encode_frame_envelope`] and the batching open-frame
@@ -57,16 +103,45 @@ pub(crate) fn frame_flags(reliable: bool) -> u8 {
 /// — it IS the wire format (zenoh-pico VLE base-128 encoding per
 /// `vendor/zenoh-pico/src/protocol/codec/core.c`), not consumer-tunable
 /// logic.
-pub(crate) fn begin_frame(buf: &mut Vec<u8>, sn: u64, parent_flags: u8) {
-    buf.push(parent_flags | wire_const::T_MID_FRAME);
-    let mut sink = VecSink::new(buf);
-    let mut vle = sn;
-    while vle >= 0x80 {
-        sink.write_u8((vle as u8 & 0x7F) | 0x80)
-            .expect("VecSink is infallible");
-        vle >>= 7;
+///
+/// R311y215 — `ext_qos` carries the Frame's QoS priority (`Some` iff a QoS
+/// session sends a non-DEFAULT priority; see
+/// [`crate::session_actions::SessionLinkActions::dispatch_network_message`]).
+/// When present the header gains `FLAG_T_Z` and a single z64 ext_qos
+/// (`[0x31][VLE(priority)]`, [`write_qos_ext`]) is written between `VLE(sn)` and
+/// the payload — zenoh `frame::ext::QoS`, written only when `!= DEFAULT`
+/// (`zenoh-codec/src/transport/frame.rs`). A `None` (DEFAULT / non-QoS) Frame is
+/// byte-identical to a pre-QoS Frame. The Frame carries only the QoS ext (no
+/// First/Drop markers — those are Fragment-only), so the ext is never chained.
+pub(crate) fn begin_frame(buf: &mut Vec<u8>, sn: u64, parent_flags: u8, ext_qos: Option<Priority>) {
+    // The QoS ext (when present) sets the Frame-level ext-chain Z flag.
+    #[cfg(feature = "transport-qos")]
+    let z = if ext_qos.is_some() {
+        wire_const::FLAG_T_Z
+    } else {
+        0u8
+    };
+    #[cfg(not(feature = "transport-qos"))]
+    let z = {
+        let _ = ext_qos;
+        0u8
+    };
+    buf.push(parent_flags | z | wire_const::T_MID_FRAME);
+    {
+        let mut sink = VecSink::new(buf);
+        let mut vle = sn;
+        while vle >= 0x80 {
+            sink.write_u8((vle as u8 & 0x7F) | 0x80)
+                .expect("VecSink is infallible");
+            vle >>= 7;
+        }
+        sink.write_u8(vle as u8).expect("VecSink is infallible");
     }
-    sink.write_u8(vle as u8).expect("VecSink is infallible");
+    #[cfg(feature = "transport-qos")]
+    if let Some(priority) = ext_qos {
+        // Frame's sole ext → never chained (Z clear on the ext header).
+        write_qos_ext(buf, priority, false);
+    }
 }
 
 /// R311jq — derive the link-driver [`Reliability`] of an already-encoded
@@ -108,13 +183,15 @@ pub(crate) fn encode_frame_envelope<P>(
     sn: u64,
     parent_flags: u8,
     worst_case_payload: usize,
+    ext_qos: Option<Priority>,
     payload_encode: P,
 ) -> Vec<u8>
 where
     P: FnOnce(&mut VecSink<'_>) -> Result<(), CodecError>,
 {
-    let mut wire = Vec::with_capacity(1 + 10 + worst_case_payload);
-    begin_frame(&mut wire, sn, parent_flags);
+    // +2 for a possible ext_qos ([0x31][VLE(priority)]); harmless slack when absent.
+    let mut wire = Vec::with_capacity(1 + 10 + 2 + worst_case_payload);
+    begin_frame(&mut wire, sn, parent_flags, ext_qos);
     {
         let mut sink = VecSink::new(&mut wire);
         payload_encode(&mut sink).expect("VecSink is infallible");
@@ -255,6 +332,7 @@ pub fn encode_frame_with_response(sn: u64, response: ResponseOwned, reliable: bo
         sn,
         frame_flags(reliable),
         Response::MAX_ENCODED_BYTES,
+        None,
         response_body(&response),
     )
 }
@@ -280,6 +358,7 @@ pub fn encode_frame_with_response_final(
         sn,
         frame_flags(reliable),
         ResponseFinal::MAX_ENCODED_BYTES,
+        None,
         response_final_body(&response_final),
     )
 }
@@ -301,6 +380,7 @@ pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool)
         sn,
         frame_flags(reliable),
         Request::MAX_ENCODED_BYTES,
+        None,
         request_body(&request),
     )
 }
@@ -326,6 +406,7 @@ pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool)
         sn,
         frame_flags(reliable),
         Declare::MAX_ENCODED_BYTES,
+        None,
         declare_body(&declare),
     )
 }
@@ -352,6 +433,7 @@ pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bo
         sn,
         frame_flags(reliable),
         Interest::MAX_ENCODED_BYTES,
+        None,
         interest_body(&interest),
     )
 }
@@ -389,6 +471,7 @@ pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u
         sn,
         frame_flags(reliable),
         Push::MAX_ENCODED_BYTES,
+        None,
         push_body(&push),
     )
 }
@@ -433,9 +516,22 @@ fn vle_width(sn: u64) -> usize {
 /// offset contract — both fragmentation re-framers (the unicast
 /// `emit_frame_or_fragments` and [`multicast_frame_or_fragments`]) slice
 /// through this instead of each re-deriving `1 + vle_width(sn)`.
+///
+/// R311y215 — a QoS Frame additionally carries a 2-byte `ext_qos`
+/// ([`QOS_EXT_WIRE_BYTES`], `[0x31][VLE(priority)]`) between `VLE(sn)` and the
+/// NetworkMessage batch. When re-fragmenting such a frame the ext_qos MUST be
+/// stripped here too — each fragment re-frames its OWN ext_qos, so the fragment
+/// payloads carry ONLY the batch; leaving the frame's ext_qos in `body` would
+/// prepend a stray `[0x31][priority]` to the reassembled batch and break the
+/// peer's `parse_frame_payload` (`0x31 & 0x1F` is not a valid network MID). The
+/// non-QoS / DEFAULT path passes `None` and slices exactly as before.
 #[cfg(feature = "transport-fragmentation")]
-pub(crate) fn frame_wire_body(frame: &[u8], sn: u64) -> &[u8] {
-    &frame[1 + vle_width(sn)..]
+pub(crate) fn frame_wire_body(frame: &[u8], sn: u64, ext_qos: Option<Priority>) -> &[u8] {
+    let mut off = 1 + vle_width(sn);
+    if ext_qos.is_some() {
+        off += QOS_EXT_WIRE_BYTES;
+    }
+    &frame[off..]
 }
 
 /// Conservative per-fragment header budget: 1 flags byte + the maximum u64
@@ -472,17 +568,23 @@ const FRAGMENT_FIRST_EXT_HEADER: u8 = 0x02;
 /// `mtu <= FRAG_HEADER_BUDGET` still terminates (one body byte per fragment)
 /// rather than dividing by zero; production `mtu` is the negotiated batch size,
 /// far above the header budget.
+///
+/// R311y215 — a `qos` chain carries an `ext_qos` ([`QOS_EXT_WIRE_BYTES`]) on
+/// EVERY fragment, so the budget grows by that width; a non-QoS chain (every
+/// build without `transport-qos`, and every DEFAULT-priority frame) keeps the
+/// pre-QoS budget, so its chunking — and its byte layout — is unchanged.
 #[cfg(feature = "transport-fragmentation")]
-fn fragment_chunk_size(mtu: usize) -> usize {
-    mtu.saturating_sub(FRAG_HEADER_BUDGET).max(1)
+fn fragment_chunk_size(mtu: usize, qos: bool) -> usize {
+    let budget = FRAG_HEADER_BUDGET + if qos { QOS_EXT_WIRE_BYTES } else { 0 };
+    mtu.saturating_sub(budget).max(1)
 }
 
 /// Number of `T_MID_FRAGMENT` frames a `body_len`-byte network message splits
 /// into at this `mtu`. The caller reserves exactly this many consecutive SNs
 /// before calling [`fragment_body`].
 #[cfg(feature = "transport-fragmentation")]
-pub(crate) fn fragment_count(body_len: usize, mtu: usize) -> usize {
-    let chunk = fragment_chunk_size(mtu);
+pub(crate) fn fragment_count(body_len: usize, mtu: usize, qos: bool) -> usize {
+    let chunk = fragment_chunk_size(mtu, qos);
     // ceil(body_len / chunk), min 1 (an empty body still emits one final
     // fragment — though the oversize precondition means body is never empty).
     body_len.div_ceil(chunk).max(1)
@@ -496,6 +598,14 @@ pub(crate) fn fragment_count(body_len: usize, mtu: usize) -> usize {
 /// value; this walk is the chain's single masking point. Every fragment but
 /// the last carries the M (more) flag; R (reliable) is set per `reliable`.
 /// zenoh-pico `_z_transport_tx_send_fragment_inner` parity.
+///
+/// R311y215 — `ext_qos` (`Some` iff a QoS session sends a non-DEFAULT priority)
+/// is written on EVERY fragment (zenoh `fragment::ext::QoS`,
+/// `zenoh-codec/src/transport/fragment.rs`): a continuation fragment that
+/// decoded as DEFAULT would miss its per-(priority,reliability) reassembly
+/// chain, so the priority must ride each chunk. The first fragment chains the
+/// QoS ext ahead of the `FRAGMENT_FIRST` marker (id order `0x1` then `0x2`). A
+/// `None` chain is byte-identical to the pre-QoS fragment wire.
 #[cfg(feature = "transport-fragmentation")]
 pub fn fragment_body(
     body: &[u8],
@@ -503,9 +613,19 @@ pub fn fragment_body(
     mtu: usize,
     base_sn: u64,
     sn_mask: u64,
+    ext_qos: Option<Priority>,
 ) -> Vec<Vec<u8>> {
-    let chunk = fragment_chunk_size(mtu);
-    let mut out = Vec::with_capacity(fragment_count(body.len(), mtu));
+    // A QoS chain shrinks every chunk by the per-fragment ext_qos width; without
+    // `transport-qos` the ext is never present, so the chunking is unchanged.
+    #[cfg(feature = "transport-qos")]
+    let qos = ext_qos.is_some();
+    #[cfg(not(feature = "transport-qos"))]
+    let qos = {
+        let _ = ext_qos;
+        false
+    };
+    let chunk = fragment_chunk_size(mtu, qos);
+    let mut out = Vec::with_capacity(fragment_count(body.len(), mtu, qos));
     let mut off = 0usize;
     let mut sn = base_sn & sn_mask;
     loop {
@@ -517,6 +637,7 @@ pub fn fragment_body(
             reliable,
             more,
             off == 0,
+            ext_qos,
         ));
         off = end;
         if !more {
@@ -543,6 +664,13 @@ pub fn fragment_body(
 /// fragment codec, symmetric with `inbound.rs`'s hand-rolled `T_MID_FRAGMENT`
 /// Z-gated ext-chain decode (the codec stays a pure `VLE(sn) + tail` SSOT; the
 /// transport-level R/M/Z flags + ext chain live at this frame-composer layer).
+///
+/// R311y215 — `ext_qos` (`Some` iff a QoS chain) prepends a z64 `ext_qos`
+/// ([`write_qos_ext`]) ahead of any `FRAGMENT_FIRST` marker, in zenoh's
+/// id-ascending order (`0x1` QoS, then `0x2` First;
+/// `zenoh-codec/src/transport/fragment.rs`). The ext-chain `Z` header bit is set
+/// whenever EITHER ext is present; the QoS ext carries the chain-continuation
+/// bit iff the First marker follows it.
 #[cfg(feature = "transport-fragmentation")]
 fn build_fragment_wire(
     sn: u64,
@@ -550,6 +678,7 @@ fn build_fragment_wire(
     reliable: bool,
     more: bool,
     first: bool,
+    ext_qos: Option<Priority>,
 ) -> Vec<u8> {
     let mut flags = 0u8;
     if reliable {
@@ -558,25 +687,42 @@ fn build_fragment_wire(
     if more {
         flags |= wire_const::FLAG_T_FRAGMENT_M;
     }
-    if first {
-        // Z: a Fragment ext chain (the FRAGMENT_FIRST marker) follows the body.
+    #[cfg(feature = "transport-qos")]
+    let has_qos = ext_qos.is_some();
+    #[cfg(not(feature = "transport-qos"))]
+    let has_qos = {
+        let _ = ext_qos;
+        false
+    };
+    // Z: a Fragment ext chain (ext_qos and/or the FRAGMENT_FIRST marker) follows.
+    let has_ext = first || has_qos;
+    if has_ext {
         flags |= wire_const::FLAG_T_Z;
     }
-    let mut wire = Vec::with_capacity(FRAG_HEADER_BUDGET + payload.len() + usize::from(first));
+    let qos_reserve = if has_qos { QOS_EXT_WIRE_BYTES } else { 0 };
+    let mut wire =
+        Vec::with_capacity(FRAG_HEADER_BUDGET + payload.len() + usize::from(first) + qos_reserve);
     wire.push(flags | wire_const::T_MID_FRAGMENT);
-    if first {
-        // First fragment wire body: VLE(sn) + FRAGMENT_FIRST ext (0x02) +
-        // payload. The codec writes VLE(sn) with an empty payload (raw tail,
-        // no length prefix — `Fragment::encode` is `write_vle_u64 + write_bytes`)
-        // so the SN wire form stays the byte-verified SSOT; the ext byte + the
-        // real payload are appended after.
+    if has_ext {
+        // Wire body: VLE(sn) + [ext_qos] + [FRAGMENT_FIRST] + payload. The codec
+        // writes VLE(sn) with an empty payload (raw tail, no length prefix —
+        // `Fragment::encode` is `write_vle_u64 + write_bytes`) so the SN wire
+        // form stays the byte-verified SSOT; the ext chain + the real payload are
+        // appended after, in id-ascending order.
         {
             let mut sink = VecSink::new(&mut wire);
             wz_codecs::fragment::Fragment { sn, payload: &[] }
                 .encode(&mut sink)
                 .expect("VecSink is infallible");
         }
-        wire.push(FRAGMENT_FIRST_EXT_HEADER);
+        #[cfg(feature = "transport-qos")]
+        if let Some(priority) = ext_qos {
+            // The QoS ext chains to the FRAGMENT_FIRST marker iff `first`.
+            write_qos_ext(&mut wire, priority, first);
+        }
+        if first {
+            wire.push(FRAGMENT_FIRST_EXT_HEADER);
+        }
         wire.extend_from_slice(payload);
     } else {
         let mut sink = VecSink::new(&mut wire);
@@ -620,14 +766,16 @@ pub fn multicast_frame_or_fragments(
     mtu: usize,
     tx_sn: &mut crate::sn::TxSn,
 ) -> Vec<Vec<u8>> {
+    // Multicast QoS conduits are deferred (a separate PeerSlot model, R311y215
+    // step 8), so the multicast re-frame carries no ext_qos: `qos = false` / `None`.
     #[cfg(feature = "transport-fragmentation")]
     if frame.len() > mtu {
-        let body = frame_wire_body(&frame, sn);
-        let count = fragment_count(body.len(), mtu);
+        let body = frame_wire_body(&frame, sn, None);
+        let count = fragment_count(body.len(), mtu, false);
         for _ in 1..count {
             tx_sn.mint(reliable);
         }
-        return fragment_body(body, reliable, mtu, sn, tx_sn.mask);
+        return fragment_body(body, reliable, mtu, sn, tx_sn.mask, None);
     }
     #[cfg(not(feature = "transport-fragmentation"))]
     let _ = (sn, reliable, mtu, tx_sn);
@@ -917,9 +1065,17 @@ mod fragment_tests {
     #[test]
     fn fragment_count_ceils_body_over_chunk_capacity() {
         // mtu 64 -> chunk = 64 - 11 = 53.
-        assert_eq!(fragment_count(53, 64), 1, "one full chunk = one fragment");
-        assert_eq!(fragment_count(54, 64), 2, "one byte over = two fragments");
-        assert_eq!(fragment_count(200, 64), 4, "ceil(200 / 53) = 4");
+        assert_eq!(
+            fragment_count(53, 64, false),
+            1,
+            "one full chunk = one fragment"
+        );
+        assert_eq!(
+            fragment_count(54, 64, false),
+            2,
+            "one byte over = two fragments"
+        );
+        assert_eq!(fragment_count(200, 64, false), 4, "ceil(200 / 53) = 4");
     }
 
     /// A >MTU body fragments into `T_MID_FRAGMENT` frames that each fit the
@@ -939,8 +1095,9 @@ mod fragment_tests {
             mtu,
             base_sn,
             crate::sn::mask_from_res(0x02),
+            None,
         );
-        assert_eq!(frames.len(), fragment_count(body.len(), mtu));
+        assert_eq!(frames.len(), fragment_count(body.len(), mtu, false));
         assert!(frames.len() > 1, "200 bytes at mtu 64 must fragment");
 
         let mut reassembled = Vec::new();
@@ -998,7 +1155,14 @@ mod fragment_tests {
         let body: Vec<u8> = (0..200u32).map(|i| (i * 7) as u8).collect();
         let mtu = 64usize;
         let base_sn = 7u64; // VLE width 1 -> the ext byte lands at wire[2].
-        let frames = fragment_body(&body, true, mtu, base_sn, crate::sn::mask_from_res(0x02));
+        let frames = fragment_body(
+            &body,
+            true,
+            mtu,
+            base_sn,
+            crate::sn::mask_from_res(0x02),
+            None,
+        );
         assert!(
             frames.len() >= 2,
             "200B at mtu 64 must be a multi-fragment chain"
@@ -1066,7 +1230,7 @@ mod fragment_tests {
         let mask = sn::mask_from_res(0x00); // 7-bit ring, seam at 127
         let body = alloc::vec![0x5Au8; 200]; // 4 fragments at mtu 64
                                              // Raw counter base one whole ring above 126: projects to 126.
-        let frames = fragment_body(&body, true, 64, 126 + (mask + 1), mask);
+        let frames = fragment_body(&body, true, 64, 126 + (mask + 1), mask, None);
         assert_eq!(frames.len(), 4);
         let sns: Vec<u64> = frames
             .iter()
@@ -1095,6 +1259,7 @@ mod fragment_tests {
             64,
             0,
             crate::sn::mask_from_res(0x02),
+            None,
         );
         assert!(frames.len() > 1, "120 bytes at mtu 64 must fragment");
         for frame in &frames {
@@ -1113,7 +1278,7 @@ mod fragment_tests {
         let mut tx_sn = crate::sn::TxSn::new(crate::sn::mask_from_res(0x02));
         let sn = tx_sn.mint(true);
         let mut frame = Vec::new();
-        super::begin_frame(&mut frame, sn, super::frame_flags(true));
+        super::begin_frame(&mut frame, sn, super::frame_flags(true), None);
         frame.extend_from_slice(&[0xCD; 16]);
         let after_mint = tx_sn;
         let out = super::multicast_frame_or_fragments(frame.clone(), sn, true, 64, &mut tx_sn);
@@ -1135,11 +1300,11 @@ mod fragment_tests {
         let sn = tx_sn.mint(true);
         let body: Vec<u8> = (0..200u32).map(|i| (i * 3) as u8).collect();
         let mut frame = Vec::new();
-        super::begin_frame(&mut frame, sn, super::frame_flags(true));
+        super::begin_frame(&mut frame, sn, super::frame_flags(true), None);
         frame.extend_from_slice(&body);
 
         let frames = super::multicast_frame_or_fragments(frame, sn, true, mtu, &mut tx_sn);
-        assert_eq!(frames.len(), fragment_count(body.len(), mtu));
+        assert_eq!(frames.len(), fragment_count(body.len(), mtu, false));
         assert!(frames.len() > 1, "200 bytes at mtu 64 must fragment");
         assert_eq!(
             tx_sn.next_reliable,
@@ -1172,5 +1337,194 @@ mod fragment_tests {
             expect_sn = crate::sn::increment(tx_sn.mask, expect_sn);
         }
         assert_eq!(reassembled, body, "payloads concatenate back to the body");
+    }
+}
+
+// R311y215 — the ext_qos wire round-trip: the priority a QoS Frame/Fragment
+// encodes is exactly the one `parse_inbound` recovers, and a DEFAULT frame is
+// byte-identical to the pre-QoS wire. `transport-qos` pulls `codec-frame`, so
+// `parse_inbound` (the real decoder) is in scope.
+#[cfg(all(test, feature = "transport-qos"))]
+mod qos_wire_tests {
+    use super::*;
+    use crate::inbound::{parse_inbound, InboundFrame};
+    use crate::qos::Priority;
+
+    /// A non-DEFAULT priority Frame sets the Z flag and carries a z64 ext_qos
+    /// (`[0x31][VLE(priority)]`) after `VLE(sn)`; `parse_inbound` recovers the
+    /// priority, reliability, sn, and has_ext. Empty payload keeps the assertion
+    /// on the ext bytes.
+    #[test]
+    fn frame_ext_qos_round_trips_priority() {
+        let wire =
+            encode_frame_envelope(7, frame_flags(true), 0, Some(Priority::RealTime), |_sink| {
+                Ok(())
+            });
+        assert_ne!(
+            wire[0] & wire_const::FLAG_T_Z,
+            0,
+            "a QoS Frame sets the ext-chain Z flag"
+        );
+        assert_eq!(wire[1], 0x07, "VLE(sn=7) is one byte");
+        assert_eq!(wire[2], 0x31, "ext_qos header = id0x1 | M | ENC_Z64");
+        assert_eq!(
+            wire[3],
+            Priority::RealTime.wire_byte(),
+            "z64 body = VLE(priority)"
+        );
+        let InboundFrame::Frame {
+            priority,
+            reliable,
+            sn,
+            has_ext,
+            ..
+        } = parse_inbound(&wire).expect("parse QoS Frame")
+        else {
+            panic!("not a Frame");
+        };
+        assert_eq!(priority, Priority::RealTime, "priority round-trips");
+        assert!(reliable);
+        assert_eq!(sn, 7);
+        assert!(has_ext);
+    }
+
+    /// A DEFAULT-priority frame (`ext_qos = None`) is byte-identical to the
+    /// pre-QoS wire — no Z flag, no ext bytes — and decodes back to DEFAULT.
+    #[test]
+    fn default_priority_frame_is_byte_identical_and_decodes_default() {
+        let wire = encode_frame_envelope(7, frame_flags(true), 0, None, |_sink| Ok(()));
+        assert_eq!(
+            wire,
+            alloc::vec![wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME, 0x07],
+            "DEFAULT frame = [R|FRAME][VLE(sn)] with NO ext (pre-QoS wire)"
+        );
+        let InboundFrame::Frame {
+            priority, has_ext, ..
+        } = parse_inbound(&wire).expect("parse DEFAULT Frame")
+        else {
+            panic!("not a Frame");
+        };
+        assert_eq!(priority, Priority::DEFAULT);
+        assert!(!has_ext, "no ext chain on a DEFAULT frame");
+    }
+
+    /// R311y215 (SN-safety F3) — a QoS fragment chain carries the ext_qos on
+    /// EVERY fragment: `parse_inbound` recovers the SAME priority off each one
+    /// (frag 0 chains it ahead of the FRAGMENT_FIRST marker), every fragment
+    /// still fits the MTU, and the decoded payloads concatenate back to the
+    /// original body. Gated on `transport-fragmentation` (the `fragment_body`
+    /// gate) — it implies `reassembly` (the `InboundFrame::Fragment` gate).
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn fragment_qos_chain_carries_priority_on_every_fragment() {
+        let body: Vec<u8> = (0..200u32).map(|i| (i * 7) as u8).collect();
+        let mtu = 64usize;
+        let frames = fragment_body(
+            &body,
+            /*reliable=*/ true,
+            mtu,
+            /*base_sn=*/ 7,
+            crate::sn::mask_from_res(0x02),
+            Some(Priority::InteractiveHigh),
+        );
+        assert!(frames.len() > 1, "200B at mtu 64 must fragment");
+        let mut reassembled = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            assert!(
+                frame.len() <= mtu,
+                "QoS fragment {i} still fits the mtu (ext_qos rides the budget)"
+            );
+            let InboundFrame::Fragment {
+                priority,
+                has_ext,
+                more,
+                sn,
+                reliable,
+                payload,
+                ..
+            } = parse_inbound(frame).expect("parse QoS fragment")
+            else {
+                panic!("frame {i} is not a Fragment");
+            };
+            assert_eq!(
+                priority,
+                Priority::InteractiveHigh,
+                "every fragment carries the chain priority (F3)"
+            );
+            assert!(has_ext, "every QoS fragment has an ext chain");
+            assert!(reliable, "R rides every fragment");
+            assert_eq!(sn, 7 + i as u64, "SNs consecutive from the base");
+            assert_eq!(
+                more,
+                i + 1 < frames.len(),
+                "M on every fragment but the last"
+            );
+            reassembled.extend_from_slice(&payload);
+        }
+        assert_eq!(
+            reassembled, body,
+            "QoS fragment payloads (both exts stripped by the decoder) reassemble to the body"
+        );
+    }
+
+    /// R311y215 regression (3-agent review finding) — re-fragmenting an OVERSIZE
+    /// QoS Frame must strip the FRAME's own ext_qos from the body before
+    /// fragmenting: each fragment re-frames its OWN ext_qos, so the reassembled
+    /// payloads are the NetworkMessage batch ALONE, not `[0x31][priority] +
+    /// batch`. Exercises the `frame_wire_body(Some(priority)) -> fragment_body`
+    /// path the immediate / batch oversize emit takes
+    /// (`session_actions::emit_frame_or_fragments`). Before the fix the frame's
+    /// 2 stale ext bytes prepended to the reassembled batch and broke the peer's
+    /// `parse_frame_payload` (`0x31 & 0x1F` is not a valid network MID).
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn oversize_qos_frame_refragment_strips_frame_ext_qos() {
+        let batch: Vec<u8> = (0..200u32).map(|i| (i * 3 + 1) as u8).collect();
+        let sn = 7u64;
+        let priority = Priority::DataHigh;
+        // Encode the WHOLE QoS Frame exactly as dispatch does:
+        // [hdr|Z][VLE(sn)][ext_qos][batch].
+        let mut frame = Vec::new();
+        begin_frame(&mut frame, sn, frame_flags(true), Some(priority));
+        frame.extend_from_slice(&batch);
+        assert_ne!(frame[0] & wire_const::FLAG_T_Z, 0, "the QoS Frame sets Z");
+        assert_eq!(frame[2], 0x31, "ext_qos header rides the frame");
+        // The re-frame body must be the BATCH alone — header + VLE(sn) + the
+        // frame's ext_qos all stripped.
+        let body = frame_wire_body(&frame, sn, Some(priority));
+        assert_eq!(
+            body,
+            &batch[..],
+            "frame_wire_body must strip the frame ext_qos, not just header+sn"
+        );
+        // Re-fragment at a small MTU and reassemble: payloads == batch, with NO
+        // 0x31 contamination, and each fragment carries the priority.
+        let mtu = 64usize;
+        let frames = fragment_body(
+            body,
+            true,
+            mtu,
+            sn,
+            crate::sn::mask_from_res(0x02),
+            Some(priority),
+        );
+        assert!(frames.len() > 1, "200B at mtu 64 must fragment");
+        let mut reassembled = Vec::new();
+        for f in &frames {
+            let InboundFrame::Fragment {
+                priority: p,
+                payload,
+                ..
+            } = parse_inbound(f).expect("parse fragment")
+            else {
+                panic!("not a fragment");
+            };
+            assert_eq!(p, priority, "each fragment carries the priority");
+            reassembled.extend_from_slice(&payload);
+        }
+        assert_eq!(
+            reassembled, batch,
+            "reassembled payloads are the batch ALONE, not [0x31,priority]+batch"
+        );
     }
 }

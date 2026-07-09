@@ -192,6 +192,7 @@ async fn r74_rx_frame_with_empty_payload_surfaces_framepayload() {
             ref messages,
             has_ext,
             ref extensions,
+            ..
         } => {
             assert!(!reliable, "no R flag → best-effort");
             assert_eq!(sn, 0);
@@ -475,7 +476,8 @@ async fn r311ke_rx_duplicate_frame_sn_rejected_per_channel() {
             outcome,
             DriverLoopOutcome::RxSnRejected {
                 reliable: true,
-                sn: 2
+                sn: 2,
+                ..
             }
         ),
         "duplicate sn=2 must drop typed; got {outcome:?}"
@@ -486,7 +488,8 @@ async fn r311ke_rx_duplicate_frame_sn_rejected_per_channel() {
             outcome,
             DriverLoopOutcome::RxSnRejected {
                 reliable: true,
-                sn: 1
+                sn: 1,
+                ..
             }
         ),
         "backward sn=1 must drop typed; got {outcome:?}"

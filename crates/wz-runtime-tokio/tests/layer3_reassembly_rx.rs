@@ -97,6 +97,7 @@ fn two_fragment_chain_reassembles_through_parse_inbound() {
                 sn,
                 more: u8::from(more),
                 payload: &payload,
+                priority: wz_session_core::qos::Priority::DEFAULT,
             },
             wz_session_core::sn::mask_from_res(0x02),
             0,

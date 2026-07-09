@@ -114,6 +114,7 @@ where
                 payload,
                 has_ext,
                 extensions,
+                ..
             }) = parse_inbound(bytes)
             {
                 match dispatcher.ingest_frame_by_src(src, reliable, sn, now_ms) {
@@ -219,7 +220,12 @@ pub fn dispatch_multicast_inbound_reassembling<
             // (pico clears the dbuf + state, multicast/rx.c): the dropped frame
             // may have superseded the chain's continuation.
             if let Some(idx) = dispatcher.peer_index_by_src(src) {
-                reasm.abort_channel(&multicast_chain_key(idx), reliable);
+                // Multicast QoS conduits are deferred (R311y215 step 8): DEFAULT.
+                reasm.abort_channel(
+                    &multicast_chain_key(idx),
+                    crate::qos::Priority::DEFAULT,
+                    reliable,
+                );
             }
         }
         MulticastRxNext::Fragment => {

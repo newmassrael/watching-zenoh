@@ -168,6 +168,10 @@ session-unicast-accept = ["dep:wz-session-core", "wz-session-core/session-unicas
 session-unicast-open = ["dep:wz-session-core", "wz-session-core/session-unicast-open"]
 transport-keepalive = ["dep:wz-session-core", "wz-session-core/transport-keepalive"]
 transport-batching = ["dep:wz-session-core", "wz-session-core/transport-batching"]
+# transport-qos (R311y215) — forwards the per-priority SN conduit gate to the
+# no_std session core (proves the `[..; Priority::NUM]` conduit arrays
+# cross-compile no-alloc on the MCU targets; the array shape is compile-time).
+transport-qos = ["dep:wz-session-core", "wz-session-core/transport-qos"]
 # R311jf — keyexpr matching composition toggles, forwarded to the
 # runtime-agnostic core gate (keyexpr_match.rs). The MCU facade routes
 # the same atomic feature here; a literal-only preset (preset-mcu-

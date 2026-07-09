@@ -1097,6 +1097,43 @@ layer_c1ad_cargo_test_lowlatency() {
         && cargo clippy -p wz-session-core --no-default-features --features transport-lowlatency --quiet -- -D warnings)
 }
 
+# ─── Layer C1bb — transport-qos: ext_qos wire + per-priority SN conduits ─
+#
+# R311y215: transport-qos builds zenoh's per-(priority,reliability) QoS
+# transport as a COMPILE-TIME cargo feature — the `[AtomicTxSn; 8]` (TX) and
+# `[RxSn; 8]` (RX) conduit arrays must be statically sized so the MCU no-alloc
+# profile never sizes a heap array by a runtime flag; `is_qos` is the RUNTIME
+# per-session negotiation WITHIN a transport-qos build (unit ext_qos on Init,
+# lowlatency-exclusive). The Frame/Fragment `ext_qos` extension (id 0x1, z64,
+# header 0x31) carries a non-DEFAULT priority; a DEFAULT frame stays
+# byte-identical to the pre-QoS wire. This lane:
+#   1. runs the qos unit suite in wz-session-core — extqos (the 0x1
+#      establishment ext), the Frame/Fragment ext_qos wire round-trip
+#      (frame_encode::qos_wire_tests), the per-priority RxConduits
+#      gate-independence (sn::tests), and the priority-keyed reassembly chains
+#      (reassembly_dispatch::tests);
+#   2. clippy-gates the ON path under --all-targets across the composition
+#      surface (qos + fragmentation + batching + reassembly + multicast);
+#   3. clippy-gates the OFF path (fragmentation WITHOUT qos — the ext_qos=None /
+#      single-conduit arms must compose with NO dead code under -D warnings);
+#   4. compile-checks the pairwise composition of qos with each adjacent
+#      transport mode (multilink / lowlatency / batching) — qos and lowlatency
+#      are RUNTIME-exclusive (the set_qos_offer guard) but MUST compile together
+#      — plus the minimal --no-default-features qos build (arrays cross a lean
+#      profile);
+#   5. proves the wz facade + wz-runtime-tokio feature forwards resolve.
+layer_c1bb_cargo_test_qos() {
+    (cd crates \
+        && cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib --quiet \
+        && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features transport-fragmentation --quiet -- -D warnings \
+        && cargo check -p wz-session-core --no-default-features --features transport-qos --quiet \
+        && cargo check -p wz-session-core --features transport-qos,transport-multilink --quiet \
+        && cargo check -p wz-session-core --features transport-qos,transport-lowlatency --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos --quiet -- -D warnings \
+        && cargo check -p wz --features transport-qos --quiet)
+}
+
 # ─── Layer C1ae — compression transport: lz4 wrap + ext 0x6 + e2e ─
 #
 # R311xm: transport-compression (the lz4 per-batch wrap) + session-extcompression
@@ -4996,6 +5033,7 @@ run_layer C1ax layer_c1ax_cargo_test_routing_namespace || overall=1
 run_layer C1ay layer_c1ay_cargo_test_router_hat || overall=1
 run_layer C1az layer_c1az_cargo_test_rest_sse || overall=1
 run_layer C1ba layer_c1ba_cargo_clippy_transport_multilink || overall=1
+run_layer C1bb layer_c1bb_cargo_test_qos || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

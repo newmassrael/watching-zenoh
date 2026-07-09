@@ -64,6 +64,7 @@
 //! `sce-rust-runtime`.
 
 use crate::bounded::BoundedVec;
+use crate::qos::Priority;
 use crate::reassembly_slot::{
     ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotFragmentChunkPayload,
     ReassemblySlotInject, ReassemblySlotPolicy, ReassemblySlotState,
@@ -185,6 +186,13 @@ pub struct Fragment<'a> {
     /// The fragment body bytes (`sources/codecs/fragment.scxml` tail
     /// payload), staged into the chain's slot buffer.
     pub payload: &'a [u8],
+    /// R311y215 — the QoS priority projected from the fragment's `ext_qos`
+    /// (id `0x1`); the third component of the §2.3 chain key under
+    /// `transport-qos`, so a peer's `high` and `low` fragment streams are
+    /// independent chains (a QoS chain's fragments all carry the same
+    /// priority). [`Priority::DEFAULT`] for a pre-QoS / multicast chain, which
+    /// collapses the key to the pre-QoS (peer, reliable) form.
+    pub priority: Priority,
 }
 
 /// Thin host binding for the generated [`ReassemblySlotActions`]. The
@@ -234,18 +242,24 @@ impl ReassemblySlotActions for SlotBinding {
 }
 
 /// The chain key: a fragment chain is identified by (peer key, reliable
-/// channel) per §2.3. Two distinct reliability channels from the same peer
-/// are independent chains (the R bit is part of the §5.M chain key
-/// alongside the peer key).
+/// channel, priority) per §2.3. Two distinct reliability channels from the same
+/// peer are independent chains (the R bit is part of the §5.M chain key
+/// alongside the peer key); R311y215 adds the QoS priority as the third
+/// component so a peer's `high` and `low` fragment streams — carried on separate
+/// per-priority SN conduits (`[crate::sn::RxConduits]`) — reassemble
+/// independently. Under a non-QoS session every fragment is
+/// [`Priority::DEFAULT`], collapsing the key to the pre-QoS (peer, reliable)
+/// form (identical behavior).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ChainKey {
     peer_key: [u8; PEER_KEY_MAX],
     peer_key_len: u8,
     reliable: bool,
+    priority: Priority,
 }
 
 impl ChainKey {
-    fn new(peer_key: &[u8], reliable: bool) -> Self {
+    fn new(peer_key: &[u8], reliable: bool, priority: Priority) -> Self {
         let mut buf = [0u8; PEER_KEY_MAX];
         let n = core::cmp::min(peer_key.len(), PEER_KEY_MAX);
         buf[..n].copy_from_slice(&peer_key[..n]);
@@ -253,6 +267,7 @@ impl ChainKey {
             peer_key: buf,
             peer_key_len: n as u8,
             reliable,
+            priority,
         }
     }
 
@@ -358,7 +373,7 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        match self.find_active(frag.peer_key, frag.reliable) {
+        match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
             Some(idx) => self.ingest_continuation(idx, frag, sn_mask, deliver),
             None => self.ingest_chain_start(frag, now_ms, deliver),
         }
@@ -382,9 +397,9 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         timed_out
     }
 
-    fn find_active(&self, peer_key: &[u8], reliable: bool) -> Option<usize> {
+    fn find_active(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> Option<usize> {
         self.slots.iter().position(|s| match &s.key {
-            Some(k) => k.reliable == reliable && k.same_peer(peer_key),
+            Some(k) => k.reliable == reliable && k.priority == priority && k.same_peer(peer_key),
             None => false,
         })
     }
@@ -418,7 +433,7 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
 
         // Arm the chain before driving the FSM so a staging overflow on the
         // very first fragment releases cleanly.
-        self.slots[idx].key = Some(ChainKey::new(frag.peer_key, frag.reliable));
+        self.slots[idx].key = Some(ChainKey::new(frag.peer_key, frag.reliable, frag.priority));
         self.slots[idx].last_sn = frag.sn;
         self.slots[idx].deadline_ms = now_ms.saturating_add(self.config.reassembly_timeout_ms);
         self.slots[idx].buf.clear();
@@ -506,7 +521,9 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         IngestOutcome::Aborted(reason)
     }
 
-    /// R311ke — abort the in-progress chain on (`peer_key`, `reliable`),
+    /// R311ke — abort the in-progress chain on (`peer_key`, `priority`,
+    /// `reliable`) — R311y215 keys per priority conduit (SN-safety F4) so a
+    /// rejection on one priority does not clear a sibling priority's chain —
     /// the zenoh-pico dbuf-clear a channel-level SN-gate rejection triggers
     /// (unicast/rx.c:112-113: an out-of-order FRAME on a channel clears
     /// that channel's defragmentation buffer — the dropped frame may have
@@ -515,8 +532,8 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
     /// abort arm before release, exactly as an in-chain abort does.
     /// Returns whether a chain was cleared (`false` = nothing in
     /// progress on that channel — the common case).
-    pub fn abort_channel(&mut self, peer_key: &[u8], reliable: bool) -> bool {
-        match self.find_active(peer_key, reliable) {
+    pub fn abort_channel(&mut self, peer_key: &[u8], priority: Priority, reliable: bool) -> bool {
+        match self.find_active(peer_key, reliable, priority) {
             Some(idx) => {
                 self.slots[idx]
                     .engine
@@ -605,7 +622,9 @@ mod tests {
         ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000))
     }
 
-    /// Terse [`Fragment`] constructor for the test calls.
+    /// Terse [`Fragment`] constructor for the test calls (DEFAULT priority —
+    /// the priority-keyed chains are exercised by
+    /// `qos_priority_keys_distinct_chains`).
     fn frag<'a>(
         peer_key: &'a [u8],
         reliable: bool,
@@ -619,6 +638,7 @@ mod tests {
             sn,
             more,
             payload,
+            priority: Priority::DEFAULT,
         }
     }
 
@@ -894,7 +914,7 @@ mod tests {
         // A duplicate mid-chain fragment trips the channel SN gate; the drive
         // layer clears the chain (drive.rs `abort_channel` on RxSnRejected).
         assert!(
-            d.abort_channel(PEER_A, true),
+            d.abort_channel(PEER_A, Priority::DEFAULT, true),
             "the in-progress P1 chain was cleared by the SN-gate rejection"
         );
         assert_eq!(d.active_chains(), 0);
@@ -931,5 +951,89 @@ mod tests {
         // The stranded fragment delivered ALONE, then P2 delivered CLEAN — the
         // pre-fix bug produced a single merged "P1TAILP2aP2b" delivery instead.
         assert_eq!(delivered, vec![b"P1TAIL".to_vec(), b"P2aP2b".to_vec()]);
+    }
+
+    /// R311y215 (SN-safety F4) — the QoS priority is part of the §2.3 chain key:
+    /// same peer + same reliability but DIFFERENT priority are INDEPENDENT
+    /// chains, so a `high` and a `low` fragment stream reassemble separately even
+    /// when their SNs collide. Without the priority component the same-SN `low`
+    /// first fragment would look like a duplicate of the `high` chain and abort
+    /// it. (The priority key is unconditional — DEFAULT under a non-QoS session —
+    /// so this holds in every build.)
+    #[test]
+    fn qos_priority_keys_distinct_chains() {
+        let mut d = dispatcher::<4, 64>();
+        let hi = |sn, more, p| Fragment {
+            peer_key: PEER_A,
+            reliable: true,
+            sn,
+            more,
+            payload: p,
+            priority: Priority::RealTime,
+        };
+        let lo = |sn, more, p| Fragment {
+            peer_key: PEER_A,
+            reliable: true,
+            sn,
+            more,
+            payload: p,
+            priority: Priority::Background,
+        };
+        assert_eq!(
+            d.ingest(hi(1, 1, b"H1"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        // Same peer/reliable/SN but a DIFFERENT priority starts its OWN chain,
+        // not a duplicate of the high chain.
+        assert_eq!(
+            d.ingest(lo(1, 1, b"L1"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(d.active_chains(), 2, "high and low are independent chains");
+
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        assert_eq!(
+            d.ingest(hi(2, 0, b"H2"), MASK, 0, |m| out.push(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(
+            d.ingest(lo(2, 0, b"L2"), MASK, 0, |m| out.push(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(
+            out,
+            vec![b"H1H2".to_vec(), b"L1L2".to_vec()],
+            "each priority chain reassembled its own payload"
+        );
+    }
+
+    /// A same-priority rejection clears ONLY that priority's chain, not a
+    /// sibling priority's (SN-safety F4, the `abort_channel` priority arg).
+    #[test]
+    fn abort_channel_is_priority_scoped() {
+        let mut d = dispatcher::<4, 64>();
+        let mk = |sn, p| Fragment {
+            peer_key: PEER_A,
+            reliable: true,
+            sn,
+            more: 1,
+            payload: b"x",
+            priority: p,
+        };
+        d.ingest(mk(1, Priority::RealTime), MASK, 0, |_| {});
+        d.ingest(mk(1, Priority::Background), MASK, 0, |_| {});
+        assert_eq!(d.active_chains(), 2);
+        // Abort only the high chain; the low chain survives.
+        assert!(d.abort_channel(PEER_A, Priority::RealTime, true));
+        assert_eq!(d.active_chains(), 1, "only the high-priority chain cleared");
+        assert!(
+            !d.abort_channel(PEER_A, Priority::RealTime, true),
+            "high already gone"
+        );
+        assert!(
+            d.abort_channel(PEER_A, Priority::Background, true),
+            "low still present"
+        );
+        assert_eq!(d.active_chains(), 0);
     }
 }

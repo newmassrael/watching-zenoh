@@ -162,8 +162,18 @@ declare -A BASELINE_MC_TEXT=(
     # through critical-section on ARMv7-M; +444 (M3) / +560 (M4F) local
     # arm-none-eabi-gcc. text-only growth (data flat); a CI-gcc follow-up rebase
     # may shift these <=256 B. Old: 50292/50328 (R311wz).
-    ["thumbv7m-none-eabi"]=50736
-    ["thumbv7em-none-eabihf"]=50888
+    # R311y215 — GREW after the transport-qos per-priority QoS transport: the
+    # reassembly ChainKey / Fragment descriptor, InboundFrame::{Frame,Fragment},
+    # and DriverLoopOutcome::{Fragment,RxSnRejected} carry a `priority`
+    # UNCONDITIONALLY (DEFAULT-keyed on this non-qos multicast build — transport-qos
+    # is alloc-only, never enabled on MCU), plus the ext_qos ext-chain projection
+    # (ext_qos_priority) compiles into the inbound decode. text-only growth
+    # (data/bss flat), +200 (M3) / +260 (M4F): the uniform priority data-path is
+    # kept cfg-free by design (no per-feature cfg-skew; the MCU pays the named
+    # faithfulness-over-cost debt paid down later via the systematic Ownership seam,
+    # not per-feature gating). Old: 50736/50888 (R311y21).
+    ["thumbv7m-none-eabi"]=50936
+    ["thumbv7em-none-eabihf"]=51148
 )
 declare -A BASELINE_MC_DATA=(
     ["thumbv7m-none-eabi"]=4

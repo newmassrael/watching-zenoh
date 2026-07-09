@@ -36,6 +36,13 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(feature = "no_std")]
 use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 
+// R311y215 — Priority threads through the Frame SN mint / conduit select and
+// the ext_qos wire. A cheap Copy value type from the unconditional `qos`
+// module, so it is always in scope even when `transport-qos` does not compile
+// (the `FrameTxConduits` non-qos variant ignores it — no cfg-skew on the
+// mint/dispatch signatures).
+use crate::qos::Priority;
+
 // CodecError is the return type of `encode_init_with_role` /
 // `encode_open_with_role` only; gate it on those encoders' codecs so a
 // consumer-plane-only subset (no handshake-body codec) does not see it unused.
@@ -193,6 +200,16 @@ pub struct BatchTx {
     pub buf: Vec<u8>,
     /// Network messages absorbed into the open frame.
     pub count: usize,
+    /// R311y215 (transport-qos) — the `Priority` conduit the currently-open
+    /// batch frame is pinned to (`None` = no frame open). A batch frame is ONE
+    /// (priority, reliability) conduit: its ext_qos + SN are fixed at open, so a
+    /// message on a DIFFERENT priority conduit must flush the open frame and
+    /// reopen (SN-safety F2), never share it — zenoh batches each priority
+    /// independently (`io/zenoh-transport/.../pipeline.rs`, one `StageIn` per
+    /// priority). Absent without the feature: a non-QoS session has one conduit,
+    /// so every message shares the open frame exactly as before.
+    #[cfg(feature = "transport-qos")]
+    pub priority: Option<Priority>,
 }
 
 /// R311y214 — the unicast outbound Frame SN generator, SPLIT per
@@ -267,6 +284,74 @@ impl AtomicTxSn {
     pub fn reset(&self, initial_sn: u64) {
         self.reliable.store(initial_sn, Ordering::SeqCst);
         self.best_effort.store(initial_sn, Ordering::SeqCst);
+    }
+}
+
+/// R311y215 (transport-qos) — the outbound Frame SN generators: ONE
+/// [`AtomicTxSn`] per `Priority` conduit when `transport-qos` compiles (zenoh
+/// `priority_tx: Arc<[TransportPriorityTx]>`, `universal/transport.rs`), else the
+/// single R311y214 conduit. The array SHAPE is compile-time behind the feature
+/// so an MCU no-alloc build never sizes a heap array by the runtime `is_qos`
+/// flag; at runtime a non-QoS session mints only `conduit[Priority::DEFAULT]`
+/// (the send seam forces `priority = Data` when `!is_qos()`), leaving the other
+/// conduits idle. Every conduit is seeded from the one `initial_sn` (zenoh seeds
+/// each `TransportPriorityTx` from the single `config.tx_initial_sn`).
+///
+/// The one-conduit-per-`(priority,reliability)` gate is what makes a multilink
+/// priority-select SAFE (R311y216): `select_link` pins one conduit to one link,
+/// so a reliable+high and a reliable+low Frame ride SEPARATE SN rings gated on
+/// SEPARATE RX conduits — no cross-link stale-drop. Splitting ONE conduit across
+/// links (a load-balancer) would reintroduce the hazard and is forbidden.
+pub struct FrameTxConduits {
+    #[cfg(feature = "transport-qos")]
+    conduits: [AtomicTxSn; Priority::NUM],
+    #[cfg(not(feature = "transport-qos"))]
+    conduit: AtomicTxSn,
+}
+
+impl FrameTxConduits {
+    /// Seed every conduit at `initial_sn` (the OpenSyn/OpenAck origin).
+    pub fn new(initial_sn: u64) -> Self {
+        Self {
+            #[cfg(feature = "transport-qos")]
+            conduits: core::array::from_fn(|_| AtomicTxSn::new(initial_sn)),
+            #[cfg(not(feature = "transport-qos"))]
+            conduit: AtomicTxSn::new(initial_sn),
+        }
+    }
+
+    /// The `(priority)` conduit — `conduits[priority]` under `transport-qos`,
+    /// the single conduit otherwise (priority ignored, no cfg-skew).
+    #[inline]
+    fn select(&self, _priority: Priority) -> &AtomicTxSn {
+        #[cfg(feature = "transport-qos")]
+        {
+            &self.conduits[_priority as usize]
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        {
+            &self.conduit
+        }
+    }
+
+    /// Mint the next SN for `(priority, reliable)` — see [`AtomicTxSn::mint`].
+    pub fn mint(&self, priority: Priority, reliable: bool, mask: u64) -> u64 {
+        self.select(priority).mint(reliable, mask)
+    }
+
+    /// Reserve one follow-on SN on `(priority, reliable)` — the fragment walk.
+    pub fn reserve_next(&self, priority: Priority, reliable: bool) {
+        self.select(priority).reserve_next(reliable);
+    }
+
+    /// Re-seed EVERY conduit to `initial_sn` on reopen.
+    pub fn reset(&self, initial_sn: u64) {
+        #[cfg(feature = "transport-qos")]
+        for c in &self.conduits {
+            c.reset(initial_sn);
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        self.conduit.reset(initial_sn);
     }
 }
 
@@ -404,6 +489,16 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// mutex so the merge advances without blocking the role ext slots.
     #[cfg(feature = "transport-lowlatency")]
     pub is_lowlatency: R::Mutex<bool>,
+    /// transport-qos (R311y215) — the negotiated QoS-transport capability for
+    /// THIS session (zenoh `TransportConfigUnicast::is_qos`). Seeded with the
+    /// local offer ([`Self::set_qos_offer`]) at bring-up, then ANDed with the
+    /// peer's Init `ext_qos` offer ([`Self::negotiate_qos_against_peer`], zenoh
+    /// "both sides QoS or NoQoS"). When true it selects `Priority::NUM`
+    /// per-priority SN conduits (else 1) and lets a non-DEFAULT Frame carry the
+    /// `ext_qos` priority. Mutually exclusive with `is_lowlatency` (guarded at
+    /// [`Self::set_qos_offer`]).
+    #[cfg(feature = "transport-qos")]
+    pub is_qos: R::Mutex<bool>,
     /// transport-compression — the negotiated compression capability for THIS
     /// session (zenoh `TransportConfigUnicast::is_compression`). Seeded with the
     /// local offer ([`Self::set_compression_offer`]) at bring-up, then ANDed
@@ -456,9 +551,11 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// fragment walk (`frame_encode::fragment_body`). R311kb
     /// realized the R121e explicit-modulo carry via zenoh-pico
     /// `_z_sn_increment` parity (the F-5 consolidation). R311y214 —
-    /// [`AtomicTxSn`], split per reliability channel (pico/zenoh parity);
-    /// the `reliable` flag of each mint selects the channel.
-    pub outbound_frame_sn: AtomicTxSn,
+    /// [`AtomicTxSn`], split per reliability channel (pico/zenoh parity).
+    /// R311y215 — [`FrameTxConduits`]: one such pair per `Priority` conduit
+    /// under `transport-qos` (else the single R311y214 pair); the
+    /// `(priority, reliable)` of each mint selects the conduit + channel.
+    pub outbound_frame_sn: FrameTxConduits,
     /// R311ke — per-channel inbound Frame/Fragment SN gate state
     /// ([`crate::sn::RxSn`]), the zenoh-pico
     /// `_z_transport_peer_unicast_t._sn_rx_reliable` /
@@ -469,7 +566,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`Self::admit_rx_frame_sn`] before a Frame payload or Fragment
     /// reaches the application layer. Handshake-scoped: reset by
     /// `reset_for_reopen` and re-seeded by the reopen handshake.
-    pub rx_sn: R::Mutex<crate::sn::RxSn>,
+    pub rx_sn: R::Mutex<crate::sn::RxConduits>,
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
     /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
@@ -1080,13 +1177,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // (`set_lowlatency_offer`) and the peer's offer is ANDed in.
                 #[cfg(feature = "transport-lowlatency")]
                 is_lowlatency: R::new_mutex(false),
+                // transport-qos — false until the AP layer offers it
+                // (`set_qos_offer`) and the peer's Init ext_qos offer is ANDed in.
+                #[cfg(feature = "transport-qos")]
+                is_qos: R::new_mutex(false),
                 #[cfg(feature = "transport-compression")]
                 is_compression: R::new_mutex(false),
                 #[cfg(feature = "transport-shm")]
                 is_shm: R::new_mutex(false),
                 inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
-                outbound_frame_sn: AtomicTxSn::new(initial_frame_sn),
-                rx_sn: R::new_mutex(crate::sn::RxSn::default()),
+                outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
+                rx_sn: R::new_mutex(crate::sn::RxConduits::default()),
                 tx_mutex: R::new_mutex(BatchTx::default()),
                 outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
                 #[cfg(feature = "session-reconnect")]
@@ -1898,6 +1999,54 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.is_lowlatency, |s| *s)
     }
 
+    /// transport-qos (R311y215) — the AP layer's "this deploy offers the QoS
+    /// transport toward this peer" config, set once at bring-up BEFORE the
+    /// handshake drives (the `set_lowlatency_offer` config-at-bringup
+    /// discipline). Seeds [`Self::is_qos`]; the peer's offer is ANDed in by
+    /// [`Self::negotiate_qos_against_peer`].
+    ///
+    /// Exclusivity guard (zenoh `manager.rs:264`: `'qos' and 'lowlatency' are
+    /// incompatible`): when a lowlatency offer is already staged, the QoS offer
+    /// is REFUSED (`is_qos` stays false, lowlatency wins) — lowlatency's lean
+    /// path has no Frame/SN, so per-priority conduits are meaningless there. The
+    /// guard lives at this offer-injection point, not in the [`crate::extqos`]
+    /// codec. A deploy that sets both is misconfigured; wz refuses the QoS
+    /// offer gracefully rather than panicking (an AP config validator can
+    /// escalate). Returns `true` iff the offer was applied.
+    #[cfg(feature = "transport-qos")]
+    pub fn set_qos_offer(&self, offer: bool) -> bool {
+        #[cfg(feature = "transport-lowlatency")]
+        if offer && self.is_lowlatency() {
+            return false;
+        }
+        R::with_mutex_mut(&self.is_qos, |s| *s = offer);
+        true
+    }
+
+    /// transport-qos (R311y215) — AND the peer's InitSyn / InitAck `ext_qos`
+    /// offer into the local capability: zenoh treats "either side NoQoS" as
+    /// NoQoS (`establishment/ext/qos.rs` `recv_init_*` `else { NoQoS }`), which
+    /// `&=` reproduces. Called from the establishment demux
+    /// ([`crate::drive::dispatch_link_event`]) on every inbound Init frame, so
+    /// the result is `local_offer && peer_offer`. The acceptor's merge lands on
+    /// InitSyn arrival BEFORE its InitAck reflect; the initiator's lands on
+    /// InitAck arrival, finalizing the capability (QoS is negotiated at the Init
+    /// exchange — Open carries nothing).
+    #[cfg(feature = "transport-qos")]
+    pub fn negotiate_qos_against_peer(&self, peer_offered: bool) {
+        R::with_mutex_mut(&self.is_qos, |s| *s &= peer_offered);
+    }
+
+    /// transport-qos (R311y215) — the negotiated QoS-transport capability for
+    /// this session. Read by the conduit selector (mint / admit) to choose
+    /// `Priority::NUM` conduits vs 1, and by the Frame `ext_qos` writer (a
+    /// non-DEFAULT priority rides the wire only when both peers negotiated QoS).
+    /// True only when BOTH peers offered the ext.
+    #[cfg(feature = "transport-qos")]
+    pub fn is_qos(&self) -> bool {
+        R::with_mutex_mut(&self.is_qos, |s| *s)
+    }
+
     /// §5.21 routing-namespace — install the per-participant namespace on this
     /// session bundle at AP bring-up, BEFORE the drive loop spins or any send
     /// fires (the `set_lowlatency_offer` config-at-bringup discipline). Seeds
@@ -2008,7 +2157,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         any(
             feature = "transport-lowlatency",
             feature = "session-extcompression",
-            feature = "session-extshm"
+            feature = "session-extshm",
+            feature = "transport-qos"
         ),
         feature = "codec-init-body",
         any(feature = "session-unicast-open", feature = "session-unicast-accept")
@@ -2289,12 +2439,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// produce it, UDP unicast can). The reliable-channel reassembly
     /// chain is cleared by the drive helper on rejection, mirroring
     /// pico's dbuf-clear (rx.c:112-113).
-    pub fn admit_rx_frame_sn(&self, reliable: bool, sn: u64) -> bool {
+    pub fn admit_rx_frame_sn(&self, priority: Priority, reliable: bool, sn: u64) -> bool {
         // Sequential mutex scopes: the mask accessor takes
         // `inbound_peer_init_caps`, then `rx_sn` — disjoint, never nested
         // (the non-reentrant MCU critical_section forbids nesting).
+        // R311y215 — the SN gate is per-(priority, reliable) conduit; a non-QoS
+        // session passes `Priority::DEFAULT` and gates on the single conduit.
         let mask = self.negotiated_sn_mask();
-        R::with_mutex_mut(&self.rx_sn, |s| s.admit(mask, reliable, sn))
+        R::with_mutex_mut(&self.rx_sn, |s| s.admit(priority, mask, reliable, sn))
     }
 
     /// R121e / R311kb — outbound Frame sequence-number mint. Returns
@@ -2318,8 +2470,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// monotonicity. The hot path is one outbound Frame per
     /// application-layer batch — the atomic cost is in the noise
     /// vs. the codec encode + TCP write below it.
-    pub fn next_outbound_frame_sn(&self, reliable: bool, sn_mask: u64) -> u64 {
-        self.outbound_frame_sn.mint(reliable, sn_mask)
+    pub fn next_outbound_frame_sn(&self, priority: Priority, reliable: bool, sn_mask: u64) -> u64 {
+        self.outbound_frame_sn.mint(priority, reliable, sn_mask)
     }
 
     /// Transport-framing chokepoint for every outbound network message —
@@ -2366,6 +2518,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn dispatch_network_message<P>(
         &self,
+        priority: Priority,
         reliable: bool,
         worst_case_payload: usize,
         encode_body: P,
@@ -2375,6 +2528,33 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             &mut sce_forge_runtime::codec::VecSink<'_>,
         ) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
+        // R311y215 (transport-qos) — the EFFECTIVE Frame priority: the caller's
+        // message priority when this session negotiated QoS, else forced to
+        // DEFAULT (a non-QoS session has one conduit and writes no ext_qos, so
+        // every Frame is Data). `priority` then selects the SN conduit at each
+        // mint and (when != DEFAULT) the ext_qos the Frame carries. When
+        // `transport-qos` does not compile, `priority` passes straight to the
+        // single-conduit mint (ignored) — no cfg-skew.
+        #[cfg(feature = "transport-qos")]
+        let priority = if self.is_qos() {
+            priority
+        } else {
+            Priority::DEFAULT
+        };
+        // R311y215 — the ext_qos this Frame/Fragment carries: `Some` ONLY for a
+        // non-DEFAULT priority (zenoh writes `ext_qos` iff `!= DEFAULT`, so a
+        // DEFAULT frame stays byte-identical to a pre-QoS frame). Computed once
+        // and threaded into every framing path (batch open / immediate /
+        // fragment) below. Without `transport-qos` there are no per-priority
+        // conduits and no ext — always `None`.
+        #[cfg(feature = "transport-qos")]
+        let ext_qos: Option<Priority> = if priority != Priority::DEFAULT {
+            Some(priority)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "transport-qos"))]
+        let ext_qos: Option<Priority> = None;
         // F2 — transport-availability gate (pico
         // `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity): inside the
         // RECONNECTING window (link released / reset for re-dial, not yet
@@ -2472,9 +2652,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // (pico `_z_transport_tx_batch_overflow` rollback+retry).
                 loop {
                     if batch.buf.is_empty() {
-                        let sn = self.next_outbound_frame_sn(reliable, sn_mask);
-                        batch.buf.reserve(1 + 10 + worst_case_payload);
-                        begin_frame(&mut batch.buf, sn, frame_flags(reliable));
+                        // R311y215 — pin the fresh frame to this priority conduit
+                        // so a later different-priority message flushes + reopens
+                        // rather than sharing this frame's SN/ext_qos (SN-safety F2).
+                        #[cfg(feature = "transport-qos")]
+                        {
+                            batch.priority = Some(priority);
+                        }
+                        let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
+                        // +2 for a possible ext_qos ([0x31][VLE(priority)]) that
+                        // begin_frame may append (symmetric with encode_frame_envelope).
+                        batch.buf.reserve(1 + 10 + 2 + worst_case_payload);
+                        begin_frame(&mut batch.buf, sn, frame_flags(reliable), ext_qos);
                         encode_into(&mut batch.buf);
                         if batch.buf.len() > mtu {
                             // The message alone exceeds the budget — the
@@ -2483,11 +2672,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             // fragmentation is off), still under the lock.
                             let frame = core::mem::take(&mut batch.buf);
                             batch.count = 0;
-                            self.emit_frame_or_fragments(&frame, sn, reliable, mtu, sn_mask);
+                            self.emit_frame_or_fragments(
+                                ext_qos, &frame, sn, reliable, mtu, sn_mask,
+                            );
                         } else {
                             batch.count = 1;
                         }
                         return;
+                    }
+                    // R311y215 — the open frame is one (priority) conduit; a
+                    // message on a different conduit flushes it and reopens
+                    // (loops back to the buf-empty arm above). Under a non-QoS
+                    // session every message is DEFAULT, so this never fires.
+                    #[cfg(feature = "transport-qos")]
+                    if batch.priority != Some(priority) {
+                        let prev = core::mem::take(&mut batch.buf);
+                        batch.count = 0;
+                        let channel = frame_wire_reliability(&prev);
+                        self.send_wire(&prev, channel);
+                        continue;
                     }
                     let wpos = batch.buf.len();
                     encode_into(&mut batch.buf);
@@ -2513,14 +2716,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Immediate path (batching off or window closed):
             // frame-per-message, mint + encode + emit under the SAME lock
             // hold (pico TX-mutex parity, R311kf).
-            let sn = self.next_outbound_frame_sn(reliable, sn_mask);
+            let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
             let wire = crate::frame_encode::encode_frame_envelope(
                 sn,
                 crate::frame_encode::frame_flags(reliable),
                 worst_case_payload,
+                ext_qos,
                 &encode_body,
             );
-            self.emit_frame_or_fragments(&wire, sn, reliable, mtu, sn_mask);
+            self.emit_frame_or_fragments(ext_qos, &wire, sn, reliable, mtu, sn_mask);
         });
         Ok(())
     }
@@ -2559,6 +2763,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn emit_frame_or_fragments(
         &self,
+        ext_qos: Option<Priority>,
         frame: &[u8],
         sn: u64,
         reliable: bool,
@@ -2573,8 +2778,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "transport-fragmentation")]
         {
             if frame.len() > mtu {
-                let body = crate::frame_encode::frame_wire_body(frame, sn);
-                let count = crate::frame_encode::fragment_count(body.len(), mtu) as u64;
+                // The conduit the follow-on SNs reserve on IS the frame's conduit:
+                // `ext_qos = Some(p)` iff the effective priority `p != DEFAULT`
+                // (dispatch_network_message), and a DEFAULT frame carries `None`,
+                // so `ext_qos.unwrap_or(DEFAULT)` reconstructs the effective
+                // priority exactly (no separate param — keeps the arg count sane).
+                let priority = ext_qos.unwrap_or(Priority::DEFAULT);
+                // R311y215 — strip the frame's own ext_qos (if any) along with the
+                // header + VLE(sn): the fragments below re-frame their OWN ext_qos,
+                // so `body` must be ONLY the NetworkMessage batch (else the stale
+                // `[0x31][priority]` prepends to the reassembled batch and breaks
+                // the peer's parse_frame_payload).
+                let body = crate::frame_encode::frame_wire_body(frame, sn, ext_qos);
+                // R311y215 — a QoS chain carries an ext_qos on every fragment, so
+                // the count (which the follow-on SN reserve below must match) uses
+                // the same qos budget the `fragment_body` chunker does.
+                let count =
+                    crate::frame_encode::fragment_count(body.len(), mtu, ext_qos.is_some()) as u64;
                 // The oversize frame's already-minted `sn` IS the first
                 // fragment's SN; reserve only the `count - 1` follow-on SNs so
                 // the chain is ring-consecutive from `sn` (zenoh
@@ -2584,17 +2804,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // discarding `sn` and leaving a 1-SN gap on the wire — tolerated
                 // wz<->wz by the peer's half-window SN check but a real
                 // divergence from the reference (R311y206).
+                // R311y215 — the follow-on SNs are reserved on the SAME
+                // (priority, reliable) conduit the first fragment minted from
+                // (the base-mint + reserve MUST share one conduit key, else
+                // conduit[priority] under-advances and reuses an SN).
                 for _ in 1..count {
-                    self.outbound_frame_sn.reserve_next(reliable);
+                    self.outbound_frame_sn.reserve_next(priority, reliable);
                 }
-                for frag in crate::frame_encode::fragment_body(body, reliable, mtu, sn, sn_mask) {
+                for frag in
+                    crate::frame_encode::fragment_body(body, reliable, mtu, sn, sn_mask, ext_qos)
+                {
                     self.send_wire(&frag, reliability);
                 }
                 return;
             }
         }
         #[cfg(not(feature = "transport-fragmentation"))]
-        let _ = (sn, mtu, sn_mask);
+        let _ = (ext_qos, sn, mtu, sn_mask);
         self.send_wire(frame, reliability);
     }
 
@@ -2679,10 +2905,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "codec-push")]
     fn dispatch_push(
         &self,
+        priority: Priority,
         push: wz_codecs::push::PushOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
+            priority,
             reliable,
             wz_codecs::push::Push::MAX_ENCODED_BYTES,
             crate::frame_encode::push_body(&push),
@@ -2750,7 +2978,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // flush_batch_if_express parity).
             #[cfg(feature = "codec-push")]
             crate::network_message::NetworkMessage::Push(push) => {
-                self.dispatch_push(*push, reliable)?;
+                self.dispatch_push(Priority::DEFAULT, *push, reliable)?;
                 #[cfg(feature = "transport-batching")]
                 if express {
                     self.flush_open_batch();
@@ -2866,6 +3094,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
+            // Declare = a control-plane message; zenoh `QoSType::DECLARE` = Control.
+            Priority::Control,
             reliable,
             wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
             crate::frame_encode::declare_body(&declare),
@@ -2891,6 +3121,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
+            // OAM = a control-plane message; zenoh `QoSType::OAM` = Control.
+            Priority::Control,
             reliable,
             wz_codecs::oam::Oam::MAX_ENCODED_BYTES,
             crate::frame_encode::oam_body(&oam),
@@ -2905,6 +3137,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
+            // Request/Response = the data plane; zenoh default `Priority::Data`.
+            Priority::DEFAULT,
             reliable,
             wz_codecs::request::Request::MAX_ENCODED_BYTES,
             crate::frame_encode::request_body(&request),
@@ -2920,6 +3154,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
+            Priority::DEFAULT,
             reliable,
             wz_codecs::response::Response::MAX_ENCODED_BYTES,
             crate::frame_encode::response_body(&response),
@@ -2934,6 +3169,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
+            Priority::DEFAULT,
             reliable,
             wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
             crate::frame_encode::response_final_body(&response_final),
@@ -2948,6 +3184,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
+            // Interest carries `QoSType::DECLARE` = Control (zenoh interests.rs).
+            Priority::Control,
             reliable,
             wz_codecs::interest::Interest::MAX_ENCODED_BYTES,
             crate::frame_encode::interest_body(&interest),
@@ -3098,15 +3336,39 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         value: &[u8],
         reliable: bool,
     ) -> Result<(), SendWireError> {
+        // The DEFAULT-priority case of the express variant below (one home for
+        // the build + dispatch, priority DEFAULT so no ext_qos ever rides).
+        self.send_push_literal_qos(keyexpr_suffix, value, reliable, Priority::DEFAULT)
+    }
+
+    /// R311y215 — the express (priority-carrying) twin of
+    /// [`Self::send_push_literal`]: dispatch a `Put` Push on the given QoS
+    /// `priority` conduit. On a session that negotiated QoS ([`Self::is_qos`]) a
+    /// non-DEFAULT priority rides its OWN per-(priority, reliability) SN conduit
+    /// and stamps the Frame's `ext_qos` (id `0x1`, z64); on a non-QoS session —
+    /// or a build without `transport-qos` — the priority has NO wire effect (one
+    /// conduit, no ext_qos) and this behaves exactly as
+    /// [`Self::send_push_literal`], so the signature is feature-stable
+    /// ([[feedback-signature-stability]]). The AP publish API threads
+    /// `Publisher` / `put` priority here; the `WzConfig` -> [`Self::set_qos_offer`]
+    /// negotiation plumbing and the priority-select multilink e2e that exercises
+    /// a live non-DEFAULT send land in R311y216 (step 8).
+    pub fn send_push_literal_qos(
+        &self,
+        keyexpr_suffix: &str,
+        value: &[u8],
+        reliable: bool,
+        priority: Priority,
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_literal(keyexpr_suffix, value)?;
-            self.dispatch_push(push, reliable)?;
+            self.dispatch_push(priority, push, reliable)?;
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
         {
-            let _ = (keyexpr_suffix, value, reliable);
+            let _ = (keyexpr_suffix, value, reliable, priority);
             Err(SendWireError::FeatureDisabled)
         }
     }
@@ -3218,7 +3480,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_aliased(mapping_id, suffix, value)?;
-            self.dispatch_push(push, reliable)?;
+            self.dispatch_push(Priority::DEFAULT, push, reliable)?;
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -3244,7 +3506,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_literal(keyexpr_suffix)?;
-            self.dispatch_push(push, reliable)?;
+            self.dispatch_push(Priority::DEFAULT, push, reliable)?;
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -3270,7 +3532,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_aliased(mapping_id, suffix)?;
-            self.dispatch_push(push, reliable)?;
+            self.dispatch_push(Priority::DEFAULT, push, reliable)?;
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -3297,7 +3559,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_literal_with_meta(keyexpr_suffix, value, meta)?;
-            self.dispatch_push(push, reliable)?;
+            self.dispatch_push(Priority::DEFAULT, push, reliable)?;
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -3320,7 +3582,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_aliased_with_meta(mapping_id, suffix, value, meta)?;
-            self.dispatch_push(push, reliable)?;
+            self.dispatch_push(Priority::DEFAULT, push, reliable)?;
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -3345,7 +3607,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_literal_with_meta(keyexpr_suffix, meta)?;
-            self.dispatch_push(push, reliable)?;
+            self.dispatch_push(Priority::DEFAULT, push, reliable)?;
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -3368,7 +3630,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_aliased_with_meta(mapping_id, suffix, meta)?;
-            self.dispatch_push(push, reliable)?;
+            self.dispatch_push(Priority::DEFAULT, push, reliable)?;
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -4706,7 +4968,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot = None);
             // R311ke — the RX SN gate is handshake-scoped: the reopen
             // handshake's OpenSyn/OpenAck re-seeds both channels.
-            R::with_mutex_mut(&self.rx_sn, |s| *s = crate::sn::RxSn::default());
+            R::with_mutex_mut(&self.rx_sn, |s| *s = crate::sn::RxConduits::default());
             // §5.21 routing-namespace — the per-session INGRESS correlation is
             // handshake-scoped too: on reopen the remote re-handshakes with EMPTY
             // declaration tables + a RESTARTED id space, so a stale blocked-id
@@ -5018,6 +5280,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 a.is_lowlatency(),
                 crate::extlowlatency::encode_lowlatency_ext,
             );
+            // transport-qos — the initiator offers the QoS unit ext (id 0x1) in
+            // InitSyn iff this deploy enabled it (zenoh `send_init_syn` emits
+            // `ext_qos` only when the QoS transport is configured).
+            #[cfg(feature = "transport-qos")]
+            a.stage_capability(
+                ExtChainRole::InitSyn,
+                a.is_qos(),
+                crate::extqos::encode_qos_ext,
+            );
             #[cfg(feature = "session-extcompression")]
             a.stage_capability(
                 ExtChainRole::InitSyn,
@@ -5102,6 +5373,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 ExtChainRole::InitAck,
                 a.is_lowlatency(),
                 crate::extlowlatency::encode_lowlatency_ext,
+            );
+            // transport-qos — reflect the QoS unit ext in InitAck iff STILL
+            // offering after the InitSyn `&=` merge (both sides agreed).
+            #[cfg(feature = "transport-qos")]
+            a.stage_capability(
+                ExtChainRole::InitAck,
+                a.is_qos(),
+                crate::extqos::encode_qos_ext,
             );
             #[cfg(feature = "session-extcompression")]
             a.stage_capability(

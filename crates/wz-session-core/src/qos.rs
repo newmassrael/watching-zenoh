@@ -21,7 +21,11 @@
 /// 8 priorities, 0..=7, with `Data` as the default. The wire byte
 /// occupies the qos packed byte's low 3 bits per
 /// `_z_n_qos_create` at network.h:84-89.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// `PartialOrd`/`Ord` follow declaration order = the wire values 0..=7
+/// (Control smallest .. Background largest), so `PriorityRange` containment
+/// (`start <= p <= end`) is a wire-order compare — the same derive zenoh
+/// puts on `Priority` (`commons/zenoh-protocol/src/core/mod.rs`). R311y215.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum Priority {
     /// `_Z_PRIORITY_CONTROL = 0`. Reserved for internal control
     /// messages in zenoh-pico (the leading-underscore name signals
@@ -52,6 +56,36 @@ impl Priority {
     /// `_z_n_qos_create` at network.h:87.
     pub const fn wire_byte(self) -> u8 {
         self as u8
+    }
+
+    /// The number of priority levels (zenoh `Priority::NUM`): 8, `Control`
+    /// (0) through `Background` (7). The per-(priority,reliability) SN
+    /// conduit array is sized by this when `transport-qos` compiles.
+    pub const NUM: usize = 8;
+
+    /// The default priority when a message carries no explicit QoS (zenoh
+    /// `Priority::DEFAULT` = `Data`, `network/mod.rs`). A Frame at DEFAULT
+    /// omits the `ext_qos` transport extension entirely (wire-identical to
+    /// a pre-QoS Frame).
+    pub const DEFAULT: Priority = Priority::Data;
+
+    /// Inverse of [`Self::wire_byte`]: map a wire byte to its `Priority`.
+    /// The 3-bit priority field cannot encode a value > 7, so the
+    /// out-of-range arm is unreachable from a conforming wire; it clamps to
+    /// [`Self::DEFAULT`] rather than panicking (the permissive-decode arm,
+    /// same spirit as `sn::mask_from_res`'s defensive default).
+    pub const fn from_wire(byte: u8) -> Priority {
+        match byte {
+            0 => Priority::Control,
+            1 => Priority::RealTime,
+            2 => Priority::InteractiveHigh,
+            3 => Priority::InteractiveLow,
+            4 => Priority::DataHigh,
+            5 => Priority::Data,
+            6 => Priority::DataLow,
+            7 => Priority::Background,
+            _ => Priority::DEFAULT,
+        }
     }
 }
 
