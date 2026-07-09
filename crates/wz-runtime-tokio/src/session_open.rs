@@ -1572,6 +1572,7 @@ pub async fn initiate_and_open_session_with_multilink(
     connected: DialedLink,
     params: SessionInitParams,
     reliability_pref: crate::config::LinkReliabilityPref,
+    qos: bool,
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
@@ -1580,6 +1581,14 @@ pub async fn initiate_and_open_session_with_multilink(
     let actions = new_session_actions(outbound, params, clock);
     actions.install_multilink_dispatch(crate::multilink::open_multilink_dispatch());
     actions.set_link_reliability_pref(reliability_pref);
+    // R311y218 — compose the QoS offer with multilink (orthogonal at the actions
+    // layer; only qos<->lowlatency conflict, and this path stages no lowlatency).
+    #[cfg(feature = "transport-qos")]
+    if qos {
+        actions.set_qos_offer(true);
+    }
+    #[cfg(not(feature = "transport-qos"))]
+    let _ = qos;
     initiator_open(
         inbound,
         actions,
@@ -1875,6 +1884,7 @@ pub async fn accept_and_open_session_with_multilink(
     accepted: DialedLink,
     params: SessionInitParams,
     reliability_pref: crate::config::LinkReliabilityPref,
+    qos: bool,
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
@@ -1883,6 +1893,14 @@ pub async fn accept_and_open_session_with_multilink(
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.install_multilink_dispatch(crate::multilink::accept_multilink_dispatch());
     actions.set_link_reliability_pref(reliability_pref);
+    // R311y218 — reflect the QoS offer on the accept side iff the peer offered it
+    // (the `&=` merge finalizes it); orthogonal to the multilink 0x4 negotiation.
+    #[cfg(feature = "transport-qos")]
+    if qos {
+        actions.set_qos_offer(true);
+    }
+    #[cfg(not(feature = "transport-qos"))]
+    let _ = qos;
     // Fresh challenge nonce per accepted handshake (the pubkey responder replay
     // defense) — drawn from AP OS entropy here because the no_std core cannot.
     let nonce = crate::session_glue::nonce_from_os_entropy().map_err(OpenError::AuthEntropy)?;

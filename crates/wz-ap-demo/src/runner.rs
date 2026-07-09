@@ -1299,6 +1299,10 @@ pub(crate) struct PeerOpts {
     /// `FaceSources.max_links`.
     #[cfg(feature = "transport-multilink")]
     pub max_links: usize,
+    /// R311y218 (transport-qos) — offer the QoS transport on this peer's aggregated
+    /// links (`--qos`). Routed through [`WzConfig::with_qos`] into `FaceSources.qos`.
+    #[cfg(feature = "transport-qos")]
+    pub qos: bool,
 }
 
 #[cfg(feature = "routing-peer")]
@@ -1321,6 +1325,8 @@ pub(crate) async fn run_peer(
     let put_payload = opts.put_payload.as_deref();
     #[cfg(feature = "transport-multilink")]
     let max_links = opts.max_links;
+    #[cfg(feature = "transport-qos")]
+    let qos = opts.qos;
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
@@ -1536,6 +1542,8 @@ pub(crate) async fn run_peer(
     // warnings=deny.
     #[cfg(feature = "transport-multilink")]
     let cfg = cfg.with_max_links(max_links);
+    #[cfg(feature = "transport-qos")]
+    let cfg = cfg.with_qos(qos);
     let wz_config = std::rc::Rc::new(std::cell::RefCell::new(cfg));
     {
         let cfg = wz_config.borrow();
@@ -1766,6 +1774,20 @@ pub(crate) async fn run_peer(
             // that many physical links to a peer zid into ONE logical session.
             #[cfg(feature = "transport-multilink")]
             max_links: wz_config.borrow().max_links,
+            // R311y218 — FaceSources.qos is gated transport-multilink (a plain bool),
+            // but WzConfig.qos is gated transport-qos, so bridge with an inner
+            // cfg-expr: the demo offers qos on its aggregated links iff `--qos` set.
+            #[cfg(feature = "transport-multilink")]
+            qos: {
+                #[cfg(feature = "transport-qos")]
+                {
+                    wz_config.borrow().qos
+                }
+                #[cfg(not(feature = "transport-qos"))]
+                {
+                    false
+                }
+            },
         },
         params,
         TokioTime::new(),
@@ -2421,6 +2443,8 @@ pub(crate) async fn run_router_hat(
             // multilink demo path is the --peer mesh mode, run_peer).
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
+            #[cfg(feature = "transport-multilink")]
+            qos: false,
         },
         params,
         TokioTime::new(),

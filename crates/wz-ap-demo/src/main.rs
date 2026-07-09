@@ -225,6 +225,14 @@ fn main() -> ExitCode {
                     }
                 })
                 .unwrap_or(1);
+            // R311y218 (transport-qos) — `--qos` (presence bool) offers the QoS
+            // transport on this peer's aggregated links (the WzConfig.qos knob).
+            // TAKES EFFECT ONLY WITH `--max-links > 1`: qos is threaded through the
+            // multilink open path (option-b), so a single-link peer (`--max-links 1`,
+            // the default) takes the bare open arms and does NOT offer qos — `--qos`
+            // is a runtime no-op there. Priority segregation across links is y219.
+            #[cfg(feature = "transport-qos")]
+            let qos = rest.iter().any(|a| a == "--qos");
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -240,6 +248,8 @@ fn main() -> ExitCode {
                     put_payload,
                     #[cfg(feature = "transport-multilink")]
                     max_links,
+                    #[cfg(feature = "transport-qos")]
+                    qos,
                 },
                 InterceptorOpts {
                     acl_deny,

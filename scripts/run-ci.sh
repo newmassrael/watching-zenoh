@@ -1583,6 +1583,10 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     local ML_DEPLOY_FEATURES="$ML_FEATURES,routing-peer"
     (cd crates \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet \
+        `# R311y218 — qos x multilink composition: the qos-gated e2e proves the` \
+        `# _with_multilink entrypoints negotiate is_qos over the 0x4 handshake` \
+        `# (both-offer -> is_qos true; qos=false control -> false).` \
+        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet \
         `# R311y212 slice-2 — the per-link AUTO-RE-ADD e2e: A's production peer_loop` \
         `# (max_links=2, dials B twice) re-dials + re-JOINs a link the harness kills` \
@@ -1594,6 +1598,14 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         && cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet -- -D warnings \
+        `# R311y218 — clippy the qos x multilink composition (entrypoint qos param,` \
+        `# the demo --qos threading) under -D warnings, incl the wz-ap-demo bridge.` \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet -- -D warnings \
+        && cargo clippy -p wz-ap-demo --features transport-qos,transport-multilink --quiet -- -D warnings \
+        `# R311y218 scope boundary — transport-qos WITHOUT transport-multilink: the` \
+        `# demo --qos wires WzConfig.qos but the single-link arms do not offer it;` \
+        `# must still compile (the FaceSources.qos bridge cfg-elides cleanly).` \
+        && cargo clippy -p wz-ap-demo --features transport-qos --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-multilink --quiet -- -D warnings \

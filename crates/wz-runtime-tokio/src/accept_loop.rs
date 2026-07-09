@@ -466,11 +466,13 @@ fn multilink_pref(id: FaceId) -> LinkReliabilityPref {
 /// tagged with `pref`. Byte-identical to [`open_face`] otherwise; the loop
 /// branches on `max_links` at the accept site.
 #[cfg(feature = "transport-multilink")]
+#[allow(clippy::too_many_arguments)]
 async fn open_face_multilink(
     id: FaceId,
     peer: SocketAddr,
     accepted: DialedLink,
     pref: LinkReliabilityPref,
+    qos: bool,
     params: SessionInitParams,
     clock: TokioTime,
     tick_interval_ms: u64,
@@ -479,6 +481,7 @@ async fn open_face_multilink(
         accepted,
         params,
         pref,
+        qos,
         clock,
         None,
         tick_interval_ms,
@@ -497,6 +500,7 @@ async fn dial_face_multilink(
     id: FaceId,
     peer: SocketAddr,
     pref: LinkReliabilityPref,
+    qos: bool,
     params: SessionInitParams,
     clock: TokioTime,
     tick_interval_ms: u64,
@@ -507,6 +511,7 @@ async fn dial_face_multilink(
                 DialedLink::Tcp(stream),
                 params,
                 pref,
+                qos,
                 clock,
                 None,
                 tick_interval_ms,
@@ -531,17 +536,19 @@ async fn dial_face_multilink(
 /// re-dial aggregates onto the surviving shared core (`join_link`) and a failed
 /// one surfaces `Err` -> the Err arm re-schedules it (retry-until-success).
 #[cfg(feature = "transport-multilink")]
+#[allow(clippy::too_many_arguments)]
 async fn dial_face_multilink_after(
     id: FaceId,
     peer: SocketAddr,
     backoff_ms: u64,
     pref: LinkReliabilityPref,
+    qos: bool,
     params: SessionInitParams,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-    dial_face_multilink(id, peer, pref, params, clock, tick_interval_ms).await
+    dial_face_multilink(id, peer, pref, qos, params, clock, tick_interval_ms).await
 }
 
 /// The fixed backoff between a dropped/failed dial and its re-dial. Shared by
@@ -652,6 +659,7 @@ fn schedule_redial(
 fn schedule_multilink_redial(
     addr: SocketAddr,
     pref: LinkReliabilityPref,
+    qos: bool,
     ml_dial_endpoints: &mut BTreeMap<FaceId, (SocketAddr, LinkReliabilityPref)>,
     opening: &mut FuturesUnordered<OpenFuture>,
     next_id: &mut u64,
@@ -681,6 +689,7 @@ fn schedule_multilink_redial(
         addr,
         RECONNECT_BACKOFF_MS,
         pref,
+        qos,
         params.clone(),
         clock,
         tick_interval_ms,
@@ -1069,6 +1078,15 @@ pub struct FaceSources {
     /// so the struct — and every non-multilink caller — is unchanged without it.
     #[cfg(feature = "transport-multilink")]
     pub max_links: usize,
+    /// R311y218 (transport-multilink) — whether this loop OFFERS the QoS transport
+    /// on every aggregated link it opens (sourced from `WzConfig.qos`). Uniform per
+    /// loop (unlike the per-face `multilink_pref`); staged via `set_qos_offer` in
+    /// the `_with_multilink` entrypoints. `false` = single-conduit, byte-identical.
+    /// Gated `transport-multilink` (a plain bool like `max_links`, not
+    /// `all(..,transport-qos)`) so the threading carries no per-call-site cfg branch;
+    /// the value is only honored under `transport-qos` (else `set_qos_offer` elides).
+    #[cfg(feature = "transport-multilink")]
+    pub qos: bool,
 }
 
 /// Bind-once, hold-N: the shared multi-face drive core behind both
@@ -1107,6 +1125,8 @@ where
         mut reconcile,
         #[cfg(feature = "transport-multilink")]
         max_links,
+        #[cfg(feature = "transport-multilink")]
+        qos,
     } = sources;
     tokio::pin!(shutdown);
 
@@ -1224,6 +1244,7 @@ where
                 id,
                 peer,
                 multilink_pref(id),
+                qos,
                 params.clone(),
                 clock,
                 tick_interval_ms,
@@ -1445,6 +1466,7 @@ where
                                 schedule_multilink_redial(
                                     addr,
                                     pref,
+                                    qos,
                                     &mut ml_dial_endpoints,
                                     &mut opening,
                                     &mut next_id,
@@ -1543,6 +1565,7 @@ where
                             schedule_multilink_redial(
                                 addr,
                                 pref,
+                                qos,
                                 &mut ml_dial_endpoints,
                                 &mut opening,
                                 &mut next_id,
@@ -1634,6 +1657,7 @@ where
                                 id,
                                 addr,
                                 multilink_pref(id),
+                                qos,
                                 params.clone(),
                                 clock,
                                 tick_interval_ms,
@@ -1671,6 +1695,7 @@ where
                                         id,
                                         addr,
                                         multilink_pref(id),
+                                        qos,
                                         params.clone(),
                                         clock,
                                         tick_interval_ms,
@@ -1798,6 +1823,7 @@ where
                         peer,
                         accepted,
                         multilink_pref(id),
+                        qos,
                         params.clone(),
                         clock,
                         tick_interval_ms,
@@ -1876,6 +1902,8 @@ where
             // the full mesh entry that carries `max_links`); byte-identical to today.
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
+            #[cfg(feature = "transport-multilink")]
+            qos: false,
         },
         params,
         clock,
@@ -2380,6 +2408,8 @@ mod tests {
                 reconcile: None,
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
+                #[cfg(feature = "transport-multilink")]
+                qos: false,
             },
             peer_params(),
             TokioTime::new(),
@@ -2457,6 +2487,8 @@ mod tests {
                 reconcile: None,
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
+                #[cfg(feature = "transport-multilink")]
+                qos: false,
             },
             peer_params(),
             TokioTime::new(),
@@ -2534,6 +2566,8 @@ mod tests {
                 reconcile: None,
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
+                #[cfg(feature = "transport-multilink")]
+                qos: false,
             },
             peer_params(),
             TokioTime::new(),

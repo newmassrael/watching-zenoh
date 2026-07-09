@@ -103,6 +103,7 @@ async fn open_multilink_link(
     init_zid: u8,
     acc_pref: LinkReliabilityPref,
     init_pref: LinkReliabilityPref,
+    qos: bool,
 ) -> (OpenedSession, OpenedSession) {
     let addr = listener.local_addr().expect("local_addr");
     let acc = async {
@@ -111,6 +112,7 @@ async fn open_multilink_link(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(acc_zid),
             acc_pref,
+            qos,
             TokioTime::new(),
             Some(ITER_CAP),
             DEFAULT_OPEN_TICK_MS,
@@ -124,6 +126,7 @@ async fn open_multilink_link(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(init_zid),
             init_pref,
+            qos,
             TokioTime::new(),
             Some(ITER_CAP),
             DEFAULT_OPEN_TICK_MS,
@@ -174,6 +177,7 @@ async fn two_links_aggregate_segregate_and_survive_link_death() {
         0x01,
         LinkReliabilityPref::Reliable,
         LinkReliabilityPref::Reliable,
+        false,
     )
     .await;
     let (b2, a2) = open_multilink_link(
@@ -182,6 +186,7 @@ async fn two_links_aggregate_segregate_and_survive_link_death() {
         0x01,
         LinkReliabilityPref::BestEffort,
         LinkReliabilityPref::BestEffort,
+        false,
     )
     .await;
 
@@ -366,6 +371,7 @@ async fn mismatched_pubkey_link_is_rejected_invalid() {
         0x01,
         LinkReliabilityPref::Reliable,
         LinkReliabilityPref::Reliable,
+        false,
     )
     .await;
 
@@ -406,6 +412,7 @@ async fn third_link_over_max_links_is_rejected() {
         0x01,
         LinkReliabilityPref::Reliable,
         LinkReliabilityPref::Reliable,
+        false,
     )
     .await;
     let (b2, a2) = open_multilink_link(
@@ -414,6 +421,7 @@ async fn third_link_over_max_links_is_rejected() {
         0x01,
         LinkReliabilityPref::BestEffort,
         LinkReliabilityPref::BestEffort,
+        false,
     )
     .await;
     let (b3, a3) = open_multilink_link(
@@ -422,6 +430,7 @@ async fn third_link_over_max_links_is_rejected() {
         0x01,
         LinkReliabilityPref::Any,
         LinkReliabilityPref::Any,
+        false,
     )
     .await;
 
@@ -521,6 +530,7 @@ async fn multilink_open_stages_multilink_ext() {
         0x01,
         LinkReliabilityPref::Reliable,
         LinkReliabilityPref::Reliable,
+        false,
     )
     .await;
 
@@ -570,4 +580,55 @@ async fn poll_until(
         tokio::time::sleep(step).await;
         waited += step;
     }
+}
+
+/// R311y218 — qos x multilink COMPOSITION: the `_with_multilink` entrypoints stage
+/// the QoS offer alongside the 0x4 aggregation ext, so a link opened with qos=true
+/// on both sides negotiates BOTH capabilities over ONE handshake (`is_qos()` true on
+/// both ends). The qos=false CONTROL leaves it off, so the `qos` param genuinely
+/// drives negotiation (not always-on). Proves the demo `--qos` reaches a
+/// qos-negotiated multilink session (WzConfig.qos is no longer dead); priority
+/// segregation across links is the y219 refinement.
+#[cfg(feature = "transport-qos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn multilink_link_negotiates_qos_when_both_offer() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+
+    // Both offer -> qos negotiated on over the multilink handshake.
+    let (acc, init) = open_multilink_link(
+        &listener,
+        0x02,
+        0x01,
+        LinkReliabilityPref::Reliable,
+        LinkReliabilityPref::Reliable,
+        /*qos=*/ true,
+    )
+    .await;
+    assert!(
+        init.actions.is_qos(),
+        "the initiator negotiated qos over the multilink 0x4 handshake"
+    );
+    assert!(
+        acc.actions.is_qos(),
+        "the acceptor negotiated qos over the multilink 0x4 handshake"
+    );
+
+    // CONTROL: qos=false leaves it off -> the `qos` param drives it.
+    let (acc0, init0) = open_multilink_link(
+        &listener,
+        0x04,
+        0x03,
+        LinkReliabilityPref::Reliable,
+        LinkReliabilityPref::Reliable,
+        /*qos=*/ false,
+    )
+    .await;
+    assert!(
+        !init0.actions.is_qos(),
+        "qos=false leaves the initiator non-qos"
+    );
+    assert!(
+        !acc0.actions.is_qos(),
+        "qos=false leaves the acceptor non-qos"
+    );
 }

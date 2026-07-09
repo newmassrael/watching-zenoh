@@ -198,6 +198,17 @@ routing-peer = [
 # other lane build unchanged; only `--features transport-multilink` compiles the
 # aggregation wiring. The atom is active <=> its cfg sites in run_peer + main.rs.
 transport-multilink = ["routing-peer", "wz/transport-multilink"]
+# R311y218 (transport-qos) — opt-in QoS transport on the `--peer` mesh mode: `--qos`
+# offers it, routed through `WzConfig.qos` into `FaceSources.qos` and staged by the
+# `_with_multilink` entrypoints. Pulls `routing-peer` (the run-mode that hosts the
+# `run_peer` wiring, per the transport-multilink convention above — a bare
+# `["wz/transport-qos"]` passthrough would let the feature enable with `run_peer`
+# compiled out = silent NOP) + the facade forward. The qos value only reaches the
+# wire when composed with `transport-multilink` (`FaceSources.qos` is a
+# multilink-path field); alone it wires `--qos -> WzConfig.qos` but the single-link
+# demo arms do not offer it (the y218 scope boundary; priority segregation is y219).
+# NOT in `default`; active <=> its cfg sites in run_peer + main.rs.
+transport-qos = ["routing-peer", "wz/transport-qos"]
 # R311y51 (§5.23 adminspace-write) — the permissions.write GATE on the config-write
 # host. SEPARATE from routing-peer (a distinct toggle) so both gate arms stay
 # compiled: `--features routing-peer,adminspace-write` = gate ON (run_peer consults
