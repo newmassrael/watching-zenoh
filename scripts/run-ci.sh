@@ -1118,10 +1118,19 @@ layer_c1ad_cargo_test_lowlatency() {
 #      single-conduit arms must compose with NO dead code under -D warnings);
 #   4. compile-checks the pairwise composition of qos with each adjacent
 #      transport mode (multilink / lowlatency / batching) — qos and lowlatency
-#      are RUNTIME-exclusive (the set_qos_offer guard) but MUST compile together
-#      — plus the minimal --no-default-features qos build (arrays cross a lean
-#      profile);
-#   5. proves the wz facade + wz-runtime-tokio feature forwards resolve.
+#      are RUNTIME-exclusive (the symmetric set_qos_offer / set_lowlatency_offer
+#      guards) but MUST compile together — plus the minimal --no-default-features
+#      qos build (arrays cross a lean profile); R311y216 RUNS the exclusivity unit
+#      test (is_qos_negotiates_by_and_and_is_lowlatency_exclusive) under BOTH
+#      features so the reciprocal-guard symmetry has executed CI coverage, not just
+#      a cargo-check compile;
+#   5. R311y216(a): runs qos_e2e over the default feature set (transport-qos +
+#      transport-unicast + transport-link-tcp, NO --no-default-features so the
+#      default codec-init-body / codec-push / session-unicast-open|accept the
+#      round-trip needs are present — mirroring the lowlatency_e2e lane), proving
+#      the `*_with_qos` entrypoints flip `is_qos` on a real handshake and a
+#      prioritized Put rides / clamps ext_qos by negotiation;
+#   6. proves the wz facade + wz-runtime-tokio feature forwards resolve.
 layer_c1bb_cargo_test_qos() {
     (cd crates \
         && cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib --quiet \
@@ -1131,6 +1140,8 @@ layer_c1bb_cargo_test_qos() {
         && cargo check -p wz-session-core --features transport-qos,transport-multilink --quiet \
         && cargo check -p wz-session-core --features transport-qos,transport-lowlatency --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp --test qos_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-qos,transport-lowlatency,transport-unicast --lib is_qos_negotiates_by_and_and_is_lowlatency_exclusive --quiet \
         && cargo check -p wz --features transport-qos --quiet)
 }
 

@@ -1197,6 +1197,11 @@ mod tests {
     /// peer's Init `ext_qos` offer. And it is mutually exclusive with
     /// `is_lowlatency` (zenoh `manager.rs:264`): a QoS offer staged after a
     /// lowlatency offer is refused at the offer-injection seam.
+    ///
+    /// R311y216 — the exclusivity is now SYMMETRIC and TOTAL (matching zenoh's
+    /// order-independent `bail!`): the reciprocal guard also refuses a lowlatency
+    /// offer staged after a QoS offer, so the both-on state is unrepresentable in
+    /// EITHER staging order (first-staged wins).
     #[cfg(feature = "transport-qos")]
     #[test]
     fn is_qos_negotiates_by_and_and_is_lowlatency_exclusive() {
@@ -1223,6 +1228,22 @@ mod tests {
                 "is_qos && is_lowlatency incompatible -> the QoS offer is refused"
             );
             assert!(!a2.is_qos(), "the refused QoS offer left is_qos false");
+
+            // R311y216 — the reciprocal direction: a QoS offer refuses a later
+            // lowlatency offer, so the both-on state is unrepresentable in either
+            // staging order (first-staged wins).
+            let p3 = wz_runtime_tokio_test_support::fixture_session_init_params();
+            let (a3, _d3) = crate::test_fixtures::recording_actions_with_params(p3);
+            assert!(a3.set_qos_offer(true), "qos offer applies on fresh actions");
+            assert!(
+                !a3.set_lowlatency_offer(true),
+                "is_lowlatency && is_qos incompatible -> the lowlatency offer is refused"
+            );
+            assert!(
+                !a3.is_lowlatency(),
+                "the refused lowlatency offer left is_lowlatency false"
+            );
+            assert!(a3.is_qos(), "the QoS offer (staged first) wins");
         }
     }
 

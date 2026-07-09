@@ -1970,9 +1970,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `TransportManager::config.unicast.is_lowlatency` seeding the per-link
     /// establishment state). Seeds [`Self::is_lowlatency`]; the peer's offer is
     /// ANDed in by [`Self::negotiate_lowlatency_against_peer`].
+    ///
+    /// R311y216 — exclusivity guard, the reciprocal of [`Self::set_qos_offer`]'s
+    /// (zenoh `manager.rs:264`: `'qos' and 'lowlatency' options are incompatible`,
+    /// a SYMMETRIC and TOTAL check that bails whenever both are set, regardless of
+    /// order). When a QoS offer is already staged, the lowlatency offer is REFUSED
+    /// (`is_lowlatency` stays false, QoS wins) — the mirror of `set_qos_offer`
+    /// refusing under a staged lowlatency. Together the two guards make the
+    /// both-on state unrepresentable in EITHER staging order (first-staged wins),
+    /// closing the y215 asymmetry where only `set_qos_offer` guarded. Returns
+    /// `true` iff the offer was applied (a config validator can escalate on
+    /// `false`); the `*_with_lowlatency` entrypoints stage only lowlatency on
+    /// fresh actions, so the guard never fires there.
     #[cfg(feature = "transport-lowlatency")]
-    pub fn set_lowlatency_offer(&self, offer: bool) {
+    pub fn set_lowlatency_offer(&self, offer: bool) -> bool {
+        #[cfg(feature = "transport-qos")]
+        if offer && self.is_qos() {
+            return false;
+        }
         R::with_mutex_mut(&self.is_lowlatency, |s| *s = offer);
+        true
     }
 
     /// transport-lowlatency — AND the peer's InitSyn / InitAck lowlatency offer

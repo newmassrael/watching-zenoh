@@ -104,15 +104,37 @@ pub struct WzConfig {
     /// mapping runner reachable.)
     #[cfg(feature = "transport-multilink")]
     pub max_links: usize,
+    /// R311y216 (transport-qos) — the EMBEDDER-facing "this deploy offers the QoS
+    /// transport toward its peers" knob (zenoh `unicast.is_qos`,
+    /// `commons/zenoh-config` `TransportUnicastConf`, read into the establishment
+    /// state at `manager.config.unicast.is_qos`). Default `false` = single-conduit,
+    /// byte-identical to a pre-QoS session. `active <=> cfg-toggle`: the field only
+    /// exists under `transport-qos`, and even then a session negotiates QoS only
+    /// when BOTH this offer AND the peer's `ext_qos` offer are set (the symmetric
+    /// `&=` AND at [`crate::session_open`] / `SessionLinkActions::set_qos_offer`).
+    ///
+    /// This is a faithful mirror of zenoh's config surface, not a divergence.
+    /// zenoh reads `unicast.is_qos` per-manager (uniform across a manager's
+    /// sessions); wz stages it per-session via the `*_with_qos` open entrypoints,
+    /// a superset (one qos session + one non-qos session under one node), while
+    /// each individual session still negotiates faithfully. Like `max_links`, this
+    /// field is the config surface: the library entrypoints take the offer
+    /// directly, and the reference peer runner bridges `WzConfig.qos -> the
+    /// `*_with_qos` entrypoint` (the demo `--qos` reader arrives with the
+    /// priority-select demo in R311y216(b), the `max_links -> FaceSources` bridge
+    /// precedent). `to_admin_json` does not render it (as with `max_links`).
+    #[cfg(feature = "transport-qos")]
+    pub qos: bool,
 }
 
 impl Default for WzConfig {
     /// The base config — `whatami = Peer`, `batch_size = 0`, `lease_ms = 0`, no
-    /// interceptors, `max_links = 1`. A hand-written impl (not derived) so the
-    /// `transport-multilink` `max_links` defaults to `1` (the single-link
-    /// degenerate path), not the `usize` `Default` of `0`; every other field
-    /// keeps its type `Default`, so the derived and hand-written impls agree on
-    /// the pre-multilink fields.
+    /// interceptors, `max_links = 1`, `qos = false`. A hand-written impl (not
+    /// derived) so the `transport-multilink` `max_links` defaults to `1` (the
+    /// single-link degenerate path), not the `usize` `Default` of `0`; every other
+    /// field keeps its type `Default` (`qos` = `false`, byte-identical to a pre-QoS
+    /// session), so the derived and hand-written impls agree on the pre-multilink
+    /// fields.
     fn default() -> Self {
         Self {
             whatami: WhatAmI::default(),
@@ -122,6 +144,8 @@ impl Default for WzConfig {
             interceptors: InterceptorConfig::default(),
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
+            #[cfg(feature = "transport-qos")]
+            qos: false,
         }
     }
 }
@@ -351,6 +375,18 @@ impl WzConfig {
     #[cfg(feature = "transport-multilink")]
     pub fn with_max_links(mut self, max_links: usize) -> Self {
         self.max_links = max_links;
+        self
+    }
+
+    /// R311y216 (transport-qos) — offer the QoS transport toward this node's
+    /// peers (zenoh `unicast.is_qos`), consumed at setup. The builder twin of the
+    /// `pub qos` field, mirroring [`Self::with_max_links`]: a caller reads this to
+    /// select the `*_with_qos` open entrypoint. `false` = single-conduit (the
+    /// `Default`, byte-identical to a pre-QoS session). QoS engages only when the
+    /// peer also offers `ext_qos` (the symmetric `&=` AND at open).
+    #[cfg(feature = "transport-qos")]
+    pub fn with_qos(mut self, qos: bool) -> Self {
+        self.qos = qos;
         self
     }
 

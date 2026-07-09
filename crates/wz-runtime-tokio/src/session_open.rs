@@ -1409,6 +1409,27 @@ pub async fn connect_and_open_session_with_lowlatency(
         .await
 }
 
+/// transport-qos (R311y216) — [`connect_and_open_session`] that OFFERS the QoS
+/// transport: dials the locator then opens with the QoS offer staged on the
+/// session actions before the handshake drives. The InitSyn carries the `ext_qos`
+/// unit ext (id 0x1); if the peer reflects it the established session negotiates
+/// `is_qos` on and prioritized traffic rides per-priority conduits. Signature-
+/// stable additive sibling of the bare connect (the
+/// [`connect_and_open_session_with_lowlatency`] twin; qos and lowlatency are
+/// runtime-exclusive, so a caller picks one).
+#[cfg(feature = "transport-qos")]
+pub async fn connect_and_open_session_with_qos(
+    locator: AnyLocator,
+    params: SessionInitParams,
+    cfg: &DialConfig,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
+    initiate_and_open_session_with_qos(dialed, params, clock, max_iters, tick_interval_ms).await
+}
+
 /// session-extcompression — [`connect_and_open_session`] that OFFERS compression:
 /// dials the locator then opens with the lz4-compression offer staged on the
 /// session actions before the handshake drives. The InitSyn carries the
@@ -1586,6 +1607,39 @@ pub async fn initiate_and_open_session_with_lowlatency(
     let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
     let actions = new_session_actions(outbound, params, clock);
     actions.set_lowlatency_offer(true);
+    initiator_open(
+        inbound,
+        actions,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// transport-qos (R311y216) — [`initiate_and_open_session`] with the QoS
+/// transport capability offered on the session actions before the handshake
+/// drives, so the InitSyn carries the `ext_qos` unit ext (id 0x1). The initiator
+/// side; the acceptor reflects via [`accept_and_open_session_with_qos`]. When the
+/// peer also offers, the established session negotiates `is_qos` on (the symmetric
+/// `&=` AND) and a non-DEFAULT priority rides its own per-priority SN conduit; a
+/// DEFAULT / non-negotiated session stays byte-identical to a pre-QoS session. The
+/// additive qos-on sibling of the bare open.
+#[cfg(feature = "transport-qos")]
+pub async fn initiate_and_open_session_with_qos(
+    connected: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let actions = new_session_actions(outbound, params, clock);
+    // Fresh actions stage only qos, so the lowlatency-exclusivity guard cannot
+    // fire — the bool return is always true here (bare-discarded, as with the
+    // lowlatency twin).
+    actions.set_qos_offer(true);
     initiator_open(
         inbound,
         actions,
@@ -1864,6 +1918,39 @@ pub async fn accept_and_open_session_with_lowlatency(
     let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.set_lowlatency_offer(true);
+
+    engine.process_event(E::InboundStart);
+    drive_open_loop(
+        inbound,
+        actions,
+        engine,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// transport-qos (R311y216) — [`accept_and_open_session`] that OFFERS the QoS
+/// transport on the accept side: the acceptor reflects the `ext_qos` unit ext in
+/// its InitAck iff the peer's InitSyn offered it (the `&=` merge runs on the
+/// inbound InitSyn before the InitAck is emitted), so the established session
+/// negotiates `is_qos` on only when BOTH sides offered. The accept-side
+/// counterpart of [`connect_and_open_session_with_qos`].
+#[cfg(feature = "transport-qos")]
+pub async fn accept_and_open_session_with_qos(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    // Fresh actions stage only qos, so the lowlatency-exclusivity guard cannot
+    // fire — the bool return is always true here (bare-discarded).
+    actions.set_qos_offer(true);
 
     engine.process_event(E::InboundStart);
     drive_open_loop(
