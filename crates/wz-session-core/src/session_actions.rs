@@ -206,8 +206,12 @@ pub struct BatchTx {
     /// message on a DIFFERENT priority conduit must flush the open frame and
     /// reopen (SN-safety F2), never share it — zenoh batches each priority
     /// independently (`io/zenoh-transport/.../pipeline.rs`, one `StageIn` per
-    /// priority). Absent without the feature: a non-QoS session has one conduit,
-    /// so every message shares the open frame exactly as before.
+    /// priority). The RELIABILITY half of the conduit key is NOT stored here: it
+    /// is recovered from the open frame's own R flag
+    /// (`frame_wire_reliability(&self.buf)`) at the reopen check (R311y222), so a
+    /// reliability change flushes+reopens too — and that dimension is UNGATED
+    /// (two reliability conduits exist even on a non-QoS session, so a non-QoS
+    /// batch is NOT single-conduit; only the priority half is qos-gated).
     #[cfg(feature = "transport-qos")]
     pub priority: Option<Priority>,
 }
@@ -2791,9 +2795,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let mut sink = sce_forge_runtime::codec::VecSink::new(buf);
                     encode_body(&mut sink).expect("VecSink is infallible");
                 };
-                // At most two iterations: an overflow flushes the open
-                // frame and falls through to the open-fresh-frame arm
-                // (pico `_z_transport_tx_batch_overflow` rollback+retry).
+                // At most two iterations: a conduit change (R311y222 — a
+                // different reliability or priority) OR an append overflow
+                // (pico `_z_transport_tx_batch_overflow` rollback+retry) flushes
+                // the open frame and falls through to the open-fresh-frame arm,
+                // which is always terminal (it empties the buf and returns).
                 loop {
                     if batch.buf.is_empty() {
                         // R311y215 — pin the fresh frame to this priority conduit
@@ -2824,21 +2830,45 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         }
                         return;
                     }
-                    // R311y215 — the open frame is one (priority) conduit; a
-                    // message on a different conduit flushes it and reopens
-                    // (loops back to the buf-empty arm above). Under a non-QoS
-                    // session every message is DEFAULT, so this never fires.
+                    // R311y222 — the open frame is ONE (priority, reliability)
+                    // conduit; a message on a DIFFERENT conduit flushes it and
+                    // reopens (loops back to the buf-empty arm above). The
+                    // RELIABILITY half is UNGATED: a non-QoS session still has two
+                    // reliability conduits, each its own Frame-SN ring
+                    // (`AtomicTxSn { reliable, best_effort }`), so a best-effort
+                    // message must not ride a reliable frame (or vice versa) even
+                    // without transport-qos — read the open frame's own R flag so no
+                    // BatchTx field is needed (priority keeps its pin below — it is
+                    // NOT cheaply recoverable, needing an ext_qos VLE parse). The
+                    // PRIORITY half is transport-qos-gated (per-priority conduits
+                    // exist only under QoS; y215 F2). Either mismatch flushes. This
+                    // is a deliberate divergence from vendored zenoh-pico, which
+                    // appends mixed-reliability into whatever frame is open
+                    // (`tx.c` `_z_transport_tx_send_n_msg_inner`) — wz follows
+                    // zenoh's per-(priority, reliability) frame boundary
+                    // (`zenoh-codec` `CurrentFrame`/`NewFrame`).
+                    // Read the open frame's reliability once (its own R flag) —
+                    // reused as the flush channel below (`prev` is the same bytes).
+                    let open_channel = frame_wire_reliability(&batch.buf);
+                    let reliability_changed =
+                        open_channel != Reliability::from_reliable_bool(reliable);
                     #[cfg(feature = "transport-qos")]
-                    if batch.priority != Some(priority) {
+                    let priority_changed = batch.priority != Some(priority);
+                    #[cfg(not(feature = "transport-qos"))]
+                    let priority_changed = false;
+                    if reliability_changed || priority_changed {
                         let prev = core::mem::take(&mut batch.buf);
                         batch.count = 0;
-                        let channel = frame_wire_reliability(&prev);
-                        // The OPEN frame's conduit is `batch.priority`, NOT the
-                        // triggering message's `priority` (this arm fires BECAUSE
-                        // they differ) — route by the frame's own pin (y217 #3;
-                        // splitting one conduit across links would trip the peer's
-                        // per-conduit RX SN gate).
-                        self.send_wire(&prev, channel, batch.priority.unwrap_or(Priority::DEFAULT));
+                        // Route the flushed frame by its OWN conduit — the frame's
+                        // R flag (`open_channel`, read above) + the priority pin —
+                        // NOT the triggering message (this arm fires BECAUSE they
+                        // differ; y217 #3, splitting one conduit across links would
+                        // trip the peer's per-conduit RX SN gate).
+                        #[cfg(feature = "transport-qos")]
+                        let route_prio = batch.priority.unwrap_or(Priority::DEFAULT);
+                        #[cfg(not(feature = "transport-qos"))]
+                        let route_prio = Priority::DEFAULT;
+                        self.send_wire(&prev, open_channel, route_prio);
                         continue;
                     }
                     let wpos = batch.buf.len();

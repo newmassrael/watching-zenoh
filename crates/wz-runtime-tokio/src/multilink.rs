@@ -532,8 +532,9 @@ mod tests {
     }
 
     /// R311y217 (#3 — the sharp SN-safety case) — a BATCH reopen-flush routes the
-    /// flushed frame by ITS OWN pinned conduit (`batch.priority`), NOT the
-    /// triggering message's priority. Open a HIGH frame in a batch window, then
+    /// flushed frame by ITS OWN pinned conduit (`batch.priority` + the frame's own
+    /// R flag as of R311y222's (priority, reliability) key), NOT the triggering
+    /// message's priority. Open a HIGH frame in a batch window, then
     /// send a LOW message: the priority change flushes the open HIGH frame, which
     /// MUST ride the HIGH-band link (its own conduit) — if it routed by the LOW
     /// trigger it would land on the low-band link, splitting one conduit across

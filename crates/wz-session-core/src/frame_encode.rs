@@ -145,13 +145,17 @@ pub(crate) fn begin_frame(buf: &mut Vec<u8>, sn: u64, parent_flags: u8, ext_qos:
 }
 
 /// R311jq — derive the link-driver [`Reliability`] of an already-encoded
-/// outbound `T_MID_FRAME` from its header's R flag. The batch flush
-/// paths re-emit a frame that was opened by an earlier message, so the
-/// channel must come from the frame bytes, not from the
-/// currently-dispatched message (zenoh-pico appends mixed-reliability
-/// messages into whatever frame is open — the OPENING message's flag
-/// governs; `tx.c _z_transport_tx_send_n_msg_inner` mints the header
-/// only when the buffer is empty).
+/// outbound `T_MID_FRAME` from its header's R flag. Two callers: (1) the
+/// batch flush paths re-emit a frame that was opened by an earlier
+/// message, so the channel must come from the frame bytes, not from the
+/// currently-dispatched message; (2) R311y222 — the batch reopen check
+/// reads the OPEN frame's R flag through this to detect a reliability
+/// change and flush+reopen, so wz keeps each batch frame homogeneous in
+/// (priority, reliability). This is where wz DIVERGES from vendored
+/// zenoh-pico, which appends mixed-reliability messages into whatever
+/// frame is open (`tx.c _z_transport_tx_send_n_msg_inner` mints the header
+/// only when the buffer is empty, then blind-appends); wz instead follows
+/// zenoh's per-(priority, reliability) frame boundary.
 ///
 /// cfg adds `session-unicast`: every consumer (the batch flush emits)
 /// lives in `session_actions`, which is gated `all(alloc,

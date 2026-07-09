@@ -2460,6 +2460,86 @@ mod batch_tx_tests {
         (sn, messages)
     }
 
+    /// R311y222 — a batch frame is ONE (priority, reliability) conduit: a
+    /// RELIABILITY change inside an open window flushes the open frame and
+    /// reopens on the other reliability conduit, instead of absorbing a
+    /// best-effort message into a reliable frame (or vice versa). This mod is
+    /// gated on `transport-batching` but NOT `transport-qos`, so the assertion
+    /// runs on a NON-QoS build too — the crux: the reliability conduit split is
+    /// real without QoS (two Frame-SN rings), so the fix must be ungated. A
+    /// deliberate wz divergence from zenoh-pico's blind mixed-reliability append,
+    /// matching zenoh's per-frame reliability boundary.
+    #[test]
+    fn batch_reliability_change_flushes_open_frame() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.batch_start().expect("batch_start");
+
+        // Open a RELIABLE frame in the window.
+        actions
+            .send_push_literal("home/batch", b"R", /*reliable=*/ true)
+            .expect("reliable push opens the frame");
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "the reliable frame sits open in the batch window"
+        );
+
+        // A BEST-EFFORT message is a DIFFERENT (reliability) conduit — it must
+        // flush the open reliable frame before opening its own, never ride it.
+        actions
+            .send_push_literal("home/batch", b"B", /*reliable=*/ false)
+            .expect("best-effort push forces the reliability-change flush");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "the reliability change flushed the open reliable frame (pre-y222 the \
+             best-effort message was wrongly absorbed into the reliable frame)"
+        );
+
+        actions
+            .batch_flush()
+            .expect("batch_flush drains the open best-effort frame");
+        assert_eq!(
+            driver.frame_count(),
+            2,
+            "flush drains the open best-effort frame"
+        );
+
+        // Frame 0 is reliable (R flag set) + carries ONLY the reliable message;
+        // frame 1 is best-effort (R clear) + carries ONLY the best-effort one.
+        let f0 = driver.frame_bytes(0);
+        let f1 = driver.frame_bytes(1);
+        assert_ne!(
+            f0[0] & wire_const::FLAG_T_FRAME_R,
+            0,
+            "frame 0 is the reliable frame (R set)"
+        );
+        assert_eq!(
+            f1[0] & wire_const::FLAG_T_FRAME_R,
+            0,
+            "frame 1 is the best-effort frame (R clear)"
+        );
+        let (sn0, m0) = decode_frame(&f0);
+        let (sn1, m1) = decode_frame(&f1);
+        assert_eq!(
+            m0.len(),
+            1,
+            "the best-effort message did NOT ride the reliable frame"
+        );
+        assert_eq!(
+            m1.len(),
+            1,
+            "the best-effort frame carries only its own message"
+        );
+        // Each conduit's OWN SN ring seeds at the initial SN independently: if the
+        // best-effort message had shared the reliable ring it would read sn=1.
+        assert_eq!(sn0, 0, "reliable ring's first frame SN");
+        assert_eq!(
+            sn1, 0,
+            "best-effort ring's first frame SN (independent ring)"
+        );
+    }
+
     /// Three batched PUTs coalesce into one frame whose body is the
     /// byte-exact concatenation of the three per-message frame bodies the
     /// unbatched path emits — and the RX loop yields all three messages.
