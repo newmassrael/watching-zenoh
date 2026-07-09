@@ -159,6 +159,15 @@ pub use wz_session_core::locality;
 /// so naming it never depends on a `transport-link-*` feature.
 pub use wz_session_core::locator;
 
+/// R311y220 — the QoS `Priority` band value type (and `CongestionControl`).
+/// Re-exported so a facade consumer (wz-ap-demo's `--express-high` / `--low`
+/// prioritized publish) names `wz::runtime_tokio::qos::Priority` to drive
+/// [`linkstate_forward::LinkstateForwarder::publish_qos`] — the same value type
+/// `accept_loop`'s per-link band assignment already uses internally. Ungated: the
+/// module is an unconditional `pub mod qos` in wz-session-core (DEFAULT priority is
+/// used on every build), and a `pub use` never warns unused.
+pub use wz_session_core::qos;
+
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. R222 introduced the
 /// three load-bearing fields (`keyexpr` / `kind` / `payload`); R225

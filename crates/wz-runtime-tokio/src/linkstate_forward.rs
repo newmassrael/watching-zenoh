@@ -117,6 +117,12 @@ use wz_session_core::push_build::{
 use wz_session_core::push_routing_context::{
     read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
 };
+// R311y220 — the QoS priority band the forwarder's `fan_out_qos` / `publish_qos`
+// twins thread down to `SessionLinkActions::send_network_message_qos`. Ungated: the
+// base `fan_out` / `publish` delegators reference `Priority::DEFAULT` unconditionally
+// (this whole module is `#[cfg(feature = "routing-peer")]`, which force-pulls
+// `codec-push`, so the referenced symbol is always live — never an unused import).
+use wz_session_core::qos::Priority;
 use wz_session_core::query::{QueryReply, QueryResponder};
 use wz_session_core::query_mode::QueryTarget;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
@@ -1164,6 +1170,33 @@ impl LinkstateForwarder {
         &self,
         reliable: bool,
         gossip_gate: Option<WhatAmIMatcher>,
+        build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
+    ) -> Result<usize, CodecError> {
+        // R311y220 — the DEFAULT-priority, non-express fan-out: every existing caller
+        // (flood_link_added / flood_self_links_changed / propagate / forward_push /
+        // publish / ...) routes through here byte-identically to the prior hard-coded
+        // `send_network_message(msg, reliable, false)`. Only `publish_qos` carries an
+        // application-chosen band, via `fan_out_qos` directly.
+        self.fan_out_qos(reliable, Priority::DEFAULT, false, gossip_gate, build)
+    }
+
+    /// R311y220 — the priority-carrying fan-out that holds the shared body: identical
+    /// to [`Self::fan_out`] except each admitted per-face send routes `priority` +
+    /// `express` through [`send_network_message_qos`](wz_session_core::session_actions)
+    /// so an aggregated QoS multilink session pins the fan-out onto the priority-band
+    /// link (`select_link`). [`Self::fan_out`] is the `(Priority::DEFAULT,
+    /// express = false)` specialization that every control-plane + transit caller
+    /// takes; `publish_qos` is the only caller that passes a non-DEFAULT band. SCOPE
+    /// BOUND: a NON-origin re-forward (`forward_push`) routes through the DEFAULT
+    /// `fan_out`, so a transit hop re-bands its relay to DEFAULT — the received
+    /// frame's priority is not preserved onward until the deferred
+    /// `FramePayload.priority` work threads it through the inbound handler.
+    fn fan_out_qos(
+        &self,
+        reliable: bool,
+        priority: Priority,
+        express: bool,
+        gossip_gate: Option<WhatAmIMatcher>,
         mut build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
     ) -> Result<usize, CodecError> {
         let mut sent = 0;
@@ -1198,7 +1231,7 @@ impl LinkstateForwarder {
                 // teardown via deregister.
                 if state
                     .actions
-                    .send_network_message(msg, reliable, false)
+                    .send_network_message_qos(msg, reliable, express, priority)
                     .is_ok()
                 {
                     sent += 1;
@@ -1802,6 +1835,30 @@ impl LinkstateForwarder {
     /// `forward_push` (which re-forwards a RECEIVED Push). Returns the number of
     /// interested-child faces the Put reached.
     pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<usize, CodecError> {
+        // R311y220 — the DEFAULT-priority origination: delegate to `publish_qos` so a
+        // plain publish stays byte-identical to the prior `fan_out(true, None, ..)`
+        // (Priority::DEFAULT = Data, in the LOW band; express = false).
+        self.publish_qos(keyexpr, payload, Priority::DEFAULT, false)
+    }
+
+    /// R311y220 — the priority-carrying origination twin of [`Self::publish`] (the
+    /// demo-reachability path the `--express-high` / `--low` flags drive). Builds the
+    /// SAME self-sourced Push carrier — priority is a TRANSPORT link-selection concern,
+    /// not a wire-payload field, so the carrier stays band-agnostic and
+    /// `dispatch_network_message` applies the band downstream as the Frame `ext_qos`
+    /// plus the `select_link` routing key. On a QoS-negotiated aggregated multilink
+    /// session this pins the Put onto the priority-band link; on any non-QoS /
+    /// single-link session it is byte-identical to `publish` (the `is_qos()` clamp
+    /// forces the effective priority back to DEFAULT). SCOPE: only the ORIGIN hop is
+    /// banded — a transit re-forward (`forward_push`) relays at DEFAULT (see the bound
+    /// on [`Self::fan_out_qos`]).
+    pub fn publish_qos(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        priority: Priority,
+        express: bool,
+    ) -> Result<usize, CodecError> {
         // The self-originate route CORE (shared with the router's client->mesh
         // re-injection, R311y112 core-extract discipline): self is the tree root,
         // the returned carrier is self-sourced (node_id 0) + fresh-budget stamped
@@ -1814,7 +1871,7 @@ impl LinkstateForwarder {
         else {
             return Ok(0); // no remote subscriber / no tree direction -> nothing to send
         };
-        self.fan_out(true, None, |_id, zid| {
+        self.fan_out_qos(true, priority, express, None, |_id, zid| {
             Ok(zid
                 .is_some_and(|z| is_child(&children, z))
                 .then(|| NetworkMessage::Push(Box::new(push.clone()))))

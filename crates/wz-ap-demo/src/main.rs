@@ -233,6 +233,30 @@ fn main() -> ExitCode {
             // is a runtime no-op there. Priority segregation across links is y219.
             #[cfg(feature = "transport-qos")]
             let qos = rest.iter().any(|a| a == "--qos");
+            // R311y220 (transport-qos) — `--express-high` / `--low` select the QoS band
+            // the `--publish` peer originates its data Puts at (mapped in `run_peer` to
+            // `publish_qos`'s (priority, express) via `PublishBand`). Mutually exclusive;
+            // `--express-high` wins with a warning if both are given (graceful-degrade,
+            // like `--max-links`). Meaningful on an aggregated QoS multilink session
+            // (`--max-links > 1 --qos`); otherwise a runtime no-op (the `is_qos()` clamp
+            // forces DEFAULT). Off by default -> plain DEFAULT publish (LOW band).
+            #[cfg(feature = "transport-qos")]
+            let publish_band = {
+                let express_high = rest.iter().any(|a| a == "--express-high");
+                let low = rest.iter().any(|a| a == "--low");
+                match (express_high, low) {
+                    (true, true) => {
+                        eprintln!(
+                            "wz-ap-demo: --express-high and --low are mutually exclusive; \
+                             using --express-high"
+                        );
+                        Some(crate::runner::PublishBand::ExpressHigh)
+                    }
+                    (true, false) => Some(crate::runner::PublishBand::ExpressHigh),
+                    (false, true) => Some(crate::runner::PublishBand::Low),
+                    (false, false) => None,
+                }
+            };
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -250,6 +274,8 @@ fn main() -> ExitCode {
                     max_links,
                     #[cfg(feature = "transport-qos")]
                     qos,
+                    #[cfg(feature = "transport-qos")]
+                    publish_band,
                 },
                 InterceptorOpts {
                     acl_deny,

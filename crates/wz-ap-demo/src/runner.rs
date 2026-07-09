@@ -1267,6 +1267,44 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
 /// parameter so the peer entry points stay within the argument-count limit
 /// (Introduce-Parameter-Object; the repo's `SessionDriveConfig` retired the same
 /// `clippy::too_many_arguments` allow). Consistent with [`crate::InterceptorOpts`].
+/// R311y220 (transport-qos) — the QoS band a `--publish` peer originates its data
+/// Puts at, selected by `--express-high` / `--low`. Maps to the `(priority, express)`
+/// pair [`LinkstateForwarder::publish_qos`](wz::runtime_tokio::linkstate_forward)
+/// threads to the transport: on an aggregated QoS multilink session
+/// (`--max-links > 1 --qos`) the priority pins the Put onto the per-face band link
+/// (`select_link`), so qos priority-band link SELECTION becomes reachable from the
+/// demo binary. Absent -> plain `publish` (DEFAULT = Data, the LOW band). NOTE: this
+/// couples priority + express into one CLI shorthand (it cannot express e.g.
+/// RealTime-non-express) — the two flags are the reachability driver, not the full
+/// orthogonal QoS surface.
+#[cfg(feature = "transport-qos")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PublishBand {
+    /// `--express-high`: RealTime (the highest APPLICATION priority; the HIGH band
+    /// `[Control..=InteractiveLow]`) with the express batch-flush hint.
+    ExpressHigh,
+    /// `--low`: Background (the lowest priority; the LOW band
+    /// `[DataHigh..=Background]`), non-express.
+    Low,
+}
+
+#[cfg(feature = "transport-qos")]
+impl PublishBand {
+    /// The `(priority, express)` pair [`publish_qos`](wz::runtime_tokio::linkstate_forward)
+    /// consumes. RealTime(1) sits in the even-FaceId HIGH band and Background(7) in the
+    /// odd-FaceId LOW band (`accept_loop::multilink_priority_range`), so the two select
+    /// DISTINCT aggregated links; DEFAULT (Data=5) also lands in the LOW band, so only
+    /// `ExpressHigh` routes onto the HIGH-band link the plain-publish path never carries
+    /// data on.
+    fn priority_express(self) -> (wz::runtime_tokio::qos::Priority, bool) {
+        use wz::runtime_tokio::qos::Priority;
+        match self {
+            PublishBand::ExpressHigh => (Priority::RealTime, true),
+            PublishBand::Low => (Priority::Background, false),
+        }
+    }
+}
+
 #[cfg(feature = "routing-peer")]
 pub(crate) struct PeerOpts {
     pub publish_key: Option<String>,
@@ -1303,6 +1341,12 @@ pub(crate) struct PeerOpts {
     /// links (`--qos`). Routed through [`WzConfig::with_qos`] into `FaceSources.qos`.
     #[cfg(feature = "transport-qos")]
     pub qos: bool,
+    /// R311y220 (transport-qos) — the QoS band `--express-high` / `--low` select for
+    /// the `--publish` origination (`None` = plain DEFAULT publish). Effective only on
+    /// an aggregated QoS multilink session; a no-op band otherwise (the `is_qos()`
+    /// clamp forces the effective priority back to DEFAULT downstream).
+    #[cfg(feature = "transport-qos")]
+    pub publish_band: Option<PublishBand>,
 }
 
 #[cfg(feature = "routing-peer")]
@@ -1327,6 +1371,8 @@ pub(crate) async fn run_peer(
     let max_links = opts.max_links;
     #[cfg(feature = "transport-qos")]
     let qos = opts.qos;
+    #[cfg(feature = "transport-qos")]
+    let publish_band = opts.publish_band;
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
@@ -1809,6 +1855,11 @@ pub(crate) async fn run_peer(
     let mut last_data_seen = 0usize;
     let mut announced_interest = false;
     let mut announced_withdrawal = false;
+    // R311y220 — one-shot latch so the qos-prioritized origination witness logs ONCE
+    // (like `announced_interest`), proving the `--express-high` / `--low` flag actually
+    // drove the `publish_qos` branch rather than the DEFAULT `publish` fall-through.
+    #[cfg(feature = "transport-qos")]
+    let mut announced_qos_publish = false;
     let mut declared = false;
     let mut undeclared = false;
     // High-water mark of the topology-graph node count, sampled each tick. The
@@ -1963,6 +2014,33 @@ pub(crate) async fn run_peer(
                     }));
                 }
                 if let Some(key) = publish_key {
+                    // R311y220 — a `--express-high` / `--low` peer originates its Put
+                    // at the selected QoS band via `publish_qos` (making qos
+                    // priority-band link selection reachable from the binary); with no
+                    // band flag it takes the plain DEFAULT `publish` (byte-identical to
+                    // the pre-y220 path). On a non-QoS session the band is a downstream
+                    // no-op (the `is_qos()` clamp forces DEFAULT).
+                    #[cfg(feature = "transport-qos")]
+                    match publish_band {
+                        Some(band) => {
+                            let (pri, express) = band.priority_express();
+                            let _ = forwarder.publish_qos(key, b"wz-mesh-data", pri, express);
+                            // Positive, once-only witness that the qos-prioritized
+                            // origination path was taken (the e2e asserts this so the
+                            // test cannot pass trivially via the DEFAULT `publish`).
+                            if !announced_qos_publish {
+                                announced_qos_publish = true;
+                                log::info!(
+                                    "wz-ap-demo peer: originating {band:?} Put via publish_qos \
+                                     (priority {pri:?}, express {express})"
+                                );
+                            }
+                        }
+                        None => {
+                            let _ = forwarder.publish(key, b"wz-mesh-data");
+                        }
+                    }
+                    #[cfg(not(feature = "transport-qos"))]
                     let _ = forwarder.publish(key, b"wz-mesh-data");
                     // Witness the subscription-filtered route: the publisher only
                     // forwards once it has LEARNED an interested subscriber (the

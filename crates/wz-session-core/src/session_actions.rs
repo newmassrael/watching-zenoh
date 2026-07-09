@@ -3125,6 +3125,52 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
         express: bool,
     ) -> Result<(), SendWireError> {
+        // R311y220 — the DEFAULT-priority entry point: delegate to the
+        // priority-carrying twin with `Priority::DEFAULT`, so every non-prioritized
+        // caller (the ~12 `fan_out` control-plane sends + the base `publish`) stays
+        // byte-identical to the prior hard-coded `dispatch_push(Priority::DEFAULT, ..)`.
+        // Only `publish_qos` -> `fan_out_qos` routes an application-chosen priority
+        // into the twin (the demo `--express-high`/`--low` reachability path).
+        self.send_network_message_qos(msg, reliable, express, Priority::DEFAULT)
+    }
+
+    /// R311y220 — the priority-carrying twin of [`Self::send_network_message`]: the
+    /// data-plane Push arm routes `priority` to [`Self::dispatch_push`] (the app's
+    /// chosen QoS band, which `select_link` pins to one aggregated link) instead of
+    /// the hard-coded DEFAULT. This differs from the base ONLY in the Push arm — all
+    /// other arms are control-plane and IGNORE `priority` by construction (Declare /
+    /// Oam self-specify `Priority::Control` inside their own dispatch; Request /
+    /// Interest / Response carry no priority parameter at all), so a non-DEFAULT
+    /// priority reaching a non-Push message is inert rather than mis-banded. A
+    /// non-QoS session further clamps `priority` back to DEFAULT downstream in
+    /// [`Self::dispatch_network_message`] (`is_qos()` gate), so the twin is a no-op
+    /// on every build that has not negotiated per-priority conduits.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-declare",
+        feature = "declare-interest",
+        feature = "codec-linkstate",
+        feature = "codec-response",
+        feature = "codec-response-final"
+    ))]
+    pub fn send_network_message_qos(
+        &self,
+        msg: crate::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Result<(), SendWireError> {
+        // `priority` is consumed ONLY in the `#[cfg(feature = "codec-push")]` Push
+        // arm below. In a build where the fn-gate is satisfied by a NON-push codec
+        // (codec-request / codec-declare / declare-interest / codec-linkstate /
+        // codec-response{,-final}) the Push arm elides and `priority` would be an
+        // unused binding (clippy `-D warnings` reject) — the same gate-skew class the
+        // `_ => { let _ = (express, reliable); }` catch arm guards for the other
+        // params. The guard is mutually exclusive with the Push arm's own
+        // `#[cfg(codec-push)]`, so it can never double-bind.
+        #[cfg(not(feature = "codec-push"))]
+        let _ = priority;
         // R311nh — the match patterns are FULLY-QUALIFIED (no `use NetworkMessage`
         // alias). The fn-gate above is `any(codec-push, codec-request,
         // codec-declare, declare-interest)`, but each typed arm keys off its own
@@ -3142,7 +3188,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // flush_batch_if_express parity).
             #[cfg(feature = "codec-push")]
             crate::network_message::NetworkMessage::Push(push) => {
-                self.dispatch_push(Priority::DEFAULT, *push, reliable)?;
+                self.dispatch_push(priority, *push, reliable)?;
                 #[cfg(feature = "transport-batching")]
                 if express {
                     self.flush_open_batch();

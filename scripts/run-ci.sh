@@ -4820,6 +4820,33 @@ layer_e6c_peer_multilink() {
         --test wz_peer_multilink_aggregate -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E6d — qos demo reachability: prioritized publish over aggregated multilink ─
+#
+# R311y220 — the demo-binary prioritized-publish proof. A `--peer` node built `--features
+# transport-qos,transport-multilink` and driven `--max-links 2 --qos --express-high`
+# ORIGINATES its `--publish` data at a non-DEFAULT QoS band (RealTime, the HIGH band)
+# through the new `LinkstateForwarder::publish_qos` app path, and the `--subscribe` peer
+# RECEIVES it over the aggregated qos session — making the y217 `select_link` band routing
+# + y219a per-face band assignment reachable from a real binary (pre-y220 the forwarder
+# publish API hard-clamped `Priority::DEFAULT`, so an application could never originate a
+# banded Put). The `clippy --features transport-qos,transport-multilink -D warnings` step
+# gates the new demo cfg sites (the `--express-high` / `--low` flag + `PublishBand`).
+# NAMED BOUND: proves publish_qos send-PATH reachability from the binary (a --express-high
+# Put is originated via publish_qos and delivered); it does NOT prove band SELECTION was
+# observed (a black-box subscriber cannot see which link carried the Put, and a green result
+# does not distinguish qos-on from qos-off), NOR the y219b joined-secondary DELIVERY fix
+# (`data_seen` is upstream of the drop gate; guarded deterministically by the
+# linkstate_forward library unit test), NOR band-selection correctness (the y219a in-process
+# `session_multilink_deploy_e2e`). wz<->wz loopback (no
+# pico/zenohd prereq), so no SKIP guard; the `wz_peer_` prefix keeps the default Layer E
+# sweep's `--skip wz_peer` from double-running it.
+layer_e6d_peer_multilink_qos() {
+    (cd crates && cargo build -p wz-ap-demo --features transport-qos,transport-multilink --quiet) || return 1
+    (cd crates && cargo clippy -p wz-ap-demo --features transport-qos,transport-multilink --quiet -- -D warnings) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_multilink_qos_reach -- --ignored --quiet) || return 1
+}
+
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
 #
 # The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
@@ -5115,6 +5142,7 @@ run_layer E5 layer_e5_router_forward || overall=1
 run_layer E6 layer_e6_peer_mesh || overall=1
 run_layer E6b layer_e6b_adminspace_introspection || overall=1
 run_layer E6c layer_e6c_peer_multilink || overall=1
+run_layer E6d layer_e6d_peer_multilink_qos || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1
