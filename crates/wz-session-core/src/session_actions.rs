@@ -881,6 +881,17 @@ pub struct LinkState<R: SessionRuntime> {
     /// until set.
     #[cfg(feature = "transport-multilink")]
     pub reliability_pref: R::Mutex<LinkReliabilityPref>,
+    /// R311y217 (transport-multilink + transport-qos) — the QoS-priority band this
+    /// link carries, so [`SessionCore::select_link`] pins each `(priority,
+    /// reliability)` conduit to ONE link (the priority tier of zenoh's per-channel
+    /// `select`). `None` (the default until set) = no priority preference: the
+    /// link is a reliability-only / failover candidate, never a `full` priority
+    /// match. Set at bring-up via
+    /// [`SessionLinkActions::set_link_priority_range`], the same
+    /// config-at-bringup discipline as [`Self::reliability_pref`]. Additive
+    /// per-link field; changes no accessor signature.
+    #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
+    pub priority_range: R::Mutex<Option<LinkPriorityRange>>,
 }
 
 /// R311y205 (transport-multilink IMPL-2b-iii) — the traffic-class preference a
@@ -902,6 +913,54 @@ pub enum LinkReliabilityPref {
     /// No preference — eligible for either channel (the failover default).
     #[default]
     Any,
+}
+
+/// R311y217 (transport-multilink + transport-qos) — the inclusive QoS-priority
+/// band a physical link carries, so [`SessionCore::select_link`] can pin one
+/// `(priority, reliability)` conduit to one link (the wz mirror of zenoh's
+/// per-link `PriorityRange`, `commons/zenoh-protocol/src/core/mod.rs:315`).
+/// Inclusive on both ends over the wire-order [`Priority`](crate::qos::Priority)
+/// scale (0 = Control = highest ... 7 = Background = lowest); a link with band
+/// `[start..=end]` covers priority `p` iff `start <= p <= end`. [`Self::width`]
+/// (band size) is the selection tie-break — the SMALLEST covering band wins (the
+/// most specific link, zenoh `tx.rs:56`). A `Copy` struct rather than zenoh's
+/// `PriorityRange(RangeInclusive<Priority>)` newtype (ergonomic; identical
+/// containment / width semantics), and [`Self::new`] orders its args so
+/// `start <= end` always holds (zenoh's `len()` underflow-panics on a malformed
+/// `start > end`; wz precludes it by construction).
+#[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkPriorityRange {
+    start: crate::qos::Priority,
+    end: crate::qos::Priority,
+}
+
+#[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
+impl LinkPriorityRange {
+    /// The inclusive band `[min(a,b) ..= max(a,b)]` — the two endpoints are
+    /// ordered so the band is always valid regardless of which the caller passes
+    /// first (no malformed `start > end`).
+    pub fn new(a: crate::qos::Priority, b: crate::qos::Priority) -> Self {
+        if a <= b {
+            Self { start: a, end: b }
+        } else {
+            Self { start: b, end: a }
+        }
+    }
+
+    /// Whether this band covers `priority` (inclusive both ends; the compare is
+    /// [`Priority`](crate::qos::Priority)'s `Ord` = the 0..=7 wire order).
+    pub fn contains(&self, priority: crate::qos::Priority) -> bool {
+        self.start <= priority && priority <= self.end
+    }
+
+    /// The band size (count of priorities covered), the selection tie-break
+    /// value: a narrower band is a more specific link and wins. Mirror of zenoh
+    /// `PriorityRange::len` (`end - start + 1`; named `width` here to avoid the
+    /// `len_without_is_empty` lint — a band is never empty, `width >= 1`).
+    pub fn width(&self) -> usize {
+        (self.end.wire_byte() as usize) - (self.start.wire_byte() as usize) + 1
+    }
 }
 
 /// R311y205 (transport-multilink IMPL-2b-iii) — the illegal-state-unrepresentable
@@ -1146,6 +1205,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 transport_available: R::new_mutex(true),
                 #[cfg(feature = "transport-multilink")]
                 reliability_pref: R::new_mutex(LinkReliabilityPref::default()),
+                #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
+                priority_range: R::new_mutex(None),
             }),
             core: R::share(SessionCore {
                 #[cfg(feature = "transport-stats")]
@@ -1287,7 +1348,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "liveliness-token",
         feature = "transport-batching",
     ))]
-    fn send_wire(&self, bytes: &[u8], reliability: Reliability) {
+    fn send_wire(&self, bytes: &[u8], reliability: Reliability, priority: Priority) {
         // R311y205 (transport-multilink IMPL-2b-iii) — reliability-routed data
         // send: an AGGREGATING session (`select_link` -> Some) emits on the
         // reliability-pref link (else first alive = failover) from the shared
@@ -1295,8 +1356,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // session (empty set -> None) and every NON-feature build emit on this
         // binding's own `self.link`, byte-identical to today. Keepalive / close
         // are per-link and bypass routing ([`Self::send_wire_this_link`]).
+        //
+        // R311y217 — `priority` is the SECOND routing key: `select_link` pins each
+        // `(priority, reliability)` conduit to one link. Callers MUST pass the
+        // priority of the FRAME being emitted (for a batch flush that is the open
+        // frame's `batch.priority`, NOT the triggering message's priority — else
+        // one conduit splits across links and the peer's per-conduit RX SN gate
+        // drops the reorder). A non-multilink build never routes, so the key is
+        // unused there.
+        #[cfg(not(feature = "transport-multilink"))]
+        let _ = priority;
         #[cfg(feature = "transport-multilink")]
-        if let Some(target) = self.select_link(reliability) {
+        if let Some(target) = self.select_link(reliability, priority) {
             self.emit_on_link(&target, bytes, reliability);
             return;
         }
@@ -1704,6 +1775,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.link.reliability_pref, |s| *s = pref);
     }
 
+    /// R311y217 — set this binding's link QoS-priority band at bring-up (before
+    /// the drive loop spins), through the shared `R::Shared<LinkState>` handle —
+    /// the `set_link_reliability_pref` config-at-bringup discipline. Read by
+    /// [`Self::select_link`] to pin each `(priority, reliability)` conduit to one
+    /// link. `None` clears the band (reliability-only / failover candidate).
+    #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
+    pub fn set_link_priority_range(&self, range: Option<LinkPriorityRange>) {
+        R::with_mutex_mut(&self.link.priority_range, |s| *s = range);
+    }
+
     /// Run the multilink dispatch's send stage for `role` and install the
     /// resulting 0x4 [`Z_EXT_MULTILINK`](crate::extmultilink::MULTILINK_EXT_ID)
     /// ext into that role's ext chain, IDEMPOTENTLY (a re-handshake never
@@ -1770,7 +1851,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "transport-batching",
         )
     ))]
-    fn select_link(&self, reliability: Reliability) -> Option<R::Shared<LinkState<R>>> {
+    fn select_link(
+        &self,
+        reliability: Reliability,
+        priority: Priority,
+    ) -> Option<R::Shared<LinkState<R>>> {
         let links = self.links.lock().expect("multilink set mutex");
         if links.is_empty() {
             return None;
@@ -1779,8 +1864,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Reliability::Reliable => LinkReliabilityPref::Reliable,
             Reliability::BestEffort => LinkReliabilityPref::BestEffort,
         };
+        // A non-qos build carries no per-link priority band, so selection degrades
+        // to the reliability-only 2-tier (byte-identical to pre-y217); `priority`
+        // is then unused (workspace warnings=deny).
+        #[cfg(not(feature = "transport-qos"))]
+        let _ = priority;
         let mut first_alive: Option<&R::Shared<LinkState<R>>> = None;
-        let mut preferred: Option<&R::Shared<LinkState<R>>> = None;
+        // partial tier: a reliability-pref match with NO covering priority band
+        // (in a non-qos build this IS the pre-y217 "preferred" tier).
+        let mut partial: Option<&R::Shared<LinkState<R>>> = None;
+        // full tier (qos only): reliability-pref match AND the band contains the
+        // priority; keep the SMALLEST band (most specific), ties -> first-seen.
+        #[cfg(feature = "transport-qos")]
+        let mut full: Option<(&R::Shared<LinkState<R>>, usize)> = None;
         for l in links.iter() {
             if !R::with_mutex_mut(&l.transport_available, |g| *g) {
                 continue;
@@ -1788,11 +1884,39 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if first_alive.is_none() {
                 first_alive = Some(l);
             }
-            if preferred.is_none() && R::with_mutex_mut(&l.reliability_pref, |p| *p) == want {
-                preferred = Some(l);
+            if R::with_mutex_mut(&l.reliability_pref, |p| *p) != want {
+                // Wrong reliability class -> only ever a first-alive fallback
+                // (LinkReliabilityPref::Any never equals `want`, so it lands here
+                // too — the failover pool, matching the pre-y217 contract and
+                // zenoh's concrete-reliability primacy: a non-matching link can
+                // never be a full/partial pick).
+                continue;
+            }
+            // Reliability matches. In a qos build a covering band promotes this
+            // link to the full tier.
+            #[cfg(feature = "transport-qos")]
+            if let Some(band) = R::with_mutex_mut(&l.priority_range, |r| *r) {
+                if band.contains(priority) {
+                    let width = band.width();
+                    // Strict `>` (zenoh tx.rs:56): a later equal-width band does
+                    // NOT displace the incumbent, so ties resolve to first-seen =
+                    // a stable, non-flapping pin (one-conduit=one-link).
+                    if full.map_or(true, |(_, prev)| prev > width) {
+                        full = Some((l, width));
+                    }
+                    continue;
+                }
+            }
+            // partial: reliability matches, no covering band.
+            if partial.is_none() {
+                partial = Some(l);
             }
         }
-        preferred.or(first_alive).cloned()
+        #[cfg(feature = "transport-qos")]
+        let selected = full.map(|(l, _)| l).or(partial).or(first_alive);
+        #[cfg(not(feature = "transport-qos"))]
+        let selected = partial.or(first_alive);
+        selected.cloned()
     }
 
     /// Register the FIRST physical link of a session that is about to aggregate —
@@ -2613,6 +2737,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 } else {
                     Reliability::BestEffort
                 },
+                priority,
             );
             return Ok(());
         }
@@ -2706,7 +2831,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         let prev = core::mem::take(&mut batch.buf);
                         batch.count = 0;
                         let channel = frame_wire_reliability(&prev);
-                        self.send_wire(&prev, channel);
+                        // The OPEN frame's conduit is `batch.priority`, NOT the
+                        // triggering message's `priority` (this arm fires BECAUSE
+                        // they differ) — route by the frame's own pin (y217 #3;
+                        // splitting one conduit across links would trip the peer's
+                        // per-conduit RX SN gate).
+                        self.send_wire(&prev, channel, batch.priority.unwrap_or(Priority::DEFAULT));
                         continue;
                     }
                     let wpos = batch.buf.len();
@@ -2721,7 +2851,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let prev = core::mem::take(&mut batch.buf);
                     batch.count = 0;
                     let channel = frame_wire_reliability(&prev);
-                    self.send_wire(&prev, channel);
+                    // Same conduit as the current message (this is the append
+                    // overflow, not a priority-change reopen — `batch.priority ==
+                    // Some(priority)` holds here), so `priority` is the open
+                    // frame's pin.
+                    self.send_wire(&prev, channel, priority);
                 }
             }
             // With transport-batching off the window flag never reads
@@ -2831,14 +2965,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 for frag in
                     crate::frame_encode::fragment_body(body, reliable, mtu, sn, sn_mask, ext_qos)
                 {
-                    self.send_wire(&frag, reliability);
+                    // Every fragment rides the frame's conduit (`priority`
+                    // reconstructed above == the SN-mint conduit) so the whole
+                    // chain pins to one link (y217 one-conduit=one-link).
+                    self.send_wire(&frag, reliability, priority);
                 }
                 return;
             }
         }
         #[cfg(not(feature = "transport-fragmentation"))]
-        let _ = (ext_qos, sn, mtu, sn_mask);
-        self.send_wire(frame, reliability);
+        let _ = (sn, mtu, sn_mask);
+        // The frame's conduit reconstructed from its own ext_qos (`Some(p)` iff
+        // `p != DEFAULT`, else `None -> DEFAULT`) — the same key the SN mint used.
+        self.send_wire(frame, reliability, ext_qos.unwrap_or(Priority::DEFAULT));
     }
 
     /// R311jq — drain the open batch frame to the link, if any. Private
@@ -2857,7 +2996,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             batch.count = 0;
             let frame = core::mem::take(&mut batch.buf);
             let channel = crate::frame_encode::frame_wire_reliability(&frame);
-            self.send_wire(&frame, channel);
+            // The open frame's conduit is `batch.priority` (y217 #3): route by the
+            // frame's own pin — this drain path carries no caller priority.
+            #[cfg(feature = "transport-qos")]
+            let priority = batch.priority.unwrap_or(Priority::DEFAULT);
+            #[cfg(not(feature = "transport-qos"))]
+            let priority = Priority::DEFAULT;
+            self.send_wire(&frame, channel, priority);
         });
     }
 
@@ -5325,7 +5470,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::InitSyn,
                 )
                 .expect("InitSyn zid/cookie are protocol-bounded (zid 1..=16, no cookie on Syn)");
-            a.send_wire(&bytes, Reliability::Reliable);
+            a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
         }
     }
 
@@ -5357,7 +5502,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::OpenSyn,
                 )
                 .expect("OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)");
-            a.send_wire(&bytes, Reliability::Reliable);
+            a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
         }
     }
 
@@ -5435,7 +5580,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::InitAck,
                 )
                 .expect("InitAck cookie is HMAC-SHA256[..16] (16 bytes, within codec cap)");
-            a.send_wire(&bytes, Reliability::Reliable);
+            a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
         }
     }
 
@@ -5463,7 +5608,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::OpenAck,
                 )
                 .expect("OpenAck omits the cookie field (A=1); only zid 1..=16 is bounded-copied");
-            a.send_wire(&bytes, Reliability::Reliable);
+            a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
         }
     }
 

@@ -165,6 +165,18 @@ impl Default for WzConfig {
 #[cfg(feature = "transport-multilink")]
 pub use wz_session_core::session_actions::LinkReliabilityPref;
 
+/// R311y217 (transport-multilink + transport-qos) — the per-link QoS-priority band
+/// the dial / accept path attaches to a physical link so the aggregation core pins
+/// each `(priority, reliability)` conduit to ONE link (the priority tier of
+/// zenoh's per-channel `select`). Re-exported from the no_std session kernel where
+/// [`LinkState`](wz_session_core::session_actions::LinkState) stores it, so the AP
+/// config surface and the kernel agree by construction (ONE type, no conversion at
+/// the `set_link_priority_range` seam). Gated `all(transport-multilink,
+/// transport-qos)` — the band is meaningful only when QoS negotiates a non-DEFAULT
+/// priority (else the reliability-only `select_link` applies).
+#[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
+pub use wz_session_core::session_actions::LinkPriorityRange;
+
 impl WzConfig {
     /// A config with default (empty) settings — `whatami = Peer`,
     /// `batch_size = 0`, `lease_ms = 0`, no interceptors. The

@@ -1130,18 +1130,25 @@ layer_c1ad_cargo_test_lowlatency() {
 #      round-trip needs are present — mirroring the lowlatency_e2e lane), proving
 #      the `*_with_qos` entrypoints flip `is_qos` on a real handshake and a
 #      prioritized Put rides / clamps ext_qos by negotiation;
-#   6. proves the wz facade + wz-runtime-tokio feature forwards resolve.
+#   6. R311y217: RUNS the multilink priority-select segregation tests (two joined
+#      recording-driver links, SAME reliability + DISTINCT priority bands) proving
+#      `select_link(reliability, priority)` pins each conduit to one link on the
+#      immediate AND batch-reopen-flush paths (the flushed frame routes by its OWN
+#      conduit, not the trigger) + the narrowest-band tie-break;
+#   7. proves the wz facade + wz-runtime-tokio feature forwards resolve.
 layer_c1bb_cargo_test_qos() {
     (cd crates \
         && cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib --quiet \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features transport-fragmentation --quiet -- -D warnings \
         && cargo check -p wz-session-core --no-default-features --features transport-qos --quiet \
-        && cargo check -p wz-session-core --features transport-qos,transport-multilink --quiet \
+        && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-multilink,codec-push --quiet -- -D warnings \
         && cargo check -p wz-session-core --features transport-qos,transport-lowlatency --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp --test qos_e2e --quiet \
         && cargo test -p wz-runtime-tokio --features transport-qos,transport-lowlatency,transport-unicast --lib is_qos_negotiates_by_and_and_is_lowlatency_exclusive --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-qos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --quiet -- -D warnings \
         && cargo check -p wz --features transport-qos --quiet)
 }
 

@@ -408,4 +408,243 @@ mod tests {
             "the reject is a LINK-ONLY (S=0) close carrying zenoh reason INVALID (0x02)"
         );
     }
+
+    /// R311y217 — join two recording-driver links onto ONE shared core, both ALIVE
+    /// and of the SAME reliability class (Reliable), with QoS negotiated on (so a
+    /// non-DEFAULT priority is NOT clamped). The caller then assigns each link's
+    /// priority band and sends prioritized Puts, observing WHICH physical link
+    /// (which driver) each rode. `primary.link` is index 0, `secondary.link` index
+    /// 1 in the aggregation set (join order), which fixes the first-seen tie-break.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close"
+    ))]
+    fn joined_qos_pair() -> (
+        Arc<SessionLinkActions>,
+        Arc<SessionLinkActions>,
+        Arc<crate::test_fixtures::RecordingLinkDriver>,
+        Arc<crate::test_fixtures::RecordingLinkDriver>,
+    ) {
+        use crate::runtime_impl::TokioRuntime;
+        use wz_runtime_core::Runtime;
+        use wz_session_core::session_actions::LinkReliabilityPref;
+
+        let (primary, primary_driver) = crate::test_fixtures::recording_actions();
+        let (secondary, secondary_driver) = crate::test_fixtures::recording_actions();
+
+        // Matching ephemeral identity so the config-equality gate authorizes.
+        let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
+        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
+        TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| *s = Some(key));
+        assert!(
+            matches!(join_link(&primary, &secondary, 2), JoinOutcome::Joined(_)),
+            "the 2nd link joins the shared core"
+        );
+
+        TokioRuntime::with_mutex_mut(&primary.link.transport_available, |g| *g = true);
+        TokioRuntime::with_mutex_mut(&secondary.link.transport_available, |g| *g = true);
+        primary.set_link_reliability_pref(LinkReliabilityPref::Reliable);
+        secondary.set_link_reliability_pref(LinkReliabilityPref::Reliable);
+
+        assert!(
+            primary.set_qos_offer(true),
+            "qos offer applies (no lowlatency)"
+        );
+        primary.negotiate_qos_against_peer(true);
+        assert!(primary.is_qos(), "qos negotiated on");
+
+        (primary, secondary, primary_driver, secondary_driver)
+    }
+
+    /// R311y217 — multilink priority-select over the IMMEDIATE send path: with QoS
+    /// negotiated, `select_link` routes each frame to the link whose priority BAND
+    /// covers it (the wz mirror of zenoh's per-channel `select`). A high-priority
+    /// Put rides the high-band link, a low-priority Put the low-band link; a
+    /// repeat pins to the SAME link (one-conduit=one-link determinism, no flap).
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close"
+    ))]
+    #[test]
+    fn multilink_priority_select_routes_by_band() {
+        use wz_session_core::qos::Priority;
+        use wz_session_core::session_actions::LinkPriorityRange;
+
+        let (primary, secondary, primary_driver, secondary_driver) = joined_qos_pair();
+        // primary = high band [Control..=InteractiveLow], secondary = low band
+        // [DataHigh..=Background] — DISTINCT, non-overlapping.
+        primary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::Control,
+            Priority::InteractiveLow,
+        )));
+        secondary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::DataHigh,
+            Priority::Background,
+        )));
+
+        // A high-priority Put rides the HIGH-band link (primary), not the low one.
+        primary
+            .send_push_literal_qos("seg/high", b"h", true, Priority::RealTime)
+            .expect("high-priority send");
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "high Put on the high-band link"
+        );
+        assert_eq!(
+            secondary_driver.frame_count(),
+            0,
+            "NOT on the low-band link"
+        );
+
+        // A low-priority Put rides the LOW-band link (secondary).
+        primary
+            .send_push_literal_qos("seg/low", b"l", true, Priority::Background)
+            .expect("low-priority send");
+        assert_eq!(
+            secondary_driver.frame_count(),
+            1,
+            "low Put on the low-band link"
+        );
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "the high-band link is untouched by the low Put"
+        );
+
+        // Determinism / one-conduit=one-link: a repeat high Put pins to the SAME
+        // link (no frame-to-frame flap that would reorder the peer's RX conduit).
+        primary
+            .send_push_literal_qos("seg/high", b"h2", true, Priority::RealTime)
+            .expect("repeat high-priority send");
+        assert_eq!(
+            primary_driver.frame_count(),
+            2,
+            "the repeat high Put re-pins to the high-band link"
+        );
+        assert_eq!(
+            secondary_driver.frame_count(),
+            1,
+            "the low-band link is unchanged"
+        );
+    }
+
+    /// R311y217 (#3 — the sharp SN-safety case) — a BATCH reopen-flush routes the
+    /// flushed frame by ITS OWN pinned conduit (`batch.priority`), NOT the
+    /// triggering message's priority. Open a HIGH frame in a batch window, then
+    /// send a LOW message: the priority change flushes the open HIGH frame, which
+    /// MUST ride the HIGH-band link (its own conduit) — if it routed by the LOW
+    /// trigger it would land on the low-band link, splitting one conduit across
+    /// links and tripping the peer's per-(priority,reliability) RX SN gate.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "transport-batching"
+    ))]
+    #[test]
+    fn multilink_batch_reopen_flush_routes_by_frame_conduit() {
+        use wz_session_core::qos::Priority;
+        use wz_session_core::session_actions::LinkPriorityRange;
+
+        let (primary, secondary, primary_driver, secondary_driver) = joined_qos_pair();
+        primary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::Control,
+            Priority::InteractiveLow,
+        )));
+        secondary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::DataHigh,
+            Priority::Background,
+        )));
+
+        primary.batch_start().expect("batch_start");
+
+        // Open a HIGH-band frame in the batch window (deferred, not yet flushed).
+        primary
+            .send_push_literal_qos("b/high", b"H", true, Priority::RealTime)
+            .expect("batched high send");
+        assert_eq!(
+            primary_driver.frame_count(),
+            0,
+            "the high frame sits in the open batch window"
+        );
+        assert_eq!(
+            secondary_driver.frame_count(),
+            0,
+            "nothing on the low-band link yet"
+        );
+
+        // A LOW message on a DIFFERENT conduit flushes the open HIGH frame. The
+        // HIGH frame must route by its OWN conduit (RealTime -> high-band link),
+        // never the LOW trigger's priority.
+        primary
+            .send_push_literal_qos("b/low", b"L", true, Priority::Background)
+            .expect("batched low send (forces the reopen-flush)");
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "the reopen-flushed HIGH frame rode the HIGH-band link (its own conduit, not the LOW trigger)"
+        );
+        assert_eq!(
+            secondary_driver.frame_count(),
+            0,
+            "the HIGH frame did NOT leak onto the low-band link"
+        );
+
+        // Draining the window emits the open LOW frame on the low-band link.
+        primary.batch_flush().expect("batch_flush");
+        assert_eq!(
+            secondary_driver.frame_count(),
+            1,
+            "the LOW frame rode the low-band link"
+        );
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "the high-band link keeps only its HIGH frame"
+        );
+    }
+
+    /// R311y217 — the full-tier tie-break: among links whose bands BOTH cover the
+    /// priority, the SMALLEST (most specific) band wins (zenoh tx.rs:56, strict
+    /// `>` -> stable first-seen on equal width, no flap). primary = wide band
+    /// `[Control..=Background]` (width 8), secondary = narrow
+    /// `[InteractiveHigh..=InteractiveLow]` (width 2); a Put at InteractiveHigh,
+    /// covered by BOTH, rides the NARROW link.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close"
+    ))]
+    #[test]
+    fn multilink_priority_select_prefers_narrowest_band() {
+        use wz_session_core::qos::Priority;
+        use wz_session_core::session_actions::LinkPriorityRange;
+
+        let (primary, secondary, primary_driver, secondary_driver) = joined_qos_pair();
+        primary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::Control,
+            Priority::Background,
+        )));
+        secondary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::InteractiveHigh,
+            Priority::InteractiveLow,
+        )));
+
+        primary
+            .send_push_literal_qos("tie/x", b"x", true, Priority::InteractiveHigh)
+            .expect("send at a doubly-covered priority");
+        assert_eq!(
+            secondary_driver.frame_count(),
+            1,
+            "the narrower (more specific) band wins the full-tier tie-break"
+        );
+        assert_eq!(
+            primary_driver.frame_count(),
+            0,
+            "the wide-band link did NOT win despite also covering the priority"
+        );
+    }
 }
