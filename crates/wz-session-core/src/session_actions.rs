@@ -195,6 +195,81 @@ pub struct BatchTx {
     pub count: usize,
 }
 
+/// R311y214 — the unicast outbound Frame SN generator, SPLIT per
+/// reliability channel: the atomic twin of the plain-`u64` multicast
+/// [`crate::sn::TxSn`] (which the single-task multicast drive loop mints
+/// under no lock). Both zenoh and zenoh-pico split the TX SN by
+/// reliability even at one priority conduit: zenoh's non-QoS
+/// `TransportPriorityTx { reliable, best_effort }` still holds two
+/// generators (`io/zenoh-transport/src/common/priority.rs`), and pico's
+/// `_z_transport_tx_get_sn(ztc, reliability)` mints from
+/// `_sn_tx_reliable` / `_sn_tx_best_effort` (`src/transport/common/tx.c:52-59`).
+/// wz's prior single shared `AtomicU64` was a divergence from BOTH: a
+/// reliable and a best-effort Frame drew from ONE ring, so each channel
+/// saw a gapped (but forward) SN cadence the peer's per-channel
+/// `_z_sn_precedes` gate merely tolerated. Splitting makes each channel a
+/// contiguous ring from `initial_sn`, matching pico exactly. Both channels
+/// seed from the one `params.initial_sn` (the OpenSyn/OpenAck origin) and
+/// share the negotiated ring mask. The mint stays lock-free (every mint
+/// site already runs under `tx_mutex`; the atomic additionally keeps a
+/// straggling reset from reordering — the SeqCst contract the reset store
+/// pairs with). R311y215 arrays this per `Priority` conduit behind
+/// `transport-qos`.
+#[derive(Debug)]
+pub struct AtomicTxSn {
+    /// Next SN for the reliable channel (pico `_sn_tx_reliable`).
+    reliable: AtomicU64,
+    /// Next SN for the best-effort channel (pico `_sn_tx_best_effort`).
+    best_effort: AtomicU64,
+}
+
+impl AtomicTxSn {
+    /// Seed both channels at `initial_sn` (the OpenSyn/OpenAck origin) so
+    /// the first Frame on either channel is exactly `initial_sn` — the peer
+    /// seeds its per-channel RX gate one before this ([`crate::sn::RxSn::seed`]).
+    pub fn new(initial_sn: u64) -> Self {
+        Self {
+            reliable: AtomicU64::new(initial_sn),
+            best_effort: AtomicU64::new(initial_sn),
+        }
+    }
+
+    /// Mint the next SN on `reliable`'s channel as a ring position of
+    /// `mask`, advancing that channel one step (the atomic twin of
+    /// [`crate::sn::TxSn::mint`]). Masking a raw monotonic `fetch_add` IS
+    /// the ring walk — `(n + 1) & mask` is the ring successor of `n & mask`
+    /// across the `u64` boundary too.
+    pub fn mint(&self, reliable: bool, mask: u64) -> u64 {
+        let slot = if reliable {
+            &self.reliable
+        } else {
+            &self.best_effort
+        };
+        slot.fetch_add(1, Ordering::SeqCst) & mask
+    }
+
+    /// Reserve (burn) one SN on `reliable`'s channel WITHOUT returning it —
+    /// the fragment-chain follow-on walk reserves `count - 1` SNs after the
+    /// first fragment's already-minted `sn` so the chain is ring-consecutive
+    /// on its own channel (R311y206).
+    pub fn reserve_next(&self, reliable: bool) {
+        let slot = if reliable {
+            &self.reliable
+        } else {
+            &self.best_effort
+        };
+        slot.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Re-seed BOTH channels to `initial_sn` on reopen (the fresh-rebuild
+    /// path). SeqCst pairs with `mint` / `reserve_next` so the store cannot
+    /// reorder against a straggling in-flight mint.
+    pub fn reset(&self, initial_sn: u64) {
+        self.reliable.store(initial_sn, Ordering::SeqCst);
+        self.best_effort.store(initial_sn, Ordering::SeqCst);
+    }
+}
+
 /// R311y205 (transport-multilink IMPL-2a) — the SHARED session kernel: the
 /// ~30 fields that are one-per-logical-session regardless of how many physical
 /// links carry it (SN generators, RX-SN gate, negotiated caps, peer identity,
@@ -380,8 +455,10 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// the mint ([`Self::next_outbound_frame_sn`]) and at the
     /// fragment walk (`frame_encode::fragment_body`). R311kb
     /// realized the R121e explicit-modulo carry via zenoh-pico
-    /// `_z_sn_increment` parity (the F-5 consolidation).
-    pub outbound_frame_sn: AtomicU64,
+    /// `_z_sn_increment` parity (the F-5 consolidation). R311y214 —
+    /// [`AtomicTxSn`], split per reliability channel (pico/zenoh parity);
+    /// the `reliable` flag of each mint selects the channel.
+    pub outbound_frame_sn: AtomicTxSn,
     /// R311ke — per-channel inbound Frame/Fragment SN gate state
     /// ([`crate::sn::RxSn`]), the zenoh-pico
     /// `_z_transport_peer_unicast_t._sn_rx_reliable` /
@@ -1008,7 +1085,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "transport-shm")]
                 is_shm: R::new_mutex(false),
                 inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
-                outbound_frame_sn: AtomicU64::new(initial_frame_sn),
+                outbound_frame_sn: AtomicTxSn::new(initial_frame_sn),
                 rx_sn: R::new_mutex(crate::sn::RxSn::default()),
                 tx_mutex: R::new_mutex(BatchTx::default()),
                 outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
@@ -2221,13 +2298,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R121e / R311kb — outbound Frame sequence-number mint. Returns
-    /// the SN for the next outbound Frame as a position on the ring of
-    /// `sn_mask` ([`Self::negotiated_sn_mask`]) and advances the
-    /// internal counter by one — zenoh-pico `_z_sn_increment` parity,
-    /// closing the R121e explicit-modulo carry.
+    /// the SN for the next outbound Frame on `reliable`'s channel as a
+    /// position on the ring of `sn_mask` ([`Self::negotiated_sn_mask`])
+    /// and advances THAT channel's counter by one — zenoh-pico
+    /// `_z_sn_increment` parity, closing the R121e explicit-modulo carry.
+    /// R311y214 — the reliable and best-effort channels are independent
+    /// rings ([`AtomicTxSn`]); `reliable` picks which.
     ///
-    /// The first call returns `params.initial_sn & sn_mask` (the
-    /// counter is seeded by `new_session_actions`; a conforming
+    /// The first call on each channel returns `params.initial_sn & sn_mask`
+    /// (both channels are seeded by `new_session_actions`; a conforming
     /// `initial_sn` is already on the ring, so the announced
     /// OpenSyn/OpenAck origin and the first wire SN agree); subsequent
     /// calls return successive ring positions. Masking the returned
@@ -2239,8 +2318,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// monotonicity. The hot path is one outbound Frame per
     /// application-layer batch — the atomic cost is in the noise
     /// vs. the codec encode + TCP write below it.
-    pub fn next_outbound_frame_sn(&self, sn_mask: u64) -> u64 {
-        self.outbound_frame_sn.fetch_add(1, Ordering::SeqCst) & sn_mask
+    pub fn next_outbound_frame_sn(&self, reliable: bool, sn_mask: u64) -> u64 {
+        self.outbound_frame_sn.mint(reliable, sn_mask)
     }
 
     /// Transport-framing chokepoint for every outbound network message —
@@ -2393,7 +2472,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // (pico `_z_transport_tx_batch_overflow` rollback+retry).
                 loop {
                     if batch.buf.is_empty() {
-                        let sn = self.next_outbound_frame_sn(sn_mask);
+                        let sn = self.next_outbound_frame_sn(reliable, sn_mask);
                         batch.buf.reserve(1 + 10 + worst_case_payload);
                         begin_frame(&mut batch.buf, sn, frame_flags(reliable));
                         encode_into(&mut batch.buf);
@@ -2434,7 +2513,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Immediate path (batching off or window closed):
             // frame-per-message, mint + encode + emit under the SAME lock
             // hold (pico TX-mutex parity, R311kf).
-            let sn = self.next_outbound_frame_sn(sn_mask);
+            let sn = self.next_outbound_frame_sn(reliable, sn_mask);
             let wire = crate::frame_encode::encode_frame_envelope(
                 sn,
                 crate::frame_encode::frame_flags(reliable),
@@ -2506,7 +2585,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // wz<->wz by the peer's half-window SN check but a real
                 // divergence from the reference (R311y206).
                 for _ in 1..count {
-                    self.outbound_frame_sn.fetch_add(1, Ordering::SeqCst);
+                    self.outbound_frame_sn.reserve_next(reliable);
                 }
                 for frag in crate::frame_encode::fragment_body(body, reliable, mtu, sn, sn_mask) {
                     self.send_wire(&frag, reliability);
@@ -4645,8 +4724,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.tx_mutex, |batch| *batch = BatchTx::default());
             // SeqCst pairs with `next_outbound_frame_sn`'s fetch_add — the
             // reset must not reorder against a straggling in-flight mint.
-            self.outbound_frame_sn
-                .store(self.params.initial_sn, Ordering::SeqCst);
+            // R311y214 — resets BOTH reliability channels to the origin.
+            self.outbound_frame_sn.reset(self.params.initial_sn);
         }
     }
 

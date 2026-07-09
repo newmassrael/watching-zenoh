@@ -1109,16 +1109,16 @@ mod tests {
         params.initial_sn = 42;
         let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
         assert_eq!(
-            actions.next_outbound_frame_sn(mask),
+            actions.next_outbound_frame_sn(true, mask),
             42,
             "first SN must equal params.initial_sn"
         );
         assert_eq!(
-            actions.next_outbound_frame_sn(mask),
+            actions.next_outbound_frame_sn(true, mask),
             43,
             "subsequent SNs must increment by 1"
         );
-        assert_eq!(actions.next_outbound_frame_sn(mask), 44);
+        assert_eq!(actions.next_outbound_frame_sn(true, mask), 44);
     }
 
     /// R311kb — the mint wraps at the ring seam: an `initial_sn` at the
@@ -1130,13 +1130,57 @@ mod tests {
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = mask;
         let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
-        assert_eq!(actions.next_outbound_frame_sn(mask), mask);
+        assert_eq!(actions.next_outbound_frame_sn(true, mask), mask);
         assert_eq!(
-            actions.next_outbound_frame_sn(mask),
+            actions.next_outbound_frame_sn(true, mask),
             0,
             "the mint must wrap mask -> 0 on the negotiated ring"
         );
-        assert_eq!(actions.next_outbound_frame_sn(mask), 1);
+        assert_eq!(actions.next_outbound_frame_sn(true, mask), 1);
+    }
+
+    /// R311y214 — the reliable and best-effort channels are INDEPENDENT
+    /// rings, each seeded from `params.initial_sn` (pico
+    /// `_sn_tx_reliable` / `_sn_tx_best_effort` split, `common/tx.c:52-59`).
+    /// A best-effort mint must NOT advance the reliable channel and vice
+    /// versa — the prior single shared counter failed this (a best-effort
+    /// Frame bumped the reliable SN, leaving a gap the peer's per-channel
+    /// gate merely tolerated). This is the divergence slice-0 closes and
+    /// the property the R311y215 per-priority conduits generalize.
+    #[test]
+    fn outbound_frame_sn_splits_reliable_and_best_effort_channels() {
+        let mask = wz_session_core::sn::mask_from_res(0x02);
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.initial_sn = 42;
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+
+        // Both channels start at the announced origin.
+        assert_eq!(
+            actions.next_outbound_frame_sn(true, mask),
+            42,
+            "reliable #1"
+        );
+        assert_eq!(
+            actions.next_outbound_frame_sn(false, mask),
+            42,
+            "best-effort #1 is independent — starts at initial_sn, not 43"
+        );
+        // Interleave: each channel advances only itself.
+        assert_eq!(
+            actions.next_outbound_frame_sn(true, mask),
+            43,
+            "reliable #2"
+        );
+        assert_eq!(
+            actions.next_outbound_frame_sn(true, mask),
+            44,
+            "reliable #3"
+        );
+        assert_eq!(
+            actions.next_outbound_frame_sn(false, mask),
+            43,
+            "best-effort #2 — a best-effort mint never advanced the reliable ring"
+        );
     }
 
     // ── R311hw / R311hx (R311hz refactor) — codec & declare behavioural
@@ -2923,9 +2967,9 @@ mod reconnect_tx_tests {
         assert_eq!(actions.live_link_count(), 1);
 
         // Advance the shared outbound SN mid-stream: 42, 43, 44 -> counter 45.
-        assert_eq!(actions.next_outbound_frame_sn(mask), 42);
-        assert_eq!(actions.next_outbound_frame_sn(mask), 43);
-        assert_eq!(actions.next_outbound_frame_sn(mask), 44);
+        assert_eq!(actions.next_outbound_frame_sn(true, mask), 42);
+        assert_eq!(actions.next_outbound_frame_sn(true, mask), 43);
+        assert_eq!(actions.next_outbound_frame_sn(true, mask), 44);
 
         // GUARD: a reset while a link is live is a no-op on the shared core ->
         // the SN continues from 45 (NOT re-seeded to 42) and the link stays
@@ -2937,7 +2981,7 @@ mod reconnect_tx_tests {
             "the survivor stays live across a guarded reset"
         );
         assert_eq!(
-            actions.next_outbound_frame_sn(mask),
+            actions.next_outbound_frame_sn(true, mask),
             45,
             "a live-link reset must PRESERVE the shared outbound SN (guard no-op)"
         );
@@ -2948,7 +2992,7 @@ mod reconnect_tx_tests {
         assert_eq!(actions.live_link_count(), 0);
         actions.reset_for_reopen();
         assert_eq!(
-            actions.next_outbound_frame_sn(mask),
+            actions.next_outbound_frame_sn(true, mask),
             42,
             "with the aggregate empty the reset re-seeds the SN (fresh-rebuild)"
         );
