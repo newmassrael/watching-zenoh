@@ -2677,8 +2677,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     {
         // R311y215 (transport-qos) — the EFFECTIVE Frame priority: the caller's
         // message priority when this session negotiated QoS, else forced to
-        // DEFAULT (a non-QoS session has one conduit and writes no ext_qos, so
-        // every Frame is Data). `priority` then selects the SN conduit at each
+        // DEFAULT (a non-QoS session has one PRIORITY conduit and writes no
+        // ext_qos, so every Frame is Data — note it still splits by RELIABILITY
+        // into two SN rings, the R311y222 batch key). `priority` then selects the
+        // SN conduit at each
         // mint and (when != DEFAULT) the ext_qos the Frame carries. When
         // `transport-qos` does not compile, `priority` passes straight to the
         // single-conduit mint (ignored) — no cfg-skew.

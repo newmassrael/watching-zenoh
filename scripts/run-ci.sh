@@ -1149,6 +1149,8 @@ layer_c1bb_cargo_test_qos() {
         && cargo test -p wz-runtime-tokio --features transport-qos,transport-lowlatency,transport-unicast --lib is_qos_negotiates_by_and_and_is_lowlatency_exclusive --quiet \
         && cargo test -p wz-runtime-tokio --features transport-qos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features routing-peer,transport-qos --lib linkstate --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,transport-qos --quiet -- -D warnings \
         && cargo check -p wz --features transport-qos --quiet)
 }
 

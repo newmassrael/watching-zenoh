@@ -1194,12 +1194,16 @@ impl LinkstateForwarder {
     /// band survives a relay hop end-to-end — the mirror of zenoh `route_data`
     /// copying `msg.ext_qos` onto egress (`net/routing/dispatcher/pubsub.rs`),
     /// restricted to the priority sub-field wz decodes (express / congestion-control
-    /// are not carried on `FramePayload`). NAMED FOLLOW-UP (dormant):
-    /// the router-tier re-forward (`RouterForwarder::forward_push_tier` -> the
-    /// DEFAULT `fan_out_tier`, which has no `_qos` twin yet) and the switchboard
-    /// `RouteTable::forward_push` (`routing.rs`, the old `send_network_message`
-    /// path) STILL re-band a transit to DEFAULT; both need the same threading when
-    /// router multilink lands (max_links = 1 today, so the band pin is inert there).
+    /// are not carried on `FramePayload`). NAMED FOLLOW-UP (R311y223 honesty
+    /// correction): the router-tier re-forward (`RouterForwarder::forward_push_tier`
+    /// -> the DEFAULT `fan_out_tier`, which has no `_qos` twin yet) and the
+    /// switchboard `RouteTable::forward_push` (`routing.rs`, the old
+    /// `send_network_message` path) STILL re-band a transit to DEFAULT. Deferred
+    /// because router+QoS is not a tested/deployed configuration today and the
+    /// tested router topologies are single-hop — NOT because the re-band is inert:
+    /// the egress `ext_qos` encoding is observable on a single QoS link (`select_link`
+    /// is the only effect max_links=1 makes inert). When router+QoS or a multi-hop
+    /// router topology lands, thread the band exactly as this peer plane does.
     fn fan_out_qos(
         &self,
         reliable: bool,

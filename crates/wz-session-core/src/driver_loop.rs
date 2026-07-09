@@ -64,16 +64,23 @@ pub enum DriverLoopOutcome {
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
         /// R311y221 — the DELIVERED-frame priority band (the decoded ext_qos),
-        /// surfaced for app-observability of the received QoS. `Priority::DEFAULT`
-        /// under a non-QoS session, the lowlatency lean-rx path, and the multicast
-        /// plane (whose per-priority conduits stay deferred, R311y215 step 8). The
+        /// surfaced on the delivery outcome so a consumer of this `FramePayload`
+        /// can read the band the frame arrived on. `Priority::DEFAULT` under a
+        /// non-QoS session, the lowlatency lean-rx path, and the multicast plane
+        /// (whose per-priority conduits stay deferred, R311y215 step 8). The
         /// FUNCTIONAL RX priority — the per-priority SN-conduit gate
         /// (`admit_rx_frame_sn`) and the reassembly chain key — was complete in
         /// y215; y221 threads the SAME decoded band onto the delivered outcome so a
         /// transit re-forward (`forward_push`) can preserve it end-to-end instead
-        /// of re-banding to DEFAULT. Unconditional (not `#[cfg]`-gated): the
-        /// variant is ungated and `qos::Priority` is always compiled, so a gated
-        /// field would feature-skew every consumer match (signature-stability).
+        /// of re-banding to DEFAULT. R311y223 SCOPE (honesty): the band reaches the
+        /// FaceForwarder delivery outcome (the transit re-forward + the deploy-e2e
+        /// witness), NOT yet a production app-facing `Sample` — the local-subscriber
+        /// / client-attachment delivery seams (`dispatch_local_subscribers`,
+        /// `deliver_to_client_subscribers`) do not carry it and `Sample` has no
+        /// transport-band field; routing it there is a follow-up. Unconditional
+        /// (not `#[cfg]`-gated): the variant is ungated and `qos::Priority` is
+        /// always compiled, so a gated field would feature-skew every consumer
+        /// match (signature-stability).
         priority: crate::qos::Priority,
     },
     /// `parse_inbound` rejected the wire bytes, OR the Frame envelope

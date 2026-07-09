@@ -58,8 +58,10 @@
 //!     into `fan_out_qos`); the deterministic witness is the library unit test
 //!     `forward_push_preserves_the_received_band_on_transit`. The router-tier
 //!     (`forward_push_tier`) + switchboard (`RouteTable::forward_push`) transit
-//!     twins still re-band to DEFAULT — a named follow-up dormant behind router
-//!     multilink (max_links = 1 today).
+//!     twins still re-band to DEFAULT — a named follow-up (R311y223), deferred
+//!     because router+QoS is not a tested/deployed config today (NOT because the
+//!     re-band is inert: it is observable on a single QoS link, not gated on
+//!     multilink).
 //!
 //! Requires the binary built `--features transport-qos,transport-multilink` (pulls
 //! `routing-peer`, so `--peer` / `--publish` / `--subscribe` / `--qos` /
