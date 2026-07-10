@@ -6054,10 +6054,13 @@ fn remote_subscriber_listener_rejects_typed_when_feature_off() {
 /// publish over a QoS group egressed at DEFAULT), while the base `publish` stays
 /// DEFAULT (byte-identical to the pre-QoS single conduit). The group-level
 /// `is_qos` CLAMP that turns a non-DEFAULT band into the per-priority conduit +
-/// frame `ext_qos` is proven at the dispatch level
-/// (`wz_session_core::multicast_tx` `qos_group_emits_frame_ext_qos_and_mints_on_the_priority_conduit`
-/// / `non_qos_group_clamps_to_default_no_ext_qos`); THIS witness pins the
-/// `Session` -> tx-item hand-off the finding named, which those cannot see.
+/// frame `ext_qos` is proven at the dispatch level by
+/// `wz_session_core::multicast_tx::qos_emit_tests`
+/// (`qos_group_emits_frame_ext_qos_and_mints_on_the_priority_conduit` /
+/// `non_qos_group_clamps_to_default_no_ext_qos`) — those need
+/// `transport-qos + codec-push`, so the run-ci C1bc lane RUNS them (the C1bb
+/// transport-qos test lane omits `codec-push` and cfg's them out). THIS witness
+/// pins the `Session` -> tx-item hand-off the finding named, which those cannot see.
 #[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
 #[test]
 fn multicast_publish_qos_stamps_band_base_publish_stays_default() {

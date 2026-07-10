@@ -1166,9 +1166,17 @@ layer_c1bb_cargo_test_qos() {
 # app band onto the `MulticastTxItem` instead of the pre-y232 hard-coded DEFAULT).
 # This lane drives BOTH gate arms so neither rots:
 #   1. ON witness — the direct multicast `Session::publish_qos` -> tx-item band
-#      hand-off (the finding fix), in the multicast+codec-push lane; the group-level
-#      is_qos clamp -> per-priority conduit + frame ext_qos stays proven at the
-#      dispatch level by C1bb's wz-session-core multicast_tx / sn suites.
+#      hand-off (the finding fix), in the multicast+codec-push lane. This pins the
+#      Session -> MulticastTxItem enqueue; the group-level is_qos CLAMP (the wire
+#      half: is_qos=true -> non-DEFAULT band survives to frame ext_qos + mints on
+#      the per-priority conduit; is_qos=false -> DEFAULT byte-identical) is the
+#      `wz-session-core` `multicast_tx::qos_emit_tests`, RUN by (1b) below. NOTE
+#      C1bb's transport-qos test lane OMITS `codec-push`, so it cfg's those two
+#      tests OUT (they need `transport-qos + codec-push`); this lane is the one
+#      that EXECUTES the wire-level clamp proof, not only clippy-compiles it.
+#   1b. ON dispatch clamp — RUN `multicast_tx::qos_emit_tests` under
+#      `transport-qos,codec-push,session-multicast,pubsub-put` (the exact combo
+#      that inhabits `MulticastTxItem::Push` AND the per-priority TX conduit).
 #   2. ON clippy — the per-priority multicast conduit + the `_qos` send seam under
 #      `transport-qos` (the conduit-active arm), --all-targets -D warnings.
 #   3. OFF clippy — multicast WITHOUT `transport-qos` (the pico-faithful 2-channel
@@ -1178,10 +1186,10 @@ layer_c1bb_cargo_test_qos() {
 #      `--multicast-qos` parse + `run_router_hat(multicast_qos)` + the two spawn
 #      `qos` params compile+lint clean.
 #   5. Demo OFF — `wz-ap-demo` with `router-multicast-faces` only: the
-#      not(transport-qos) flag arm (flag ignored, non-QoS group) + the
-#      not(router-multicast-faces) is unrelated here.
+#      not(transport-qos) flag arm (flag ignored, non-QoS group).
 layer_c1bc_cargo_test_mcast_qos() {
     (cd crates \
+        && cargo test -p wz-session-core --features transport-qos,codec-push,session-multicast,pubsub-put --lib qos_emit_tests --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features transport-multicast,transport-link-udp,codec-push,pubsub-put,pubsub-allow-loop --lib multicast_publish_qos_stamps --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features transport-multicast,transport-link-udp,codec-push,transport-qos,pubsub-put,pubsub-allow-loop --lib multicast_publish_qos_stamps --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-multicast,transport-link-udp,codec-push,transport-qos --quiet -- -D warnings \
