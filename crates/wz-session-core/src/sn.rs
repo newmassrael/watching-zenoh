@@ -441,6 +441,14 @@ impl MulticastRxConduits {
     /// at 0: a non-qos peer never sends a non-DEFAULT frame. Identical to the
     /// pre-R311y227 `PeerSlot::seed_from_join` 2-SN seed.
     pub fn seed_plain(&mut self, mask: u64, next_reliable: u64, next_best_effort: u64) {
+        // JOIN-authoritative reset: a non-qos peer advertises ONLY the DEFAULT
+        // 2-channel pair, so every OTHER conduit returns to its unseeded baseline.
+        // This clears any stale non-DEFAULT baseline a recycled slot — or a peer
+        // that was qos on a PRIOR JOIN and re-JOINs non-qos (or whose qos ext
+        // fails to parse) — left behind, closing the re-JOIN-consistency gap the
+        // R311y227 review flagged. pico re-copies the whole `_sn_rx_sns` from every
+        // JOIN (multicast/rx.c:453-456), so a full reset is the faithful model.
+        *self = Self::default();
         let d = self.select_mut(crate::qos::Priority::DEFAULT);
         d.reliable = decrement(mask, next_reliable);
         d.best_effort = decrement(mask, next_best_effort);

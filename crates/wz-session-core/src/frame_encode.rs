@@ -1399,6 +1399,72 @@ mod qos_wire_tests {
     use crate::inbound::{parse_inbound, InboundFrame};
     use crate::qos::Priority;
 
+    /// R311y227 — an oversize QoS MULTICAST frame re-frames as a fragment chain
+    /// that carries the `ext_qos` on EVERY fragment AND mints its follow-on SNs on
+    /// the frame's PRIORITY conduit (not DEFAULT) — the oversize *prioritized*
+    /// multicast Push the R311y227 review flagged as untested at the multicast
+    /// layer (it was covered only transitively via the unicast `fragment_body`).
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn multicast_qos_oversize_chains_carry_ext_qos_on_the_priority_conduit() {
+        use crate::sn::{mask_from_res, MulticastTxConduits};
+        let mtu = 64usize;
+        let mut tx = MulticastTxConduits::new(mask_from_res(0x02));
+        // Mint the head on the RealTime reliable conduit (SN 0).
+        let sn = tx.mint(Priority::RealTime, true);
+        let body: Vec<u8> = (0..200u32).map(|i| (i * 3) as u8).collect();
+        let mut frame = Vec::new();
+        super::begin_frame(
+            &mut frame,
+            sn,
+            super::frame_flags(true),
+            Some(Priority::RealTime),
+        );
+        frame.extend_from_slice(&body);
+        let mask = tx.mask();
+        let frames = super::multicast_frame_or_fragments(
+            frame,
+            sn,
+            true,
+            mtu,
+            &mut tx,
+            Some(Priority::RealTime),
+        );
+        assert!(frames.len() > 1, "200 bytes at mtu 64 must fragment");
+        // Follow-on SNs minted on the RealTime conduit; DEFAULT conduit untouched.
+        assert_eq!(
+            tx.advertise_per_priority()[Priority::RealTime as usize].next_reliable,
+            (sn + frames.len() as u64) & mask,
+            "the chain's follow-on mints ride the RealTime conduit"
+        );
+        assert_eq!(
+            tx.advertise_default().next_reliable,
+            0,
+            "the DEFAULT conduit is untouched by a RealTime fragment chain"
+        );
+        // Every fragment decodes with the RealTime band (ext re-emitted per chunk).
+        let mut reassembled = Vec::new();
+        for frag in &frames {
+            assert!(frag.len() <= mtu, "fragment fits mtu");
+            let InboundFrame::Fragment {
+                priority, payload, ..
+            } = parse_inbound(frag).expect("fragment decodes")
+            else {
+                panic!("expected a Fragment");
+            };
+            assert_eq!(
+                priority,
+                Priority::RealTime,
+                "each fragment carries the ext_qos band"
+            );
+            reassembled.extend_from_slice(&payload);
+        }
+        assert_eq!(
+            reassembled, body,
+            "the qos fragment payloads concatenate back to the body"
+        );
+    }
+
     /// A non-DEFAULT priority Frame sets the Z flag and carries a z64 ext_qos
     /// (`[0x31][VLE(priority)]`) after `VLE(sn)`; `parse_inbound` recovers the
     /// priority, reliability, sn, and has_ext. Empty payload keeps the assertion

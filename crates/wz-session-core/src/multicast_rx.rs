@@ -60,7 +60,14 @@ pub enum MulticastRxNext {
     /// reassembly Router should clear that peer-channel's in-progress chain
     /// (the dropped frame may have superseded its continuation). `reliable`
     /// selects the channel.
-    FrameOutOfOrder { reliable: bool },
+    FrameOutOfOrder {
+        reliable: bool,
+        /// R311y227 — the rejected frame's decoded QoS band, so the reassembly
+        /// tail aborts THAT priority conduit's in-progress chain (a qos peer's
+        /// per-priority chains gate independently). DEFAULT for a non-qos frame,
+        /// so the abort targets the single DEFAULT chain as before.
+        priority: crate::qos::Priority,
+    },
     /// A `T_MID_CLOSE`: the caller calls `close_by_src` (a reassembly caller
     /// aborts the peer's chains FIRST, before the slot index can recycle).
     Close,
@@ -202,7 +209,9 @@ where
                         }
                         MulticastRxNext::Done
                     }
-                    FrameIngest::OutOfOrder => MulticastRxNext::FrameOutOfOrder { reliable },
+                    FrameIngest::OutOfOrder => {
+                        MulticastRxNext::FrameOutOfOrder { reliable, priority }
+                    }
                     _ => MulticastRxNext::Done,
                 }
             } else {
@@ -253,17 +262,15 @@ pub fn dispatch_multicast_inbound_reassembling<
 {
     match dispatch_multicast_inbound(dispatcher, params, bytes, src, now_ms, on_event) {
         MulticastRxNext::Done => {}
-        MulticastRxNext::FrameOutOfOrder { reliable } => {
+        MulticastRxNext::FrameOutOfOrder { reliable, priority } => {
             // An out-of-order Frame clears the channel's in-progress chain
             // (pico clears the dbuf + state, multicast/rx.c): the dropped frame
-            // may have superseded the chain's continuation.
+            // may have superseded the chain's continuation. R311y227 — abort the
+            // SAME (peer, priority, reliable) chain the rejected frame's band
+            // would have continued, so a qos peer's OTHER-priority chains are
+            // untouched. DEFAULT for a non-qos frame (byte-identical to before).
             if let Some(idx) = dispatcher.peer_index_by_src(src) {
-                // Multicast QoS conduits are deferred (R311y215 step 8): DEFAULT.
-                reasm.abort_channel(
-                    &multicast_chain_key(idx),
-                    crate::qos::Priority::DEFAULT,
-                    reliable,
-                );
+                reasm.abort_channel(&multicast_chain_key(idx), priority, reliable);
             }
         }
         MulticastRxNext::Fragment => {
