@@ -1194,16 +1194,14 @@ impl LinkstateForwarder {
     /// band survives a relay hop end-to-end — the mirror of zenoh `route_data`
     /// copying `msg.ext_qos` onto egress (`net/routing/dispatcher/pubsub.rs`),
     /// restricted to the priority sub-field wz decodes (express / congestion-control
-    /// are not carried on `FramePayload`). NAMED FOLLOW-UP (R311y223 honesty
-    /// correction): the router-tier re-forward (`RouterForwarder::forward_push_tier`
-    /// -> the DEFAULT `fan_out_tier`, which has no `_qos` twin yet) and the
-    /// switchboard `RouteTable::forward_push` (`routing.rs`, the old
-    /// `send_network_message` path) STILL re-band a transit to DEFAULT. Deferred
-    /// because router+QoS is not a tested/deployed configuration today and the
-    /// tested router topologies are single-hop — NOT because the re-band is inert:
-    /// the egress `ext_qos` encoding is observable on a single QoS link (`select_link`
-    /// is the only effect max_links=1 makes inert). When router+QoS or a multi-hop
-    /// router topology lands, thread the band exactly as this peer plane does.
+    /// are not carried on `FramePayload`). R311y224 added the router twin
+    /// (`RouterForwarder::fan_out_tier_qos`) so the router-tier re-forward
+    /// (`forward_push_tier` + the cross-mesh bridge) and the switchboard
+    /// `RouteTable::forward_push` preserve a transit band too; R311y225 extended it to
+    /// the CLIENT-face egress (`deliver_to_client_subscribers`) and the client->mesh
+    /// re-inject (`reinject_client_push`) on this plane. The remaining DEFAULT data
+    /// egresses are the multicast plane (a structural 2-channel, no per-priority
+    /// conduit) and the query plane (Request/Response, uniformly DEFAULT).
     fn fan_out_qos(
         &self,
         reliable: bool,
@@ -3020,7 +3018,13 @@ impl LinkstateForwarder {
     /// Push back). Wildcard-aware via the SAME `keyexpr_intersects_target` SSOT the
     /// mesh route reads (over the id-keyed store's ke VALUES) — an exact string match
     /// would blackhole every `demo/**` client sub receiving a `demo/data` Push.
-    fn deliver_to_client_subscribers(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
+    fn deliver_to_client_subscribers(
+        &self,
+        inbound: FaceId,
+        reliable: bool,
+        priority: Priority,
+        push: &PushOwned,
+    ) {
         if self.client_subs.borrow().is_empty() {
             return;
         }
@@ -3051,7 +3055,13 @@ impl LinkstateForwarder {
         // The DATA-plane twin of the R311y179 forward_request_to_client_queryables fix.
         set_push_source(&mut carrier, 0);
         let target_chunks: Vec<&str> = keyexpr.split('/').collect();
-        let _ = self.fan_out(reliable, None, |id, _zid| {
+        // R311y225 — preserve the received band on the CLIENT-face egress (the y224
+        // residual): route through `fan_out_qos` on the frame's `priority` so a
+        // QoS-negotiated client observes the same band the mesh transit carries (zenoh
+        // `route_data` copies `ext_qos` onto client-face egress the same as any egress).
+        // DEFAULT under a non-QoS session; a pico client negotiates no unicast ext_qos
+        // so it stays DEFAULT. The peer-tier twin of the router's y225 client egress.
+        let _ = self.fan_out_qos(reliable, priority, false, None, |id, _zid| {
             if id == inbound {
                 return Ok(None);
             }
@@ -3077,7 +3087,13 @@ impl LinkstateForwarder {
     /// peer has no master election (zenoh `linkstate_peer::compute_data_route` has no
     /// `elect_router` gate). Mirrors zenoh routing a `source_type == Client` push over
     /// `linkstatepeer_subs` with self as the tree root.
-    fn reinject_client_push(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
+    fn reinject_client_push(
+        &self,
+        inbound: FaceId,
+        reliable: bool,
+        priority: Priority,
+        push: &PushOwned,
+    ) {
         // Resolve the client Push key against ITS face alias table (c3c-3 B1), once.
         let keyexpr = {
             let faces = self.faces.borrow();
@@ -3101,7 +3117,12 @@ impl LinkstateForwarder {
         let Some((carrier, children)) = computed else {
             return; // no remote subscriber / no tree direction -> nothing to re-inject
         };
-        let _ = self.fan_out(reliable, None, |_id, zid| {
+        // R311y225 — preserve the received band on the client->mesh re-inject: this
+        // re-forwards a RECEIVED client frame into the mesh (reliteralize_push), so it
+        // carries the client's band through `fan_out_qos`, the peer-tier twin of the
+        // router's already-threaded `publish_client_push_into_meshes` (y224). A pico
+        // client sends DEFAULT (no unicast ext_qos); a QoS wz client's band survives.
+        let _ = self.fan_out_qos(reliable, priority, false, None, |_id, zid| {
             Ok(zid
                 .is_some_and(|z| is_child(&children, z))
                 .then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
@@ -5010,14 +5031,14 @@ impl FaceForwarder for LinkstateForwarder {
                     // sub) AND a CLIENT-sourced Push (client A -> co-attached client
                     // B); the inbound face is excluded, and a mesh face is never in
                     // `client_subs`, so this neither echoes nor double-delivers.
-                    self.deliver_to_client_subscribers(id, *reliable, push);
+                    self.deliver_to_client_subscribers(id, *reliable, *priority, push);
                     // R311y164 (D4b / C3b) — re-inject a co-attached CLIENT
                     // publisher's Push into the mesh as SELF-sourced (the transit
                     // `forward_push` above drops a client source, which is not a graph
                     // node). Gated on `is_client_face` so a MESH-sourced Push is NOT
                     // self-re-sourced — it rides `forward_push`'s transit re-forward.
                     if self.is_client_face(id) {
-                        self.reinject_client_push(id, *reliable, push);
+                        self.reinject_client_push(id, *reliable, *priority, push);
                     }
                 }
                 // c3c-3 — a sourced subscription declaration: a
@@ -6325,6 +6346,134 @@ mod tests {
             forwarded_source(&sink_b.frame_bytes(0)),
             0,
             "the mesh copy is SELF-sourced"
+        );
+    }
+
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn deliver_to_client_subscribers_preserves_the_received_band() {
+        // R311y225 — the peer CLIENT-face egress preserves the received band (the
+        // y224 residual): a RealTime mesh Put reaches a co-attached QoS-negotiated
+        // CLIENT subscriber still banded RealTime, driven through the full `forward`
+        // dispatch. The client must `set_qos_offer(true)`, else the per-face send
+        // clamps every Frame to DEFAULT (`dispatch_push`) and the band is unobservable.
+        // Source is a MESH face so only `deliver_to_client_subscribers` fires (a client
+        // source would ALSO trigger `reinject_client_push` — a different sink anyway).
+        use crate::session_glue::{parse_inbound, InboundFrame};
+        fn egress_band(frame: &[u8]) -> Priority {
+            let InboundFrame::Frame { priority, .. } =
+                parse_inbound(frame).expect("parse forwarded frame")
+            else {
+                panic!("forwarded bytes are not a Frame");
+            };
+            priority
+        }
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_a, _sink_a) = peer_face(zid(0x0A)); // the mesh Push source
+        let (client_sub, sink_sub) = peer_face_whatami(zid(0x0C), 2);
+        client_sub.set_qos_offer(true);
+        fwd.register(FaceId(0), &peer_a);
+        fwd.register(FaceId(1), &client_sub);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/**");
+
+        // RealTime mesh Put -> the co-attached client sub, still RealTime.
+        sink_sub.reset();
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: Priority::RealTime,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+        assert_eq!(sink_sub.frame_count(), 1, "delivered to the client sub");
+        assert_eq!(
+            egress_band(&sink_sub.frame_bytes(0)),
+            Priority::RealTime,
+            "client-face egress PRESERVES the received band — not re-clamped to DEFAULT"
+        );
+
+        // Negative control: a DEFAULT client egress stays DEFAULT.
+        sink_sub.reset();
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+        assert_eq!(
+            egress_band(&sink_sub.frame_bytes(0)),
+            Priority::DEFAULT,
+            "a DEFAULT client egress stays DEFAULT"
+        );
+    }
+
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn reinject_client_push_preserves_the_received_band() {
+        // R311y225 — the peer client->mesh re-inject preserves the received band: a
+        // RealTime Put from a co-attached CLIENT publisher reaches a subscribing
+        // QoS-negotiated MESH peer still banded RealTime (the peer twin of the
+        // router's `publish_client_push_into_meshes`, y224 — restoring the symmetry
+        // the y224 ledger flagged). Driven through the full `forward` dispatch.
+        use crate::session_glue::{parse_inbound, InboundFrame};
+        fn egress_band(frame: &[u8]) -> Priority {
+            let InboundFrame::Frame { priority, .. } =
+                parse_inbound(frame).expect("parse forwarded frame")
+            else {
+                panic!("forwarded bytes are not a Frame");
+            };
+            priority
+        }
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_b, sink_b) = peer_face(zid(0x0B)); // the mesh subscriber
+        let (client_pub, _cp) = peer_face_whatami(zid(0x0C), 2); // the client publisher
+        peer_b.set_qos_offer(true);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client_pub);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(0), "demo/data"); // the mesh peer B subscribes
+
+        // RealTime client Put -> re-injected to the subscribing mesh peer, still RealTime.
+        sink_b.reset();
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: Priority::RealTime,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
+        assert_eq!(sink_b.frame_count(), 1, "re-injected to the mesh sub");
+        assert_eq!(
+            egress_band(&sink_b.frame_bytes(0)),
+            Priority::RealTime,
+            "client->mesh re-inject PRESERVES the received band"
+        );
+
+        // Negative control: DEFAULT stays DEFAULT.
+        sink_b.reset();
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
+        assert_eq!(
+            egress_band(&sink_b.frame_bytes(0)),
+            Priority::DEFAULT,
+            "a DEFAULT re-inject stays DEFAULT"
         );
     }
 

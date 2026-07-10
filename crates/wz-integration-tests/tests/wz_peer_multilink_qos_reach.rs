@@ -62,9 +62,12 @@
 //!     switchboard (`RouteTable::forward_push`) transit re-forwards — deterministic
 //!     witnesses are the `route_push_preserves_the_received_band_on_transit`
 //!     (router) + `forward_push_preserves_the_received_band_on_transit` (switchboard)
-//!     unit tests. Only the CLIENT-face egress (`deliver_to_client_subscribers`)
-//!     still re-bands to DEFAULT — a named follow-up, deferred (NOT inert:
-//!     `is_qos()` is whatami-agnostic, so a QoS-negotiated client would observe it).
+//!     unit tests. R311y225 completed the CLIENT-seam egress
+//!     (`deliver_to_client_subscribers` both planes + the peer `reinject_client_push`),
+//!     so every UNICAST pubsub wire egress now preserves the band. The remaining
+//!     DEFAULT egresses are the mcast plane (a structural 2-channel, no per-priority
+//!     conduit) and the app-facing Sample — the band rides the wire frame's ext_qos
+//!     but is not yet surfaced to a local subscriber's Sample (a separate follow-up).
 //!
 //! Requires the binary built `--features transport-qos,transport-multilink` (pulls
 //! `routing-peer`, so `--peer` / `--publish` / `--subscribe` / `--qos` /

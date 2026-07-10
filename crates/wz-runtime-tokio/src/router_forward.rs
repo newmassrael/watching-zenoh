@@ -1276,17 +1276,15 @@ impl RouterForwarder {
     /// `fan_out_qos` (R311y221), and the zenoh `route_data` `ext_qos` copy
     /// (`net/routing/dispatcher/pubsub.rs`) restricted to the priority sub-field wz
     /// decodes. DEFAULT under a non-QoS session (the `dispatch_push` clamp), so
-    /// byte-identical to the prior `fan_out_tier` on every non-QoS transit. RESIDUAL
-    /// (still DEFAULT, named honestly): the CLIENT-face egress
-    /// [`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers) — a
-    /// separate client-seam follow-up, consistent with the peer plane's own DEFAULT
-    /// client egress (`LinkstateForwarder::deliver_to_client_subscribers` also fans out
-    /// on `fan_out` = DEFAULT). DEFERRED, NOT inert: `is_qos()` is whatami-agnostic
-    /// (`set_qos_offer` / `negotiate_qos_against_peer` carry no client gate), so a
-    /// QoS-negotiated client WOULD observe the re-band on its egress `ext_qos` (only a
-    /// pico client, which negotiates no unicast ext_qos, makes it moot) — the y221/y223
-    /// honesty framing. Also `broadcast_to_mcast_groups` (the multicast plane is a
-    /// structural 2-channel, no per-priority conduit).
+    /// byte-identical to the prior `fan_out_tier` on every non-QoS transit. R311y225
+    /// extended the same preservation to the CLIENT-face egress
+    /// [`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers) (this
+    /// plane + the peer plane's twin), so a QoS-negotiated client observes the band too
+    /// (a pico client, which negotiates no unicast ext_qos, keeps DEFAULT). RESIDUAL
+    /// (still DEFAULT, named honestly): `broadcast_to_mcast_groups` (the multicast
+    /// plane is a structural 2-channel, no per-priority conduit) and the QUERY-plane
+    /// client egress (a Response to a client querier -- a separate, uniformly-DEFAULT
+    /// plane).
     fn fan_out_tier_qos(
         &self,
         tier: FaceTier,
@@ -2523,18 +2521,22 @@ impl RouterForwarder {
         };
         let master = self.is_master(&keyexpr);
         // Blocks 1 & 2 — within-tier transit (ungated, the resolved-source route).
-        // R311y224 — the received band is threaded through the two MESH-directed
-        // re-forwards (within-tier + cross-mesh bridge) so a relayed Put keeps its
-        // priority end-to-end; the CLIENT-face egress below stays DEFAULT (the
-        // client-seam band is a separate follow-up — deferred, not inert; a
-        // QoS-negotiated client would observe the difference).
+        // R311y224/y225 — the received band is threaded through EVERY unicast pubsub
+        // re-forward this Push fans out to: the within-tier transit + the master-gated
+        // cross-mesh bridge (y224, below) AND the CLIENT-face egress (y225, block 3),
+        // so a relayed Put keeps its priority end-to-end. The mcast-group egress
+        // (broadcast_to_mcast_groups) is the one remaining DEFAULT wire egress — the
+        // 2-channel mcast plane has no per-priority conduit (residual, not inert).
         self.forward_push_tier(inbound, tier, reliable, priority, push);
         // Blocks 1 & 2 — the master-gated cross-mesh bridge (a received-frame transit
         // re-injected into the other mesh; preserves the band).
         self.bridge_push_cross_mesh(tier, reliable, priority, push, &keyexpr, master);
-        // Block 3 — local client delivery (master || source == Router). DEFAULT band
-        // (client egress residual, consistent with the peer plane's client seam).
-        self.deliver_to_client_subscribers(inbound, tier, reliable, push, &keyexpr, master);
+        // Block 3 — local client delivery (master || source == Router). R311y225 —
+        // now PRESERVES the received band on the client-face egress (was the y224
+        // DEFAULT residual); a QoS-negotiated client observes the mesh legs' band.
+        self.deliver_to_client_subscribers(
+            inbound, tier, reliable, priority, push, &keyexpr, master,
+        );
         // Client-sourced mesh re-injection (peer leg ungated, router leg master).
         // A multicast INGRESS Push (I3b) federates into the mesh ONLY when this
         // router is the Designated Router (DR) for its keyexpr: `is_group_dr`
@@ -2939,11 +2941,16 @@ impl RouterForwarder {
     /// (`FaceTier::Client`) like every other router send, so it inherits the
     /// interceptor / egress-ACL gate once that plane lands on the seam (the y113
     /// obligation) rather than being a separate retrofit site.
+    // R311y225 added the `priority` band arg (client-egress band preservation),
+    // crossing the 7-arg lint; the args are the irreducible routing context
+    // (source, tier, reliability, band, payload, keyexpr, master-gate).
+    #[allow(clippy::too_many_arguments)]
     fn deliver_to_client_subscribers(
         &self,
         inbound: FaceId,
         inbound_tier: FaceTier,
         reliable: bool,
+        priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
         master: bool,
@@ -2984,7 +2991,15 @@ impl RouterForwarder {
         // `demo/data` sub (exact `HashSet::contains` would silently blackhole every
         // wildcard client sub, re-opening the very gap C3 closes).
         let target_chunks: Vec<&str> = keyexpr.split('/').collect();
-        let _ = self.fan_out_tier(FaceTier::Client, reliable, |id, _zid| {
+        // R311y225 — preserve the received band on the CLIENT-face egress (the y224
+        // residual): route through `fan_out_tier_qos` on the frame's `priority`, so a
+        // QoS-negotiated client observes the same band the mesh legs carry (zenoh
+        // `route_data` copies `ext_qos` onto client-face egress the same as any egress,
+        // pubsub.rs). DEFAULT under a non-QoS session; a pico client negotiates no
+        // unicast ext_qos so it stays DEFAULT. (The QUERY-plane client egress -- a
+        // Response to a client querier -- is a separate, uniformly-DEFAULT plane, out
+        // of scope here.)
+        let _ = self.fan_out_tier_qos(FaceTier::Client, reliable, priority, false, |id, _zid| {
             if id == inbound {
                 return Ok(None);
             }
@@ -6555,6 +6570,73 @@ mod tests {
             sink_cb.frame_count(),
             1,
             "the bridged router-source copy delivers exactly once"
+        );
+    }
+
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn deliver_to_client_subscribers_preserves_the_received_band() {
+        // R311y225 — the router CLIENT-face egress preserves the received band (the
+        // y224 residual): a RealTime mesh Put reaches a QoS-negotiated CLIENT
+        // subscriber still banded RealTime, driven through the full `forward` ->
+        // route_push dispatch. Single-router => self is master => the block-3 client
+        // delivery is unconditional. The client must `set_qos_offer(true)`, else the
+        // per-face send clamps every Frame to DEFAULT (`dispatch_push`).
+        use crate::session_glue::{parse_inbound, InboundFrame};
+        fn egress_band(frame: &[u8]) -> Priority {
+            let InboundFrame::Frame { priority, .. } =
+                parse_inbound(frame).expect("parse forwarded frame")
+            else {
+                panic!("forwarded bytes are not a Frame");
+            };
+            priority
+        }
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // the mesh Push source
+        let (cb, sink_cb) = face(zid(0xCC), WIRE_CLIENT); // the client subscriber
+        cb.set_qos_offer(true);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &cb);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/**")); // the client subscribes
+
+        // RealTime mesh Put -> the client sub, still RealTime.
+        sink_cb.reset();
+        forward_one_priority(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Push(Box::new(
+                wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+                    .expect("build push"),
+            )),
+            true,
+            Priority::RealTime,
+        );
+        assert_eq!(sink_cb.frame_count(), 1, "delivered to the client sub");
+        assert_eq!(
+            egress_band(&sink_cb.frame_bytes(0)),
+            Priority::RealTime,
+            "router client-face egress PRESERVES the received band — not re-clamped"
+        );
+
+        // Negative control: a DEFAULT client egress stays DEFAULT.
+        sink_cb.reset();
+        forward_one_priority(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Push(Box::new(
+                wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+                    .expect("build push"),
+            )),
+            true,
+            Priority::DEFAULT,
+        );
+        assert_eq!(
+            egress_band(&sink_cb.frame_bytes(0)),
+            Priority::DEFAULT,
+            "a DEFAULT client egress stays DEFAULT"
         );
     }
 
