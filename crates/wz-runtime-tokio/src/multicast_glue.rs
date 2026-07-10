@@ -780,14 +780,19 @@ pub fn spawn_router_mcast_ingress(
                 if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                     messages,
                     reliable,
+                    priority,
                     ..
                 }) = event
                 {
                     for msg in messages {
                         if let NetworkMessage::Push(push) = msg {
+                            // R311y227 — carry the frame's decoded QoS band across
+                            // the fold so the forwarder re-injects at that priority
+                            // (DEFAULT on a non-qos group).
                             let _ = ingress_tx.send(McastIngressItem {
                                 push: (**push).clone(),
                                 reliable: *reliable,
+                                priority: *priority,
                             });
                         }
                     }

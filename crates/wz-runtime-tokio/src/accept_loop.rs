@@ -116,7 +116,9 @@ use crate::session_open::{
 };
 #[cfg(feature = "transport-multilink")]
 use std::collections::BTreeSet;
-#[cfg(feature = "transport-multilink")]
+// R311y227 — also the multicast INGRESS band (McastIngressItem.priority +
+// route_mcast_ingress), which is `codec-push`-gated, not multilink.
+#[cfg(any(feature = "transport-multilink", feature = "codec-push"))]
 use wz_session_core::qos::Priority;
 
 /// Backoff applied after an `accept()` error before re-arming the accept —
@@ -283,7 +285,7 @@ pub trait FaceForwarder {
     /// to unicast subscribers, echo-guarded off the groups). Default no-op: only a
     /// forwarder with a multicast ingress plane (the router) implements it.
     #[cfg(feature = "codec-push")]
-    fn route_mcast_ingress(&self, _reliable: bool, _push: &PushOwned) {}
+    fn route_mcast_ingress(&self, _priority: Priority, _reliable: bool, _push: &PushOwned) {}
 
     /// The on-group ROUTER member set changed (a JOIN admit / lease evict on the
     /// router's multicast group) — the I3b Designated-Router election candidate
@@ -1107,6 +1109,11 @@ pub struct McastIngressItem {
     pub push: PushOwned,
     /// The frame's reliability, preserved for the routed egress legs.
     pub reliable: bool,
+    /// R311y227 — the frame's decoded QoS band, so the router re-injects the
+    /// group-ingress Push into the mesh / local subscribers at the priority it
+    /// arrived (DEFAULT on a non-qos group). Paired with `push` (`codec-push`).
+    #[cfg(feature = "codec-push")]
+    pub priority: Priority,
 }
 
 pub struct FaceSources {
@@ -1871,7 +1878,7 @@ where
             // without `codec-push` the channel is always `None` so this is dead.
             Step::McastIngress(_item) => {
                 #[cfg(feature = "codec-push")]
-                forwarder.route_mcast_ingress(_item.reliable, &_item.push);
+                forwarder.route_mcast_ingress(_item.priority, _item.reliable, &_item.push);
             }
 
             // The on-group ROUTER set changed — refresh the forwarder's DR

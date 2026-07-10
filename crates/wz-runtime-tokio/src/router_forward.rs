@@ -2585,6 +2585,7 @@ impl RouterForwarder {
         #[cfg(feature = "transport-multicast")]
         self.broadcast_to_mcast_groups(
             reliable,
+            priority,
             push,
             &keyexpr,
             inbound_is_mcast,
@@ -2622,6 +2623,7 @@ impl RouterForwarder {
     fn broadcast_to_mcast_groups(
         &self,
         reliable: bool,
+        priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
         inbound_is_mcast: bool,
@@ -2693,12 +2695,13 @@ impl RouterForwarder {
             let _ = group.tx.send(MulticastTxItem::Push {
                 push: Box::new(carrier.clone()),
                 reliable,
-                // C1 foundation: DEFAULT frame band. The router egress threads the
-                // received routing band (the frame's decoded priority) here at C3
-                // (the "mcast-egress band" residual proper); until then a routed
-                // Push egresses the group at DEFAULT (byte-identical), and the
-                // app priority still rides the Push's own qos ext.
-                priority: Priority::DEFAULT,
+                // R311y227 — the received routing band (the inbound frame's decoded
+                // priority) egresses to the group on its own conduit when the group
+                // negotiated is_qos; `multicast_tx_emit` clamps it back to DEFAULT
+                // on a non-qos group (byte-identical). This closes the "mcast-egress
+                // band" residual: a QoS client's prioritized Put reaches the group
+                // at its band, not DEFAULT.
+                priority,
             });
         }
     }
@@ -5408,15 +5411,17 @@ impl FaceForwarder for RouterForwarder {
     /// Client-tier fan-out's source self-skip (`id == inbound`) excludes no real
     /// subscriber.
     #[cfg(feature = "transport-multicast")]
-    fn route_mcast_ingress(&self, reliable: bool, push: &PushOwned) {
-        // A multicast-received Push carries no per-priority conduit (the wz mcast
-        // plane is a structural 2-channel, pico-faithful), so its band is DEFAULT —
-        // R311y224, matching the peer plane's multicast_rx DEFAULT.
+    fn route_mcast_ingress(&self, priority: Priority, reliable: bool, push: &PushOwned) {
+        // R311y227 — a multicast-received Push re-injects at the priority its frame
+        // carried (the decoded ext_qos band surfaced by `multicast_rx`; DEFAULT on
+        // a non-qos group). The mesh federation + local-client delivery then ride
+        // that band via `route_push`, closing the ingress half of the
+        // "mcast-egress band" residual (the egress half is `broadcast_to_mcast_groups`).
         self.route_push(
             MCAST_INGRESS_FACE,
             FaceTier::Client,
             reliable,
-            Priority::DEFAULT,
+            priority,
             push,
             true,
         );
@@ -6717,7 +6722,7 @@ mod tests {
 
         let push =
             wz_session_core::push_build::build_push_literal("demo/data", b"z").expect("push");
-        fwd.route_mcast_ingress(true, &push);
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
 
         assert_eq!(
             sink_p.frame_count(),
@@ -6757,7 +6762,7 @@ mod tests {
 
         let push =
             wz_session_core::push_build::build_push_literal("demo/data", b"z").expect("push");
-        fwd.route_mcast_ingress(true, &push);
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
 
         assert_eq!(
             sink_p.frame_count(),
@@ -12100,7 +12105,7 @@ mod tests {
 
         // A Put whose source is NOT a multicast face broadcasts to the group,
         // UNCONDITIONALLY (no matching sub is registered on this forwarder).
-        fwd.broadcast_to_mcast_groups(true, &push, "demo/data", false, false);
+        fwd.broadcast_to_mcast_groups(true, Priority::DEFAULT, &push, "demo/data", false, false);
         let item = rx.try_recv().expect("the routed Put reached the group");
         assert!(
             matches!(item, MulticastTxItem::Push { reliable: true, .. }),
@@ -12108,7 +12113,7 @@ mod tests {
         );
 
         // Echo guard: a Push whose source IS a multicast face is not re-broadcast.
-        fwd.broadcast_to_mcast_groups(true, &push, "demo/data", true, false);
+        fwd.broadcast_to_mcast_groups(true, Priority::DEFAULT, &push, "demo/data", true, false);
         assert!(
             rx.try_recv().is_err(),
             "a multicast-sourced Push must not echo back to a group"
@@ -12517,7 +12522,7 @@ mod tests {
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
-        fwd.route_mcast_ingress(true, &push);
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
 
         assert_eq!(
             sink_cb.frame_count(),
@@ -12539,7 +12544,7 @@ mod tests {
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
-        fwd.route_mcast_ingress(true, &push);
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
 
         assert!(
             rx.try_recv().is_err(),
@@ -12567,7 +12572,7 @@ mod tests {
         // table, so it resolves to None and is dropped (no delivery).
         let aliased =
             wz_session_core::push_build::build_push_aliased(7, None, b"payload").expect("aliased");
-        fwd.route_mcast_ingress(true, &aliased);
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &aliased);
 
         assert_eq!(
             sink_cb.frame_count(),

@@ -116,7 +116,9 @@ where
                         #[cfg(feature = "transport-qos")]
                         {
                             let qos_next_sns = decode_join_qos(bytes);
-                            if !(qos_next_sns.is_some() && !params.is_qos) {
+                            // Admit unless the peer is qos AND this node is not
+                            // (the ONE refused case): `peer_non_qos || local_qos`.
+                            if qos_next_sns.is_none() || params.is_qos {
                                 dispatcher.ingest_join_qos(
                                     join.zid,
                                     src,
