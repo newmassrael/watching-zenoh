@@ -1154,6 +1154,42 @@ layer_c1bb_cargo_test_qos() {
         && cargo check -p wz --features transport-qos --quiet)
 }
 
+# ─── Layer C1bc — multicast per-priority QoS conduit ACTIVATION (R311y232) ─
+#
+# R311y232 flips the multicast per-priority QoS conduit from DEFAULT-inert
+# (built at R311y227, every ctor hard-`false`) to config-sourced: the AP
+# `spawn_router_mcast_egress` / `_ingress` gain a `qos` param -> `MulticastParams.is_qos`
+# (the wz seam for zenoh `transport.multicast.qos.enabled`, default FALSE, a knob
+# DISTINCT from unicast `transport.unicast.qos`), driven by the demo
+# `--multicast-qos` flag; and the direct multicast-Session send seam gains a
+# `priority` (the WHOLE-SESSION finding — `Session::publish_qos` now stamps the
+# app band onto the `MulticastTxItem` instead of the pre-y232 hard-coded DEFAULT).
+# This lane drives BOTH gate arms so neither rots:
+#   1. ON witness — the direct multicast `Session::publish_qos` -> tx-item band
+#      hand-off (the finding fix), in the multicast+codec-push lane; the group-level
+#      is_qos clamp -> per-priority conduit + frame ext_qos stays proven at the
+#      dispatch level by C1bb's wz-session-core multicast_tx / sn suites.
+#   2. ON clippy — the per-priority multicast conduit + the `_qos` send seam under
+#      `transport-qos` (the conduit-active arm), --all-targets -D warnings.
+#   3. OFF clippy — multicast WITHOUT `transport-qos` (the pico-faithful 2-channel
+#      arm: `effective_mcast_priority`'s not(transport-qos) clamp + the seam's
+#      DEFAULT hand-off must compose with NO dead code under -D warnings).
+#   4. Demo ON — `wz-ap-demo` with `router-multicast-faces,transport-qos`: the
+#      `--multicast-qos` parse + `run_router_hat(multicast_qos)` + the two spawn
+#      `qos` params compile+lint clean.
+#   5. Demo OFF — `wz-ap-demo` with `router-multicast-faces` only: the
+#      not(transport-qos) flag arm (flag ignored, non-QoS group) + the
+#      not(router-multicast-faces) is unrelated here.
+layer_c1bc_cargo_test_mcast_qos() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio --no-default-features --features transport-multicast,transport-link-udp,codec-push,pubsub-put,pubsub-allow-loop --lib multicast_publish_qos_stamps --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features transport-multicast,transport-link-udp,codec-push,transport-qos,pubsub-put,pubsub-allow-loop --lib multicast_publish_qos_stamps --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-multicast,transport-link-udp,codec-push,transport-qos --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features transport-multicast,transport-link-udp,codec-push --quiet -- -D warnings \
+        && cargo clippy -p wz-ap-demo --all-targets --features router-multicast-faces,transport-qos --quiet -- -D warnings \
+        && cargo clippy -p wz-ap-demo --all-targets --features router-multicast-faces --quiet -- -D warnings)
+}
+
 # ─── Layer C1ae — compression transport: lz4 wrap + ext 0x6 + e2e ─
 #
 # R311xm: transport-compression (the lz4 per-batch wrap) + session-extcompression
@@ -5126,6 +5162,7 @@ run_layer C1ay layer_c1ay_cargo_test_router_hat || overall=1
 run_layer C1az layer_c1az_cargo_test_rest_sse || overall=1
 run_layer C1ba layer_c1ba_cargo_clippy_transport_multilink || overall=1
 run_layer C1bb layer_c1bb_cargo_test_qos || overall=1
+run_layer C1bc layer_c1bc_cargo_test_mcast_qos || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

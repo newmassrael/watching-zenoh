@@ -6044,6 +6044,75 @@ fn remote_subscriber_listener_rejects_typed_when_feature_off() {
     );
 }
 
+// ── R311y232 direct multicast Session publish QoS band ──
+
+/// R311y232 (transport-qos ACTIVATION) — the direct multicast-Session send seam
+/// threads the app QoS band onto the enqueued
+/// [`MulticastTxItem`](wz_session_core::multicast_tx::MulticastTxItem): `publish_qos`
+/// stamps the caller's chosen priority (closing the WHOLE-SESSION finding — the
+/// multicast arm formerly hard-coded `Priority::DEFAULT`, so a direct prioritized
+/// publish over a QoS group egressed at DEFAULT), while the base `publish` stays
+/// DEFAULT (byte-identical to the pre-QoS single conduit). The group-level
+/// `is_qos` CLAMP that turns a non-DEFAULT band into the per-priority conduit +
+/// frame `ext_qos` is proven at the dispatch level
+/// (`wz_session_core::multicast_tx` `qos_group_emits_frame_ext_qos_and_mints_on_the_priority_conduit`
+/// / `non_qos_group_clamps_to_default_no_ext_qos`); THIS witness pins the
+/// `Session` -> tx-item hand-off the finding named, which those cannot see.
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
+#[test]
+fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
+    use wz_session_core::multicast_tx::MulticastTxItem;
+    use wz_session_core::qos::Priority;
+
+    // The band accessor: exhaustive in every feature combo the test runs in — the
+    // catch-all is cfg-gated to the codecs that add the reply-plane variants, so a
+    // codec-push-only lane (where `Push` is the sole variant) has no unreachable
+    // arm, and a lane with reply variants has a reachable one.
+    let tx_band = |item: &MulticastTxItem| -> Priority {
+        match item {
+            MulticastTxItem::Push { priority, .. } => *priority,
+            #[cfg(any(
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "liveliness-token"
+            ))]
+            _ => panic!("expected a multicast Push tx item"),
+        }
+    };
+
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let clock = Arc::new(TokioTime::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
+    let session: TokioMulticastSession = Session::new_multicast(observer, clock, tx);
+
+    // `Remote` locality routes the codec-push wire leg only (no loopback subscriber
+    // needed); the leg enqueues one `MulticastTxItem::Push` per publish.
+    let remote = PublishOptions::put().with_locality(Locality::Remote);
+
+    session
+        .publish_qos(
+            "home/temp",
+            b"hot",
+            remote.clone(),
+            Priority::InteractiveHigh,
+        )
+        .expect("multicast publish_qos enqueues");
+    assert_eq!(
+        tx_band(&rx.try_recv().expect("publish_qos staged a tx item")),
+        Priority::InteractiveHigh,
+        "publish_qos must stamp the app band, not the pre-y232 hard-coded DEFAULT"
+    );
+
+    session
+        .publish("home/temp", b"cold", remote)
+        .expect("multicast publish enqueues");
+    assert_eq!(
+        tx_band(&rx.try_recv().expect("publish staged a tx item")),
+        Priority::DEFAULT,
+        "the base publish stays DEFAULT-band (byte-identical to the pre-QoS send)"
+    );
+}
+
 // ── R311ld Session::dispatch_iteration_event (dispatch SSOT) ──
 
 /// R311ld — the dispatch SSOT pairs the observer fan with the
