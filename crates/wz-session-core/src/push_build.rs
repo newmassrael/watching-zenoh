@@ -414,16 +414,24 @@ fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<V
         feature = "pubsub-congestion-control",
         feature = "pubsub-express"
     ))]
+    // R311y226 — suppress the DEFAULT-byte ext (priority Data / Drop /
+    // no-express, raw 0x05) so a plain publish stays wire-identical to
+    // the metadata-stripped baseline. The wz analog of zenoh-pico's
+    // encode-time `has_qos_ext = msg->_qos._val != _Z_N_QOS_DEFAULT._val`
+    // (`src/protocol/codec/network.c` 44) — ONE gate for every producer
+    // (publish_qos / PublishOptions::with_qos / SHM), not per-caller.
     if let Some(q) = qos {
-        exts.push(ExtEntryOwned {
-            // ENC_ZINT(0x20) | id_qos(0x01). No M flag — qos is
-            // informational per zenoh-pico `_z_n_msg_encode_push`
-            // outer-chain emit (network.c).
-            header: 0x20 | 0x01,
-            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
-                value: q.raw as u64,
-            }),
-        });
+        if q != crate::sample::QosLevel::DEFAULT {
+            exts.push(ExtEntryOwned {
+                // ENC_ZINT(0x20) | id_qos(0x01). No M flag — qos is
+                // informational per zenoh-pico `_z_n_msg_encode_push`
+                // outer-chain emit (network.c).
+                header: 0x20 | 0x01,
+                body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
+                    value: q.raw as u64,
+                }),
+            });
+        }
     }
     #[cfg(not(any(
         feature = "pubsub-priority",
@@ -976,6 +984,30 @@ mod tests {
     #[test]
     fn build_push_outer_extensions_returns_none_without_qos() {
         assert!(build_push_outer_extensions(None).is_none());
+    }
+
+    #[cfg(all(
+        feature = "codec-push",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
+    ))]
+    #[test]
+    fn build_push_outer_extensions_suppresses_default_qos_byte() {
+        // R311y226 — the DEFAULT byte (Data/Drop/no-express, raw 0x05) is
+        // suppressed so a plain publish stays wire-identical (pico
+        // has_qos_ext gate, network.c:44); a non-default byte still emits.
+        assert_eq!(crate::sample::QosLevel::DEFAULT.raw, 0x05);
+        assert!(
+            build_push_outer_extensions(Some(crate::sample::QosLevel::DEFAULT)).is_none(),
+            "DEFAULT qos byte must not emit an outer ext"
+        );
+        assert!(
+            build_push_outer_extensions(Some(QosLevel::from_raw(0x11))).is_some(),
+            "a non-default qos byte must emit"
+        );
     }
 
     /// `build_push_literal` populates the Push struct with the

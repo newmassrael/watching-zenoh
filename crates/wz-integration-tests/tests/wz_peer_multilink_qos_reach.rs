@@ -64,10 +64,12 @@
 //!     (router) + `forward_push_preserves_the_received_band_on_transit` (switchboard)
 //!     unit tests. R311y225 completed the CLIENT-seam egress
 //!     (`deliver_to_client_subscribers` both planes + the peer `reinject_client_push`),
-//!     so every UNICAST pubsub wire egress now preserves the band. The remaining
-//!     DEFAULT egresses are the mcast plane (a structural 2-channel, no per-priority
-//!     conduit) and the app-facing Sample — the band rides the wire frame's ext_qos
-//!     but is not yet surfaced to a local subscriber's Sample (a separate follow-up).
+//!     so every UNICAST pubsub wire egress now preserves the frame conduit band.
+//!     R311y226 surfaced the APP-observable priority via the PER-MESSAGE Push qos ext
+//!     (`Sample::priority()`) — orthogonal to and independent of the frame conduit
+//!     band (zenoh/pico both source the app priority from the per-message qos, NOT
+//!     the frame ext_qos). The remaining DEFAULT frame-band egresses are the mcast
+//!     plane (a structural 2-channel, no per-priority conduit) and the query plane.
 //!
 //! Requires the binary built `--features transport-qos,transport-multilink` (pulls
 //! `routing-peer`, so `--peer` / `--publish` / `--subscribe` / `--qos` /

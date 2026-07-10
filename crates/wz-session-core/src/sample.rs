@@ -229,6 +229,52 @@ impl QosLevel {
     pub fn is_express(&self) -> bool {
         (self.raw & (1 << 4)) != 0
     }
+
+    /// R311y226 — pack a typed `(priority, congestion, express)` triple
+    /// into the single QoS byte. The SOLE packer for the
+    /// `_z_n_qos_create` bit layout
+    /// (`vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h`
+    /// 84-89): `priority` in the low 3 bits, `nodrop`
+    /// (`congestion == Block`) at bit 3, `express` at bit 4. zenoh
+    /// `QoSType::new` packs the identical layout
+    /// (`commons/zenoh-protocol/src/network/mod.rs`).
+    /// [`crate::request_build::RequestQueryBuilder::request_qos_typed`]
+    /// delegates here so the layout lives once (no drift between the
+    /// Push-side and Request-side QoS setters).
+    pub const fn from_parts(
+        priority: crate::qos::Priority,
+        congestion: crate::qos::CongestionControl,
+        express: bool,
+    ) -> Self {
+        Self {
+            raw: priority.wire_byte() | (congestion.wire_bit() << 3) | ((express as u8) << 4),
+        }
+    }
+
+    /// R311y226 — the wire-DEFAULT QoS byte: priority `Data` (5),
+    /// `Drop` congestion, no express, so `raw == 0x05`
+    /// (`_Z_N_QOS_DEFAULT._val = 5`,
+    /// `vendor/zenoh-pico/src/protocol/definitions/network.c` 22). The
+    /// named sentinel the Push outer-ext encoder suppresses against
+    /// (`build_push_outer_extensions`) — NOT the derived
+    /// [`QosLevel::default`] (`raw 0` = `Control`), which would mis-gate
+    /// a genuine DEFAULT publish.
+    pub const DEFAULT: QosLevel = Self::from_parts(
+        crate::qos::Priority::DEFAULT,
+        crate::qos::CongestionControl::Drop,
+        false,
+    );
+
+    /// R311y226 — decode the priority sub-field (low 3 bits) into the
+    /// typed [`crate::qos::Priority`]. The unpack twin of
+    /// [`Self::from_parts`]; mirrors zenoh-pico `_z_n_qos_get_priority`
+    /// (`network.h` 90-92) which masks `& 0x07` with NO Control guard,
+    /// so a `Control` (0) band surfaces as-is (pico-faithful; zenoh-Rust
+    /// instead collapses `Control` to `Data` at its app-`Priority`
+    /// boundary — a NAMED divergence, wz mirrors pico here).
+    pub const fn priority(&self) -> crate::qos::Priority {
+        crate::qos::Priority::from_wire(self.raw & 0x07)
+    }
 }
 
 /// Source identification for a Sample.
@@ -320,9 +366,9 @@ pub use crate::reliability::Reliability;
 /// by reference.
 ///
 /// The struct is `#[non_exhaustive]` — future rounds can refine the
-/// surface (e.g. a typed `Priority` enum derived from `QosLevel.raw`,
-/// or transport-layer `reliability` wire-up) without breaking external
-/// callers that read existing fields. External construction is via
+/// surface without breaking external callers that read existing fields
+/// (R311y226 added [`Sample::priority`], a typed [`crate::qos::Priority`]
+/// derived from the `QosLevel` qos ext). External construction is via
 /// [`Sample::new_put`] / [`Sample::new_del`] plus optional `with_*`
 /// setters; intra-crate `dispatch_push` builds the full literal.
 #[derive(Debug, Clone)]
@@ -506,6 +552,22 @@ impl Sample {
     pub fn with_reliability(mut self, reliability: Reliability) -> Self {
         self.reliability = reliability;
         self
+    }
+
+    /// R311y226 — the transport priority the publisher stamped on this
+    /// sample, decoded from the Push outer QoS ext ([`QosLevel`]). The
+    /// app-observable priority, mirroring zenoh `Sample::priority()`
+    /// (`zenoh/src/api/sample.rs`) and zenoh-pico `z_sample_priority`
+    /// (`src/api/api.c` 1261) — both read the PER-MESSAGE Push qos, NOT
+    /// the transport frame conduit band. `Priority::DEFAULT` (`Data`)
+    /// when the sample carries no QoS ext: a plain publish (the encoder
+    /// suppresses the DEFAULT byte), or an `off`-subset build where the
+    /// ext is neither emitted nor decoded. Always present on `Sample`
+    /// (not `pubsub-*`-gated; `crate::qos::Priority` is no_std / always
+    /// compiled), matching [`Self::reliability`]'s unconditional access.
+    pub fn priority(&self) -> crate::qos::Priority {
+        self.qos
+            .map_or(crate::qos::Priority::DEFAULT, |q| q.priority())
     }
 }
 
@@ -796,6 +858,76 @@ mod tests {
         assert!(QosLevel::from_raw(0b1111_1111).is_express());
         assert!(!QosLevel::from_raw(0b0000_0000).is_express());
         assert!(!QosLevel::from_raw(0b1110_1111).is_express());
+    }
+
+    #[test]
+    fn qos_level_from_parts_packs_zenoh_pico_layout() {
+        // _z_n_qos_create (network.h:84-89): priority(low 3) | nodrop<<3 | express<<4.
+        // RealTime(1) + express + Drop -> 0b0001_0001 = 0x11.
+        assert_eq!(
+            QosLevel::from_parts(
+                crate::qos::Priority::RealTime,
+                crate::qos::CongestionControl::Drop,
+                true
+            )
+            .raw,
+            0b0001_0001
+        );
+        // Data(5) + Block(nodrop=1) + no-express -> 0b0000_1101 = 0x0D.
+        assert_eq!(
+            QosLevel::from_parts(
+                crate::qos::Priority::Data,
+                crate::qos::CongestionControl::Block,
+                false
+            )
+            .raw,
+            0b0000_1101
+        );
+        // The DEFAULT sentinel is the Data byte (5), NOT the derived
+        // QosLevel::default() (raw 0 = Control) — the encoder gates on this.
+        assert_eq!(QosLevel::DEFAULT.raw, 0x05);
+        assert_ne!(QosLevel::DEFAULT, QosLevel::default());
+    }
+
+    #[test]
+    fn qos_level_priority_masks_low_three_bits() {
+        // express(bit4) + RealTime(1) = 0x11; priority() must mask & 0x07 so a
+        // set express bit does not corrupt the decoded priority.
+        assert_eq!(
+            QosLevel::from_raw(0x11).priority(),
+            crate::qos::Priority::RealTime
+        );
+        assert_eq!(
+            QosLevel::from_raw(0xFF).priority(),
+            crate::qos::Priority::Background
+        );
+        // from_parts / priority round-trip across bands (express set to prove masking).
+        for p in [
+            crate::qos::Priority::Control,
+            crate::qos::Priority::RealTime,
+            crate::qos::Priority::Data,
+            crate::qos::Priority::Background,
+        ] {
+            assert_eq!(
+                QosLevel::from_parts(p, crate::qos::CongestionControl::Drop, true).priority(),
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn sample_priority_derives_from_qos_ext_else_default() {
+        let s = Sample::new_put("k", b"v".to_vec()).with_qos(QosLevel::from_parts(
+            crate::qos::Priority::InteractiveHigh,
+            crate::qos::CongestionControl::Drop,
+            false,
+        ));
+        assert_eq!(s.priority(), crate::qos::Priority::InteractiveHigh);
+        // No qos ext -> DEFAULT (Data), mirroring a plain publish / off-subset.
+        assert_eq!(
+            Sample::new_put("k", b"v".to_vec()).priority(),
+            crate::qos::Priority::DEFAULT
+        );
     }
 
     #[test]

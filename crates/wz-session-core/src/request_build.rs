@@ -344,8 +344,9 @@ impl RequestQueryBuilder {
         congestion: CongestionControl,
         express: bool,
     ) -> Self {
-        let packed = ((express as u8) << 4) | (congestion.wire_bit() << 3) | priority.wire_byte();
-        self.request_qos(packed)
+        // R311y226 — delegate the `_z_n_qos_create` bit layout to the SOLE
+        // packer so the Push-side and Request-side QoS setters never drift.
+        self.request_qos(crate::sample::QosLevel::from_parts(priority, congestion, express).raw)
     }
 
     /// Set the Request-level timestamp extension. `time` is the

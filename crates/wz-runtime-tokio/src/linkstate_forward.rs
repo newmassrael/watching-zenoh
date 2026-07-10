@@ -112,7 +112,7 @@ use wz_session_core::linkstate_oam::{
 };
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::{
-    build_push_literal, reliteralize_push, set_push_keyexpr_literal,
+    build_push_literal, build_push_literal_with_meta, reliteralize_push, set_push_keyexpr_literal,
 };
 use wz_session_core::push_routing_context::{
     read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
@@ -1858,16 +1858,19 @@ impl LinkstateForwarder {
     }
 
     /// R311y220 — the priority-carrying origination twin of [`Self::publish`] (the
-    /// demo-reachability path the `--express-high` / `--low` flags drive). Builds the
-    /// SAME self-sourced Push carrier — priority is a TRANSPORT link-selection concern,
-    /// not a wire-payload field, so the carrier stays band-agnostic and
-    /// `dispatch_network_message` applies the band downstream as the Frame `ext_qos`
-    /// plus the `select_link` routing key. On a QoS-negotiated aggregated multilink
-    /// session this pins the Put onto the priority-band link; on any non-QoS /
-    /// single-link session it is byte-identical to `publish` (the `is_qos()` clamp
-    /// forces the effective priority back to DEFAULT). SCOPE: only the ORIGIN hop is
-    /// banded — a transit re-forward (`forward_push`) relays at DEFAULT (see the bound
-    /// on [`Self::fan_out_qos`]).
+    /// demo-reachability path the `--express-high` / `--low` flags drive).
+    /// R311y226 — the self-sourced carrier now carries the priority on BOTH wire
+    /// halves of the publisher dual-write (zenoh `resolve_put` + conduit select; pico
+    /// `_z_n_qos_make`): the per-message Push qos ext (so a subscriber reads it via
+    /// `Sample::priority()` — the app-observable band) AND, downstream via
+    /// `dispatch_network_message`, the Frame `ext_qos` conduit + `select_link` routing
+    /// key. On a QoS-negotiated aggregated multilink session the frame band pins the
+    /// Put onto the priority-band link; on any non-QoS / single-link session the frame
+    /// half is byte-identical to `publish` (the `is_qos()` clamp forces the effective
+    /// conduit priority back to DEFAULT) while the qos ext still rides the wire so the
+    /// app sees the band. A DEFAULT publish emits no qos ext (encoder suppression),
+    /// staying wire-identical. Transit re-forwards preserve the frame band
+    /// (R311y221-y225) and the per-message qos ext (clone-based re-literalize).
     pub fn publish_qos(
         &self,
         keyexpr: &str,
@@ -1878,11 +1881,35 @@ impl LinkstateForwarder {
         // The self-originate route CORE (shared with the router's client->mesh
         // re-injection, R311y112 core-extract discipline): self is the tree root,
         // the returned carrier is self-sourced (node_id 0) + fresh-budget stamped
-        // (node_count). `build_push_literal` originates a FRESH sample from
-        // keyexpr+payload (this node IS the producer, so no metadata to preserve).
+        // (node_count). R311y226 — the FRESH carrier now carries the per-message Push
+        // qos ext (priority + express) so a subscriber reads the band via
+        // `Sample::priority()`. congestion is Drop (publish_qos exposes no congestion
+        // knob — a wz-side setter is a follow-up).
+        let qos = wz_session_core::sample::QosLevel::from_parts(
+            priority,
+            wz_session_core::qos::CongestionControl::Drop,
+            express,
+        );
         let Some((push, children)) =
             compute_self_publish_forward(&self.net, &self.subs, keyexpr, || {
-                build_push_literal(keyexpr, payload)
+                // A DEFAULT band carries no metadata: skip the meta bundle and emit
+                // the stripped baseline (byte-identical to a plain `publish`). The
+                // encoder `build_push_outer_extensions` suppresses a DEFAULT ext
+                // anyway — it stays the correctness SSOT; this is the allocation
+                // fast-path that also keeps the two builders producing identical
+                // bytes for a DEFAULT publish.
+                if qos == wz_session_core::sample::QosLevel::DEFAULT {
+                    build_push_literal(keyexpr, payload)
+                } else {
+                    build_push_literal_with_meta(
+                        keyexpr,
+                        payload,
+                        &wz_session_core::metadata::PushMetadata {
+                            qos: Some(qos),
+                            ..Default::default()
+                        },
+                    )
+                }
             })?
         else {
             return Ok(0); // no remote subscriber / no tree direction -> nothing to send
@@ -6908,6 +6935,53 @@ mod tests {
         }
     }
 
+    /// R311y226 — decode the per-message outer qos ext off a captured
+    /// egress frame's Push (the decode primitive). `None` when the Push
+    /// carries no qos ext (a plain / DEFAULT-suppressed publish), so a
+    /// caller can witness ABSENCE, not merely a DEFAULT read. Decoding
+    /// the full outer chain also proves the qos(0x01) ext coexists with
+    /// the self-origin source(0x03) + hoplimit(0x0a) stamps uncorrupted.
+    /// Gated on the same qos-byte subset as its only callers (the R311y226
+    /// tests) so a routing-peer build WITHOUT the qos-byte features does
+    /// not carry it as dead code (Layer C1ba's ML_DEPLOY_FEATURES combo).
+    #[cfg(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    ))]
+    fn forwarded_qos(frame: &[u8]) -> Option<wz_session_core::sample::QosLevel> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        let Some(NetworkMessage::Push(p)) = msgs.first() else {
+            panic!("expected a forwarded Push");
+        };
+        wz_session_core::sample::extract_qos(p.extensions.as_deref().unwrap_or(&[]))
+    }
+
+    /// R311y226 — project a captured egress frame's per-message qos ext
+    /// onto a `Sample` and read the app-observable priority exactly as
+    /// the production RX path does (extract_qos -> Sample::priority()).
+    /// `Priority::DEFAULT` when the Push carries no qos ext. Gated with
+    /// [`forwarded_qos`] on the qos-byte subset (its only callers are the
+    /// R311y226 tests).
+    #[cfg(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    ))]
+    fn forwarded_priority(frame: &[u8]) -> wz_session_core::qos::Priority {
+        let mut sample = wz_session_core::sample::Sample::new_put("k", Vec::<u8>::new());
+        if let Some(q) = forwarded_qos(frame) {
+            sample = sample.with_qos(q);
+        }
+        sample.priority()
+    }
+
     /// Decode the routing-context `node_id` of the single forwarded Declare in a
     /// recorded wire frame — the control-plane twin of [`forwarded_source`],
     /// proving the re-stamp landed ON THE WIRE for a sourced (Un)DeclareSubscriber.
@@ -8490,6 +8564,64 @@ mod tests {
         assert_eq!(forwarded_source(&sink_a.frame_bytes(0)), 0);
     }
 
+    // Gated on the same qos-byte subset as the emit/decode path
+    // (build_push_outer_extensions / extract_qos): off-subset the ext is
+    // neither emitted nor decoded, so the RealTime assertion would not hold.
+    #[cfg(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    ))]
+    #[test]
+    fn publish_qos_emits_per_message_qos_ext_observable_as_sample_priority() {
+        // R311y226 — a prioritized publish stamps the per-message Push qos ext
+        // so a subscriber reads the band via Sample::priority(); a plain
+        // (DEFAULT) publish emits no qos ext (wire-identity preserved). This is
+        // the app-observable half of the publisher dual-write (the frame band
+        // is the orthogonal transport half).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        declare_interest(&fwd, FaceId(0), "demo/data");
+
+        // Prioritized: RealTime rides the wire and is app-observable, while the
+        // self-origin source(0) + hoplimit stamps stay intact on the same chain.
+        sink_a.reset();
+        let sent = fwd
+            .publish_qos(
+                "demo/data",
+                b"v",
+                wz_session_core::qos::Priority::RealTime,
+                true,
+            )
+            .expect("publish_qos");
+        assert_eq!(sent, 1, "reached the one interested child");
+        assert_eq!(sink_a.frame_count(), 1);
+        assert_eq!(
+            forwarded_priority(&sink_a.frame_bytes(0)),
+            wz_session_core::qos::Priority::RealTime,
+            "subscriber must observe the published RealTime band via Sample::priority()"
+        );
+        assert_eq!(
+            forwarded_source(&sink_a.frame_bytes(0)),
+            0,
+            "self-origin source stamp intact alongside the qos ext"
+        );
+
+        // Plain publish (DEFAULT) -> the qos ext is SUPPRESSED (ABSENT on the
+        // wire), not merely decoded as DEFAULT — asserting absence proves
+        // wire-identity, where a `== DEFAULT` read would also pass on a
+        // present raw-0x05 ext.
+        sink_a.reset();
+        fwd.publish("demo/data", b"v").expect("publish");
+        assert_eq!(sink_a.frame_count(), 1);
+        assert!(
+            forwarded_qos(&sink_a.frame_bytes(0)).is_none(),
+            "a plain publish carries NO qos ext (DEFAULT suppression, wire-identity)"
+        );
+    }
+
     #[test]
     fn publish_to_an_unsubscribed_keyexpr_sends_nothing() {
         // The any-interest gate on the publish path: with no subscriber for the
@@ -10064,6 +10196,59 @@ mod tests {
             egress_band(&sink_b.frame_bytes(0)),
             Priority::DEFAULT,
             "a DEFAULT transit stays DEFAULT"
+        );
+    }
+
+    #[cfg(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    ))]
+    #[test]
+    fn forward_push_preserves_the_per_message_qos_ext_on_transit() {
+        // R311y226 — a transit re-forward (reliteralize_push, clone-based) must
+        // preserve the RECEIVED Push's per-message qos ext, so a downstream
+        // subscriber reads the ORIGINAL publisher's band via Sample::priority().
+        // This is DISTINCT from the frame conduit band (covered by
+        // forward_push_preserves_the_received_band_on_transit): the per-message
+        // ext rides the Push payload and is not subject to the is_qos() frame
+        // clamp, so B needs no qos negotiation to observe it.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+
+        // A received Put carrying a per-message qos ext (RealTime).
+        let received = build_push_literal_with_meta(
+            "demo/data",
+            b"payload",
+            &wz_session_core::metadata::PushMetadata {
+                qos: Some(wz_session_core::sample::QosLevel::from_parts(
+                    wz_session_core::qos::Priority::RealTime,
+                    wz_session_core::qos::CongestionControl::Drop,
+                    false,
+                )),
+                ..Default::default()
+            },
+        )
+        .expect("build received push with qos ext");
+
+        sink_b.reset();
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &received,
+        );
+        assert_eq!(sink_b.frame_count(), 1, "relayed to the interested child B");
+        assert_eq!(
+            forwarded_priority(&sink_b.frame_bytes(0)),
+            wz_session_core::qos::Priority::RealTime,
+            "transit preserves the received per-message qos ext (Sample::priority)"
         );
     }
 

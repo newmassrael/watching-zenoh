@@ -72,12 +72,14 @@ pub enum DriverLoopOutcome {
         /// (`admit_rx_frame_sn`) and the reassembly chain key — was complete in
         /// y215; y221 threads the SAME decoded band onto the delivered outcome so a
         /// transit re-forward (`forward_push`) can preserve it end-to-end instead
-        /// of re-banding to DEFAULT. R311y223 SCOPE (honesty): the band reaches the
-        /// FaceForwarder delivery outcome (the transit re-forward + the deploy-e2e
-        /// witness), NOT yet a production app-facing `Sample` — the local-subscriber
-        /// / client-attachment delivery seams (`dispatch_local_subscribers`,
-        /// `deliver_to_client_subscribers`) do not carry it and `Sample` has no
-        /// transport-band field; routing it there is a follow-up. Unconditional
+        /// of re-banding to DEFAULT. R311y223/y226 SCOPE (honesty): this is the FRAME
+        /// CONDUIT band (SN-conduit gate + `select_link`) and is deliberately
+        /// TRANSPORT-ONLY — it is NOT stamped onto the app `Sample`. The
+        /// app-observable priority is the SEPARATE per-message Push qos ext, which
+        /// zenoh/pico both source independently of the frame conduit (y226 surfaces it
+        /// via `Sample::priority()`); the local-subscriber / client-attachment seams
+        /// carry this frame band on the WIRE (transit + client egress) but do not
+        /// project it onto the delivered `Sample`. Unconditional
         /// (not `#[cfg]`-gated): the variant is ungated and `qos::Priority` is
         /// always compiled, so a gated field would feature-skew every consumer
         /// match (signature-stability).
