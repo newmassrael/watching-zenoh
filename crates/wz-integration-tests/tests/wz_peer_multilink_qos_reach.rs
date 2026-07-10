@@ -56,12 +56,15 @@
 //!     preservation. As of R311y221 a mesh/linkstate-peer relay DOES preserve the
 //!     received band on re-forward (`forward_push` threads `FramePayload.priority`
 //!     into `fan_out_qos`); the deterministic witness is the library unit test
-//!     `forward_push_preserves_the_received_band_on_transit`. The router-tier
-//!     (`forward_push_tier`) + switchboard (`RouteTable::forward_push`) transit
-//!     twins still re-band to DEFAULT — a named follow-up (R311y223), deferred
-//!     because router+QoS is not a tested/deployed config today (NOT because the
-//!     re-band is inert: it is observable on a single QoS link, not gated on
-//!     multilink).
+//!     `forward_push_preserves_the_received_band_on_transit`. R311y224 extended the
+//!     same preservation to the router-tier (`forward_push_tier` + the cross-mesh
+//!     bridge / client->mesh reinject via `self_publish_into_tier`) and the
+//!     switchboard (`RouteTable::forward_push`) transit re-forwards — deterministic
+//!     witnesses are the `route_push_preserves_the_received_band_on_transit`
+//!     (router) + `forward_push_preserves_the_received_band_on_transit` (switchboard)
+//!     unit tests. Only the CLIENT-face egress (`deliver_to_client_subscribers`)
+//!     still re-bands to DEFAULT — a named follow-up, deferred (NOT inert:
+//!     `is_qos()` is whatami-agnostic, so a QoS-negotiated client would observe it).
 //!
 //! Requires the binary built `--features transport-qos,transport-multilink` (pulls
 //! `routing-peer`, so `--peer` / `--publish` / `--subscribe` / `--qos` /

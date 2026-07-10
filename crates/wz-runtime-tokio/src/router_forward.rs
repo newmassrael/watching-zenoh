@@ -346,6 +346,7 @@ use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::push_routing_context::set_push_source;
+use wz_session_core::qos::Priority;
 use wz_session_core::query::{QueryReply, QueryResponder};
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
@@ -1246,6 +1247,52 @@ impl RouterForwarder {
         &self,
         tier: FaceTier,
         reliable: bool,
+        build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
+    ) -> Result<usize, CodecError> {
+        // R311y224 — the DEFAULT-priority, non-express tier fan-out: every
+        // control-plane caller (flood_*_tier / declare re-floods / the client-egress
+        // `deliver_to_client_subscribers`) routes through here byte-identically to the
+        // prior hard-coded `send_network_message(msg, reliable, false)`. The
+        // band-carrying transit callers go to `fan_out_tier_qos` directly:
+        // `forward_push_tier` (a within-tier re-forward) and `self_publish_into_tier`
+        // (the cross-mesh bridge + client->mesh re-inject), both preserving the
+        // received `FramePayload.priority` — the router twin of the peer plane's
+        // `fan_out` / `fan_out_qos` split (R311y220/y221).
+        self.fan_out_tier_qos(tier, reliable, Priority::DEFAULT, false, build)
+    }
+
+    /// R311y224 — the priority-carrying tier fan-out: identical to
+    /// [`Self::fan_out_tier`] except each admitted per-face send routes `priority` +
+    /// `express` through [`send_network_message_qos`](wz_session_core::session_actions)
+    /// so an aggregated QoS multilink mesh peer pins the fan-out onto the
+    /// priority-band link (`select_link`) and re-encodes ext_qos = the band.
+    /// [`Self::fan_out_tier`] is the `(Priority::DEFAULT, express = false)`
+    /// specialization every control-plane caller takes. TRANSIT PRESERVATION
+    /// (R311y224): the router-tier re-forwards route through here on the received
+    /// band — [`forward_push_tier`](Self::forward_push_tier) (within-tier) plus
+    /// [`self_publish_into_tier`](Self::self_publish_into_tier) (the C4 cross-mesh
+    /// bridge + the C3b client->mesh re-inject) — so a band survives a router relay
+    /// hop end-to-end. The router twin of the peer plane's `forward_push` ->
+    /// `fan_out_qos` (R311y221), and the zenoh `route_data` `ext_qos` copy
+    /// (`net/routing/dispatcher/pubsub.rs`) restricted to the priority sub-field wz
+    /// decodes. DEFAULT under a non-QoS session (the `dispatch_push` clamp), so
+    /// byte-identical to the prior `fan_out_tier` on every non-QoS transit. RESIDUAL
+    /// (still DEFAULT, named honestly): the CLIENT-face egress
+    /// [`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers) — a
+    /// separate client-seam follow-up, consistent with the peer plane's own DEFAULT
+    /// client egress (`LinkstateForwarder::deliver_to_client_subscribers` also fans out
+    /// on `fan_out` = DEFAULT). DEFERRED, NOT inert: `is_qos()` is whatami-agnostic
+    /// (`set_qos_offer` / `negotiate_qos_against_peer` carry no client gate), so a
+    /// QoS-negotiated client WOULD observe the re-band on its egress `ext_qos` (only a
+    /// pico client, which negotiates no unicast ext_qos, makes it moot) — the y221/y223
+    /// honesty framing. Also `broadcast_to_mcast_groups` (the multicast plane is a
+    /// structural 2-channel, no per-priority conduit).
+    fn fan_out_tier_qos(
+        &self,
+        tier: FaceTier,
+        reliable: bool,
+        priority: Priority,
+        express: bool,
         mut build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
     ) -> Result<usize, CodecError> {
         let mut sent = 0;
@@ -1267,7 +1314,7 @@ impl RouterForwarder {
                 }
                 if state
                     .actions
-                    .send_network_message(msg, reliable, false)
+                    .send_network_message_qos(msg, reliable, express, priority)
                     .is_ok()
                 {
                     sent += 1;
@@ -2467,6 +2514,7 @@ impl RouterForwarder {
         inbound: FaceId,
         tier: FaceTier,
         reliable: bool,
+        priority: Priority,
         push: &PushOwned,
         inbound_is_mcast: bool,
     ) {
@@ -2475,10 +2523,17 @@ impl RouterForwarder {
         };
         let master = self.is_master(&keyexpr);
         // Blocks 1 & 2 — within-tier transit (ungated, the resolved-source route).
-        self.forward_push_tier(inbound, tier, reliable, push);
-        // Blocks 1 & 2 — the master-gated cross-mesh bridge (self-origination).
-        self.bridge_push_cross_mesh(tier, reliable, push, &keyexpr, master);
-        // Block 3 — local client delivery (master || source == Router).
+        // R311y224 — the received band is threaded through the two MESH-directed
+        // re-forwards (within-tier + cross-mesh bridge) so a relayed Put keeps its
+        // priority end-to-end; the CLIENT-face egress below stays DEFAULT (the
+        // client-seam band is a separate follow-up — deferred, not inert; a
+        // QoS-negotiated client would observe the difference).
+        self.forward_push_tier(inbound, tier, reliable, priority, push);
+        // Blocks 1 & 2 — the master-gated cross-mesh bridge (a received-frame transit
+        // re-injected into the other mesh; preserves the band).
+        self.bridge_push_cross_mesh(tier, reliable, priority, push, &keyexpr, master);
+        // Block 3 — local client delivery (master || source == Router). DEFAULT band
+        // (client egress residual, consistent with the peer plane's client seam).
         self.deliver_to_client_subscribers(inbound, tier, reliable, push, &keyexpr, master);
         // Client-sourced mesh re-injection (peer leg ungated, router leg master).
         // A multicast INGRESS Push (I3b) federates into the mesh ONLY when this
@@ -2513,7 +2568,7 @@ impl RouterForwarder {
                 }
             }
             if federate {
-                self.publish_client_push_into_meshes(reliable, push, &keyexpr, master);
+                self.publish_client_push_into_meshes(reliable, priority, push, &keyexpr, master);
             }
         }
         // EGRESS to any attached multicast group — UNCONDITIONAL, OUTSIDE the
@@ -2783,6 +2838,7 @@ impl RouterForwarder {
         &self,
         inbound_tier: FaceTier,
         reliable: bool,
+        priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
         master: bool,
@@ -2795,9 +2851,11 @@ impl RouterForwarder {
             FaceTier::Routers => FaceTier::LinkstatePeers,
             FaceTier::Client => return, // a client's mesh path is C3b, not a bridge
         };
-        // The cross leg is a SELF-origination into the target mesh (self tree root,
-        // node_id 0) via the shared self-publish-into-tier seam.
-        self.self_publish_into_tier(target_tier, reliable, push, keyexpr);
+        // The cross leg re-injects the RECEIVED mesh frame into the target mesh (self
+        // tree root, node_id 0) via the shared self-publish-into-tier seam, PRESERVING
+        // the received band (R311y224) — a mesh source can be QoS-negotiated, so the
+        // bridged copy must carry the same priority the within-tier copy does.
+        self.self_publish_into_tier(target_tier, reliable, priority, push, keyexpr);
     }
 
     /// Route a data `Push` WITHIN its inbound tier's mesh (C1) — the router twin
@@ -2815,7 +2873,14 @@ impl RouterForwarder {
     /// so it is only counted (the reception witness in [`forward`]). A drop
     /// (unresolvable source / no interested subscriber / hop-exhausted) is silent,
     /// as in the single-net path.
-    fn forward_push_tier(&self, inbound: FaceId, tier: FaceTier, reliable: bool, push: &PushOwned) {
+    fn forward_push_tier(
+        &self,
+        inbound: FaceId,
+        tier: FaceTier,
+        reliable: bool,
+        priority: Priority,
+        push: &PushOwned,
+    ) {
         let Some((net, _dirty)) = self.plane(tier) else {
             return; // Client tier: no mesh -> within-tier routes nowhere (C2/C3).
         };
@@ -2839,7 +2904,13 @@ impl RouterForwarder {
         else {
             return;
         };
-        let _ = self.fan_out_tier(tier, reliable, |id, zid| {
+        // R311y224 — preserve the received band on the within-tier transit
+        // re-forward: route through `fan_out_tier_qos` on the frame's `priority`
+        // (express stays false — a FramePayload carries no express bit), so an
+        // aggregated QoS multilink mesh peer pins the relay onto the band link. The
+        // router twin of the peer plane's `forward_push` (R311y221). DEFAULT under a
+        // non-QoS session (the `dispatch_push` clamp).
+        let _ = self.fan_out_tier_qos(tier, reliable, priority, false, |id, zid| {
             Ok(
                 is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
                     .then(|| NetworkMessage::Push(Box::new(carrier.clone()))),
@@ -2949,6 +3020,7 @@ impl RouterForwarder {
     fn publish_client_push_into_meshes(
         &self,
         reliable: bool,
+        priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
         master: bool,
@@ -2969,7 +3041,7 @@ impl RouterForwarder {
             if tier == FaceTier::Routers && !master {
                 continue;
             }
-            self.self_publish_into_tier(tier, reliable, push, keyexpr);
+            self.self_publish_into_tier(tier, reliable, priority, push, keyexpr);
         }
     }
 
@@ -2990,6 +3062,7 @@ impl RouterForwarder {
         &self,
         tier: FaceTier,
         reliable: bool,
+        priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
     ) {
@@ -3004,7 +3077,18 @@ impl RouterForwarder {
         let Ok(Some((carrier, children))) = carrier_children else {
             return; // no interested mesh sub / no tree direction / build err
         };
-        let _ = self.fan_out_tier(tier, reliable, |_id, zid| {
+        // R311y224 — preserve the received band on the cross-mesh / client->mesh
+        // re-inject: this seam RELITERALIZES a RECEIVED frame (`reliteralize_push`),
+        // so it is a transit re-forward of a banded sample (NOT a fresh produce like
+        // `publish` / the peer `publish_qos`), and the band survives the tier bridge.
+        // The `node_id 0` tree-root is a routing-graph fact (the source zid is not a
+        // node in the TARGET net), not a QoS-provenance reset. zenoh `route_data`
+        // copies `ext_qos` across the cross-HAT federation the same as any egress.
+        // DEFAULT under a non-QoS session. The band is threaded UNCONDITIONALLY, so the
+        // C3b client->mesh re-inject preserves whatever band the client frame carried
+        // (a pico client negotiates no unicast ext_qos, so that band is typically
+        // DEFAULT — but the seam does not rely on it).
+        let _ = self.fan_out_tier_qos(tier, reliable, priority, false, |_id, zid| {
             Ok(zid
                 .filter(|z| children.contains(z))
                 .map(|_| NetworkMessage::Push(Box::new(carrier.clone()))))
@@ -5304,7 +5388,17 @@ impl FaceForwarder for RouterForwarder {
     /// subscriber.
     #[cfg(feature = "transport-multicast")]
     fn route_mcast_ingress(&self, reliable: bool, push: &PushOwned) {
-        self.route_push(MCAST_INGRESS_FACE, FaceTier::Client, reliable, push, true);
+        // A multicast-received Push carries no per-priority conduit (the wz mcast
+        // plane is a structural 2-channel, pico-faithful), so its band is DEFAULT —
+        // R311y224, matching the peer plane's multicast_rx DEFAULT.
+        self.route_push(
+            MCAST_INGRESS_FACE,
+            FaceTier::Client,
+            reliable,
+            Priority::DEFAULT,
+            push,
+            true,
+        );
     }
 
     /// Replace the on-group ROUTER member set (the I3b Designated-Router election
@@ -5374,7 +5468,10 @@ impl FaceForwarder for RouterForwarder {
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
-            messages, reliable, ..
+            messages,
+            reliable,
+            priority,
+            ..
         }) = event
         else {
             return;
@@ -5459,7 +5556,7 @@ impl FaceForwarder for RouterForwarder {
                 // a no-op and the behavior is the pre-C4 route.
                 NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
-                    self.route_push(id, tier, *reliable, push, false);
+                    self.route_push(id, tier, *reliable, *priority, push, false);
                 }
                 // A declaration: ingest a DeclareSubscriber (1b) / DeclareQueryable
                 // (1c) into the inbound tier's subs/qabls table + re-flood within
@@ -5684,8 +5781,23 @@ mod tests {
         message: NetworkMessage,
         reliable: bool,
     ) {
+        forward_one_priority(fwd, face, message, reliable, Priority::DEFAULT);
+    }
+
+    /// [`forward_one_reliability`] with an explicit priority BAND — so a
+    /// transport-qos test can drive a banded inbound frame and assert the router
+    /// PRESERVES it on transit (R311y224). `forward_one_reliability` delegates here
+    /// with `Priority::DEFAULT`, so this helper always has a non-gated caller (no
+    /// dead-code under the plain `routing-router-hat` clippy arm).
+    fn forward_one_priority(
+        fwd: &RouterForwarder,
+        face: FaceId,
+        message: NetworkMessage,
+        reliable: bool,
+        priority: Priority,
+    ) {
         let outcome = DriverLoopOutcome::FramePayload {
-            priority: wz_session_core::qos::Priority::DEFAULT,
+            priority,
             reliable,
             sn: 0,
             messages: vec![message],
@@ -5942,6 +6054,103 @@ mod tests {
             sink_r.frame_count(),
             1,
             "bridged to the router-tier subscriber (self is master in single-router)"
+        );
+    }
+
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn route_push_preserves_the_received_band_on_transit() {
+        // R311y224 — the router twin of the peer plane's
+        // `forward_push_preserves_the_received_band_on_transit`. A RealTime Put from
+        // peer source A, driven through the FULL `forward` dispatch, must reach BOTH
+        // the within-tier peer subscriber C (`forward_push_tier`) AND the cross-mesh
+        // router subscriber R (`bridge_push_cross_mesh` -> `self_publish_into_tier`)
+        // still banded RealTime — proving the FramePayload destructure -> route_push
+        // band threading across both MESH-directed re-forwards, not just a leaf
+        // fan-out. C and R must be QoS-negotiated, else the per-face send clamps every
+        // Frame to DEFAULT (`dispatch_push`) and the band cannot be observed.
+        use crate::session_glue::{parse_inbound, InboundFrame};
+        fn egress_band(frame: &[u8]) -> Priority {
+            let InboundFrame::Frame { priority, .. } =
+                parse_inbound(frame).expect("parse forwarded frame")
+            else {
+                panic!("forwarded bytes are not a Frame");
+            };
+            priority
+        }
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink_a) = face(zid(0xAA), WIRE_PEER); // peer source
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // peer subscriber (within-tier child)
+        let (r, sink_r) = face(zid(0xDD), WIRE_ROUTER); // router subscriber (cross-mesh bridge)
+        c.set_qos_offer(true);
+        r.set_qos_offer(true);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &r);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5); // peer edge self<->A
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5); // peer edge self<->C
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xDD, 5); // router edge self<->R
+        fwd.tick(); // compute both nets' spanning trees
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // C (peer) subscribes
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data")); // R (router) subscribes
+
+        // A RealTime Put from A: preserved on BOTH the within-tier relay to C and the
+        // master-gated cross-mesh bridge to R.
+        sink_c.reset();
+        sink_r.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one_priority(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Push(Box::new(push)),
+            true,
+            Priority::RealTime,
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "relayed to the within-tier child C"
+        );
+        assert_eq!(
+            egress_band(&sink_c.frame_bytes(0)),
+            Priority::RealTime,
+            "within-tier transit PRESERVES the received band — not re-clamped to DEFAULT"
+        );
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "bridged to the router subscriber R"
+        );
+        assert_eq!(
+            egress_band(&sink_r.frame_bytes(0)),
+            Priority::RealTime,
+            "cross-mesh bridge PRESERVES the received band — not re-clamped to DEFAULT"
+        );
+
+        // Negative control: a DEFAULT transit stays DEFAULT on both legs
+        // (byte-identical to the pre-y224 `fan_out_tier` path).
+        sink_c.reset();
+        sink_r.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one_priority(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Push(Box::new(push)),
+            true,
+            Priority::DEFAULT,
+        );
+        assert_eq!(
+            egress_band(&sink_c.frame_bytes(0)),
+            Priority::DEFAULT,
+            "a DEFAULT within-tier transit stays DEFAULT"
+        );
+        assert_eq!(
+            egress_band(&sink_r.frame_bytes(0)),
+            Priority::DEFAULT,
+            "a DEFAULT cross-mesh bridge stays DEFAULT"
         );
     }
 

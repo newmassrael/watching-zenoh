@@ -127,8 +127,21 @@ mod tests {
     // peer emits on the wire (literal id=0 keyexpr + real payload) — so the
     // tests forward the same bytes the e2e does, with no test-only Push shape.
     fn push_frame(push: PushOwned, reliable: bool) -> DriverLoopOutcome {
+        push_frame_priority(push, reliable, wz_session_core::qos::Priority::DEFAULT)
+    }
+
+    /// [`push_frame`] with an explicit priority BAND — so a transport-qos test can
+    /// drive a banded Put and assert the switchboard PRESERVES it on transit
+    /// (R311y224). `push_frame` delegates here with `Priority::DEFAULT`, so this
+    /// helper always has a non-gated caller (no dead-code under the plain
+    /// `routing-routes` clippy arm).
+    fn push_frame_priority(
+        push: PushOwned,
+        reliable: bool,
+        priority: wz_session_core::qos::Priority,
+    ) -> DriverLoopOutcome {
         DriverLoopOutcome::FramePayload {
-            priority: wz_session_core::qos::Priority::DEFAULT,
+            priority,
             reliable,
             sn: 0,
             messages: vec![NetworkMessage::Push(Box::new(push))],
@@ -195,6 +208,69 @@ mod tests {
             producer_sink.frame_count(),
             0,
             "the publisher's face received nothing back"
+        );
+    }
+
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn forward_push_preserves_the_received_band_on_transit() {
+        // R311y224 — the switchboard twin of the linkstate/router transit band
+        // preservation: a RealTime Put published by the producer must reach the
+        // subscribing consumer still banded RealTime, driven through the full
+        // `observe` dispatch (so the FramePayload destructure -> forward_push band
+        // threading is proven). The consumer must be QoS-negotiated, else the
+        // per-face send clamps every Frame to DEFAULT (`dispatch_push`) and the band
+        // cannot be observed.
+        use crate::session_glue::{parse_inbound, InboundFrame};
+        fn egress_band(frame: &[u8]) -> wz_session_core::qos::Priority {
+            let InboundFrame::Frame { priority, .. } =
+                parse_inbound(frame).expect("parse forwarded frame")
+            else {
+                panic!("forwarded bytes are not a Frame");
+            };
+            priority
+        }
+
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        consumer.set_qos_offer(true);
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+        declare_sub(&fwd, 0, 1, "home/temp");
+        // register + declare emit nothing on the consumer's own sink (the switchboard
+        // sends only forwarded Puts), so frame index 0 is the first forward — no
+        // `RecordingLinkDriver::reset` (which is `routing-peer`-gated, absent here).
+
+        // A RealTime Put from the producer must reach the consumer still RealTime.
+        let push = build_push_literal("home/temp", b"payload").expect("literal Put push");
+        let outcome = push_frame_priority(push, true, wz_session_core::qos::Priority::RealTime);
+        fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
+        assert_eq!(
+            consumer_sink.frame_count(),
+            1,
+            "forwarded to the subscriber"
+        );
+        assert_eq!(
+            egress_band(&consumer_sink.frame_bytes(0)),
+            wz_session_core::qos::Priority::RealTime,
+            "switchboard transit PRESERVES the received band — not re-clamped to DEFAULT"
+        );
+
+        // Negative control: a DEFAULT transit stays DEFAULT (byte-identical to the
+        // pre-y224 `send_network_message` path) — the 2nd forward, frame index 1.
+        let push = build_push_literal("home/temp", b"payload").expect("literal Put push");
+        let outcome = push_frame_priority(push, true, wz_session_core::qos::Priority::DEFAULT);
+        fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
+        assert_eq!(
+            consumer_sink.frame_count(),
+            2,
+            "the DEFAULT Put also forwards"
+        );
+        assert_eq!(
+            egress_band(&consumer_sink.frame_bytes(1)),
+            wz_session_core::qos::Priority::DEFAULT,
+            "a DEFAULT transit stays DEFAULT"
         );
     }
 

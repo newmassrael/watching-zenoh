@@ -111,6 +111,7 @@ mod imp {
     use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
     use crate::link::SessionRuntime;
     use crate::network_message::NetworkMessage;
+    use crate::qos::Priority;
     use crate::session_actions::SessionLinkActions;
     use crate::wireexpr_resolve::resolve_wireexpr;
     use alloc::sync::Arc;
@@ -335,7 +336,10 @@ mod imp {
         /// threads each face's `drive_session_until_terminal` observer into.
         pub fn observe(&mut self, src_id: u64, event: IterationEvent<'_>) -> usize {
             let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
-                messages, reliable, ..
+                messages,
+                reliable,
+                priority,
+                ..
             }) = event
             else {
                 return 0;
@@ -345,7 +349,7 @@ mod imp {
                 match message {
                     NetworkMessage::Declare(declare) => self.record_declare(src_id, declare),
                     NetworkMessage::Push(push) => {
-                        forwarded += self.forward_push(src_id, push, *reliable)
+                        forwarded += self.forward_push(src_id, push, *reliable, *priority)
                     }
                     _ => {}
                 }
@@ -425,7 +429,13 @@ mod imp {
         /// Forward a Put received on `src_id` to every OTHER face whose
         /// subscriptions match its keyexpr. Returns the number of forwards
         /// that the destination send seam accepted.
-        fn forward_push(&self, src_id: u64, push: &PushOwned, reliable: bool) -> usize {
+        fn forward_push(
+            &self,
+            src_id: u64,
+            push: &PushOwned,
+            reliable: bool,
+            priority: Priority,
+        ) -> usize {
             // Resolve the source keyexpr in the source face's alias context
             // (literal id=0 verbatim; aliased id!=0 via DeclareKeyexpr). An id
             // with no prior mapping yields None and is dropped.
@@ -485,11 +495,19 @@ mod imp {
                     continue;
                 };
                 // The destination's own send seam mints the frame SN. `express`
-                // so an open batch window flushes (deliver-now forward).
+                // so an open batch window flushes (deliver-now forward). R311y224 —
+                // route through `send_network_message_qos` on the received
+                // `FramePayload.priority` so this switchboard transit PRESERVES the
+                // band (the twin of the linkstate `forward_push` / router
+                // `forward_push_tier`), instead of re-clamping to DEFAULT. `express`
+                // stays TRUE here (the switchboard's deliver-now forward, unlike the
+                // mesh transit's express=false); DEFAULT under a non-QoS session (the
+                // `dispatch_push` clamp), so byte-identical to the prior
+                // `send_network_message` on every non-QoS transit.
                 let msg = NetworkMessage::Push(Box::new(forwarded.clone()));
                 if face
                     .actions
-                    .send_network_message(msg, reliable, true)
+                    .send_network_message_qos(msg, reliable, true, priority)
                     .is_ok()
                 {
                     count += 1;

@@ -1310,11 +1310,22 @@ layer_c1ax_cargo_test_routing_namespace() {
 #      `cargo build -p wz-ap-demo --features router-connect-reconcile` step compiles
 #      the `--connect-after` run-mode host (the atom's A3 cfg site). The wz<->wz E2E
 #      runs in Layer E7b.
+#   8. R311y224 transit QoS band: the `routing-router-hat,transport-qos` arm RUNS
+#      the router band-preservation test (route_push_preserves_the_received_band_on
+#      _transit, `#[cfg(feature="transport-qos")]`-gated so it is NEVER compiled by
+#      the plain routing-router-hat arm above) + clippy-gates the transport-qos cfg.
+#      It proves a RealTime Put driven through the full `forward` dispatch survives
+#      BOTH the within-tier relay (forward_push_tier) AND the cross-mesh bridge
+#      (bridge_push_cross_mesh -> self_publish_into_tier) still banded — the router
+#      twin of the peer transit lane (C1bb's routing-peer,transport-qos --lib
+#      linkstate). Without this arm the y224 threading would be unguarded in CI.
 layer_c1ay_cargo_test_router_hat() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,transport-qos --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,access-acl,access-downsampling,access-quota --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet \
@@ -2007,11 +2018,18 @@ layer_c1w_cargo_test_routing_accept() {
 #      to prove the forwarder composes standalone (routing-routes pulls
 #      routing-accept + the kernel + codec-push + declare-subscriber).
 # The demo-binary forwarding e2e is Layer E5 (separate, --features routing-routes).
+# R311y224: the `routing-routes,transport-qos` arm additionally RUNS the switchboard
+# band-preservation test (forward_push_preserves_the_received_band_on_transit,
+# `#[cfg(feature="transport-qos")]`-gated) + clippy-gates the transport-qos cfg — the
+# switchboard twin of the router/linkstate transit band lanes (RouteTable::forward_push
+# now routes through send_network_message_qos on the received FramePayload.priority).
 layer_c1x_cargo_test_routing_routes() {
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-routes --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-routes --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features routing-routes,transport-qos --lib routing_forward --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-routes,transport-qos --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-routes --quiet -- -D warnings)
 }
 
