@@ -4489,15 +4489,19 @@ layer_m_scouting_multicast() {
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \
         --test multicast_pubsub_loopback -- --ignored --quiet) || return 1
-    # R311y232 — the transport-qos ARM of the multicast e2e: a both-is_qos group
-    # (the --multicast-qos ACTIVATION) with a direct TokioMulticastSession::publish_qos
-    # prioritized publish; the qos subscriber admits the qos peer's JOIN + delivers.
-    # Separate invocation because the default A1c set omits transport-qos; runs in
-    # THIS isolated multicast lane (not the parallel host lanes) so it never contends
-    # for the multicast route under load (the --ignored no-flaky discipline).
+    # R311y232/y234 — the transport-qos ARM of the multicast e2e (BOTH qos tests, the
+    # `qos` filter): the POSITIVE arm (both-is_qos group, a direct
+    # TokioMulticastSession::publish_qos prioritized publish delivers -- the composed
+    # real-socket path + live publish_qos driver) AND the y234 NEGATIVE DISCRIMINATOR
+    # (a qos publisher meets a non-qos subscriber, which REFUSES the qos JOIN -> no
+    # admit, no delivery -- the config that actually exercises the is_qos wire gate).
+    # Separate invocation because the default set omits transport-qos; runs in THIS
+    # isolated (opt-in) multicast lane so it never contends for the multicast route
+    # under load (the --ignored no-flaky discipline). The deterministic per-priority
+    # band-survival proof runs unconditionally in default CI via C1bc's qos_emit_tests.
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-qos \
-        --test multicast_pubsub_loopback qos_group_publish_qos_reaches_subscriber \
+        --test multicast_pubsub_loopback qos \
         -- --ignored --quiet) || return 1
     # R311nm — wz->pico multicast JOIN+Push interop e2e: a wz in-library
     # multicast publisher's JOIN beacon + framed Push are admitted and

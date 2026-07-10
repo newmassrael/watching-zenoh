@@ -165,23 +165,28 @@ async fn publisher_push_reaches_group_subscriber() {
     );
 }
 
-/// R311y232 (transport-qos ACTIVATION e2e) — the composed proof over REAL UDP that
-/// closes the direct-multicast QoS-publish path the WHOLE-SESSION finding named.
-/// BOTH nodes offer `is_qos` (the `--multicast-qos` knob -> `MulticastParams.is_qos`),
-/// node A publishes through a DIRECT [`TokioMulticastSession::publish_qos`] at a
-/// NON-DEFAULT priority, and the qos subscriber node B admits A's qos JOIN and
-/// delivers the prioritized Put. The admission IS the qos-handshake proof: a
-/// NON-qos B would REFUSE a qos peer's JOIN (the group-agreed rule, zenoh
-/// multicast/rx.rs:131 / wz multicast_rx self-gate), so delivery on a both-qos
-/// group can only happen if the is_qos offer travelled the wire and both sides
-/// agreed. This gives `Session::publish_qos` a real end-to-end driver (the
-/// per-priority conduit SN-isolation itself is the deterministic dispatch proof
-/// `wz_session_core::multicast_tx::qos_emit_tests`, run by run-ci Layer C1bc). The
-/// publisher's own JOIN also rides `is_qos=true`, so this exercises the qos JOIN
-/// encode + decode + admit path end to end, not only the frame ext_qos.
+/// R311y232 (transport-qos ACTIVATION e2e, POSITIVE arm) — the composed real-UDP
+/// path with the QoS conduit ACTIVE: BOTH nodes offer `is_qos` (the `--multicast-qos`
+/// knob -> `MulticastParams.is_qos`), node A publishes through a DIRECT
+/// [`TokioMulticastSession::publish_qos`] at a NON-DEFAULT priority, A's drive loop
+/// mints the per-priority conduit + writes the frame `ext_qos` (`params_a.is_qos`), and
+/// the qos subscriber B admits + delivers. This proves the whole `publish_qos` path
+/// COMPOSES over a real socket (qos JOIN ext encode/decode + framed Push + delivery)
+/// AND gives `Session::publish_qos` a real end-to-end driver.
+///
+/// SCOPE (R311y234 review correction — do not oversell): with BOTH nodes qos, B admits
+/// ANY peer (`multicast_rx.rs:121`, admit iff `qos_next_sns.is_none() || params.is_qos`),
+/// so this arm does NOT by itself discriminate is_qos on vs off — a DEFAULT delivery
+/// would pass the same keyexpr/payload assertions. The is_qos DISCRIMINATION is the
+/// sibling NEGATIVE arm [`qos_publisher_refused_by_non_qos_subscriber`] (a non-qos B
+/// REFUSES a qos A's JOIN -> no admit, no delivery), and the per-priority
+/// band-survival / frame-`ext_qos` proof is the deterministic
+/// `wz_session_core::multicast_tx::qos_emit_tests` (run in default CI by Layer C1bc).
+/// This arm's unique value is the composed real-socket delivery + the live
+/// `publish_qos` driver, not a standalone qos-handshake proof.
 #[cfg(feature = "transport-qos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "multicast loopback e2e; Layer A1c qos arm runs it via --ignored"]
+#[ignore = "multicast loopback e2e; Layer M qos arm runs it via --ignored"]
 async fn qos_group_publish_qos_reaches_subscriber() {
     // Distinct group port from the sibling loopback tests (7449/7450/7451) so the
     // --ignored lane never contends on the same multicast bind.
@@ -288,10 +293,134 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     }
 
     assert_eq!(fired.load(Ordering::SeqCst), 1, "exactly one qos delivery");
+    // Both nodes are qos, so this admission is unconditional (not a discriminator);
+    // the refusal discriminator lives in the negative arm below.
     assert_eq!(
         dispatcher_b.active_peers(),
         1,
-        "qos B admitted qos A's JOIN (a non-qos B would refuse a qos peer)"
+        "qos B admitted the qos peer's JOIN"
+    );
+}
+
+/// R311y234 (the is_qos DISCRIMINATOR the positive arm lacks) — the group-agreed
+/// REFUSAL over REAL UDP: a qos publisher A (`is_qos=true`, so its JOIN carries the
+/// qos ext) meets a NON-qos subscriber B (`is_qos=false`). B REFUSES A's JOIN
+/// (`multicast_rx.rs:121`: admit iff `qos_next_sns.is_none() || params.is_qos`; here
+/// peer-qos AND !local-qos is the ONE refused case), so A is never admitted and its
+/// prioritized Put is dropped as from-an-unknown-peer. `active_peers()==0` is the
+/// DETERMINISTIC discriminator — not timing-dependent: B never admits A no matter how
+/// many JOIN beacons arrive — and `fired==0` confirms no delivery. This is the ONLY
+/// configuration that exercises the is_qos WIRE gate, so together with the positive
+/// arm (delivery when both agree) + C1bc's band proof the activation is genuinely
+/// proven, not smoke-tested. Both nodes compile WITH transport-qos; the discrimination
+/// is B's RUNTIME `is_qos=false` (the pico-faithful default), exactly the mismatch a
+/// pico multicast peer (always non-qos) would present to a qos wz node.
+#[cfg(feature = "transport-qos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M qos arm runs it via --ignored"]
+async fn qos_publisher_refused_by_non_qos_subscriber() {
+    // Distinct group port from the other loopback tests (7449..7453).
+    const REFUSE_PORT: u16 = 7454;
+
+    // Subscriber node B is NON-qos (the mc_params default is_qos=false).
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, REFUSE_PORT)
+        .await
+        .expect("bind non-qos multicast subscriber link");
+    let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_b = mc_params(0xBB);
+    assert!(
+        !params_b.is_qos,
+        "node B must be non-qos for the refusal arm"
+    );
+
+    let fired = Arc::new(AtomicUsize::new(0));
+    let mut observer_b = ApplicationLayerObserver::new();
+    {
+        let fired = fired.clone();
+        observer_b.subscribers.register(KEYEXPR, move |_sample| {
+            fired.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+
+    // Publisher node A is qos, driven through a direct Session::publish_qos.
+    let sock_a = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .expect("bind ephemeral publisher socket");
+    let mut driver_a = UdpDriver::from_socket(sock_a, SocketAddr::from((GROUP, REFUSE_PORT)));
+    let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_a = MulticastParams {
+        is_qos: true,
+        ..mc_params(0xAA)
+    };
+
+    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+
+    let clock = Arc::new(TokioTime::new());
+    let session_a: TokioMulticastSession = TokioMulticastSession::new_multicast(
+        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        clock.clone(),
+        tx_a,
+    );
+
+    let drive_b = drive_multicast_session(
+        &mut dispatcher_b,
+        MulticastDriveConfig {
+            params: &params_b,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut driver_b,
+        clock.as_ref(),
+        |event| observer_b.dispatch_event(event),
+        &mut rx_b,
+    );
+    let drive_a = drive_multicast_session(
+        &mut dispatcher_a,
+        MulticastDriveConfig {
+            params: &params_a,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut driver_a,
+        clock.as_ref(),
+        |_| {},
+        &mut rx_a,
+    );
+
+    let scenario = async move {
+        // Let A's qos JOIN beacons reach B (~6 beacons at 50ms) so B has had every
+        // chance to admit; a non-qos B refuses each. Then publish and observe past the
+        // positive arm's ~330ms delivery time to confirm nothing arrives.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        session_a
+            .publish_qos(
+                KEYEXPR,
+                PAYLOAD,
+                PublishOptions::put(),
+                Priority::InteractiveHigh,
+            )
+            .expect("multicast publish_qos");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    };
+
+    tokio::select! {
+        _ = drive_b => panic!("subscriber drive loop ended unexpectedly"),
+        _ = drive_a => panic!("publisher drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    // The discriminator: a non-qos B never admitted the qos peer, so its prioritized
+    // Put was dropped. If is_qos were ignored on the wire, B would admit A and deliver.
+    assert_eq!(
+        dispatcher_b.active_peers(),
+        0,
+        "non-qos B must REFUSE the qos peer's JOIN (the group-agreed gate)"
+    );
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "no delivery: the refused qos peer's frame is dropped as from-an-unknown-peer"
     );
 }
 
