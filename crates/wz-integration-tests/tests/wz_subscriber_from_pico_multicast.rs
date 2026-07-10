@@ -102,6 +102,7 @@ fn wz_mc_params() -> MulticastParams {
         seq_num_res: PICO_SN_RESOLUTION,
         req_id_res: PICO_SN_RESOLUTION,
         batch_size: PICO_BATCH_MULTICAST_SIZE,
+        is_qos: false,
     }
 }
 

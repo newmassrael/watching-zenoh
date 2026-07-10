@@ -2693,6 +2693,12 @@ impl RouterForwarder {
             let _ = group.tx.send(MulticastTxItem::Push {
                 push: Box::new(carrier.clone()),
                 reliable,
+                // C1 foundation: DEFAULT frame band. The router egress threads the
+                // received routing band (the frame's decoded priority) here at C3
+                // (the "mcast-egress band" residual proper); until then a routed
+                // Push egresses the group at DEFAULT (byte-identical), and the
+                // app priority still rides the Push's own qos ext.
+                priority: Priority::DEFAULT,
             });
         }
     }
@@ -12136,7 +12142,7 @@ mod tests {
         let item = rx
             .try_recv()
             .expect("the routed Push reached the group via the route_push tail");
-        let MulticastTxItem::Push { push, reliable } = item else {
+        let MulticastTxItem::Push { push, reliable, .. } = item else {
             panic!("expected a MulticastTxItem::Push");
         };
         assert!(reliable, "broadcast on the reliable channel");

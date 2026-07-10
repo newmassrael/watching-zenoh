@@ -130,7 +130,13 @@ use wz_session_core::multicast_rx::{
 use wz_session_core::multicast_tx::multicast_tx_emit;
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
-use wz_session_core::sn::{self, TxSn};
+use wz_session_core::sn::{self, MulticastTxConduits};
+// `TxSn` is now only constructed by the test helpers that build a peer's JOIN
+// datagram for `encode_join`; the drive loop owns the per-priority
+// `MulticastTxConduits`. Gated on `test` so a production MCU build carries no
+// unused import.
+#[cfg(test)]
+use wz_session_core::sn::TxSn;
 // R311ma/R311mb/R311md — the no_std multicast reply backing (MulticastReplyQueue,
 // below): the observer drains its staged replies through the shared generic
 // wz_session_core::multicast_reply_sink::MulticastReplySink<MulticastReplyQueue>,
@@ -363,14 +369,14 @@ where
         feature = "codec-response-final",
         feature = "liveliness-token"
     ))]
-    let mut tx_sn = TxSn::new(sn::mask_from_res(params.seq_num_res));
+    let mut tx_sn = MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res));
     #[cfg(not(any(
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
     )))]
-    let tx_sn = TxSn::new(sn::mask_from_res(params.seq_num_res));
+    let tx_sn = MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res));
     // Emit the first JOIN beacon immediately, then every join_interval_ms; the
     // sweep runs on its own tick_ms cadence (the busy-poll equivalents of the
     // AP loop's JOIN-due check + select! sweep tick).
@@ -398,6 +404,8 @@ where
         let now = clock.now_monotonic_ms();
         // JoinEmit: multicast the self-advertising JOIN beacon when due.
         if now >= next_join_ms {
+            // R311y227 — the DEFAULT conduit's live SNs (the single-conduit
+            // beacon); a qos group additionally advertises per-priority ext_qos (C2).
             let dgram = encode_join(params, &tx_sn);
             driver.send_to_group(&dgram);
             next_join_ms = now.saturating_add(params.join_interval_ms);
@@ -524,6 +532,7 @@ mod tests {
             seq_num_res: 0x02,
             req_id_res: 0x02,
             batch_size: 2_048,
+            is_qos: false,
         }
     }
 
@@ -560,7 +569,10 @@ mod tests {
         // the socket in the driver — it queues in lwIP, and the loop's first
         // poll_loopback delivers it to try_recv ahead of our own beacon echo.
         let peer = params(&[0x01, 0x02, 0x03, 0x04]);
-        let peer_join = encode_join(&peer, &TxSn::new(sn::mask_from_res(peer.seq_num_res)));
+        let peer_join = encode_join(
+            &peer,
+            &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
+        );
         socket
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
@@ -625,7 +637,10 @@ mod tests {
         // loop's first poll delivers it ahead of our own beacon / Push echo,
         // creating the (src_addr, src_port) peer entry the echoed Push matches.
         let other = params(&[0x01, 0x02, 0x03, 0x04]);
-        let other_join = encode_join(&other, &TxSn::new(sn::mask_from_res(other.seq_num_res)));
+        let other_join = encode_join(
+            &other,
+            &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
+        );
         socket
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
@@ -706,7 +721,10 @@ mod tests {
         // wrapping the socket so the loop's first poll creates the peer entry the
         // echoed Declare matches (mirror of the Push round-trip test).
         let other = params(&[0x01, 0x02, 0x03, 0x04]);
-        let other_join = encode_join(&other, &TxSn::new(sn::mask_from_res(other.seq_num_res)));
+        let other_join = encode_join(
+            &other,
+            &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
+        );
         socket
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
@@ -807,7 +825,10 @@ mod tests {
         // it. Both injected before wrapping the socket (delivered ahead of our
         // own beacon echo by the loop's first polls).
         let other = params(&[0x01, 0x02, 0x03, 0x04]);
-        let other_join = encode_join(&other, &TxSn::new(sn::mask_from_res(other.seq_num_res)));
+        let other_join = encode_join(
+            &other,
+            &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
+        );
         socket
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
@@ -919,7 +940,10 @@ mod tests {
         // loopback source; the Query then rides that peer's reliable channel at
         // the advertised SN 0 so the per-peer SN gate admits it.
         let other = params(&[0x01, 0x02, 0x03, 0x04]);
-        let other_join = encode_join(&other, &TxSn::new(sn::mask_from_res(other.seq_num_res)));
+        let other_join = encode_join(
+            &other,
+            &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
+        );
         socket
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
@@ -1033,7 +1057,10 @@ mod tests {
         // the echoed fragments would hit an UnknownPeer drop.
         let mut other = params(&[0x01, 0x02, 0x03, 0x04]);
         other.batch_size = 64;
-        let other_join = encode_join(&other, &TxSn::new(sn::mask_from_res(other.seq_num_res)));
+        let other_join = encode_join(
+            &other,
+            &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
+        );
         socket
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");

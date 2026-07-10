@@ -31,6 +31,8 @@ use core::net::SocketAddr;
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::inbound::{parse_inbound, InboundFrame};
 use crate::multicast_dispatch::{FrameIngest, MulticastDispatcher};
+#[cfg(feature = "transport-qos")]
+use crate::multicast_join::decode_join_qos;
 use crate::multicast_join::{decode_join, validate_join};
 use crate::multicast_params::MulticastParams;
 use crate::network_message::parse_frame_payload;
@@ -40,7 +42,7 @@ use crate::wire_const;
 // loop layers onto the classify. Gated like ingest_multicast_fragment.
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
 use crate::multicast_dispatch::{
-    abort_peer_chains, ingest_multicast_fragment, multicast_chain_key,
+    abort_peer_chains, ingest_multicast_fragment_qos, multicast_chain_key,
 };
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
 use crate::reassembly_dispatch::ReassemblyDispatcher;
@@ -96,6 +98,28 @@ where
             if let Some(join) = decode_join(bytes) {
                 if join.zid != params.zid.as_slice() {
                     if let Some(baseline) = validate_join(&join, params) {
+                        // R311y227 — group-agreed QoS admission (zenoh
+                        // multicast/rx.rs `handle_join_from_unknown`): a non-qos
+                        // node REFUSES a qos peer's JOIN (its per-priority frames
+                        // would decode as "Unknown priority" against a single
+                        // conduit), while a qos node ACCEPTS a non-qos peer and
+                        // seeds its single DEFAULT conduit. `decode_join_qos` parses
+                        // the JOIN `ext_qos` (`None` = a non-qos peer), and the
+                        // per-priority next-SNs seed each of the peer's conduits.
+                        #[cfg(feature = "transport-qos")]
+                        {
+                            let qos_next_sns = decode_join_qos(bytes);
+                            if !(qos_next_sns.is_some() && !params.is_qos) {
+                                dispatcher.ingest_join_qos(
+                                    join.zid,
+                                    src,
+                                    baseline,
+                                    qos_next_sns,
+                                    now_ms,
+                                );
+                            }
+                        }
+                        #[cfg(not(feature = "transport-qos"))]
                         dispatcher.ingest_join(join.zid, src, baseline, now_ms);
                     }
                 }
@@ -114,10 +138,15 @@ where
                 payload,
                 has_ext,
                 extensions,
+                priority,
                 ..
             }) = parse_inbound(bytes)
             {
-                match dispatcher.ingest_frame_by_src(src, reliable, sn, now_ms) {
+                // R311y227 — admit against the frame's OWN per-priority conduit
+                // (the qos peer's per-conduit SN streams gate independently). A
+                // non-qos frame decodes as `Priority::DEFAULT`, so it rides the
+                // single DEFAULT conduit — byte-identical to the pre-R311y227 gate.
+                match dispatcher.ingest_frame_by_src_qos(src, priority, reliable, sn, now_ms) {
                     FrameIngest::Admitted => {
                         if let Ok(messages) = parse_frame_payload(&payload) {
                             // The `ingest_frame_by_src` `&mut dispatcher` borrow
@@ -132,13 +161,15 @@ where
                                 messages,
                                 has_ext,
                                 extensions,
-                                // Multicast QoS conduits are deferred (R311y215
-                                // step 8): the single-conduit SN gate
-                                // (`ingest_frame_by_src`) does not isolate by
-                                // priority, so the delivered band is DEFAULT (the
-                                // decoded wire priority is intentionally dropped
-                                // by the `..` above, not surfaced).
-                                priority: crate::qos::Priority::DEFAULT,
+                                // R311y227 — the frame's decoded `ext_qos` band,
+                                // now that the per-priority conduit gate
+                                // (`ingest_frame_by_src_qos`) isolates each priority
+                                // stream. Surfaced to the delivery outcome so a
+                                // router egress / app observes the same band the
+                                // frame carried. DEFAULT for a non-qos frame (no
+                                // ext_qos), so a non-`transport-qos` build is
+                                // unchanged.
+                                priority,
                             };
                             // §5.21 routing-namespace — strip this peer's inbound
                             // batch (per-peer via `src`) BEFORE the observer fan,
@@ -244,11 +275,16 @@ pub fn dispatch_multicast_inbound_reassembling<
                 sn,
                 more,
                 payload,
+                priority,
                 ..
             }) = parse_inbound(bytes)
             {
-                ingest_multicast_fragment(
-                    dispatcher, reasm, src, reliable, sn, more, &payload, now_ms, on_event,
+                // R311y227 — the fragment's decoded `ext_qos` band selects its
+                // per-priority conduit gate + reassembly chain (DEFAULT for a
+                // non-qos peer, so the pre-R311y227 path is unchanged).
+                ingest_multicast_fragment_qos(
+                    dispatcher, reasm, src, reliable, sn, more, priority, &payload, now_ms,
+                    on_event,
                 );
             }
         }

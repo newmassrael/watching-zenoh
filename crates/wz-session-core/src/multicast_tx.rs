@@ -31,6 +31,11 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+// R311y227 — the per-priority multicast conduit send-side band type. Gated on the
+// data codec that carries a band (Push); the reply-plane variants are DEFAULT.
+#[cfg(feature = "codec-push")]
+use crate::qos::Priority;
+
 /// One queued outbound data emission for a multicast drive loop's TX half
 /// (A1c). The application enqueues items (the AP via a
 /// `tokio::sync::mpsc::UnboundedSender`, the MCU via its per-iteration pull
@@ -70,6 +75,13 @@ pub enum MulticastTxItem {
         /// best-effort either way; the flag governs the SN channel +
         /// the frame's R flag).
         reliable: bool,
+        /// R311y227 — the app / routing QoS band. Under `transport-qos` on a
+        /// group that negotiated `is_qos` it selects the per-priority TX conduit
+        /// and rides the frame `ext_qos`; otherwise the emit clamps it to
+        /// [`Priority::DEFAULT`] (no non-DEFAULT frame reaches a non-qos / pico
+        /// receiver). A local produce with no chosen priority passes
+        /// `Priority::DEFAULT` (the [`multicast_put_literal`] default).
+        priority: Priority,
     },
     /// R311lq — a queryable `Response(Reply|Err)` over multicast: the
     /// reply a queryable's handler produced for a Query that arrived on
@@ -164,6 +176,38 @@ pub struct MulticastTxFrames {
 /// Gated on the union of the body codecs that inhabit [`MulticastTxItem`]: with
 /// none, the item is uninhabited and can never be enqueued, so the emit SSOT
 /// does not exist (the loops consume the uninhabited item with an empty match).
+/// R311y227 — the multicast send-side band clamp: the app / routing priority
+/// when the group negotiated `is_qos` under `transport-qos`, else
+/// [`Priority::DEFAULT`]. A build WITHOUT `transport-qos` has no per-priority
+/// conduit, so the band is always elided to DEFAULT — no non-DEFAULT frame can
+/// ride (the pico-faithful 2-channel default), and a non-qos / pico receiver
+/// never decodes an "Unknown priority" frame.
+#[cfg(feature = "codec-push")]
+fn effective_mcast_priority(priority: Priority, is_qos: bool) -> Priority {
+    #[cfg(feature = "transport-qos")]
+    {
+        if is_qos {
+            priority
+        } else {
+            Priority::DEFAULT
+        }
+    }
+    #[cfg(not(feature = "transport-qos"))]
+    {
+        let _ = (priority, is_qos);
+        Priority::DEFAULT
+    }
+}
+
+/// R311y227 — the Frame `ext_qos` for a clamped conduit priority: `Some` only for
+/// a non-DEFAULT priority (zenoh OMITS the QoS ext on a DEFAULT / Data frame; the
+/// receiver decodes its ABSENCE as DEFAULT). `None` ⇒ byte-identical to the
+/// pre-qos wire — the anchor the layer3 byte-equiv tests pin.
+#[cfg(feature = "codec-push")]
+fn frame_ext_qos(priority: Priority) -> Option<Priority> {
+    (priority != Priority::DEFAULT).then_some(priority)
+}
+
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-response",
@@ -172,7 +216,7 @@ pub struct MulticastTxFrames {
 ))]
 pub fn multicast_tx_emit(
     item: MulticastTxItem,
-    tx_sn: &mut crate::sn::TxSn,
+    tx_sn: &mut crate::sn::MulticastTxConduits,
     params: &crate::multicast_params::MulticastParams,
 ) -> MulticastTxFrames {
     match item {
@@ -184,15 +228,30 @@ pub fn multicast_tx_emit(
         // hole in a fragment chain aborts that chain at every receiver, as on
         // pico — so the loop's send is best-effort like the JOIN beacon.
         #[cfg(feature = "codec-push")]
-        MulticastTxItem::Push { push, reliable } => {
-            let frame_sn = tx_sn.mint(reliable);
-            let dgram = crate::frame_encode::encode_frame_with_push(frame_sn, *push, reliable);
+        MulticastTxItem::Push {
+            push,
+            reliable,
+            priority,
+        } => {
+            // R311y227 — clamp the app / routing band to DEFAULT unless the group
+            // negotiated `is_qos` (else a non-qos / pico receiver bails "Unknown
+            // priority"). Under `transport-qos` on a qos group the clamped `eff`
+            // selects the per-priority TX conduit AND rides the frame `ext_qos`;
+            // the fragment re-frame re-emits that SAME `ext_qos` and mints its
+            // follow-ons on the SAME conduit. `None` / DEFAULT is byte-identical
+            // to the pre-qos wire.
+            let eff = effective_mcast_priority(priority, params.is_qos);
+            let ext_qos = frame_ext_qos(eff);
+            let frame_sn = tx_sn.mint(eff, reliable);
+            let dgram =
+                crate::frame_encode::encode_frame_with_push_qos(frame_sn, *push, reliable, ext_qos);
             let datagrams = crate::frame_encode::multicast_frame_or_fragments(
                 dgram,
                 frame_sn,
                 reliable,
                 params.batch_size as usize,
                 tx_sn,
+                ext_qos,
             );
             MulticastTxFrames {
                 datagrams,
@@ -205,7 +264,7 @@ pub fn multicast_tx_emit(
         // chain exactly like an oversize Push.
         #[cfg(feature = "codec-response")]
         MulticastTxItem::Response { response } => {
-            let frame_sn = tx_sn.mint(/* reliable = */ true);
+            let frame_sn = tx_sn.mint(crate::qos::Priority::DEFAULT, /* reliable = */ true);
             let dgram = crate::frame_encode::encode_frame_with_response(
                 frame_sn, *response, /* reliable = */ true,
             );
@@ -215,6 +274,10 @@ pub fn multicast_tx_emit(
                 true,
                 params.batch_size as usize,
                 tx_sn,
+                // Control-plane reply frames (Response / ResponseFinal /
+                // DeclareReply) are DEFAULT-band (zenoh treats reply priority as a
+                // separate concern); no frame ext_qos, no per-priority conduit.
+                None,
             );
             MulticastTxFrames {
                 datagrams,
@@ -227,7 +290,7 @@ pub fn multicast_tx_emit(
         // `send_response_final` (reliability pinned).
         #[cfg(feature = "codec-response-final")]
         MulticastTxItem::ResponseFinal { request_id } => {
-            let frame_sn = tx_sn.mint(/* reliable = */ true);
+            let frame_sn = tx_sn.mint(crate::qos::Priority::DEFAULT, /* reliable = */ true);
             let dgram = crate::frame_encode::encode_frame_with_response_final(
                 frame_sn,
                 crate::response_final_build::build_response_final(request_id),
@@ -243,6 +306,10 @@ pub fn multicast_tx_emit(
                 true,
                 params.batch_size as usize,
                 tx_sn,
+                // Control-plane reply frames (Response / ResponseFinal /
+                // DeclareReply) are DEFAULT-band (zenoh treats reply priority as a
+                // separate concern); no frame ext_qos, no per-priority conduit.
+                None,
             );
             MulticastTxFrames {
                 datagrams,
@@ -255,7 +322,7 @@ pub fn multicast_tx_emit(
         // keyexpr re-frames as a fragment chain exactly like an oversize Push.
         #[cfg(feature = "liveliness-token")]
         MulticastTxItem::DeclareReply { declare } => {
-            let frame_sn = tx_sn.mint(/* reliable = */ true);
+            let frame_sn = tx_sn.mint(crate::qos::Priority::DEFAULT, /* reliable = */ true);
             let dgram = crate::frame_encode::encode_frame_with_declare(
                 frame_sn, *declare, /* reliable = */ true,
             );
@@ -265,6 +332,10 @@ pub fn multicast_tx_emit(
                 true,
                 params.batch_size as usize,
                 tx_sn,
+                // Control-plane reply frames (Response / ResponseFinal /
+                // DeclareReply) are DEFAULT-band (zenoh treats reply priority as a
+                // separate concern); no frame ext_qos, no per-priority conduit.
+                None,
             );
             MulticastTxFrames {
                 datagrams,
@@ -294,5 +365,106 @@ pub fn multicast_put_literal(
             payload,
         )?),
         reliable: true,
+        // The convenience builder produces a DEFAULT-band Put (the pico-faithful
+        // put default); a prioritized multicast produce constructs the item
+        // directly with its chosen `priority` (mirrors the unicast publish_qos).
+        priority: Priority::DEFAULT,
     })
+}
+
+// R311y227 — the emit-level witness: `multicast_tx_emit` clamps the band by the
+// group's `is_qos`, selects the per-priority TX conduit, and writes the frame
+// `ext_qos` — the composition the sn.rs (conduit) + frame_encode (wire) unit
+// tests exercise separately. Gated on `transport-qos` (the per-priority conduit)
+// + `codec-push` (the Push item) — `transport-qos` pulls `codec-frame`, so the
+// real `parse_inbound` decoder is in scope.
+#[cfg(all(test, feature = "transport-qos", feature = "codec-push"))]
+mod qos_emit_tests {
+    use super::*;
+    use crate::inbound::{parse_inbound, InboundFrame};
+    use crate::multicast_params::MulticastParams;
+    use crate::qos::Priority;
+    use crate::sn::{mask_from_res, MulticastTxConduits};
+    use crate::WhatAmI;
+
+    fn params(is_qos: bool) -> MulticastParams {
+        MulticastParams {
+            version: 0x09,
+            whatami: WhatAmI::Peer,
+            zid: alloc::vec![1, 2, 3, 4],
+            lease_ms: 5_000,
+            join_interval_ms: 50,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos,
+        }
+    }
+
+    /// On a qos group a non-DEFAULT-priority Push emits a Frame that carries the
+    /// on-wire `ext_qos` (the priority `parse_inbound` recovers) AND mints on that
+    /// priority's own conduit — the DEFAULT ring stays untouched.
+    #[test]
+    fn qos_group_emits_frame_ext_qos_and_mints_on_the_priority_conduit() {
+        let params = params(true);
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let item = MulticastTxItem::Push {
+            push: Box::new(crate::push_build::build_push_literal("k", b"v").unwrap()),
+            reliable: true,
+            priority: Priority::RealTime,
+        };
+        let frames = multicast_tx_emit(item, &mut tx, &params);
+        assert_eq!(frames.datagrams.len(), 1);
+        let InboundFrame::Frame { priority, sn, .. } = parse_inbound(&frames.datagrams[0]).unwrap()
+        else {
+            panic!("expected a Frame");
+        };
+        assert_eq!(
+            priority,
+            Priority::RealTime,
+            "the emitted frame carries its ext_qos band"
+        );
+        assert_eq!(sn, 0, "first mint on the RealTime conduit is SN 0");
+        // The DEFAULT conduit is untouched — proof the mint went to RealTime's ring.
+        assert_eq!(tx.advertise_default().next_reliable, 0);
+        assert_eq!(
+            tx.advertise_per_priority()[Priority::RealTime as usize].next_reliable,
+            1
+        );
+    }
+
+    /// A NON-qos group clamps the same Push to DEFAULT: no frame ext_qos
+    /// (byte-identical to the pre-qos wire), minted on the DEFAULT ring — a pico /
+    /// non-qos receiver never sees an "Unknown priority" frame.
+    #[test]
+    fn non_qos_group_clamps_to_default_no_ext_qos() {
+        let params = params(false);
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let item = MulticastTxItem::Push {
+            push: Box::new(crate::push_build::build_push_literal("k", b"v").unwrap()),
+            reliable: true,
+            priority: Priority::RealTime, // requested high, but the group is non-qos
+        };
+        let frames = multicast_tx_emit(item, &mut tx, &params);
+        let InboundFrame::Frame {
+            priority, has_ext, ..
+        } = parse_inbound(&frames.datagrams[0]).unwrap()
+        else {
+            panic!("expected a Frame");
+        };
+        assert_eq!(
+            priority,
+            Priority::DEFAULT,
+            "clamped to DEFAULT: an absent ext decodes as DEFAULT"
+        );
+        assert!(
+            !has_ext,
+            "no frame transport ext on a non-qos clamp (byte-identical to pre-qos)"
+        );
+        assert_eq!(
+            tx.advertise_default().next_reliable,
+            1,
+            "minted on the DEFAULT conduit"
+        );
+    }
 }

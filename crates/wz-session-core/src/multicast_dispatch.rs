@@ -363,11 +363,16 @@ struct PeerSlot {
     /// `entry->_sn_res = _z_sn_max(msg->_seq_num_res)`). Valid iff
     /// `src.is_some()`.
     sn_mask: u64,
-    /// Last-seen SN per channel (reliable / best-effort), seeded one
-    /// before the JOIN-advertised `next_sn` (§3.2 `init_rx_seq`) and
-    /// advanced by each admitted frame. Valid iff `src.is_some()`.
-    rx_sn_reliable: u64,
-    rx_sn_best_effort: u64,
+    /// Last-seen SN per `(priority, channel)` conduit, seeded one before the
+    /// JOIN-advertised `next_sn` (§3.2 `init_rx_seq`) and advanced by each admitted
+    /// frame. Valid iff `src.is_some()`. R311y227 — under `transport-qos` a qos
+    /// peer fills all `Priority::NUM` conduits from its JOIN `ext_qos` (each gating
+    /// on its OWN SN stream, so a high-priority frame at a high SN and a low frame
+    /// at a low SN both admit); a non-qos peer (and every non-`transport-qos`
+    /// build) fills only the single DEFAULT conduit — the pico-faithful 2-channel
+    /// gate, byte-identical to the pre-R311y227 `rx_sn_reliable`/`_best_effort`
+    /// pair.
+    rx_sn: crate::sn::MulticastRxConduits,
     /// §5.21 routing-namespace — this peer's stateful ingress decorator (the
     /// `ENamespace` mirror): strips the namespace from inbound keyexprs and
     /// correlates id-only undeclares against the declares it dropped. PER-PEER
@@ -441,8 +446,7 @@ impl PeerSlot {
             last_seen_ms: 0,
             lease_ms: 0,
             sn_mask: 0,
-            rx_sn_reliable: 0,
-            rx_sn_best_effort: 0,
+            rx_sn: crate::sn::MulticastRxConduits::default(),
             #[cfg(feature = "routing-namespace")]
             namespace_ingress: None,
             #[cfg(feature = "multicast-declarations")]
@@ -460,10 +464,32 @@ impl PeerSlot {
     /// announcer's lease window (R311ks). One home, mirroring zenoh-pico's
     /// adjacent copies at both the admit and refresh sites
     /// (multicast/rx.c:388-394 / 453-456).
-    fn seed_from_join(&mut self, baseline: JoinBaseline) {
+    fn seed_from_join(
+        &mut self,
+        baseline: JoinBaseline,
+        qos_next_sns: Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]>,
+    ) {
         self.sn_mask = sn::mask_from_res(baseline.sn_res);
-        self.rx_sn_reliable = sn::decrement(self.sn_mask, baseline.next_sn_reliable);
-        self.rx_sn_best_effort = sn::decrement(self.sn_mask, baseline.next_sn_best_effort);
+        // R311y227 — a qos peer's JOIN `ext_qos` carries a DISTINCT next-SN pair
+        // per priority, so seed each conduit from its OWN origin (NOT the
+        // single-origin unicast seed — that would stale-drop a high-priority
+        // stream whose SN sits far from the DEFAULT's). A non-qos peer (or a
+        // non-`transport-qos` build, where `qos_next_sns` is always `None`) seeds
+        // only the DEFAULT conduit from the base 2-channel `next_sn` — identical
+        // to the pre-R311y227 2-SN seed.
+        #[cfg(feature = "transport-qos")]
+        if let Some(pairs) = qos_next_sns {
+            self.rx_sn.seed_per_priority(self.sn_mask, &pairs);
+            self.lease_ms = baseline.lease_ms;
+            return;
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        let _ = qos_next_sns;
+        self.rx_sn.seed_plain(
+            self.sn_mask,
+            baseline.next_sn_reliable,
+            baseline.next_sn_best_effort,
+        );
         self.lease_ms = baseline.lease_ms;
     }
 
@@ -499,8 +525,7 @@ impl PeerSlot {
         self.last_seen_ms = 0;
         self.lease_ms = 0;
         self.sn_mask = 0;
-        self.rx_sn_reliable = 0;
-        self.rx_sn_best_effort = 0;
+        self.rx_sn = crate::sn::MulticastRxConduits::default();
         // §5.21 routing-namespace — drop this peer's blocked-id / incomplete-alias
         // correlation state with the slot so a recycled index can never inherit a
         // dead peer's namespace ingress state (the same recycle-safety the SN /
@@ -929,11 +954,12 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// (zenoh-pico re-copies `_sn_rx_sns` AND `_lease` from every JOIN,
     /// multicast/rx.c:453-456 — the announcer's advertisement is
     /// authoritative). `now_ms` is the runtime monotonic clock.
-    pub fn ingest_join(
+    pub fn ingest_join_qos(
         &mut self,
         zid: &[u8],
         src: SocketAddr,
         baseline: JoinBaseline,
+        qos_next_sns: Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]>,
         now_ms: u64,
     ) -> JoinOutcome {
         if self.session_state() != SessionFsmMulticastState::Running {
@@ -982,7 +1008,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 self.peers[idx].remote_subs.clear();
             }
             self.peers[idx].zid = Some(copy_zid(zid));
-            self.peers[idx].seed_from_join(baseline);
+            self.peers[idx].seed_from_join(baseline, qos_next_sns);
             // §5.21 router-multicast-faces (I3b) — refresh the peer's role from
             // its latest JOIN (a peer's whatami is stable, but this keeps the DR
             // candidate set correct even across a same-slot zid reuse).
@@ -1004,7 +1030,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         self.peers[idx].src = Some(src);
         self.peers[idx].zid = Some(copy_zid(zid));
         self.peers[idx].last_seen_ms = now_ms;
-        self.peers[idx].seed_from_join(baseline);
+        self.peers[idx].seed_from_join(baseline, qos_next_sns);
         // §5.21 router-multicast-faces (I3b) — record the newly-admitted peer's
         // node role for the on-group Designated-Router election.
         #[cfg(feature = "multicast-declarations")]
@@ -1018,6 +1044,21 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             .engine
             .process_event(MulticastPeerEvent::PeerActivated);
         JoinOutcome::Admitted
+    }
+
+    /// The DEFAULT-band `ingest_join` (no per-priority QoS advertisement) — the
+    /// non-qos entry, delegating to [`Self::ingest_join_qos`] with `None`. The
+    /// whole pre-R311y227 surface, the MCU non-qos loop, and the tests use this;
+    /// only the qos RX classifier ([`crate::multicast_rx`]) parses a JOIN
+    /// `ext_qos` and passes the decoded per-priority next-SNs to `ingest_join_qos`.
+    pub fn ingest_join(
+        &mut self,
+        zid: &[u8],
+        src: SocketAddr,
+        baseline: JoinBaseline,
+        now_ms: u64,
+    ) -> JoinOutcome {
+        self.ingest_join_qos(zid, src, baseline, None, now_ms)
     }
 
     /// Admit one inbound data Frame from the peer at source address `src`
@@ -1038,6 +1079,31 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         frame_sn: u64,
         now_ms: u64,
     ) -> FrameIngest {
+        self.ingest_frame_by_src_qos(
+            src,
+            crate::qos::Priority::DEFAULT,
+            reliable,
+            frame_sn,
+            now_ms,
+        )
+    }
+
+    /// R311y227 — the priority-carrying twin of [`Self::ingest_frame_by_src`]: the
+    /// frame is admitted against the peer's `(priority, channel)` conduit (the
+    /// per-priority SN gate a qos peer's per-conduit streams need — zenoh
+    /// `peer.priority_rx[priority]`, multicast/rx.rs). `priority` is the frame's
+    /// decoded `ext_qos` band ([`crate::multicast_rx`]); DEFAULT (the wrapper's
+    /// value, and every non-qos frame's decoded band) selects the single DEFAULT
+    /// conduit, byte-identical to the pre-R311y227 2-channel gate. Under a
+    /// non-`transport-qos` build `priority` is ignored (one conduit).
+    pub fn ingest_frame_by_src_qos(
+        &mut self,
+        src: SocketAddr,
+        priority: crate::qos::Priority,
+        reliable: bool,
+        frame_sn: u64,
+        now_ms: u64,
+    ) -> FrameIngest {
         if self.session_state() != SessionFsmMulticastState::Running {
             return FrameIngest::SessionNotRunning;
         }
@@ -1048,18 +1114,9 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         // Liveness before validity (pico `_received = true` precedes the
         // SN gate): any frame from a known address refreshes the lease.
         slot.last_seen_ms = now_ms;
-        let last = if reliable {
-            slot.rx_sn_reliable
-        } else {
-            slot.rx_sn_best_effort
-        };
-        if !sn::precedes(slot.sn_mask, last, frame_sn) {
+        let mask = slot.sn_mask;
+        if !slot.rx_sn.admit(priority, mask, reliable, frame_sn) {
             return FrameIngest::OutOfOrder;
-        }
-        if reliable {
-            slot.rx_sn_reliable = frame_sn;
-        } else {
-            slot.rx_sn_best_effort = frame_sn;
         }
         FrameIngest::Admitted
     }
@@ -1088,6 +1145,30 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         frame_sn: u64,
         now_ms: u64,
     ) -> FragmentIngest {
+        self.ingest_fragment_by_src_qos(
+            src,
+            crate::qos::Priority::DEFAULT,
+            reliable,
+            frame_sn,
+            now_ms,
+        )
+    }
+
+    /// R311y227 — the priority-carrying twin of [`Self::ingest_fragment_by_src`]:
+    /// a fragment rides the SAME per-`(priority, channel)` conduit SN ring as a
+    /// data frame (zenoh-pico `_z_multicast_handle_fragment_inner`), so a qos
+    /// peer's fragment chain gates on its own priority conduit. `priority` is the
+    /// fragment's decoded `ext_qos`; DEFAULT selects the single DEFAULT conduit
+    /// (byte-identical to the pre-R311y227 gate; the reassembly chain key already
+    /// keys per priority via the decoded band the caller passes on).
+    pub fn ingest_fragment_by_src_qos(
+        &mut self,
+        src: SocketAddr,
+        priority: crate::qos::Priority,
+        reliable: bool,
+        frame_sn: u64,
+        now_ms: u64,
+    ) -> FragmentIngest {
         if self.session_state() != SessionFsmMulticastState::Running {
             return FragmentIngest::SessionNotRunning;
         }
@@ -1098,22 +1179,13 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         // Liveness before validity (pico `_received = true` precedes the
         // SN gate): any fragment from a known address refreshes the lease.
         slot.last_seen_ms = now_ms;
-        let last = if reliable {
-            slot.rx_sn_reliable
-        } else {
-            slot.rx_sn_best_effort
-        };
-        if !sn::precedes(slot.sn_mask, last, frame_sn) {
+        let mask = slot.sn_mask;
+        if !slot.rx_sn.admit(priority, mask, reliable, frame_sn) {
             return FragmentIngest::OutOfOrder { peer_idx: idx };
-        }
-        if reliable {
-            slot.rx_sn_reliable = frame_sn;
-        } else {
-            slot.rx_sn_best_effort = frame_sn;
         }
         FragmentIngest::Admitted {
             peer_idx: idx,
-            sn_mask: slot.sn_mask,
+            sn_mask: mask,
         }
     }
 
@@ -1234,8 +1306,12 @@ pub fn multicast_chain_key(peer_idx: usize) -> [u8; 4] {
 /// [`IterationEvent::ReassemblyDropped`]. An unknown-peer / not-running
 /// fragment is dropped silently (pico logs and moves on). Alloc-gated
 /// like the observer surface it fans into ([`crate::driver_loop`]).
+/// The DEFAULT-band fragment ingest (no per-priority QoS conduit) — the non-qos
+/// entry, delegating to [`ingest_multicast_fragment_qos`] with `Priority::DEFAULT`.
+/// The pre-R311y227 surface + the tests use this; only the qos RX classifier
+/// ([`crate::multicast_rx`]) passes the fragment's decoded band.
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
-#[allow(clippy::too_many_arguments)] // the decoded fragment's wire fields ride flat, mirroring report_outcome_reassembling's outcome fields
+#[allow(clippy::too_many_arguments)]
 pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, const CAP: usize, F>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
@@ -1249,23 +1325,59 @@ pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, con
 ) where
     F: FnMut(IterationEvent<'_>),
 {
-    let (peer_idx, sn_mask) = match dispatcher.ingest_fragment_by_src(src, reliable, sn, now_ms) {
-        FragmentIngest::Admitted { peer_idx, sn_mask } => (peer_idx, sn_mask),
-        FragmentIngest::OutOfOrder { peer_idx } => {
-            // The rejected channel's in-progress chain must never complete
-            // from mixed generations (pico clears the dbuf + state on an
-            // out-of-order fragment, multicast/rx.c).
-            // Multicast QoS conduits are deferred (R311y215 step 8), so the
-            // chain key uses DEFAULT priority.
-            reasm.abort_channel(
-                &multicast_chain_key(peer_idx),
-                crate::qos::Priority::DEFAULT,
-                reliable,
-            );
-            return;
-        }
-        FragmentIngest::UnknownPeer | FragmentIngest::SessionNotRunning => return,
-    };
+    ingest_multicast_fragment_qos(
+        dispatcher,
+        reasm,
+        src,
+        reliable,
+        sn,
+        more,
+        crate::qos::Priority::DEFAULT,
+        payload,
+        now_ms,
+        on_event,
+    )
+}
+
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[allow(clippy::too_many_arguments)] // the decoded fragment's wire fields ride flat, mirroring report_outcome_reassembling's outcome fields
+pub fn ingest_multicast_fragment_qos<
+    const MAX_PEERS: usize,
+    const SLOTS: usize,
+    const CAP: usize,
+    F,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+    src: SocketAddr,
+    reliable: bool,
+    sn: u64,
+    more: bool,
+    priority: crate::qos::Priority,
+    payload: &[u8],
+    now_ms: u64,
+    on_event: &mut F,
+) where
+    F: FnMut(IterationEvent<'_>),
+{
+    // R311y227 — a qos peer's oversize frame fragments ride its per-`priority`
+    // conduit SN ring (the SAME conduit the whole-frame gate uses); admit against
+    // it, and key the reassembly chain by that priority (the Router already keys
+    // per `(peer, reliable, priority)`) so two priorities' chains never collide.
+    // DEFAULT for a non-qos fragment — byte-identical to the pre-R311y227 gate.
+    let (peer_idx, sn_mask) =
+        match dispatcher.ingest_fragment_by_src_qos(src, priority, reliable, sn, now_ms) {
+            FragmentIngest::Admitted { peer_idx, sn_mask } => (peer_idx, sn_mask),
+            FragmentIngest::OutOfOrder { peer_idx } => {
+                // The rejected channel's in-progress chain must never complete
+                // from mixed generations (pico clears the dbuf + state on an
+                // out-of-order fragment, multicast/rx.c). Abort the SAME
+                // `(peer, priority, reliable)` chain the fragment rode.
+                reasm.abort_channel(&multicast_chain_key(peer_idx), priority, reliable);
+                return;
+            }
+            FragmentIngest::UnknownPeer | FragmentIngest::SessionNotRunning => return,
+        };
     let key = multicast_chain_key(peer_idx);
     let mut completed: Option<DriverLoopOutcome> = None;
     let ingest_outcome = reasm.ingest(
@@ -1275,21 +1387,18 @@ pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, con
             sn,
             more: u8::from(more),
             payload,
-            // Multicast QoS conduits are deferred (R311y215 step 8): DEFAULT.
-            priority: crate::qos::Priority::DEFAULT,
+            // R311y227 — the fragment's decoded band keys the reassembly chain per
+            // `(peer, reliable, priority)`, so a qos peer's two-priority oversize
+            // frames reassemble on independent chains. DEFAULT for a non-qos peer.
+            priority,
         },
         sn_mask,
         now_ms,
         |msg| {
-            // Multicast QoS conduits are deferred (R311y215 step 8): the chain
-            // key is DEFAULT (above), so the reassembled outcome carries DEFAULT
-            // too — consistent with the single-conduit multicast SN gate.
-            completed = Some(reassembled_frame_outcome(
-                reliable,
-                sn,
-                crate::qos::Priority::DEFAULT,
-                msg,
-            ));
+            // R311y227 — the reassembled outcome carries the chain's priority (the
+            // same band the fragments rode), surfaced to the delivery outcome just
+            // like the whole-frame path. DEFAULT for a non-qos chain.
+            completed = Some(reassembled_frame_outcome(reliable, sn, priority, msg));
         },
     );
     if let Some(o) = completed {
@@ -1341,9 +1450,22 @@ pub fn abort_peer_chains<const SLOTS: usize, const CAP: usize>(
     peer_idx: usize,
 ) {
     let key = multicast_chain_key(peer_idx);
-    // Multicast QoS conduits are deferred (R311y215 step 8): DEFAULT.
-    reasm.abort_channel(&key, crate::qos::Priority::DEFAULT, true);
-    reasm.abort_channel(&key, crate::qos::Priority::DEFAULT, false);
+    // R311y227 — a qos peer can hold an in-flight chain on ANY priority conduit,
+    // so abort every `(priority, reliable)` chain before the slot recycles (else
+    // a recycled index inherits a dead qos peer's non-DEFAULT chain). A non-qos
+    // peer only ever fills the DEFAULT conduit, so the extra aborts are no-ops;
+    // without `transport-qos` there is only the DEFAULT conduit to clear.
+    #[cfg(feature = "transport-qos")]
+    for i in 0..crate::qos::Priority::NUM as u8 {
+        let p = crate::qos::Priority::from_wire(i);
+        reasm.abort_channel(&key, p, true);
+        reasm.abort_channel(&key, p, false);
+    }
+    #[cfg(not(feature = "transport-qos"))]
+    {
+        reasm.abort_channel(&key, crate::qos::Priority::DEFAULT, true);
+        reasm.abort_channel(&key, crate::qos::Priority::DEFAULT, false);
+    }
 }
 
 /// Copy a peer ZID into the fixed `([u8; ZID_MAX], len)` key form, clamping

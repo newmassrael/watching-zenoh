@@ -835,6 +835,7 @@ mod tests {
                 crate::push_build::build_push_literal("foo/bar", b"v").unwrap(),
             ),
             reliable: true,
+            priority: crate::qos::Priority::DEFAULT,
         };
         apply_egress_multicast_item(&n, &mut item).unwrap();
         let MulticastTxItem::Push { push, .. } = &item else {

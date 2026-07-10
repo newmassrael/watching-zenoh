@@ -471,11 +471,36 @@ pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bo
 /// `Frame::encode` does not emit.
 #[cfg(feature = "codec-push")]
 pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u8> {
+    // DEFAULT anchor: no Frame ext_qos, byte-identical to every pre-QoS caller
+    // (the ~10 existing call sites + all layer3 byte-equiv tests). The multicast
+    // per-priority TX emit uses the `_qos` twin below (R311y227); keeping this
+    // ext_qos-free preserves the anchor exactly (the y226 build_push_literal
+    // idiom — the DEFAULT fast path stays the byte-verified reference).
+    encode_frame_with_push_qos(sn, push, reliable, None)
+}
+
+/// R311y227 — the QoS-carrying twin of [`encode_frame_with_push`]: writes the
+/// Frame `ext_qos` (id 0x1, header 0x31, low-3-bit priority — [`begin_frame`] /
+/// [`write_qos_ext`]) when `ext_qos` is `Some(non-DEFAULT priority)`, else
+/// byte-identical to the anchor. The multicast per-priority TX emit
+/// ([`crate::multicast_tx::multicast_tx_emit`]) passes the clamped conduit
+/// priority; `None` (DEFAULT / non-qos group) carries no ext, so a pico /
+/// non-qos receiver never decodes an "Unknown priority" frame (zenoh
+/// `io/zenoh-transport/src/multicast/rx.rs` bails on a non-DEFAULT frame at a
+/// non-qos peer). The unicast TX writes the same ext through its batch writer
+/// ([`crate::session_actions`]), not this helper.
+#[cfg(feature = "codec-push")]
+pub fn encode_frame_with_push_qos(
+    sn: u64,
+    push: PushOwned,
+    reliable: bool,
+    ext_qos: Option<Priority>,
+) -> Vec<u8> {
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
         Push::MAX_ENCODED_BYTES,
-        None,
+        ext_qos,
         push_body(&push),
     )
 }
@@ -768,21 +793,35 @@ pub fn multicast_frame_or_fragments(
     sn: u64,
     reliable: bool,
     mtu: usize,
-    tx_sn: &mut crate::sn::TxSn,
+    tx_sn: &mut crate::sn::MulticastTxConduits,
+    ext_qos: Option<Priority>,
 ) -> Vec<Vec<u8>> {
-    // Multicast QoS conduits are deferred (a separate PeerSlot model, R311y215
-    // step 8), so the multicast re-frame carries no ext_qos: `qos = false` / `None`.
+    // R311y227 — a qos multicast frame carries its `ext_qos` (id 0x1) exactly as
+    // the unicast per-priority path does: the fragment re-frame re-emits that ext
+    // on EVERY fragment and slices the frame body PAST it ([`frame_wire_body`]),
+    // and the follow-on SNs mint on the SAME priority conduit the head frame drew
+    // (`ext_qos.unwrap_or(DEFAULT)`) so a fragment chain never splits across
+    // conduits (the per-(priority,reliability) reassembly key stays intact). A
+    // `None` chain (DEFAULT / non-qos group) is byte-identical to the pre-qos
+    // re-frame — the pico-faithful 2-channel path, where `tx_sn` collapses to the
+    // single conduit and `mint` ignores the priority.
     #[cfg(feature = "transport-fragmentation")]
     if frame.len() > mtu {
-        let body = frame_wire_body(&frame, sn, None);
-        let count = fragment_count(body.len(), mtu, false);
+        let body = frame_wire_body(&frame, sn, ext_qos);
+        // `fragment_count` / `fragment_body` size chunks against the per-fragment
+        // ext_qos width iff a qos chain; `ext_qos.is_some()` is that flag, and it
+        // is always false without `transport-qos` (the emit passes `None`).
+        let qos = ext_qos.is_some();
+        let count = fragment_count(body.len(), mtu, qos);
+        let mint_priority = ext_qos.unwrap_or(Priority::DEFAULT);
+        let mask = tx_sn.mask();
         for _ in 1..count {
-            tx_sn.mint(reliable);
+            tx_sn.mint(mint_priority, reliable);
         }
-        return fragment_body(body, reliable, mtu, sn, tx_sn.mask, None);
+        return fragment_body(body, reliable, mtu, sn, mask, ext_qos);
     }
     #[cfg(not(feature = "transport-fragmentation"))]
-    let _ = (sn, reliable, mtu, tx_sn);
+    let _ = (sn, reliable, mtu, tx_sn, ext_qos);
     alloc::vec![frame]
 }
 
@@ -1279,13 +1318,16 @@ mod fragment_tests {
     /// mints nothing beyond the frame SN the caller already drew.
     #[test]
     fn multicast_frame_passes_through_when_it_fits() {
-        let mut tx_sn = crate::sn::TxSn::new(crate::sn::mask_from_res(0x02));
-        let sn = tx_sn.mint(true);
+        use crate::qos::Priority;
+        let mut tx_sn = crate::sn::MulticastTxConduits::new(crate::sn::mask_from_res(0x02));
+        let sn = tx_sn.mint(Priority::DEFAULT, true);
         let mut frame = Vec::new();
         super::begin_frame(&mut frame, sn, super::frame_flags(true), None);
         frame.extend_from_slice(&[0xCD; 16]);
-        let after_mint = tx_sn;
-        let out = super::multicast_frame_or_fragments(frame.clone(), sn, true, 64, &mut tx_sn);
+        let after_mint = tx_sn.clone();
+        // DEFAULT / non-qos re-frame: ext_qos = None, byte-identical to pre-qos.
+        let out =
+            super::multicast_frame_or_fragments(frame.clone(), sn, true, 64, &mut tx_sn, None);
         assert_eq!(out, alloc::vec![frame], "a fitting frame passes through");
         assert_eq!(tx_sn, after_mint, "no follow-on mint for a fitting frame");
     }
@@ -1298,25 +1340,28 @@ mod fragment_tests {
     /// whose follow-on mints advance the channel to one past the chain.
     #[test]
     fn multicast_oversize_chains_from_the_minted_frame_sn() {
+        use crate::qos::Priority;
         let mtu = 64usize;
-        let mut tx_sn = crate::sn::TxSn::new(crate::sn::mask_from_res(0x02));
-        tx_sn.next_reliable = 200; // 2-byte VLE: pins the body-offset slice
-        let sn = tx_sn.mint(true);
+        let mut tx_sn = crate::sn::MulticastTxConduits::new(crate::sn::mask_from_res(0x02));
+        tx_sn.default_conduit_mut().next_reliable = 200; // 2-byte VLE: pins the body-offset slice
+        let sn = tx_sn.mint(Priority::DEFAULT, true);
         let body: Vec<u8> = (0..200u32).map(|i| (i * 3) as u8).collect();
         let mut frame = Vec::new();
         super::begin_frame(&mut frame, sn, super::frame_flags(true), None);
         frame.extend_from_slice(&body);
 
-        let frames = super::multicast_frame_or_fragments(frame, sn, true, mtu, &mut tx_sn);
+        let mask = tx_sn.mask();
+        let frames = super::multicast_frame_or_fragments(frame, sn, true, mtu, &mut tx_sn, None);
         assert_eq!(frames.len(), fragment_count(body.len(), mtu, false));
         assert!(frames.len() > 1, "200 bytes at mtu 64 must fragment");
         assert_eq!(
-            tx_sn.next_reliable,
-            (sn + frames.len() as u64) & tx_sn.mask,
+            tx_sn.advertise_default().next_reliable,
+            (sn + frames.len() as u64) & mask,
             "the chain consumes count SNs total (frame mint + count-1 follow-ons)",
         );
         assert_eq!(
-            tx_sn.next_best_effort, 0,
+            tx_sn.advertise_default().next_best_effort,
+            0,
             "a reliable chain leaves the other channel untouched",
         );
 
@@ -1338,7 +1383,7 @@ mod fragment_tests {
             assert_eq!(frag_sn, expect_sn, "fragment {i} SN must walk the ring");
             assert_eq!(more, i + 1 < frames.len(), "M on every fragment but last");
             reassembled.extend_from_slice(&payload);
-            expect_sn = crate::sn::increment(tx_sn.mask, expect_sn);
+            expect_sn = crate::sn::increment(mask, expect_sn);
         }
         assert_eq!(reassembled, body, "payloads concatenate back to the body");
     }

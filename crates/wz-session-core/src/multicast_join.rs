@@ -32,7 +32,22 @@ use crate::multicast_params::{
     pack_res_cbyte, unpack_res_cbyte, MulticastParams, PROTOCOL_DEFAULT_BATCH_SIZE,
     PROTOCOL_DEFAULT_RESOLUTION,
 };
-use crate::sn::TxSn;
+use crate::sn::MulticastTxConduits;
+
+// R311y227 — the JOIN QoS-SN extension header byte: id `0x1` | M (mandatory,
+// `0x10`) | ENC_ZBUF (`0x40`) = `0x51` — byte-identical to zenoh-pico
+// `_Z_MSG_EXT_ID_JOIN_QOS` (protocol/ext.h:46) and zenoh's `join::ext::QoS::ID`.
+// A qos JOIN sets the transport-message `Z` header flag and appends this ZBUF ext
+// (`[0x51][VLE(len)][Priority::NUM * 2 VLE SNs]`) after the base body. wz emits
+// ONLY this JOIN ext, so it never carries the ext-chain MORE bit (`0x80`); a peer
+// that chains a Patch ext after it (pico, when fragmentation is on) still decodes
+// here because the QoS ext is emitted FIRST (transport.c:71 before :90).
+#[cfg(feature = "transport-qos")]
+const JOIN_QOS_EXT_HEADER: u8 = 0x51;
+/// The ext-id mask (`_Z_EXT_FULL_ID_MASK`, ext.h:30) — strips the chain-MORE bit
+/// so a chained (`0xD1`) and an un-chained (`0x51`) QoS ext compare equal.
+#[cfg(feature = "transport-qos")]
+const EXT_FULL_ID_MASK: u8 = 0x7F;
 
 /// Frame a multicast JOIN datagram for `params`:
 /// `[T_MID_JOIN][version][cbyte][zid][S: res-cbyte + batch][lease vle]`
@@ -58,7 +73,7 @@ use crate::sn::TxSn;
 /// A1c — the JOIN advertises the LIVE per-channel `next_sn` from `tx_sn`
 /// (the §3.2 `init_rx_seq` contract: receivers seed their RX baseline one
 /// before these, so the next data frame this node mints is admitted).
-pub fn encode_join(params: &MulticastParams, tx_sn: &TxSn) -> Vec<u8> {
+pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec<u8> {
     let zid = &params.zid;
     let mut join = Join::new();
     join.version = params.version;
@@ -76,8 +91,29 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &TxSn) -> Vec<u8> {
     // the unicast OPEN encoder; both carry the same `_Z_FLAG_T_*_T` rule.
     let (lease_in_seconds, wire_lease) = crate::lease::lease_to_wire(params.lease_ms);
     join.lease = wire_lease;
-    join.next_sn_reliable = tx_sn.next_reliable;
-    join.next_sn_best_effort = tx_sn.next_best_effort;
+    // A1c — the base `next_sn` is the DEFAULT (Data) conduit's LIVE SNs on a
+    // non-qos beacon. R311y227 — a qos beacon writes the `{0, 0}` DECOY here
+    // (zenoh `multicast/link.rs:487` sets `next_sn = PrioritySn::DEFAULT` when the
+    // real per-priority SNs ride the `ext_qos`), so every qos decoder seeds from
+    // the ext and IGNORES this base; a non-qos peer rejects the qos JOIN outright
+    // (group-agreed), so the decoy is never consumed.
+    let default_conduit = tx_sn.advertise_default();
+    #[cfg(feature = "transport-qos")]
+    let (base_r, base_be) = if params.is_qos {
+        (0, 0)
+    } else {
+        (
+            default_conduit.next_reliable,
+            default_conduit.next_best_effort,
+        )
+    };
+    #[cfg(not(feature = "transport-qos"))]
+    let (base_r, base_be) = (
+        default_conduit.next_reliable,
+        default_conduit.next_best_effort,
+    );
+    join.next_sn_reliable = base_r;
+    join.next_sn_best_effort = base_be;
     let body = join.encode_to_vec(u8::from(advertises));
 
     let mut dgram = Vec::with_capacity(1 + body.len());
@@ -89,9 +125,77 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &TxSn) -> Vec<u8> {
     if lease_in_seconds {
         flags |= wire_const::FLAG_T_JOIN_T;
     }
+    // R311y227 — the per-priority QoS-SN advertisement rides a JOIN transport
+    // extension, so the `Z` (extensions-follow) header bit is set when this node
+    // offers qos on the group.
+    #[cfg(feature = "transport-qos")]
+    if params.is_qos {
+        flags |= wire_const::FLAG_T_Z;
+    }
     dgram.push(flags | wire_const::T_MID_JOIN);
     dgram.extend_from_slice(&body);
+    #[cfg(feature = "transport-qos")]
+    if params.is_qos {
+        write_join_qos_ext(&mut dgram, &tx_sn.advertise_per_priority());
+    }
     dgram
+}
+
+/// R311y227 — append the JOIN QoS-SN extension: `[0x51][VLE(len)][NUM*2 VLE SNs]`
+/// (the zenoh `join::ext::QoS` / pico `_Z_MSG_EXT_ID_JOIN_QOS` ZBUF). The body is
+/// the LIVE per-priority `next_sn` each conduit will mint (`reliable` then
+/// `best_effort` per `Priority`, ascending), so a receiver seeds its per-priority
+/// RX baseline one before each. The header byte carries no chain-MORE bit (wz
+/// emits only this JOIN ext); the ZBUF is VLE-length-prefixed
+/// ([`crate::vle::write_zbuf`], the Zenoh080 ZBuf framing / pico
+/// `_z_zsize_encode(len)`).
+#[cfg(feature = "transport-qos")]
+fn write_join_qos_ext(out: &mut Vec<u8>, conduits: &[crate::sn::TxSn; crate::qos::Priority::NUM]) {
+    out.push(JOIN_QOS_EXT_HEADER);
+    let mut body = Vec::new();
+    for c in conduits.iter() {
+        crate::vle::encode_vle_u64_into(&mut body, c.next_reliable);
+        crate::vle::encode_vle_u64_into(&mut body, c.next_best_effort);
+    }
+    crate::vle::write_zbuf(out, &body);
+}
+
+/// R311y227 — decode the JOIN QoS-SN extension into the announcer's per-priority
+/// next-SN pairs, or `None` when the JOIN is non-qos (no `Z` header flag, or the
+/// first ext is not [`JOIN_QOS_EXT_HEADER`]). The base body is re-decoded to
+/// position the cursor at the ext chain (cheap; the SCXML `Join` codec has no ext
+/// awareness, so the trailer is hand-parsed here — the multicast twin of the
+/// frame/fragment `ext_qos` hand-roll in `frame_encode`, mesh-path-B: no new
+/// `sce:*`). Only the leading QoS ext is honoured (pico emits it before any Patch
+/// ext, transport.c:71/90); a chained Patch ext after it is not needed here.
+#[cfg(feature = "transport-qos")]
+pub fn decode_join_qos(
+    bytes: &[u8],
+) -> Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]> {
+    let header = *bytes.first()?;
+    if header & 0x1f != wire_const::T_MID_JOIN {
+        return None;
+    }
+    if header & wire_const::FLAG_T_Z == 0 {
+        return None; // no extension chain -> non-qos JOIN
+    }
+    let s = u8::from(header & wire_const::FLAG_T_JOIN_S != 0);
+    let mut cursor = SceCursor::new(&bytes[1..]);
+    // Re-decode the base body to advance the cursor to the extension chain.
+    Join::decode(&mut cursor, s).ok()?;
+    let ext_header = *cursor.peek_slice(1).ok()?.first()?;
+    cursor.advance(1).ok()?;
+    if ext_header & EXT_FULL_ID_MASK != JOIN_QOS_EXT_HEADER {
+        return None; // leading ext is not the QoS-SN advertisement
+    }
+    let ext_body = crate::vle::read_zbuf(&mut cursor)?;
+    let mut inner = SceCursor::new(&ext_body);
+    let mut pairs = [crate::sn::MulticastRxPair::default(); crate::qos::Priority::NUM];
+    for p in pairs.iter_mut() {
+        p.reliable = inner.read_vle_u64().ok()?;
+        p.best_effort = inner.read_vle_u64().ok()?;
+    }
+    Some(pairs)
 }
 
 /// If `bytes` is a multicast JOIN datagram, decode its full body (a
@@ -205,13 +309,17 @@ mod tests {
             seq_num_res: 0x02,
             req_id_res: 0x02,
             batch_size: 2_048,
+            is_qos: false,
         }
     }
 
     /// A fresh announcer's JOIN datagram (both advertised next SNs = 0) —
     /// the wire-shape fixtures only need SOME valid beacon.
     fn join0(p: &MulticastParams) -> Vec<u8> {
-        encode_join(p, &TxSn::new(sn::mask_from_res(p.seq_num_res)))
+        encode_join(
+            p,
+            &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
+        )
     }
 
     /// A params bundle at the PROTOCOL defaults (8192 / 0x02 / 0x02) —
@@ -364,6 +472,71 @@ mod tests {
         let dgram = [wz_codecs::wire_const::T_MID_KEEP_ALIVE, 0x00];
         assert_eq!(decode_join_zid(&dgram), None);
         assert_eq!(decode_join_zid(&[]), None);
+    }
+
+    /// R311y227 — the qos JOIN round-trips its per-priority next-SN advertisement:
+    /// `encode_join` sets the Z header flag + the `{0,0}` base decoy + the QoS ext
+    /// (`0x51` ZBUF), and `decode_join_qos` recovers all `Priority::NUM` DISTINCT
+    /// pairs exactly. A non-qos JOIN clears Z and carries no qos ext.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn encode_join_qos_round_trips_per_priority_sns() {
+        use crate::qos::Priority;
+        let mut p = params(&[0x01, 0x02, 0x03, 0x04]);
+        p.is_qos = true;
+        let mut tx = MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res));
+        // Mint a DISTINCT number of reliable SNs per priority so the round-trip
+        // proves each conduit's own advertisement (not a shared origin).
+        for pri in [
+            Priority::Control,
+            Priority::RealTime,
+            Priority::Data,
+            Priority::Background,
+        ] {
+            for _ in 0..=(pri as usize) {
+                tx.mint(pri, true);
+            }
+        }
+        let expected = tx.advertise_per_priority();
+        let dgram = encode_join(&p, &tx);
+        assert_ne!(
+            dgram[0] & wire_const::FLAG_T_Z,
+            0,
+            "a qos JOIN sets the Z (extensions-follow) header flag"
+        );
+        let base = decode_join(&dgram).expect("base body decodes");
+        assert_eq!(
+            (base.next_sn_reliable, base.next_sn_best_effort),
+            (0, 0),
+            "the base next_sn is the {{0,0}} decoy under qos"
+        );
+        let pairs = decode_join_qos(&dgram).expect("the qos ext decodes");
+        for i in 0..Priority::NUM {
+            assert_eq!(
+                pairs[i].reliable, expected[i].next_reliable,
+                "conduit {i} reliable SN round-trips"
+            );
+            assert_eq!(
+                pairs[i].best_effort, expected[i].next_best_effort,
+                "conduit {i} best-effort SN round-trips"
+            );
+        }
+        // A non-qos JOIN clears Z and carries no qos ext.
+        let mut p2 = params(&[0x01, 0x02, 0x03, 0x04]);
+        p2.is_qos = false;
+        let dgram2 = encode_join(
+            &p2,
+            &MulticastTxConduits::new(sn::mask_from_res(p2.seq_num_res)),
+        );
+        assert_eq!(
+            dgram2[0] & wire_const::FLAG_T_Z,
+            0,
+            "a non-qos JOIN clears the Z header flag"
+        );
+        assert!(
+            decode_join_qos(&dgram2).is_none(),
+            "a non-qos JOIN carries no qos ext"
+        );
     }
 
     /// A richer JOIN with the S flag set (sn_res + batch_size present) still

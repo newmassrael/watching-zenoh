@@ -232,7 +232,16 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
                 // variants Response / ResponseFinal / Oam are emitted by the
                 // drive-loop MulticastReplySink, never routed here).
                 NetworkMessage::Push(push) => {
-                    let _ = payload.tx.send(MulticastTxItem::Push { push, reliable });
+                    let _ = payload.tx.send(MulticastTxItem::Push {
+                        push,
+                        reliable,
+                        // C1 foundation: the multicast Session send-seam carries a
+                        // DEFAULT frame band (the app priority rides the Push's own
+                        // qos ext). The per-priority conduit band is threaded when
+                        // this seam gains a `priority` param at activation; DEFAULT
+                        // keeps it byte-identical until then.
+                        priority: wz_session_core::qos::Priority::DEFAULT,
+                    });
                     Ok(())
                 }
                 _ => Err(SendWireError::UnsupportedVariant),

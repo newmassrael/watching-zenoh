@@ -290,5 +290,6 @@ fn params(zid: &[u8]) -> MulticastParams {
         seq_num_res: 0x02,
         req_id_res: 0x02,
         batch_size: 2_048,
+        is_qos: false,
     }
 }

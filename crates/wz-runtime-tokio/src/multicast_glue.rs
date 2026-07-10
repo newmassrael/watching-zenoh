@@ -125,7 +125,7 @@ pub use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::multicast_tx::multicast_tx_emit;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
-use wz_session_core::sn::{self, TxSn};
+use wz_session_core::sn::{self, MulticastTxConduits};
 
 use wz_runtime_core::TimeSource;
 
@@ -338,7 +338,7 @@ where
         )),
         allow(unused_mut)
     )]
-    let mut tx_sn = TxSn::new(sn::mask_from_res(params.seq_num_res));
+    let mut tx_sn = MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res));
     // R311kn — the loop owns the multicast reassembly Router: per-peer
     // fragment chains keyed by the peer's pool-slot index (zenoh-pico's
     // per-entry dbuf pair, generalised to the bounded §5.M slot pool).
@@ -377,6 +377,10 @@ where
         // JoinEmit: multicast the self-advertising JOIN beacon when due.
         let now = clock.now_monotonic_ms();
         if now >= next_join_ms {
+            // R311y227 — the non-qos JOIN advertises the DEFAULT conduit's live
+            // SNs (the single-conduit beacon); a qos group additionally carries
+            // the per-priority `ext_qos` advertisement (C2). `advertise_default`
+            // is the DEFAULT (Data) conduit either way.
             let dgram = encode_join(params, &tx_sn);
             let frame = TxFrame { bytes: &dgram };
             // Best-effort: a failed multicast send is non-fatal (the next
@@ -602,6 +606,7 @@ pub fn spawn_router_mcast_egress(
         seq_num_res: 0x02,
         req_id_res: 0x02,
         batch_size: 2_048,
+        is_qos: false,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -728,6 +733,7 @@ pub fn spawn_router_mcast_ingress(
         seq_num_res: 0x02,
         req_id_res: 0x02,
         batch_size: 2_048,
+        is_qos: false,
     };
 
     let (ingress_tx, ingress_rx) = tokio::sync::mpsc::unbounded_channel::<McastIngressItem>();
@@ -863,13 +869,17 @@ mod tests {
             seq_num_res: 0x02,
             req_id_res: 0x02,
             batch_size: 2_048,
+            is_qos: false,
         }
     }
 
     /// A fresh announcer's JOIN datagram (both advertised next SNs = 0) —
     /// the membership fixtures only need SOME valid beacon.
     fn join0(p: &MulticastParams) -> Vec<u8> {
-        encode_join(p, &TxSn::new(sn::mask_from_res(p.seq_num_res)))
+        encode_join(
+            p,
+            &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
+        )
     }
 
     /// A publish-free outbound seam: the sender is dropped immediately, so
@@ -1947,8 +1957,12 @@ mod tests {
             // eviction abort, B's poisoned head (SN 5) would make C's SN 0
             // continuation non-consecutive and abort C's chain instead.
             let join_b = params(&peer_b);
-            let mut b_tx = TxSn::new(sn::mask_from_res(join_b.seq_num_res));
-            b_tx.next_reliable = 5; // B advertises next_sn_reliable = 5
+            let mut b_tx = MulticastTxConduits::new(sn::mask_from_res(join_b.seq_num_res));
+            // B advertises next_sn_reliable = 5: mint 5 on the DEFAULT reliable
+            // conduit (the crate-private field setter is not reachable cross-crate).
+            for _ in 0..5 {
+                b_tx.mint(wz_session_core::qos::Priority::DEFAULT, true);
+            }
             let join_b_dgram = encode_join(&join_b, &b_tx);
 
             let mut driver = FakeDriver::with([

@@ -126,6 +126,21 @@ pub struct MulticastParams {
     /// exposes no MTU, so the budget alone governs and stays well under
     /// the 65507-byte UDP datagram ceiling at the default.)
     pub batch_size: u16,
+    /// R311y227 (transport-qos) — whether THIS node offers the per-priority QoS
+    /// conduit on the group: its JOIN carries the `ext_qos` advertisement
+    /// (`Box<[PrioritySn; NUM]>`, zenoh `Join.ext_qos`) and its data frames ride
+    /// the per-priority conduits with an on-frame `ext_qos`. `false` = the
+    /// pico-faithful 2-channel default (zenoh-pico multicast is ALWAYS non-qos —
+    /// its JOIN sends `_is_qos = false`, `src/transport/multicast/transport.c:125`),
+    /// byte-identical to the pre-QoS wire. Group-agreed (zenoh's multicast QoS is
+    /// a deployment-wide choice): a qos node emits qos frames a non-qos / pico
+    /// receiver would reject, so the JOIN validator refuses a qos/non-qos
+    /// MISMATCH (C2). The field is unconditional (a plain bool) but only ever
+    /// `true` under `transport-qos` — a build without the feature has no
+    /// per-priority conduit to offer, so the emit / JOIN paths keep it inert.
+    /// Sourced from `WzConfig.qos` at the drive-loop seam (C4), mirroring the
+    /// unicast `set_qos_offer`.
+    pub is_qos: bool,
 }
 
 impl MulticastParams {
