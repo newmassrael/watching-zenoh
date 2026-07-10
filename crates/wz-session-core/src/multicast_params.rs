@@ -138,8 +138,10 @@ pub struct MulticastParams {
     /// MISMATCH (C2). The field is unconditional (a plain bool) but only ever
     /// `true` under `transport-qos` — a build without the feature has no
     /// per-priority conduit to offer, so the emit / JOIN paths keep it inert.
-    /// Sourced from `WzConfig.qos` at the drive-loop seam (C4), mirroring the
-    /// unicast `set_qos_offer`.
+    /// TODAY every construction site hard-sets `false`, so the conduit is built
+    /// but DEFAULT-inert. The `WzConfig.qos -> this field` sourcing at the
+    /// drive-loop seam (mirroring the unicast `set_qos_offer`) is the R2
+    /// ACTIVATION follow-up — until it lands, `is_qos` never flips true.
     pub is_qos: bool,
 }
 
