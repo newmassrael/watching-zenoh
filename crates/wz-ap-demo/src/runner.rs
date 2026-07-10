@@ -2252,8 +2252,17 @@ pub(crate) async fn run_router_hat(
     listen: &str,
     dial_targets: &[String],
     connect_after: Option<(u64, Vec<String>)>,
+    // R311y232 (transport-qos ACTIVATION) — offer the per-priority multicast QoS
+    // conduit on the router's data-plane group (the `--multicast-qos` demo flag).
+    // Consumed only by the `router-multicast-faces` egress/ingress spawns below;
+    // a build without that face has no group to offer QoS on. Plain `bool` (not
+    // `transport-qos`-gated) so the run-mode signature stays feature-stable — the
+    // caller passes `false` when `transport-qos` is off.
+    multicast_qos: bool,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
+    #[cfg(not(feature = "router-multicast-faces"))]
+    let _ = multicast_qos;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::Zid;
@@ -2367,6 +2376,7 @@ pub(crate) async fn run_router_hat(
             MCAST_GROUP,
             MCAST_PORT,
             params.zid.clone(),
+            multicast_qos,
         );
         forwarder.attach_mcast_group(mcast_tx);
         log::info!(
@@ -2401,6 +2411,7 @@ pub(crate) async fn run_router_hat(
                 MCAST_GROUP,
                 MCAST_PORT,
                 params.zid.clone(),
+                multicast_qos,
             );
         log::info!(
             "wz-ap-demo router-hat: multicast ingress group {MCAST_GROUP}:{MCAST_PORT} \

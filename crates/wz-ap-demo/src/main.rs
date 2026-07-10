@@ -333,7 +333,31 @@ fn main() -> ExitCode {
                 }
                 None
             };
-            return run_router_hat_mode(router_hat_listen, dial_targets, connect_after);
+            // R311y232 (transport-qos ACTIVATION) — `--multicast-qos` (presence bool)
+            // offers the per-priority QoS conduit on the router's data-plane
+            // multicast group (the wz seam for zenoh `transport.multicast.qos.enabled`,
+            // default false, DISTINCT from the unicast `--qos` / `transport.unicast.qos`
+            // knob). Gated on `transport-qos` (no per-priority conduit compiles
+            // otherwise); a build without the feature ignores the flag and offers the
+            // pico-faithful 2-channel group.
+            #[cfg(feature = "transport-qos")]
+            let multicast_qos = rest.iter().any(|a| a == "--multicast-qos");
+            #[cfg(not(feature = "transport-qos"))]
+            let multicast_qos = {
+                if rest.iter().any(|a| a == "--multicast-qos") {
+                    eprintln!(
+                        "wz-ap-demo: --multicast-qos requires the `transport-qos` \
+                         feature; offering the non-QoS multicast group"
+                    );
+                }
+                false
+            };
+            return run_router_hat_mode(
+                router_hat_listen,
+                dial_targets,
+                connect_after,
+                multicast_qos,
+            );
         }
         #[cfg(not(feature = "router-hat-router"))]
         {
@@ -896,6 +920,7 @@ fn run_router_hat_mode(
     listen: String,
     dial_targets: Vec<String>,
     connect_after: Option<(u64, Vec<String>)>,
+    multicast_qos: bool,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -909,6 +934,7 @@ fn run_router_hat_mode(
         &listen,
         &dial_targets,
         connect_after,
+        multicast_qos,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

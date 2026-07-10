@@ -484,7 +484,9 @@ async fn router_egress_helper_reaches_group_subscriber() {
 
     // The router egress: the PRODUCTION helper spawns the group drive loop on its
     // own task and returns the sender `RouterForwarder::attach_mcast_group` holds.
-    let tx = spawn_router_mcast_egress(GROUP, HELPER_PORT, vec![0xAA; 4]);
+    // `qos = false`: this loopback witness pins the pico-faithful 2-channel group
+    // (the per-priority conduit is exercised by the dedicated qos witness, R311y232).
+    let tx = spawn_router_mcast_egress(GROUP, HELPER_PORT, vec![0xAA; 4], false);
 
     let fired_probe = fired.clone();
     let scenario = async move {

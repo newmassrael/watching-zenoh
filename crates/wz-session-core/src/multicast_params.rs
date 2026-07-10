@@ -138,10 +138,19 @@ pub struct MulticastParams {
     /// MISMATCH (C2). The field is unconditional (a plain bool) but only ever
     /// `true` under `transport-qos` — a build without the feature has no
     /// per-priority conduit to offer, so the emit / JOIN paths keep it inert.
-    /// TODAY every construction site hard-sets `false`, so the conduit is built
-    /// but DEFAULT-inert. The `WzConfig.qos -> this field` sourcing at the
-    /// drive-loop seam (mirroring the unicast `set_qos_offer`) is the R2
-    /// ACTIVATION follow-up — until it lands, `is_qos` never flips true.
+    /// R311y232 (ACTIVATION) — sourced at the transport spawn seam from the deploy's
+    /// multicast-QoS choice (the AP `spawn_router_mcast_egress` / `_ingress` `qos`
+    /// param, driven by the demo `--multicast-qos` flag; the MCU multicast_drive
+    /// stays `false`, no `transport-qos`). This is the wz analogue of zenoh
+    /// `transport.multicast.qos.enabled` — a knob DISTINCT from unicast:
+    /// `QoSMulticastConf` defaults `false` (commons/zenoh-config defaults.rs:234)
+    /// where `QoSUnicastConf` defaults `true`, and zenoh's multicast manager reads
+    /// `config.multicast.is_qos` on its own (multicast/establishment.rs:54,
+    /// manager.rs:40), NOT the unicast `is_qos`. So the multicast offer does NOT
+    /// reuse the unicast `WzConfig.qos` (an earlier ACTIVATION sketch's premise,
+    /// corrected by direct-read). Absent `transport-qos` the whole per-priority
+    /// conduit is elided, so the seam forces `false` and the wire stays the
+    /// pico-faithful 2-channel default.
     pub is_qos: bool,
 }
 

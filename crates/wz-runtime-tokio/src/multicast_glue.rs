@@ -582,6 +582,7 @@ pub fn spawn_router_mcast_egress(
     group: core::net::Ipv4Addr,
     port: u16,
     zid: Vec<u8>,
+    qos: bool,
 ) -> UnboundedSender<MulticastTxItem> {
     use core::net::{Ipv4Addr, SocketAddr};
 
@@ -606,7 +607,16 @@ pub fn spawn_router_mcast_egress(
         seq_num_res: 0x02,
         req_id_res: 0x02,
         batch_size: 2_048,
-        is_qos: false,
+        // R311y232 (transport-qos ACTIVATION) — the group's per-priority QoS offer,
+        // sourced from the deploy's `qos` choice (the demo `--multicast-qos` flag).
+        // This is the wz seam for zenoh `transport.multicast.qos.enabled` (default
+        // FALSE, `QoSMulticastConf`, commons/zenoh-config defaults.rs:234) — a knob
+        // DISTINCT from the unicast `transport.unicast.qos.enabled` (default TRUE):
+        // zenoh's multicast manager reads `config.multicast.is_qos` on its own
+        // (io/zenoh-transport multicast/establishment.rs:54), so the wz multicast
+        // offer does NOT reuse the unicast `WzConfig.qos`. `false` keeps the group
+        // pico-faithful 2-channel (byte-identical to the pre-y227 wire).
+        is_qos: qos,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -708,6 +718,7 @@ pub fn spawn_router_mcast_ingress(
     group: core::net::Ipv4Addr,
     port: u16,
     zid: Vec<u8>,
+    qos: bool,
 ) -> RouterMcastIngressChannels {
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::multicast_dispatch::MulticastConfig;
@@ -733,7 +744,13 @@ pub fn spawn_router_mcast_ingress(
         seq_num_res: 0x02,
         req_id_res: 0x02,
         batch_size: 2_048,
-        is_qos: false,
+        // R311y232 (transport-qos ACTIVATION) — MUST match the egress offer (a router
+        // is one bidirectional group member sharing one zid; a qos/non-qos mismatch
+        // between its own egress + ingress would make its RX self-zid gate the only
+        // thing saving it from refusing its own JOIN). Same deploy `qos` source as
+        // `spawn_router_mcast_egress`; zenoh `transport.multicast.qos.enabled`
+        // (default false, distinct from unicast) seam.
+        is_qos: qos,
     };
 
     let (ingress_tx, ingress_rx) = tokio::sync::mpsc::unbounded_channel::<McastIngressItem>();
