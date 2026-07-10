@@ -4489,6 +4489,16 @@ layer_m_scouting_multicast() {
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \
         --test multicast_pubsub_loopback -- --ignored --quiet) || return 1
+    # R311y232 — the transport-qos ARM of the multicast e2e: a both-is_qos group
+    # (the --multicast-qos ACTIVATION) with a direct TokioMulticastSession::publish_qos
+    # prioritized publish; the qos subscriber admits the qos peer's JOIN + delivers.
+    # Separate invocation because the default A1c set omits transport-qos; runs in
+    # THIS isolated multicast lane (not the parallel host lanes) so it never contends
+    # for the multicast route under load (the --ignored no-flaky discipline).
+    (cd crates && cargo test -p wz-runtime-tokio \
+        --features transport-multicast,transport-qos \
+        --test multicast_pubsub_loopback qos_group_publish_qos_reaches_subscriber \
+        -- --ignored --quiet) || return 1
     # R311nm — wz->pico multicast JOIN+Push interop e2e: a wz in-library
     # multicast publisher's JOIN beacon + framed Push are admitted and
     # decoded by an external zenoh-pico `z_sub -m peer` over a real UDP

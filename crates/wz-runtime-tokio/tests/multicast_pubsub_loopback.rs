@@ -46,6 +46,12 @@ use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::WhatAmI;
+#[cfg(feature = "transport-qos")]
+use {
+    std::sync::Mutex,
+    wz_runtime_tokio::session::{PublishOptions, TokioMulticastSession},
+    wz_session_core::qos::Priority,
+};
 
 const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
 // Distinct group port from the scouting Layer M tests (7446 / 7448) so the
@@ -156,6 +162,136 @@ async fn publisher_push_reaches_group_subscriber() {
         dispatcher_b.active_peers(),
         1,
         "B admitted A from its JOIN beacon"
+    );
+}
+
+/// R311y232 (transport-qos ACTIVATION e2e) — the composed proof over REAL UDP that
+/// closes the direct-multicast QoS-publish path the WHOLE-SESSION finding named.
+/// BOTH nodes offer `is_qos` (the `--multicast-qos` knob -> `MulticastParams.is_qos`),
+/// node A publishes through a DIRECT [`TokioMulticastSession::publish_qos`] at a
+/// NON-DEFAULT priority, and the qos subscriber node B admits A's qos JOIN and
+/// delivers the prioritized Put. The admission IS the qos-handshake proof: a
+/// NON-qos B would REFUSE a qos peer's JOIN (the group-agreed rule, zenoh
+/// multicast/rx.rs:131 / wz multicast_rx self-gate), so delivery on a both-qos
+/// group can only happen if the is_qos offer travelled the wire and both sides
+/// agreed. This gives `Session::publish_qos` a real end-to-end driver (the
+/// per-priority conduit SN-isolation itself is the deterministic dispatch proof
+/// `wz_session_core::multicast_tx::qos_emit_tests`, run by run-ci Layer C1bc). The
+/// publisher's own JOIN also rides `is_qos=true`, so this exercises the qos JOIN
+/// encode + decode + admit path end to end, not only the frame ext_qos.
+#[cfg(feature = "transport-qos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer A1c qos arm runs it via --ignored"]
+async fn qos_group_publish_qos_reaches_subscriber() {
+    // Distinct group port from the sibling loopback tests (7449/7450/7451) so the
+    // --ignored lane never contends on the same multicast bind.
+    const QOS_PORT: u16 = 7453;
+    let qos_params = |zid_byte: u8| MulticastParams {
+        is_qos: true,
+        ..mc_params(zid_byte)
+    };
+
+    // Subscriber node B: qos group-joined socket + observer-backed drive loop.
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, QOS_PORT)
+        .await
+        .expect("bind qos multicast subscriber link");
+    let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_b = qos_params(0xBB);
+
+    let fired = Arc::new(AtomicUsize::new(0));
+    let mut observer_b = ApplicationLayerObserver::new();
+    {
+        let fired = fired.clone();
+        observer_b.subscribers.register(KEYEXPR, move |sample| {
+            assert_eq!(sample.keyexpr(), KEYEXPR);
+            assert_eq!(sample.payload(), PAYLOAD);
+            fired.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+
+    // Publisher node A: ephemeral-bound socket targeting the group, DRIVEN through a
+    // direct multicast Session so `publish_qos` (not a hand-built tx item) is the
+    // originator under test.
+    let sock_a = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .expect("bind ephemeral publisher socket");
+    let mut driver_a = UdpDriver::from_socket(sock_a, SocketAddr::from((GROUP, QOS_PORT)));
+    let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_a = qos_params(0xAA);
+
+    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+
+    let clock = Arc::new(TokioTime::new());
+    // The direct multicast Session whose `publish_qos` feeds A's drive-loop channel.
+    let session_a: TokioMulticastSession = TokioMulticastSession::new_multicast(
+        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        clock.clone(),
+        tx_a,
+    );
+
+    let drive_b = drive_multicast_session(
+        &mut dispatcher_b,
+        MulticastDriveConfig {
+            params: &params_b,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut driver_b,
+        clock.as_ref(),
+        |event| observer_b.dispatch_event(event),
+        &mut rx_b,
+    );
+    let drive_a = drive_multicast_session(
+        &mut dispatcher_a,
+        MulticastDriveConfig {
+            params: &params_a,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut driver_a,
+        clock.as_ref(),
+        |_| {},
+        &mut rx_a,
+    );
+
+    let fired_probe = fired.clone();
+    let scenario = async move {
+        // Give A's qos JOIN beacons time to admit it into B's peer table.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The DIRECT multicast-Session prioritized publish (the finding's path):
+        // publish_qos stamps InteractiveHigh onto the MulticastTxItem, and A's drive
+        // loop `multicast_tx_emit` selects the per-priority conduit + frame ext_qos
+        // because params_a.is_qos = true. On a non-qos group the same call would
+        // clamp to DEFAULT (byte-identical); here the qos offer travelled the wire.
+        session_a
+            .publish_qos(
+                KEYEXPR,
+                PAYLOAD,
+                PublishOptions::put(),
+                Priority::InteractiveHigh,
+            )
+            .expect("multicast publish_qos");
+        for _ in 0..100 {
+            if fired_probe.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("qos subscriber did not fire within the 3s budget");
+    };
+
+    tokio::select! {
+        _ = drive_b => panic!("subscriber drive loop ended unexpectedly"),
+        _ = drive_a => panic!("publisher drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    assert_eq!(fired.load(Ordering::SeqCst), 1, "exactly one qos delivery");
+    assert_eq!(
+        dispatcher_b.active_peers(),
+        1,
+        "qos B admitted qos A's JOIN (a non-qos B would refuse a qos peer)"
     );
 }
 
