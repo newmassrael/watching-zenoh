@@ -131,12 +131,6 @@ use wz_session_core::multicast_tx::multicast_tx_emit;
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, MulticastTxConduits};
-// `TxSn` is now only constructed by the test helpers that build a peer's JOIN
-// datagram for `encode_join`; the drive loop owns the per-priority
-// `MulticastTxConduits`. Gated on `test` so a production MCU build carries no
-// unused import.
-#[cfg(test)]
-use wz_session_core::sn::TxSn;
 // R311ma/R311mb/R311md — the no_std multicast reply backing (MulticastReplyQueue,
 // below): the observer drains its staged replies through the shared generic
 // wz_session_core::multicast_reply_sink::MulticastReplySink<MulticastReplyQueue>,
@@ -1079,7 +1073,7 @@ mod tests {
         // the shared SSOT splits the oversize frame into >1 datagram, so the
         // round trip below exercises the Fragment RX arm, not the whole-Frame
         // arm (a single frame would ride the admitted-Frame path instead).
-        let mut probe_sn = TxSn::new(sn::mask_from_res(self_params.seq_num_res));
+        let mut probe_sn = MulticastTxConduits::new(sn::mask_from_res(self_params.seq_num_res));
         let probe = multicast_put_literal("demo/mc", &payload).expect("build put");
         let probe_frames = multicast_tx_emit(probe, &mut probe_sn, &self_params);
         std::assert!(

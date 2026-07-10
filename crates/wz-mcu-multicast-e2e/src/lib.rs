@@ -85,7 +85,7 @@ use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastParams};
 use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit, MulticastTxItem};
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::sn::{self, TxSn};
+use wz_session_core::sn::{self, MulticastTxConduits};
 use wz_session_core::WhatAmI;
 
 /// The multicast transport group + port the e2e binds + multicasts to:
@@ -200,7 +200,10 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
     //    echo, creating the (src_addr, src_port) entry the fragments match.
     let mut peer = params(PEER_ZID);
     peer.batch_size = BATCH_SIZE;
-    let peer_join = encode_join(&peer, &TxSn::new(sn::mask_from_res(peer.seq_num_res)));
+    let peer_join = encode_join(
+        &peer,
+        &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
+    );
     let _ = socket.send_to(group, PORT, &peer_join);
 
     let mut driver = LwipMulticastDriver::new(socket, group, PORT);
@@ -217,7 +220,7 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
     // Probe the TX side fragments at this budget BEFORE the loop, so a passing
     // saw_push below is known to have exercised the Fragment RX arm (a single
     // frame would ride the whole-Frame admit path instead).
-    let mut probe_sn = TxSn::new(sn::mask_from_res(self_params.seq_num_res));
+    let mut probe_sn = MulticastTxConduits::new(sn::mask_from_res(self_params.seq_num_res));
     let tx_fragmented = match multicast_put_literal(KEYEXPR, &payload) {
         Ok(item) => {
             multicast_tx_emit(item, &mut probe_sn, &self_params)
