@@ -1107,6 +1107,99 @@ fn publish_loopback_propagates_qos_to_sample() {
     );
 }
 
+// ── R311y-item3 typed PublishOptions::with_priority (two-input unification) ──
+
+/// R311y-item3 — `with_priority` sets the priority sub-field of the SINGLE
+/// `qos` source: `priority_band()` reads it back as the transport conduit band
+/// AND the same byte is what the app observes via `Sample.priority`, so the two
+/// former inputs cannot diverge. Also pins the bit-preservation contract (only
+/// the low-3-bit priority field is rewritten; congestion + express survive).
+#[cfg(feature = "pubsub-priority")]
+#[test]
+fn publish_options_with_priority_is_single_source_band() {
+    use wz_session_core::qos::{CongestionControl, Priority};
+
+    // No QoS attached -> DEFAULT conduit band (byte-identical to a pre-QoS send).
+    assert_eq!(PublishOptions::put().priority_band(), Priority::DEFAULT);
+
+    // with_priority drives BOTH the derived conduit band AND the observable byte.
+    let hi = PublishOptions::put().with_priority(Priority::InteractiveHigh);
+    assert_eq!(hi.priority_band(), Priority::InteractiveHigh);
+    assert_eq!(hi.qos.unwrap().priority(), Priority::InteractiveHigh);
+
+    // with_priority PRESERVES congestion (bit 3) + express (bit 4) from a prior
+    // with_qos; it rewrites only the low-3-bit priority sub-field.
+    let merged = PublishOptions::put()
+        .with_qos(QosLevel::from_parts(
+            Priority::Data,
+            CongestionControl::Block,
+            true,
+        ))
+        .with_priority(Priority::RealTime);
+    let q = merged.qos.unwrap();
+    assert_eq!(q.priority(), Priority::RealTime, "priority overwritten");
+    assert!(q.is_express(), "express bit (4) preserved");
+    assert_eq!(
+        q.raw & (1 << 3),
+        1 << 3,
+        "congestion nodrop bit (3) preserved"
+    );
+    assert_eq!(merged.priority_band(), Priority::RealTime);
+}
+
+/// R311y-item3 — the OBSERVABLE half of the unification: the same `qos` byte the
+/// conduit band derives from (via `priority_band`) also surfaces on the loopback
+/// `Sample.priority`. This `SessionLocal` publish exercises ONLY the loopback leg
+/// (the conduit leg is proven by
+/// `publish_with_priority_routes_multicast_conduit_band`); together they show one
+/// `with_priority` feeds both legs from a single source.
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-priority"))]
+#[test]
+fn publish_with_priority_propagates_band_to_loopback_sample() {
+    use wz_session_core::qos::Priority;
+    let (session, _driver) = build_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+
+    let opts = PublishOptions::put()
+        .with_locality(Locality::SessionLocal)
+        .with_priority(Priority::InteractiveHigh);
+    session.publish("home/temp", b"22.5", opts).unwrap();
+
+    let s = captured.lock().unwrap();
+    assert_eq!(
+        s[0].qos.unwrap().priority(),
+        Priority::InteractiveHigh,
+        "with_priority surfaces as Sample.priority on the loopback leg",
+    );
+}
+
+/// R311y-item3 — under `pubsub-priority`, `publish_qos` FOLDS its explicit band
+/// into the single `opts.qos` source (was band-agnostic on the loopback leg
+/// pre-item3, the y232 stopgap), so the loopback Sample now OBSERVES the band.
+/// This `SessionLocal` publish proves the observable half of the fold; the
+/// conduit half follows because the fold delegates to `publish` (conduit proven
+/// by `publish_with_priority_routes_multicast_conduit_band`). Closes the
+/// two-source smell — `with_qos(low)` + `publish_qos(high)` can no longer desync.
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-priority"))]
+#[test]
+fn publish_qos_folds_band_into_observable_sample() {
+    use wz_session_core::qos::Priority;
+    let (session, _driver) = build_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+
+    let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
+    session
+        .publish_qos("home/temp", b"22.5", opts, Priority::InteractiveHigh)
+        .unwrap();
+
+    let s = captured.lock().unwrap();
+    assert_eq!(
+        s[0].qos.unwrap().priority(),
+        Priority::InteractiveHigh,
+        "publish_qos folds the explicit band into the observable Sample.priority",
+    );
+}
+
 #[cfg(all(
     feature = "pubsub-allow-loop",
     feature = "pubsub-attachment",
@@ -6113,6 +6206,69 @@ fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
         tx_band(&rx.try_recv().expect("publish staged a tx item")),
         Priority::DEFAULT,
         "the base publish stays DEFAULT-band (byte-identical to the pre-QoS send)"
+    );
+}
+
+/// R311y-item3 — the COMPOSED unification proof: the base `publish` (NOT
+/// `publish_qos`) with `PublishOptions::with_priority` set drives the multicast
+/// per-priority conduit band from the SINGLE `opts.qos` source. Pre-item3 the
+/// base publish hard-coded `Priority::DEFAULT` regardless of `opts.qos`, so a
+/// prioritized-but-observable publish egressed at DEFAULT while the app saw the
+/// band — the exact split this closes. The multicast tx item exposes the band as
+/// a struct field (unlike the unicast wire-byte-buried form), so this is the leg
+/// where the `publish -> priority_band() -> tx band` chain is directly
+/// observable. Needs `pubsub-priority` (with_priority) + `transport-multicast`
+/// (the tx-item harness); the both-transports+pubsub-priority run-ci lane runs it.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    feature = "pubsub-priority"
+))]
+#[test]
+fn publish_with_priority_routes_multicast_conduit_band() {
+    use wz_session_core::multicast_tx::MulticastTxItem;
+    use wz_session_core::qos::Priority;
+
+    let tx_band = |item: &MulticastTxItem| -> Priority {
+        match item {
+            MulticastTxItem::Push { priority, .. } => *priority,
+            #[cfg(any(
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "liveliness-token"
+            ))]
+            _ => panic!("expected a multicast Push tx item"),
+        }
+    };
+
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let clock = Arc::new(TokioTime::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
+    let session: TokioMulticastSession = Session::new_multicast(observer, clock, tx);
+
+    // Base `publish` with with_priority set -> the band flows from
+    // `opts.qos.priority()` to the enqueued tx item (the item3 change).
+    let hi = PublishOptions::put()
+        .with_locality(Locality::Remote)
+        .with_priority(Priority::InteractiveHigh);
+    session
+        .publish("home/temp", b"hot", hi)
+        .expect("multicast publish enqueues");
+    assert_eq!(
+        tx_band(&rx.try_recv().expect("publish staged a tx item")),
+        Priority::InteractiveHigh,
+        "base publish routes the conduit band from opts.with_priority (item3 unification)",
+    );
+
+    // No with_priority -> DEFAULT band, byte-identical to the pre-QoS send.
+    let plain = PublishOptions::put().with_locality(Locality::Remote);
+    session
+        .publish("home/temp", b"cold", plain)
+        .expect("multicast publish enqueues");
+    assert_eq!(
+        tx_band(&rx.try_recv().expect("publish staged a tx item")),
+        Priority::DEFAULT,
+        "no with_priority -> DEFAULT band (unchanged base-publish contract)",
     );
 }
 

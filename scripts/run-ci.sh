@@ -1187,13 +1187,25 @@ layer_c1bb_cargo_test_qos() {
 #      `qos` params compile+lint clean.
 #   5. Demo OFF — `wz-ap-demo` with `router-multicast-faces` only: the
 #      not(transport-qos) flag arm (flag ignored, non-QoS group).
+#   6. item3 UNIFIED — the base `publish` (NOT publish_qos) with
+#      `PublishOptions::with_priority` routes the conduit band from the SINGLE
+#      `opts.qos` source. RUN `publish_with_priority_routes_multicast_conduit_band`
+#      + clippy under the both-transports+`pubsub-priority` combo (the multicast
+#      tx-item harness needs `transport-multicast`; `with_priority` + the
+#      `publish_qos` fold-arm need `pubsub-priority`; multicast-only+pubsub-priority
+#      is a pre-existing incompatible combo — the SessionRuntime ActionsHandle GAT
+#      is `transport-unicast`-gated — so both transports are required). This is the
+#      only lane that exercises `with_priority` on the multicast conduit AND the
+#      pubsub-priority arm of the `publish_qos` fold.
 layer_c1bc_cargo_test_mcast_qos() {
     (cd crates \
         && cargo test -p wz-session-core --features transport-qos,codec-push,session-multicast,pubsub-put --lib qos_emit_tests --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features transport-multicast,transport-link-udp,codec-push,pubsub-put,pubsub-allow-loop --lib multicast_publish_qos_stamps --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features transport-multicast,transport-link-udp,codec-push,transport-qos,pubsub-put,pubsub-allow-loop --lib multicast_publish_qos_stamps --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,transport-multicast,transport-link-udp,codec-push,transport-qos,pubsub-put,pubsub-allow-loop,pubsub-priority --lib publish_with_priority_routes_multicast_conduit_band --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-multicast,transport-link-udp,codec-push,transport-qos --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features transport-multicast,transport-link-udp,codec-push --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features transport-unicast,transport-multicast,transport-link-udp,codec-push,transport-qos,pubsub-put,pubsub-allow-loop,pubsub-priority --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features router-multicast-faces,transport-qos --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features router-multicast-faces --quiet -- -D warnings)
 }

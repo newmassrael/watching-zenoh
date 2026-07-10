@@ -28,6 +28,11 @@
 
 use crate::locality::Locality;
 use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint};
+// R311y-item3 — `Priority` is the transport conduit band + the QoS byte's
+// priority sub-field. Ungated import: the always-compiled `priority_band`
+// accessor below reads it on every profile (the `with_priority` setter is
+// `pubsub-priority`-gated, but the derived-band read is not).
+use wz_session_core::qos::Priority;
 // `build_loopback_sample` is the sole `Sample` consumer here, so the import
 // follows its `pubsub-allow-loop` gate (the loopback leg).
 #[cfg(feature = "pubsub-allow-loop")]
@@ -222,6 +227,53 @@ impl PublishOptions {
     pub fn with_qos(mut self, qos: QosLevel) -> Self {
         self.qos = Some(qos);
         self
+    }
+
+    /// R311y-item3 — set the typed [`Priority`] as the SINGLE priority source
+    /// for the publish. Merges `p` into the priority sub-field (low 3 bits) of
+    /// the packed QoS byte, PRESERVING any congestion (bit 3) / express (bit 4)
+    /// bits a prior [`with_qos`](Self::with_qos) attached. This one value then
+    /// drives EVERY leg — the app-observable Push qos ext + loopback
+    /// `Sample.priority` (via `qos`, R232/R311y226) AND the transport frame
+    /// conduit band ([`Session::publish`](super::Session::publish) reads it back
+    /// through [`priority_band`](Self::priority_band), R311y232) — closing the
+    /// y226/y232 two-input split where a caller had to set `with_qos` AND call
+    /// `publish_qos` with matching bands. One `with_priority` cannot diverge,
+    /// mirroring zenoh's single `QoSType` (`resolve_put`) and the already-unified
+    /// peer path [`LinkstateForwarder::publish_qos`](crate::linkstate_forward).
+    ///
+    /// Gated on `pubsub-priority` (the priority-observability feature). Without
+    /// it the priority sub-field cannot ride the wire, so a transport-qos-only
+    /// build drives the conduit band via
+    /// [`Session::publish_qos`](super::Session::publish_qos) instead.
+    #[cfg(feature = "pubsub-priority")]
+    pub fn with_priority(mut self, p: Priority) -> Self {
+        // Preserve the congestion (bit 3) + express (bit 4) bits from any prior
+        // `with_qos`; when unset, base off the wire-DEFAULT byte
+        // (`QosLevel::DEFAULT` = 0x05 = Data / Drop / no-express) so the
+        // non-priority bits match a DEFAULT publish. `& !0x07` clears the low 3
+        // priority bits before OR-ing the new band's `wire_byte()`.
+        let base = self.qos.map(|q| q.raw).unwrap_or(QosLevel::DEFAULT.raw);
+        self.qos = Some(QosLevel::from_raw((base & !0x07) | p.wire_byte()));
+        self
+    }
+
+    /// R311y-item3 — the transport frame conduit band derived from the SINGLE
+    /// priority source [`qos`](Self::qos): the priority sub-field of the packed
+    /// byte, or [`Priority::DEFAULT`] when no QoS was attached.
+    /// [`Session::publish`](super::Session::publish) /
+    /// [`publish_aliased`](super::Session::publish_aliased) /
+    /// [`publish_shm`](super::Session::publish_shm) read this back so a
+    /// `with_priority` (or raw `with_qos`) publish rides the matching
+    /// per-priority conduit — the SAME value the app observes via
+    /// `Sample.priority`, never a second source.
+    ///
+    /// Ungated: it reads only the always-present `qos` field plus the no_std
+    /// value types [`QosLevel::priority`] / [`Priority`], so it compiles on every
+    /// profile. A build without the `transport-qos` conduit split clamps the
+    /// band back to DEFAULT downstream, so deriving it here is inert there.
+    pub(super) fn priority_band(&self) -> Priority {
+        self.qos.map(|q| q.priority()).unwrap_or(Priority::DEFAULT)
     }
 
     /// Translate [`Reliability`] into the bool flag the legacy

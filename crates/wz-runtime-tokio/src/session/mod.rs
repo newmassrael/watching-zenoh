@@ -585,31 +585,39 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         payload: &[u8],
         opts: PublishOptions,
     ) -> Result<usize, PublishError> {
-        // R311y232 — the DEFAULT-priority entry point; the prioritized twin
-        // `publish_qos` is the only path that threads a non-DEFAULT band, so the
-        // base publish stays byte-identical to the pre-QoS single-conduit send.
-        self.publish_prioritized(
-            keyexpr,
-            payload,
-            opts,
-            wz_session_core::qos::Priority::DEFAULT,
-        )
+        // R311y-item3 — the conduit band is derived from the SINGLE priority
+        // source `opts.qos` (set via `PublishOptions::with_priority` / the raw
+        // `with_qos`), so a prioritized publish rides the matching per-priority
+        // conduit AND is observable as `Sample.priority` from ONE value (the
+        // y226/y232 two-input unification — mirrors zenoh's single `QoSType`
+        // driving both conduit-select and the carried ext). No QoS attached ->
+        // `priority_band()` returns `Priority::DEFAULT`, byte-identical to the
+        // pre-QoS single-conduit send (the base-publish contract at
+        // `tests::multicast_publish_qos_stamps_band_base_publish_stays_default`).
+        let band = opts.priority_band();
+        self.publish_prioritized(keyexpr, payload, opts, band)
     }
 
-    /// R311y232 (transport-qos ACTIVATION) — the priority-carrying twin of
-    /// [`Self::publish`]: routes the remote wire leg through
-    /// [`Self::send_network_message_qos`] with the caller's QoS band. On a
-    /// MULTICAST session that offered `is_qos` this is what makes a direct
-    /// prioritized publish ride the per-priority conduit + stamp the frame
-    /// `ext_qos` (the WHOLE-SESSION finding it closes: the multicast send seam
-    /// previously hard-coded `Priority::DEFAULT`, so a direct `Session::publish`
-    /// over a QoS group egressed at DEFAULT); on the unicast transport the band
-    /// reaches `dispatch_push`'s per-priority conduit. A non-QoS session / group
-    /// clamps the band back to DEFAULT downstream, so this behaves exactly like
-    /// [`Self::publish`] there. The LOCAL loopback leg is band-agnostic (the
-    /// observed `Sample` priority rides `PublishOptions`, whose typed
-    /// `with_priority` is the separate R311y226 follow-up); this twin threads the
-    /// band only to the WIRE leg — the seam the finding named.
+    /// R311y232 (transport-qos ACTIVATION) / R311y-item3 — publish with an
+    /// EXPLICIT conduit band `priority`. On a MULTICAST session that offered
+    /// `is_qos` this rides the per-priority conduit + stamps the frame `ext_qos`
+    /// (the WHOLE-SESSION finding it closed: the multicast send seam previously
+    /// hard-coded `Priority::DEFAULT`, so a direct QoS-group publish egressed at
+    /// DEFAULT); on the unicast transport the band reaches `dispatch_push`'s
+    /// per-priority conduit; a non-QoS session / group clamps back to DEFAULT
+    /// downstream, so this behaves exactly like [`Self::publish`] there.
+    ///
+    /// R311y-item3 — under `pubsub-priority` the explicit band is FOLDED into
+    /// the single `opts.qos` source via
+    /// [`PublishOptions::with_priority`](PublishOptions::with_priority) and the
+    /// call delegates to [`Self::publish`], so the app-observable Push qos ext /
+    /// loopback `Sample.priority` and the conduit band CANNOT diverge (closing
+    /// the y226 two-input smell — `with_qos(low)` + `publish_qos(high)` no longer
+    /// desyncs; the explicit band now wins for BOTH legs). Without
+    /// `pubsub-priority` there is no observable qos byte to desync, so the band
+    /// threads straight to the WIRE conduit (the transport-qos-only path this
+    /// method exists for). The signature stays feature-independent
+    /// (signature-stability rule) — only the internal routing branches.
     pub fn publish_qos(
         &self,
         keyexpr: &str,
@@ -617,13 +625,26 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         opts: PublishOptions,
         priority: wz_session_core::qos::Priority,
     ) -> Result<usize, PublishError> {
-        self.publish_prioritized(keyexpr, payload, opts, priority)
+        // R311y-item3 — fold into the single `opts.qos` source when the
+        // observable qos byte exists, else thread the band directly to the
+        // conduit. `publish` re-derives the identical band via `priority_band()`.
+        #[cfg(feature = "pubsub-priority")]
+        {
+            self.publish(keyexpr, payload, opts.with_priority(priority))
+        }
+        #[cfg(not(feature = "pubsub-priority"))]
+        {
+            self.publish_prioritized(keyexpr, payload, opts, priority)
+        }
     }
 
-    /// R311y232 — the shared publish body behind [`Self::publish`] (DEFAULT band)
-    /// and [`Self::publish_qos`] (app band). Factored out so the two entry points
-    /// share the remote + loopback leg logic and only the frame band differs; the
-    /// remote leg hands `priority` to [`Self::send_network_message_qos`].
+    /// R311y232 / R311y-item3 — the shared publish body behind [`Self::publish`]
+    /// (band derived from `opts` via
+    /// [`PublishOptions::priority_band`](PublishOptions::priority_band)) and
+    /// [`Self::publish_qos`] (explicit band, folded into `opts` under
+    /// `pubsub-priority`). Factored out so both entry points share the remote +
+    /// loopback leg logic and only the frame band differs; the remote leg hands
+    /// `priority` to [`Self::send_network_message_qos`].
     fn publish_prioritized(
         &self,
         keyexpr: &str,
@@ -1259,10 +1280,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 &meta,
             )
             .map_err(SendWireError::Codec)?;
-            self.send_network_message(
+            // R311y-item3 — route the SHM descriptor leg through the QoS send
+            // seam with the band derived from the SINGLE `opts.qos` source, so a
+            // prioritized zero-copy publish rides the matching per-priority
+            // conduit like `Self::publish` (was `send_network_message` = hard
+            // DEFAULT conduit — the last split literal-publish surface, which
+            // already carried the observable qos ext + `express` but pinned the
+            // conduit to DEFAULT). The `_qos` seam is present under this
+            // `transport-unicast` + `codec-push` leg (same gate `publish` uses).
+            self.send_network_message_qos(
                 wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
                 opts.reliable_bool(),
                 meta.is_express(),
+                opts.priority_band(),
             )?;
             // The remote leg fired the descriptor; deliver the bytes to any LOCAL
             // subscriber (same-host) directly.
@@ -1539,10 +1569,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 ),
             }
             .map_err(SendWireError::Codec)?;
-            self.send_network_message(
+            // R311y-item3 — route through the QoS send seam with the band
+            // derived from the SINGLE `opts.qos` source, so an aliased publish
+            // rides the matching per-priority conduit exactly like the literal
+            // `Self::publish` (was `send_network_message` = hard DEFAULT conduit,
+            // which left the aliased path split while `publish` was unified). The
+            // `_qos` seam is present wherever this `codec-push` + `transport-
+            // unicast` leg compiles (same gate `Self::publish`'s remote leg uses).
+            self.send_network_message_qos(
                 wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
                 reliable,
                 express,
+                opts.priority_band(),
             )?;
         }
         #[cfg(not(feature = "codec-push"))]
