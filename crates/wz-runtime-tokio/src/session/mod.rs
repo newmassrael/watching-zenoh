@@ -585,6 +585,56 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         payload: &[u8],
         opts: PublishOptions,
     ) -> Result<usize, PublishError> {
+        // R311y232 — the DEFAULT-priority entry point; the prioritized twin
+        // `publish_qos` is the only path that threads a non-DEFAULT band, so the
+        // base publish stays byte-identical to the pre-QoS single-conduit send.
+        self.publish_prioritized(
+            keyexpr,
+            payload,
+            opts,
+            wz_session_core::qos::Priority::DEFAULT,
+        )
+    }
+
+    /// R311y232 (transport-qos ACTIVATION) — the priority-carrying twin of
+    /// [`Self::publish`]: routes the remote wire leg through
+    /// [`Self::send_network_message_qos`] with the caller's QoS band. On a
+    /// MULTICAST session that offered `is_qos` this is what makes a direct
+    /// prioritized publish ride the per-priority conduit + stamp the frame
+    /// `ext_qos` (the WHOLE-SESSION finding it closes: the multicast send seam
+    /// previously hard-coded `Priority::DEFAULT`, so a direct `Session::publish`
+    /// over a QoS group egressed at DEFAULT); on the unicast transport the band
+    /// reaches `dispatch_push`'s per-priority conduit. A non-QoS session / group
+    /// clamps the band back to DEFAULT downstream, so this behaves exactly like
+    /// [`Self::publish`] there. The LOCAL loopback leg is band-agnostic (the
+    /// observed `Sample` priority rides `PublishOptions`, whose typed
+    /// `with_priority` is the separate R311y226 follow-up); this twin threads the
+    /// band only to the WIRE leg — the seam the finding named.
+    pub fn publish_qos(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        opts: PublishOptions,
+        priority: wz_session_core::qos::Priority,
+    ) -> Result<usize, PublishError> {
+        self.publish_prioritized(keyexpr, payload, opts, priority)
+    }
+
+    /// R311y232 — the shared publish body behind [`Self::publish`] (DEFAULT band)
+    /// and [`Self::publish_qos`] (app band). Factored out so the two entry points
+    /// share the remote + loopback leg logic and only the frame band differs; the
+    /// remote leg hands `priority` to [`Self::send_network_message_qos`].
+    fn publish_prioritized(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        opts: PublishOptions,
+        priority: wz_session_core::qos::Priority,
+    ) -> Result<usize, PublishError> {
+        // `priority` is consumed only by the `codec-push` remote leg below; a
+        // build without it (loopback-only) never reads the band.
+        #[cfg(not(feature = "codec-push"))]
+        let _ = priority;
         // W3 — the remote wire leg is `codec-push`-gated (symmetric with the
         // `pubsub-allow-loop` loopback gate below). On a build without
         // `codec-push` the Push codec is statically absent, so the remote leg
@@ -620,10 +670,11 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 }
             }
             .map_err(SendWireError::Codec)?;
-            self.send_network_message(
+            self.send_network_message_qos(
                 wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
                 reliable,
                 express,
+                priority,
             )?;
         }
         // R311cc — pubsub-allow-loop gates the local_publish loopback branch.
@@ -734,6 +785,38 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         express: bool,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
         Tp::send_network_message(&self.transport, msg, reliable, express)
+    }
+
+    /// R311y232 (transport-qos ACTIVATION) — the priority-carrying twin of
+    /// [`Self::send_network_message`]: threads the caller's QoS band through the
+    /// typestate's [`TransportState::send_network_message_qos`] to the owned
+    /// transport. The base seam above is exactly `_qos` with
+    /// [`Priority::DEFAULT`](wz_session_core::qos::Priority), so every existing
+    /// caller stays byte-identical; only [`Self::publish_qos`] threads a
+    /// non-DEFAULT band. On the MULTICAST transport this is what lets a direct
+    /// prioritized `Session::publish_qos` select the per-priority conduit on a
+    /// QoS group (before this the multicast arm hard-coded DEFAULT); a non-QoS
+    /// session / group clamps back to DEFAULT downstream.
+    #[cfg(any(
+        all(
+            feature = "transport-unicast",
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-declare",
+                feature = "declare-interest"
+            )
+        ),
+        all(feature = "transport-multicast", feature = "codec-push")
+    ))]
+    pub fn send_network_message_qos(
+        &self,
+        msg: wz_session_core::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: wz_session_core::qos::Priority,
+    ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        Tp::send_network_message_qos(&self.transport, msg, reliable, express, priority)
     }
 
     /// Borrow the observer handle. Application code registers

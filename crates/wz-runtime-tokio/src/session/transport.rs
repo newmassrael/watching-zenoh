@@ -104,11 +104,46 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     /// [`Session::send_network_message`](super::Session::send_network_message)
     /// forwarder can name it uniformly, but it is never reached there (the
     /// forwarder is gated to exactly the builds with a codec + a caller).
+    ///
+    /// R311y232 — the DEFAULT-priority entry point delegates to the
+    /// priority-carrying [`Self::send_network_message_qos`] twin with
+    /// [`Priority::DEFAULT`](wz_session_core::qos::Priority), so every
+    /// non-prioritized caller (the ~12 control-plane sends + the base
+    /// `publish`) stays byte-identical to the prior single-conduit send. The
+    /// per-transport body lives in the `_qos` twin (one place each).
     fn send_network_message(
         payload: &Self::Payload,
         msg: wz_session_core::network_message::NetworkMessage,
         reliable: bool,
         express: bool,
+    ) -> Result<(), SendWireError> {
+        Self::send_network_message_qos(
+            payload,
+            msg,
+            reliable,
+            express,
+            wz_session_core::qos::Priority::DEFAULT,
+        )
+    }
+
+    /// R311y232 — the priority-carrying twin: threads the caller's QoS band to
+    /// the per-transport send body. The UNICAST impl forwards to
+    /// [`SessionLinkActions::send_network_message_qos`], whose Push arm routes
+    /// `priority` to the per-priority conduit (`dispatch_push`); the MULTICAST
+    /// impl stamps `priority` onto the enqueued
+    /// [`MulticastTxItem::Push`](wz_session_core::multicast_tx::MulticastTxItem)
+    /// (replacing the R311y227 hard-coded `Priority::DEFAULT` — the WHOLE-SESSION
+    /// finding that a direct `Session::publish` over a QoS multicast group
+    /// egressed at DEFAULT). A non-QoS session / group clamps `priority` back to
+    /// DEFAULT downstream (the unicast `is_qos()` gate / the multicast
+    /// `effective_mcast_priority(.., params.is_qos)` clamp), so the twin is inert
+    /// on every build / session that has not negotiated per-priority conduits.
+    fn send_network_message_qos(
+        payload: &Self::Payload,
+        msg: wz_session_core::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: wz_session_core::qos::Priority,
     ) -> Result<(), SendWireError>;
 }
 
@@ -134,13 +169,14 @@ impl sealed::Sealed for Multicast {}
 impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
     type Payload = Arc<SessionLinkActions<R, T>>;
 
-    fn send_network_message(
+    fn send_network_message_qos(
         payload: &Self::Payload,
         msg: wz_session_core::network_message::NetworkMessage,
         reliable: bool,
         express: bool,
+        priority: wz_session_core::qos::Priority,
     ) -> Result<(), SendWireError> {
-        // The unicast send capability (`SessionLinkActions::send_network_message`)
+        // The unicast send capability (`SessionLinkActions::send_network_message_qos`)
         // exists only with a wire codec (push / request / declare / interest);
         // a handshake-only unicast build has no `NetworkMessage` to originate,
         // so the method stays required (uniform with the multicast impl) but
@@ -154,8 +190,8 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
         {
             // §5.21 routing-namespace — LOCAL-ORIGIN egress seam. This unicast
             // `Tp` arm sits ABOVE the shared
-            // `SessionLinkActions::send_network_message` floor (the
-            // `payload.send_network_message` call below) that the peer/linkstate
+            // `SessionLinkActions::send_network_message_qos` floor (the
+            // `payload.send_network_message_qos` call below) that the peer/linkstate
             // forwarders invoke DIRECTLY, so decorating here namespaces only
             // THIS participant's own sends — a relay is never re-namespaced.
             // (Query replies take the separate `send_response` seam; a multicast
@@ -171,7 +207,10 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
                 }
             })
             .map_err(SendWireError::Codec)?;
-            payload.send_network_message(msg, reliable, express)
+            // R311y232 — forward the app band to the SessionLinkActions `_qos`
+            // twin; its Push arm selects the per-priority conduit (`dispatch_push`),
+            // clamping to DEFAULT on a non-QoS session (`is_qos()` gate).
+            payload.send_network_message_qos(msg, reliable, express, priority)
         }
         // No wire codec: the transport IS unicast and matches — the cause is
         // the build-time codec elision, so this is `FeatureDisabled`, NOT
@@ -185,7 +224,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
             feature = "declare-interest"
         )))]
         {
-            let _ = (payload, msg, reliable, express);
+            let _ = (payload, msg, reliable, express, priority);
             Err(SendWireError::FeatureDisabled)
         }
     }
@@ -215,11 +254,12 @@ pub struct MulticastPayload {
 impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
     type Payload = MulticastPayload;
 
-    fn send_network_message(
+    fn send_network_message_qos(
         payload: &Self::Payload,
         msg: wz_session_core::network_message::NetworkMessage,
         reliable: bool,
         _express: bool,
+        priority: wz_session_core::qos::Priority,
     ) -> Result<(), SendWireError> {
         // UDP multicast is best-effort with no per-session batch window, so
         // `express` is ignored (parity with the old multicast send arm).
@@ -235,16 +275,23 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
                     let _ = payload.tx.send(MulticastTxItem::Push {
                         push,
                         reliable,
-                        // C1 foundation: the multicast Session send-seam carries a
-                        // DEFAULT frame band (the app priority rides the Push's own
-                        // qos ext). The per-priority conduit band is threaded when
-                        // this seam gains a `priority` param at activation; DEFAULT
-                        // keeps it byte-identical until then.
-                        priority: wz_session_core::qos::Priority::DEFAULT,
+                        // R311y232 (ACTIVATION) — the app's chosen QoS band, staged onto
+                        // the TX item. `multicast_tx_emit` clamps it via
+                        // `effective_mcast_priority(priority, params.is_qos)`: on a
+                        // NON-QoS group it forces DEFAULT (byte-identical to the pre-y227
+                        // wire), and only on a group that offered `is_qos` does a
+                        // non-DEFAULT band select the per-priority conduit + ride the
+                        // frame `ext_qos`. Replaces the R311y227 hard-coded DEFAULT (the
+                        // WHOLE-SESSION finding: a direct `Session::publish_qos` over a
+                        // QoS multicast group previously egressed at DEFAULT).
+                        priority,
                     });
                     Ok(())
                 }
-                _ => Err(SendWireError::UnsupportedVariant),
+                _ => {
+                    let _ = priority;
+                    Err(SendWireError::UnsupportedVariant)
+                }
             }
         }
         // No `codec-push`: the payload has no `tx` and there is no
@@ -256,7 +303,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
         // Unreachable (the forwarder requires `codec-push`), but honest.
         #[cfg(not(feature = "codec-push"))]
         {
-            let _ = (payload, msg, reliable);
+            let _ = (payload, msg, reliable, priority);
             Err(SendWireError::FeatureDisabled)
         }
     }
