@@ -1784,7 +1784,11 @@ layer_c1am_cargo_test_adminspace() {
         && cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,storage-backend,query-get --lib compiled_plugins --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-plugins-handlers --quiet -- -D warnings \
-        && cargo clippy -p wz-ap-demo --all-targets --features router-hat-router,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings)
+        && cargo clippy -p wz-ap-demo --all-targets --features router-hat-router,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings \
+        && cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet \
+        && cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-config-hotreload --quiet -- -D warnings \
+        && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,adminspace-write,adminspace-config-hotreload --quiet -- -D warnings)
 }
 
 # ─── Layer C1an — adminspace §5.23 SELF-SUFFICIENCY under --no-default-features ─

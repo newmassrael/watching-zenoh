@@ -1763,6 +1763,17 @@ pub(crate) async fn run_peer(
                     log::info!("wz-ap-demo peer: config-write received acl-deny {deny_kx}");
                     *pending.borrow_mut() = Some(deny_kx);
                 }
+                // R311y239 — the storage config-hotreload intents (AddStorage / RemoveStorage,
+                // decoded only under adminspace-config-hotreload) are recognized but this demo
+                // peer hosts no RuntimeStorageManager: the storage-hosting demo run-mode is a
+                // deferred follow-up (run_peer is forwarder-based, no single Session for
+                // add_storage), so log + ignore rather than apply. The arm is always compiled
+                // (the variants are always present) even when the parse never produces them.
+                AdminConfigWriteOutcome::Apply(other) => log::warn!(
+                    "wz-ap-demo peer: config-write storage intent {other:?} decoded but this \
+                     demo build hosts no storage manager (the storage config-hotreload run-mode \
+                     is a deferred follow-up); ignored"
+                ),
                 // permissions.write=false — zenoh logs this at error (adminspace.rs:397).
                 AdminConfigWriteOutcome::Denied => log::error!(
                     "wz-ap-demo peer: config-write DENIED \

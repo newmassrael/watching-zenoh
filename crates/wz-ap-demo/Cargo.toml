@@ -229,6 +229,12 @@ adminspace-introspection-handlers = ["wz/adminspace-introspection-handlers"]
 # crate's run_peer/run_router_hat host wiring. Forwards the facade surface only; a
 # subsystem to REPORT (e.g. storage-backend below) is a separate opt-in.
 adminspace-plugins-handlers = ["wz/adminspace-plugins-handlers"]
+# R311y239 (§5.23 adminspace-config-hotreload) — the config-diff storage lifecycle
+# forward. The demo-binary storage-hosting run-mode (config-write → live storage) is
+# a documented follow-up (net-new demo mode; run_peer is forwarder-based, no single
+# Session for RuntimeStorageManager); the mechanism is proven by the wz-runtime-tokio
+# composed integration test. This forward keeps the facade->demo chain complete.
+adminspace-config-hotreload = ["wz/adminspace-config-hotreload"]
 # R311y237 — opt-in: compile the storage_manager subsystem into the demo binary so
 # `compiled_plugins` reports it (state=Loaded) over the plugins admin legs. The wz
 # mirror of zenoh's canonical `zenoh-plugin-storage-manager`; forwards the facade

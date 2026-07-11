@@ -261,6 +261,50 @@ pub fn compiled_plugins(version: &str) -> Vec<wz_session_core::adminspace::Admin
     }
 }
 
+/// R311y239 (`adminspace-config-hotreload`) — the DYNAMIC plugin-registry BUILDER:
+/// the config-hotreload counterpart of [`compiled_plugins`], reporting `storage_manager`
+/// as `Started` when a storage is LIVE (`storage_started`, i.e.
+/// `RuntimeStorageManager::is_empty() == false`) and `Loaded` otherwise. The
+/// [`crate::adminspace::answer_admin_query`] SEAM already replies whatever
+/// `&[AdminPlugin]` slice its caller passes, so a host that OWNS a storage manager
+/// builds its slice with THIS (feeding its live state) and a `storage-add` then flips
+/// `storage_manager` Loaded→Started in the y237 plugins admin surface (local_data
+/// `plugins` object + the Started-only `status/plugins` legs).
+///
+/// WIRING STATUS (honest): no SHIPPING admin host calls this yet — the library Session
+/// host (`session/mod.rs`) and the demo forwarder hosts (`runner.rs`) hold NO storage
+/// manager, so they correctly pass the STATIC [`compiled_plugins`] slice (`Loaded`).
+/// Feeding a live slice needs a storage-hosting host, which is the SAME deferred demo
+/// storage-mode as the wire E2E; this builder + the composed integration test prove the
+/// mechanism, and the reflection is a one-line swap (`compiled_plugins` →
+/// `compiled_plugins_dyn`) in such a host.
+#[cfg(feature = "adminspace-config-hotreload")]
+pub fn compiled_plugins_dyn(
+    version: &str,
+    storage_started: bool,
+) -> Vec<wz_session_core::adminspace::AdminPlugin> {
+    #[cfg(feature = "storage-backend")]
+    {
+        use wz_session_core::adminspace::{AdminPlugin, AdminPluginState};
+        let state = if storage_started {
+            AdminPluginState::Started
+        } else {
+            AdminPluginState::Loaded
+        };
+        vec![AdminPlugin::wz_static(
+            "storage_manager",
+            "storage_manager",
+            Some(version),
+            state,
+        )]
+    }
+    #[cfg(not(feature = "storage-backend"))]
+    {
+        let _ = (version, storage_started);
+        Vec::new()
+    }
+}
+
 #[cfg(all(test, feature = "adminspace-plugins-handlers"))]
 mod compiled_plugins_tests {
     use super::compiled_plugins;

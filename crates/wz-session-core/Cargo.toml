@@ -101,6 +101,13 @@ adminspace-introspection-handlers = ["adminspace-core"]
 # a dlopen `.so` — the AdminPlugin slice is the cargo-feature/subsystem registry the
 # host supplies, always-compiled (signature stability). Composes adminspace-core.
 adminspace-plugins-handlers = ["adminspace-core"]
+# adminspace-config-hotreload (§5.23, R311y239) — the config-diff-driven storage
+# lifecycle: the `storage-add` / `storage-del` admin config-WRITE sub-key parse arms
+# in parse_admin_config_write (the wz-native superset of zenoh's config-hotreload,
+# which is dlopen plugin start/stop — no wz analogue). Composes adminspace-core (the
+# config-write decoder) + storage-backend (the StorageConfig + storage subsystem the
+# decoded AddStorage/RemoveStorage intent drives at the runtime layer).
+adminspace-config-hotreload = ["adminspace-core", "storage-backend"]
 # adminspace-router-linkstate (§5.23) — the ROUTER-tier admin introspection legs
 # (`@/<zid>/router/linkstate/{routers,peers}` petgraph-DOT + `.../route/successor/**`)
 # inside `answer_router_admin_query` + the `admin_linkstate_*` / route-successor

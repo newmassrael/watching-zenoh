@@ -238,6 +238,19 @@ adminspace-plugins-handlers = [
     "adminspace-core",
     "wz-session-core/adminspace-plugins-handlers",
 ]
+# adminspace-config-hotreload (§5.23, R311y239) — the config-diff-driven storage
+# lifecycle: the storage-add/del config-write intents (parse in wz-session-core) +
+# the DYNAMIC plugin registry (compiled_plugins_dyn reflects storage_manager Started
+# when a storage is live) + the apply via RuntimeStorageManager::add_storage /
+# remove_storage. Composes adminspace-plugins-handlers (the surface it reflects into)
+# + storage-backend (the RuntimeStorageManager + StorageConfig) + the wz-session-core
+# decoder. The wz-native superset of zenoh's config-hotreload (dlopen plugin start/stop).
+adminspace-config-hotreload = [
+    "adminspace-plugins-handlers",
+    "storage-mgr-multi-storage-host",
+    "declare-subscriber",
+    "wz-session-core/adminspace-config-hotreload",
+]
 # adminspace-router-linkstate (§5.23) — the ROUTER-tier admin introspection legs
 # (`@/<zid>/router/linkstate/{routers,peers}` petgraph-DOT + `.../route/successor/**`),
 # hosted on the RouterForwarder's NEW self-dispatch admin queryable (register_local_

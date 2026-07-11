@@ -829,7 +829,11 @@ plugin-manager = []
 plugin-static-registration = []
 
 # ----- §5.23 adminspace + config (11 atomic: 1 active + 10 reserved) -----
-adminspace-config-hotreload = []
+# R311y239 — adminspace-config-hotreload: the config-diff-driven storage lifecycle
+# (storage-add/del config-write intents + the dynamic plugin registry). Forwards the
+# runtime cfg site (which self-pulls the storage-manager + declare-subscriber deps);
+# was a no-op `= []` facade.
+adminspace-config-hotreload = ["wz-runtime-tokio?/adminspace-config-hotreload"]
 # R311y34 — adminspace-core is now a real cfg gate (the built-in
 # @/<zid>/<whatami>/** admin queryable + local_data JSON, via
 # Session::declare_adminspace). The facade forward must light up the runtime

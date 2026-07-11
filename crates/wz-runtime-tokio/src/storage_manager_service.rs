@@ -279,6 +279,72 @@ mod tests {
         assert_eq!(mgr.len(), 1, "the duplicate did not replace the original");
     }
 
+    // R311y239 — the COMPOSED config-hotreload mechanism (adminspace-config-hotreload):
+    // an admin config-WRITE `storage-add` decodes (wz-session-core) → to_storage_config →
+    // RuntimeStorageManager::add_storage spawns a LIVE storage → the dynamic registry
+    // BUILDER compiled_plugins_dyn(.., !mgr.is_empty()) reports storage_manager Started;
+    // a `storage-del` reverses it. NOTE: this drives compiled_plugins_dyn DIRECTLY with the
+    // manager's live state — it proves the parse→spawn→despawn→builder chain, NOT the
+    // answer_admin_query reply path (no shipping host feeds a live slice yet; that is the
+    // deferred storage-hosting host, see the compiled_plugins_dyn WIRING STATUS note).
+    #[cfg(feature = "adminspace-config-hotreload")]
+    #[test]
+    fn config_hotreload_spawns_despawns_storage_and_reflects_plugin_state() {
+        use crate::compiled_plugins_dyn;
+        use wz_session_core::adminspace::{
+            parse_admin_config_write, AdminConfigWrite, AdminConfigWriteOutcome, AdminPluginState,
+        };
+
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+
+        // Before any storage: registry reports storage_manager Loaded (compiled, not running).
+        assert!(mgr.is_empty());
+        assert_eq!(
+            compiled_plugins_dyn("0.1.0", !mgr.is_empty())[0].state,
+            AdminPluginState::Loaded
+        );
+
+        // A config-write `storage-add demo:demo/**` → AddStorage → StorageConfig → live spawn.
+        let prefix = "@/z/peer/config/";
+        let out =
+            parse_admin_config_write(prefix, "@/z/peer/config/storage-add", b"demo:demo/**", true);
+        let AdminConfigWriteOutcome::Apply(intent) = out else {
+            panic!("storage-add must Apply: {out:?}");
+        };
+        let config = intent
+            .to_storage_config()
+            .expect("AddStorage -> StorageConfig");
+        assert_eq!(config.name, "demo");
+        assert_eq!(config.key_expr, "demo/**");
+        mgr.add_storage(&session, &config, vec![0x01])
+            .expect("spawn a live memory storage");
+
+        // After add: the storage is hosted + the registry flips storage_manager Started.
+        assert_eq!(mgr.len(), 1);
+        assert!(mgr.storage("demo").is_some());
+        assert_eq!(
+            compiled_plugins_dyn("0.1.0", !mgr.is_empty())[0].state,
+            AdminPluginState::Started,
+            "a live storage -> the builder reports storage_manager Started (the state a \
+             storage-hosting host would surface via the plugins admin reply)"
+        );
+
+        // A `storage-del demo` → RemoveStorage → despawn (RAII undeclare) → back to Loaded.
+        let out = parse_admin_config_write(prefix, "@/z/peer/config/storage-del", b"demo", true);
+        let AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveStorage(name)) = out else {
+            panic!("storage-del must Apply RemoveStorage: {out:?}");
+        };
+        assert!(mgr.remove_storage(&name), "despawn the named storage");
+        assert!(mgr.is_empty());
+        assert_eq!(
+            compiled_plugins_dyn("0.1.0", !mgr.is_empty())[0].state,
+            AdminPluginState::Loaded,
+            "despawn -> storage_manager Loaded"
+        );
+    }
+
     #[test]
     fn remove_storage_undeclares_and_frees_the_name() {
         let session = make_session();

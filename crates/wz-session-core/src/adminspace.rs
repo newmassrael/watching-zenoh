@@ -837,13 +837,57 @@ pub fn answer_router_admin_query(
 }
 
 /// R311y51 (§5.23 `adminspace-write`) — the typed intent a recognized admin
-/// config-WRITE PUT decodes to. MVP affordance (NOT zenoh — see the
-/// [`admin_config_write_key`] fidelity caveat): only the bespoke `acl-deny`
-/// sub-key; the full json5/json-pointer config engine is a deferred §5.23 layer.
+/// config-WRITE PUT decodes to. MVP affordance (NOT zenoh's full json5/json-pointer
+/// config engine — see the [`admin_config_write_key`] fidelity caveat): the bespoke
+/// `acl-deny` sub-key (R311y51), and — under `adminspace-config-hotreload` (R311y239)
+/// — the `storage-add` / `storage-del` sub-keys that live-spawn / -despawn a storage
+/// via the compiled storage-manager subsystem (the wz-native superset of zenoh's
+/// config-hotreload, which is dlopen plugin start/stop — no wz analogue). The
+/// variants are ALWAYS compiled (signature stability); only the PARSE arms that
+/// construct the storage ones are `#[cfg]`-gated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminConfigWrite {
     /// `.../config/acl-deny <keyexpr>` — deny the keyexpr carried in the payload.
     AclDeny(String),
+    /// `.../config/storage-add <name>:<keyexpr>` — live-spawn a storage `name`
+    /// owning `key_expr`, backed by the in-memory volume. The config-diff-driven
+    /// subsystem activation the host applies via the runtime storage manager
+    /// (R311y239). Split on the FIRST `:` only, so `key_expr` may itself contain `:`.
+    /// `volume_id` is always `"mem"` from the wire (explicit volume selection is a
+    /// deferred follow-up — it needs a keyexpr-safe delimiter or a json5 body); the
+    /// field is retained for programmatic construction.
+    AddStorage {
+        /// The storage's unique name within the manager.
+        name: String,
+        /// The keyexpr the storage captures + answers on.
+        key_expr: String,
+        /// The backing volume id (`"mem"` from the wire; a builder may set another).
+        volume_id: String,
+    },
+    /// `.../config/storage-del <name>` — live-despawn the storage named `name`
+    /// (RAII undeclare of its capture-sub + queryable). R311y239.
+    RemoveStorage(String),
+}
+
+#[cfg(feature = "adminspace-config-hotreload")]
+impl AdminConfigWrite {
+    /// R311y239 — the intent → [`crate::storage_config::StorageConfig`] SSOT: an
+    /// [`AddStorage`](Self::AddStorage) intent maps to a `StorageConfig` (zenoh-faithful
+    /// defaults, [`StorageConfig::new`]) the runtime storage manager spawns; any other
+    /// intent yields `None`. Kept here (not at the runtime layer) because both the
+    /// intent and `StorageConfig` are wz-session-core types — one mapping, no drift.
+    pub fn to_storage_config(&self) -> Option<crate::storage_config::StorageConfig> {
+        match self {
+            AdminConfigWrite::AddStorage {
+                name,
+                key_expr,
+                volume_id,
+            } => Some(crate::storage_config::StorageConfig::new(
+                name, key_expr, volume_id,
+            )),
+            _ => None,
+        }
+    }
 }
 
 /// R311y51 (§5.23 `adminspace-write`) — the outcome of gating + decoding an admin
@@ -860,10 +904,12 @@ pub enum AdminConfigWriteOutcome {
     /// (e.g. the bare `.../config` GET key the `/**` subscriber also matches) —
     /// silently ignored, not a write.
     NotAWrite,
-    /// A recognized sub-key with an unusable payload (an empty `acl-deny`).
+    /// A recognized sub-key with an unusable payload (an empty `acl-deny`, or a
+    /// `storage-add`/`storage-del` with an empty name / keyexpr / no `:`).
     Malformed,
-    /// An unrecognized sub-key — only `acl-deny` is decoded (the full json5
-    /// engine is deferred); the caller logs + ignores it.
+    /// An unrecognized sub-key — `acl-deny` (always) + `storage-add`/`storage-del`
+    /// (under `adminspace-config-hotreload`) are decoded; the full json5 engine is
+    /// deferred. The caller logs + ignores an unknown sub-key.
     UnknownKey(String),
 }
 
@@ -901,8 +947,62 @@ pub fn parse_admin_config_write(
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::AclDeny(String::from(deny)))
             }
         }
+        // R311y239 (adminspace-config-hotreload) — the config-diff-driven storage
+        // lifecycle. `storage-add <name>:<keyexpr>` decodes to AddStorage (split on the
+        // FIRST `:` only, so the keyexpr may contain `:`; volume is always the in-memory
+        // one — the host live-spawns it via the runtime storage manager); an empty name
+        // or keyexpr is Malformed. Gated so a build without the feature falls the
+        // sub-key through to UnknownKey (signature-stable; the decoder is one SSOT).
+        #[cfg(feature = "adminspace-config-hotreload")]
+        "storage-add" => match parse_storage_add_payload(payload) {
+            Some((name, key_expr, volume_id)) => {
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
+                    name,
+                    key_expr,
+                    volume_id,
+                })
+            }
+            None => AdminConfigWriteOutcome::Malformed,
+        },
+        // `storage-del <name>` — despawn the named storage; empty name is Malformed.
+        #[cfg(feature = "adminspace-config-hotreload")]
+        "storage-del" => {
+            let name = String::from_utf8_lossy(payload);
+            let name = name.trim();
+            if name.is_empty() {
+                AdminConfigWriteOutcome::Malformed
+            } else {
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveStorage(String::from(name)))
+            }
+        }
         other => AdminConfigWriteOutcome::UnknownKey(String::from(other)),
     }
+}
+
+/// R311y239 (`adminspace-config-hotreload`) — decode a `storage-add` payload
+/// `<name>:<keyexpr>` into `(name, key_expr, volume_id)`. The payload is split on the
+/// FIRST `:` only (`splitn(2)`): `name` is the leading field, `key_expr` is the entire
+/// remainder — so a keyexpr that itself contains `:` (a legal keyexpr byte per the
+/// zenoh grammar) is preserved verbatim, not silently truncated. Returns `None`
+/// (→ [`AdminConfigWriteOutcome::Malformed`]) if `name` or `key_expr` is empty, or if
+/// there is no `:` at all. `volume_id` is always `"mem"` (the in-memory volume) for
+/// this MVP affordance: explicit volume selection would need a delimiter that cannot
+/// appear in a keyexpr (or a json5 body), so it is a deferred §5.23 follow-up — the
+/// `AddStorage.volume_id` field is retained for programmatic construction.
+#[cfg(feature = "adminspace-config-hotreload")]
+fn parse_storage_add_payload(payload: &[u8]) -> Option<(String, String, String)> {
+    let text = String::from_utf8_lossy(payload);
+    let (name, key_expr) = text.split_once(':')?;
+    let name = name.trim();
+    let key_expr = key_expr.trim();
+    if name.is_empty() || key_expr.is_empty() {
+        return None;
+    }
+    Some((
+        String::from(name),
+        String::from(key_expr),
+        String::from("mem"),
+    ))
 }
 
 /// The OpenMetrics body the admin `@/<zid>/<whatami>/metrics` GET replies with
@@ -1179,6 +1279,107 @@ mod tests {
         // no trailing sub-key -> NotAWrite (the demo's prior `else { return }`).
         let out = parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config", b"x", true);
         assert_eq!(out, AdminConfigWriteOutcome::NotAWrite);
+    }
+
+    // R311y239 — the config-hotreload storage-lifecycle decode (adminspace-config-hotreload).
+    #[cfg(feature = "adminspace-config-hotreload")]
+    mod config_hotreload {
+        use super::*;
+
+        #[test]
+        fn storage_add_decodes_name_keyexpr_default_volume() {
+            // `storage-add demo:demo/**` -> AddStorage, volume defaults to "mem".
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-add",
+                b"demo:demo/**",
+                true,
+            );
+            assert_eq!(
+                out,
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
+                    name: String::from("demo"),
+                    key_expr: String::from("demo/**"),
+                    volume_id: String::from("mem"),
+                })
+            );
+        }
+
+        #[test]
+        fn storage_add_keyexpr_may_contain_colon() {
+            // Split on the FIRST `:` only: a keyexpr containing `:` (a legal keyexpr
+            // byte) is preserved verbatim, NOT truncated. Volume is always "mem".
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-add",
+                b"  demo : foo:bar/**  ",
+                true,
+            );
+            assert_eq!(
+                out,
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
+                    name: String::from("demo"),
+                    key_expr: String::from("foo:bar/**"),
+                    volume_id: String::from("mem"),
+                })
+            );
+        }
+
+        #[test]
+        fn storage_add_empty_name_or_keyexpr_is_malformed() {
+            for payload in [&b":demo/**"[..], b"demo:", b"", b"  :  "] {
+                let out = parse_admin_config_write(
+                    WRITE_PREFIX,
+                    "@/a1b2/peer/config/storage-add",
+                    payload,
+                    true,
+                );
+                assert_eq!(
+                    out,
+                    AdminConfigWriteOutcome::Malformed,
+                    "payload {payload:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn storage_del_decodes_name() {
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-del",
+                b"  demo  ",
+                true,
+            );
+            assert_eq!(
+                out,
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveStorage(String::from(
+                    "demo"
+                )))
+            );
+        }
+
+        #[test]
+        fn storage_del_empty_is_malformed() {
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-del",
+                b"  ",
+                true,
+            );
+            assert_eq!(out, AdminConfigWriteOutcome::Malformed);
+        }
+
+        #[test]
+        fn storage_write_gated_by_permission() {
+            // permissions.write=false denies BEFORE decode (same gate as acl-deny).
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-add",
+                b"demo:demo/**",
+                false,
+            );
+            assert_eq!(out, AdminConfigWriteOutcome::Denied);
+        }
     }
 
     #[cfg(feature = "adminspace-metrics")]
