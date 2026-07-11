@@ -92,6 +92,15 @@ adminspace-metrics = ["adminspace-core"]
 # (the reply machinery + the keyexpr matcher). publisher/querier are OMITTED (wz
 # maintains no such table; zenoh's empty-table loop emits nothing).
 adminspace-introspection-handlers = ["adminspace-core"]
+# adminspace-plugins-handlers (§5.23, R311y237) — the wz-native plugins admin legs
+# (`@/<zid>/<whatami>/plugins/**` full PluginStatusRec + `.../status/plugins/<id>/
+# __path__`) inside `answer_admin_query` + the plugin key helpers + the `plugins`
+# field of local_data (surface A). The wz superset of zenoh's PluginsManager admin
+# handlers (net/runtime/adminspace.rs:922 `plugins_data` + :952 `plugins_status`):
+# a wz "plugin" is a COMPILED-IN composable subsystem (storage_manager, rest), NOT
+# a dlopen `.so` — the AdminPlugin slice is the cargo-feature/subsystem registry the
+# host supplies, always-compiled (signature stability). Composes adminspace-core.
+adminspace-plugins-handlers = ["adminspace-core"]
 # adminspace-router-linkstate (§5.23) — the ROUTER-tier admin introspection legs
 # (`@/<zid>/router/linkstate/{routers,peers}` petgraph-DOT + `.../route/successor/**`)
 # inside `answer_router_admin_query` + the `admin_linkstate_*` / route-successor

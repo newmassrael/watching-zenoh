@@ -2015,9 +2015,16 @@ fn declare_adminspace_answers_root_get_with_local_data_json() {
 
     let got = payload.lock().unwrap().clone().expect("admin GET replied");
     // build_session has no connected peer -> sessions:[]; the embedder-supplied
-    // version + locator are reflected verbatim.
+    // version + locator are reflected verbatim. R311y237 — the `plugins` field is
+    // `null` without `adminspace-plugins-handlers`, `{}` with it (the Session host's
+    // `compiled_plugins` reports subsystems as `Loaded`, and surface A lists STARTED
+    // plugins only, so the started object is empty here).
+    #[cfg(not(feature = "adminspace-plugins-handlers"))]
+    let plugins_tok = "null";
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    let plugins_tok = "{}";
     let expected = format!(
-        r#"{{"locators":["tcp/127.0.0.1:7447"],"metadata":null,"plugins":null,"sessions":[],"version":"0.9.9","zid":"{zid_hex}"}}"#
+        r#"{{"locators":["tcp/127.0.0.1:7447"],"metadata":null,"plugins":{plugins_tok},"sessions":[],"version":"0.9.9","zid":"{zid_hex}"}}"#
     );
     assert_eq!(String::from_utf8(got).unwrap(), expected);
     // application/json: zenoh encoding id 5 -> wz packed_id 10 (id << 1), no schema.

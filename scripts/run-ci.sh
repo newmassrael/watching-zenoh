@@ -1777,7 +1777,14 @@ layer_c1am_cargo_test_adminspace() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-write,query-get --quiet -- -D warnings \
         && cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet \
         && cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-introspection-handlers --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-introspection-handlers --quiet -- -D warnings \
+        && cargo test -p wz-session-core --features adminspace-plugins-handlers --lib adminspace --quiet \
+        && cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet \
+        && cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib compiled_plugins --quiet \
+        && cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,storage-backend,query-get --lib compiled_plugins --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-plugins-handlers --quiet -- -D warnings \
+        && cargo clippy -p wz-ap-demo --all-targets --features router-hat-router,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings)
 }
 
 # ─── Layer C1an — adminspace §5.23 SELF-SUFFICIENCY under --no-default-features ─
@@ -4961,6 +4968,26 @@ layer_e6d_peer_multilink_qos() {
         --test wz_peer_multilink_qos_reach -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E6e — §5.23 adminspace-plugins-handlers E2E ─────────────────────────
+#
+# The wz-native plugins admin surface (R311y237) driven over the wire: a routing peer
+# A (--config-queryable) answers a client B's `@/<A_zid>/peer/plugins/**` GET with its
+# compiled-in plugin registry, the wz superset of zenoh's `plugins_data` handler. Needs
+# its OWN demo binary built with
+# `--features routing-peer,adminspace-plugins-handlers,storage-backend` — the
+# storage-backend opt-in compiles the `storage_manager` subsystem so `compiled_plugins`
+# reports it (state=Loaded, the wz mirror of zenoh-plugin-storage-manager). The e2e
+# asserts the reply key carries the ACTUAL plugin id AND the body is the zenoh
+# PluginStatusRec (id/state/path), so a green reply cannot be a static echo — it proves
+# the live `compiled_plugins()` enumeration. wz<->wz loopback (the plugins legs add no
+# wire format, so no cross-impl leg is needed). The `wz_peer_` fn prefix keeps the
+# default Layer E sweep's `--skip wz_peer` from double-running it.
+layer_e6e_adminspace_plugins() {
+    (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-plugins-handlers,storage-backend --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_adminspace_plugins -- --ignored --quiet) || return 1
+}
+
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
 #
 # The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
@@ -5259,6 +5286,7 @@ run_layer E6 layer_e6_peer_mesh || overall=1
 run_layer E6b layer_e6b_adminspace_introspection || overall=1
 run_layer E6c layer_e6c_peer_multilink || overall=1
 run_layer E6d layer_e6d_peer_multilink_qos || overall=1
+run_layer E6e layer_e6e_adminspace_plugins || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1

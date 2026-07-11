@@ -227,6 +227,17 @@ adminspace-introspection-handlers = [
     "adminspace-core",
     "wz-session-core/adminspace-introspection-handlers",
 ]
+# adminspace-plugins-handlers (§5.23, R311y237) — the wz-native plugins admin legs
+# (`plugins/**` + `status/plugins/**`) inside declare_adminspace's answerer + the
+# `plugins` field of local_data. Composes adminspace-core (the dispatch + reply
+# machinery) + the wz-session-core reply legs. The Session host reports the
+# compiled-in subsystems it can see via `cfg!(feature = ..)` (storage_manager under
+# `storage-backend`); wz has NO dlopen plugin-manager (the §5.22 plugin family is
+# reserved) — the registry is the cargo-feature/subsystem set.
+adminspace-plugins-handlers = [
+    "adminspace-core",
+    "wz-session-core/adminspace-plugins-handlers",
+]
 # adminspace-router-linkstate (§5.23) — the ROUTER-tier admin introspection legs
 # (`@/<zid>/router/linkstate/{routers,peers}` petgraph-DOT + `.../route/successor/**`),
 # hosted on the RouterForwarder's NEW self-dispatch admin queryable (register_local_

@@ -222,6 +222,19 @@ adminspace-write = ["wz/adminspace-write"]
 # The atom is active <=> its cfg sites in wz-session-core answer_admin_query + this
 # crate's run_peer.
 adminspace-introspection-handlers = ["wz/adminspace-introspection-handlers"]
+# R311y237 (§5.23 adminspace-plugins-handlers) — compiles the demo host's plugins
+# admin legs (`plugins/**` + `status/plugins/**` + the local_data `plugins` field).
+# The plugin list is the compiled-in subsystem registry (`compiled_plugins`), so
+# the atom is active <=> its cfg sites in wz-session-core answer_admin_query + this
+# crate's run_peer/run_router_hat host wiring. Forwards the facade surface only; a
+# subsystem to REPORT (e.g. storage-backend below) is a separate opt-in.
+adminspace-plugins-handlers = ["wz/adminspace-plugins-handlers"]
+# R311y237 — opt-in: compile the storage_manager subsystem into the demo binary so
+# `compiled_plugins` reports it (state=Loaded) over the plugins admin legs. The wz
+# mirror of zenoh's canonical `zenoh-plugin-storage-manager`; forwards the facade
+# `storage-backend` (which reaches wz-runtime-tokio's cfg site `compiled_plugins`
+# checks). NOT in `default`; Layer E6e builds the demo with it for the plugins E2E.
+storage-backend = ["wz/storage-backend"]
 # P4 §5.21 — the FOUNDATION feature (routing-accept precedent): forwards the facade
 # `routing-router-hat`, which pulls `routing-peer` transitively + compiles the
 # library `RouterForwarder`. It no longer gates a demo run-mode directly (the

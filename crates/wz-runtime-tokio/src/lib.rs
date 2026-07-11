@@ -223,6 +223,75 @@ pub use wz_session_core::decl_sink;
 #[cfg(feature = "adminspace-core")]
 pub use wz_session_core::adminspace;
 
+/// R311y237 (§5.23 `adminspace-plugins-handlers`) — the wz-native plugin registry:
+/// the compiled-in composable subsystems THIS binary carries, as
+/// [`adminspace::AdminPlugin`] entries the admin `plugins/**` + `status/plugins/**`
+/// legs (+ the local_data `plugins` field) reply from. wz has NO dlopen
+/// plugin-manager (the §5.22 plugin family is reserved) — a wz "plugin" is a
+/// cargo-feature/subsystem with a zenoh-plugin analogue, so the registry is built
+/// from `cfg!(feature = ..)`, NOT enumerated off a `PluginsManager`. Reported state
+/// is `Loaded` (compiled into the binary); a host that actually instantiates the
+/// subsystem at runtime would report `Started` (which additionally surfaces it in
+/// the local_data `plugins` field, faithful to zenoh's `started_plugins_iter`).
+/// `version` is the node build version. Currently reports `storage_manager` (the wz
+/// mirror of `zenoh-plugin-storage-manager`) under `storage-backend`; `rest`
+/// (`zenoh-plugin-rest`, under `rest-http-bridge`) is an extension point.
+#[cfg(feature = "adminspace-plugins-handlers")]
+pub fn compiled_plugins(version: &str) -> Vec<wz_session_core::adminspace::AdminPlugin> {
+    // Each compiled-in subsystem with a zenoh-plugin analogue contributes one entry;
+    // an empty registry (the surface compiled but no subsystem) is valid. Built
+    // branch-wise so `unused_mut` / unused-param lints stay clean across the
+    // storage-backend toggle (a `let mut` with all pushes cfg'd out is a hard error
+    // under `-D warnings`). Extending with `rest` (under `rest-http-bridge`) appends
+    // another cfg branch here.
+    #[cfg(feature = "storage-backend")]
+    {
+        use wz_session_core::adminspace::{AdminPlugin, AdminPluginState};
+        vec![AdminPlugin::wz_static(
+            "storage_manager",
+            "storage_manager",
+            Some(version),
+            AdminPluginState::Loaded,
+        )]
+    }
+    #[cfg(not(feature = "storage-backend"))]
+    {
+        let _ = version;
+        Vec::new()
+    }
+}
+
+#[cfg(all(test, feature = "adminspace-plugins-handlers"))]
+mod compiled_plugins_tests {
+    use super::compiled_plugins;
+
+    // Locks the wz-native registry to the ACTUAL compiled feature set. Dropping the
+    // `#[cfg(feature="storage-backend")]` gate in `compiled_plugins` (returning
+    // storage_manager unconditionally) FAILS the storage-OFF arm of this test — a
+    // regression the E2E alone cannot catch (Layer E6e always builds storage-backend
+    // ON). CI runs BOTH cfg states (run-ci Layer C1am), so exactly one arm asserts
+    // per compilation and the pair pins the gating.
+    #[test]
+    fn compiled_plugins_reflects_the_storage_backend_cfg() {
+        let plugins = compiled_plugins("9.9.9");
+        #[cfg(feature = "storage-backend")]
+        {
+            use wz_session_core::adminspace::{AdminPluginState, WZ_STATIC_PLUGIN_PATH};
+            assert_eq!(plugins.len(), 1, "storage-backend ON -> one plugin");
+            assert_eq!(plugins[0].id, "storage_manager");
+            assert_eq!(plugins[0].name, "storage_manager");
+            assert_eq!(plugins[0].version.as_deref(), Some("9.9.9"));
+            assert_eq!(plugins[0].path, WZ_STATIC_PLUGIN_PATH);
+            assert_eq!(plugins[0].state, AdminPluginState::Loaded);
+        }
+        #[cfg(not(feature = "storage-backend"))]
+        assert!(
+            plugins.is_empty(),
+            "storage-backend OFF -> empty registry (no subsystem compiled)"
+        );
+    }
+}
+
 /// R311y68 (§5.25) — the Zenoh Serialization Format codec
 /// (`z_serialize` / `z_deserialize`), re-exported under
 /// `ext-pubsub-serde-codec` so an AP consumer serializes typed payloads

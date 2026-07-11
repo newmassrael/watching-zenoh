@@ -2673,12 +2673,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 locators: &locators,
                 read,
             };
+            // R311y237 — the node's compiled-in plugin registry (the wz-native
+            // subsystem set this binary carries; `Loaded` state). Empty vec without
+            // the feature so the answerer's `plugins` param is signature-stable.
+            #[cfg(feature = "adminspace-plugins-handlers")]
+            let plugins = crate::compiled_plugins(&version);
+            #[cfg(not(feature = "adminspace-plugins-handlers"))]
+            let plugins: Vec<wz_session_core::adminspace::AdminPlugin> = Vec::new();
             // The pure-Session admin host does not enumerate declarations (its admin
             // sink fires while the observer is locked mid-`iter_mut`, so it cannot
             // re-read the declaration registries — the introspection materialization
             // for this host is a NAMED follow-up). The forwarder-hosted demo admin
             // (`--config-queryable`) is the wired introspection host for §5.23.
-            answer_admin_query(view, out, &ctx, &sessions, &[], &config_json);
+            answer_admin_query(view, out, &ctx, &sessions, &[], &plugins, &config_json);
         };
 
         self.declare_queryable(queryable_key, QueryableOptions::default(), handler)

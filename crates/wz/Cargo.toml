@@ -851,7 +851,12 @@ adminspace-router-linkstate = [
     "routing-router-hat",
     "wz-runtime-tokio?/adminspace-router-linkstate",
 ]
-adminspace-plugins-handlers = []
+# R311y237 — adminspace-plugins-handlers is now a real cfg gate (the wz-native
+# `plugins/**` + `status/plugins/**` admin legs + the local_data `plugins` field);
+# forward to the runtime cfg site, not a no-op `= []` (the
+# [[feedback-facade-forward-separate-edit]] dead-stub trap). The plugin registry is
+# the compiled-in subsystem set (storage_manager, rest), NOT a dlopen plugin-manager.
+adminspace-plugins-handlers = ["wz-runtime-tokio?/adminspace-plugins-handlers"]
 # R311y36 — adminspace-read is now a real cfg gate (the permissions.read GET
 # gate); forward to the runtime cfg site, not a no-op `= []`.
 adminspace-read = ["wz-runtime-tokio?/adminspace-read"]

@@ -1679,12 +1679,20 @@ pub(crate) async fn run_peer(
                 locators: &locators,
                 read: true,
             };
+            // R311y237 — the node's compiled-in plugin registry (wz-native subsystem
+            // set; e.g. storage_manager under `storage-backend`). Empty without the
+            // feature so the answerer's `plugins` param stays signature-stable.
+            #[cfg(feature = "adminspace-plugins-handlers")]
+            let plugins = wz::runtime_tokio::compiled_plugins(&version);
+            #[cfg(not(feature = "adminspace-plugins-handlers"))]
+            let plugins: Vec<wz::runtime_tokio::adminspace::AdminPlugin> = Vec::new();
             answer_admin_query(
                 view,
                 out,
                 &ctx,
                 &[],
                 &introspection_h.borrow(),
+                &plugins,
                 &config_json,
             );
         };
@@ -2493,7 +2501,12 @@ pub(crate) async fn run_router_hat(
                 locators: &locators,
                 read: true,
             };
-            answer_admin_query(view, out, &ctx, &[], &[], "{}");
+            // R311y237 — the router node's compiled-in plugin registry.
+            #[cfg(feature = "adminspace-plugins-handlers")]
+            let plugins = wz::runtime_tokio::compiled_plugins(&version);
+            #[cfg(not(feature = "adminspace-plugins-handlers"))]
+            let plugins: Vec<wz::runtime_tokio::adminspace::AdminPlugin> = Vec::new();
+            answer_admin_query(view, out, &ctx, &[], &[], &plugins, "{}");
             // The ROUTER-tier legs, rendered LIVE from the two nets per GET.
             let routers_dot = routers_view.dot();
             let peers_dot = peers_view.dot();

@@ -59,12 +59,159 @@ pub struct AdminSession {
     pub links: Vec<AdminLink>,
 }
 
+/// wz-native plugin state — the compile-time analogue of zenoh's `PluginState`
+/// (`zenoh-plugin-trait/src/plugin.rs:35-40`). wz has NO dynamic loading, so a
+/// subsystem's presence IS its compiled-in-ness: a compiled subsystem is at least
+/// [`Loaded`](Self::Loaded), and [`Started`](Self::Started) once the node
+/// activates it at runtime. [`Declared`](Self::Declared) — zenoh's
+/// config-named-but-unloaded state — has no wz analogue (presence == compiled;
+/// there is no "named but absent"), but the variant is retained for wire fidelity
+/// with zenoh's serde enum so an admin client parses the same `state` strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminPluginState {
+    /// Config-named but not loaded (zenoh). wz never emits this (kept for parity).
+    Declared,
+    /// Compiled into the binary but not activated at runtime.
+    Loaded,
+    /// Compiled into the binary AND activated at runtime.
+    Started,
+}
+
+impl AdminPluginState {
+    /// The zenoh serde variant name (capitalized — `serde` serializes the variant
+    /// name verbatim, `plugin.rs:35-40`): `"Declared"` / `"Loaded"` / `"Started"`.
+    /// Consumed only by [`AdminPlugin::to_status_json`] (gated the same way).
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    fn as_str(self) -> &'static str {
+        match self {
+            AdminPluginState::Declared => "Declared",
+            AdminPluginState::Loaded => "Loaded",
+            AdminPluginState::Started => "Started",
+        }
+    }
+}
+
+/// The wz-native `"__static__"` plugin path marker — the honest superset over
+/// zenoh's dylib path (`PluginStatus::path`, `plugin.rs:83`). zenoh reports a
+/// loaded plugin's `.so` filesystem path (or `"__not_loaded__"` when unloaded,
+/// `manager/dynamic_plugin.rs:149-155`); wz subsystems are STATICALLY linked
+/// (composed at build time, no dlopen — cf. `wz-rest`'s "compile-time-composed
+/// superset of zenoh's zenoh-plugin-rest"), so there is no dylib path. The marker
+/// mirrors the form of zenoh's `"__not_loaded__"` sentinel.
+pub const WZ_STATIC_PLUGIN_PATH: &str = "__static__";
+
+/// One entry in the wz-native plugin registry — the compile-time analogue of a
+/// zenoh `PluginStatusRec` (`zenoh-plugin-trait/src/plugin.rs:92-102`). A wz
+/// "plugin" is a COMPILED-IN composable subsystem with a zenoh-plugin analogue
+/// (`storage_manager` = zenoh-plugin-storage-manager; `rest` = zenoh-plugin-rest),
+/// NOT a dlopen shared library — the wz "superset via composition": the same admin
+/// wire shape, sourced from the cargo-feature/subsystem registry instead of a
+/// `PluginsManager`. ALWAYS compiled (like [`AdminSession`]) so
+/// [`answer_admin_query`]'s slice parameter is signature-stable across the
+/// `adminspace-plugins-handlers` toggle; only the reply BLOCKS that consume it are
+/// `#[cfg]`-gated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminPlugin {
+    /// The plugin id (zenoh `PluginStatus::id`) — the registry key + reply-key leaf.
+    pub id: String,
+    /// The human plugin name (zenoh `PluginStatus::name`); wz uses the same string.
+    pub name: String,
+    /// The plugin version (zenoh `PluginStatus::version`, `Option`) — the node's
+    /// build version for a static wz subsystem. `None` → the `version` key is
+    /// OMITTED from the status body (zenoh's `skip_serializing_if`).
+    pub version: Option<String>,
+    /// The plugin path — [`WZ_STATIC_PLUGIN_PATH`] for a static wz subsystem.
+    pub path: String,
+    /// Compiled-in / activated state.
+    pub state: AdminPluginState,
+}
+
+impl AdminPlugin {
+    /// Build a static wz-subsystem plugin entry: [`path`](Self::path) =
+    /// [`WZ_STATIC_PLUGIN_PATH`]. `version` is the node build version (or `None`).
+    pub fn wz_static(id: &str, name: &str, version: Option<&str>, state: AdminPluginState) -> Self {
+        Self {
+            id: String::from(id),
+            name: String::from(name),
+            version: version.map(String::from),
+            path: String::from(WZ_STATIC_PLUGIN_PATH),
+            state,
+        }
+    }
+}
+
+// The status-body + local_data-object serializers are consumed ONLY by the
+// `adminspace-plugins-handlers` reply blocks; gated so a build without the feature
+// (where `AdminPlugin` still compiles inside the always-present `answer_admin_query`
+// signature) does not carry them as dead code — the same rationale as
+// `AdminSources::to_json`.
+#[cfg(feature = "adminspace-plugins-handlers")]
+impl AdminPlugin {
+    /// The zenoh `PluginStatusRec` JSON body (handler B, `@/<zid>/<whatami>/
+    /// plugins/<id>`). `serde` serializes the derived struct in FIELD-DECLARATION
+    /// order (NOT alphabetical — this is `serde_json::to_vec(&rec)`, not the `json!`
+    /// macro): `name, id, version?, long_version, path, state, report`
+    /// (`plugin.rs:92-102`). `version` is OMITTED when `None`
+    /// (`skip_serializing_if`), while `long_version` is emitted as `null`
+    /// (asymmetric — only `version` is skipped); wz has no long_version, so it is
+    /// always `null`. `report` is the default `{"level":"Info"}` (zenoh
+    /// `PluginReport::default`; `messages` skipped when empty) — wz subsystems
+    /// surface no health report (an extension point).
+    fn to_status_json(&self) -> String {
+        let mut out = String::from("{\"name\":");
+        crate::json::escape_into(&self.name, &mut out);
+        out.push_str(",\"id\":");
+        crate::json::escape_into(&self.id, &mut out);
+        if let Some(v) = &self.version {
+            out.push_str(",\"version\":");
+            crate::json::escape_into(v, &mut out);
+        }
+        out.push_str(",\"long_version\":null,\"path\":");
+        crate::json::escape_into(&self.path, &mut out);
+        out.push_str(",\"state\":");
+        crate::json::escape_into(self.state.as_str(), &mut out);
+        out.push_str(",\"report\":{\"level\":\"Info\"}}");
+        out
+    }
+}
+
+/// The `local_data` `plugins` field object (surface A) — zenoh builds it from
+/// `started_plugins_iter()` (`adminspace.rs:588-593`) as a JSON object keyed by
+/// plugin id, each value `{"name":..,"path":..}`. Only STARTED plugins appear (a
+/// `Loaded` subsystem is in handler B but not here — faithful to zenoh). The
+/// object keys are id-SORTED (zenoh's `serde_json` `Map` is a `BTreeMap`, no
+/// `preserve_order`), and each value's `name`/`path` keys are alphabetical (the
+/// `json!` macro form). Emits `{}` when no plugin is started.
+#[cfg(feature = "adminspace-plugins-handlers")]
+fn push_plugins_object(plugins: &[AdminPlugin], out: &mut String) {
+    let mut started: Vec<&AdminPlugin> = plugins
+        .iter()
+        .filter(|p| p.state == AdminPluginState::Started)
+        .collect();
+    started.sort_by(|a, b| a.id.cmp(&b.id));
+    out.push('{');
+    for (i, p) in started.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        // The object KEY is the plugin id as a quoted JSON string.
+        crate::json::escape_into(&p.id, out);
+        out.push_str(":{\"name\":");
+        crate::json::escape_into(&p.name, out);
+        out.push_str(",\"path\":");
+        crate::json::escape_into(&p.path, out);
+        out.push('}');
+    }
+    out.push('}');
+}
+
 /// The `@/<zid>/<whatami>` `local_data` view — zenoh `local_data`'s JSON object
 /// (`adminspace.rs:678-685`): `{zid, version, metadata, locators, sessions,
-/// plugins}`. `metadata` and `plugins` are `null` at this core (wz has no
-/// config-metadata surface and no plugin framework — the plugin family is a
-/// separate out-of-scope / foundational-inert atom cluster); the key set is
-/// preserved so a zenoh admin client parses the same shape.
+/// plugins}`. `metadata` is `null` at this core (wz has no config-metadata
+/// surface). `plugins` is `null` WITHOUT `adminspace-plugins-handlers` (the
+/// original byte-behavior) and, WITH the feature, the started-plugins object
+/// [`push_plugins_object`] builds from [`Self::plugins`] (surface A); the key set
+/// is preserved so a zenoh admin client parses the same shape either way.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdminLocalData {
     /// This node's zid in zenoh `ZenohId` Display form.
@@ -76,6 +223,11 @@ pub struct AdminLocalData {
     pub locators: Vec<String>,
     /// The connected peer(s).
     pub sessions: Vec<AdminSession>,
+    /// The node's compiled-in plugin registry (surface A, the `plugins` field).
+    /// Only STARTED entries appear in the emitted object; ignored (and the field
+    /// emits `null`) without `adminspace-plugins-handlers`. Always present so the
+    /// struct + [`answer_admin_query`] stay signature-stable across the toggle.
+    pub plugins: Vec<AdminPlugin>,
 }
 
 /// Admin-space access permissions — the embedder-supplied gate values for the
@@ -129,7 +281,14 @@ impl AdminLocalData {
         // R311y60 — the locators string array via the json::push_str_array SSOT.
         out.push_str("{\"locators\":");
         crate::json::push_str_array(&self.locators, &mut out);
-        out.push_str(",\"metadata\":null,\"plugins\":null,\"sessions\":[");
+        // `metadata` is null at this core; `plugins` is the started-plugins object
+        // under `adminspace-plugins-handlers`, else `null` (the original behavior).
+        out.push_str(",\"metadata\":null,\"plugins\":");
+        #[cfg(feature = "adminspace-plugins-handlers")]
+        push_plugins_object(&self.plugins, &mut out);
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        out.push_str("null");
+        out.push_str(",\"sessions\":[");
         for (i, session) in self.sessions.iter().enumerate() {
             if i > 0 {
                 out.push(',');
@@ -330,6 +489,32 @@ pub fn admin_config_write_key(zid_hex: &str, whatami: &str) -> String {
     s
 }
 
+/// R311y237 (§5.23 `adminspace-plugins-handlers`) — the per-plugin admin key
+/// `@/<zid>/<whatami>/plugins/<id>` (surface B). zenoh's `plugins_data` handler
+/// replies each `PluginStatusRec` under `root_key.join(status.id())`
+/// (`adminspace.rs:934`); the `id` here is the wz subsystem id (`storage_manager`,
+/// `rest`).
+#[cfg(feature = "adminspace-plugins-handlers")]
+fn admin_plugin_key(zid_hex: &str, whatami: &str, id: &str) -> String {
+    let mut s = admin_root_key(zid_hex, whatami);
+    s.push_str("/plugins/");
+    s.push_str(id);
+    s
+}
+
+/// R311y237 (§5.23 `adminspace-plugins-handlers`) — the per-plugin status-path
+/// key `@/<zid>/<whatami>/status/plugins/<id>/__path__` (surface C). zenoh's
+/// `plugins_status` handler replies each STARTED plugin's `path()` under this
+/// `__path__` leaf as `text/plain` (`adminspace.rs:963-969`).
+#[cfg(feature = "adminspace-plugins-handlers")]
+fn admin_plugin_status_path_key(zid_hex: &str, whatami: &str, id: &str) -> String {
+    let mut s = admin_root_key(zid_hex, whatami);
+    s.push_str("/status/plugins/");
+    s.push_str(id);
+    s.push_str("/__path__");
+    s
+}
+
 /// R311y45 (§5.23 Phase 2b) — the node-identity + version + locators + GET
 /// permission an [`answer_admin_query`] call needs. The caller (a Session, or a
 /// routing peer's forwarder-hosted admin) supplies these; `sessions[]` and
@@ -358,16 +543,24 @@ pub struct AdminAnswerCtx<'a> {
 /// Fires every admin handler whose key INTERSECTS the GET keyexpr (zenoh's
 /// `for (key, handler) in handlers { if key_expr.intersects(key) { .. } }`,
 /// `adminspace.rs:499-503`): root `local_data`, `metrics` (under
-/// `adminspace-metrics`), and `config`. `read=false` answers NOTHING (the
-/// dispatch SSOT still emits the terminating Final — zenoh's bare ResponseFinal
-/// on deny, `:462-467`). The reply path is the same `reply_keyed_encoded` the
-/// Session queryable uses.
+/// `adminspace-metrics`), `config`, the per-entity `subscriber`/`queryable`
+/// introspection (under `adminspace-introspection-handlers`), and the
+/// `plugins`/`status/plugins` legs (under `adminspace-plugins-handlers`).
+/// `read=false` answers NOTHING (the dispatch SSOT still emits the terminating
+/// Final — zenoh's bare ResponseFinal on deny, `:462-467`). The reply path is the
+/// same `reply_keyed_encoded` the Session queryable uses.
+///
+/// `plugins` is the node's compiled-in subsystem registry (surface A/B/C); it is
+/// consumed by [`AdminLocalData::plugins`] unconditionally (so the parameter is
+/// always used) and by the `plugins/**` + `status/plugins/**` reply blocks under
+/// the feature.
 pub fn answer_admin_query(
     view: &dyn crate::query_sink::QueryView,
     out: &mut dyn crate::query_sink::ReplyOut,
     ctx: &AdminAnswerCtx,
     sessions: &[AdminSession],
     declarations: &[AdminDeclaration],
+    plugins: &[AdminPlugin],
     config_json: &str,
 ) {
     if !ctx.read {
@@ -389,6 +582,10 @@ pub fn answer_admin_query(
             version: String::from(ctx.version),
             locators: ctx.locators.to_vec(),
             sessions: sessions.to_vec(),
+            // Surface A: the `plugins` field object (started-only) — always set so
+            // `plugins` is a used parameter regardless of the feature; `to_json`
+            // emits `null` when `adminspace-plugins-handlers` is off.
+            plugins: plugins.to_vec(),
         };
         out.reply_keyed_encoded(
             &root_key,
@@ -443,6 +640,52 @@ pub fn answer_admin_query(
                 decl.sources.to_json().as_bytes(),
                 Some(&crate::sample::EncodingHint::APPLICATION_JSON),
             );
+        }
+    }
+
+    // `plugins/**` (surface B) + `status/plugins/**` (surface C) — under
+    // `adminspace-plugins-handlers`. The wz-native superset of zenoh's
+    // PluginsManager admin handlers (adminspace.rs:922 `plugins_data` + :952
+    // `plugins_status`): the plugin list is the compiled-in subsystem registry the
+    // HOST supplies, NOT a dlopen enumeration.
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    {
+        // Surface B — `@/<zid>/<whatami>/plugins/<id>`: ONE reply per DECLARED
+        // plugin (any state) whose entity key INTERSECTS the GET, body the zenoh
+        // `PluginStatusRec` (zenoh replies every `plugins_status(names)` item,
+        // adminspace.rs:930-934). The wz registry is the compiled-subsystem list,
+        // so "declared" = "compiled in" (every entry the host passes).
+        for p in plugins {
+            let key = admin_plugin_key(ctx.zid_hex, ctx.whatami, &p.id);
+            let chunks: Vec<&str> = key.split('/').collect();
+            if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
+                out.reply_keyed_encoded(
+                    &key,
+                    p.to_status_json().as_bytes(),
+                    Some(&crate::sample::EncodingHint::APPLICATION_JSON),
+                );
+            }
+        }
+        // Surface C — `@/<zid>/<whatami>/status/plugins/<id>/__path__`: for each
+        // STARTED plugin, the `__path__` leg (text/plain, the plugin path). zenoh
+        // iterates `started_plugins_iter()` and replies `__path__` as TEXT_PLAIN
+        // (adminspace.rs:960-969). The plugin-defined `adminspace_getter` delegation
+        // (adminspace.rs:987, the `.../<id>/**` sub-tree) has no wz analogue — wz
+        // subsystems expose no admin getter — so only the always-present `__path__`
+        // leg is served (a NAMED deferral; the getter sub-tree is an extension point).
+        for p in plugins {
+            if p.state != AdminPluginState::Started {
+                continue;
+            }
+            let key = admin_plugin_status_path_key(ctx.zid_hex, ctx.whatami, &p.id);
+            let chunks: Vec<&str> = key.split('/').collect();
+            if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
+                out.reply_keyed_encoded(
+                    &key,
+                    p.path.as_bytes(),
+                    Some(&crate::sample::EncodingHint::TEXT_PLAIN),
+                );
+            }
         }
     }
 }
@@ -707,6 +950,7 @@ fn push_json_str(s: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
     use alloc::string::ToString as _;
     use alloc::vec;
 
@@ -771,13 +1015,23 @@ mod tests {
             version: "0.1.0".to_string(),
             locators: vec![],
             sessions: vec![],
+            plugins: vec![],
         };
         // The zenoh `local_data` key set with no peers / locators, in
         // serde_json's BTreeMap (alphabetical) key order:
-        // locators/metadata/plugins/sessions/version/zid.
+        // locators/metadata/plugins/sessions/version/zid. `plugins` is `null`
+        // without `adminspace-plugins-handlers` (the original byte-behavior) and
+        // `{}` with it (an empty started-plugins object, faithful to zenoh's
+        // `started_plugins_iter().collect()` on no started plugins).
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        let plugins_tok = "null";
+        #[cfg(feature = "adminspace-plugins-handlers")]
+        let plugins_tok = "{}";
         assert_eq!(
             data.to_json(),
-            r#"{"locators":[],"metadata":null,"plugins":null,"sessions":[],"version":"0.1.0","zid":"a1b2"}"#
+            format!(
+                r#"{{"locators":[],"metadata":null,"plugins":{plugins_tok},"sessions":[],"version":"0.1.0","zid":"a1b2"}}"#
+            )
         );
     }
 
@@ -795,17 +1049,26 @@ mod tests {
                     dst: "tcp/127.0.0.1:51000".to_string(),
                 }],
             }],
+            plugins: vec![],
         };
         // serde_json BTreeMap (alphabetical) key order at every level:
         // top locators/metadata/plugins/sessions/version/zid; session
-        // links/peer/weight/whatami; link dst/src.
+        // links/peer/weight/whatami; link dst/src. `plugins` = `null` (feature off)
+        // or `{}` (feature on, no STARTED plugin).
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        let plugins_tok = "null";
+        #[cfg(feature = "adminspace-plugins-handlers")]
+        let plugins_tok = "{}";
         assert_eq!(
             data.to_json(),
-            concat!(
-                r#"{"locators":["tcp/127.0.0.1:7447"],"metadata":null,"plugins":null,"#,
-                r#""sessions":[{"links":[{"dst":"tcp/127.0.0.1:51000","src":"tcp/127.0.0.1:7447"}],"#,
-                r#""peer":"c3d4","weight":null,"whatami":"router"}],"#,
-                r#""version":"0.1.0","zid":"a1b2"}"#
+            format!(
+                concat!(
+                    r#"{{"locators":["tcp/127.0.0.1:7447"],"metadata":null,"plugins":{plugins_tok},"#,
+                    r#""sessions":[{{"links":[{{"dst":"tcp/127.0.0.1:51000","src":"tcp/127.0.0.1:7447"}}],"#,
+                    r#""peer":"c3d4","weight":null,"whatami":"router"}}],"#,
+                    r#""version":"0.1.0","zid":"a1b2"}}"#
+                ),
+                plugins_tok = plugins_tok
             )
         );
     }
@@ -823,6 +1086,7 @@ mod tests {
                 whatami: None,
                 links: vec![],
             }],
+            plugins: vec![],
         };
         assert!(data.to_json().contains(r#""whatami":"unknown""#));
     }
@@ -836,6 +1100,7 @@ mod tests {
             version: "v\"1\\0\n".to_string(),
             locators: vec![],
             sessions: vec![],
+            plugins: vec![],
         };
         assert!(data.to_json().contains(r#""version":"v\"1\\0\n""#));
     }
@@ -999,6 +1264,7 @@ mod tests {
             &admin_ctx(true),
             &[],
             &[],
+            &[],
             r#"{"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
         );
         assert_eq!(out.replies.len(), 1, "only the config handler fires");
@@ -1014,12 +1280,19 @@ mod tests {
         // A GET on the bare root fires ONLY local_data (config is 4 chunks).
         let view = admin_view("@/a1b2/peer");
         let mut out = RecordingReply::default();
-        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], "{}");
+        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &[], "{}");
         assert_eq!(out.replies.len(), 1, "only local_data fires");
         assert_eq!(out.replies[0].0, "@/a1b2/peer");
+        // No plugins passed: `plugins` is `null` without the feature, `{}` with it.
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        let plugins_tok = "null";
+        #[cfg(feature = "adminspace-plugins-handlers")]
+        let plugins_tok = "{}";
         assert_eq!(
             String::from_utf8(out.replies[0].1.clone()).unwrap(),
-            r#"{"locators":[],"metadata":null,"plugins":null,"sessions":[],"version":"0.1.0","zid":"a1b2"}"#
+            format!(
+                r#"{{"locators":[],"metadata":null,"plugins":{plugins_tok},"sessions":[],"version":"0.1.0","zid":"a1b2"}}"#
+            )
         );
     }
 
@@ -1058,7 +1331,7 @@ mod tests {
             sub_decl("demo/**", &["a1b2"]),
             sub_decl("other/data", &["a1b2", "c3d4"]),
         ];
-        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, "{}");
+        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, &[], "{}");
         assert_eq!(out.replies.len(), 2, "one reply per declared subscriber");
         assert!(out
             .replies
@@ -1084,7 +1357,7 @@ mod tests {
             sub_decl("demo/**", &["a1b2"]),
             sub_decl("other/data", &["a1b2"]),
         ];
-        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, "{}");
+        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, &[], "{}");
         assert_eq!(out.replies.len(), 1, "only the intersecting subscriber");
         assert_eq!(out.replies[0].0, "@/a1b2/peer/subscriber/demo/**");
     }
@@ -1097,7 +1370,7 @@ mod tests {
         let view = admin_view("@/a1b2/peer/queryable/**");
         let mut out = RecordingReply::default();
         let decls = [qabl_decl("demo/q", &["a1b2"])];
-        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, "{}");
+        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, &[], "{}");
         assert_eq!(out.replies.len(), 1);
         assert_eq!(out.replies[0].0, "@/a1b2/peer/queryable/demo/q");
         assert_eq!(
@@ -1118,6 +1391,7 @@ mod tests {
             &admin_ctx(false),
             &[],
             &subs,
+            &[],
             "{}",
         );
         assert!(out.replies.is_empty(), "read=false gates all replies");
@@ -1131,6 +1405,7 @@ mod tests {
             &admin_ctx(true),
             &[],
             &qabls,
+            &[],
             "{}",
         );
         assert!(
@@ -1144,8 +1419,169 @@ mod tests {
         // read=false: a deny answers NOTHING (the dispatch SSOT emits the Final).
         let view = admin_view("@/a1b2/peer/config");
         let mut out = RecordingReply::default();
-        answer_admin_query(&view, &mut out, &admin_ctx(false), &[], &[], "{}");
+        answer_admin_query(&view, &mut out, &admin_ctx(false), &[], &[], &[], "{}");
         assert!(out.replies.is_empty(), "read=false yields no replies");
+    }
+
+    // R311y237 — the wz-native plugins surface (adminspace-plugins-handlers).
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    mod plugins {
+        use super::*;
+
+        // A compiled-but-not-started subsystem (Loaded) + an activated one (Started).
+        fn storage_loaded() -> AdminPlugin {
+            AdminPlugin::wz_static(
+                "storage_manager",
+                "storage_manager",
+                Some("0.1.0"),
+                AdminPluginState::Loaded,
+            )
+        }
+        fn rest_started() -> AdminPlugin {
+            AdminPlugin::wz_static("rest", "rest", Some("0.1.0"), AdminPluginState::Started)
+        }
+
+        #[test]
+        fn status_json_matches_zenoh_pluginstatusrec_field_order() {
+            // serde field-declaration order: name,id,version,long_version,path,state,
+            // report; version present (Some), long_version null, report default Info.
+            assert_eq!(
+                storage_loaded().to_status_json(),
+                concat!(
+                    r#"{"name":"storage_manager","id":"storage_manager","version":"0.1.0","#,
+                    r#""long_version":null,"path":"__static__","state":"Loaded","#,
+                    r#""report":{"level":"Info"}}"#
+                )
+            );
+        }
+
+        #[test]
+        fn status_json_omits_version_when_none() {
+            // zenoh's `version` has skip_serializing_if=Option::is_none, while
+            // long_version is emitted as null (asymmetric).
+            let p = AdminPlugin::wz_static("rest", "rest", None, AdminPluginState::Started);
+            assert_eq!(
+                p.to_status_json(),
+                concat!(
+                    r#"{"name":"rest","id":"rest","long_version":null,"path":"__static__","#,
+                    r#""state":"Started","report":{"level":"Info"}}"#
+                )
+            );
+        }
+
+        #[test]
+        fn local_data_plugins_field_lists_started_only_id_sorted() {
+            // Surface A: the root local_data `plugins` object lists STARTED plugins
+            // only (a Loaded subsystem appears in handler B, not here), keyed by id.
+            let view = admin_view("@/a1b2/peer");
+            let mut out = RecordingReply::default();
+            let plugins = [rest_started(), storage_loaded()];
+            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            assert_eq!(out.replies.len(), 1, "only local_data fires on a root GET");
+            let body = String::from_utf8(out.replies[0].1.clone()).unwrap();
+            // Only `rest` (Started); `storage_manager` (Loaded) is absent. Each value
+            // is `{"name","path"}` (alphabetical), the object keyed+id-sorted.
+            assert!(
+                body.contains(r#""plugins":{"rest":{"name":"rest","path":"__static__"}}"#),
+                "local_data plugins field must list only the started rest: {body}"
+            );
+        }
+
+        #[test]
+        fn plugins_handler_lists_every_declared_plugin_full_status() {
+            // Surface B: `plugins/**` replies ONE full PluginStatusRec per plugin
+            // (any state — both Loaded and Started), keyed `@/<zid>/<whatami>/
+            // plugins/<id>`.
+            let view = admin_view("@/a1b2/peer/plugins/**");
+            let mut out = RecordingReply::default();
+            let plugins = [storage_loaded(), rest_started()];
+            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            assert_eq!(out.replies.len(), 2, "one reply per declared plugin");
+            assert!(out
+                .replies
+                .iter()
+                .any(|(k, v)| k == "@/a1b2/peer/plugins/storage_manager"
+                    && v == storage_loaded().to_status_json().as_bytes()));
+            assert!(out
+                .replies
+                .iter()
+                .any(|(k, v)| k == "@/a1b2/peer/plugins/rest"
+                    && v == rest_started().to_status_json().as_bytes()));
+        }
+
+        #[test]
+        fn plugins_handler_narrowed_get_filters_by_id() {
+            // A narrowed `plugins/storage_manager` GET replies only that plugin.
+            let view = admin_view("@/a1b2/peer/plugins/storage_manager");
+            let mut out = RecordingReply::default();
+            let plugins = [storage_loaded(), rest_started()];
+            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            assert_eq!(out.replies.len(), 1, "only the intersecting plugin");
+            assert_eq!(out.replies[0].0, "@/a1b2/peer/plugins/storage_manager");
+        }
+
+        #[test]
+        fn status_plugins_handler_replies_path_for_started_only() {
+            // Surface C: `status/plugins/**` replies the `__path__` leg (text/plain)
+            // for STARTED plugins only (zenoh's started_plugins_iter). A Loaded
+            // subsystem is absent from C.
+            let view = admin_view("@/a1b2/peer/status/plugins/**");
+            let mut out = RecordingReply::default();
+            let plugins = [storage_loaded(), rest_started()];
+            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            assert_eq!(out.replies.len(), 1, "only the started rest __path__ leg");
+            assert_eq!(out.replies[0].0, "@/a1b2/peer/status/plugins/rest/__path__");
+            assert_eq!(out.replies[0].1, WZ_STATIC_PLUGIN_PATH.as_bytes());
+        }
+
+        #[test]
+        fn plugins_surfaces_are_read_gated() {
+            // read=false gates the plugins legs too (the dispatch SSOT emits Final).
+            let mut out = RecordingReply::default();
+            let plugins = [rest_started()];
+            answer_admin_query(
+                &admin_view("@/a1b2/peer/plugins/**"),
+                &mut out,
+                &admin_ctx(false),
+                &[],
+                &[],
+                &plugins,
+                "{}",
+            );
+            assert!(
+                out.replies.is_empty(),
+                "read=false yields no plugin replies"
+            );
+        }
+
+        #[test]
+        fn plugins_handler_empty_registry_replies_nothing() {
+            // Surface B with an EMPTY registry: a `plugins/**` GET yields 0 replies
+            // (distinct from the read-gate path — read=true, but nothing compiled).
+            let view = admin_view("@/a1b2/peer/plugins/**");
+            let mut out = RecordingReply::default();
+            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &[], "{}");
+            assert!(
+                out.replies.is_empty(),
+                "an empty plugin registry replies nothing to plugins/**"
+            );
+        }
+
+        #[test]
+        fn status_plugins_all_loaded_replies_nothing() {
+            // Surface C started-only filter: with ONLY a Loaded plugin, a
+            // `status/plugins/**` GET yields nothing (the __path__ leg is started-only,
+            // zenoh's `started_plugins_iter`). This guards against inverting the
+            // `state != Started` filter — an inversion would wrongly reply here.
+            let view = admin_view("@/a1b2/peer/status/plugins/**");
+            let mut out = RecordingReply::default();
+            let plugins = [storage_loaded()];
+            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            assert!(
+                out.replies.is_empty(),
+                "status/plugins/** replies nothing when no plugin is Started"
+            );
+        }
     }
 
     // R311y204 — the ROUTER-tier admin legs (adminspace-router-linkstate).
