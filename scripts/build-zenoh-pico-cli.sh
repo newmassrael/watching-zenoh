@@ -81,16 +81,24 @@ echo "build-zenoh-pico-cli: pin = $(git -C "$VENDOR_DIR" rev-parse --short HEAD 
 # interrupted earlier run that left a partial patch behind is
 # still cleaned up. THIRD_PARTY.md vendor/zenoh-pico section
 # documents this divergence.
-restore_z_put() {
+#
+# R311y240 — a SECOND in-place example patch lands below
+# (z_sub_attachment.c priority-print). Bash keeps ONE `trap ... EXIT`
+# handler, so a separate `trap restore_z_sub_attachment EXIT` would
+# SILENTLY REPLACE this one and disable the z_put revert. Both
+# git-checkouts therefore live in ONE handler, wired once — which also
+# makes the up-front restore-first cover both files.
+restore_pico_example_patches() {
     if [[ -e "$VENDOR_DIR/.git" ]]; then
         git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_put.c 2>/dev/null || true
+        git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_sub_attachment.c 2>/dev/null || true
     fi
 }
-trap restore_z_put EXIT
+trap restore_pico_example_patches EXIT
 
-# Restore first so the patch anchor grep below matches the
-# committed shape even if a previous run aborted mid-build.
-restore_z_put
+# Restore first so the patch anchor greps below match the committed
+# shape even if a previous run aborted mid-build (leftover patches).
+restore_pico_example_patches
 
 z_put_src="$EXAMPLES_DIR/unix/c11/z_put.c"
 if grep -q "z_put(z_loan(s), z_loan(ke), z_move(payload), NULL)" "$z_put_src"; then
@@ -113,6 +121,53 @@ else
     echo "build-zenoh-pico-cli: z_put.c upstream shape changed (NULL options literal absent);" >&2
     echo "  the wz-side BLOCK patch anchor is missing. Re-verify the patch against the" >&2
     echo "  current vendor pin (current: $(git -C "$VENDOR_DIR" rev-parse --short HEAD)) before continuing." >&2
+    exit 2
+fi
+
+# R311y240 — wz-side build-time patch on vendor/zenoh-pico/examples/
+# unix/c11/z_sub_attachment.c. The stock example prints the received
+# sample's encoding / timestamp / attachment but NOT its qos priority
+# (it never calls z_sample_priority). This patch adds a
+# `with priority: <n>` line so the CLI becomes the FOREIGN witness for
+# wz's Push outer QoS-ext (priority sub-field) propagation
+# (tests/wz_priority_to_pico_zsub.rs). Same lifecycle as the z_put
+# patch above: applied in-place, reverted by the shared trap.
+#
+# Idempotency hazard (WHY the explicit marker check below): the z_put
+# patch is self-guarding — its anchor `z_put(.., NULL)` is CONSUMED by
+# the patch (rewritten to `&opts`), so a leftover-patched file fails the
+# anchor grep and the else-branch exit 2 fires. This patch's anchor is a
+# COMMENT (`// Check timestamp`) that SURVIVES the insert, so a restore
+# miss (e.g. SIGKILL before the trap) would let a stale marker slip the
+# anchor grep and DOUBLE-insert the printf. Hard-reject when the marker
+# is already present so a dirty submodule tree errors loudly instead.
+# THIRD_PARTY.md vendor/zenoh-pico section documents this divergence.
+z_sub_att_src="$EXAMPLES_DIR/unix/c11/z_sub_attachment.c"
+if grep -q "with priority:" "$z_sub_att_src"; then
+    echo "build-zenoh-pico-cli: z_sub_attachment.c already prints 'with priority:'" >&2
+    echo "  — either a prior patch was not reverted (dirty submodule tree; revert with" >&2
+    echo "  'git -C \"$VENDOR_DIR\" checkout -- examples/unix/c11/z_sub_attachment.c')" >&2
+    echo "  or a vendor-pin bump added a native priority print (re-verify the patch)." >&2
+    exit 2
+fi
+if grep -q "// Check timestamp" "$z_sub_att_src"; then
+    # `#`-delimited address: the anchor contains `//`, which would
+    # collide with sed's default `/.../` delimiter. `\\n` becomes a
+    # literal `\n` in the emitted C (GNU sed processes `\n` in i-text
+    # as a real newline, which would split the string literal).
+    sed -i '
+        \#// Check timestamp#i\
+    printf("    with priority: %d\\n", (int)z_sample_priority(sample));
+    ' "$z_sub_att_src"
+    if ! grep -q "with priority:" "$z_sub_att_src"; then
+        echo "build-zenoh-pico-cli: priority-print patch failed to land in $z_sub_att_src" >&2
+        exit 2
+    fi
+    echo "build-zenoh-pico-cli: applied priority-print patch to z_sub_attachment.c" >&2
+else
+    echo "build-zenoh-pico-cli: z_sub_attachment.c upstream shape changed (// Check timestamp" >&2
+    echo "  anchor absent); re-verify the priority patch against the current vendor pin" >&2
+    echo "  (current: $(git -C "$VENDOR_DIR" rev-parse --short HEAD)) before continuing." >&2
     exit 2
 fi
 

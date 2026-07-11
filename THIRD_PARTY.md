@@ -57,7 +57,9 @@ changelog that authorized the bump.
   c11/z_put.c` switching the PUT congestion control default from
   upstream's DROP to BLOCK, then reverts the file via
   `git checkout` on exit (success, error, or signal — see the
-  `trap restore_z_put EXIT` block). DROP is the upstream default
+  `trap restore_pico_example_patches EXIT` block, renamed from
+  `restore_z_put` in R311y240 when a second example patch landed).
+  DROP is the upstream default
   per `include/zenoh-pico/api/constants.h::z_internal_congestion_
   control_default_push()` and is correct for sustained
   high-throughput publishers where dropping under back-pressure
@@ -72,6 +74,27 @@ changelog that authorized the bump.
   test-harness binary; runtime use of zenoh-pico via
   `crates/zenoh-pico-sys` FFI is unaffected because that path
   links against the upstream library, not the patched example.
+- **Build-time divergence (R311y240)**: the same
+  `scripts/build-zenoh-pico-cli.sh` applies a second in-place patch
+  to `vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c`,
+  inserting a `printf("    with priority: %d\n",
+  (int)z_sample_priority(sample))` line into its `data_handler` so
+  the CLI reports the received sample's qos priority (the stock
+  example prints encoding / timestamp / attachment but never calls
+  `z_sample_priority`). This makes it the foreign witness for
+  watching-zenoh's Push outer QoS-ext priority propagation
+  (`crates/wz-integration-tests/tests/wz_priority_to_pico_zsub.rs`).
+  The anchor is the `// Check timestamp` comment; unlike the R216
+  z_put patch (whose anchor `z_put(.., NULL)` is consumed by its own
+  edit, so a leftover patch fails the anchor grep and errors loudly),
+  the comment survives the insert — so the script hard-rejects a run
+  where the `with priority:` marker is already present (a dirty
+  submodule tree from a missed revert) rather than silently
+  double-inserting. Both example patches share the single
+  `trap restore_pico_example_patches EXIT` handler (bash keeps one
+  EXIT trap), which reverts both files via `git checkout` on exit.
+  Same harness-only scope as the R216 patch: runtime FFI use via
+  `crates/zenoh-pico-sys` is unaffected.
 
 ## vendor/lwip — lightweight TCP/IP stack
 

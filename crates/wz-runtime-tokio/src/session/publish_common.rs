@@ -82,14 +82,20 @@ pub struct PublishOptions {
     pub kind: SampleKind,
     /// R232 — body-level timestamp propagated to subscribers via
     /// `Sample.timestamp`. On the loopback branch the value lands
-    /// verbatim. On the wire branch the value will encode into the
-    /// `MsgPut`/`MsgDel` body (R233 carry — current wire branch drops
-    /// this field). `None` (default) means no timestamp attached.
+    /// verbatim. On the wire branch (R233) it encodes into the
+    /// `MsgPut`/`MsgDel` body (`gated_timestamp_field`, gated
+    /// `pubsub-timestamp`; the header T-flag `0x20` rides with it) and
+    /// is foreign-decoded — R311y208 proves a real zenoh-pico
+    /// `z_sub_attachment` reads it (`wz_timestamp_to_pico_zsub`).
+    /// `None` (default) means no timestamp attached.
     pub timestamp: Option<TimestampHint>,
     /// R232 — body-level encoding propagated to Put-kind subscribers
     /// via `Sample.encoding`. Del-kind ignores this field (zenoh-pico
     /// `_z_msg_del_t` has no encoding slot). Wire-side propagation is
-    /// the R233 carry; loopback honours it from R232.
+    /// built (R233, `gated_encoding_field` on the Put body, gated
+    /// `pubsub-encoding`) and foreign-proven — R311y207
+    /// (`wz_encoding_to_pico_zsub`, `text/plain` decoded by pico);
+    /// loopback honours it from R232.
     pub encoding: Option<EncodingHint>,
     /// R232 — body-level source identification propagated to
     /// `Sample.source_info`. Cooperates with the R231 self-echo dedup:
@@ -97,17 +103,33 @@ pub struct PublishOptions {
     /// `source_info.zid` matches the session's own zid, the dedup
     /// suppresses the duplicate fire so a `Locality::Any` publish only
     /// invokes any-locality subscribers once. Wire-side propagation is
-    /// the R233 carry; loopback honours it from R232.
+    /// built (R233, body ext `0x01` via `build_body_extensions`, gated
+    /// `pubsub-source-info`; an empty zid prefix emits no ext). Unlike
+    /// encoding / timestamp / attachment, source_info has NO cross-impl
+    /// parity witness — no wz->pico e2e AND no FFI byte-compare (the
+    /// `layer3_msg_*` gates cover only the metadata-absent baseline);
+    /// its encode is pinned solely by the wz-internal unit test
+    /// `build_msg_put_with_meta_attaches_source_info_ext_and_sets_z_flag`.
+    /// Loopback honours it from R232.
     pub source_info: Option<SourceInfo>,
     /// R232 — body-level attachment blob propagated to
-    /// `Sample.attachment`. Wire-side propagation is the R233 carry;
-    /// loopback honours it from R232.
+    /// `Sample.attachment`. Wire-side propagation is built (R233, body
+    /// ext `0x03` via `build_body_extensions`, gated `pubsub-attachment`)
+    /// and foreign-proven — R311y209 (`wz_attachment_to_pico_zsub`,
+    /// ze_serializer kv-pairs decoded by pico); loopback honours it
+    /// from R232.
     pub attachment: Option<Vec<u8>>,
     /// R232 — outer-level QoS metadata propagated to `Sample.qos`.
     /// zenoh-pico mirror: the Push outer `_Z_MSG_EXT_ENC_ZINT | 0x01`
     /// extension carrying priority + congestion-control + express
-    /// packed into one byte. Wire-side propagation is the R233 carry;
-    /// loopback honours it from R232.
+    /// packed into one byte. Wire-side propagation is built (R233,
+    /// `build_push_outer_extensions`, gated on any of `pubsub-priority`
+    /// / `pubsub-congestion-control` / `pubsub-express`; the ext is
+    /// suppressed when the byte equals `QosLevel::DEFAULT`). The
+    /// PRIORITY sub-field is foreign-proven — R311y240
+    /// (`wz_priority_to_pico_zsub`, pico `z_sample_priority`);
+    /// congestion / express ride the same byte but have no wz->pico
+    /// witness yet. Loopback honours all three from R232.
     pub qos: Option<QosLevel>,
 }
 
@@ -150,7 +172,8 @@ impl PublishOptions {
 
     /// R232 — attach a body-level timestamp. The loopback branch
     /// propagates this into `Sample.timestamp` for the subscriber
-    /// callback. Wire-side propagation lands in R233.
+    /// callback; the wire branch encodes it into the Put/Del body
+    /// (R233, foreign-proven R311y208).
     // R311fx — gated on `pubsub-timestamp` (wire-data helper, mirrors
     // `with_attachment`): the send-side encode elides the timestamp when
     // the feature is off, so offering the setter would silently drop it.
