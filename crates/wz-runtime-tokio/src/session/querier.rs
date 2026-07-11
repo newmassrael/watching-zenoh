@@ -17,17 +17,16 @@ use super::*;
 ///
 /// At R239 the *load-bearing* knob is `allowed_destination`: it
 /// selects which branches of [`Session::query`] actually run (wire,
-/// loopback, or both). The remaining slots (target, consolidation,
-/// payload, encoding, attachment, timeout_ms) are captured for
-/// future-additive propagation — the AP MVP `send_request_query`
-/// path takes none of them today, and the loopback path's
-/// in-process [`crate::query::QueryableRegistry::local_query`]
-/// only inspects the keyexpr. The R232 → R233 split precedent
-/// applies: loopback-side propagation lands first (the in-process
-/// `Query` shape exposes these fields), wire-side propagation
-/// follows in a subsequent round when the layered
-/// `RequestQueryBuilder` is wired through
-/// `Session::query`.
+/// loopback, or both). R240 wired the layered `RequestQueryBuilder`
+/// through `Session::query` -> `send_request_query_with_meta` (via
+/// `QueryOptions::query_metadata` -> `build_request_query_with_meta`),
+/// so `target` / `consolidation` / `attachment` / `parameters` /
+/// `source_info` / `timeout_ms` now propagate on the outbound Query.
+/// `payload` / `encoding` stay captured as future-additive slots —
+/// R241+ carry, the wz codec has no Q_B body / Q_E inline slot yet —
+/// so a later round lands them without an API break. The loopback
+/// path's in-process [`crate::query::QueryableRegistry::local_query`]
+/// still only inspects the keyexpr.
 ///
 /// `#[non_exhaustive]` so future rounds add fields without breaking
 /// callers. Construct via [`QueryOptions::get`] (or `default`) plus
@@ -82,7 +81,10 @@ pub struct QueryOptions {
     /// loopback propagation — see `payload`.
     pub encoding: Option<EncodingHint>,
     /// Optional Query-level attachment blob. Mirror of
-    /// `z_get_options_t.attachment`. R239 carry.
+    /// `z_get_options_t.attachment`. Propagated on the outbound Query
+    /// since R240 (`build_request_query_with_meta` ->
+    /// `RequestQueryBuilder::query_attachment`); an empty blob elides
+    /// the ext.
     pub attachment: Option<Vec<u8>>,
     /// Optional Query selector parameters (the `_sn=START..&_max=N`
     /// URL-style selector after `?`). `None` (or empty) elides the `Q_P`

@@ -388,6 +388,8 @@ pub use wz_session_core::metadata::PushMetadata;
 /// | `target`           | [`RequestQueryBuilder::request_target`] |
 /// | `consolidation`    | [`RequestQueryBuilder::consolidation`] |
 /// | `attachment`       | [`RequestQueryBuilder::query_attachment`] |
+/// | `parameters`       | [`RequestQueryBuilder::parameters`] |
+/// | `source_info`      | [`RequestQueryBuilder::query_source_info`] |
 /// | `timeout_ms`       | [`RequestQueryBuilder::request_timeout_ms`] |
 /// | `payload`          | R241+ carry — wz codec has no Q_B body slot yet |
 /// | `encoding`         | R241+ carry — wz codec has no Q_E inline slot yet |
