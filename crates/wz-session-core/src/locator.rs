@@ -58,10 +58,18 @@
 //! decided here — resolution stays an AP-side (`std`) concern, out of this
 //! no_std-compatible parse (the dial seam resolves a `Named` tcp endpoint).
 //!
+//! R311y236 — the `#`-delimited config tail IS now parsed on the IP leaf:
+//! [`parse_locator`] / [`classify_named_ip`] split it off before the addr parse
+//! and extract `iface=<name>` (zenoh `BIND_INTERFACE`) into
+//! [`ParsedLocator::iface`] / [`AnyLocator::Named`], so
+//! `udp/1.2.3.4:7447#iface=eth0` now parses (the runtime dial/listen seam binds
+//! the socket to the NIC via `SO_BINDTODEVICE` under the `locator-iface`
+//! feature). Config keys OTHER than `iface` are accepted-then-ignored
+//! (forward-compat), and zenoh's `?`-delimited METADATA separator is NOT split
+//! (wz carries no `?metadata` grammar) — both are silent, so a dial-semantic
+//! config key beyond `iface` would not take effect.
+//!
 //! Still surfaced as parse errors rather than silently mis-parsed:
-//! - IP locator metadata suffixes (`udp/1.2.3.4:7447#iface=eth0`) — the
-//!   `#`-delimited config tail is not split by the IP leaf (the serial
-//!   leaf DOES read its `#baudrate=` tail);
 //! - other transports not yet wired (`bt/...`).
 
 use alloc::string::{String, ToString};
@@ -123,10 +131,23 @@ pub enum Proto {
 }
 
 /// A locator parsed into its transport protocol and numeric endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// R311y236 — no longer `Copy`: the optional `iface` interface-binding name
+/// (from the `#iface=<name>` config tail) is an owned `String`. The type stays
+/// `Clone`; every embedding ([`AnyLocator::Ip`], [`crate::reconnect`]) was
+/// already `Clone`-only (the `AnyLocator::Named` arm carries a `String` host),
+/// so dropping `Copy` ripples only to the few explicit-copy sites.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedLocator {
     pub proto: Proto,
     pub addr: SocketAddr,
+    /// R311y236 — the `#iface=<name>` interface-binding config from the
+    /// locator's `#`-delimited config tail (zenoh `BIND_INTERFACE`, applied as
+    /// `SO_BINDTODEVICE` on the dialing socket). `None` = no bind. Carried
+    /// verbatim by the no_std parser; the runtime dial seam honours it on
+    /// Linux/Android and no-ops (with a warn) off-platform — mirroring zenoh
+    /// (`zenoh-util::net::set_bind_to_device_*`, a Linux/Android-only syscall).
+    pub iface: Option<String>,
 }
 
 /// Why a locator string did not parse into a [`ParsedLocator`]. Each
@@ -138,17 +159,22 @@ pub enum LocatorParseError {
     MissingProtoSeparator,
     /// The protocol token is not one of the supported transports.
     UnknownProto(String),
-    /// The `addr:port` part is not a numeric [`SocketAddr`] (DNS names,
-    /// metadata suffixes, and malformed addresses all land here).
+    /// The `addr:port` part (after stripping any `#`-config tail, R311y236) is
+    /// not a numeric [`SocketAddr`] — DNS names and malformed addresses land
+    /// here. A well-formed `#iface=` tail no longer lands here (it parses); an
+    /// address that is still non-numeric after the tail is stripped does.
     BadAddress(String),
 }
 
 /// Parse a zenoh locator `proto/addr:port` into a [`ParsedLocator`].
 ///
-/// The protocol is the substring before the first `/`; everything after
-/// it is parsed as a [`SocketAddr`]. See the module doc for the MVP
-/// scope (numeric tcp/udp/tls/ws endpoints; DNS / metadata / other transports
-/// are reported as errors, not silently accepted).
+/// The protocol is the substring before the first `/`; the remainder is the
+/// `addr:port` up to an optional `#`-config tail (R311y236), which is parsed as
+/// a [`SocketAddr`]. The `#iface=<name>` tail is extracted into
+/// [`ParsedLocator::iface`]; other config keys are ignored. See the module doc
+/// for the MVP scope (numeric tcp/udp/tls/ws endpoints; DNS names classify to
+/// [`AnyLocator::Named`] via [`parse_any_locator`], other transports are
+/// reported as errors, not silently accepted).
 pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> {
     let (proto_str, addr_str) = locator
         .split_once('/')
@@ -162,10 +188,52 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
         "quic-datagram" => Proto::QuicDatagram,
         other => return Err(LocatorParseError::UnknownProto(other.to_string())),
     };
-    let addr = SocketAddr::from_str(addr_str)
-        .map_err(|_| LocatorParseError::BadAddress(addr_str.to_string()))?;
-    Ok(ParsedLocator { proto, addr })
+    // R311y236 — split off the `#`-delimited config tail (zenoh
+    // `CONFIG_SEPARATOR`, endpoint.rs:24) BEFORE the numeric addr parse: the
+    // address is the part before `#`, the config carries `iface=<name>` (the
+    // only key wz honours; unknown keys are ignored for forward-compat). This
+    // flips the pre-R311y236 reject where the raw `1.2.3.4:7447#iface=eth0`
+    // string failed `SocketAddr::from_str` as `BadAddress`.
+    let (numeric, config) = split_config_tail(addr_str);
+    let addr = SocketAddr::from_str(numeric)
+        .map_err(|_| LocatorParseError::BadAddress(numeric.to_string()))?;
+    Ok(ParsedLocator {
+        proto,
+        addr,
+        iface: parse_iface(config),
+    })
 }
+
+/// R311y236 — split an IP address token into its numeric `addr:port` head and
+/// its `#`-delimited config tail (zenoh's `CONFIG_SEPARATOR`). No `#` => the
+/// whole token is the address and the config is empty. Shared by the numeric
+/// [`parse_locator`] and the DNS-name [`classify_named_ip`] so the two agree on
+/// where the address ends and the config begins.
+fn split_config_tail(addr_token: &str) -> (&str, &str) {
+    match addr_token.split_once('#') {
+        Some((addr, config)) => (addr, config),
+        None => (addr_token, ""),
+    }
+}
+
+/// R311y236 — extract the optional `iface=<name>` interface-binding name from
+/// the `;`-delimited `key=value` config tail (zenoh `BIND_INTERFACE = "iface"`,
+/// zenoh-link-commons/src/lib.rs:52). Unknown keys are ignored (forward-compat
+/// with zenoh's richer config grammar); an empty value or an absent `iface` key
+/// yields `None`. Pure alloc string work, like [`parse_baudrate`].
+fn parse_iface(config: &str) -> Option<String> {
+    for pair in config.split(';') {
+        if let Some((key, value)) = pair.split_once('=') {
+            if key == LOCATOR_IFACE_KEY && !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// zenoh `BIND_INTERFACE` config key (`io/zenoh-link-commons/src/lib.rs:52`).
+const LOCATOR_IFACE_KEY: &str = "iface";
 
 // ─── serial locator leaf ───
 //
@@ -570,6 +638,10 @@ pub enum AnyLocator {
         proto: Proto,
         host: String,
         port: u16,
+        /// R311y236 — the `#iface=<name>` bind from the config tail, carried
+        /// like [`ParsedLocator::iface`] so a DNS-named dial can also bind its
+        /// outgoing socket to a NIC (`SO_BINDTODEVICE`). `None` = no bind.
+        iface: Option<String>,
     },
     /// A serial endpoint (`serial/...`) — see [`SerialEndpoint`]. ALWAYS
     /// present (R311ny: the serial locator leaf is ungated), so a
@@ -691,7 +763,12 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
         // them here makes DNS-vs-numeric an address-token property the dial seam
         // routes on, instead of a raw-string re-inspection at each caller.
         Err(LocatorParseError::BadAddress(addr)) => match classify_named_ip(locator) {
-            Some((proto, host, port)) => Ok(AnyLocator::Named { proto, host, port }),
+            Some((proto, host, port, iface)) => Ok(AnyLocator::Named {
+                proto,
+                host,
+                port,
+                iface,
+            }),
             None => Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(addr))),
         },
         Err(e) => Err(AnyLocatorError::Ip(e)),
@@ -706,7 +783,7 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
 /// not already parse numerically — is genuinely malformed (`None`). This only
 /// classifies the token SHAPE; it performs NO DNS resolution (that is the std
 /// dial layer's concern, per this module's deferral contract).
-fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16)> {
+fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, Option<String>)> {
     let (proto_str, addr) = locator.split_once('/')?;
     let proto = match proto_str {
         "tcp" => Proto::Tcp,
@@ -717,6 +794,11 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16)> {
         "quic-datagram" => Proto::QuicDatagram,
         _ => return None,
     };
+    // R311y236 — strip the `#`-delimited config tail before shape-classifying
+    // the host:port, so a DNS-named locator carries its `iface=` bind exactly
+    // like the numeric leaf (else `example.org:7447#iface=eth0` would look
+    // malformed and reject). Shared `split_config_tail` keeps the two agreeing.
+    let (addr, config) = split_config_tail(addr);
     // A bracketed address is an IPv6 literal; if it did not parse as a
     // SocketAddr above, it is malformed, not a name.
     if addr.starts_with('[') {
@@ -727,7 +809,7 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16)> {
     if host.is_empty() || host.contains('/') || host.contains(':') {
         return None;
     }
-    Some((proto, host.to_string(), port))
+    Some((proto, host.to_string(), port, parse_iface(config)))
 }
 
 #[cfg(test)]
@@ -860,6 +942,7 @@ mod tests {
                 proto: Proto::Quic,
                 host: "example.org".to_string(),
                 port: 7447,
+                iface: None,
             })
         );
     }
@@ -877,12 +960,51 @@ mod tests {
     }
 
     #[test]
-    fn rejects_metadata_suffix_as_bad_address() {
+    fn parses_iface_config_tail_on_numeric_ip() {
+        // R311y236 — `#iface=<name>` is the zenoh config tail (SO_BINDTODEVICE
+        // NIC bind); the numeric addr is the part before `#`, iface is extracted.
+        // Flips the pre-R311y236 `BadAddress` reject of the whole `#`-bearing
+        // string (the locator-iface atom's core behaviour).
+        let p = parse_locator("udp/1.2.3.4:7447#iface=eth0").expect("iface tail parses");
+        assert_eq!(p.proto, Proto::Udp);
+        assert_eq!(p.addr, "1.2.3.4:7447".parse::<SocketAddr>().unwrap());
+        assert_eq!(p.iface.as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn no_config_tail_leaves_iface_none() {
+        let p = parse_locator("tcp/1.2.3.4:7447").expect("plain locator parses");
+        assert_eq!(p.iface, None);
+    }
+
+    #[test]
+    fn unknown_config_key_is_ignored_iface_none() {
+        // Forward-compat with zenoh's richer config grammar: a non-`iface` key
+        // parses (addr accepted) but yields iface None (only `iface` is honoured).
+        let p = parse_locator("tcp/1.2.3.4:7447#priority=4").expect("addr parses");
+        assert_eq!(p.addr, "1.2.3.4:7447".parse::<SocketAddr>().unwrap());
+        assert_eq!(p.iface, None);
+    }
+
+    #[test]
+    fn empty_iface_value_is_none() {
+        // `#iface=` with no value is not a bind (guards the empty-NIC-name case).
+        let p = parse_locator("tcp/1.2.3.4:7447#iface=").expect("addr parses");
+        assert_eq!(p.iface, None);
+    }
+
+    #[test]
+    fn parses_iface_config_tail_on_dns_name() {
+        // R311y236 — a DNS-named locator carries iface too (bind the outgoing
+        // socket to the NIC, then connect the resolved name).
         assert_eq!(
-            parse_locator("udp/1.2.3.4:7447#iface=eth0"),
-            Err(LocatorParseError::BadAddress(
-                "1.2.3.4:7447#iface=eth0".to_string()
-            ))
+            parse_any_locator("tcp/example.org:7447#iface=eth0"),
+            Ok(AnyLocator::Named {
+                proto: Proto::Tcp,
+                host: "example.org".to_string(),
+                port: 7447,
+                iface: Some("eth0".to_string()),
+            })
         );
     }
 
@@ -931,6 +1053,7 @@ mod tests {
                 proto: Proto::Tcp,
                 host: "example.org".to_string(),
                 port: 7447,
+                iface: None,
             })
         );
     }
@@ -952,6 +1075,7 @@ mod tests {
                     proto,
                     host: "example.org".to_string(),
                     port: 7447,
+                    iface: None,
                 }),
                 "{s} should classify as Named"
             );

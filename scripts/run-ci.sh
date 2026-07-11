@@ -1210,6 +1210,30 @@ layer_c1bc_cargo_test_mcast_qos() {
         && cargo clippy -p wz-ap-demo --all-targets --features router-multicast-faces --quiet -- -D warnings)
 }
 
+# ─── Layer C1bd — locator-iface: #iface= NIC bind honor (R311y236) ─
+#
+# R311y236 promotes `locator-iface` reserved-INERT -> active: the `#iface=<name>`
+# locator config tail (parsed always-on in wz-session-core::locator) is now
+# HONORED by binding the dialing/listening socket to the named NIC
+# (SO_BINDTODEVICE, Linux/Android; warn-noop off-platform) across tcp/tls/ws/udp/
+# quic/quic-datagram + the listen bind. This lane clippy-gates the feature-ON
+# honor path (which pulls socket2 + compiles the real SO_BINDTODEVICE bind)
+# -D warnings across the TCP-family (udp+ws), TLS, and QUIC(+datagram)
+# feature-arms — each transport ALONE with locator-iface, since tls+quic TOGETHER
+# is a pre-existing DialConfig-literal clash unrelated to this atom. The #iface=
+# PARSE tests (wz-session-core) + the Some-arm noop-connect wiring test
+# (link_pipeline, gated not(locator-iface)) run in the DEFAULT lanes; this lane
+# pins that the honor path itself builds clean under the feature for every
+# transport that carries it.
+layer_c1bd_locator_iface() {
+    (cd crates \
+        && cargo test -p wz-session-core --lib locator::tests --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features locator-iface,transport-link-udp,transport-link-ws --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features locator-iface,transport-link-tls --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features locator-iface,transport-link-quic,transport-link-quic-datagram --quiet -- -D warnings \
+        && cargo build -p wz --features locator-iface --quiet)
+}
+
 # ─── Layer C1ae — compression transport: lz4 wrap + ext 0x6 + e2e ─
 #
 # R311xm: transport-compression (the lz4 per-batch wrap) + session-extcompression
@@ -5197,6 +5221,7 @@ run_layer C1az layer_c1az_cargo_test_rest_sse || overall=1
 run_layer C1ba layer_c1ba_cargo_clippy_transport_multilink || overall=1
 run_layer C1bb layer_c1bb_cargo_test_qos || overall=1
 run_layer C1bc layer_c1bc_cargo_test_mcast_qos || overall=1
+run_layer C1bd layer_c1bd_locator_iface || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

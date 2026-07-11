@@ -555,6 +555,97 @@ pub mod stream_link;
 #[cfg(feature = "transport-link-tcp")]
 pub mod link_pipeline;
 
+// R311y236 — the `#iface=` SO_BINDTODEVICE honor helper. Lives at the crate
+// root (NOT the `transport-link-tcp`-gated `link_pipeline`) because
+// `udp_pipeline` + `quic_pipeline` also call it and do NOT imply tcp — a
+// udp-only / multicast-udp build would otherwise fail to find `link_pipeline`
+// (the R311y236 push caught this: Layer C1v / C4e E0433). Gated on the union of
+// its caller backends — tcp/udp/quic use `bind_socket_to_device`; tcp/ws use
+// `connect_tcp_bound` (`transport-link-ws` does NOT pull tcp, unlike tls, so ws
+// must reach the connect helper without the tcp `link_pipeline`); tls implies
+// tcp, quic-datagram implies quic. So it is never dead-code when no link builds.
+#[cfg(any(
+    feature = "transport-link-tcp",
+    feature = "transport-link-udp",
+    feature = "transport-link-quic",
+    feature = "transport-link-ws"
+))]
+pub(crate) mod iface_bind {
+    use std::io;
+
+    /// Bind a socket to a named NIC (`SO_BINDTODEVICE`), the honor half of the
+    /// `#iface=<name>` locator config ([`wz_session_core::locator`]).
+    ///
+    /// Three arms: (1) `locator-iface` + Linux/Android performs the real
+    /// `SO_BINDTODEVICE` (via the feature-pulled `socket2`); (2) `locator-iface`
+    /// off-platform warns (the syscall is Linux/Android-only, mirroring
+    /// zenoh-util's non-Linux stub); (3) without the `locator-iface` feature the
+    /// bind is not compiled in, so a parsed `#iface=` warns rather than silently
+    /// connecting unbound. The PARSE of `#iface=` is always-on (foundational);
+    /// only the honor is the gated atom.
+    #[cfg(all(
+        feature = "locator-iface",
+        any(target_os = "linux", target_os = "android")
+    ))]
+    pub(crate) fn bind_socket_to_device<S: std::os::fd::AsFd>(
+        sock: &S,
+        iface: &str,
+    ) -> io::Result<()> {
+        socket2::SockRef::from(sock).bind_device(Some(iface.as_bytes()))
+    }
+
+    /// `locator-iface` on, off-platform: `SO_BINDTODEVICE` is Linux/Android-only,
+    /// so warn and connect unbound (zenoh-util's non-Linux stub warns too).
+    #[cfg(all(
+        feature = "locator-iface",
+        not(any(target_os = "linux", target_os = "android"))
+    ))]
+    pub(crate) fn bind_socket_to_device<S>(_sock: &S, iface: &str) -> io::Result<()> {
+        log::warn!("wz: locator #iface={iface} ignored (SO_BINDTODEVICE is Linux/Android-only)");
+        Ok(())
+    }
+
+    /// Without the `locator-iface` feature the honor is not built (no `socket2`
+    /// dep); a parsed `#iface=` warns so it is never a silent
+    /// configured-but-unbound trap. Enable `locator-iface` to honour it.
+    #[cfg(not(feature = "locator-iface"))]
+    pub(crate) fn bind_socket_to_device<S>(_sock: &S, iface: &str) -> io::Result<()> {
+        log::warn!("wz: locator #iface={iface} ignored (build without the locator-iface feature)");
+        Ok(())
+    }
+
+    /// R311y236 — the shared TCP-connect primitive behind
+    /// [`crate::link_pipeline::dial_tcp`] / [`crate::tls_pipeline::dial_tls`] /
+    /// [`crate::ws_pipeline::dial_ws`]: a plain [`tokio::net::TcpStream::connect`]
+    /// when no `#iface=` bind is requested, else a `TcpSocket` whose device is set
+    /// BEFORE connect (SO_BINDTODEVICE steers the SYN's egress route, so it must
+    /// precede the connect — the reason a bound dial cannot use the socket-less
+    /// `TcpStream::connect`). Lives here (not in the `transport-link-tcp`-gated
+    /// `link_pipeline`) because `ws_pipeline` reaches it WITHOUT pulling tcp;
+    /// gated on its callers (tcp / tls->tcp / ws) so it is not dead in a
+    /// udp/quic-only build. Uses tokio's `TcpStream`/`TcpSocket` (never
+    /// feature-gated — only the `link_pipeline` MODULE is).
+    #[cfg(any(feature = "transport-link-tcp", feature = "transport-link-ws"))]
+    pub(crate) async fn connect_tcp_bound(
+        addr: std::net::SocketAddr,
+        iface: Option<&str>,
+    ) -> io::Result<tokio::net::TcpStream> {
+        use std::net::SocketAddr;
+        use tokio::net::{TcpSocket, TcpStream};
+        match iface {
+            None => TcpStream::connect(addr).await,
+            Some(iface) => {
+                let socket = match addr {
+                    SocketAddr::V4(_) => TcpSocket::new_v4()?,
+                    SocketAddr::V6(_) => TcpSocket::new_v6()?,
+                };
+                bind_socket_to_device(&socket, iface)?;
+                socket.connect(addr).await
+            }
+        }
+    }
+}
+
 /// R311ez — datagram sibling of [`link_pipeline`] (UDP). A UDP socket is
 /// not split into owned read/write halves; the one socket is shared via
 /// `Arc` to back the inbound [`udp_pipeline::UdpReadDriver`] and the
@@ -1165,7 +1256,11 @@ impl TcpDriver {
     /// stream for the FSM, rather than burying the stream inside this
     /// driver — hence the raw-dial seam lives in `link_pipeline`.
     pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
-        Ok(Self::from_stream(link_pipeline::dial_tcp(addr).await?))
+        // R311y236 — the driver-level connect takes a bare addr (no locator, so
+        // no `#iface=`); pass `None` for the interface bind.
+        Ok(Self::from_stream(
+            link_pipeline::dial_tcp(addr, None).await?,
+        ))
     }
 }
 

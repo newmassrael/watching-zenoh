@@ -230,8 +230,10 @@ pub async fn dial_quic_datagram(
     addr: SocketAddr,
     client_config: Arc<RustlsClientConfig>,
     server_name: &str,
+    iface: Option<&str>,
 ) -> io::Result<QuicDatagramLink> {
-    let (endpoint, connection) = connect_quic_client(addr, client_config, server_name).await?;
+    let (endpoint, connection) =
+        connect_quic_client(addr, client_config, server_name, iface).await?;
     Ok(QuicDatagramLink {
         endpoint,
         connection,

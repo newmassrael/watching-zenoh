@@ -32,7 +32,7 @@ async fn pipeline_round_trips_both_directions_through_codec_envelope() {
 
     // Initiator side: dial via the raw-dial primitive, then split into the
     // session-open pipeline triple.
-    let stream = dial_tcp(addr).await.expect("dial");
+    let stream = dial_tcp(addr, None).await.expect("dial");
     let (mut inbound, outbound, writer_handle) = wire_tcp_stream(stream);
     let mut peer = accept_task.await.expect("accept join");
 

@@ -346,7 +346,7 @@ liveliness-token = ["wz-runtime-tokio?/liveliness-token", "wz-session-lwip?/live
 # parser lands, locator-tcp will auto-enable transport-link-tcp etc).
 # The prior comment "3 active / 6 reserved" was a forward-looking
 # estimate; corrected to "0 active / 9 reserved" per R311ce audit.
-locator-iface = []
+locator-iface = ["wz-runtime-tokio?/locator-iface"]
 locator-quic = ["transport-link-quic"]
 locator-serial = ["transport-link-serial"]
 locator-tcp = ["transport-link-tcp"]

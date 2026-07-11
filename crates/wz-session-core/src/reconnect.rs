@@ -77,6 +77,10 @@ pub enum ReconnectLocator {
         proto: Proto,
         host: String,
         port: u16,
+        /// R311y236 — the `#iface=<name>` NIC bind, preserved across re-dials
+        /// so a reconnect-supervised named dial keeps binding to the same
+        /// interface. Mirrors [`AnyLocator::Named::iface`].
+        iface: Option<String>,
     },
 }
 
@@ -118,9 +122,17 @@ impl From<ReconnectLocator> for AnyLocator {
     fn from(locator: ReconnectLocator) -> Self {
         match locator {
             ReconnectLocator::Ip(ip) => AnyLocator::Ip(ip),
-            ReconnectLocator::Named { proto, host, port } => {
-                AnyLocator::Named { proto, host, port }
-            }
+            ReconnectLocator::Named {
+                proto,
+                host,
+                port,
+                iface,
+            } => AnyLocator::Named {
+                proto,
+                host,
+                port,
+                iface,
+            },
         }
     }
 }
@@ -134,9 +146,17 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
     fn try_from(locator: AnyLocator) -> Result<Self, Self::Error> {
         match locator {
             AnyLocator::Ip(ip) => Ok(ReconnectLocator::Ip(ip)),
-            AnyLocator::Named { proto, host, port } => {
-                Ok(ReconnectLocator::Named { proto, host, port })
-            }
+            AnyLocator::Named {
+                proto,
+                host,
+                port,
+                iface,
+            } => Ok(ReconnectLocator::Named {
+                proto,
+                host,
+                port,
+                iface,
+            }),
             AnyLocator::Serial(_) => Err(NotReconnectable::Serial),
             // R311xi — unix-domain socket: non-IP, not in the reconnect set
             // (see [`NotReconnectable::Unixsock`]). Rejected at the boundary
@@ -403,6 +423,7 @@ mod reconnect_locator_tests {
         ParsedLocator {
             proto: Proto::Tcp,
             addr: "1.2.3.4:7447".parse::<SocketAddr>().unwrap(),
+            iface: None,
         }
     }
 
@@ -425,6 +446,7 @@ mod reconnect_locator_tests {
             proto: Proto::Tcp,
             host: "example.org".into(),
             port: 7447,
+            iface: None,
         };
         let reconnectable =
             ReconnectLocator::try_from(any.clone()).expect("named is reconnectable");
@@ -434,6 +456,7 @@ mod reconnect_locator_tests {
                 proto: Proto::Tcp,
                 host: "example.org".into(),
                 port: 7447,
+                iface: None,
             }
         );
         assert_eq!(AnyLocator::from(reconnectable), any);

@@ -67,8 +67,11 @@ pub async fn dial_tls(
     addr: SocketAddr,
     config: Arc<ClientConfig>,
     server_name: ServerName<'static>,
+    iface: Option<&str>,
 ) -> io::Result<TlsStream<TcpStream>> {
-    let tcp = TcpStream::connect(addr).await?;
+    // R311y236 — the TCP under a TLS dial honours the locator `#iface=` bind via
+    // the shared connect primitive (SO_BINDTODEVICE before connect).
+    let tcp = crate::iface_bind::connect_tcp_bound(addr, iface).await?;
     let connector = TlsConnector::from(config);
     // `client::TlsStream` -> the unified `TlsStream` enum so the wire path is
     // one type for both roles (the byte stream is identical post-handshake).

@@ -132,7 +132,9 @@ pub async fn run_acceptor_e2e<H>(
     //    TcpListener::bind, the same seam wz-ap-demo's establish_link uses; the
     //    binary-name-tagged log lines stay here (the harness owns its prefix,
     //    so it cannot share accept_bound's "wz accept:" form).
-    let listener = bind_tcp_host(&listen).await?;
+    // R311y236 — the e2e harness listens on a scheme-less host:port with no
+    // locator `#iface=`, so no interface bind is threaded (`None`).
+    let listener = bind_tcp_host(&listen, None).await?;
     log::info!("{binary_name}: listening on {}", listener.local_addr()?);
     let (stream, peer) = accept_tcp(listener).await?;
     log::info!("{binary_name}: accepted peer {peer}");

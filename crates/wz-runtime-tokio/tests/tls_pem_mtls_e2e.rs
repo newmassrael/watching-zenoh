@@ -97,7 +97,7 @@ async fn tls_handshake_pair(
         let (tcp, _peer) = listener.accept().await.expect("accept tcp");
         accept_tls(tcp, server_config).await
     };
-    let dial = async { dial_tls(addr, client_config, server_name).await };
+    let dial = async { dial_tls(addr, client_config, server_name, None).await };
     tokio::join!(acc, dial)
 }
 

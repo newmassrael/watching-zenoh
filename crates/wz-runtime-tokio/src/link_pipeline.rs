@@ -61,8 +61,12 @@ pub type TcpReadDriver = StreamReadDriver<OwnedReadHalf>;
 /// ([`wz_session_core::locator`]) resolves a locator to a [`SocketAddr`],
 /// deferring DNS to the std layer. [`dial_tcp_host`] is the DNS-capable
 /// sibling for a `host:port` STRING.
-pub async fn dial_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
-    let stream = TcpStream::connect(addr).await?;
+pub async fn dial_tcp(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpStream> {
+    // R311y236 — the `#iface=` connect helper lives in the ungated
+    // [`crate::iface_bind`] module (NOT here) so `ws_pipeline` (which does NOT
+    // pull `transport-link-tcp`) can also reach it without dragging in the whole
+    // TCP stream pipeline.
+    let stream = crate::iface_bind::connect_tcp_bound(addr, iface).await?;
     configure_tcp_stream(&stream);
     Ok(stream)
 }
@@ -79,8 +83,35 @@ pub async fn dial_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
 /// Used by the session-open dial seam ([`crate::session_open::dial_endpoint`])
 /// for a scheme-less `--connect HOST:PORT` and a `tcp/HOST` with a DNS
 /// hostname; the numeric [`dial_tcp`] handles a parsed `tcp/` locator.
-pub async fn dial_tcp_host(host: &str) -> io::Result<TcpStream> {
-    let stream = TcpStream::connect(host).await?;
+pub async fn dial_tcp_host(host: &str, iface: Option<&str>) -> io::Result<TcpStream> {
+    let stream = match iface {
+        // No bind: the single `ToSocketAddrs` connect walks every resolved
+        // address until one connects (the original path).
+        None => TcpStream::connect(host).await?,
+        // R311y236 — a device-bound named dial must resolve first, then connect
+        // each candidate through a device-bound `TcpSocket` (the bind precedes
+        // connect); `lookup_host` is the std resolver `TcpStream::connect`
+        // otherwise uses internally, made explicit so each attempt can carry the
+        // bind. Tries in resolved order until one connects (the same walk).
+        Some(iface) => {
+            let mut last_err: Option<io::Error> = None;
+            for addr in tokio::net::lookup_host(host).await? {
+                match crate::iface_bind::connect_tcp_bound(addr, Some(iface)).await {
+                    Ok(stream) => {
+                        configure_tcp_stream(&stream);
+                        return Ok(stream);
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            return Err(last_err.unwrap_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    format!("no addresses resolved for {host}"),
+                )
+            }));
+        }
+    };
     configure_tcp_stream(&stream);
     Ok(stream)
 }
@@ -95,8 +126,8 @@ pub async fn dial_tcp_host(host: &str) -> io::Result<TcpStream> {
 /// to"). Numeric only by construction, mirroring [`dial_tcp`]; [`bind_tcp_host`]
 /// is the DNS-capable sibling. Built through the [`bind_listener`] SSOT
 /// (`TcpSocket` + backlog 1024, zenoh parity).
-pub async fn bind_tcp(addr: SocketAddr) -> io::Result<TcpListener> {
-    bind_listener(addr)
+pub async fn bind_tcp(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpListener> {
+    bind_listener(addr, iface)
 }
 
 /// Bind a TCP listener on a `host:port` STRING — the DNS-capable sibling of
@@ -108,10 +139,10 @@ pub async fn bind_tcp(addr: SocketAddr) -> io::Result<TcpListener> {
 /// posture holds whichever address binds. (Listen-side hostnames are unusual,
 /// but `TcpSocket::bind` takes a single `SocketAddr`, so the resolve loop the
 /// numeric path skips is hand-rolled here.)
-pub async fn bind_tcp_host(host: &str) -> io::Result<TcpListener> {
+pub async fn bind_tcp_host(host: &str, iface: Option<&str>) -> io::Result<TcpListener> {
     let mut last_err: Option<io::Error> = None;
     for addr in lookup_host(host).await? {
-        match bind_listener(addr) {
+        match bind_listener(addr, iface) {
             Ok(listener) => return Ok(listener),
             Err(e) => last_err = Some(e),
         }
@@ -151,12 +182,18 @@ const LISTEN_BACKLOG: u32 = 1024;
 /// reuseaddr posture this crate has always had. (It also aligns the Windows
 /// case, where mio deliberately skips it; wz does not target Windows, so that is
 /// a side benefit, not the motive.)
-fn bind_listener(addr: SocketAddr) -> io::Result<TcpListener> {
+fn bind_listener(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpListener> {
     let socket = match addr {
         SocketAddr::V4(_) => TcpSocket::new_v4()?,
         SocketAddr::V6(_) => TcpSocket::new_v6()?,
     };
     socket.set_reuseaddr(true)?;
+    // R311y236 — honour a listen-side `#iface=` bind (SO_BINDTODEVICE) before
+    // bind, so a listener can be pinned to a NIC (the accept-side mirror of the
+    // dial-side connect bind). Feature/platform-gated in `bind_socket_to_device`.
+    if let Some(iface) = iface {
+        crate::iface_bind::bind_socket_to_device(&socket, iface)?;
+    }
     socket.bind(addr)?;
     socket.listen(LISTEN_BACKLOG)
 }
@@ -259,7 +296,10 @@ mod tests {
             .expect("probe bind");
         let dead = probe.local_addr().expect("probe addr");
         drop(probe);
-        assert!(dial_tcp(dead).await.is_err(), "dial to closed port errors");
+        assert!(
+            dial_tcp(dead, None).await.is_err(),
+            "dial to closed port errors"
+        );
     }
 
     /// `bind_tcp` + `accept_tcp` complete a loopback connection race-free: the
@@ -269,7 +309,7 @@ mod tests {
     /// port race the prior one-shot `accept_tcp(listen)` form could not avoid.
     #[tokio::test]
     async fn bind_tcp_then_accept_tcp_round_trip() {
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"))
+        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
             .await
             .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
@@ -289,11 +329,11 @@ mod tests {
     /// `configure_tcp_stream`), so there is nothing to assert for it.
     #[tokio::test]
     async fn dialed_and_accepted_streams_have_nodelay() {
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"))
+        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
             .await
             .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
-        let client = tokio::spawn(async move { dial_tcp(addr).await });
+        let client = tokio::spawn(async move { dial_tcp(addr, None).await });
         let (server, _peer) = accept_tcp(listener).await.expect("accept one peer");
         let client_stream = client.await.expect("client task").expect("client dial");
         assert!(
@@ -316,7 +356,7 @@ mod tests {
     /// construction + code review.
     #[tokio::test]
     async fn bind_tcp_listener_sets_so_reuseaddr() {
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"))
+        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
             .await
             .expect("bind loopback");
         let std_listener = listener.into_std().expect("into_std");
@@ -324,6 +364,42 @@ mod tests {
         assert!(
             sock.reuse_address().expect("read SO_REUSEADDR"),
             "bind_listener must explicitly set SO_REUSEADDR (TcpSocket does not default it on)"
+        );
+    }
+
+    /// R311y236 — `connect_tcp_bound` with `Some(iface)` builds a `TcpSocket` and
+    /// connects (the SO_BINDTODEVICE bind precedes connect). Gated on
+    /// `not(locator-iface)` so the bind is the warn-NOOP stub (no `socket2`, no
+    /// root-only syscall): this proves the `Some`-arm's socket-build + connect
+    /// wiring is behaviour-preserving vs the plain `TcpStream::connect` `None`
+    /// arm, WITHOUT the root-gated real bind (which zenoh likewise does not
+    /// unit-test). Under `locator-iface` on Linux the same call attempts the real
+    /// `SO_BINDTODEVICE` (needs CAP_NET_RAW), so that path is covered by
+    /// compilation + the wz-session-core parse tests, not a CI unit test.
+    #[cfg(not(feature = "locator-iface"))]
+    #[tokio::test]
+    async fn connect_tcp_bound_some_iface_connects_via_noop_stub() {
+        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let client =
+            tokio::spawn(
+                async move { crate::iface_bind::connect_tcp_bound(addr, Some("lo")).await },
+            );
+        let (_server, peer) = accept_tcp(listener).await.expect("accept one peer");
+        let stream = client
+            .await
+            .expect("client task")
+            .expect("Some(iface) arm connects on the noop stub");
+        assert_eq!(
+            peer.ip(),
+            addr.ip(),
+            "the Some(iface) arm reaches the loopback listener"
+        );
+        assert!(
+            stream.peer_addr().is_ok(),
+            "the device-bound-arm stream is connected"
         );
     }
 }

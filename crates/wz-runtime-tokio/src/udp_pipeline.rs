@@ -96,12 +96,20 @@ pub const UDP_LINK_MTU: usize = 1450;
 /// socket cannot reach a v6 peer); the ephemeral port (`:0`) lets the kernel
 /// assign — the peer learns this Initiator port from the first datagram's
 /// source address.
-pub async fn dial_udp(peer: SocketAddr) -> io::Result<UdpSocket> {
+pub async fn dial_udp(peer: SocketAddr, iface: Option<&str>) -> io::Result<UdpSocket> {
     let bind_addr: SocketAddr = match peer {
         SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
         SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
     };
-    UdpSocket::bind(bind_addr).await
+    let socket = UdpSocket::bind(bind_addr).await?;
+    // R311y236 — honour the locator `#iface=` bind (SO_BINDTODEVICE). Unlike TCP
+    // (where the device must precede connect), a UDP socket sets it after bind
+    // and before the first send — both steer egress routing. Linux/Android only;
+    // a warn-no-op off-platform (the shared `bind_socket_to_device` stub).
+    if let Some(iface) = iface {
+        crate::iface_bind::bind_socket_to_device(&socket, iface)?;
+    }
+    Ok(socket)
 }
 
 /// Share a bound [`UdpSocket`] into the cooperating drivers the session FSM
@@ -278,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn dial_udp_binds_ephemeral_v4() {
         let peer: SocketAddr = "127.0.0.1:9".parse().expect("peer addr");
-        let socket = dial_udp(peer).await.expect("bind ephemeral");
+        let socket = dial_udp(peer, None).await.expect("bind ephemeral");
         let local = socket.local_addr().expect("local addr");
         assert!(local.is_ipv4(), "v4 peer -> v4 bind");
         assert_ne!(local.port(), 0, "kernel assigned a concrete port");

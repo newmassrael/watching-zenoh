@@ -396,10 +396,12 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
     let _ = cfg;
     match locator {
         AnyLocator::Ip(ip) => match ip.proto {
-            Proto::Tcp => Ok(DialedLink::Tcp(dial_tcp(ip.addr).await?)),
+            Proto::Tcp => Ok(DialedLink::Tcp(
+                dial_tcp(ip.addr, ip.iface.as_deref()).await?,
+            )),
             #[cfg(feature = "transport-link-udp")]
             Proto::Udp => Ok(DialedLink::Udp {
-                socket: dial_udp(ip.addr).await?,
+                socket: dial_udp(ip.addr, ip.iface.as_deref()).await?,
                 peer: ip.addr,
             }),
             #[cfg(not(feature = "transport-link-udp"))]
@@ -417,7 +419,13 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 // Clone the TLS material here, lazily — only when a TLS dial
                 // actually happens (dial_tls owns its rustls config + name).
                 Some(t) => Ok(DialedLink::Tls(Box::new(
-                    dial_tls(ip.addr, t.client_config.clone(), t.server_name.clone()).await?,
+                    dial_tls(
+                        ip.addr,
+                        t.client_config.clone(),
+                        t.server_name.clone(),
+                        ip.iface.as_deref(),
+                    )
+                    .await?,
                 ))),
                 None => Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -437,7 +445,9 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // does. With the backend feature off, a typed `Unsupported` (same
             // shape as the udp arm), keeping the match exhaustive.
             #[cfg(feature = "transport-link-ws")]
-            Proto::Ws => Ok(DialedLink::Ws(Box::new(dial_ws(ip.addr).await?))),
+            Proto::Ws => Ok(DialedLink::Ws(Box::new(
+                dial_ws(ip.addr, ip.iface.as_deref()).await?,
+            ))),
             #[cfg(not(feature = "transport-link-ws"))]
             Proto::Ws => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -455,7 +465,13 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::Quic => match &cfg.quic {
                 // Clone the client config lazily — only on an actual QUIC dial.
                 Some(q) => Ok(DialedLink::Quic(Box::new(
-                    dial_quic(ip.addr, q.client_config.clone(), &q.server_name).await?,
+                    dial_quic(
+                        ip.addr,
+                        q.client_config.clone(),
+                        &q.server_name,
+                        ip.iface.as_deref(),
+                    )
+                    .await?,
                 ))),
                 None => Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -478,7 +494,13 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             #[cfg(feature = "transport-link-quic-datagram")]
             Proto::QuicDatagram => match &cfg.quic {
                 Some(q) => Ok(DialedLink::QuicDatagram(Box::new(
-                    dial_quic_datagram(ip.addr, q.client_config.clone(), &q.server_name).await?,
+                    dial_quic_datagram(
+                        ip.addr,
+                        q.client_config.clone(),
+                        &q.server_name,
+                        ip.iface.as_deref(),
+                    )
+                    .await?,
                 ))),
                 None => Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -503,9 +525,14 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // NOT a silent fallback or a string-prefix special-case. The `Tcp` arm
         // is unconditional like the `Ip(Proto::Tcp)` arm above — tcp is the
         // always-on baseline stream transport.
-        AnyLocator::Named { proto, host, port } => match proto {
+        AnyLocator::Named {
+            proto,
+            host,
+            port,
+            iface,
+        } => match proto {
             Proto::Tcp => Ok(DialedLink::Tcp(
-                dial_tcp_host(&format!("{host}:{port}")).await?,
+                dial_tcp_host(&format!("{host}:{port}"), iface.as_deref()).await?,
             )),
             other => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -715,13 +742,18 @@ pub async fn bind_locator(locator: AnyLocator) -> io::Result<TcpListener> {
     }
     match locator {
         AnyLocator::Ip(ip) => match ip.proto {
-            Proto::Tcp => bind_tcp(ip.addr).await,
+            Proto::Tcp => bind_tcp(ip.addr, ip.iface.as_deref()).await,
             other => Err(unsupported(&format!(
                 "{other:?} acceptor is a not-yet-wired extension point"
             ))),
         },
-        AnyLocator::Named { proto, host, port } => match proto {
-            Proto::Tcp => bind_tcp_host(&format!("{host}:{port}")).await,
+        AnyLocator::Named {
+            proto,
+            host,
+            port,
+            iface,
+        } => match proto {
+            Proto::Tcp => bind_tcp_host(&format!("{host}:{port}"), iface.as_deref()).await,
             // A non-tcp NAME is unwired for two reasons (acceptor + non-tcp
             // name resolution), kept distinct from the numeric arm's message.
             other => Err(unsupported(&format!(
@@ -2215,6 +2247,7 @@ mod tests {
                 proto: Proto::Tcp,
                 host: "example.org".to_string(),
                 port: 7447,
+                iface: None,
             })
         );
     }
@@ -2239,6 +2272,7 @@ mod tests {
                 proto: Proto::Tcp,
                 host: "example.org".to_string(),
                 port: 7447,
+                iface: None,
             })
         );
         assert_eq!(

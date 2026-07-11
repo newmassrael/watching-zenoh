@@ -2211,7 +2211,7 @@ mod tests {
     // ── shared fixtures ────────────────────────────────────────────────
 
     async fn bind_loopback() -> (TcpListener, SocketAddr) {
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"))
+        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("local addr");

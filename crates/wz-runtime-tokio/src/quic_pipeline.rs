@@ -139,8 +139,28 @@ pub(crate) async fn connect_quic_client(
     addr: SocketAddr,
     client_config: Arc<RustlsClientConfig>,
     server_name: &str,
+    iface: Option<&str>,
 ) -> io::Result<(Endpoint, Connection)> {
-    let mut endpoint = Endpoint::client(client_bind_addr(addr))?;
+    let mut endpoint = match iface {
+        // No `#iface=`: the convenience `Endpoint::client` binds its own
+        // ephemeral UDP socket (the original path).
+        None => Endpoint::client(client_bind_addr(addr))?,
+        // R311y236 — a device-bound QUIC client needs a PRE-built UDP socket
+        // (`Endpoint::client` exposes no bind-device hook): build a std
+        // `UdpSocket`, set `SO_BINDTODEVICE` on it, then hand it to
+        // `Endpoint::new` with the tokio runtime. Off-feature / off-platform the
+        // shared `bind_socket_to_device` warns and the socket stays unbound.
+        Some(iface) => {
+            let sock = std::net::UdpSocket::bind(client_bind_addr(addr))?;
+            crate::iface_bind::bind_socket_to_device(&sock, iface)?;
+            Endpoint::new(
+                quinn::EndpointConfig::default(),
+                None,
+                sock,
+                std::sync::Arc::new(quinn::TokioRuntime),
+            )?
+        }
+    };
     let quic_crypto = QuicClientConfig::try_from(client_config).map_err(io_other)?;
     endpoint.set_default_client_config(QuinnClientConfig::new(Arc::new(quic_crypto)));
     let connection = endpoint
@@ -199,8 +219,10 @@ pub async fn dial_quic(
     addr: SocketAddr,
     client_config: Arc<RustlsClientConfig>,
     server_name: &str,
+    iface: Option<&str>,
 ) -> io::Result<QuicLink> {
-    let (endpoint, connection) = connect_quic_client(addr, client_config, server_name).await?;
+    let (endpoint, connection) =
+        connect_quic_client(addr, client_config, server_name, iface).await?;
     // The initiator opens the one bidirectional stream; the responder
     // `accept_bi`s it (zenoh: open_bi on dial, accept_bi on listen).
     let (send, recv) = connection.open_bi().await.map_err(io_other)?;

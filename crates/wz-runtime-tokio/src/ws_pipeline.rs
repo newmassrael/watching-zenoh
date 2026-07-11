@@ -59,8 +59,13 @@ use wz_session_core::link::BoxedLinkDriver;
 /// is `ws://{addr}/` (the `Host` header matches the dialed addr; wz<->wz uses
 /// the root path). No cert config is involved, so — unlike TLS — a `ws/...`
 /// session dials through the generic `dial_locator`, not a bespoke seam.
-pub async fn dial_ws(addr: SocketAddr) -> io::Result<WebSocketStream<TcpStream>> {
-    let tcp = TcpStream::connect(addr).await?;
+pub async fn dial_ws(
+    addr: SocketAddr,
+    iface: Option<&str>,
+) -> io::Result<WebSocketStream<TcpStream>> {
+    // R311y236 — the TCP under a WS dial honours the locator `#iface=` bind via
+    // the shared connect primitive (SO_BINDTODEVICE before connect).
+    let tcp = crate::iface_bind::connect_tcp_bound(addr, iface).await?;
     let url = format!("ws://{addr}/");
     let (ws, _resp) = client_async(url.as_str(), tcp)
         .await

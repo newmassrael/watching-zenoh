@@ -682,6 +682,12 @@ codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/co
 # this crate does not own them.
 transport-link-tcp = []
 transport-link-udp = []
+# R311y236 — locator-iface: honour the `#iface=<name>` locator config tail by
+# binding the dialing socket to the named NIC (SO_BINDTODEVICE, Linux/Android;
+# a warn-noop off-platform). Pulls `socket2` for the syscall. The PARSE of
+# `#iface=` is always-on (foundational, in wz-session-core::locator); only the
+# BIND honor is this gated atom (reserved-INERT -> active).
+locator-iface = ["dep:socket2"]
 # R311nv — host tty backend for the SERIAL link. Forwards the
 # wz-session-core `transport-link-serial` gate (the R311nt
 # transport-agnostic `serial_link` framing/handshake/locator logic +
