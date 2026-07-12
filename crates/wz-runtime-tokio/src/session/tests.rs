@@ -2343,17 +2343,18 @@ fn alloc_next_request_id_increments_and_starts_at_zero() {
 fn query_options_query_metadata_extracts_wire_fields() {
     // R240 — QueryOptions::query_metadata must surface the
     // wire-propagatable subset (target / consolidation /
-    // attachment / timeout_ms). payload / encoding stay on
-    // QueryOptions as future-additive carries: the Q_B / Q_E
-    // codec slot landed R311y248 (RequestQueryBuilder::query_value)
-    // but the QueryOptions -> QueryMetadata threading is still
-    // pending, so the extracted QueryMetadata MUST NOT carry them yet.
+    // attachment / timeout_ms). R311y250 — payload / encoding now
+    // thread too: they collapse into the single QueryMetadata::value
+    // wire unit (encoding, payload) that build_request_query_with_meta
+    // stamps onto RequestQueryBuilder::query_value (the Q_B / Q_E value
+    // ext 0x03; codec landed R311y248). The population is ungated so
+    // this (no-query-value gate) test still observes the collapse.
     let opts = QueryOptions::get()
         .with_target(QueryTarget::AllComplete)
         .with_consolidation(ConsolidationMode::Monotonic)
         .with_attachment(b"q-att".to_vec())
         .with_timeout_ms(5_000)
-        .with_payload(b"unused-payload".to_vec())
+        .with_payload(b"q-value-payload".to_vec())
         .with_encoding(EncodingHint {
             packed_id: 1,
             schema: None,
@@ -2363,6 +2364,17 @@ fn query_options_query_metadata_extracts_wire_fields() {
     assert_eq!(meta.consolidation, Some(ConsolidationMode::Monotonic));
     assert_eq!(meta.attachment.as_deref(), Some(&b"q-att"[..]));
     assert_eq!(meta.timeout_ms, 5_000);
+    assert_eq!(
+        meta.value,
+        Some((
+            EncodingHint {
+                packed_id: 1,
+                schema: None,
+            },
+            b"q-value-payload".to_vec(),
+        )),
+        "payload + encoding collapse into the QueryMetadata::value unit",
+    );
 }
 
 #[cfg(feature = "query-get")]

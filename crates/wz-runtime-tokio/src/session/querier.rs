@@ -22,13 +22,14 @@ use super::*;
 /// `QueryOptions::query_metadata` -> `build_request_query_with_meta`),
 /// so `target` / `consolidation` / `attachment` / `parameters` /
 /// `source_info` / `timeout_ms` now propagate on the outbound Query.
-/// `payload` / `encoding` stay captured as future-additive slots —
-/// R311y248 landed the Q_B / Q_E codec extension itself
-/// (`RequestQueryBuilder::query_value`), but threading `QueryOptions` →
-/// `build_request_query_with_meta` is still pending, so they do not yet
-/// propagate on the outbound Query. The loopback path's in-process
+/// R311y250 extended that threading to `payload` / `encoding`: they
+/// collapse into the [`QueryMetadata::value`] wire unit
+/// (`RequestQueryBuilder::query_value`, value ext 0x03; codec landed
+/// R311y248), so a querier's attached value now propagates on the
+/// outbound Query. The loopback path's in-process
 /// [`crate::query::QueryableRegistry::local_query`] still only inspects the
-/// keyexpr.
+/// keyexpr (surfacing attachment / source_info / value to a SessionLocal
+/// queryable is a separate deferred loopback-parity item).
 ///
 /// `#[non_exhaustive]` so future rounds add fields without breaking
 /// callers. Construct via [`QueryOptions::get`] (or `default`) plus
@@ -70,18 +71,20 @@ pub struct QueryOptions {
     /// consolidation (single-source replies have no duplicate to
     /// fold).
     pub consolidation: Option<ConsolidationMode>,
-    /// Optional Query-body payload propagated to the queryable
-    /// callback. The Q_B codec builder landed R311y248
-    /// (`RequestQueryBuilder::query_value` encodes the value ext 0x03);
-    /// what is still pending is threading this captured `payload` through
-    /// `send_request_query_with_meta` onto that builder, plus loopback's
-    /// `Query` surfacing `payload` to the responder callback. The slot is
-    /// reserved so that a follow-up threading round lands it
-    /// without an API break.
+    /// Optional Query-body payload — the querier's attached VALUE (with
+    /// the optional `encoding` below). The Q_B codec landed R311y248
+    /// (`RequestQueryBuilder::query_value`, value ext 0x03); R311y250
+    /// threaded the WIRE propagation (`query_metadata` collapses the
+    /// `payload` and `encoding` slots into [`QueryMetadata::value`], routed
+    /// through `build_request_query_with_meta`). Loopback surfacing to a
+    /// SessionLocal queryable callback stays deferred (attachment and
+    /// source_info are likewise not yet loopback-surfaced). Set via
+    /// [`QueryOptions::with_payload`].
     pub payload: Option<Vec<u8>>,
-    /// Optional encoding metadata for the Query body. Mirror of
-    /// `z_get_options_t.encoding`. R239 carry on both wire and
-    /// loopback propagation — see `payload`.
+    /// Optional encoding metadata for the Query body VALUE. Mirror of
+    /// `z_get_options_t.encoding`; rides the value ext beside `payload`
+    /// (wire propagation R311y250 — see `payload`). An encoding-only value
+    /// (no payload) is valid. Set via [`QueryOptions::with_encoding`].
     pub encoding: Option<EncodingHint>,
     /// Optional Query-level attachment blob. Mirror of
     /// `z_get_options_t.attachment`. Propagated on the outbound Query
@@ -169,19 +172,42 @@ impl QueryOptions {
         self
     }
 
-    /// Attach a Query-body payload. The Q_B codec builder landed R311y248
-    /// (`RequestQueryBuilder::query_value` encodes it); wire + loopback
-    /// PROPAGATION (threading this captured payload through
-    /// `send_request_query_with_meta` onto the builder, and loopback's
-    /// `Query` surfacing it to the responder callback) lands in a follow-up
-    /// threading round.
+    /// Attach a Query-body payload — the querier's VALUE (paired with the
+    /// optional [`Self::with_encoding`]), stamped on the outbound Query body
+    /// VALUE ext (id 0x03 ENC_ZBUF, the "Q_B / Q_E" wire slot). The codec
+    /// landed R311y248; R311y250 threaded the WIRE propagation:
+    /// [`QueryOptions::query_metadata`] collapses `payload` + `encoding` into
+    /// the [`QueryMetadata::value`] unit, which `build_request_query_with_meta`
+    /// stamps onto `RequestQueryBuilder::query_value` behind the `query-value`
+    /// gate. Loopback surfacing to a SessionLocal queryable is a separate
+    /// deferred parity item (attachment / source_info are likewise not yet
+    /// surfaced to loopback).
+    ///
+    /// R311y250 — signature-stable (ungated) with an UNCONDITIONAL store.
+    /// Three sibling setter shapes coexist on `QueryOptions`: hard-gated
+    /// wire-data setters whose fn disappears when off (`with_source_info` /
+    /// `with_attachment`); ungated setters whose store no-ops when off
+    /// (`with_target` / `with_consolidation`); and this shape — ungated with
+    /// an unconditional store. The unconditional store is REQUIRED because
+    /// the `query_options_with_setters_chain` unit test exercises this setter
+    /// in a feature set WITHOUT `query-value` and asserts capture (per the
+    /// `feedback_signature_stability` anchor). Consequence on a
+    /// `query-value`-OFF build: the field is captured but inert — the gated
+    /// wire threading in `build_request_query_with_meta` elides it (a no-op,
+    /// bytes unchanged); the only cost is that a value-only query forfeits
+    /// `Session::query`'s `is_empty()` fast path there (see
+    /// [`QueryOptions::query_metadata`]).
     pub fn with_payload(mut self, payload: Vec<u8>) -> Self {
         self.payload = Some(payload);
         self
     }
 
-    /// Attach Query-body encoding metadata. Wire + loopback
-    /// propagation lands in a follow-up round.
+    /// Attach Query-body encoding metadata — the content-type of the
+    /// [`Self::with_payload`] value (an encoding-only value with no payload is
+    /// valid; zenoh-pico's `_z_encoding_check` emits the ext for a non-default
+    /// encoding). Mirror of `z_get_options_t.encoding`. Threaded onto the wire
+    /// VALUE ext alongside `payload` since R311y250 (see [`Self::with_payload`]
+    /// for the propagation path + the signature-stability rationale).
     pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
         self.encoding = Some(encoding);
         self
@@ -281,11 +307,11 @@ impl QueryOptions {
     /// [`crate::session_glue::SessionLinkActions::send_request_query_with_meta`]
     /// without the lower module learning about [`Locality`] /
     /// `allowed_destination` (those stay on the dispatch-time
-    /// surface). The `payload` and `encoding` slots are intentionally
-    /// not threaded here yet — the Q_B / Q_E codec slot landed R311y248
-    /// (`RequestQueryBuilder::query_value`), but threading `QueryOptions`
-    /// onto it is a follow-up round, so they stay captured on
-    /// [`QueryOptions`] as future-additive carries.
+    /// surface). R311y250 — the `payload` + `encoding` slots now thread
+    /// too: they collapse into the single [`QueryMetadata::value`] wire
+    /// unit `(encoding, payload)` that `build_request_query_with_meta`
+    /// stamps onto `RequestQueryBuilder::query_value` (the Q_B / Q_E value
+    /// ext 0x03; codec landed R311y248).
     ///
     /// Clones owned slots (attachment Vec); the expected query path
     /// performs one extraction per Session::query call so the
@@ -302,6 +328,31 @@ impl QueryOptions {
             attachment: self.attachment.clone(),
             parameters: self.parameters.clone(),
             source_info: self.source_info.clone(),
+            // R311y250 — collapse the two ergonomic QueryOptions slots
+            // (`payload` / `encoding`, each independently optional) into the
+            // single wire VALUE unit `(encoding, payload)`. `(None, None)`
+            // stays `None` so a default QueryOptions is `is_empty()` and takes
+            // the no-meta fast path; any set slot yields a value with the
+            // unset half defaulted (zero encoding / empty payload), and the
+            // builder's `build()` `.body` predicate still elides a fully-empty
+            // value on the wire. Population is ungated (mirroring
+            // `push_metadata`); the `query-value` gate lives at the wire
+            // threading in `build_request_query_with_meta`, so on a
+            // `query-value`-OFF build a captured value is derived here but
+            // never emitted. (Ungated-not-gated is deliberate: gating this
+            // derivation would break the non-`query-value`-gated
+            // `query_options_query_metadata_extracts_wire_fields` test, which
+            // asserts the collapse. The one cost is that a value-only query on
+            // a `query-value`-OFF build forfeits the `is_empty()` fast path —
+            // the emitted bytes are identical either way since the value can't
+            // emit on that build.)
+            value: match (&self.payload, &self.encoding) {
+                (None, None) => None,
+                _ => Some((
+                    self.encoding.clone().unwrap_or_default(),
+                    self.payload.clone().unwrap_or_default(),
+                )),
+            },
             timeout_ms: self.timeout_ms,
         }
     }
@@ -896,5 +947,58 @@ mod tests {
         let meta = opts.query_metadata();
         assert_eq!(meta.parameters.as_deref(), Some(b"_sn=1..".as_slice()));
         assert!(!meta.is_empty(), "parameters make the metadata non-empty");
+    }
+}
+
+#[cfg(all(test, feature = "query-get", feature = "query-value"))]
+mod value_threading_tests {
+    use super::*;
+
+    /// R311y250 — `QueryOptions::with_payload` collapses onto the
+    /// `QueryMetadata::value` slot so a querier's attached value reaches the
+    /// wire builder (`build_request_query_with_meta` ->
+    /// `RequestQueryBuilder::query_value`). The QueryOptions -> QueryMetadata
+    /// half of the query-value send path (the wire half is locked in
+    /// request_build.rs). A payload-only value fills the zero-encoding half.
+    #[test]
+    fn with_payload_threads_into_query_metadata_value() {
+        let opts = QueryOptions::get().with_payload(b"q-value".to_vec());
+        let meta = opts.query_metadata();
+        assert_eq!(
+            meta.value,
+            Some((EncodingHint::default(), b"q-value".to_vec())),
+            "payload-only value fills the zero encoding half",
+        );
+        assert!(!meta.is_empty(), "a value makes the metadata non-empty");
+    }
+
+    /// `with_encoding` composes with `with_payload` into the single value
+    /// unit; an encoding-only value (no payload) is valid (zenoh-pico
+    /// `_z_encoding_check` emits the ext for a non-default encoding).
+    #[test]
+    fn with_encoding_threads_into_query_metadata_value() {
+        let enc = EncodingHint {
+            packed_id: 0x0A, // id 5, no schema flag (non-default id)
+            schema: None,
+        };
+        let meta = QueryOptions::get()
+            .with_encoding(enc.clone())
+            .query_metadata();
+        assert_eq!(
+            meta.value,
+            Some((enc, Vec::new())),
+            "encoding-only value fills the empty payload half",
+        );
+        assert!(!meta.is_empty());
+    }
+
+    /// The `(None, None) -> None` collapse: a default QueryOptions (no
+    /// payload, no encoding) yields `value = None` so the no-meta fast path
+    /// is preserved.
+    #[test]
+    fn default_options_yield_no_value() {
+        let meta = QueryOptions::get().query_metadata();
+        assert_eq!(meta.value, None);
+        assert!(meta.is_empty());
     }
 }

@@ -79,7 +79,9 @@ impl PushMetadata {
 /// `SessionLinkActions::send_request_query_with_meta` without the
 /// glue layer learning about `QueryOptions` directly.
 ///
-/// Field coverage at R240 is *partial vs* `QueryOptions`:
+/// Field coverage vs `QueryOptions` (R311y250 — every wire-propagatable
+/// field now threads; `QueryOptions::allowed_destination` stays a
+/// dispatch-time knob, not a wire field, so it is the only excluded slot):
 ///
 /// | QueryOptions field | Wire propagation slot |
 /// |--------------------|-----------------------|
@@ -88,17 +90,16 @@ impl PushMetadata {
 /// | `attachment`       | `RequestQueryBuilder::query_attachment` |
 /// | `parameters`       | `RequestQueryBuilder::parameters` (`Q_P` 0x40) |
 /// | `timeout_ms`       | `RequestQueryBuilder::request_timeout_ms` |
-/// | `payload`          | codec slot landed R311y248 (`RequestQueryBuilder::query_value`, value ext 0x03); `QueryMetadata` → builder threading still pending |
-/// | `encoding`         | codec slot landed R311y248 (rides the value ext beside `payload`); threading still pending |
+/// | `payload`+`encoding` | `RequestQueryBuilder::query_value` (value ext 0x03), via the `value` slot below (threaded R311y250) |
 ///
-/// `payload` / `encoding` stay on `QueryOptions` as future-additive
-/// slots. R311y248 landed the Q_B / Q_E codec extension itself (the value
-/// ext `0x03`, via [`crate::query_value_ext`] + `RequestQueryBuilder::
-/// query_value`), correcting the R241+ carry that presumed an inline slot was
-/// needed — the value rides the generic Query ext chain. The remaining step is
-/// threading `QueryMetadata` (add a `value` field) → the builder in
-/// `build_request_query_with_meta`, so a later round surfaces the propagation
-/// from `QueryOptions` without an API break.
+/// R311y250 closed the last gap: `QueryOptions`' `payload` / `encoding`
+/// now collapse into the [`Self::value`] slot (an `(encoding, payload)`
+/// unit — the wire `_z_value_t` shape), which
+/// `build_request_query_with_meta` threads onto
+/// [`RequestQueryBuilder::query_value`] behind the `query-value` gate. The
+/// codec extension itself landed R311y248 (the value ext `0x03`, via
+/// [`crate::query_value_ext`]), correcting the R241+ carry that presumed an
+/// inline slot was needed — the value rides the generic Query ext chain.
 #[derive(Debug, Clone, Default)]
 pub struct QueryMetadata {
     /// Reply target hint (`Q_T` flag on the outbound Query). `None`
@@ -120,6 +121,23 @@ pub struct QueryMetadata {
     /// Query-level source-info (querier identity: zid / eid / sn;
     /// ext_id=0x01 ZBUF on the Query ext chain). `None` elides the ext.
     pub source_info: Option<SourceInfo>,
+    /// Query-level VALUE — the querier's attached `(encoding, payload)`
+    /// pair (the wire `_z_value_t`; ext_id=0x03 ENC_ZBUF on the Query
+    /// body chain, emitted FIRST — before source_info 0x01 and
+    /// attachment 0x05 — per zenoh-pico's `_z_query_encode` order).
+    /// `None` elides the ext. Threaded onto
+    /// [`crate::request_build::RequestQueryBuilder::query_value`] by
+    /// `build_request_query_with_meta` behind the `query-value` gate
+    /// (R311y250); the codec landed R311y248. The tuple mirrors the
+    /// builder's internal storage: `(encoding, payload)`.
+    ///
+    /// A fully-empty value (empty payload AND the zero encoding
+    /// `EncodingHint::default()`) still emits NO ext — the builder's
+    /// `build()` applies zenoh-pico's `.body` predicate, so a
+    /// `Some((default, empty))` here is wire-equivalent to `None`
+    /// (it only differs by taking the with-meta build path, exactly
+    /// as `attachment = Some(empty)` does).
+    pub value: Option<(EncodingHint, Vec<u8>)>,
     /// Request-level timeout in milliseconds. `0` elides the ext
     /// per zenoh-pico's `_z_n_msg_request_needed_exts` predicate
     /// (`msg->_ext_timeout_ms != 0`).
@@ -137,6 +155,7 @@ impl QueryMetadata {
             && self.attachment.is_none()
             && self.parameters.is_none()
             && self.source_info.is_none()
+            && self.value.is_none()
             && self.timeout_ms == 0
     }
 }
@@ -188,6 +207,18 @@ mod tests {
     fn query_metadata_with_timeout_ms_nonzero_is_not_empty() {
         let meta = QueryMetadata {
             timeout_ms: 5_000,
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+
+    #[test]
+    fn query_metadata_with_value_is_not_empty() {
+        // A payload-bearing value (zero encoding) makes the bundle
+        // non-empty so `Session::query` takes the with-meta build path
+        // that threads it onto `RequestQueryBuilder::query_value`.
+        let meta = QueryMetadata {
+            value: Some((EncodingHint::default(), b"q-value".to_vec())),
             ..Default::default()
         };
         assert!(!meta.is_empty());

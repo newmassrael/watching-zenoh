@@ -143,6 +143,7 @@ default = [
     "query-selector-parameters",
     "query-reply-err",
     "query-source-info",
+    "query-value",
 ]
 # R311dz — liveliness-* / declare-{subscriber,queryable} additionally
 # forward to the wz-session-core same-named gate-only feature so the
@@ -1212,6 +1213,15 @@ keyexpr-includes = ["wz-session-core/keyexpr-includes"]
 query-attachment = ["wz-session-core/query-attachment"]
 query-selector-parameters = ["wz-session-core/query-selector-parameters"]
 query-source-info = ["wz-session-core/query-source-info"]
+# query-value (11th feature): the outbound Query VALUE ext (id 0x03
+# ENC_ZBUF — the querier's attached payload + encoding, "Q_B / Q_E") is
+# wired via QueryOptions.payload/encoding -> QueryOptions::query_metadata ->
+# QueryMetadata.value -> build_request_query_with_meta ->
+# RequestQueryBuilder::query_value (there is no dedicated
+# build_request_query_with_value fn — the _with_meta path carries it, same
+# as query-source-info). The codec landed R311y248; the QueryOptions
+# threading + this forward landed R311y250. In the default set.
+query-value = ["wz-session-core/query-value"]
 query-reply-err = ["wz-session-core/query-reply-err"]
 # R311en — scouting domain wire-up (active mode). First of the
 # scouting 0/6 -> active transition (north-star missing-subsystem

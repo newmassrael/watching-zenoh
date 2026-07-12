@@ -4842,10 +4842,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///   (`vendor/zenoh-pico/src/protocol/codec/network.c:140`)
     /// * `meta.consolidation` → Q_C flag + consolidation wire byte
     ///   (`vendor/zenoh-pico/src/protocol/codec/message.c:402-412`)
-    /// * `meta.attachment` → Query-level attachment ext (id=0x03 ZBUF)
+    /// * `meta.parameters` → Q_P flag + params slice, gated
+    ///   `query-selector-parameters`
+    /// * `meta.value` → Query-body VALUE ext (id=0x03 ZBUF: encoding +
+    ///   payload) — emitted FIRST in the Query body ext chain — gated
+    ///   `query-value` (R311y250)
+    /// * `meta.source_info` → Query-body source-info ext (id=0x01 ZBUF),
+    ///   gated `query-source-info`
+    /// * `meta.attachment` → Query-body attachment ext (id=0x05 ZBUF),
+    ///   gated `query-attachment`
     /// * `meta.timeout_ms` → Request-level timeout ext (gated by the
     ///   `_z_n_msg_request_needed_exts._ext_timeout_ms != 0`
     ///   predicate at `network.c`).
+    ///
+    /// The three Query-body exts emit in zenoh-pico's `_z_query_encode`
+    /// order (value 0x03 → source_info 0x01 → attachment 0x05,
+    /// `message.c:433-448`) regardless of `meta` field order.
     ///
     /// Empty slots elide the corresponding wire byte / ext so a
     /// `meta = QueryMetadata::default()` call produces the same wire

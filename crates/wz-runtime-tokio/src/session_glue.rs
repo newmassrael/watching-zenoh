@@ -381,7 +381,10 @@ pub use wz_session_core::metadata::PushMetadata;
 /// [`SessionLinkActions::send_request_query_with_meta`] without the
 /// glue layer learning about `QueryOptions` directly.
 ///
-/// Field coverage at R240 is *partial vs* [`crate::session::QueryOptions`]:
+/// Field coverage vs [`crate::session::QueryOptions`] (R311y250 — every
+/// wire-propagatable field now threads; `QueryOptions::allowed_destination`
+/// stays a dispatch-time knob, not a wire field, so it is the only excluded
+/// slot):
 ///
 /// | QueryOptions field | Wire propagation slot |
 /// |--------------------|-----------------------|
@@ -391,16 +394,15 @@ pub use wz_session_core::metadata::PushMetadata;
 /// | `parameters`       | [`RequestQueryBuilder::parameters`] |
 /// | `source_info`      | [`RequestQueryBuilder::query_source_info`] |
 /// | `timeout_ms`       | [`RequestQueryBuilder::request_timeout_ms`] |
-/// | `payload`          | codec slot landed R311y248 ([`RequestQueryBuilder::query_value`], value ext 0x03); `QueryOptions` → builder threading pending |
-/// | `encoding`         | codec slot landed R311y248 (rides the value ext beside `payload`); threading pending |
+/// | `payload`+`encoding` | [`RequestQueryBuilder::query_value`] (value ext 0x03), via the `value` slot (threaded R311y250) |
 ///
-/// `payload` / `encoding` stay captured on
-/// [`crate::session::QueryOptions`] as future-additive slots. R311y248
-/// landed the Q_B / Q_E codec extension itself (the value ext `0x03` via
-/// `wz_session_core::query_value_ext` + [`RequestQueryBuilder::query_value`]);
-/// the remaining step is threading `QueryOptions` → `QueryMetadata` →
-/// `build_request_query_with_meta` so the propagation surfaces without an API
-/// break.
+/// R311y250 closed the last gap: `QueryOptions`' `payload` / `encoding`
+/// collapse into the `QueryMetadata::value` unit (an `(encoding, payload)`
+/// pair — the wire `_z_value_t` shape) that
+/// `build_request_query_with_meta` threads onto
+/// [`RequestQueryBuilder::query_value`] behind the `query-value` gate. The
+/// Q_B / Q_E codec extension itself landed R311y248 (the value ext `0x03` via
+/// `wz_session_core::query_value_ext`).
 ///
 /// `#[derive(Default)]` makes the empty bundle trivially constructable
 /// for the no-metadata fast path; [`Self::is_empty`] mirrors

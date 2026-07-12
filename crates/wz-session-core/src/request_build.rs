@@ -168,8 +168,8 @@ pub fn set_request_keyexpr_literal(
 /// kin already give the publish path. Threads each set
 /// [`QueryMetadata`](crate::metadata::QueryMetadata) slot onto the fluent
 /// [`RequestQueryBuilder`]; `build()` emits the Query exts in zenoh-pico
-/// body order (source_info 0x01 -> attachment 0x05) regardless of the
-/// setter call order.
+/// body order (value 0x03 -> source_info 0x01 -> attachment 0x05) regardless
+/// of the setter call order.
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_meta(
     rid: u64,
@@ -183,6 +183,18 @@ pub fn build_request_query_with_meta(
     }
     if let Some(consolidation) = meta.consolidation {
         builder = builder.consolidation(consolidation);
+    }
+    // Query VALUE ext threading — gated `query-value` (the builder's
+    // `query_value` setter gates with it). Ordered FIRST; `build()` emits the
+    // Query body exts in zenoh-pico order (value 0x03 -> source_info 0x01 ->
+    // attachment 0x05) regardless of setter order. The builder applies
+    // zenoh-pico's `.body` empty-value predicate at `build()`, so a
+    // fully-empty value (empty payload + zero encoding) threads through as NO
+    // ext — no empty-guard needed here (unlike attachment, whose setter panics
+    // on empty; `query_value` accepts an encoding-only or fully-empty value).
+    #[cfg(feature = "query-value")]
+    if let Some((encoding, payload)) = meta.value.as_ref() {
+        builder = builder.query_value(payload, encoding.clone());
     }
     // Query source-info ext threading — gated `query-source-info` (the
     // builder's `query_source_info` setter gates with it). Ordered before
@@ -1334,6 +1346,60 @@ mod tests {
         assert_eq!(
             via_empty, no_meta,
             "empty parameters must elide Q_P (no-meta parity)",
+        );
+    }
+
+    /// R311y250 — `build_request_query_with_meta` threads the QueryMetadata
+    /// `value` slot onto the Query body VALUE ext (0x03), byte-identical to a
+    /// direct `RequestQueryBuilder::query_value`. The composition proof for the
+    /// QueryOptions.payload/encoding -> QueryMetadata.value -> wire path; a
+    /// fully-empty value elides the ext (build()'s `.body` predicate, so
+    /// `Some((default, empty))` is no-meta parity — the "Some(empty) = clear"
+    /// contract the sibling `attachment` / `parameters` slots also honour).
+    #[cfg(all(feature = "codec-request", feature = "query-value", feature = "alloc"))]
+    #[test]
+    fn build_request_query_with_meta_threads_value_to_ext_0x03() {
+        use crate::sample::EncodingHint;
+        let enc = EncodingHint {
+            packed_id: 0,
+            schema: None,
+        };
+        let meta = crate::metadata::QueryMetadata {
+            value: Some((enc.clone(), b"q-value".to_vec())),
+            ..Default::default()
+        };
+        let via_meta = build_request_query_with_meta(42, 7, None, &meta)
+            .unwrap()
+            .wire();
+        let via_builder = RequestQueryBuilder::new(42, 7, None)
+            .query_value(b"q-value", enc)
+            .build()
+            .unwrap()
+            .wire();
+        assert_eq!(
+            via_meta, via_builder,
+            "QueryMetadata.value must thread onto the value ext (0x03) \
+             byte-for-byte vs the direct RequestQueryBuilder::query_value",
+        );
+        // A fully-empty value (empty payload + zero encoding) elides the ext
+        // (build()'s `.body` predicate) — byte-identical to the no-meta path.
+        let empty = crate::metadata::QueryMetadata {
+            value: Some((
+                EncodingHint {
+                    packed_id: 0,
+                    schema: None,
+                },
+                Vec::new(),
+            )),
+            ..Default::default()
+        };
+        let via_empty = build_request_query_with_meta(42, 7, None, &empty)
+            .unwrap()
+            .wire();
+        let no_meta = build_request_query(42, 7, None).unwrap().wire();
+        assert_eq!(
+            via_empty, no_meta,
+            "fully-empty value must elide the value ext (no-meta parity)",
         );
     }
 
