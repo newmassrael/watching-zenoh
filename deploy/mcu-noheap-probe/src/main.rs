@@ -295,6 +295,10 @@ fn main() -> ! {
                 keyexpr: "svc/a",
                 parameters: None,
                 attachment: None,
+                // R311y248 — the query VALUE ext payload. Un-gated (the
+                // `encoding` sibling is alloc-gated and absent on this no-alloc
+                // probe, like `source_info`), so it must be set even here.
+                payload: None,
                 rid: 1,
                 // `false` for wire dispatch (this is a remote query — `is_remote
                 // = true` below); the query-source-info round added this field

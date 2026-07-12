@@ -1960,6 +1960,27 @@ layer_c1as_cargo_test_reply_source_info() {
             --quiet -- -D warnings)
 }
 
+# ─── Layer C1be — query-value (Q_B/Q_E): the querier VALUE ext ────────────────
+#
+# R311y248: query-value is a brand-new off-default wz-session-core feature — the
+# querier's attached VALUE ext (payload + encoding, id 0x03 ENC_ZBUF, the
+# "Q_B / Q_E" wire codec slots). No default / other lane enables it, so its
+# encode/decode SSOT (query_value_ext) unit tests + the builder -> dispatch ->
+# QueryView surface test + the gated request_build / query.rs / query_sink.rs
+# code would be never-run / never-compiled-on in CI (the recurring feature-gated-
+# test pattern). This lane runs the lib suite + clippy-gates the ON-branch. (The
+# layer3_request VALUE byte-parity vs pico runs in the integration lane, whose
+# wz-session-core dev-dep enables query-value.)
+layer_c1be_cargo_test_query_value() {
+    (cd crates \
+        && cargo test -p wz-session-core \
+            --features codec-request,codec-response,alloc,query-value,query-queryable,query-attachment,query-source-info,query-selector-parameters,query-reply-err \
+            --lib --quiet \
+        && cargo clippy -p wz-session-core --all-targets \
+            --features codec-request,codec-response,alloc,query-value,query-queryable,query-attachment,query-source-info,query-selector-parameters,query-reply-err \
+            --quiet -- -D warnings)
+}
+
 # ─── Layer C1at — ext-pubsub-advanced-recovery §5.25: gap recovery (consumer) ─
 #
 # R311y82: ext-pubsub-advanced-recovery is the CONSUMER half of gap recovery —
@@ -5253,6 +5274,7 @@ run_layer C1ba layer_c1ba_cargo_clippy_transport_multilink || overall=1
 run_layer C1bb layer_c1bb_cargo_test_qos || overall=1
 run_layer C1bc layer_c1bc_cargo_test_mcast_qos || overall=1
 run_layer C1bd layer_c1bd_locator_iface || overall=1
+run_layer C1be layer_c1be_cargo_test_query_value || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

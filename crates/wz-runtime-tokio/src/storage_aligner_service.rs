@@ -678,6 +678,8 @@ mod tests {
             parameters: None,
             attachment,
             source_info: None,
+            payload: None,
+            encoding: None,
             rid: 1,
             is_local: false,
         }

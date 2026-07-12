@@ -74,6 +74,24 @@ pub trait QueryView {
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
         None
     }
+    /// Value payload extracted from the Query body VALUE ext (id 0x03 — the
+    /// querier's attached value, zenoh-pico `z_query_payload`). `None` when no
+    /// value ext is present or `query-value` is off. Default impl returns
+    /// `None` so `QueryView` impls that predate this accessor stay valid.
+    /// Pairs with [`Self::encoding`] (the value's content type).
+    fn payload(&self) -> Option<&[u8]> {
+        None
+    }
+    /// Value encoding extracted from the Query body VALUE ext (id 0x03),
+    /// describing [`Self::payload`]'s content type (zenoh-pico
+    /// `z_query_encoding`). `None` when no value ext is present or
+    /// `query-value` is off. Default `None`. `alloc`-only (the `EncodingHint`
+    /// type lives in the `alloc`-gated `sample` module); mirrors
+    /// [`Self::source_info`].
+    #[cfg(feature = "alloc")]
+    fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
+        None
+    }
     /// Request id from the outer `Request.rid` envelope (correlation key
     /// for the matching reply chain).
     fn rid(&self) -> u64;
@@ -296,6 +314,17 @@ pub struct BorrowedQuery<'a> {
     /// lives in the `alloc`-gated `sample` module.
     #[cfg(feature = "alloc")]
     pub source_info: Option<&'a crate::sample::SourceInfo>,
+    /// Value payload (Query body VALUE ext id 0x03 — the querier's attached
+    /// value), if any. Borrowed — the dispatcher decodes the ext once into a
+    /// local that outlives the per-queryable fan and lends the payload slice,
+    /// matching the attachment / source_info borrow shape.
+    pub payload: Option<&'a [u8]>,
+    /// Value encoding (the VALUE ext's content type, describing
+    /// [`Self::payload`]). Owned by the same dispatcher local, lent here.
+    /// `alloc`-only — the `EncodingHint` type lives in the `alloc`-gated
+    /// `sample` module (mirrors `source_info`).
+    #[cfg(feature = "alloc")]
+    pub encoding: Option<&'a crate::sample::EncodingHint>,
     /// Request id (correlation key).
     pub rid: u64,
     /// R311li — in-process loopback origin marker (see
@@ -316,6 +345,13 @@ impl QueryView for BorrowedQuery<'_> {
     #[cfg(feature = "alloc")]
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
         self.source_info
+    }
+    fn payload(&self) -> Option<&[u8]> {
+        self.payload
+    }
+    #[cfg(feature = "alloc")]
+    fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
+        self.encoding
     }
     fn rid(&self) -> u64 {
         self.rid
@@ -442,6 +478,9 @@ mod tests {
                 attachment: None,
                 #[cfg(feature = "alloc")]
                 source_info: None,
+                payload: None,
+                #[cfg(feature = "alloc")]
+                encoding: None,
                 rid: 42,
                 is_local: false,
             },
@@ -505,6 +544,8 @@ mod tests {
                 parameters: None,
                 attachment: None,
                 source_info: None,
+                payload: None,
+                encoding: None,
                 rid: 1,
                 is_local: false,
             },
@@ -516,6 +557,8 @@ mod tests {
                 parameters: Some(b"x=2"),
                 attachment: Some(b"att"),
                 source_info: None,
+                payload: None,
+                encoding: None,
                 rid: 2,
                 is_local: false,
             },

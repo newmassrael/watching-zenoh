@@ -489,6 +489,8 @@ mod tests {
             parameters: params,
             attachment: None,
             source_info: None,
+            payload: None,
+            encoding: None,
             rid: 0,
             is_local: true,
         };
@@ -652,6 +654,8 @@ mod tests {
             parameters: Some(b"_time=[now(-30s)..]"),
             attachment: None,
             source_info: None,
+            payload: None,
+            encoding: None,
             rid: 0,
             is_local: true,
         };

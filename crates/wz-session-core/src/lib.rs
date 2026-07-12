@@ -737,6 +737,16 @@ pub mod source_info_ext;
 #[cfg(all(feature = "alloc", feature = "attachment-bytes"))]
 pub mod attachment;
 
+/// SSOT for the Query body VALUE extension wire shape (the querier's attached
+/// `payload` + `encoding`, the "Q_B / Q_E" wire codec slots). Gated on the
+/// `query-value` catalog primitive that the querier `RequestQueryBuilder::
+/// query_value` (encode) and the queryable `query::extract_query_value`
+/// (decode) select; owns the one encode / decode pair for the
+/// `(0x3, ENC_ZBUF, ExtZbuf body = encoding || payload)` value ext. Sibling of
+/// `source_info_ext` (0x01) and `attachment` (0x05) — the three Query body exts.
+#[cfg(all(feature = "alloc", feature = "query-value"))]
+pub mod query_value_ext;
+
 /// SSOT for the Z_EXT_AUTH establishment extension wire shape. Gated on the
 /// `session-extauth` catalog primitive (AP-only — zenoh-pico has no auth);
 /// owns the one encode / decode pair for the `(0x3, ENC_ZBUF, ExtZbuf body)`

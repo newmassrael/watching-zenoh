@@ -262,6 +262,8 @@ pub struct RequestQueryBuilder {
     query_source_info: Option<crate::sample::SourceInfo>,
     #[cfg(feature = "query-attachment")]
     query_attachment: Option<Vec<u8>>,
+    #[cfg(feature = "query-value")]
+    query_value: Option<(crate::sample::EncodingHint, Vec<u8>)>,
     // Request-layer ext settings.
     request_qos: Option<u8>,
     request_tstamp: Option<TimestampOwned>,
@@ -287,6 +289,8 @@ impl RequestQueryBuilder {
             query_source_info: None,
             #[cfg(feature = "query-attachment")]
             query_attachment: None,
+            #[cfg(feature = "query-value")]
+            query_value: None,
             request_qos: None,
             request_tstamp: None,
             request_target: None,
@@ -471,6 +475,27 @@ impl RequestQueryBuilder {
         self
     }
 
+    /// Set the Query-level VALUE extension (the querier's attached payload +
+    /// encoding — the "Q_B / Q_E" wire slots). Gated on `query-value` (wire-data
+    /// helper) so a `codec-request` subset that does not compose querier values
+    /// carries no value encode path. The ext is emitted as `ENC_ZBUF | 0x03` on
+    /// the Query body chain — FIRST, before source_info (`0x01`) and attachment
+    /// (`0x05`), matching zenoh-pico's `_z_query_encode` emit order (body →
+    /// info → attachment, `message.c:433-448`) — built through the shared
+    /// [`crate::query_value_ext::encode_query_value_ext`] SSOT. `encoding` is a
+    /// required argument; pass the zero encoding
+    /// (`EncodingHint { packed_id: 0, schema: None }`) to attach only a payload.
+    /// Unlike attachment, an EMPTY payload is allowed (a value may be
+    /// encoding-only) — but a fully-empty value (empty payload AND the zero
+    /// encoding) emits NO ext at all, matching zenoh-pico's `.body` predicate
+    /// (`build()` applies the guard, so this setter never forces a spurious
+    /// empty value ext).
+    #[cfg(feature = "query-value")]
+    pub fn query_value(mut self, payload: &[u8], encoding: crate::sample::EncodingHint) -> Self {
+        self.query_value = Some((encoding, payload.to_vec()));
+        self
+    }
+
     /// Set the Request-level target extension. Wire mapping per
     /// [`QueryTarget::wire_byte`]; the M=1 mandatory marker is set on
     /// the emitted ExtEntry header per zenoh-pico convention
@@ -534,11 +559,35 @@ impl RequestQueryBuilder {
                 query.parameters = Some(owned_bytes(&params)?);
             }
             // Query body ext chain in zenoh-pico encode order:
-            // source_info (0x01) → attachment (0x05) (message.c:438-448).
-            // Z chain-continuation bit set on every entry except the last
-            // (mirrors the Request-level ext assembly below); the Q_Z
-            // (0x80) header flag marks the chain's presence.
+            // value (0x03) → source_info (0x01) → attachment (0x05)
+            // (message.c:433-448 — the value/body ext is emitted FIRST, before
+            // source_info, despite its higher id). Z chain-continuation bit set
+            // on every entry except the last (mirrors the Request-level ext
+            // assembly below); the Q_Z (0x80) header flag marks the chain's
+            // presence.
             let mut query_exts: Vec<ExtEntryOwned> = Vec::new();
+            #[cfg(feature = "query-value")]
+            if let Some((encoding, payload)) = self.query_value {
+                // zenoh-pico emits the value ext iff the value is non-empty:
+                // `_z_msg_query_required_extensions.body =
+                //  _z_bytes_check(payload) || _z_encoding_check(encoding)`
+                // (definitions/message.c:33), where `_z_encoding_check` = id != 0
+                // || schema present (net/encoding.h). A fully-empty value (empty
+                // payload + default encoding id 0 / no schema) emits NO ext —
+                // matching pico byte-for-byte rather than a spurious empty
+                // `0x43 || VLE(1) || 0x00`. `EncodingHint.packed_id` is
+                // `id << 1 | schema_flag`, so id != 0 is `packed_id >> 1 != 0`.
+                let encoding_non_default =
+                    (encoding.packed_id >> 1) != 0 || encoding.schema.is_some();
+                if !payload.is_empty() || encoding_non_default {
+                    // The value ext (ENC_ZBUF|0x03, body = encoding || payload);
+                    // emitted first per pico's order. Z bit applied in the
+                    // finalize loop below.
+                    query_exts.push(crate::query_value_ext::encode_query_value_ext(
+                        &encoding, &payload,
+                    )?);
+                }
+            }
             #[cfg(feature = "query-source-info")]
             if let Some(si) = self.query_source_info {
                 // The full-entry source_info SSOT (header ENC_ZBUF|0x01 +
@@ -1425,6 +1474,124 @@ mod tests {
                 )
                 .expect("query attachment ext (id 0x05) present");
                 assert_eq!(att, big.as_slice(), "the full 200-byte attachment survived");
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+    }
+
+    /// R311y248 — the COMPOSED Query body ext chain: when a query carries a
+    /// VALUE (0x03) + source_info (0x01) + attachment (0x05) together, the exts
+    /// emit in zenoh-pico's `_z_query_encode` order (value -> info -> attachment,
+    /// message.c:433-448) with the chain-continuation Z bit set on every entry
+    /// but the last, and the Q_Z (0x80) header flag set. The value ext is
+    /// emitted FIRST despite its higher id — the composition invariant a
+    /// value-alone test cannot catch. The setters are called in a DIFFERENT
+    /// order (source_info, attachment, value) to prove `build()` re-orders to
+    /// pico's canonical chain regardless of call order.
+    #[cfg(all(
+        feature = "codec-request",
+        feature = "query-value",
+        feature = "query-source-info",
+        feature = "query-attachment",
+        feature = "alloc"
+    ))]
+    #[test]
+    fn build_request_query_composed_exts_emit_value_source_info_attachment_in_order() {
+        use crate::sample::{EncodingHint, SourceInfo};
+        let req = RequestQueryBuilder::new(9, 0, Some("demo/data"))
+            .query_source_info(SourceInfo::new(&[0xAA], 1, 2))
+            .query_attachment(b"att")
+            .query_value(
+                b"val",
+                EncodingHint {
+                    packed_id: 0,
+                    schema: None,
+                },
+            )
+            .build()
+            .expect("composed query builds");
+        match &req.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
+                assert_eq!(q.header & 0x80, 0x80, "Q_Z set (ext chain present)");
+                let exts = q.extensions.as_deref().expect("ext chain present");
+                assert_eq!(exts.len(), 3, "value + source_info + attachment");
+                // pico emit order: value(0x03) -> source_info(0x01) ->
+                // attachment(0x05), regardless of the setter call order above.
+                assert_eq!(exts[0].ext_id(), 0x03, "value ext emitted FIRST");
+                assert_eq!(exts[1].ext_id(), 0x01, "source_info ext SECOND");
+                assert_eq!(exts[2].ext_id(), 0x05, "attachment ext THIRD");
+                // Chain Z bit: set on every entry but the last (terminator).
+                assert_eq!(exts[0].header & 0x80, 0x80, "value: Z set (more follows)");
+                assert_eq!(
+                    exts[1].header & 0x80,
+                    0x80,
+                    "source_info: Z set (more follows)"
+                );
+                assert_eq!(
+                    exts[2].header & 0x80,
+                    0x00,
+                    "attachment: Z clear (terminator)"
+                );
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+    }
+
+    /// R311y248 — the empty-value guard: `query_value(b"", <zero encoding>)`
+    /// emits NO value ext, matching zenoh-pico's `.body` predicate
+    /// (`_z_bytes_check(payload) || _z_encoding_check(encoding)` — both false
+    /// for an empty payload + default encoding). A spurious `0x43 || VLE(1) ||
+    /// 0x00` would diverge from pico byte-for-byte.
+    #[cfg(all(feature = "codec-request", feature = "query-value", feature = "alloc"))]
+    #[test]
+    fn query_value_empty_payload_default_encoding_emits_no_ext() {
+        use crate::sample::EncodingHint;
+        let req = RequestQueryBuilder::new(9, 0, Some("demo/data"))
+            .query_value(
+                b"",
+                EncodingHint {
+                    packed_id: 0,
+                    schema: None,
+                },
+            )
+            .build()
+            .expect("builds");
+        match &req.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
+                assert_eq!(q.header & 0x80, 0x00, "Q_Z clear — no ext chain");
+                assert!(
+                    q.extensions.is_none(),
+                    "no value ext emitted for a fully-empty value"
+                );
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+    }
+
+    /// R311y248 — an encoding-only value (empty payload but a NON-default
+    /// encoding) DOES emit the value ext (pico `_z_encoding_check` true), so a
+    /// querier can attach a content-type with no bytes.
+    #[cfg(all(feature = "codec-request", feature = "query-value", feature = "alloc"))]
+    #[test]
+    fn query_value_empty_payload_nondefault_encoding_emits_ext() {
+        use crate::sample::EncodingHint;
+        // packed_id = 5 << 1 = 0x0A: id 5, no schema flag (non-default id).
+        let req = RequestQueryBuilder::new(9, 0, Some("demo/data"))
+            .query_value(
+                b"",
+                EncodingHint {
+                    packed_id: 0x0A,
+                    schema: None,
+                },
+            )
+            .build()
+            .expect("builds");
+        match &req.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
+                assert_eq!(q.header & 0x80, 0x80, "Q_Z set — value ext present");
+                let exts = q.extensions.as_deref().expect("ext chain present");
+                assert_eq!(exts.len(), 1);
+                assert_eq!(exts[0].ext_id(), 0x03, "the encoding-only value ext");
             }
             _ => panic!("expected CodecZenohQuery"),
         }

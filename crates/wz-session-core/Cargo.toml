@@ -558,6 +558,15 @@ query-reply-err = []
 # projection (query.rs::extract_query_source_info). Send-side is
 # foreign-proven wz->pico on the Query carrier (R311y244).
 query-source-info = []
+# query-value gates BOTH sides of the Query body VALUE ext (id 0x03 ENC_ZBUF —
+# the querier's attached payload + encoding, the "Q_B / Q_E" wire slots): the
+# querier-side stamping (request_build.rs::query_value) and the queryable-side
+# projection (query.rs::extract_query_value). The value ext body is a
+# `_z_value_t` = encoding || payload; the encoding rides the shared
+# `wz_codecs::encoding` codec. Standalone gate (no wz-codecs forward — the
+# ExtEntry chain the value rides is already carried by the generated Query
+# codec); OFF (default) = a Query carries no value ext, pico-faithful.
+query-value = []
 # R311y74 — reply-source-info gates the queryable REPLY-side emission of
 # the inner Put-body source-info ext (id 0x01 ENC_ZBUF), the Reply-body
 # twin of pubsub-source-info (Push) / query-source-info (Query). A Reply

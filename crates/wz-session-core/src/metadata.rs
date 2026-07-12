@@ -88,12 +88,17 @@ impl PushMetadata {
 /// | `attachment`       | `RequestQueryBuilder::query_attachment` |
 /// | `parameters`       | `RequestQueryBuilder::parameters` (`Q_P` 0x40) |
 /// | `timeout_ms`       | `RequestQueryBuilder::request_timeout_ms` |
-/// | `payload`          | R241+ carry — wz codec has no Q_B body slot yet |
-/// | `encoding`         | R241+ carry — wz codec has no Q_E inline slot yet |
+/// | `payload`          | codec slot landed R311y248 (`RequestQueryBuilder::query_value`, value ext 0x03); `QueryMetadata` → builder threading still pending |
+/// | `encoding`         | codec slot landed R311y248 (rides the value ext beside `payload`); threading still pending |
 ///
 /// `payload` / `encoding` stay on `QueryOptions` as future-additive
-/// slots so a later round that lands the Q_B / Q_E codec extensions
-/// surfaces the propagation without an API break.
+/// slots. R311y248 landed the Q_B / Q_E codec extension itself (the value
+/// ext `0x03`, via [`crate::query_value_ext`] + `RequestQueryBuilder::
+/// query_value`), correcting the R241+ carry that presumed an inline slot was
+/// needed — the value rides the generic Query ext chain. The remaining step is
+/// threading `QueryMetadata` (add a `value` field) → the builder in
+/// `build_request_query_with_meta`, so a later round surfaces the propagation
+/// from `QueryOptions` without an API break.
 #[derive(Debug, Clone, Default)]
 pub struct QueryMetadata {
     /// Reply target hint (`Q_T` flag on the outbound Query). `None`

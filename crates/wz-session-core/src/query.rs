@@ -226,6 +226,27 @@ fn extract_query_source_info(query: &QueryOwned) -> Option<crate::sample::Source
     }
 }
 
+// R311y248 — project the querier's VALUE ext (id 0x03 ENC_ZBUF, the attached
+// payload + encoding, the "Q_B / Q_E" wire slots) into `(encoding, payload)`.
+// The value ext body is a `_z_value_t` = encoding || payload; the shared
+// `crate::query_value_ext` SSOT decodes it (the same module the querier-side
+// stamping uses). Signature stable (returns Option); `query-value` off
+// short-circuits to None so a `codec-request` subset that does not compose
+// querier values carries no value decode path.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+fn extract_query_value(query: &QueryOwned) -> Option<(crate::sample::EncodingHint, &[u8])> {
+    #[cfg(not(feature = "query-value"))]
+    {
+        let _ = query;
+        None
+    }
+    #[cfg(feature = "query-value")]
+    {
+        let exts = query.extensions.as_deref()?;
+        crate::query_value_ext::decode_query_value_ext(exts)
+    }
+}
+
 /// Stable handle returned by [`QueryableRegistry::register`] so the
 /// caller can later unregister the queryable without re-keying on
 /// the keyexpr pattern (duplicate-pattern queryables are explicitly
@@ -1278,6 +1299,11 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // this local; each matched queryable's `BorrowedQuery` lends it
         // (`.as_ref()`), matching the attachment/parameters borrow shape.
         let source_info_view = extract_query_source_info(query);
+        // R311y248 — querier VALUE ext, decoded once per inbound query into
+        // this local (owned encoding + borrowed payload); each matched
+        // queryable's `BorrowedQuery` lends both, matching the source_info
+        // borrow shape.
+        let value_view = extract_query_value(query);
         let mut matched = 0;
         for queryable in self.queryables.iter_mut() {
             // R311gb (Track 2) — shared match SSOT with the no-heap
@@ -1305,6 +1331,8 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     parameters: parameters_view,
                     attachment: attachment_view,
                     source_info: source_info_view.as_ref(),
+                    payload: value_view.as_ref().map(|(_, p)| *p),
+                    encoding: value_view.as_ref().map(|(e, _)| e),
                     rid,
                     // R311li — loopback origin marker (pico _is_local
                     // parity); the deferred Session-tier sink routes
@@ -2628,6 +2656,59 @@ mod tests {
         );
     }
 
+    /// R311y248 — the full builder → dispatch → QueryView surface path for the
+    /// Query VALUE ext (Q_B/Q_E): a `Request(Query)` built with
+    /// `RequestQueryBuilder::query_value(payload, encoding)` carries the value
+    /// ext (0x03), and the dispatched queryable's handler reads it back through
+    /// `QueryView::payload()` / `QueryView::encoding()`. Proves the value rides
+    /// the whole encode-chain → decode (`extract_query_value`) → surface path,
+    /// including the schema-bearing encoding (packed_id 0x0B).
+    #[cfg(feature = "query-value")]
+    #[test]
+    fn query_value_surfaces_on_queryview_through_dispatch() {
+        use crate::request_build::RequestQueryBuilder;
+        use crate::sample::EncodingHint;
+        use std::sync::{Arc, Mutex};
+
+        // The handler asserts the surface directly (a panic propagates out of
+        // the synchronous dispatch); the flag confirms the handler ran.
+        let observed: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let observed_cb = observed.clone();
+        let mut reg = QueryableRegistry::new();
+        reg.register("demo/data", move |q, _responder| {
+            assert_eq!(
+                q.payload(),
+                Some(&b"the-query-value"[..]),
+                "the query VALUE payload surfaced on QueryView"
+            );
+            assert_eq!(
+                q.encoding().map(|e| e.packed_id),
+                Some(0x0B),
+                "the schema-flagged encoding surfaced intact"
+            );
+            *observed_cb.lock().unwrap() = true;
+        });
+
+        // packed_id 0x0B = id 5 with the schema flag set; the schema string
+        // sits between the id and the payload, so a correct surface requires
+        // the decode to consume the whole encoding before the payload.
+        let encoding = EncodingHint {
+            packed_id: 0x0B,
+            schema: Some("json".to_string()),
+        };
+        let request = RequestQueryBuilder::new(9, 0, Some("demo/data"))
+            .query_value(b"the-query-value", encoding)
+            .build()
+            .unwrap();
+        let mut replies = Vec::new();
+        let matched = reg.dispatch_request(&request, &HashMap::new(), &mut replies);
+        assert_eq!(matched, 1, "the demo/data queryable matched the query");
+        assert!(
+            *observed.lock().unwrap(),
+            "the queryable handler ran and observed the value"
+        );
+    }
+
     #[test]
     fn query_reply_into_response_del_path_flips_inner_arm() {
         let reply = QueryReply::Reply {
@@ -2984,6 +3065,8 @@ mod tests {
                 parameters: None,
                 attachment: None,
                 source_info: None,
+                payload: None,
+                encoding: None,
                 rid: 7,
                 is_local: false,
             },

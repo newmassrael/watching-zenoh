@@ -55,6 +55,17 @@ wz-codecs = { path = "../wz-codecs", features = ["codec-serial"] }
 # SerialFrameReader}` (the wz serial framing logic under test).
 wz-session-core = { path = "../wz-session-core", features = [
     "transport-link-serial",
+    # R311y248 — the layer3 query VALUE byte-parity test
+    # (layer3_request.rs::layer3_request_query_value_byte_equivalent) builds a
+    # wz Query carrying the value ext via the production
+    # `RequestQueryBuilder::query_value` (codec-request) and byte-compares it
+    # against a pico `_z_request_encode` with `_ext_value.payload` set, so the
+    # dev-dep build needs the querier-side value encode path. `query-value`
+    # gates the ext helper + builder setter; `codec-request` gates the builder
+    # itself. Not an inventory atom flip here (the atom is added in R311y248's
+    # inventory entry); this only composes the send-side stamp for the test.
+    "codec-request",
+    "query-value",
     # R311y245 — reply-source-info gates the queryable REPLY-side emission
     # of the inner Put-body source_info ext (id 0x01 ENC_ZBUF). The
     # wz_reply_source_info_to_pico_zget e2e drives an in-process wz

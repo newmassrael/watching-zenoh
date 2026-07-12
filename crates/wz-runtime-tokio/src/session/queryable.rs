@@ -119,6 +119,11 @@ struct OwnedQueryEvent {
     parameters: Option<Vec<u8>>,
     attachment: Option<Vec<u8>>,
     source_info: Option<SourceInfo>,
+    // R311y248 — the querier's VALUE ext (payload + encoding), owned so the
+    // deferred handler can read it at drain time (the borrowed view is gone by
+    // then, mirroring the attachment/source_info owned-copy shape).
+    payload: Option<Vec<u8>>,
+    encoding: Option<EncodingHint>,
     rid: u64,
     is_local: bool,
 }
@@ -177,6 +182,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 parameters: view.parameters().map(<[u8]>::to_vec),
                 attachment: view.attachment().map(<[u8]>::to_vec),
                 source_info: view.source_info().cloned(),
+                payload: view.payload().map(<[u8]>::to_vec),
+                encoding: view.encoding().cloned(),
                 rid: view.rid(),
                 is_local: view.is_local(),
             };
@@ -190,6 +197,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         parameters: owned.parameters.as_deref(),
                         attachment: owned.attachment.as_deref(),
                         source_info: owned.source_info.as_ref(),
+                        payload: owned.payload.as_deref(),
+                        encoding: owned.encoding.as_ref(),
                         rid: owned.rid,
                         is_local: owned.is_local,
                     };
