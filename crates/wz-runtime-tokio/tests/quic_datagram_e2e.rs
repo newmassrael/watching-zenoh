@@ -108,14 +108,15 @@ async fn wz_to_wz_over_quic_datagram_reaches_established_and_delivers_put() {
     let init_open = async {
         let locator = parse_any_locator(&format!("quic-datagram/{addr}"))
             .expect("parse quic-datagram locator");
-        let cfg = DialConfig {
-            quic: Some(QuicDialConfig {
-                client_config,
-                // SNI must match the cert SAN (`localhost`), independent of the
-                // numeric dial address — the tls/quic model.
-                server_name: "localhost".to_string(),
-            }),
-        };
+        // R311y253 — builder form (`DialConfig` is `#[non_exhaustive]`; both its
+        // fields are cfg-gated, so an exhaustive literal broke under any feature
+        // combo it was not written against).
+        let cfg = DialConfig::default().with_quic(QuicDialConfig {
+            client_config,
+            // SNI must match the cert SAN (`localhost`), independent of the
+            // numeric dial address — the tls/quic model.
+            server_name: "localhost".to_string(),
+        });
         let mut params = fixture_session_init_params();
         params.zid = vec![0x01; 4];
         connect_and_open_session(

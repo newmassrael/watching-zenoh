@@ -97,18 +97,20 @@ async fn wz_to_wz_over_quic_reaches_established_and_delivers_put() {
     };
     let init_open = async {
         let locator = parse_any_locator(&format!("quic/{addr}")).expect("parse quic locator");
-        // The quic-only build has `quic` as the sole `DialConfig` field (the
-        // `tls` field is `transport-link-tls`-gated), so no `..Default::default()`
-        // — mirrors the tls_harness `DialConfig { tls: Some(..) }` shape and
-        // keeps clippy off `needless_update`.
-        let cfg = DialConfig {
-            quic: Some(QuicDialConfig {
-                client_config,
-                // SNI must match the cert SAN (`localhost`), independent of the
-                // numeric dial address — exactly the tls model.
-                server_name: "localhost".to_string(),
-            }),
-        };
+        // R311y253 — builder form, not a struct literal. Both `DialConfig`
+        // fields are `#[cfg]`-gated, so an exhaustive literal only compiles for
+        // the feature combo it was written against: this one omitted `tls` and
+        // so failed E0063 the moment `transport-link-tls` was also on (which
+        // `--all-features` does). `DialConfig` is now `#[non_exhaustive]`, so
+        // the literal form is unrepresentable here and the builder is the only
+        // way in — which also sidesteps the `needless_update` lint that the old
+        // comment cited as the reason for omitting `..Default::default()`.
+        let cfg = DialConfig::default().with_quic(QuicDialConfig {
+            client_config,
+            // SNI must match the cert SAN (`localhost`), independent of the
+            // numeric dial address — exactly the tls model.
+            server_name: "localhost".to_string(),
+        });
         let mut params = fixture_session_init_params();
         params.zid = vec![0x01; 4];
         connect_and_open_session(

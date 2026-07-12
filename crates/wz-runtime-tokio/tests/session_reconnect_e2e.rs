@@ -514,12 +514,13 @@ mod tls_reconnect {
         // The retained dial config: a `tls/...` re-dial reads this on EVERY
         // reconnect, so the supervisor must own it (R311oe).
         let server_name = ServerName::try_from("localhost").expect("server name");
-        let dial_config = DialConfig {
-            tls: Some(TlsDialConfig {
-                client_config,
-                server_name,
-            }),
-        };
+        // R311y253 — builder form (`DialConfig` is `#[non_exhaustive]`; both its
+        // fields are cfg-gated, so an exhaustive literal broke under any feature
+        // combo it was not written against — this one omitted `quic`).
+        let dial_config = DialConfig::default().with_tls(TlsDialConfig {
+            client_config,
+            server_name,
+        });
 
         // ── Connection #1: client opens (reconnect-supervised) over TLS,
         //    declares a subscriber; the acceptor handshakes and observes it.

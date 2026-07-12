@@ -186,7 +186,22 @@ pub const DEFAULT_OPEN_TICK_MS: u64 = 50;
 /// actually happens ([`dial_locator`]'s tls arm). A caller that holds the dial
 /// future across a `join!` binds the config to a `let` so it outlives the
 /// borrow — the idiomatic Rust handling of a borrow-across-await.
+/// R311y253 — `#[non_exhaustive]` + `with_*` builders, the same shape every
+/// other options struct in this crate already uses (`QueryOptions`,
+/// `PublishOptions`, `QueryableOptions`: "construct via `default` plus optional
+/// `with_*` setters — never struct-literal externally"). `DialConfig` was the
+/// lone exception, and the exception was a latent build break: BOTH its fields
+/// are `#[cfg]`-gated, so an exhaustive struct literal only compiles for the one
+/// feature combination its author happened to build with. Every literal in the
+/// tree named exactly one field, so each was missing the other's — the tls-side
+/// ones broke the moment `transport-link-quic` was on, and the quic-side ones
+/// the moment `transport-link-tls` was. They compiled only because the curated CI
+/// lanes enable tls XOR quic, never both; `--all-features` failed 6 test targets
+/// with E0063. `#[non_exhaustive]` makes that fragile form UNREPRESENTABLE for
+/// out-of-crate callers (integration tests under `tests/` are separate crates),
+/// so a future third cfg-gated transport field cannot silently break them either.
 #[derive(Default)]
+#[non_exhaustive]
 pub struct DialConfig {
     /// TLS client material for a `tls/...` dial. `None` (the default) => a
     /// `tls/...` locator dials to a typed `Unsupported` error (no certs to
@@ -199,6 +214,34 @@ pub struct DialConfig {
     /// same shape as `tls`.
     #[cfg(feature = "transport-link-quic")]
     pub quic: Option<QuicDialConfig>,
+}
+
+impl DialConfig {
+    /// Supply the TLS client material for a `tls/...` dial. Chain onto
+    /// [`DialConfig::default`]; a config without this dials a `tls/...` locator
+    /// to a typed `Unsupported`.
+    ///
+    /// Hard-gated on `transport-link-tls` (the setter's parameter type
+    /// [`TlsDialConfig`] is itself gated, so the signature cannot exist without
+    /// the feature). This is the same "wire-data setter disappears when off"
+    /// shape `QueryOptions::with_attachment` / `with_source_info` use, rather
+    /// than the ungated no-op shape reserved for setters whose parameter type is
+    /// always available.
+    #[cfg(feature = "transport-link-tls")]
+    pub fn with_tls(mut self, tls: TlsDialConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Supply the QUIC client material for a `quic/...` dial (also used by the
+    /// QUIC-datagram transport, which reuses the same cert threading). Mirror of
+    /// [`Self::with_tls`], hard-gated on `transport-link-quic` for the same
+    /// reason (its [`QuicDialConfig`] parameter type is gated).
+    #[cfg(feature = "transport-link-quic")]
+    pub fn with_quic(mut self, quic: QuicDialConfig) -> Self {
+        self.quic = Some(quic);
+        self
+    }
 }
 
 /// The TLS material a `tls/...` dial needs beyond the locator's addr: the

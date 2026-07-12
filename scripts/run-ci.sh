@@ -2963,6 +2963,33 @@ layer_c1s_runtime_tokio_multicast_tests() {
 # if the thumbv7m-none-eabi rustup target or arm-none-eabi-gcc is
 # absent so a host-only developer is not forced to install the
 # cross toolchain just to clear C2.
+
+# ─── Layer C1bf — wz-runtime-tokio CROSS-FEATURE composition gate ─────
+#
+# R311y253. Layer C2 runs `clippy --workspace --all-targets` on the DEFAULT
+# feature set, so it never composes two optional features that are individually
+# exercised by their own lanes but never together. That blind spot shipped a real
+# build break: `DialConfig` (session_open.rs) has TWO `#[cfg]`-gated fields
+# (`tls` @transport-link-tls, `quic` @transport-link-quic), and every exhaustive
+# struct literal in the tree named exactly ONE of them — so the tls-side literals
+# failed E0063 the moment `transport-link-quic` was also on, and the quic-side
+# ones the moment `transport-link-tls` was. Six integration-test targets did not
+# compile under `--all-features`, and NO lane caught it, because the tls lane and
+# the quic lane each enable their own feature alone.
+#
+# This lane closes that gap for the crate where the risk lives (wz-runtime-tokio
+# is the one carrying cfg-gated public struct fields): it clippy-gates the crate
+# with ALL of its features on at once, over --all-targets so the integration
+# tests (separate crates, and the ones that actually broke) are included.
+#
+# Scoped to `-p wz-runtime-tokio` deliberately: a WORKSPACE-wide `--all-features`
+# is structurally impossible here — sce-rust-runtime declares `no_std` and
+# `http-send` mutually exclusive (a compile_error! guard), so `--all-features`
+# can never be a workspace gate. Per-crate is the only form this check can take.
+layer_c1bf_cargo_clippy_all_features() {
+    (cd crates && cargo clippy -p wz-runtime-tokio --all-targets --all-features \
+        --quiet -- -D warnings) || return 1
+}
 layer_c2_cargo_clippy() {
     # Stage 4b — exclude wz-session-lwip (no_std-engine crate, mutually
     # exclusive with tokio's http-send in a unified graph; isolated clippy
@@ -5275,6 +5302,7 @@ run_layer C1bb layer_c1bb_cargo_test_qos || overall=1
 run_layer C1bc layer_c1bc_cargo_test_mcast_qos || overall=1
 run_layer C1bd layer_c1bd_locator_iface || overall=1
 run_layer C1be layer_c1be_cargo_test_query_value || overall=1
+run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

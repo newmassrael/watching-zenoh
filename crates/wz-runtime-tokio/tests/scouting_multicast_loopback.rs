@@ -423,12 +423,13 @@ mod round3_tls {
             // the DialConfig, exactly as pico threads `session_cfg`. Built
             // inside the async block so the borrow stays local to this future.
             let server_name = ServerName::try_from("localhost").expect("server name");
-            let cfg = DialConfig {
-                tls: Some(TlsDialConfig {
-                    client_config,
-                    server_name,
-                }),
-            };
+            // R311y253 — builder form (`DialConfig` is `#[non_exhaustive]`; both
+            // its fields are cfg-gated, so an exhaustive literal broke under any
+            // feature combo it was not written against — this one omitted `quic`).
+            let cfg = DialConfig::default().with_tls(TlsDialConfig {
+                client_config,
+                server_name,
+            });
             let mut params = fixture_session_init_params();
             params.zid = vec![0x01; 4];
             open_session_at(
