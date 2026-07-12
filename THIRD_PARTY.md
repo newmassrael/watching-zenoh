@@ -74,22 +74,32 @@ changelog that authorized the bump.
   test-harness binary; runtime use of zenoh-pico via
   `crates/zenoh-pico-sys` FFI is unaffected because that path
   links against the upstream library, not the patched example.
-- **Build-time divergence (R311y240 / R311y242)**: the same
+- **Build-time divergence (R311y240 / R311y242 / R311y243)**: the same
   `scripts/build-zenoh-pico-cli.sh` applies a second in-place patch
   to `vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c`,
-  inserting `printf` lines for all three Push QoS-byte sub-fields —
+  inserting `printf` lines for the three Push QoS-byte sub-fields —
   `with priority:` (`z_sample_priority`), `with congestion:`
   (`z_sample_congestion_control`) and `with express:`
-  (`z_sample_express`) — into its `data_handler` so the CLI reports
-  the received sample's qos byte (the stock example prints encoding /
-  timestamp / attachment but never calls those getters). This makes
-  it the foreign witness for watching-zenoh's Push outer QoS-ext
-  propagation: the priority sub-field
+  (`z_sample_express`) — plus, under `#ifdef Z_FEATURE_UNSTABLE_API`,
+  `with source_info eid: .. sn: ..` (`z_sample_source_info`, guarded
+  against a NULL when the sender set none) — into its `data_handler`
+  so the CLI reports the received sample's qos byte + source_info (the
+  stock example prints encoding / timestamp / attachment but never
+  calls those getters). Because `z_sample_source_info` is an UNSTABLE
+  getter (vendor default `Z_FEATURE_UNSTABLE_API=0`,
+  `CMakeLists.txt:316`), the cmake configure step now passes
+  `-DZ_FEATURE_UNSTABLE_API=ON`; the `#ifdef` keeps the file compiling
+  if a future config omits it. Enabling the flag alone cascades no
+  other feature on and changes no wire behaviour. This makes the CLI
+  the foreign witness for watching-zenoh's Push metadata propagation:
+  the priority sub-field
   (`crates/wz-integration-tests/tests/wz_priority_to_pico_zsub.rs`,
-  R311y240) and the congestion + express sub-fields
+  R311y240), the congestion + express sub-fields
   (`crates/wz-integration-tests/tests/`
-  `wz_qos_congestion_express_to_pico_zsub.rs`, R311y242). All three
-  land in one atomic multi-line insert.
+  `wz_qos_congestion_express_to_pico_zsub.rs`, R311y242) and
+  source_info
+  (`crates/wz-integration-tests/tests/wz_source_info_to_pico_zsub.rs`,
+  R311y243). All land in one atomic multi-line insert.
   The anchor is the `// Check timestamp` comment; unlike the R216
   z_put patch (whose anchor `z_put(.., NULL)` is consumed by its own
   edit, so a leftover patch fails the anchor grep and errors loudly),

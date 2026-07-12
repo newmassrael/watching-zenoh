@@ -21,13 +21,15 @@
 //!   counterpart to [`crate::session_glue::SessionLinkActions::send_push_aliased`]
 //!   will land as `publish_aliased` once a use case surfaces.
 //! * [`PublishOptions`] carries the three load-bearing knobs
-//!   (`allowed_destination`, `reliability`, `kind`). The remaining
-//!   five [`crate::sample::Sample`] body fields (`qos`, `attachment`,
-//!   `timestamp`, `encoding`, `source_info`) are R229+ carries —
-//!   the wire path's `send_push_literal` currently does not accept
-//!   them either, so propagating them through `Session::publish`
-//!   would surface an asymmetry between the wire branch (loses the
-//!   metadata) and the loopback branch (preserves it).
+//!   (`allowed_destination`, `reliability`, `kind`) plus the five
+//!   [`crate::sample::Sample`] body-metadata fields (`qos`,
+//!   `attachment`, `timestamp`, `encoding`, `source_info`), which
+//!   since landed (R232/R233) and ARE preserved on the wire:
+//!   `Session::publish` routes a metadata-bearing publish through
+//!   `build_push_literal_with_meta` + the `send_network_message_qos`
+//!   seam (NOT the metadata-agnostic `send_push_literal`), so the wire
+//!   branch matches the loopback branch — each field foreign-proven
+//!   wz->pico (encoding R311y207 .. source_info y243).
 //! * `Session` is a NEW public surface introduced in parallel with
 //!   the legacy direct-`SessionLinkActions` + direct-`ApplicationLayerObserver`
 //!   pattern that `wz-ap-demo` and the integration suite still use.

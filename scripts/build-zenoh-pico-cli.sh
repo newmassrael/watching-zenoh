@@ -124,18 +124,22 @@ else
     exit 2
 fi
 
-# R311y240 / R311y242 — wz-side build-time patch on
+# R311y240 / R311y242 / R311y243 — wz-side build-time patch on
 # vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c. The stock
 # example prints the received sample's encoding / timestamp /
-# attachment but NOT its qos byte (it never calls z_sample_priority /
-# z_sample_congestion_control / z_sample_express). This patch adds
-# `with priority:` / `with congestion:` / `with express:` lines so the
-# CLI becomes the FOREIGN witness for wz's Push outer QoS-ext
-# propagation — all three sub-fields ride the single packed byte
-# (priority: tests/wz_priority_to_pico_zsub.rs, R311y240; congestion +
-# express: tests/wz_qos_congestion_express_to_pico_zsub.rs, R311y242).
-# Same lifecycle as the z_put patch above: applied in-place, reverted
-# by the shared trap.
+# attachment but NOT its qos byte or source_info. This patch adds
+# `with priority:` / `with congestion:` / `with express:` (the packed
+# QoS byte, stable API) and — under `#ifdef Z_FEATURE_UNSTABLE_API` —
+# `with source_info eid: .. sn: ..` (z_sample_source_info is an UNSTABLE
+# getter; the cmake config below sets -DZ_FEATURE_UNSTABLE_API=ON, and
+# the #ifdef keeps the file compiling if a future config omits it). So
+# the CLI becomes the FOREIGN witness for wz's Push metadata
+# propagation: the QoS sub-fields (priority:
+# tests/wz_priority_to_pico_zsub.rs, R311y240; congestion + express:
+# tests/wz_qos_congestion_express_to_pico_zsub.rs, R311y242) and
+# source_info (tests/wz_source_info_to_pico_zsub.rs, R311y243). Same
+# lifecycle as the z_put patch above: applied in-place, reverted by the
+# shared trap.
 #
 # Idempotency hazard (WHY the explicit marker check below): the z_put
 # patch is self-guarding — its anchor `z_put(.., NULL)` is CONSUMED by
@@ -163,7 +167,14 @@ if grep -q "// Check timestamp" "$z_sub_att_src"; then
         \#// Check timestamp#i\
     printf("    with priority: %d\\n", (int)z_sample_priority(sample));\
     printf("    with congestion: %d\\n", (int)z_sample_congestion_control(sample));\
-    printf("    with express: %d\\n", (int)z_sample_express(sample));
+    printf("    with express: %d\\n", (int)z_sample_express(sample));\
+#ifdef Z_FEATURE_UNSTABLE_API\
+    const z_source_info_t *wz_si = z_sample_source_info(sample);\
+    if (wz_si != NULL) {\
+        z_entity_global_id_t wz_gid = z_source_info_id(wz_si);\
+        printf("    with source_info eid: %u sn: %u\\n", (unsigned)z_entity_global_id_eid(\&wz_gid), (unsigned)z_source_info_sn(wz_si));\
+    }\
+#endif
     ' "$z_sub_att_src"
     # Post-insert marker tripwire (belt-and-suspenders, same shape as the
     # y240 single-line check). With `set -e` plus the `// Check timestamp`
@@ -177,11 +188,12 @@ if grep -q "// Check timestamp" "$z_sub_att_src"; then
     # stops emitting a line without failing sed's own exit code.
     if ! grep -q "with priority:" "$z_sub_att_src" ||
         ! grep -q "with congestion:" "$z_sub_att_src" ||
-        ! grep -q "with express:" "$z_sub_att_src"; then
-        echo "build-zenoh-pico-cli: qos-print patch failed to land in $z_sub_att_src" >&2
+        ! grep -q "with express:" "$z_sub_att_src" ||
+        ! grep -q "with source_info" "$z_sub_att_src"; then
+        echo "build-zenoh-pico-cli: qos/source_info-print patch failed to land in $z_sub_att_src" >&2
         exit 2
     fi
-    echo "build-zenoh-pico-cli: applied qos-print patch (priority/congestion/express) to z_sub_attachment.c" >&2
+    echo "build-zenoh-pico-cli: applied qos+source_info print patch (priority/congestion/express/source_info) to z_sub_attachment.c" >&2
 else
     echo "build-zenoh-pico-cli: z_sub_attachment.c upstream shape changed (// Check timestamp" >&2
     echo "  anchor absent); re-verify the priority patch against the current vendor pin" >&2
@@ -192,9 +204,17 @@ fi
 mkdir -p "$BUILD_DIR" "$INSTALL_DIR"
 
 # Configure (idempotent — CMake re-uses the build dir cache).
+# R311y243 — Z_FEATURE_UNSTABLE_API=ON exposes the unstable per-sample
+# getters (z_sample_source_info, primitives.h #ifdef block); the vendor
+# default is 0 (CMakeLists.txt:316). Enabling it alone does NOT cascade
+# other features on (the CMakeLists guards only DISABLE dependents when
+# it is off), and it changes no wire behaviour, so the stable-API
+# witnesses (priority/congestion/express/timestamp/encoding/attachment)
+# are unaffected. Needed for tests/wz_source_info_to_pico_zsub.rs.
 cmake -B "$BUILD_DIR" -S "$EXAMPLES_DIR" \
     -DCMAKE_C_STANDARD=11 \
-    -DCMAKE_BUILD_TYPE=Release >&2
+    -DCMAKE_BUILD_TYPE=Release \
+    -DZ_FEATURE_UNSTABLE_API=ON >&2
 
 # Build only the curated CLI targets (avoids the full examples target
 # set; faster + smaller install surface).

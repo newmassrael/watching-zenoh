@@ -58,12 +58,15 @@ use wz_session_core::send_wire_error::SendWireError;
 /// fans both branches (`Locality::Any`) with `Reliability::Reliable`
 /// matching zenoh-pico's `Z_RELIABILITY_DEFAULT`.
 ///
-/// Future-additive: this struct is `#[non_exhaustive]` so R229+ can
-/// add metadata fields (`qos`, `attachment`, `timestamp`, `encoding`,
-/// `source_info`) without breaking external callers when the wire-side
-/// `send_push_literal` learns to accept them. Construct through the
-/// builder API rather than struct-literal so the future-additive
-/// contract holds.
+/// Future-additive: this struct is `#[non_exhaustive]` so later rounds
+/// can add metadata fields without breaking external callers. The five
+/// R229+ metadata fields (`qos`, `attachment`, `timestamp`, `encoding`,
+/// `source_info`) have since landed (R232/R233) and ARE carried on the
+/// wire — the remote leg routes them through
+/// `build_push_literal_with_meta`, each foreign-proven wz->pico
+/// (encoding R311y207 / timestamp y208 / attachment y209 / qos
+/// y240+y242 / source_info y243). Construct through the builder API
+/// rather than struct-literal so the future-additive contract holds.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct PublishOptions {
@@ -104,13 +107,13 @@ pub struct PublishOptions {
     /// suppresses the duplicate fire so a `Locality::Any` publish only
     /// invokes any-locality subscribers once. Wire-side propagation is
     /// built (R233, body ext `0x01` via `build_body_extensions`, gated
-    /// `pubsub-source-info`; an empty zid prefix emits no ext). Unlike
-    /// encoding / timestamp / attachment, source_info has NO cross-impl
-    /// parity witness — no wz->pico e2e AND no FFI byte-compare (the
-    /// `layer3_msg_*` gates cover only the metadata-absent baseline);
-    /// its encode is pinned solely by the wz-internal unit test
-    /// `build_msg_put_with_meta_attaches_source_info_ext_and_sets_z_flag`.
-    /// Loopback honours it from R232.
+    /// `pubsub-source-info`; an empty zid prefix emits no ext) and
+    /// foreign-proven — R311y243 (`wz_source_info_to_pico_zsub`, pico
+    /// decodes the (zid, eid, sn) triple and `z_sample_source_info`
+    /// surfaces `eid: 66 sn: 153`; the pico getter is `Z_FEATURE_UNSTABLE_API`
+    /// -gated, which the CLI build now enables). The wz-internal unit test
+    /// `build_msg_put_with_meta_attaches_source_info_ext_and_sets_z_flag`
+    /// still pins the byte layout. Loopback honours it from R232.
     pub source_info: Option<SourceInfo>,
     /// R232 — body-level attachment blob propagated to
     /// `Sample.attachment`. Wire-side propagation is built (R233, body
