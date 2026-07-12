@@ -228,6 +228,28 @@ pub trait ReplyOut {
         let _ = source_info;
         self.reply_keyed_stamped(keyexpr, payload, encoding, timestamp);
     }
+    /// Emit a Del-form reply carrying the sample's `source_info` (the
+    /// inner-body source_info ext id 0x01) — the Del-arm mirror of
+    /// [`Self::reply_keyed_sourced`]. A Del body shares the push-body
+    /// `_commons` with a Put, so source_info rides a Del reply exactly as it
+    /// rides a Put reply (the codec emits the same `ENC_ZBUF | 0x01` ext on
+    /// whichever inner arm survives). Replies under the responder's bound
+    /// keyexpr (like [`Self::reply_del`]) — the faithful shape an
+    /// `ext-pubsub-advanced-cache` recovery reply needs when the retransmitted
+    /// sample is a Delete: the Del reply carries the `(zid, eid, sn)` the
+    /// subscriber re-keys / reorders it by.
+    ///
+    /// Default impl falls back to [`Self::reply_del`] (dropping the
+    /// source_info), so impls that predate this seam stay valid — a build
+    /// without `reply-source-info` (or a sink that does not carry it) simply
+    /// omits the body source_info ext. `alloc`-gated (the
+    /// [`crate::sample::SourceInfo`] type lives in the `alloc`-gated `sample`
+    /// module), mirroring [`Self::reply_keyed_sourced`].
+    #[cfg(feature = "alloc")]
+    fn reply_del_sourced(&mut self, source_info: Option<&crate::sample::SourceInfo>) {
+        let _ = source_info;
+        self.reply_del();
+    }
     /// Emit a Del-form reply (the queryable signals deletion at the
     /// keyexpr).
     fn reply_del(&mut self);

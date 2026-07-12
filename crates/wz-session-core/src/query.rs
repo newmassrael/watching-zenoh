@@ -744,6 +744,32 @@ impl<'a> QueryResponder<'a> {
         });
     }
 
+    /// R311y247 — the Del-arm mirror of [`Self::send_reply_keyed_sourced`]:
+    /// emit a Del-form reply carrying the sample's `source_info` (the inner
+    /// push-body source_info ext id 0x01). A Del body shares the push-body
+    /// `_commons`, so source_info rides a Del reply exactly as it rides a Put
+    /// reply; the emission is gated `reply-source-info` at the codec
+    /// ([`crate::response_build::ResponseReplyBuilder::source_info`], reached
+    /// via [`QueryReply::into_response`]). Replies under the responder's bound
+    /// keyexpr like [`Self::send_reply_del`] — no payload / encoding (a Del
+    /// body carries neither) and no timestamp (the recovery subscriber orders
+    /// by the source_info `sn`). Closes the reply-Del handler-level gap left by
+    /// [`Self::send_reply_del`] (which stamps no source_info), so the Del
+    /// carrier is reachable without dropping to the low-level
+    /// `ResponseReplyBuilder`.
+    pub fn send_reply_del_sourced(&mut self, source_info: Option<&SourceInfo>) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: self.keyexpr_literal.clone(),
+            body: ReplyBody::Del,
+            encoding: None,
+            timestamp: None,
+            responder: self.responder.clone(),
+            attachment: None,
+            source_info: source_info.cloned(),
+        });
+    }
+
     /// Emit an Err reply. `encoding_id` (with optional `schema`)
     /// maps onto [`ResponseErrBuilder::encoding`] at frame-emit
     /// time — pass `None` to skip the encoding ext and rely on the
@@ -891,6 +917,9 @@ impl ReplyOut for QueryResponder<'_> {
     }
     fn reply_del(&mut self) {
         self.send_reply_del();
+    }
+    fn reply_del_sourced(&mut self, source_info: Option<&SourceInfo>) {
+        self.send_reply_del_sourced(source_info);
     }
     fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
         #[cfg(feature = "query-reply-err")]
@@ -2545,6 +2574,57 @@ mod tests {
             via_chain, via_builder,
             "reply_keyed_sourced → QueryResponder → into_response must emit the \
              source_info ext byte-for-byte",
+        );
+    }
+
+    /// R311y247 — the Del-arm mirror of
+    /// `reply_keyed_sourced_emits_source_info_ext_through_responder`: a
+    /// queryable that calls `out.reply_del_sourced(..)` stages a Del-body
+    /// `QueryReply` carrying the source_info, so `into_response` emits the
+    /// source_info ext on a MsgDel reply. Locks the trait-method → staging →
+    /// wire chain byte-for-byte against the direct `reply_del().source_info()`
+    /// builder — proving the reply-Del carrier is reachable through the
+    /// handler-level `ReplyOut` seam (not only the low-level builder).
+    #[cfg(feature = "reply-source-info")]
+    #[test]
+    fn reply_del_sourced_emits_source_info_ext_through_responder() {
+        let si = crate::sample::SourceInfo::new(&[0x09; 1], 3, 5);
+        let si_cb = si.clone();
+        let mut reg = QueryableRegistry::new();
+        reg.register("demo/data", move |_q, responder| {
+            responder.reply_del_sourced(Some(&si_cb));
+        });
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(7, 0, Some("demo/data")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        assert_eq!(replies.len(), 1);
+        let staged = replies.pop().unwrap();
+        match &staged {
+            QueryReply::Reply {
+                body, source_info, ..
+            } => {
+                assert_eq!(*body, ReplyBody::Del, "reply_del_sourced stages a Del body");
+                assert!(
+                    source_info.is_some(),
+                    "reply_del_sourced stages the source_info onto the Del reply",
+                );
+            }
+            _ => panic!("reply_del_sourced must stage a QueryReply::Reply"),
+        }
+        let via_chain = staged.into_response().unwrap().wire();
+        let via_builder = ResponseReplyBuilder::new(7, 0, Some("demo/data"), &[])
+            .reply_del()
+            .source_info(&si)
+            .build()
+            .unwrap()
+            .wire();
+        assert_eq!(
+            via_chain, via_builder,
+            "reply_del_sourced → QueryResponder → into_response must emit the \
+             source_info ext on the MsgDel reply byte-for-byte",
         );
     }
 
