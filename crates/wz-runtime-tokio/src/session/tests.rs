@@ -4689,6 +4689,105 @@ fn declared_queryable_fires_on_loopback_query() {
     assert_eq!(replies.load(Ordering::SeqCst), 1);
 }
 
+/// R311y252 — a SessionLocal query fans the loopback queryable with the SAME
+/// Query-body surface a wire queryable observes: selector `parameters` (Q_P)
+/// PLUS the value (ext 0x03) / source_info (ext 0x01) / attachment (ext 0x05)
+/// ext chain. Before y252 `build_loopback_query` carried only `parameters`, so
+/// a loopback queryable's `attachment()` / `source_info()` / `payload()` /
+/// `encoding()` accessors all returned `None` even when the querier set them
+/// (they surfaced correctly only on the wire path). `build_loopback_query` now
+/// reuses the wire SSOT (`build_request_query_with_meta`) Query body, so both
+/// origins carry the identical ext chain.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "query-value",
+    feature = "query-source-info",
+    feature = "query-attachment",
+    feature = "query-selector-parameters"
+))]
+#[test]
+fn loopback_query_surfaces_body_metadata_to_queryable() {
+    type Captured = (
+        Option<Vec<u8>>,             // parameters
+        Option<Vec<u8>>,             // attachment
+        Option<(Vec<u8>, u32, u32)>, // source_info (zid, eid, sn)
+        Option<Vec<u8>>,             // value payload
+        Option<u32>,                 // value encoding packed_id
+    );
+    let (session, _driver) = build_session();
+    let captured: Arc<Mutex<Option<Captured>>> = Arc::new(Mutex::new(None));
+    let cap = captured.clone();
+    let _q = session
+        .declare_queryable(
+            "home/temp",
+            QueryableOptions::default(),
+            move |query: &dyn QueryView, responder: &mut dyn ReplyOut| {
+                let si = query
+                    .source_info()
+                    .map(|s| (s.zid_prefix().to_vec(), s.eid, s.sn));
+                *cap.lock().unwrap() = Some((
+                    query.parameters().map(<[u8]>::to_vec),
+                    query.attachment().map(<[u8]>::to_vec),
+                    si,
+                    query.payload().map(<[u8]>::to_vec),
+                    query.encoding().map(|e| e.packed_id),
+                ));
+                responder.reply(b"ok");
+            },
+        )
+        .expect("query-queryable feature is ON in this test build");
+
+    session
+        .query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_parameters(b"_max=3".to_vec())
+                .with_attachment(b"q-att".to_vec())
+                .with_source_info(SourceInfo::new(&[0xDE, 0xAD, 0xBE, 0xEF], 7, 42))
+                .with_payload(b"q-value".to_vec())
+                .with_encoding(EncodingHint {
+                    // zenoh encoding id 5 (application/json) -> wz packed_id 10
+                    // (id << 1, no schema).
+                    packed_id: 10,
+                    schema: None,
+                }),
+            |_reply| {},
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+
+    let got = captured.lock().unwrap();
+    let (params, att, si, payload, enc) = got.as_ref().expect("loopback queryable fired");
+    assert_eq!(
+        params.as_deref(),
+        Some(&b"_max=3"[..]),
+        "loopback surfaces selector parameters (already true pre-y252)"
+    );
+    assert_eq!(
+        att.as_deref(),
+        Some(&b"q-att"[..]),
+        "R311y252 — loopback now surfaces the query attachment"
+    );
+    let (zid, eid, sn) = si
+        .as_ref()
+        .expect("R311y252 — loopback surfaces source_info");
+    assert_eq!(zid.as_slice(), &[0xDE, 0xAD, 0xBE, 0xEF]);
+    assert_eq!(*eid, 7);
+    assert_eq!(*sn, 42);
+    assert_eq!(
+        payload.as_deref(),
+        Some(&b"q-value"[..]),
+        "R311y252 — loopback surfaces the value payload"
+    );
+    assert_eq!(
+        *enc,
+        Some(10),
+        "R311y252 — loopback surfaces the value encoding"
+    );
+}
+
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 #[test]
 fn queryable_drop_auto_unregisters() {

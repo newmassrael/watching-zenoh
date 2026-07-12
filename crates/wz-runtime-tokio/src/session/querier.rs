@@ -26,10 +26,13 @@ use super::*;
 /// collapse into the [`QueryMetadata::value`] wire unit
 /// (`RequestQueryBuilder::query_value`, value ext 0x03; codec landed
 /// R311y248), so a querier's attached value now propagates on the
-/// outbound Query. The loopback path's in-process
-/// [`crate::query::QueryableRegistry::local_query`] still only inspects the
-/// keyexpr (surfacing attachment / source_info / value to a SessionLocal
-/// queryable is a separate deferred loopback-parity item).
+/// outbound Query. R311y252 closed the last gap: the loopback path's
+/// in-process [`crate::query::QueryableRegistry::local_query`] now surfaces
+/// `parameters` / `attachment` / `source_info` / `value` to a SessionLocal
+/// queryable identically to the wire path — `build_loopback_query` reuses the
+/// same `build_request_query_with_meta` SSOT and lifts out its Query body, so
+/// both origins carry the same ext chain (`target` / `consolidation` /
+/// `timeout_ms` stay loopback-inert by design).
 ///
 /// `#[non_exhaustive]` so future rounds add fields without breaking
 /// callers. Construct via [`QueryOptions::get`] (or `default`) plus
@@ -76,10 +79,10 @@ pub struct QueryOptions {
     /// (`RequestQueryBuilder::query_value`, value ext 0x03); R311y250
     /// threaded the WIRE propagation (`query_metadata` collapses the
     /// `payload` and `encoding` slots into [`QueryMetadata::value`], routed
-    /// through `build_request_query_with_meta`). Loopback surfacing to a
-    /// SessionLocal queryable callback stays deferred (attachment and
-    /// source_info are likewise not yet loopback-surfaced). Set via
-    /// [`QueryOptions::with_payload`].
+    /// through `build_request_query_with_meta`). R311y252 surfaces the value to
+    /// a SessionLocal queryable on the loopback path too (alongside attachment /
+    /// source_info / parameters — `build_loopback_query` reuses the same wire
+    /// SSOT Query body). Set via [`QueryOptions::with_payload`].
     pub payload: Option<Vec<u8>>,
     /// Optional encoding metadata for the Query body VALUE. Mirror of
     /// `z_get_options_t.encoding`; rides the value ext beside `payload`
@@ -179,9 +182,9 @@ impl QueryOptions {
     /// [`QueryOptions::query_metadata`] collapses `payload` + `encoding` into
     /// the [`QueryMetadata::value`] unit, which `build_request_query_with_meta`
     /// stamps onto `RequestQueryBuilder::query_value` behind the `query-value`
-    /// gate. Loopback surfacing to a SessionLocal queryable is a separate
-    /// deferred parity item (attachment / source_info are likewise not yet
-    /// surfaced to loopback).
+    /// gate. R311y252 surfaces the value on the loopback path too (alongside
+    /// attachment / source_info / parameters), so a SessionLocal queryable
+    /// observes it identically to a wire queryable.
     ///
     /// R311y250 — signature-stable (ungated) with an UNCONDITIONAL store.
     /// Three sibling setter shapes coexist on `QueryOptions`: hard-gated
@@ -313,10 +316,16 @@ impl QueryOptions {
     /// stamps onto `RequestQueryBuilder::query_value` (the Q_B / Q_E value
     /// ext 0x03; codec landed R311y248).
     ///
-    /// Clones owned slots (attachment Vec); the expected query path
-    /// performs one extraction per Session::query call so the
-    /// allocation cost is amortised against the wire frame's existing
-    /// copies. Mirrors R233's
+    /// Clones owned slots (attachment Vec), so the allocation cost is
+    /// amortised against the wire frame's existing copies. R311y252 — a
+    /// `Locality::Any` query now extracts TWICE per [`Session::query`] call: once
+    /// for the wire branch, and once inside `build_loopback_query`, which trims
+    /// the bundle to the queryable-observable Query-body slots before reusing the
+    /// same `build_request_query_with_meta` SSOT. (A `Remote`-only or
+    /// `SessionLocal`-only query still extracts once — only the branch it routes
+    /// to runs.) The second extraction is one struct clone on the non-hot
+    /// loopback branch, taken deliberately so the loopback does not re-derive the
+    /// Query ext-chain assembly. Mirrors R233's
     /// [`PublishOptions::push_metadata`] pattern verbatim.
     ///
     /// R311o — private helper, cfg-gated like [`Self::expected_finals`].

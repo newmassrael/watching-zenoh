@@ -96,45 +96,88 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::sync::Mutex;
 
-// R307 — `wz_codecs::query::Query` is referenced bare only by the
-// loopback fan inside `Session::query` (`Query::default()`); the
-// `declare_queryable` callback signature uses the fully-qualified
-// path so it does not consume this `use`.
-// R311fq — the loopback fan is now `query-queryable`-gated (decoupled
-// from `query-get`), so this import follows `all(query-get,
-// query-queryable)` — its sole call site.
-#[cfg(all(feature = "query-get", feature = "query-queryable"))]
-use wz_codecs::query::Query;
+// R311y252 — the loopback fan no longer references `wz_codecs::query::Query`
+// bare: `build_loopback_query` now reuses the wire SSOT
+// `build_request_query_with_meta` and lifts the inner Query body out of the
+// resulting `wz_codecs::request::RequestOwnedVariant::CodecZenohQuery`, so the
+// former `use wz_codecs::query::Query;` (its sole consumer) is gone. The
+// `declare_queryable` callback signature already used the fully-qualified path.
 
-/// R311y94 (review V2) — build the loopback Query carrying the GET's selector
-/// parameters (`_sn` / `_max`) so a `SessionLocal` queryable's handler observes the
-/// same selector the wire path delivers. Before this the loopback fan built
-/// `Query::default()` with empty params, so a queryable's `answer_from_ring` never
-/// filtered on loopback: `_max` over-returned and `_sn` only "worked" because the
-/// advanced subscriber's reorder buffer masked the cache's over-return. Mirrors the
-/// wire `query_metadata().parameters` threading.
+/// R311y94 (review V2) — build the loopback Query so a `SessionLocal`
+/// queryable's handler observes the same Query-body surface the wire path
+/// delivers. Before R311y94 the loopback fan built an empty `Query`, so a
+/// queryable's `answer_from_ring` never filtered on loopback (`_max`
+/// over-returned; `_sn` only "worked" because the advanced subscriber's reorder
+/// buffer masked the cache's over-return).
 ///
-/// R311y96 (review-arbiter MED) — `try_into_owned` is INFALLIBLE on this `alloc`
-/// runtime profile: the owned `parameters` is `SceBytes<256>` whose `from_slice` is
-/// an unbounded heap copy under `alloc` (`N` advisory), so the conversion never
-/// rejects. The prior `unwrap_or_else` degrade-to-no-selector branch was dead code
-/// documenting an impossible case (and, had this fn ever compiled on a no-alloc
-/// profile, silently dropping the selector would over-return, not "gracefully
-/// degrade"). Resolved to a named `.expect` of the real invariant.
+/// R311y252 — extended from selector-parameters-only to the FULL
+/// queryable-observable Query body. It now reuses the wire SSOT
+/// ([`build_request_query_with_meta`](wz_session_core::request_build)) and lifts
+/// out the inner Query body, so `parameters` (Q_P) AND the value (ext 0x03) /
+/// source_info (ext 0x01) / attachment (ext 0x05) ext chain — assembled once, in
+/// zenoh-pico body order with the Q_Z + Z-continuation bits — reach the loopback
+/// queryable exactly as they reach a wire queryable. `fire_matching_queryables`
+/// then extracts all four (`extract_query_value`, `extract_query_source_info`,
+/// `extract_query_attachment`, and `query.parameters`) identically for both
+/// origins; each slot's threading is gated on the same feature its receive-side
+/// extractor is (`query-value` / `query-source-info` / `query-attachment` /
+/// `query-selector-parameters`), so the loopback surface stays symmetric with
+/// the wire surface across every feature subset — no ext-chain assembly is
+/// duplicated here.
+///
+/// Only the queryable-observable Query-BODY slots are carried: `target` /
+/// `consolidation` / `timeout_ms` stay out of the loopback meta (a loopback
+/// queryable never inspects them — `target` / `timeout_ms` are Request-level
+/// exts a single-host fan-out has no relay to honour, and `consolidation` folds
+/// duplicate replies the single-source loopback cannot produce), so the trimmed
+/// meta also emits no discarded Request-level ext chain.
+///
+/// The `rid = 0` / literal-id 0 envelope `build_request_query_with_meta` wraps
+/// the body in is discarded: the loopback rid + resolved keyexpr ride the
+/// `local_query()` call arguments, not the Query body. The `.expect` names the
+/// real invariant — the `CodecError` arm is unreachable on this `alloc` runtime
+/// profile (the owned `SceBytes<N>` copies are unbounded heap copies, `N`
+/// advisory).
+///
+/// ## Panic contract (R311y252 — a deliberate wire/loopback unification)
+///
+/// Reusing the wire builder also adopts its caller-error asserts, of which
+/// exactly one is reachable from the trimmed meta: `RequestQueryBuilder::
+/// parameters` panics on a selector longer than
+/// [`REQUEST_QUERY_PARAMETERS_MAX_LEN`](wz_session_core::request_build::REQUEST_QUERY_PARAMETERS_MAX_LEN)
+/// (256). A `Locality::Any` / `Remote` query ALREADY hits that assert today (its
+/// wire branch calls the same builder), so only the `SessionLocal`-only path
+/// changes: it used to accept an over-256-byte selector silently (the old
+/// `SceBytes<256>` copy is unbounded under `alloc`, `N` advisory) and now panics
+/// like every other locality. That is the intended outcome — a selector that
+/// exceeds the wire bound could never have reached a real wire queryable, so
+/// letting it through on loopback alone was a latent wire/loopback divergence.
+/// The other builder asserts are unreachable here: `query_attachment`'s
+/// empty-slice panic is guarded by `build_request_query_with_meta`'s
+/// `!attachment.is_empty()` check, `request_timeout_ms`'s zero panic cannot fire
+/// because the trimmed meta pins `timeout_ms` to its `0` default, and
+/// `query_value` asserts nothing.
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 fn build_loopback_query(opts: &QueryOptions) -> wz_codecs::query::QueryOwned {
-    #[cfg_attr(not(feature = "query-selector-parameters"), allow(unused_mut))]
-    let mut q = Query::default();
-    #[cfg(feature = "query-selector-parameters")]
-    if let Some(params) = opts.parameters.as_deref() {
-        q.parameters = Some(params);
-        q.parameters_len = Some(params.len() as u64);
-        q.set_p(true);
+    // Carry only the queryable-observable Query-body slots (parameters +
+    // value / source_info / attachment); target / consolidation / timeout are
+    // loopback-inert (see the doc note) so they stay at their `Default` sentinels.
+    let full = opts.query_metadata();
+    let meta = wz_session_core::metadata::QueryMetadata {
+        parameters: full.parameters,
+        source_info: full.source_info,
+        attachment: full.attachment,
+        value: full.value,
+        ..Default::default()
+    };
+    let request = wz_session_core::request_build::build_request_query_with_meta(0, 0, None, &meta)
+        .expect("loopback Query body build is infallible on the alloc runtime profile");
+    match request.body {
+        wz_codecs::request::RequestOwnedVariant::CodecZenohQuery(query) => query,
+        _ => {
+            unreachable!("build_request_query_with_meta always produces a CodecZenohQuery body")
+        }
     }
-    #[cfg(not(feature = "query-selector-parameters"))]
-    let _ = opts;
-    q.try_into_owned()
-        .expect("loopback Query owns its selector by the infallible alloc SceBytes copy")
 }
 // R311s — `TimeSource` is the generic-parameter bound on the
 // type-ungated `Session::query` + `Querier::get` + `QuerierAliased::get`
