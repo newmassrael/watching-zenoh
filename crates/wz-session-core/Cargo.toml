@@ -552,10 +552,11 @@ query-queryable = ["codec-request", "codec-response"]
 query-attachment = ["attachment-bytes"]
 query-selector-parameters = []
 query-reply-err = []
-# query-source-info gates the queryable-side projection of the inbound
-# Query body source-info ext (id 0x01 ENC_ZBUF, shared with the Push
-# decoder). Receive-side only at this round; send-side stamping is a
-# follow-up.
+# query-source-info gates BOTH sides of the Query body source-info ext
+# (id 0x01 ENC_ZBUF, shared with the Push decoder): the querier-side
+# stamping (request_build.rs::query_source_info) and the queryable-side
+# projection (query.rs::extract_query_source_info). Send-side is
+# foreign-proven wz->pico on the Query carrier (R311y244).
 query-source-info = []
 # R311y74 — reply-source-info gates the queryable REPLY-side emission of
 # the inner Put-body source-info ext (id 0x01 ENC_ZBUF), the Reply-body

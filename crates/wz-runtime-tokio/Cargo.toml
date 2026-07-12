@@ -1203,9 +1203,12 @@ keyexpr-includes = ["wz-session-core/keyexpr-includes"]
 #                                 dispatch. cfg-off: parameters_view = None.
 #   query-reply-err             — Err-form reply emit via ReplyEmitter
 #                                 (combined with query-queryable gate).
-# query-source-info (10th feature) stays cluster-deferred: no source
-# implementation of build_request_query_with_source_info yet (doc-only
-# reference); wire-up cascade lands when the impl arrives.
+# query-source-info (10th feature): the outbound Query source_info stamp
+# is wired via build_request_query_with_meta ->
+# RequestQueryBuilder::query_source_info (there is no dedicated
+# build_request_query_with_source_info fn — the _with_meta path carries
+# it). In the default set + foreign-proven wz->pico on the Query carrier
+# (R311y244, wz_query_source_info_to_pico_zqueryable).
 query-attachment = ["wz-session-core/query-attachment"]
 query-selector-parameters = ["wz-session-core/query-selector-parameters"]
 query-source-info = ["wz-session-core/query-source-info"]

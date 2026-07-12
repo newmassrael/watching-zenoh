@@ -74,9 +74,9 @@ changelog that authorized the bump.
   test-harness binary; runtime use of zenoh-pico via
   `crates/zenoh-pico-sys` FFI is unaffected because that path
   links against the upstream library, not the patched example.
-- **Build-time divergence (R311y240 / R311y242 / R311y243)**: the same
-  `scripts/build-zenoh-pico-cli.sh` applies a second in-place patch
-  to `vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c`,
+- **Build-time divergence (R311y240 / R311y242 / R311y243 / R311y244)**:
+  the same `scripts/build-zenoh-pico-cli.sh` applies a second in-place
+  patch to `vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c`,
   inserting `printf` lines for the three Push QoS-byte sub-fields —
   `with priority:` (`z_sample_priority`), `with congestion:`
   (`z_sample_congestion_control`) and `with express:`
@@ -99,17 +99,28 @@ changelog that authorized the bump.
   `wz_qos_congestion_express_to_pico_zsub.rs`, R311y242) and
   source_info
   (`crates/wz-integration-tests/tests/wz_source_info_to_pico_zsub.rs`,
-  R311y243). All land in one atomic multi-line insert.
-  The anchor is the `// Check timestamp` comment; unlike the R216
-  z_put patch (whose anchor `z_put(.., NULL)` is consumed by its own
-  edit, so a leftover patch fails the anchor grep and errors loudly),
-  the comment survives the insert — so the script hard-rejects a run
-  where the `with priority:` marker is already present (a dirty
-  submodule tree from a missed revert) rather than silently
-  double-inserting. Both example patches share the single
-  `trap restore_pico_example_patches EXIT` handler (bash keeps one
-  EXIT trap), which reverts both files via `git checkout` on exit.
-  Same harness-only scope as the R216 patch: runtime FFI use via
+  R311y243). All Push-side lines land in one atomic multi-line insert.
+  A THIRD in-place patch (R311y244) adds `with query source_info eid:
+  .. sn: ..` (`z_query_source_info` + a NULL check) to `z_queryable.c`'s
+  query handler, so the CLI also witnesses wz's QUERY-carrier source_info
+  (`crates/wz-integration-tests/tests/`
+  `wz_query_source_info_to_pico_zqueryable.rs`). Unlike the
+  z_sub_attachment source_info line, this one carries NO
+  `#ifdef Z_FEATURE_UNSTABLE_API` guard: `z_query_source_info` +
+  `z_source_info_id` / `z_source_info_sn` are declared unconditionally
+  (`primitives.h:1013` / `:1156`), whereas the Put carrier's
+  `z_sample_source_info` is UNSTABLE-gated (`:2218` block).
+  The z_sub_attachment anchor is the `// Check timestamp` comment and
+  the z_queryable anchor is `// Process value`; unlike the R216 z_put
+  patch (whose anchor `z_put(.., NULL)` is consumed by its own edit, so
+  a leftover patch fails the anchor grep and errors loudly), those
+  comments survive the insert — so the script hard-rejects a run where
+  the respective marker is already present (a dirty submodule tree from
+  a missed revert) rather than silently double-inserting. The three
+  example patches (z_put / z_sub_attachment / z_queryable) share the
+  single `trap restore_pico_example_patches EXIT` handler (bash keeps
+  one EXIT trap), which reverts all three files via `git checkout` on
+  exit. Same harness-only scope as the R216 patch: runtime FFI use via
   `crates/zenoh-pico-sys` is unaffected.
 
 ## vendor/lwip — lightweight TCP/IP stack

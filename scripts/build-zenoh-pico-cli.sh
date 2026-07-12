@@ -82,16 +82,18 @@ echo "build-zenoh-pico-cli: pin = $(git -C "$VENDOR_DIR" rev-parse --short HEAD 
 # still cleaned up. THIRD_PARTY.md vendor/zenoh-pico section
 # documents this divergence.
 #
-# R311y240 — a SECOND in-place example patch lands below
-# (z_sub_attachment.c priority-print). Bash keeps ONE `trap ... EXIT`
-# handler, so a separate `trap restore_z_sub_attachment EXIT` would
-# SILENTLY REPLACE this one and disable the z_put revert. Both
-# git-checkouts therefore live in ONE handler, wired once — which also
-# makes the up-front restore-first cover both files.
+# R311y240 / R311y244 — SECOND + THIRD in-place example patches land
+# below (z_sub_attachment.c qos+source_info print; z_queryable.c query
+# source_info print). Bash keeps ONE `trap ... EXIT` handler, so a
+# separate `trap ... EXIT` per file would SILENTLY REPLACE this one and
+# disable the earlier reverts. All git-checkouts therefore live in ONE
+# handler, wired once — which also makes the up-front restore-first
+# cover every patched file.
 restore_pico_example_patches() {
     if [[ -e "$VENDOR_DIR/.git" ]]; then
         git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_put.c 2>/dev/null || true
         git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_sub_attachment.c 2>/dev/null || true
+        git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_queryable.c 2>/dev/null || true
     fi
 }
 trap restore_pico_example_patches EXIT
@@ -197,6 +199,50 @@ if grep -q "// Check timestamp" "$z_sub_att_src"; then
 else
     echo "build-zenoh-pico-cli: z_sub_attachment.c upstream shape changed (// Check timestamp" >&2
     echo "  anchor absent); re-verify the priority patch against the current vendor pin" >&2
+    echo "  (current: $(git -C "$VENDOR_DIR" rev-parse --short HEAD)) before continuing." >&2
+    exit 2
+fi
+
+# R311y244 — THIRD in-place example patch on
+# vendor/zenoh-pico/examples/unix/c11/z_queryable.c. The stock query
+# handler prints the received query's keyexpr / parameters / value but
+# NOT its source_info. This patch adds `with query source_info eid: ..
+# sn: ..` (z_query_source_info + z_source_info_id / z_source_info_sn).
+# Unlike the Put carrier's z_sample_source_info (UNSTABLE-gated,
+# primitives.h:2218 block), these query / source-info getters are
+# declared UNCONDITIONALLY (primitives.h:1013 / :1156, after the
+# UNSTABLE block closes at :769), so NO `#ifdef Z_FEATURE_UNSTABLE_API`
+# guard is needed here (they compile whether or not the flag is set;
+# the cmake config sets it ON for z_sub_attachment regardless). This
+# makes the CLI the FOREIGN witness for wz's QUERY-carrier source_info
+# propagation (tests/wz_query_source_info_to_pico_zqueryable.rs). Anchor
+# is the `// Process value` comment (survives the insert), so — like the
+# z_sub_attachment patch — hard-reject when the marker is already present
+# rather than double-insert. Reverted by the shared trap.
+z_qabl_src="$EXAMPLES_DIR/unix/c11/z_queryable.c"
+if grep -q "with query source_info" "$z_qabl_src"; then
+    echo "build-zenoh-pico-cli: z_queryable.c already prints 'with query source_info'" >&2
+    echo "  — revert with 'git -C \"$VENDOR_DIR\" checkout -- examples/unix/c11/z_queryable.c'" >&2
+    echo "  or re-verify the patch against the current vendor pin." >&2
+    exit 2
+fi
+if grep -q "// Process value" "$z_qabl_src"; then
+    sed -i '
+        \#// Process value#i\
+    const z_source_info_t *wz_qsi = z_query_source_info(query);\
+    if (wz_qsi != NULL) {\
+        z_entity_global_id_t wz_qgid = z_source_info_id(wz_qsi);\
+        printf("    with query source_info eid: %u sn: %u\\n", (unsigned)z_entity_global_id_eid(\&wz_qgid), (unsigned)z_source_info_sn(wz_qsi));\
+    }
+    ' "$z_qabl_src"
+    if ! grep -q "with query source_info" "$z_qabl_src"; then
+        echo "build-zenoh-pico-cli: query source_info-print patch failed to land in $z_qabl_src" >&2
+        exit 2
+    fi
+    echo "build-zenoh-pico-cli: applied query source_info-print patch to z_queryable.c" >&2
+else
+    echo "build-zenoh-pico-cli: z_queryable.c upstream shape changed (// Process value" >&2
+    echo "  anchor absent); re-verify the query source_info patch against the current vendor pin" >&2
     echo "  (current: $(git -C "$VENDOR_DIR" rev-parse --short HEAD)) before continuing." >&2
     exit 2
 fi

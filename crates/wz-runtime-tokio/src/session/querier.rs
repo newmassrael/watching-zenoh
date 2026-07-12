@@ -95,7 +95,10 @@ pub struct QueryOptions {
     pub parameters: Option<Vec<u8>>,
     /// Optional Query-level source-info (querier identity: zid / eid /
     /// sn) stamped on the outbound Query body (ext 0x01 ZBUF). `None`
-    /// elides the ext. Symmetric to `PublishOptions::source_info`.
+    /// elides the ext. Symmetric to `PublishOptions::source_info`, and
+    /// foreign-proven on the QUERY carrier — R311y244
+    /// (`wz_query_source_info_to_pico_zqueryable`, pico
+    /// `z_query_source_info` decodes `eid: 77 sn: 88`).
     pub source_info: Option<SourceInfo>,
     /// Query timeout in milliseconds (`0` = default = use
     /// `Z_GET_TIMEOUT_DEFAULT`). Used by a future R240+
