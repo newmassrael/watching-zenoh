@@ -128,12 +128,14 @@ else
     exit 2
 fi
 
-# R311y240 / R311y242 / R311y243 — wz-side build-time patch on
+# R311y240 / R311y242 / R311y243 / R311y246 — wz-side build-time patch on
 # vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c. The stock
 # example prints the received sample's encoding / timestamp /
-# attachment but NOT its qos byte or source_info. This patch adds
-# `with priority:` / `with congestion:` / `with express:` (the packed
-# QoS byte, stable API) and — under `#ifdef Z_FEATURE_UNSTABLE_API` —
+# attachment but NOT its sample kind, qos byte, or source_info. This
+# patch adds `with kind:` (z_sample_kind — 0=PUT / 1=DELETE, stable API,
+# the R311y246 Del-carrier discriminator) / `with priority:` /
+# `with congestion:` / `with express:` (the packed QoS byte, stable API)
+# and — under `#ifdef Z_FEATURE_UNSTABLE_API` —
 # `with source_info eid: .. sn: ..` (z_sample_source_info is an UNSTABLE
 # getter; the cmake config below sets -DZ_FEATURE_UNSTABLE_API=ON, and
 # the #ifdef keeps the file compiling if a future config omits it). So
@@ -169,6 +171,7 @@ if grep -q "// Check timestamp" "$z_sub_att_src"; then
     # as a real newline, which would split the string literal).
     sed -i '
         \#// Check timestamp#i\
+    printf("    with kind: %d\\n", (int)z_sample_kind(sample));\
     printf("    with priority: %d\\n", (int)z_sample_priority(sample));\
     printf("    with congestion: %d\\n", (int)z_sample_congestion_control(sample));\
     printf("    with express: %d\\n", (int)z_sample_express(sample));\
@@ -190,14 +193,15 @@ if grep -q "// Check timestamp" "$z_sub_att_src"; then
     # integration tests' runtime assertions. The tripwire's residual value
     # is narrow: it trips only if a future edit to the sed program above
     # stops emitting a line without failing sed's own exit code.
-    if ! grep -q "with priority:" "$z_sub_att_src" ||
+    if ! grep -q "with kind:" "$z_sub_att_src" ||
+        ! grep -q "with priority:" "$z_sub_att_src" ||
         ! grep -q "with congestion:" "$z_sub_att_src" ||
         ! grep -q "with express:" "$z_sub_att_src" ||
         ! grep -q "with source_info" "$z_sub_att_src"; then
         echo "build-zenoh-pico-cli: qos/source_info-print patch failed to land in $z_sub_att_src" >&2
         exit 2
     fi
-    echo "build-zenoh-pico-cli: applied qos+source_info print patch (priority/congestion/express/source_info) to z_sub_attachment.c" >&2
+    echo "build-zenoh-pico-cli: applied kind+qos+source_info print patch (kind/priority/congestion/express/source_info) to z_sub_attachment.c" >&2
 else
     echo "build-zenoh-pico-cli: z_sub_attachment.c upstream shape changed (// Check timestamp" >&2
     echo "  anchor absent); re-verify the priority patch against the current vendor pin" >&2

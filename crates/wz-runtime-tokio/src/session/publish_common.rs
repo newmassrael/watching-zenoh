@@ -108,10 +108,14 @@ pub struct PublishOptions {
     /// invokes any-locality subscribers once. Wire-side propagation is
     /// built (R233, body ext `0x01` via `build_body_extensions`, gated
     /// `pubsub-source-info`; an empty zid prefix emits no ext) and
-    /// foreign-proven — R311y243 (`wz_source_info_to_pico_zsub`, pico
-    /// decodes the (zid, eid, sn) triple and `z_sample_source_info`
-    /// surfaces `eid: 66 sn: 153`; the pico getter is `Z_FEATURE_UNSTABLE_API`
-    /// -gated, which the CLI build now enables). The wz-internal unit test
+    /// foreign-proven on BOTH the Put and Del kinds — R311y243
+    /// (`wz_source_info_to_pico_zsub`, a Put; pico decodes the
+    /// (zid, eid, sn) triple and `z_sample_source_info` surfaces
+    /// `eid: 66 sn: 153`) and R311y246 (`wz_del_source_info_to_pico_zsub`,
+    /// a Delete decoded with `with kind: 1` + `eid: 44 sn: 55`; the field
+    /// feeds `del()` publishes via `build_msg_del_with_meta`). The pico
+    /// getter is `Z_FEATURE_UNSTABLE_API`-gated, which the CLI build now
+    /// enables. The wz-internal unit test
     /// `build_msg_put_with_meta_attaches_source_info_ext_and_sets_z_flag`
     /// still pins the byte layout. Loopback honours it from R232.
     pub source_info: Option<SourceInfo>,
