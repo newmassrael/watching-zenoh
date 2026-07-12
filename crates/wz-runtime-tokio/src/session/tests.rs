@@ -2344,9 +2344,10 @@ fn query_options_query_metadata_extracts_wire_fields() {
     // R240 — QueryOptions::query_metadata must surface the
     // wire-propagatable subset (target / consolidation /
     // attachment / timeout_ms). payload / encoding stay on
-    // QueryOptions as future-additive carries until the wz
-    // codec lands the Q_B / Q_E slots; the extracted
-    // QueryMetadata MUST NOT carry them.
+    // QueryOptions as future-additive carries: the Q_B / Q_E
+    // codec slot landed R311y248 (RequestQueryBuilder::query_value)
+    // but the QueryOptions -> QueryMetadata threading is still
+    // pending, so the extracted QueryMetadata MUST NOT carry them yet.
     let opts = QueryOptions::get()
         .with_target(QueryTarget::AllComplete)
         .with_consolidation(ConsolidationMode::Monotonic)

@@ -23,10 +23,12 @@ use super::*;
 /// so `target` / `consolidation` / `attachment` / `parameters` /
 /// `source_info` / `timeout_ms` now propagate on the outbound Query.
 /// `payload` / `encoding` stay captured as future-additive slots —
-/// R241+ carry, the wz codec has no Q_B body / Q_E inline slot yet —
-/// so a later round lands them without an API break. The loopback
-/// path's in-process [`crate::query::QueryableRegistry::local_query`]
-/// still only inspects the keyexpr.
+/// R311y248 landed the Q_B / Q_E codec extension itself
+/// (`RequestQueryBuilder::query_value`), but threading `QueryOptions` →
+/// `build_request_query_with_meta` is still pending, so they do not yet
+/// propagate on the outbound Query. The loopback path's in-process
+/// [`crate::query::QueryableRegistry::local_query`] still only inspects the
+/// keyexpr.
 ///
 /// `#[non_exhaustive]` so future rounds add fields without breaking
 /// callers. Construct via [`QueryOptions::get`] (or `default`) plus
@@ -69,11 +71,12 @@ pub struct QueryOptions {
     /// fold).
     pub consolidation: Option<ConsolidationMode>,
     /// Optional Query-body payload propagated to the queryable
-    /// callback. R239 carry — current `send_request_query` wire
-    /// builder does not thread the Q_B payload byte; loopback's
-    /// `Query` struct does not surface `payload` to the responder
-    /// callback either. The slot is reserved so a future round that
-    /// adds the wire builder + the `Query.payload` field lands
+    /// callback. The Q_B codec builder landed R311y248
+    /// (`RequestQueryBuilder::query_value` encodes the value ext 0x03);
+    /// what is still pending is threading this captured `payload` through
+    /// `send_request_query_with_meta` onto that builder, plus loopback's
+    /// `Query` surfacing `payload` to the responder callback. The slot is
+    /// reserved so that a follow-up threading round lands it
     /// without an API break.
     pub payload: Option<Vec<u8>>,
     /// Optional encoding metadata for the Query body. Mirror of
@@ -166,10 +169,12 @@ impl QueryOptions {
         self
     }
 
-    /// Attach a Query-body payload. Wire + loopback propagation
-    /// lands in a follow-up round (current R239 wire builder does
-    /// not encode Q_B; loopback's `Query` does not surface payload
-    /// to the responder callback either).
+    /// Attach a Query-body payload. The Q_B codec builder landed R311y248
+    /// (`RequestQueryBuilder::query_value` encodes it); wire + loopback
+    /// PROPAGATION (threading this captured payload through
+    /// `send_request_query_with_meta` onto the builder, and loopback's
+    /// `Query` surfacing it to the responder callback) lands in a follow-up
+    /// threading round.
     pub fn with_payload(mut self, payload: Vec<u8>) -> Self {
         self.payload = Some(payload);
         self
@@ -277,10 +282,10 @@ impl QueryOptions {
     /// without the lower module learning about [`Locality`] /
     /// `allowed_destination` (those stay on the dispatch-time
     /// surface). The `payload` and `encoding` slots are intentionally
-    /// not threaded here — current wz codec has no Q_B / Q_E slot
-    /// on the outbound `Request(Query)`, so they stay on
-    /// [`QueryOptions`] as future-additive carries (R241+ when the
-    /// codec lands them).
+    /// not threaded here yet — the Q_B / Q_E codec slot landed R311y248
+    /// (`RequestQueryBuilder::query_value`), but threading `QueryOptions`
+    /// onto it is a follow-up round, so they stay captured on
+    /// [`QueryOptions`] as future-additive carries.
     ///
     /// Clones owned slots (attachment Vec); the expected query path
     /// performs one extraction per Session::query call so the

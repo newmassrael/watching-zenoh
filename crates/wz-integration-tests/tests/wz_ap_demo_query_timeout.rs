@@ -18,10 +18,11 @@
 //     declares only a subscriber, no queryable. Inbound Request(Query)
 //     has no matching responder, so no Response/ResponseFinal goes back
 //     on the wire. (wz-ap-demo does not auto-emit a
-//     "no matching queryable" ResponseFinal — Q_B / Q_E codec slots
-//     are still TBD per R263 carry; the AP demo's queryable side
-//     dispatches via callback only.) The Query effectively sinks at
-//     the peer.
+//     "no matching queryable" ResponseFinal; the AP demo's queryable
+//     side dispatches via callback only.) The Query effectively sinks
+//     at the peer. (The Q_B / Q_E value-ext codec slot itself landed
+//     R311y248 via RequestQueryBuilder::query_value — unrelated to this
+//     no-responder-ResponseFinal behavior.)
 //   - Initiator `wz-ap-demo --connect <port> --query demo/timeout
 //     --query-timeout-ms 500 --on-query-final-log` sends one
 //     outbound Query once the session reaches Established. The

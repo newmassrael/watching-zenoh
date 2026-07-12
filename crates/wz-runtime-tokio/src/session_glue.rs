@@ -391,13 +391,16 @@ pub use wz_session_core::metadata::PushMetadata;
 /// | `parameters`       | [`RequestQueryBuilder::parameters`] |
 /// | `source_info`      | [`RequestQueryBuilder::query_source_info`] |
 /// | `timeout_ms`       | [`RequestQueryBuilder::request_timeout_ms`] |
-/// | `payload`          | R241+ carry — wz codec has no Q_B body slot yet |
-/// | `encoding`         | R241+ carry — wz codec has no Q_E inline slot yet |
+/// | `payload`          | codec slot landed R311y248 ([`RequestQueryBuilder::query_value`], value ext 0x03); `QueryOptions` → builder threading pending |
+/// | `encoding`         | codec slot landed R311y248 (rides the value ext beside `payload`); threading pending |
 ///
-/// `payload` / `encoding` stay on
-/// [`crate::session::QueryOptions`] as future-additive slots so a
-/// later round that lands the Q_B / Q_E codec extensions surfaces
-/// the propagation without an API break.
+/// `payload` / `encoding` stay captured on
+/// [`crate::session::QueryOptions`] as future-additive slots. R311y248
+/// landed the Q_B / Q_E codec extension itself (the value ext `0x03` via
+/// `wz_session_core::query_value_ext` + [`RequestQueryBuilder::query_value`]);
+/// the remaining step is threading `QueryOptions` → `QueryMetadata` →
+/// `build_request_query_with_meta` so the propagation surfaces without an API
+/// break.
 ///
 /// `#[derive(Default)]` makes the empty bundle trivially constructable
 /// for the no-metadata fast path; [`Self::is_empty`] mirrors
