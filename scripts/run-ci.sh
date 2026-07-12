@@ -2977,18 +2977,64 @@ layer_c1s_runtime_tokio_multicast_tests() {
 # compile under `--all-features`, and NO lane caught it, because the tls lane and
 # the quic lane each enable their own feature alone.
 #
-# This lane closes that gap for the crate where the risk lives (wz-runtime-tokio
-# is the one carrying cfg-gated public struct fields): it clippy-gates the crate
-# with ALL of its features on at once, over --all-targets so the integration
-# tests (separate crates, and the ones that actually broke) are included.
+# This lane closes that gap by clippy-gating every crate in the HAZARD CLASS with
+# ALL of its features on at once, over --all-targets so the integration tests
+# (separate crates, and the ones that actually broke) are included.
 #
-# Scoped to `-p wz-runtime-tokio` deliberately: a WORKSPACE-wide `--all-features`
-# is structurally impossible here — sce-rust-runtime declares `no_std` and
-# `http-send` mutually exclusive (a compile_error! guard), so `--all-features`
-# can never be a workspace gate. Per-crate is the only form this check can take.
+# R311y254 — the hazard class is "crates that declare a `#[cfg(feature ...)]`-gated
+# `pub` struct field", because that is exactly the shape an exhaustive struct
+# literal cannot survive: the literal only compiles for the one feature
+# combination its author built with. R311y253 covered wz-runtime-tokio alone and
+# NAMED the rest as a residual; the sweep that closed it found two more crates in
+# the class (wz-session-core — whose ApplicationLayerObserver carries EIGHT
+# independently-gated pub fields — and wz-ap-demo). Both already composed clean,
+# so this is a gate over a latent hazard, not a second fix.
+#
+# The audit step below is what keeps the list HONEST: it re-derives the hazard set
+# from the source on every run and fails if a crate joins the class without being
+# added to COVERED. Without it, the next crate to grow a cfg-gated pub field would
+# silently sit outside the gate — the exact way the DialConfig break shipped.
+#
+# Scoped per-crate deliberately: a WORKSPACE-wide `--all-features` is structurally
+# impossible here — sce-rust-runtime declares `no_std` and `http-send` mutually
+# exclusive (a compile_error! guard), so `--all-features` can never be a workspace
+# gate. Per-crate is the only form this check can take. If a future crate in the
+# class carries its own mutually-exclusive feature pair, NARROW its entry to an
+# explicit max-compatible feature set — do not drop it from COVERED, which would
+# restore the blind spot this lane exists to cover.
 layer_c1bf_cargo_clippy_all_features() {
-    (cd crates && cargo clippy -p wz-runtime-tokio --all-targets --all-features \
-        --quiet -- -D warnings) || return 1
+    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo)
+
+    # Drift audit: re-derive the hazard class from source. A crate qualifies when
+    # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`
+    # declaration. Deliberately over-inclusive (an enum or private struct can trip
+    # it) — a false positive costs one line in COVERED, a false NEGATIVE costs a
+    # shipped build break.
+    local hazard=() c n
+    for c in crates/*/; do
+        n="$(grep -rn -A1 --include=*.rs '^[[:space:]]*#\[cfg(feature' "$c" 2>/dev/null \
+             | grep -cE '^[^[:space:]]+[-:][0-9]+-[[:space:]]*pub [a-z_]+:' || true)"
+        [ "${n:-0}" -gt 0 ] && hazard+=("$(basename "$c")")
+    done
+
+    local h uncovered=()
+    for h in "${hazard[@]}"; do
+        printf '%s\n' "${covered[@]}" | grep -qx "$h" || uncovered+=("$h")
+    done
+    if [ "${#uncovered[@]}" -gt 0 ]; then
+        echo "  C1bf FAIL: crate(s) grew a cfg-gated pub struct field but are not"
+        echo "  in the C1bf COVERED list, so no lane composes their features:"
+        printf '    - %s\n' "${uncovered[@]}"
+        echo "  Add them to COVERED (or narrow, if they have exclusive features)."
+        return 1
+    fi
+    echo "  C1bf audit: hazard class = ${hazard[*]} — all covered"
+
+    local pkg
+    for pkg in "${covered[@]}"; do
+        (cd crates && cargo clippy -p "$pkg" --all-targets --all-features \
+            --quiet -- -D warnings) || return 1
+    done
 }
 layer_c2_cargo_clippy() {
     # Stage 4b — exclude wz-session-lwip (no_std-engine crate, mutually
