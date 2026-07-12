@@ -1,67 +1,74 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311y240 — FOREIGN-INTEROP Put PRIORITY: a watching-zenoh publisher emits a
-//! `Put` carrying a non-default qos priority (`RealTime` = 1), and a real
-//! zenoh-pico `z_sub_attachment` CLI decodes it and prints `with priority: 1`.
+//! R311y242 — FOREIGN-INTEROP Put CONGESTION + EXPRESS: a watching-zenoh
+//! publisher emits a `Put` carrying a non-default qos byte (congestion
+//! `Block` + `express` set), and a real zenoh-pico `z_sub_attachment` CLI
+//! decodes it and prints `with congestion: 1` + `with express: 1`.
 //!
-//! ## The gap this closes
+//! ## The gap this closes (the named R311y240 follow-up)
 //!
-//! wz's Put-metadata WIRE propagation for the outer Push QoS ext (priority /
-//! congestion-control / express, packed one byte) is built — `Session::publish`
-//! routes a metadata-bearing publish through `push_metadata()` ->
-//! `build_push_literal_with_meta` -> `build_push_outer_extensions`, which emits
-//! the `_Z_MSG_EXT_ENC_ZINT | 0x01` QoS ext when the packed byte differs from
-//! `QosLevel::DEFAULT` — and it is wz<->wz proven (session/tests.rs field
-//! threading + the outer-ext unit tests in push_build.rs). But the byte had
-//! NEVER been decoded by a foreign peer: encoding (y207), timestamp (y208) and
-//! attachment (y209) each gained a wz->pico witness, while the qos byte had
-//! none. This test closes the PRIORITY SUB-FIELD wz->pico gap.
+//! The Push outer QoS ext packs three sub-fields into ONE byte: priority
+//! (low 3 bits) + congestion-control (bit 3, `nodrop`) + express (bit 4).
+//! R311y240 (`wz_priority_to_pico_zsub`) proved the PRIORITY sub-field
+//! wz->pico via pico's `z_sample_priority`, but left congestion + express
+//! unproven. That round's scope note deferred them with the claim
+//! "congestion has no per-sample getter; express is a batching-only
+//! effect" — a claim that is FALSE on direct read of the vendor pin:
+//! `zenoh-pico/include/zenoh-pico/api/primitives.h` declares BOTH
+//! `z_sample_congestion_control` (line ~2255) and `z_sample_express`
+//! (line ~2266), and `src/api/api.c` implements them as
+//! `_z_n_qos_get_congestion_control(sample->qos)` /
+//! `_z_n_qos_get_express(sample->qos)` — reading the SAME `sample->qos`
+//! byte that y240 already proved is wire-populated. So both sub-fields
+//! ARE foreign-observable; this test closes the remaining two.
 //!
-//! ## Scope — priority sub-field ONLY
+//! ## Scope — congestion + express sub-fields
 //!
-//! The QoS ext byte packs priority (low 3 bits) + congestion (bit 3) + express
-//! (bit 4). `z_sample_priority` witnesses ONLY the priority sub-field. This
-//! test does NOT prove congestion-control or express foreign-decode — those
-//! ride the same byte and are witnessed separately by
-//! `wz_qos_congestion_express_to_pico_zsub` (R311y242) via pico's public
-//! `z_sample_congestion_control` / `z_sample_express` getters (both DO exist
-//! and read the same `sample->qos` byte — do not repeat the earlier "no
-//! congestion getter" mis-read). Do not read this single test as a full "qos
-//! cross-impl proven" claim.
+//! wz emits the whole packed byte in one ext (`build_push_outer_extensions`
+//! writes `q.raw`, gated on `any(pubsub-priority / pubsub-congestion-control
+//! / pubsub-express)` — no sub-field masking), so with `pubsub-priority`
+//! already active the congestion + express bits already ride the wire. This
+//! test needs NO send-path change; it only sets those bits and reads them
+//! back through pico's public getters. Note the honest limit: this witnesses
+//! the express BIT's foreign decode, NOT express's batching-flush SEMANTICS
+//! (a sender-side tx behaviour with no receiver-observable proxy).
 //!
-//! ## Why `RealTime` (1) and not the default
+//! ## Why `Block`(1) + `express`(1) and not the default
 //!
-//! pico's default sample priority is `Z_PRIORITY_DATA` = 5
-//! (`constants.h`, `_Z_N_QOS_DEFAULT._val = 5`). If wz DROPPED the priority on
-//! the wire, pico would decode the default and print `with priority: 5`. A
-//! `Data`(5) publish is doubly wrong: wz's `build_push_outer_extensions`
-//! SUPPRESSES the ext when the byte equals `QosLevel::DEFAULT` (0x05), so pico
-//! would print 5 whether or not propagation works — a tautology. `RealTime`(1)
-//! is maximally distinct: wz's `Priority::wire_byte()` is 1:1 with pico's
-//! `z_priority_t` (`RealTime = 1` on both), the emitted qos byte is 0x01, and
-//! pico decodes `0x01 & 0x07 = 1`. So `with priority: 1` genuinely
-//! discriminates "priority propagated" from "priority dropped" (which prints
-//! the default 5), the same discriminating shape as the y207 encoding witness
-//! (`text/plain` vs the fallback `zenoh/bytes`).
+//! pico's default sample qos is `_Z_N_QOS_DEFAULT._val = 5`
+//! (`src/protocol/definitions/network.c` 22) = priority `Data`(5), congestion
+//! `DROP`(0), express `false`(0). `z_sample_congestion_control` returns
+//! `Z_CONGESTION_CONTROL_BLOCK = 1` / `Z_CONGESTION_CONTROL_DROP = 0`
+//! (`api/constants.h`), and `z_sample_express` returns the bit-4 boolean. If
+//! wz DROPPED the qos byte on the wire, pico would decode the default and
+//! print `with congestion: 0` + `with express: 0`. wz's
+//! `build_push_outer_extensions` SUPPRESSES the ext when the byte equals
+//! `QosLevel::DEFAULT` (0x05); `QosLevel::from_parts(Data, Block, true)` packs
+//! to 0x1D (`5 | 1<<3 | 1<<4`), which is != DEFAULT, so the ext IS emitted and
+//! pico decodes congestion `1` + express `1`. So `with congestion: 1` +
+//! `with express: 1` genuinely discriminate "propagated" from "dropped"
+//! (which prints the default `0`/`0`) — the same discriminating shape as the
+//! y240 priority witness (`RealTime`(1) vs the default `5`).
 //!
 //! ## The witness
 //!
-//! The stock `z_sub_attachment` does NOT print priority; `scripts/
-//! build-zenoh-pico-cli.sh` build-time-patches it to add a
-//! `printf("    with priority: %d\n", (int)z_sample_priority(sample))` line
-//! (the 2nd wz-side in-place pico-example patch, alongside the z_put.c
-//! BLOCK-congestion patch; documented in THIRD_PARTY.md, reverted on exit by
-//! the shared trap). `pubsub-priority` is ON in this crate's wz-runtime-tokio
-//! dev-dep default set, so the send-side encodes the byte.
+//! `scripts/build-zenoh-pico-cli.sh` build-time-patches `z_sub_attachment.c`
+//! to print `with priority:` / `with congestion:` / `with express:` (the same
+//! in-place patch y240 introduced, extended to all three getters; documented
+//! in THIRD_PARTY.md, reverted on exit by the shared trap). The qos byte is
+//! set via `PublishOptions::with_qos(QosLevel::from_parts(..))`, the typed
+//! packer that already exists — no new publish API is needed (congestion +
+//! express carry no transport-conduit-band role, unlike priority, so they
+//! need no `with_priority`-style single-source setter).
 //!
 //! ## Harness shape
 //!
-//! Mirrors `wz_encoding_to_pico_zsub.rs` (in-test wz acceptor +
+//! Mirrors `wz_priority_to_pico_zsub.rs` (in-test wz acceptor +
 //! `Session::publish` over the accepted session, `select!` drive-vs-scenario,
 //! pico CLI dial-in with accept-retry + a subscriber-declared readiness gate +
-//! a 150 ms republish cadence). The only deltas: the `with_priority` publish
-//! and the `with priority: 1` assertion.
+//! a 150 ms republish cadence). The only deltas: the `with_qos` publish and
+//! the `with congestion: 1` + `with express: 1` assertions.
 
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -77,17 +84,18 @@ use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{accept_and_open_session, DialedLink, DEFAULT_OPEN_TICK_MS};
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
-use wz_session_core::qos::Priority;
+use wz_session_core::qos::{CongestionControl, Priority};
+use wz_session_core::sample::QosLevel;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
-const PUBLISH_KEYEXPR: &str = "demo/prio";
+const PUBLISH_KEYEXPR: &str = "demo/qos";
 const SUB_KEYEXPR: &str = "demo/**";
-const PAYLOAD: &str = "prioritized-hello-from-wz";
+const PAYLOAD: &str = "qos-metadata-hello-from-wz";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub_attachment); Layer E runs via --ignored"]
-async fn wz_put_priority_decoded_by_pico_zsub_attachment() {
+async fn wz_put_congestion_express_decoded_by_pico_zsub_attachment() {
     let z_sub = zenoh_pico_cli_binary("z_sub_attachment");
 
     // wz acceptor binds first so pico's client dial lands in the listen
@@ -98,7 +106,7 @@ async fn wz_put_priority_decoded_by_pico_zsub_attachment() {
     let addr = listener.local_addr().expect("local_addr");
     let endpoint = format!("tcp/{addr}");
 
-    // Accept + handshake WITH RETRY (same rationale as wz_encoding_to_pico_zsub):
+    // Accept + handshake WITH RETRY (same rationale as wz_priority_to_pico_zsub):
     // pico's one-shot open transient must be a retry, not a red build. The
     // common case succeeds on attempt 1.
     const OPEN_ATTEMPTS: usize = 6;
@@ -132,7 +140,7 @@ async fn wz_put_priority_decoded_by_pico_zsub_attachment() {
                 }
             };
             // Default (non-fragmenting) batch: a small Put stays one frame; the
-            // proof is the decoded priority, not fragmentation.
+            // proof is the decoded qos byte, not fragmentation.
             let params = fixture_session_init_params();
             match accept_and_open_session(
                 DialedLink::Tcp(stream),
@@ -185,10 +193,15 @@ async fn wz_put_priority_decoded_by_pico_zsub_attachment() {
     );
 
     let received_witness = ">> [Subscriber] Received";
-    // `RealTime` = 1; a dropped priority would print the default `5`, so the
-    // exact `with priority: 1` line discriminates propagated from dropped.
-    let priority_witness = "with priority: 1";
+    // congestion `Block` = 1, express = 1; a dropped qos byte would print the
+    // default `0`/`0`, so the exact lines discriminate propagated from dropped.
+    let congestion_witness = "with congestion: 1";
+    let express_witness = "with express: 1";
     let subscribed_witness = "Declaring Subscriber on";
+    // Priority stays `Data` (5) so the qos byte's discrimination is on the
+    // congestion + express bits alone; the priority sub-field is R311y240's
+    // witness, not this test's.
+    let qos = QosLevel::from_parts(Priority::Data, CongestionControl::Block, true);
     let scenario = async {
         // Gate the delivery budget on pico's subscriber-declared witness
         // before publishing (no-flaky; pico open latency does not eat the
@@ -207,32 +220,34 @@ async fn wz_put_priority_decoded_by_pico_zsub_attachment() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        // Republish the RealTime-priority Put on a 150 ms cadence until pico
-        // prints BOTH the payload AND `with priority: 1` (idempotent,
-        // byte-identical — one landing after the subscription is installed
-        // suffices; not flaky-masking retry).
+        // Republish the Block+express Put on a 150 ms cadence until pico prints
+        // the payload AND both `with congestion: 1` and `with express: 1`
+        // (idempotent, byte-identical — one landing after the subscription is
+        // installed suffices; not flaky-masking retry).
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
             publisher
                 .publish(
                     PUBLISH_KEYEXPR,
                     PAYLOAD.as_bytes(),
-                    PublishOptions::put().with_priority(Priority::RealTime),
+                    PublishOptions::put().with_qos(qos),
                 )
-                .expect("prioritized publish builds and routes through the send seam");
+                .expect("qos-metadata publish builds and routes through the send seam");
             tokio::time::sleep(Duration::from_millis(150)).await;
             let captured = read_captured(&mut z_sub_stdout_reader);
             if captured.contains(received_witness)
                 && captured.contains(PAYLOAD)
-                && captured.contains(priority_witness)
+                && captured.contains(congestion_witness)
+                && captured.contains(express_witness)
             {
                 return Ok(());
             }
             if Instant::now() >= deadline {
                 return Err(format!(
-                    "pico z_sub_attachment did not decode wz's RealTime-priority Put within 12s.\n\
-                     Expected '{received_witness}' + payload '{PAYLOAD}' + '{priority_witness}' \
-                     (a dropped priority would print the default 'with priority: 5').\n\
+                    "pico z_sub_attachment did not decode wz's Block+express Put within 12s.\n\
+                     Expected '{received_witness}' + payload '{PAYLOAD}' + '{congestion_witness}' \
+                     + '{express_witness}' (a dropped qos byte would print the default \
+                     'with congestion: 0' + 'with express: 0').\n\
                      --- captured stdout ---\n{captured}"
                 ));
             }
@@ -241,7 +256,7 @@ async fn wz_put_priority_decoded_by_pico_zsub_attachment() {
 
     let result = tokio::select! {
         _ = drive => panic!(
-            "wz drive loop reached a terminal state before pico decoded the prioritized Put"
+            "wz drive loop reached a terminal state before pico decoded the qos-metadata Put"
         ),
         r = scenario => r,
     };
@@ -250,6 +265,6 @@ async fn wz_put_priority_decoded_by_pico_zsub_attachment() {
     let _ = z_sub_child.child_mut().wait();
 
     if let Err(msg) = result {
-        panic!("wz->pico Put-priority interop FAILED.\n{msg}");
+        panic!("wz->pico Put-congestion/express interop FAILED.\n{msg}");
     }
 }

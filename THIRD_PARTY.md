@@ -74,16 +74,22 @@ changelog that authorized the bump.
   test-harness binary; runtime use of zenoh-pico via
   `crates/zenoh-pico-sys` FFI is unaffected because that path
   links against the upstream library, not the patched example.
-- **Build-time divergence (R311y240)**: the same
+- **Build-time divergence (R311y240 / R311y242)**: the same
   `scripts/build-zenoh-pico-cli.sh` applies a second in-place patch
   to `vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c`,
-  inserting a `printf("    with priority: %d\n",
-  (int)z_sample_priority(sample))` line into its `data_handler` so
-  the CLI reports the received sample's qos priority (the stock
-  example prints encoding / timestamp / attachment but never calls
-  `z_sample_priority`). This makes it the foreign witness for
-  watching-zenoh's Push outer QoS-ext priority propagation
-  (`crates/wz-integration-tests/tests/wz_priority_to_pico_zsub.rs`).
+  inserting `printf` lines for all three Push QoS-byte sub-fields —
+  `with priority:` (`z_sample_priority`), `with congestion:`
+  (`z_sample_congestion_control`) and `with express:`
+  (`z_sample_express`) — into its `data_handler` so the CLI reports
+  the received sample's qos byte (the stock example prints encoding /
+  timestamp / attachment but never calls those getters). This makes
+  it the foreign witness for watching-zenoh's Push outer QoS-ext
+  propagation: the priority sub-field
+  (`crates/wz-integration-tests/tests/wz_priority_to_pico_zsub.rs`,
+  R311y240) and the congestion + express sub-fields
+  (`crates/wz-integration-tests/tests/`
+  `wz_qos_congestion_express_to_pico_zsub.rs`, R311y242). All three
+  land in one atomic multi-line insert.
   The anchor is the `// Check timestamp` comment; unlike the R216
   z_put patch (whose anchor `z_put(.., NULL)` is consumed by its own
   edit, so a leftover patch fails the anchor grep and errors loudly),

@@ -125,11 +125,13 @@ pub struct PublishOptions {
     /// packed into one byte. Wire-side propagation is built (R233,
     /// `build_push_outer_extensions`, gated on any of `pubsub-priority`
     /// / `pubsub-congestion-control` / `pubsub-express`; the ext is
-    /// suppressed when the byte equals `QosLevel::DEFAULT`). The
-    /// PRIORITY sub-field is foreign-proven — R311y240
+    /// suppressed when the byte equals `QosLevel::DEFAULT`). All three
+    /// sub-fields are foreign-proven: PRIORITY — R311y240
     /// (`wz_priority_to_pico_zsub`, pico `z_sample_priority`);
-    /// congestion / express ride the same byte but have no wz->pico
-    /// witness yet. Loopback honours all three from R232.
+    /// CONGESTION + EXPRESS — R311y242
+    /// (`wz_qos_congestion_express_to_pico_zsub`, pico
+    /// `z_sample_congestion_control` / `z_sample_express`). Loopback
+    /// honours all three from R232.
     pub qos: Option<QosLevel>,
 }
 

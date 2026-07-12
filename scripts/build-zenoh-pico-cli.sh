@@ -124,14 +124,18 @@ else
     exit 2
 fi
 
-# R311y240 — wz-side build-time patch on vendor/zenoh-pico/examples/
-# unix/c11/z_sub_attachment.c. The stock example prints the received
-# sample's encoding / timestamp / attachment but NOT its qos priority
-# (it never calls z_sample_priority). This patch adds a
-# `with priority: <n>` line so the CLI becomes the FOREIGN witness for
-# wz's Push outer QoS-ext (priority sub-field) propagation
-# (tests/wz_priority_to_pico_zsub.rs). Same lifecycle as the z_put
-# patch above: applied in-place, reverted by the shared trap.
+# R311y240 / R311y242 — wz-side build-time patch on
+# vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c. The stock
+# example prints the received sample's encoding / timestamp /
+# attachment but NOT its qos byte (it never calls z_sample_priority /
+# z_sample_congestion_control / z_sample_express). This patch adds
+# `with priority:` / `with congestion:` / `with express:` lines so the
+# CLI becomes the FOREIGN witness for wz's Push outer QoS-ext
+# propagation — all three sub-fields ride the single packed byte
+# (priority: tests/wz_priority_to_pico_zsub.rs, R311y240; congestion +
+# express: tests/wz_qos_congestion_express_to_pico_zsub.rs, R311y242).
+# Same lifecycle as the z_put patch above: applied in-place, reverted
+# by the shared trap.
 #
 # Idempotency hazard (WHY the explicit marker check below): the z_put
 # patch is self-guarding — its anchor `z_put(.., NULL)` is CONSUMED by
@@ -157,13 +161,27 @@ if grep -q "// Check timestamp" "$z_sub_att_src"; then
     # as a real newline, which would split the string literal).
     sed -i '
         \#// Check timestamp#i\
-    printf("    with priority: %d\\n", (int)z_sample_priority(sample));
+    printf("    with priority: %d\\n", (int)z_sample_priority(sample));\
+    printf("    with congestion: %d\\n", (int)z_sample_congestion_control(sample));\
+    printf("    with express: %d\\n", (int)z_sample_express(sample));
     ' "$z_sub_att_src"
-    if ! grep -q "with priority:" "$z_sub_att_src"; then
-        echo "build-zenoh-pico-cli: priority-print patch failed to land in $z_sub_att_src" >&2
+    # Post-insert marker tripwire (belt-and-suspenders, same shape as the
+    # y240 single-line check). With `set -e` plus the `// Check timestamp`
+    # anchor guard above, control only reaches here after an atomic sed
+    # insert, so all three markers are expected present — this grep is NOT
+    # a getter-existence check. A renamed vendor getter is still written
+    # verbatim here and fails loudly at the C compile (undefined symbol);
+    # a getter that decodes the wrong field is caught by the two
+    # integration tests' runtime assertions. The tripwire's residual value
+    # is narrow: it trips only if a future edit to the sed program above
+    # stops emitting a line without failing sed's own exit code.
+    if ! grep -q "with priority:" "$z_sub_att_src" ||
+        ! grep -q "with congestion:" "$z_sub_att_src" ||
+        ! grep -q "with express:" "$z_sub_att_src"; then
+        echo "build-zenoh-pico-cli: qos-print patch failed to land in $z_sub_att_src" >&2
         exit 2
     fi
-    echo "build-zenoh-pico-cli: applied priority-print patch to z_sub_attachment.c" >&2
+    echo "build-zenoh-pico-cli: applied qos-print patch (priority/congestion/express) to z_sub_attachment.c" >&2
 else
     echo "build-zenoh-pico-cli: z_sub_attachment.c upstream shape changed (// Check timestamp" >&2
     echo "  anchor absent); re-verify the priority patch against the current vendor pin" >&2
