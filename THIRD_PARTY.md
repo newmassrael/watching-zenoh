@@ -74,8 +74,9 @@ changelog that authorized the bump.
   test-harness binary; runtime use of zenoh-pico via
   `crates/zenoh-pico-sys` FFI is unaffected because that path
   links against the upstream library, not the patched example.
-- **Build-time divergence (R311y240 / R311y242 / R311y243 / R311y244)**:
-  the same `scripts/build-zenoh-pico-cli.sh` applies a second in-place
+- **Build-time divergence (R311y240 / R311y242 / R311y243 / R311y244 /
+  R311y245)**: the same `scripts/build-zenoh-pico-cli.sh` applies a second
+  in-place
   patch to `vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c`,
   inserting `printf` lines for the three Push QoS-byte sub-fields —
   `with priority:` (`z_sample_priority`), `with congestion:`
@@ -110,16 +111,24 @@ changelog that authorized the bump.
   `z_source_info_id` / `z_source_info_sn` are declared unconditionally
   (`primitives.h:1013` / `:1156`), whereas the Put carrier's
   `z_sample_source_info` is UNSTABLE-gated (`:2218` block).
-  The z_sub_attachment anchor is the `// Check timestamp` comment and
-  the z_queryable anchor is `// Process value`; unlike the R216 z_put
-  patch (whose anchor `z_put(.., NULL)` is consumed by its own edit, so
-  a leftover patch fails the anchor grep and errors loudly), those
-  comments survive the insert — so the script hard-rejects a run where
-  the respective marker is already present (a dirty submodule tree from
-  a missed revert) rather than silently double-inserting. The three
-  example patches (z_put / z_sub_attachment / z_queryable) share the
-  single `trap restore_pico_example_patches EXIT` handler (bash keeps
-  one EXIT trap), which reverts all three files via `git checkout` on
+  A FOURTH in-place patch (R311y245) adds `with reply source_info eid:
+  .. sn: ..` (`z_sample_source_info` on the reply sample + a NULL check,
+  under `#ifdef Z_FEATURE_UNSTABLE_API` — a Reply body IS a Put
+  push-body, so the same UNSTABLE getter reads it) to `z_get.c`'s reply
+  handler, witnessing wz's REPLY-carrier source_info
+  (`crates/wz-integration-tests/tests/`
+  `wz_reply_source_info_to_pico_zget.rs`).
+  The z_sub_attachment anchor is the `// Check timestamp` comment, the
+  z_queryable anchor is `// Process value`, and the z_get anchor is the
+  reply-ok branch's `z_drop(z_move(replystr));` cleanup; unlike the R216
+  z_put patch (whose anchor `z_put(.., NULL)` is consumed by its own
+  edit, so a leftover patch fails the anchor grep and errors loudly),
+  those anchors survive the insert — so the script hard-rejects a run
+  where the respective marker is already present (a dirty submodule tree
+  from a missed revert) rather than silently double-inserting. The four
+  example patches (z_put / z_sub_attachment / z_queryable / z_get) share
+  the single `trap restore_pico_example_patches EXIT` handler (bash keeps
+  one EXIT trap), which reverts all four files via `git checkout` on
   exit. Same harness-only scope as the R216 patch: runtime FFI use via
   `crates/zenoh-pico-sys` is unaffected.
 

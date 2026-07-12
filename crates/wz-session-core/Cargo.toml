@@ -570,7 +570,10 @@ query-source-info = []
 # reuse of pubsub-source-info) for consistency with the per-message-kind
 # source-info gate family (query-source-info already has its own); storage /
 # query replies stay byte-unchanged regardless of the gate choice, since no
-# such queryable calls `.source_info()` -- exactly as reply-attachment safely
+# such PRODUCTION queryable calls `.source_info()` (a test queryable does:
+# reply source_info is foreign-proven wz->pico by R311y245,
+# wz_reply_source_info_to_pico_zget, via ReplyOut::reply_keyed_sourced) --
+# exactly as reply-attachment safely
 # reuses pubsub-attachment.
 reply-source-info = []
 # R311fm — the z_get consumer's reply-body decode plane. Gates the

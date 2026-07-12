@@ -55,6 +55,14 @@ wz-codecs = { path = "../wz-codecs", features = ["codec-serial"] }
 # SerialFrameReader}` (the wz serial framing logic under test).
 wz-session-core = { path = "../wz-session-core", features = [
     "transport-link-serial",
+    # R311y245 — reply-source-info gates the queryable REPLY-side emission
+    # of the inner Put-body source_info ext (id 0x01 ENC_ZBUF). The
+    # wz_reply_source_info_to_pico_zget e2e drives an in-process wz
+    # queryable that replies WITH source_info (via ReplyOut
+    # reply_keyed_sourced) for a pico z_get to decode, so it needs the
+    # send-side stamp compiled in. Not an inventory atom (A3-neutral);
+    # only forwarded elsewhere by ext-pubsub-advanced-recovery.
+    "reply-source-info",
 ] }
 zenoh-pico-sys = { path = "../zenoh-pico-sys" }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }

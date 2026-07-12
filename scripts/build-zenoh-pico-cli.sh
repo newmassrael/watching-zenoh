@@ -82,18 +82,20 @@ echo "build-zenoh-pico-cli: pin = $(git -C "$VENDOR_DIR" rev-parse --short HEAD 
 # still cleaned up. THIRD_PARTY.md vendor/zenoh-pico section
 # documents this divergence.
 #
-# R311y240 / R311y244 — SECOND + THIRD in-place example patches land
-# below (z_sub_attachment.c qos+source_info print; z_queryable.c query
-# source_info print). Bash keeps ONE `trap ... EXIT` handler, so a
-# separate `trap ... EXIT` per file would SILENTLY REPLACE this one and
-# disable the earlier reverts. All git-checkouts therefore live in ONE
-# handler, wired once — which also makes the up-front restore-first
-# cover every patched file.
+# R311y240 / R311y244 / R311y245 — SECOND + THIRD + FOURTH in-place
+# example patches land below (z_sub_attachment.c qos+source_info print;
+# z_queryable.c query source_info print; z_get.c reply source_info
+# print). Bash keeps ONE `trap ... EXIT` handler, so a separate
+# `trap ... EXIT` per file would SILENTLY REPLACE this one and disable
+# the earlier reverts. All git-checkouts therefore live in ONE handler,
+# wired once — which also makes the up-front restore-first cover every
+# patched file.
 restore_pico_example_patches() {
     if [[ -e "$VENDOR_DIR/.git" ]]; then
         git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_put.c 2>/dev/null || true
         git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_sub_attachment.c 2>/dev/null || true
         git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_queryable.c 2>/dev/null || true
+        git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_get.c 2>/dev/null || true
     fi
 }
 trap restore_pico_example_patches EXIT
@@ -243,6 +245,51 @@ if grep -q "// Process value" "$z_qabl_src"; then
 else
     echo "build-zenoh-pico-cli: z_queryable.c upstream shape changed (// Process value" >&2
     echo "  anchor absent); re-verify the query source_info patch against the current vendor pin" >&2
+    echo "  (current: $(git -C "$VENDOR_DIR" rev-parse --short HEAD)) before continuing." >&2
+    exit 2
+fi
+
+# R311y245 — FOURTH in-place example patch on
+# vendor/zenoh-pico/examples/unix/c11/z_get.c. The stock reply handler
+# prints the reply sample's keyexpr / payload but NOT its source_info.
+# This patch adds `with reply source_info eid: .. sn: ..`
+# (z_sample_source_info on the reply sample — a Reply body IS a Put
+# push-body, so the same UNSTABLE getter reads it) under
+# `#ifdef Z_FEATURE_UNSTABLE_API` (z_sample_source_info is UNSTABLE-gated,
+# primitives.h:2218 block, so the guard IS needed here — unlike the
+# unconditional z_query_source_info in the z_queryable patch). This makes
+# the CLI the FOREIGN witness for wz's REPLY-carrier source_info
+# propagation (tests/wz_reply_source_info_to_pico_zget.rs). Anchor is the
+# `z_drop(z_move(replystr));` line (the reply-ok branch's cleanup, unique;
+# the err branch drops `errstr`), which survives the insert — so, like the
+# other example patches, hard-reject when the marker is already present
+# rather than double-insert. Reverted by the shared trap.
+z_get_src="$EXAMPLES_DIR/unix/c11/z_get.c"
+if grep -q "with reply source_info" "$z_get_src"; then
+    echo "build-zenoh-pico-cli: z_get.c already prints 'with reply source_info'" >&2
+    echo "  — revert with 'git -C \"$VENDOR_DIR\" checkout -- examples/unix/c11/z_get.c'" >&2
+    echo "  or re-verify the patch against the current vendor pin." >&2
+    exit 2
+fi
+if grep -q "z_drop(z_move(replystr));" "$z_get_src"; then
+    sed -i '
+        \#z_drop(z_move(replystr));#i\
+#ifdef Z_FEATURE_UNSTABLE_API\
+        const z_source_info_t *wz_rsi = z_sample_source_info(sample);\
+        if (wz_rsi != NULL) {\
+            z_entity_global_id_t wz_rgid = z_source_info_id(wz_rsi);\
+            printf("    with reply source_info eid: %u sn: %u\\n", (unsigned)z_entity_global_id_eid(\&wz_rgid), (unsigned)z_source_info_sn(wz_rsi));\
+        }\
+#endif
+    ' "$z_get_src"
+    if ! grep -q "with reply source_info" "$z_get_src"; then
+        echo "build-zenoh-pico-cli: reply source_info-print patch failed to land in $z_get_src" >&2
+        exit 2
+    fi
+    echo "build-zenoh-pico-cli: applied reply source_info-print patch to z_get.c" >&2
+else
+    echo "build-zenoh-pico-cli: z_get.c upstream shape changed (z_drop(z_move(replystr))" >&2
+    echo "  anchor absent); re-verify the reply source_info patch against the current vendor pin" >&2
     echo "  (current: $(git -C "$VENDOR_DIR" rev-parse --short HEAD)) before continuing." >&2
     exit 2
 fi
