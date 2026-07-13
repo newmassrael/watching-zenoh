@@ -5155,6 +5155,23 @@ layer_e6b_adminspace_introspection() {
     (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-introspection-handlers --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_adminspace_introspection -- --ignored --quiet) || return 1
+    # R311y270 — the CROSS-IMPL half, on the SAME binary: a real zenoh-pico z_get
+    # CLI reads wz's admin bodies (the adminspace-core node record + the
+    # introspection subscriber leg). §5.23 was wz<->wz only until now, which is why
+    # every adminspace atom sat `unproven` on the cross-impl proof axis: an admin GET
+    # adds no new wire FORMAT, but "no new format" is a claim about the envelope, not
+    # about the KEYS and BODIES a foreign client must agree with.
+    #
+    # SKIPs on the FOREIGN binary only (the pico CLI a machine may legitimately lack),
+    # never on a wz one — the R311y265 rule. WZ_PICO_REQUIRE escalates that skip to a
+    # FAIL wherever the job provisions pico, so a hosted lane cannot go green having
+    # run nothing.
+    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+        _pico_cli_unavailable "Layer E6b (pico adminspace z_get)" || return 1
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_adminspace_to_pico_zget -- --ignored --quiet) || return 1
 }
 
 # ─── Layer E6c — transport-multilink: demo-binary N-link aggregation E2E ───────
