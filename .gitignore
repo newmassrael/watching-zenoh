@@ -21,6 +21,11 @@ deploy/mcu-session-acceptor/target/
 # R311mi — deploy/mcu-multicast-e2e is the fifth standalone workspace
 # (multicast footprint bin; Layer Q.5). Same target/ policy.
 deploy/mcu-multicast-e2e/target/
+# R311y269 — Layer Q.6 (the loopback-multicast QEMU runtime proof) builds the
+# SAME bin with a different feature set, and cargo uplifts every feature variant
+# to the same final path — so Q.6's ELF used to overwrite Q.5's footprint
+# artifact. Q.6 now gets its own CARGO_TARGET_DIR; same target/ policy.
+deploy/mcu-multicast-e2e/target-loopback/
 # R311y27 — deploy/mcu-freertos-demo is the standalone FreeRTOS-profile
 # workspace (boot e2e; Layer Q.frt). Same target/ policy.
 deploy/mcu-freertos-demo/target/

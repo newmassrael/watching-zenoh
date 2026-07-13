@@ -4640,7 +4640,25 @@ layer_q_qemu_mcu_e2e() {
     # LwipLink::route_multicast_over_loopback) against the TESTMODE
     # `cross-test-mcast` lwIP port (LWIP_LOOPIF_MULTICAST + LWIP_TESTMODE) — a
     # SEPARATE ELF + port from Q.5's footprint build, so the shared cross-test
-    # port + the Q.5 baseline stay byte-identical. mps2-class only (M3/M4/M7):
+    # port + the Q.5 baseline stay byte-identical.
+    #
+    # R311y269 — the ELF is separate BY CONSTRUCTION now, via a dedicated
+    # CARGO_TARGET_DIR. It was not before, and the claim above was false: cargo
+    # keys a binary's FINAL path on (target dir, triple, profile, bin name) only
+    # — features are hashed into the intermediate deps/<bin>-<hash> artifact,
+    # then the last build UPLIFTS (hard-links) over the same stable path. So
+    # Q.6's loopback-multicast ELF landed exactly where Q.5's footprint artifact
+    # lives, and the ELF left on disk after Layer Q was ALWAYS Q.6's (bss 287244,
+    # not the footprint bin's 272268 — which is how R311y268 caught it, having
+    # diffed the wrong binary). The measurement was never wrong, because Q.5
+    # gates immediately after its own build and before Q.6 runs — but that made
+    # the gate's correctness depend on LANE ORDERING, and a future round that
+    # reorders these or footprints anything after Q.6 would have silently
+    # measured the wrong binary. A separate target dir makes the collision
+    # unrepresentable instead of merely unreached; it also ends the per-run
+    # rebuild thrash (the two lanes flip WZ_LWIP_PORT, which lwip-sys declares
+    # rerun-if-env-changed, so each invalidated the other's C build).
+    # mps2-class only (M3/M4/M7):
     # the ~49 KB multicast rx pool does not fit nrf51's 16 KB SRAM (thumbv6m
     # excluded, as in Q.5); an505/M33 is omitted from the M3/M4/M7 loop below —
     # the same cortex-m-rt Secure-state carry Q.2 explicitly KNOWN_SKIPs. With
@@ -4648,8 +4666,11 @@ layer_q_qemu_mcu_e2e() {
     # arm, so QEMU exit 0 == PASS (a failed join/roundtrip exits non-zero);
     # run_qemu_case's 30s backstop bounds a runaway. This CLOSES the "MCU
     # multicast is host-only / on-target evidence deferred" debt.
-    local mcast_port mcrun_lane mcmachine mccpu mctgt
+    local mcast_port mcrun_lane mcmachine mccpu mctgt mcast_target_dir
     mcast_port="$(realpath crates/lwip-sys/port/cross-test-mcast)"
+    # Q.6's own target dir — see the R311y269 note above. Keeps the
+    # loopback-multicast ELF off Q.5's footprint artifact path for good.
+    mcast_target_dir="$repo_root/deploy/mcu-multicast-e2e/target-loopback"
     declare -A mcrun_built=()
     for mcrun_lane in \
         "mps2-an385:cortex-m3:thumbv7m-none-eabi" \
@@ -4662,7 +4683,8 @@ layer_q_qemu_mcu_e2e() {
         fi
         # Build once per triple (an386 + an500 share thumbv7em-none-eabihf).
         if [[ -z "${mcrun_built[$mctgt]:-}" ]]; then
-            if WZ_LWIP_PORT="$mcast_port" cargo build --release \
+            if CARGO_TARGET_DIR="$mcast_target_dir" \
+                WZ_LWIP_PORT="$mcast_port" cargo build --release \
                 --manifest-path deploy/mcu-multicast-e2e/Cargo.toml \
                 --target "$mctgt" --features loopback-multicast \
                 --bin mcu-multicast-e2e --quiet; then
@@ -4682,7 +4704,7 @@ layer_q_qemu_mcu_e2e() {
         if ! run_qemu_case \
             "Q.6.${mcmachine} run mcu-multicast-e2e (loopback-multicast) via qemu-system-arm ${mcmachine}" \
             "$mccpu" "$mcmachine" \
-            "deploy/mcu-multicast-e2e/target/${mctgt}/release/mcu-multicast-e2e"; then
+            "${mcast_target_dir}/${mctgt}/release/mcu-multicast-e2e"; then
             fail=1
         fi
     done
