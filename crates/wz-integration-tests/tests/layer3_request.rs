@@ -40,8 +40,8 @@
 
 use wz_codecs::request::Request;
 use zenoh_pico_sys::{
-    _z_bytes_from_buf, _z_bytes_t, _z_n_msg_request_t, _z_request_encode, _z_wbuf_clear,
-    _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear,
+    _z_bytes_from_buf, _z_bytes_t, _z_n_msg_request_t, _z_request_encode, _z_slice_t,
+    _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear,
 };
 
 fn zenoh_pico_encode_request_default() -> Vec<u8> {
@@ -168,4 +168,319 @@ fn layer3_request_query_value_byte_equivalent() {
     let mut expected = std::vec![0x5C_u8, 0x00, 0x00, 0x83, 0x43, 0x10, 0x00];
     expected.extend_from_slice(PAYLOAD);
     assert_eq!(wz, expected, "value-ext wire layout locked");
+}
+
+// ── R311y261 — the QUERY KNOBS, byte-compared against zenoh-pico ──────────────
+//
+// R311y248 proved the Query VALUE ext. The other five knobs the zenoh Query/Request
+// wire carries had never been checked against a foreign encoder at all: the two
+// REQUEST-level exts (`_ext_target` id 0x05, `_ext_timeout_ms` id 0x07) and the three
+// QUERY-body fields (`_consolidation` behind the Q_C flag, `_parameters` behind Q_P,
+// and the `_ext_attachment` ext). Each is an independent chance for wz and zenoh-pico
+// to disagree about a flag bit, an ext id, or a length prefix -- and a disagreement is
+// invisible locally: wz's own round-trip tests would still pass while a real pico
+// queryable silently ignored (or mis-read) the knob.
+//
+// zenoh-pico's defaults are the reason each knob is a DISCRIMINATING witness: the
+// encoder only emits an ext when its value differs from the sentinel
+// (`_z_n_msg_request_needed_exts` / `_z_msg_query_required_extensions`), so a wz that
+// dropped a knob would emit the bare 4-byte default envelope and the compare fails.
+
+/// A zenoh-pico `_z_n_msg_request_t` carrying exactly one Query knob.
+///
+/// Collapsing the five cases into one patch-set keeps the unsafe surface to a single
+/// audited block instead of five near-duplicates.
+#[derive(Default)]
+struct PicoQueryKnobs<'a> {
+    /// `z_query_target_t`; sentinel `Z_QUERY_TARGET_BEST_MATCHING = 0`.
+    target: Option<u32>,
+    /// `_ext_timeout_ms`; sentinel 0 (absent).
+    timeout_ms: Option<u64>,
+    /// `z_consolidation_mode_t`; sentinel `Z_CONSOLIDATION_MODE_DEFAULT = AUTO = -1`.
+    consolidation: Option<i32>,
+    /// Query-body `_parameters` (Q_P flag).
+    parameters: Option<&'a [u8]>,
+    /// Query-body `_ext_attachment`.
+    attachment: Option<&'a [u8]>,
+}
+
+fn zenoh_pico_encode_request_query_knobs(k: &PicoQueryKnobs<'_>) -> Vec<u8> {
+    // SAFETY: same wbuf-extract path as `zenoh_pico_encode_request_default`, with the
+    // same two default patches. `_parameters` is a plain `_z_slice_t { len, start,
+    // _delete_context }` that the ENCODER only READS -- it is borrowed from the caller's
+    // slice for the duration of `_z_request_encode` and never dropped by pico (we do not
+    // call `_z_n_msg_request_clear`), so a zeroed delete-context is correct here.
+    // `_z_bytes_from_buf` initialises the zeroed `_z_bytes_t` in place and copies.
+    unsafe {
+        let mut wbf = _z_wbuf_make(128, false);
+        let mut msg = _z_n_msg_request_t::default();
+        msg._ext_qos._val = 5;
+        msg._body._query._consolidation = k
+            .consolidation
+            .unwrap_or(zenoh_pico_sys::z_consolidation_mode_t_Z_CONSOLIDATION_MODE_DEFAULT);
+        if let Some(t) = k.target {
+            msg._ext_target = t;
+        }
+        if let Some(ms) = k.timeout_ms {
+            msg._ext_timeout_ms = ms;
+        }
+        if let Some(p) = k.parameters {
+            msg._body._query._parameters = _z_slice_t {
+                len: p.len(),
+                start: p.as_ptr(),
+                _delete_context: core::mem::zeroed(),
+            };
+        }
+        let mut att_bytes: _z_bytes_t = core::mem::zeroed();
+        if let Some(a) = k.attachment {
+            let rc = _z_bytes_from_buf(&mut att_bytes, a.as_ptr(), a.len());
+            assert_eq!(rc, 0, "_z_bytes_from_buf failed");
+            msg._body._query._ext_attachment = att_bytes;
+        }
+        let ret = _z_request_encode(&mut wbf, &msg);
+        assert_eq!(ret, 0, "_z_request_encode failed");
+        let mut zbf = _z_wbuf_to_zbuf(&wbf);
+        let bytes = std::slice::from_raw_parts(zbf._ios._buf, zbf._ios._w_pos).to_vec();
+        _z_zbuf_clear(&mut zbf);
+        _z_wbuf_clear(&mut wbf);
+        bytes
+    }
+}
+
+/// wz's `RequestQueryBuilder::request_target(All)` must encode the REQUEST-level target
+/// ext byte-for-byte as zenoh-pico's `_ext_target = Z_QUERY_TARGET_ALL`.
+// wz-proves: query-target codec-parity partial
+// wz-proves: codec-request codec-parity partial
+#[test]
+fn layer3_request_target_byte_equivalent() {
+    use wz_session_core::query_mode::QueryTarget;
+    use wz_session_core::request_build::RequestQueryBuilder;
+
+    for (wz_target, pico_target) in [
+        (
+            QueryTarget::All,
+            zenoh_pico_sys::z_query_target_t_Z_QUERY_TARGET_ALL,
+        ),
+        (
+            QueryTarget::AllComplete,
+            zenoh_pico_sys::z_query_target_t_Z_QUERY_TARGET_ALL_COMPLETE,
+        ),
+    ] {
+        let owned = RequestQueryBuilder::new(0, 0, None)
+            .request_target(wz_target)
+            .build()
+            .expect("wz target request builds");
+        let wz = owned
+            .try_as_borrowed()
+            .expect("borrow the owned request")
+            .encode_to_vec();
+        let pico = zenoh_pico_encode_request_query_knobs(&PicoQueryKnobs {
+            target: Some(pico_target),
+            ..Default::default()
+        });
+        assert_ne!(
+            pico,
+            zenoh_pico_encode_request_default(),
+            "anti-vacuity: the target ext must actually reach the wire, else wz and pico \
+             would agree by both emitting nothing"
+        );
+        assert_eq!(
+            wz, pico,
+            "REQUEST target ext ({wz_target:?}) must match zenoh-pico byte-for-byte; \
+             wz={wz:02x?} pico={pico:02x?}"
+        );
+    }
+}
+
+/// wz's `RequestQueryBuilder::request_timeout_ms` must encode the REQUEST-level timeout
+/// ext byte-for-byte as zenoh-pico's `_ext_timeout_ms`.
+// wz-proves: query-timeout codec-parity partial
+// wz-proves: codec-request codec-parity partial
+#[test]
+fn layer3_request_timeout_byte_equivalent() {
+    use wz_session_core::request_build::RequestQueryBuilder;
+
+    // A one-byte VLE (1) and a multi-byte one (5000) — the ext's length prefix is where
+    // a zint-vs-zint64 disagreement would surface.
+    for timeout_ms in [1_u64, 5_000, 4_294_967_296] {
+        let owned = RequestQueryBuilder::new(0, 0, None)
+            .request_timeout_ms(timeout_ms)
+            .build()
+            .expect("wz timeout request builds");
+        let wz = owned
+            .try_as_borrowed()
+            .expect("borrow the owned request")
+            .encode_to_vec();
+        let pico = zenoh_pico_encode_request_query_knobs(&PicoQueryKnobs {
+            timeout_ms: Some(timeout_ms),
+            ..Default::default()
+        });
+        assert_ne!(
+            pico,
+            zenoh_pico_encode_request_default(),
+            "anti-vacuity: the timeout ext must actually reach the wire"
+        );
+        assert_eq!(
+            wz, pico,
+            "REQUEST timeout ext ({timeout_ms} ms) must match zenoh-pico byte-for-byte; \
+             wz={wz:02x?} pico={pico:02x?}"
+        );
+    }
+}
+
+/// wz's `RequestQueryBuilder::consolidation` must set the Query-body Q_C flag and the
+/// mode byte byte-for-byte as zenoh-pico's `_consolidation`.
+// wz-proves: query-consolidation codec-parity partial
+// wz-proves: codec-request codec-parity partial
+#[test]
+fn layer3_request_consolidation_byte_equivalent() {
+    use wz_session_core::query_mode::ConsolidationMode;
+    use wz_session_core::request_build::RequestQueryBuilder;
+
+    // AUTO (-1) is pico's sentinel and emits nothing, so the three explicit modes are
+    // exactly the discriminating set.
+    for (wz_mode, pico_mode) in [
+        (
+            ConsolidationMode::None,
+            zenoh_pico_sys::z_consolidation_mode_t_Z_CONSOLIDATION_MODE_NONE,
+        ),
+        (
+            ConsolidationMode::Monotonic,
+            zenoh_pico_sys::z_consolidation_mode_t_Z_CONSOLIDATION_MODE_MONOTONIC,
+        ),
+        (
+            ConsolidationMode::Latest,
+            zenoh_pico_sys::z_consolidation_mode_t_Z_CONSOLIDATION_MODE_LATEST,
+        ),
+    ] {
+        let owned = RequestQueryBuilder::new(0, 0, None)
+            .consolidation(wz_mode)
+            .build()
+            .expect("wz consolidation request builds");
+        let wz = owned
+            .try_as_borrowed()
+            .expect("borrow the owned request")
+            .encode_to_vec();
+        let pico = zenoh_pico_encode_request_query_knobs(&PicoQueryKnobs {
+            consolidation: Some(pico_mode),
+            ..Default::default()
+        });
+        assert_ne!(
+            pico,
+            zenoh_pico_encode_request_default(),
+            "anti-vacuity: the Q_C flag + mode byte must actually reach the wire"
+        );
+        assert_eq!(
+            wz, pico,
+            "Query consolidation ({wz_mode:?}) must match zenoh-pico byte-for-byte; \
+             wz={wz:02x?} pico={pico:02x?}"
+        );
+    }
+}
+
+/// wz's `RequestQueryBuilder::parameters` must set the Query-body Q_P flag and the
+/// length-prefixed selector-parameter slice byte-for-byte as zenoh-pico's `_parameters`.
+// wz-proves: query-selector-parameters codec-parity partial
+// wz-proves: codec-request codec-parity partial
+#[test]
+fn layer3_request_parameters_byte_equivalent() {
+    use wz_session_core::request_build::RequestQueryBuilder;
+
+    for params in [&b"k=v"[..], b"_time=[now(-1h)..now()];k=v"] {
+        let owned = RequestQueryBuilder::new(0, 0, None)
+            .parameters(params)
+            .build()
+            .expect("wz parameters request builds");
+        let wz = owned
+            .try_as_borrowed()
+            .expect("borrow the owned request")
+            .encode_to_vec();
+        let pico = zenoh_pico_encode_request_query_knobs(&PicoQueryKnobs {
+            parameters: Some(params),
+            ..Default::default()
+        });
+        assert_ne!(
+            pico,
+            zenoh_pico_encode_request_default(),
+            "anti-vacuity: the Q_P flag + parameters slice must actually reach the wire"
+        );
+        assert_eq!(
+            wz, pico,
+            "Query selector parameters must match zenoh-pico byte-for-byte; \
+             wz={wz:02x?} pico={pico:02x?}"
+        );
+    }
+}
+
+/// wz's `RequestQueryBuilder::query_attachment` must encode the Query-body attachment
+/// ext byte-for-byte as zenoh-pico's `_ext_attachment`.
+// wz-proves: query-attachment codec-parity partial
+// wz-proves: codec-request codec-parity partial
+#[test]
+fn layer3_request_attachment_byte_equivalent() {
+    use wz_session_core::request_build::RequestQueryBuilder;
+
+    // 1 byte, a mid-size blob, and the wz codec's declared ceiling
+    // (`QUERY_EXT_ZBUF_MAX_LEN` = 32) — the ext is length-prefixed, so the boundary is
+    // where a length-encoding disagreement would surface. Empty is not a case: the
+    // setter panics on it by contract (pico's encoder clears the ext on empty).
+    let max_len = wz_session_core::request_build::QUERY_EXT_ZBUF_MAX_LEN;
+    let ceiling = vec![0xA5_u8; max_len];
+    for attachment in [&b"a"[..], b"query-attachment-bytes", &ceiling] {
+        let owned = RequestQueryBuilder::new(0, 0, None)
+            .query_attachment(attachment)
+            .build()
+            .expect("wz attachment request builds");
+        let wz = owned
+            .try_as_borrowed()
+            .expect("borrow the owned request")
+            .encode_to_vec();
+        let pico = zenoh_pico_encode_request_query_knobs(&PicoQueryKnobs {
+            attachment: Some(attachment),
+            ..Default::default()
+        });
+        assert_ne!(
+            pico,
+            zenoh_pico_encode_request_default(),
+            "anti-vacuity: the attachment ext must actually reach the wire"
+        );
+        assert_eq!(
+            wz,
+            pico,
+            "Query attachment ext ({} bytes) must match zenoh-pico byte-for-byte; \
+             wz={wz:02x?} pico={pico:02x?}",
+            attachment.len()
+        );
+    }
+}
+
+/// The CONVERSE of the five knob tests, and the cheapest real gap they left open.
+///
+/// Every knob test asserts "wz emits what pico emits WHEN THE KNOB IS SET". None of them
+/// asserted the other direction: that `RequestQueryBuilder` with NO knob set emits what
+/// pico emits when nothing is set. Without this, a builder that spuriously wrote a
+/// sentinel-valued ext (a target of 0, a Q_C byte for the absent mode, an empty-params
+/// Q_P) would emit bytes zenoh-pico never emits -- a real pico queryable would mis-decode
+/// -- and not one test in the suite would fail. `layer3_request_default_byte_equivalent`
+/// does not cover it: that drives the raw `Request::default()` CODEC STRUCT, not the
+/// production builder.
+// wz-proves: codec-request codec-parity partial
+#[test]
+fn layer3_request_builder_default_emits_no_spurious_ext() {
+    use wz_session_core::request_build::RequestQueryBuilder;
+
+    let owned = RequestQueryBuilder::new(0, 0, None)
+        .build()
+        .expect("wz knob-less request builds");
+    let wz = owned
+        .try_as_borrowed()
+        .expect("borrow the owned request")
+        .encode_to_vec();
+    assert_eq!(
+        wz,
+        zenoh_pico_encode_request_default(),
+        "a knob-less RequestQueryBuilder must emit exactly zenoh-pico's default envelope; \
+         any extra byte is an ext pico would not send and may mis-decode; \
+         wz={wz:02x?}"
+    );
 }
