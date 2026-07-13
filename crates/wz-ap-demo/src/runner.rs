@@ -2889,3 +2889,372 @@ pub(crate) async fn run_router_hat(
     }
     Ok(())
 }
+
+/// R311y277 (§5.23 `adminspace-config-hotreload` ACTIVATION) — the storage-HOSTING
+/// run-mode (`--storage-host <listen>`): the config-diff-driven storage lifecycle
+/// driven END-TO-END over the wire by a stock zenoh-pico client. A pico `z_put`
+/// `@/<zid>/peer/config/storage-add <name>:<keyexpr>` live-spawns a
+/// [`RuntimeStorageManager`](wz::runtime_tokio::storage_manager_service::RuntimeStorageManager)-hosted
+/// storage, and a subsequent pico `z_get` `@/<zid>/peer/plugins/**` then reports
+/// `storage_manager` state `Started` (`Loaded` before); `storage-del <name>`
+/// reverses it. This is the ACTIVE-FLIP run-mode the y239 forward reserved: the
+/// demo forwarder hosts ([`run_peer`]) are forwarder-based with no single Session
+/// for `add_storage`, so this net-new mode hosts a per-client Session instead.
+///
+/// ## Multi-accept loop (why)
+///
+/// A stock pico `z_put` and `z_get` are SEPARATE one-shot processes, each opening
+/// its own unicast session; a single unicast Session is 1:1 and cannot serve the
+/// four sequential clients (add / get / del / get). So the host binds ONCE
+/// ([`bind_endpoint`](wz::runtime_tokio::session_open::bind_endpoint)) then loops:
+/// accept one client
+/// ([`accept_bound_on`](wz::runtime_tokio::session_open::accept_bound_on)) -> open a
+/// [`TokioSession`] -> declare the two admin handlers on it -> drive it to terminal
+/// (the client disconnects when its one-shot exits) -> drop the session ->
+/// re-accept. State that must persist across client sessions is HOISTED above the
+/// loop.
+///
+/// ## The Send+'static handler bound forces Arc-shared state
+///
+/// [`Session::declare_queryable`] / [`Session::declare_subscriber`] callbacks are
+/// `Send + 'static` (session/mod.rs), but the manager is NOT `Send` (the storage
+/// `Volume` trait carries no `Send` bound). So the manager CANNOT be captured by a
+/// handler — it stays task-local in the drive-loop dispatch closure (which has no
+/// `Send` bound). The GET handler captures only `storage_started: Arc<AtomicBool>`
+/// (+ owned admin-key Strings); the write handler captures only `pending:
+/// Arc<Mutex<Vec<AdminConfigWrite>>>` (+ owned Strings). This is why [`run_peer`]'s
+/// `Rc<RefCell<>>` forwarder handlers are NOT reused here — an `Rc` capture would be
+/// a `cannot be sent between threads` compile error on the Session declare path.
+///
+/// ## The "zombie storage" bound (NAMED)
+///
+/// A storage is spawned via `add_storage(&session, ..)` on the TRANSIENT z_put
+/// client Session. When that pico process exits and the session is dropped at end
+/// of the accept-loop iteration, the hosted `StorageService` SURVIVES: the manager
+/// is hoisted and the service holds `Arc` clones of the session's observer + actions
+/// (its RAII `Subscriber` / `Queryable` handles), and dead-link undeclare emits are
+/// swallowed. So the storage keeps the manager NON-EMPTY (`storage_started` stays
+/// true -> a later client's plugins GET reports `Started`), but it is a ZOMBIE:
+/// STATE-OBSERVABLE, not data-serving across the session boundary. This is
+/// sufficient for the plugins-STATE witness (which reads `!manager.is_empty()`) and
+/// MUST NOT be read as a claim that the storage serves cross-connection data.
+#[cfg(feature = "adminspace-config-hotreload")]
+pub(crate) async fn run_storage_host(listen: &str) -> io::Result<()> {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    use wz::runtime_tokio::adminspace::{
+        admin_config_key, admin_config_write_key, admin_queryable_key, answer_admin_query,
+        parse_admin_config_write, AdminAnswerCtx, AdminConfigWrite, AdminConfigWriteOutcome,
+    };
+    use wz::runtime_tokio::compiled_plugins_dyn;
+    use wz::runtime_tokio::config::WzConfig;
+    use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
+    use wz::runtime_tokio::session_open::{accept_bound_on, bind_endpoint};
+    use wz::runtime_tokio::sink::SampleView;
+    use wz::runtime_tokio::storage_manager_service::RuntimeStorageManager;
+    use wz::runtime_tokio::storage_volume::MemoryVolume;
+    use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
+
+    use crate::args::NodeKind;
+
+    let session_clock = TokioTime::new();
+    let params = demo_session_init_params(NodeKind::StorageHost);
+    // The pico witness scrapes ONE zid across all four sequential client sessions,
+    // so the host zid must be STABLE across accept-loop iterations. The demo's fixed
+    // Peer zid is that stable identity; there is exactly one storage host, so the
+    // per-port zid derivation `run_peer` needs (mesh-graph collision avoidance) does
+    // not apply here — a fixed zid is both correct and simpler.
+    let node_zid = params.zid.clone();
+    let zid_hex = zid_to_zenoh_hex(&node_zid);
+    let whatami_str = params.whatami.to_str();
+
+    let listener = bind_endpoint(listen).await?;
+    let local = listener.local_addr()?;
+
+    // The admin keys this host serves (SSOT-derived from the same zid/whatami).
+    let queryable_key = admin_queryable_key(&zid_hex, whatami_str); // @/<zid>/peer/**
+    let config_key = admin_config_key(&zid_hex, whatami_str); // @/<zid>/peer/config
+    let write_key = admin_config_write_key(&zid_hex, whatami_str); // @/<zid>/peer/config/**
+                                                                   // The `@/<zid>/peer/config/` prefix a config-write PUT's sub-key hangs under.
+    let write_prefix = {
+        let mut p = admin_config_key(&zid_hex, whatami_str);
+        p.push('/');
+        p
+    };
+    // The read-at-open config mirror the admin `config` leg answers from — built once
+    // from the handshake params (the witness reads only the plugins leg, but the
+    // answerer serves the whole admin surface, so it needs a config body).
+    let config_json = WzConfig::from_init_params(&params).to_admin_json();
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let locators = vec![format!("tcp/{local}")];
+
+    // ── State HOISTED above the accept loop (persists across client Sessions) ──
+    // The manager is TASK-LOCAL: captured only by the (non-Send) dispatch closure,
+    // never by a (Send+'static) Session handler. `RuntimeStorageManager` is not
+    // `Send` (the storage `Volume` trait carries no `Send` bound), so this placement
+    // is load-bearing, not incidental. R/T are inferred from the `add_storage(&session,
+    // ..)` call below (TokioSession's TokioRuntime / TokioTime).
+    let mut manager = RuntimeStorageManager::new();
+    manager.register_volume("mem", Box::new(MemoryVolume));
+    // The flag the GET handler reads; shared with the Send+'static handler via Arc.
+    let storage_started = Arc::new(AtomicBool::new(false));
+    // The intent stash the config-write handler fills, drained + applied in the
+    // dispatch closure. A std `Mutex` (Send + Sync), NOT the wz `sync::Mutex` aliased
+    // at the top of this module — the buffer crosses the Send+'static handler boundary.
+    let pending: Arc<std::sync::Mutex<Vec<AdminConfigWrite>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    log::info!(
+        "wz-ap-demo storage-host: listening on {local}; config WRITE at {write_key} \
+         (storage-add/-del live-spawn a RuntimeStorageManager storage; a plugins GET \
+         reports storage_manager Started when one is live)"
+    );
+    // The dedicated readiness barrier the witness scrapes for the admin root key —
+    // emitted AFTER bind + all keys are computed, so a client cannot race the host.
+    log::info!("wz-ap-demo storage-host: adminspace config GET at {config_key}");
+
+    // The accept loop serves until the process is killed (the witness SIGKILLs the
+    // host via ChildGuard) or a graceful-shutdown signal arrives (Ctrl-C / SIGTERM),
+    // handled via the same `race_against_shutdown` SSOT the one-shot demo uses.
+    loop {
+        let dialed =
+            match race_against_shutdown(accept_bound_on(&listener), "storage-host accept").await {
+                Some(Ok(d)) => d,
+                Some(Err(e)) => {
+                    log::warn!("wz-ap-demo storage-host: accept failed: {e}; re-accepting");
+                    continue;
+                }
+                None => break, // graceful shutdown while idle
+            };
+        let opened = match accept_and_open_session(
+            dialed,
+            params.clone(),
+            session_clock,
+            None,
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                log::warn!("wz-ap-demo storage-host: session open failed: {e:?}; re-accepting");
+                continue;
+            }
+        };
+        log::info!("wz-ap-demo storage-host: client session Established");
+
+        let actions = opened.actions.clone();
+        let session = TokioSession::new(
+            actions.clone(),
+            Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+            Arc::new(session_clock),
+        );
+
+        // ── admin GET queryable (Send+'static: captures storage_started + Strings) ──
+        // Mirrors run_peer's --config-queryable handler (runner.rs answer path) but
+        // swaps compiled_plugins -> compiled_plugins_dyn(&version, storage_started) so
+        // the plugins leg reports Started iff a storage is live. read:true (constraint:
+        // AdminAnswerCtx.read must be set; this host is permissive-read).
+        let get_started = storage_started.clone();
+        let get_zid = zid_hex.clone();
+        let get_version = version.clone();
+        let get_locators = locators.clone();
+        let get_config = config_json.clone();
+        let _admin_queryable: Option<Queryable> = match session.declare_queryable(
+            queryable_key.clone(),
+            QueryableOptions::default(),
+            move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                let ctx = AdminAnswerCtx {
+                    zid_hex: &get_zid,
+                    whatami: whatami_str,
+                    version: &get_version,
+                    locators: &get_locators,
+                    read: true,
+                };
+                // The DYNAMIC registry: storage_manager is Started when a storage is
+                // live (!manager.is_empty(), reflected into storage_started), Loaded
+                // otherwise. This is what binds the witness to REAL add_storage.
+                let plugins = compiled_plugins_dyn(&get_version, get_started.load(Relaxed));
+                answer_admin_query(view, out, &ctx, &[], &[], &plugins, &get_config);
+            },
+        ) {
+            Ok(q) => Some(q),
+            Err(e) => {
+                log::warn!("wz-ap-demo storage-host: admin queryable declare rejected: {e:?}");
+                None
+            }
+        };
+
+        // ── config-WRITE subscriber (Send+'static: captures pending + Strings) ──
+        // Mirrors run_peer's --config-writable handler (runner.rs write path). Writes
+        // are PERMITTED unconditionally in this mode (permit = true), so the witness
+        // needs no extra flag. wire -> intent ONLY: the apply (add_storage /
+        // remove_storage) happens in the dispatch closure, which owns &mut manager.
+        let sub_pending = pending.clone();
+        let sub_prefix = write_prefix.clone();
+        let _config_write_sub: Option<Subscriber> = match session.declare_subscriber(
+            write_key.clone(),
+            SubscribeOptions::default(),
+            move |sample: &dyn SampleView| {
+                match parse_admin_config_write(
+                    &sub_prefix,
+                    sample.keyexpr(),
+                    sample.payload(),
+                    true, // permit — this run-mode grants config-write for the witness
+                ) {
+                    AdminConfigWriteOutcome::Apply(intent) => {
+                        log::info!(
+                            "wz-ap-demo storage-host: config-write intent stashed: {intent:?}"
+                        );
+                        sub_pending
+                            .lock()
+                            .expect("storage-host pending mutex poisoned")
+                            .push(intent);
+                    }
+                    // permit is true here, so Denied is unreachable; handled for
+                    // completeness (the outcome enum is feature-independent).
+                    AdminConfigWriteOutcome::Denied => {}
+                    AdminConfigWriteOutcome::Malformed => log::warn!(
+                        "wz-ap-demo storage-host: config-write malformed payload; ignored"
+                    ),
+                    AdminConfigWriteOutcome::UnknownKey(k) => log::warn!(
+                        "wz-ap-demo storage-host: config-write unknown key '{k}'; ignored"
+                    ),
+                    AdminConfigWriteOutcome::NotAWrite => {}
+                }
+            },
+        ) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::warn!(
+                    "wz-ap-demo storage-host: config-write subscriber declare rejected: {e}"
+                );
+                None
+            }
+        };
+
+        // ── the per-iteration dispatch closure ──
+        // Fires the session's handlers, THEN drains + applies the stashed storage
+        // intents. add_storage / remove_storage run AFTER
+        // `dispatch_iteration_event_with` RETURNS (observer lock released), NOT inside
+        // its under_lock closure — the latter forbids observer re-entry (add_storage's
+        // declare_subscriber/-queryable re-lock the observer, a deadlock). The closure
+        // captures &mut manager (non-Send is OK: drive_session_until_terminal's dispatch
+        // bound is bare `FnMut`, no Send), the per-client session clone, the Arcs, and
+        // node_zid.
+        let session_for_dispatch = session.clone();
+        let dispatch_pending = pending.clone();
+        let dispatch_started = storage_started.clone();
+        let dispatch_zid = node_zid.clone();
+        let mut dispatch =
+            |event: IterationEvent<'_>| {
+                // Fires the admin GET queryable + config-write subscriber; the config-write
+                // handler stashes any AddStorage/RemoveStorage intent into `pending`. This
+                // call also flushes staged replies + drains the deferred ResponseFinal
+                // fires (session/mod.rs), so the querier's terminating Final is sent.
+                session_for_dispatch.dispatch_iteration_event_with(event, |_obs| {});
+                // Drain the stashed intents and apply them to the hoisted manager. Copied
+                // out first so the pending lock is released before the (potentially
+                // re-entrant-to-the-observer) add_storage runs.
+                let drained: Vec<AdminConfigWrite> = {
+                    let mut guard = dispatch_pending
+                        .lock()
+                        .expect("storage-host pending mutex poisoned");
+                    guard.drain(..).collect()
+                };
+                for intent in &drained {
+                    match intent {
+                        AdminConfigWrite::AddStorage { name, .. } => {
+                            match intent.to_storage_config() {
+                                Some(cfg) => {
+                                    match manager.add_storage(
+                                        &session_for_dispatch,
+                                        &cfg,
+                                        dispatch_zid.clone(),
+                                    ) {
+                                        Ok(()) => log::info!(
+                                    "wz-ap-demo storage-host: spawned live storage '{name}' \
+                                     — storage_manager Started"
+                                ),
+                                        Err(e) => log::warn!(
+                                    "wz-ap-demo storage-host: add_storage '{name}' failed: {e}"
+                                ),
+                                    }
+                                }
+                                None => log::warn!(
+                                    "wz-ap-demo storage-host: AddStorage intent produced no \
+                             StorageConfig; ignored"
+                                ),
+                            }
+                        }
+                        AdminConfigWrite::RemoveStorage(name) => {
+                            if manager.remove_storage(name) {
+                                log::info!(
+                                "wz-ap-demo storage-host: despawned '{name}' — storage_manager {}",
+                                if manager.is_empty() { "Loaded" } else { "Started" }
+                            );
+                            } else {
+                                log::warn!(
+                                    "wz-ap-demo storage-host: remove_storage '{name}' — \
+                                 no such storage"
+                                );
+                            }
+                        }
+                        // Not a storage intent; this run-mode hosts no interceptor chain.
+                        AdminConfigWrite::AclDeny(_) => log::warn!(
+                            "wz-ap-demo storage-host: acl-deny config-write ignored \
+                         (this mode hosts no interceptor chain)"
+                        ),
+                    }
+                }
+                // Reflect the LIVE storage state the GET handler reads. Binding to
+                // !manager.is_empty() ties the witness to REAL add_storage / remove_storage
+                // — never a bare bool flip that would report Started without a live storage
+                // (an OVER-CLAIM this design forbids).
+                dispatch_started.store(!manager.is_empty(), Relaxed);
+            };
+
+        // Drive this client session to terminal (it ends when the pico one-shot
+        // disconnects). The engine + inbound half live in this stack frame (not inside
+        // the future), so the shutdown select!-drop stays cancel-safe (run_demo's
+        // OneShot-arm shape). `None` max_iters = run until the client terminates.
+        let OpenedSession {
+            mut engine,
+            inbound,
+            writer_handle,
+            ..
+        } = opened;
+        let mut driver = inbound;
+        let session_timeouts = SessionTimeouts::spec_defaults();
+        let outcome = race_against_shutdown(
+            drive_session_until_terminal(
+                &mut driver,
+                &actions,
+                &mut engine,
+                None,
+                &session_clock,
+                &session_timeouts,
+                &mut dispatch,
+            ),
+            "storage-host drive",
+        )
+        .await;
+
+        // Stop this client's writer task before re-accepting. It would NOT exit on its
+        // own: any zombie StorageService the manager kept holds an `Arc` clone of this
+        // session's actions (a live channel sender), so the writer's channel never
+        // closes — abort it explicitly to avoid one lingering task per client.
+        writer_handle.abort();
+        match outcome {
+            Some(o) => log::info!("wz-ap-demo storage-host: client session ended: {o:?}"),
+            None => {
+                log::info!("wz-ap-demo storage-host: graceful shutdown");
+                break;
+            }
+        }
+        // `dispatch` (and its &mut manager borrow), `session`, `actions`, and the RAII
+        // `_admin_queryable` / `_config_write_sub` handles drop here at scope end. The
+        // HOISTED manager (and any storage it holds) survives — the NAMED zombie bound.
+    }
+    Ok(())
+}

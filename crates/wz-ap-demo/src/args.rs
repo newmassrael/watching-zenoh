@@ -136,6 +136,15 @@ pub(crate) enum NodeKind {
     /// graph as a router and this node partitions its two meshes by peer role.
     #[cfg(feature = "router-hat-router")]
     RouterHat,
+    /// R311y277 (§5.23 `adminspace-config-hotreload` ACTIVATION) — the
+    /// storage-hosting node (`--storage-host <listen>`): a bare-Session admin host
+    /// that live-spawns storages from a stock zenoh-pico client's config-writes and
+    /// reflects `storage_manager` `Started` in its plugins admin leg. Announces the
+    /// Peer `whatami` (its admin key is `@/<zid>/peer/...`); distinct from the other
+    /// kinds because it hosts a per-client Session with a `RuntimeStorageManager`
+    /// rather than a forwarder (the y239 forward's reserved run-mode).
+    #[cfg(feature = "adminspace-config-hotreload")]
+    StorageHost,
 }
 
 impl Role {
@@ -164,6 +173,10 @@ pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
         // is the first wz run-mode to present WhatAmI::Router on the wire.
         #[cfg(feature = "router-hat-router")]
         NodeKind::RouterHat => WhatAmI::Router,
+        // R311y277 — the storage host announces Peer, so its admin key is
+        // `@/<zid>/peer/...` (the surface a pico z_get / z_put addresses).
+        #[cfg(feature = "adminspace-config-hotreload")]
+        NodeKind::StorageHost => WhatAmI::Peer,
         NodeKind::Initiator => WhatAmI::Client, // R121f initiator path
     };
     SessionInitParams {

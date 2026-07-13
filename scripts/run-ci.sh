@@ -5352,6 +5352,36 @@ layer_e6g_adminspace_read() {
         --test wz_peer_adminspace_read_deny_to_pico_zget -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E6h — §5.23 adminspace-config-hotreload E2E (vs zenoh-pico) ──────────
+#
+# The config-diff-driven storage lifecycle (R311y239 mechanism, R311y277 ACTIVATION)
+# driven END-TO-END over the wire by a stock zenoh-pico client. Needs its OWN demo
+# binary built with `--features adminspace-config-hotreload` — the ONLY build that
+# compiles the `--storage-host` run-mode (a bare-Session admin host that multi-accepts
+# per-client Sessions and applies storage-add/-del via RuntimeStorageManager). A pico
+# z_put `.../config/storage-add demo:demo/**` live-spawns a storage; a pico z_get on
+# `.../plugins/**` then decodes storage_manager state Started (Loaded before), and a
+# z_put `.../config/storage-del demo` reverses it. The Started state binds to a REAL
+# add_storage (storage_started tracks !manager.is_empty(), never a bool flip), so a
+# green reply proves the compiled_plugins_dyn + RuntimeStorageManager wiring. clippy is
+# run on the feature build because it is the ONLY lane compiling the run-mode. The
+# `wz_storage_host_` fn prefix keeps the default Layer E sweep's `--skip wz_peer` /
+# `--skip wz_router` from touching it.
+#
+# SKIPs on the FOREIGN binaries only (the pico CLIs a machine may legitimately lack),
+# never on a wz one — the R311y265 rule; WZ_PICO_REQUIRE escalates that SKIP to a FAIL
+# wherever the job provisions pico.
+layer_e6h_adminspace_config_hotreload() {
+    (cd crates && cargo build -p wz-ap-demo --features adminspace-config-hotreload --quiet) || return 1
+    (cd crates && cargo clippy -p wz-ap-demo --features adminspace-config-hotreload -- -D warnings) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_get ]]; then
+        _pico_cli_unavailable "Layer E6h (pico config-hotreload z_put/z_get)" || return 1
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_storage_host_config_hotreload_pico -- --ignored --quiet --test-threads=1) || return 1
+}
+
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
 #
 # The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
@@ -5670,6 +5700,7 @@ run_layer E6d layer_e6d_peer_multilink_qos || overall=1
 run_layer E6e layer_e6e_adminspace_plugins || overall=1
 run_layer E6f layer_e6f_adminspace_metrics || overall=1
 run_layer E6g layer_e6g_adminspace_read || overall=1
+run_layer E6h layer_e6h_adminspace_config_hotreload || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1

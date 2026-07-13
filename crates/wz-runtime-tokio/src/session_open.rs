@@ -50,7 +50,8 @@ use wz_session_core::qos::Priority;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
 use crate::link_pipeline::{
-    accept_tcp, bind_tcp, bind_tcp_host, dial_tcp, dial_tcp_host, wire_tcp_stream, TcpReadDriver,
+    accept_tcp, accept_tcp_on, bind_tcp, bind_tcp_host, dial_tcp, dial_tcp_host, wire_tcp_stream,
+    TcpReadDriver,
 };
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
 use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
@@ -849,6 +850,26 @@ pub async fn bind_locator(locator: AnyLocator) -> io::Result<TcpListener> {
 async fn accept_bound(listener: TcpListener) -> io::Result<DialedLink> {
     log::info!("wz accept: listening on {}", listener.local_addr()?);
     let (stream, peer) = accept_tcp(listener).await?;
+    log::info!("wz accept: accepted peer {peer}");
+    Ok(DialedLink::Tcp(stream))
+}
+
+/// Accept ONE peer from a *borrowed* [`TcpListener`], wrapping it as a
+/// [`DialedLink::Tcp`] — the multi-accept counterpart of [`accept_bound`] (which
+/// CONSUMES the listener for the one-shot session-open contract). Borrowing keeps
+/// the listener bound across accepts, so a host that serves N SEQUENTIAL clients
+/// binds once via [`bind_endpoint`] then loops this + [`accept_and_open_session`],
+/// opening and driving ONE session at a time (the caller's loop owns the
+/// re-accept). This is the bind-once/accept-many seam at the session-open layer
+/// that the [`crate::accept_loop`] docstring references — distinct from the full
+/// [`accept_loop`](crate::accept_loop), which holds N CONCURRENT faces: this seam
+/// suits a per-client-Session host (e.g. the demo's `--storage-host` admin mode,
+/// where a pico `z_put` then a pico `z_get` are separate one-shot connections a
+/// single 1:1 unicast Session cannot both serve). Reuses the [`accept_tcp_on`]
+/// SSOT (accept + per-link TCP tuning); logs the "accepted peer" line here, quiet
+/// like [`accept_bound`]'s primitive siblings.
+pub async fn accept_bound_on(listener: &TcpListener) -> io::Result<DialedLink> {
+    let (stream, peer) = accept_tcp_on(listener).await?;
     log::info!("wz accept: accepted peer {peer}");
     Ok(DialedLink::Tcp(stream))
 }

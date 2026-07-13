@@ -379,6 +379,27 @@ fn main() -> ExitCode {
         }
     }
 
+    // R311y277 (§5.23 adminspace-config-hotreload ACTIVATION) — `--storage-host
+    // <listen>` selects the storage-hosting mode: a bare-Session admin host that
+    // live-spawns storages from a stock zenoh-pico client's config-writes and
+    // reflects storage_manager Started in its plugins admin leg. Handled before the
+    // single-session role parse. Opt-in behind `adminspace-config-hotreload`
+    // (mirrors --router-hat): a build without it rejects the flag rather than
+    // silently no-op'ing, so the catalog claim and the binary stay in lockstep.
+    if let Some(storage_host_listen) = parse_pair(rest, "--storage-host") {
+        #[cfg(feature = "adminspace-config-hotreload")]
+        return run_storage_host_mode(storage_host_listen);
+        #[cfg(not(feature = "adminspace-config-hotreload"))]
+        {
+            let _ = storage_host_listen;
+            eprintln!(
+                "wz-ap-demo: --storage-host requires the `adminspace-config-hotreload` feature \
+                 (build: cargo build -p wz-ap-demo --features adminspace-config-hotreload)"
+            );
+            return ExitCode::from(2);
+        }
+    }
+
     // R121f — exactly one of --listen / --connect must be supplied.
     // The demo's session FSM role-start is hard-coded to one or
     // the other (Acceptor calls InboundStart on listen; Initiator
@@ -911,6 +932,32 @@ fn run_peer_mode(
         &opts,
         &interceptors,
     )) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("wz-ap-demo: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// R311y277 (§5.23 adminspace-config-hotreload ACTIVATION) — storage-host mode
+/// entry (`--storage-host <listen>`): init logging, build the runtime, and run the
+/// multi-accept storage-hosting loop
+/// ([`runner::run_storage_host`](crate::runner::run_storage_host)). Mirrors
+/// [`run_router_hat_mode`] — a bare loop with no per-connection application I/O,
+/// just the admin GET queryable + config-write subscriber + the storage lifecycle
+/// apply (live-spawn / -despawn a `RuntimeStorageManager` storage).
+#[cfg(feature = "adminspace-config-hotreload")]
+fn run_storage_host_mode(listen: String) -> ExitCode {
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
+    let runtime = match build_demo_runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match runtime.block_on(crate::runner::run_storage_host(&listen)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wz-ap-demo: {e}");

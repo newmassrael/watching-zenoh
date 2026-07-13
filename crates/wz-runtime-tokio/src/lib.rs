@@ -1082,6 +1082,16 @@ pub mod storage_replication_service;
 #[cfg(feature = "storage-aligner")]
 pub mod storage_aligner_service;
 
+/// R311y277 — re-export the storage VOLUME registry types (the
+/// [`storage_volume::Volume`] trait + the in-memory [`storage_volume::MemoryVolume`])
+/// so a consumer hosting a [`storage_manager_service::RuntimeStorageManager`] can
+/// register a volume (`register_volume("mem", Box::new(MemoryVolume))`) via the
+/// stable `wz::runtime_tokio::*` surface, without a direct wz-session-core dep. Gated
+/// with the storage_volume module's own `storage-backend` SSOT gate in wz-session-core
+/// (the demo's `--storage-host` mode is the first such consumer).
+#[cfg(feature = "storage-backend")]
+pub use wz_session_core::storage_volume;
+
 /// R311y62 — the storage MANAGER DRIVER (§5.24): the AP tokio binding that
 /// hosts N live [`storage_service::StorageService`]s over a volume registry.
 /// A [`storage_manager_service::RuntimeStorageManager`] reuses the kernel
