@@ -1147,6 +1147,68 @@ fn publish_options_with_priority_is_single_source_band() {
     assert_eq!(merged.priority_band(), Priority::RealTime);
 }
 
+/// R311y255 — the typed congestion / express knobs are the siblings
+/// `with_priority` had been missing. Before y255 both bits rode the wire and were
+/// foreign-proven (R311y242, a real zenoh-pico subscriber decodes them), but had
+/// NO typed entry point: setting `Block` meant hand-assembling the whole byte via
+/// `with_qos(QosLevel::from_parts(..))`, which forces the caller to restate the
+/// priority and express they did not want to touch. This pins the fix: each knob
+/// merges ONLY its own sub-field, the three compose in any order, and the
+/// untouched sub-fields fall back to the wire-DEFAULT byte (0x05 = Data / Drop /
+/// no-express) rather than a zeroed `Control` byte.
+#[cfg(all(
+    feature = "pubsub-priority",
+    feature = "pubsub-congestion-control",
+    feature = "pubsub-express"
+))]
+#[test]
+fn publish_options_typed_qos_knobs_merge_independently() {
+    use wz_session_core::qos::{CongestionControl, Priority};
+
+    // A lone congestion knob: nodrop set, and the sub-fields the caller did NOT
+    // touch come from the wire DEFAULT (Data priority, no express) — NOT from a
+    // zeroed byte, which would silently demote the publish to Control priority.
+    let blocked = PublishOptions::put().with_congestion_control(CongestionControl::Block);
+    let q = blocked.qos.unwrap();
+    assert_eq!(q.congestion(), CongestionControl::Block);
+    assert_eq!(
+        q.priority(),
+        Priority::DEFAULT,
+        "untouched priority = DEFAULT"
+    );
+    assert!(!q.is_express(), "untouched express = DEFAULT (clear)");
+    assert_eq!(q.raw, QosLevel::DEFAULT.raw | (1 << 3));
+
+    // A lone express knob, same contract.
+    let express = PublishOptions::put().with_express(true);
+    let q = express.qos.unwrap();
+    assert!(q.is_express());
+    assert_eq!(q.priority(), Priority::DEFAULT);
+    assert_eq!(q.congestion(), CongestionControl::Drop);
+
+    // All three chained: each lands in its own sub-field, none clobbers another,
+    // and the result equals the one-shot from_parts packing.
+    let all = PublishOptions::put()
+        .with_priority(Priority::RealTime)
+        .with_congestion_control(CongestionControl::Block)
+        .with_express(true);
+    let q = all.qos.unwrap();
+    assert_eq!(
+        q,
+        QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true),
+        "chained typed knobs == the one-shot packed byte"
+    );
+    // The conduit band still derives from the same single source.
+    assert_eq!(all.priority_band(), Priority::RealTime);
+
+    // Order independence: the knobs commute.
+    let reordered = PublishOptions::put()
+        .with_express(true)
+        .with_congestion_control(CongestionControl::Block)
+        .with_priority(Priority::RealTime);
+    assert_eq!(reordered.qos.unwrap(), q);
+}
+
 /// R311y-item3 — the OBSERVABLE half of the unification: the same `qos` byte the
 /// conduit band derives from (via `priority_band`) also surfaces on the loopback
 /// `Sample.priority`. This `SessionLocal` publish exercises ONLY the loopback leg

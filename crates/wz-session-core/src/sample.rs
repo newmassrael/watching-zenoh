@@ -223,11 +223,63 @@ impl QosLevel {
         Self { raw }
     }
 
+    /// R311y255 — the `_z_n_qos_create` bit positions, named ONCE
+    /// (`vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h`
+    /// 84-89). Every packer, unpacker and per-field merge setter below is
+    /// expressed in terms of these three, so the layout is stated in exactly one
+    /// place. Before y255 the masks were also open-coded at the `PublishOptions`
+    /// setter (`& !0x07`), which quietly falsified [`Self::from_parts`]'s own
+    /// "the layout lives once" claim; that setter now delegates here.
+    const PRIORITY_MASK: u8 = 0x07; // bits 0-2
+    const NODROP_BIT: u8 = 1 << 3; // bit 3 — set when congestion == Block
+    const EXPRESS_BIT: u8 = 1 << 4; // bit 4
+
     /// Express flag (zenoh-pico `_Z_N_QOS_IS_EXPRESS_FLAG = 1 << 4`,
     /// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h`
     /// 82).
-    pub fn is_express(&self) -> bool {
-        (self.raw & (1 << 4)) != 0
+    pub const fn is_express(&self) -> bool {
+        (self.raw & Self::EXPRESS_BIT) != 0
+    }
+
+    /// R311y255 — decode the congestion-control sub-field (the `nodrop` bit 3)
+    /// into the typed [`crate::qos::CongestionControl`]. The unpack twin of
+    /// [`Self::with_congestion`], and the congestion sibling of
+    /// [`Self::priority`] / [`Self::is_express`] — the three unpackers now cover
+    /// all three packed sub-fields.
+    pub const fn congestion(&self) -> crate::qos::CongestionControl {
+        if (self.raw & Self::NODROP_BIT) != 0 {
+            crate::qos::CongestionControl::Block
+        } else {
+            crate::qos::CongestionControl::Drop
+        }
+    }
+
+    /// R311y255 — merge a typed [`crate::qos::Priority`] into the priority
+    /// sub-field (low 3 bits), PRESERVING the congestion + express bits. The
+    /// per-field merge setter the `PublishOptions` / `Sample` QoS knobs delegate
+    /// to, so no consumer re-derives the mask.
+    pub const fn with_priority(self, priority: crate::qos::Priority) -> Self {
+        Self {
+            raw: (self.raw & !Self::PRIORITY_MASK) | priority.wire_byte(),
+        }
+    }
+
+    /// R311y255 — merge a typed [`crate::qos::CongestionControl`] into the
+    /// `nodrop` bit (3), PRESERVING the priority + express bits. `wire_bit()` is
+    /// 0 or 1, so multiplying by [`Self::NODROP_BIT`] lands it in position
+    /// without re-stating the shift.
+    pub const fn with_congestion(self, congestion: crate::qos::CongestionControl) -> Self {
+        Self {
+            raw: (self.raw & !Self::NODROP_BIT) | (congestion.wire_bit() * Self::NODROP_BIT),
+        }
+    }
+
+    /// R311y255 — merge the express flag into bit 4, PRESERVING the priority +
+    /// congestion bits. The pack twin of [`Self::is_express`].
+    pub const fn with_express(self, express: bool) -> Self {
+        Self {
+            raw: (self.raw & !Self::EXPRESS_BIT) | ((express as u8) * Self::EXPRESS_BIT),
+        }
     }
 
     /// R311y226 — pack a typed `(priority, congestion, express)` triple
@@ -241,14 +293,19 @@ impl QosLevel {
     /// [`crate::request_build::RequestQueryBuilder::request_qos_typed`]
     /// delegates here so the layout lives once (no drift between the
     /// Push-side and Request-side QoS setters).
+    ///
+    /// R311y255 — now COMPOSED from the three per-field merge setters above
+    /// rather than restating the shifts, so "the layout lives once" is
+    /// structurally true rather than a comment asking to be believed.
     pub const fn from_parts(
         priority: crate::qos::Priority,
         congestion: crate::qos::CongestionControl,
         express: bool,
     ) -> Self {
-        Self {
-            raw: priority.wire_byte() | (congestion.wire_bit() << 3) | ((express as u8) << 4),
-        }
+        Self { raw: 0 }
+            .with_priority(priority)
+            .with_congestion(congestion)
+            .with_express(express)
     }
 
     /// R311y226 — the wire-DEFAULT QoS byte: priority `Data` (5),
@@ -273,7 +330,7 @@ impl QosLevel {
     /// instead collapses `Control` to `Data` at its app-`Priority`
     /// boundary — a NAMED divergence, wz mirrors pico here).
     pub const fn priority(&self) -> crate::qos::Priority {
-        crate::qos::Priority::from_wire(self.raw & 0x07)
+        crate::qos::Priority::from_wire(self.raw & Self::PRIORITY_MASK)
     }
 }
 
@@ -887,6 +944,75 @@ mod tests {
         // QosLevel::default() (raw 0 = Control) — the encoder gates on this.
         assert_eq!(QosLevel::DEFAULT.raw, 0x05);
         assert_ne!(QosLevel::DEFAULT, QosLevel::default());
+    }
+
+    /// R311y255 — the three per-field merge setters each touch ONLY their own
+    /// sub-field and preserve the other two. This is the property the
+    /// `PublishOptions` QoS knobs rely on: a caller may chain
+    /// `.with_priority(..).with_congestion_control(..).with_express(..)` in any
+    /// order and get the same byte, without one knob clobbering another.
+    #[test]
+    fn qos_level_per_field_setters_preserve_sibling_bits() {
+        use crate::qos::{CongestionControl, Priority};
+
+        // Start from a byte with ALL THREE sub-fields non-default:
+        // RealTime(1) | nodrop(bit3) | express(bit4) = 0b0001_1001.
+        let full = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
+        assert_eq!(full.raw, 0b0001_1001);
+
+        // Re-setting priority must not disturb nodrop / express.
+        let p = full.with_priority(Priority::Background); // 7
+        assert_eq!(p.raw, 0b0001_1111, "priority merged, nodrop+express kept");
+        assert_eq!(p.priority(), Priority::Background);
+        assert_eq!(p.congestion(), CongestionControl::Block);
+        assert!(p.is_express());
+
+        // Re-setting congestion must not disturb priority / express.
+        let c = full.with_congestion(CongestionControl::Drop);
+        assert_eq!(c.raw, 0b0001_0001, "nodrop cleared, priority+express kept");
+        assert_eq!(c.priority(), Priority::RealTime);
+        assert_eq!(c.congestion(), CongestionControl::Drop);
+        assert!(c.is_express());
+
+        // Re-setting express must not disturb priority / congestion.
+        let e = full.with_express(false);
+        assert_eq!(e.raw, 0b0000_1001, "express cleared, priority+nodrop kept");
+        assert_eq!(e.priority(), Priority::RealTime);
+        assert_eq!(e.congestion(), CongestionControl::Block);
+        assert!(!e.is_express());
+
+        // Chain order is irrelevant — the setters commute, which is what lets the
+        // PublishOptions knobs be applied independently.
+        let a = QosLevel::DEFAULT
+            .with_priority(Priority::RealTime)
+            .with_congestion(CongestionControl::Block)
+            .with_express(true);
+        let b = QosLevel::DEFAULT
+            .with_express(true)
+            .with_congestion(CongestionControl::Block)
+            .with_priority(Priority::RealTime);
+        assert_eq!(a.raw, b.raw);
+        assert_eq!(a, full, "composing all three reproduces from_parts");
+    }
+
+    /// R311y255 — `congestion()` is the unpack twin of `with_congestion` and
+    /// completes the trio with `priority()` / `is_express()`; a set express bit
+    /// must not be misread as nodrop (and vice versa).
+    #[test]
+    fn qos_level_congestion_unpacks_only_the_nodrop_bit() {
+        use crate::qos::CongestionControl;
+        // express set, nodrop clear -> Drop (bit 4 must not leak into bit 3).
+        assert_eq!(
+            QosLevel::from_raw(0b0001_0000).congestion(),
+            CongestionControl::Drop
+        );
+        // nodrop set -> Block.
+        assert_eq!(
+            QosLevel::from_raw(0b0000_1000).congestion(),
+            CongestionControl::Block
+        );
+        // The wire DEFAULT byte is Drop.
+        assert_eq!(QosLevel::DEFAULT.congestion(), CongestionControl::Drop);
     }
 
     #[test]

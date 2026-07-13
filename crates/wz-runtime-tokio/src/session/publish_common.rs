@@ -32,6 +32,12 @@ use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo,
 // priority sub-field. Ungated import: the always-compiled `priority_band`
 // accessor below reads it on every profile (the `with_priority` setter is
 // `pubsub-priority`-gated, but the derived-band read is not).
+// R311y255 — `CongestionControl` is named ONLY by the
+// `pubsub-congestion-control`-gated `PublishOptions::with_congestion_control`
+// signature, so the import follows that gate. (`Priority` below stays ungated:
+// the always-compiled `priority_band()` names it regardless of feature.)
+#[cfg(feature = "pubsub-congestion-control")]
+use wz_session_core::qos::CongestionControl;
 use wz_session_core::qos::Priority;
 // `build_loopback_sample` is the sole `Sample` consumer here, so the import
 // follows its `pubsub-allow-loop` gate (the loopback leg).
@@ -278,16 +284,67 @@ impl PublishOptions {
     /// it the priority sub-field cannot ride the wire, so a transport-qos-only
     /// build drives the conduit band via
     /// [`Session::publish_qos`](super::Session::publish_qos) instead.
+    ///
+    /// R311y255 — the bit surgery moved to [`QosLevel::with_priority`]: this
+    /// setter open-coded the `& !0x07` priority mask, which quietly falsified
+    /// [`QosLevel::from_parts`]'s "the layout lives once" claim. It now merges
+    /// through the SSOT, and its congestion / express siblings below do the same.
     #[cfg(feature = "pubsub-priority")]
     pub fn with_priority(mut self, p: Priority) -> Self {
-        // Preserve the congestion (bit 3) + express (bit 4) bits from any prior
-        // `with_qos`; when unset, base off the wire-DEFAULT byte
-        // (`QosLevel::DEFAULT` = 0x05 = Data / Drop / no-express) so the
-        // non-priority bits match a DEFAULT publish. `& !0x07` clears the low 3
-        // priority bits before OR-ing the new band's `wire_byte()`.
-        let base = self.qos.map(|q| q.raw).unwrap_or(QosLevel::DEFAULT.raw);
-        self.qos = Some(QosLevel::from_raw((base & !0x07) | p.wire_byte()));
+        self.qos = Some(self.qos_base().with_priority(p));
         self
+    }
+
+    /// R311y255 — set the typed [`CongestionControl`] for the publish, merging it
+    /// into the `nodrop` bit (3) of the packed QoS byte and PRESERVING any
+    /// priority / express bits a prior setter attached. The congestion sibling of
+    /// [`with_priority`](Self::with_priority): both ride the SAME single outer-ext
+    /// byte, and congestion is already foreign-proven end-to-end — R311y242
+    /// (`wz_qos_congestion_express_to_pico_zsub`) has a real zenoh-pico
+    /// subscriber decode it off the wire.
+    ///
+    /// Before y255 this knob existed on the WIRE and was proven, but had no typed
+    /// entry point: a caller wanting `Block` had to hand-assemble the whole byte
+    /// via `with_qos(QosLevel::from_parts(..))`, which forces them to restate the
+    /// priority and express they did not want to change. That asymmetry (a typed
+    /// `with_priority` but no typed congestion / express) is what this closes.
+    ///
+    /// Gated on `pubsub-congestion-control`, mirroring `with_priority`'s gate on
+    /// `pubsub-priority` — without it the bit cannot ride the wire.
+    #[cfg(feature = "pubsub-congestion-control")]
+    pub fn with_congestion_control(mut self, c: CongestionControl) -> Self {
+        self.qos = Some(self.qos_base().with_congestion(c));
+        self
+    }
+
+    /// R311y255 — set the express flag for the publish, merging it into bit 4 of
+    /// the packed QoS byte and PRESERVING any priority / congestion bits. The
+    /// express sibling of [`with_priority`](Self::with_priority) /
+    /// [`with_congestion_control`](Self::with_congestion_control); also
+    /// foreign-proven by R311y242.
+    ///
+    /// Gated on `pubsub-express`, mirroring the sibling gates.
+    #[cfg(feature = "pubsub-express")]
+    pub fn with_express(mut self, express: bool) -> Self {
+        self.qos = Some(self.qos_base().with_express(express));
+        self
+    }
+
+    /// R311y255 — the base byte the three per-field QoS setters merge into: the
+    /// QoS already attached by a prior setter, else the wire-DEFAULT
+    /// ([`QosLevel::DEFAULT`] = 0x05 = Data / Drop / no-express) so the sub-fields
+    /// the caller did NOT set match a DEFAULT publish rather than a zeroed
+    /// `Control`-priority byte (`QosLevel::default()`, raw 0 — the trap
+    /// R311y226 named).
+    ///
+    /// Gated on the union of the three, matching the setters that call it.
+    #[cfg(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    ))]
+    fn qos_base(&self) -> QosLevel {
+        self.qos.unwrap_or(QosLevel::DEFAULT)
     }
 
     /// R311y-item3 — the transport frame conduit band derived from the SINGLE

@@ -11,10 +11,15 @@
 //! `build_push_literal_with_meta` -> `build_msg_put_with_meta`, which sets the
 //! `MsgPut.timestamp` field (`gated_timestamp_field`, gated `pubsub-timestamp`)
 //! AND the header T-flag `0x20` (`push_build.rs`), so a patched peer decodes it
-//! off `header & 0x20`. The field-doc comment in `publish_common.rs`
-//! ("current wire branch DROPS this field") is STALE — this test (and the
-//! wz<->wz `metadata_wire_e2e` backstop) prove the timestamp propagates, the
-//! same stale-comment story as the R311y207 encoding round.
+//! off `header & 0x20`. This test (and the wz<->wz `metadata_wire_e2e` backstop)
+//! prove the timestamp propagates.
+//!
+//! R311y255 — this note used to say the `publish_common.rs` field-doc comment
+//! ("current wire branch DROPS this field") was STALE. That comment has since
+//! been corrected (the `PublishOptions::timestamp` doc now cites this very test),
+//! so the note pointed at a quote that no longer exists — a stale claim ABOUT a
+//! stale claim. Dropped; the propagation fact it was guarding is stated directly
+//! above.
 //!
 //! ## Witness
 //!
