@@ -5245,6 +5245,21 @@ layer_e6e_adminspace_plugins() {
     (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-plugins-handlers,storage-backend --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_adminspace_plugins -- --ignored --quiet) || return 1
+    # R311y271 — the CROSS-IMPL half, on the SAME binary this lane already builds:
+    # pico's z_get reads the `plugins/**` leg and decodes wz's compiled-subsystem
+    # record. PARTIAL and graded so — the atom's other two surfaces
+    # (`status/plugins/**` + the node record's `plugins` field) report STARTED
+    # plugins, and nothing starts storage_manager here, so they are faithfully empty.
+    #
+    # SKIPs on the FOREIGN binary only (the pico CLI a machine may legitimately lack),
+    # never on a wz one — the R311y265 rule; WZ_PICO_REQUIRE escalates that skip to a
+    # FAIL wherever the job provisions pico.
+    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+        _pico_cli_unavailable "Layer E6e (pico adminspace plugins z_get)" || return 1
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_adminspace_plugins_to_pico_zget -- --ignored --quiet) || return 1
 }
 
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───

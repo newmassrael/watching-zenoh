@@ -519,6 +519,16 @@ jobs:
         # landing local-only.
         run: bash scripts/run-ci.sh --layer E6b
 
+      - name: Layer E6e — adminspace plugins registry (wz<->wz + vs zenoh-pico)
+        # R311y271 wired this lane here for the reason E6b's note above predicted:
+        # its pico z_get proof of `adminspace-plugins-handlers` would otherwise be
+        # LOCAL-ONLY. Layer A4 reports "proven by tests hosted CI actually runs" as a
+        # separate population precisely so a proof that never executes cannot pad the
+        # number that gates merges — and before this step, adding the proof moved the
+        # all-lanes count while leaving the executed count flat. That gap is the
+        # signal; this closes it.
+        run: bash scripts/run-ci.sh --layer E6e
+
       - name: Layer E8 — router-hat data plane vs a zenoh-pico subscriber
         run: bash scripts/run-ci.sh --layer E8
 

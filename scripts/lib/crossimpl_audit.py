@@ -91,11 +91,36 @@ KIND_CLASS = corpus.KIND_CLASS
 # it is opt-in, so it runs on NO default path at all, not even the pre-push full run --
 # see opt_in_lanes(), and the PROVEN-WITH-NO-HOSTED-CI-WITNESS roll-up that names the
 # atoms resting on it.
-CLASS_LANES = {
-    "codec": ["C1"],          # linked pico C; NOT #[ignore]d -- runs on every push
-    "pico": ["E", "E2", "E6", "E7", "E8", "M"],
-    "zenohd": ["Z"],
-}
+# R311y271 — CLASS_LANES WAS HARDCODED, AND IT HAD ALREADY ROTTED. The comment above
+# claimed "R311y264 wired E2/E6/E6b/E8/Z in, and the printed line moved with it without an
+# edit here". It did not: the disclosure intersects this map with the hosted set, so a lane
+# in hosted CI but ABSENT from the map is invisible to it -- and E6b was exactly that,
+# printing "hosted CI runs E/E2/E6/E8" while E6b's pico proofs ran there all along. The
+# roll-up COUNTS were right (ci_executes derives them end to end); only the sentence
+# describing them lied, which is the failure this axis exists to catch, one level up.
+#
+# So it is derived now, from the same two sources ci_executes uses: the corpus (which class
+# a test proves) and run-ci.sh's lane -> --test target map. Wiring a lane into the workflow
+# now moves the disclosure as well as the number, with no edit here -- the property the old
+# comment asserted and did not have.
+def class_lanes(corpus_files) -> dict[str, list[str]]:
+    """Which lanes carry each proof class. Derived; never hardcoded."""
+    out: dict[str, set[str]] = {}
+    for cf in corpus_files:
+        lanes: set[str] = set()
+        # NOT #[ignore]d -> `cargo test --workspace` (Layer C1) runs it every push.
+        if any(not t.has_ignore for t in cf.tests):
+            lanes.add("C1")
+        # A dedicated lane that names this file as a --test target.
+        for lane, targets in LANE_TARGETS.items():
+            if cf.path.stem in targets:
+                lanes.add(lane)
+        # Layer E's --ignored catch-all, unless the fn name matches one of its --skips.
+        if any(t.has_ignore and not any(s in t.name for s in E_SKIPS) for t in cf.tests):
+            lanes.add("E")
+        for cls in cf.classes:
+            out.setdefault(cls, set()).update(lanes)
+    return {cls: sorted(v) for cls, v in out.items()}
 
 
 def opt_in_lanes() -> set[str]:
@@ -390,8 +415,9 @@ def main() -> int:
 
     hosted = hosted_ci_layers()
     opt_in = opt_in_lanes()
-    for cls in sorted(CLASS_LANES):
-        lanes = CLASS_LANES[cls]
+    lanes_by_class = class_lanes(corpus_files)
+    for cls in sorted(lanes_by_class):
+        lanes = lanes_by_class[cls]
         run_here = [x for x in lanes if x in hosted]
         local_only = [x for x in lanes if x not in hosted and x not in opt_in]
         nowhere = [x for x in lanes if x not in hosted and x in opt_in]
