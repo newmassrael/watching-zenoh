@@ -73,8 +73,7 @@ wz-session-core = { path = "../wz-session-core", features = [
     # reply_keyed_sourced) for a pico z_get to decode, so it needs the
     # send-side stamp compiled in. Not an inventory atom (A3-neutral);
     # only forwarded elsewhere by ext-pubsub-advanced-recovery.
-    "reply-source-info",
-] }
+    "reply-source-info", "keyexpr-includes"] }
 zenoh-pico-sys = { path = "../zenoh-pico-sys" }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 # R116b — `hal_timer_routing.rs` declares an in-test TimerProbePolicy

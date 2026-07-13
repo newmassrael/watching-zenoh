@@ -326,6 +326,10 @@ fn main() {
         // the `_z_keyexpr_t` / `_z_string_t` composite types in the
         // bindgen allowlist.
         .allowlist_function("_z_keyexpr_forward_intersects")
+        // R311y262 — the directional INCLUDES twin (same template, same
+        // signature); `keyexpr-includes` is an ACTIVE atom whose cfg-gated
+        // matcher had no cross-impl witness.
+        .allowlist_function("_z_keyexpr_forward_includes")
         // R299 — keyexpr canonicalization mirror. Cross-validates
         // wz-runtime-tokio's `keyexpr_canon::canonize_keyexpr` (R221
         // structural transform) against zenoh-pico's

@@ -51,6 +51,13 @@ use wz_integration_tests::common::{
 };
 
 // wz-proves: declare-keyexpr wz->pico
+// wz-proves: keyexpr-mapping wz->pico partial
+//   partial: pico resolving wz's mapping id back to the literal proves wz's
+//   outbound alias table is POPULATED and resolvable (publish_aliased_auto
+//   errors out, emitting nothing, on a table miss). Its CONTENT is not
+//   independently witnessed here -- a table resolving 7 -> "wrong/key" would
+//   surface as a keyexpr mismatch on pico's side, but nothing asserts the
+//   table directly.
 // wz-proves: pubsub-put wz->pico
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]

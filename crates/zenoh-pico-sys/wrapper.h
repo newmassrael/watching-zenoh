@@ -96,6 +96,24 @@ z_result_t _z_hello_encode(_z_wbuf_t *wbf, uint8_t header, const _z_s_msg_hello_
 #include <stdbool.h>
 bool _z_keyexpr_forward_intersects(const char *lbegin, const char *lend, const char *rbegin, const char *rend, bool can_have_verbatim);
 
+/* R311y262 — keyexpr INCLUSION matcher, the directional twin of the R297
+ * intersects worker.
+ *
+ * `keyexpr_match_template.h` is instantiated TWICE in session/keyexpr.c
+ * (lines 565-568: once with _ZP_KE_MATCH_TEMPLATE_INTERSECTS=1, once with
+ * =0), so the same macro that emits `_z_keyexpr_forward_intersects` also
+ * emits `_z_keyexpr_forward_includes` with identical linkage and an
+ * identical signature. It is the worker `_z_keyexpr_includes`
+ * (session/keyexpr.h:65) dispatches into.
+ *
+ * INCLUDES is DIRECTIONAL where intersects is symmetric: `a includes b`
+ * asks whether every key `b` matches is also matched by `a`. That
+ * asymmetry is exactly why it needs its own cross-impl differential --
+ * an implementation can agree with pico on intersects and still disagree
+ * on which side subsumes the other.
+ */
+bool _z_keyexpr_forward_includes(const char *lbegin, const char *lend, const char *rbegin, const char *rend, bool can_have_verbatim);
+
 /* R299 — keyexpr canonicalization mirror.
  *
  * `_z_keyexpr_canonize(char *start, size_t *len)` mutates `start`

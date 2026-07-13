@@ -50,6 +50,7 @@ use wz_integration_tests::common::{
 
 // wz-proves: pubsub-put pico->wz
 // wz-proves: declare-keyexpr pico->wz partial
+// wz-proves: keyexpr-mapping pico->wz partial
 // wz-proves: session-unicast-accept pico->wz
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
