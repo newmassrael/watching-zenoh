@@ -399,6 +399,62 @@ mod admin_write_permit_tests {
     }
 }
 
+/// R311y276 (§5.23 `adminspace-read`) — resolve the effective admin GET permit
+/// from the embedder's [`adminspace::AdminSpacePermissions`]. The read-side mirror
+/// of [`admin_write_permit`]: under the `adminspace-read` cfg it returns
+/// `permissions.read` (zenoh `permissions.read`, `adminspace.rs:457-467` —
+/// `read=false` answers nothing, the querier gets only the terminating Final);
+/// with the gate compiled out it returns `true` (the gate elided — the permissive
+/// zenoh `PermissionsConf` read default). A GET host feeds the resolved bool to
+/// [`adminspace::AdminAnswerCtx::read`], which [`adminspace::answer_admin_query`]
+/// consults at its top (`if !ctx.read { return }`) — "the gate is the value, not a
+/// cfg" once past this resolver, exactly as the write side does. This is a second
+/// `adminspace-read` cfg site (the first is `Session::declare_adminspace_with_permissions`),
+/// so a forwarder-hosted admin GET (the `--config-queryable` demo host) gates real
+/// library code rather than hardcoding `read: true`.
+#[cfg(feature = "adminspace-core")]
+pub fn admin_read_permit(permissions: &adminspace::AdminSpacePermissions) -> bool {
+    #[cfg(feature = "adminspace-read")]
+    {
+        permissions.read
+    }
+    #[cfg(not(feature = "adminspace-read"))]
+    {
+        let _ = permissions;
+        true
+    }
+}
+
+#[cfg(all(test, feature = "adminspace-core"))]
+mod admin_read_permit_tests {
+    use super::admin_read_permit;
+    use super::adminspace::AdminSpacePermissions;
+
+    #[test]
+    fn permit_resolves_per_gate() {
+        let granted = AdminSpacePermissions {
+            read: true,
+            write: false,
+        };
+        let denied = AdminSpacePermissions {
+            read: false,
+            write: false,
+        };
+        #[cfg(feature = "adminspace-read")]
+        {
+            // Gated: the resolver reads permissions.read (--no-admin-read -> false).
+            assert!(admin_read_permit(&granted));
+            assert!(!admin_read_permit(&denied));
+        }
+        #[cfg(not(feature = "adminspace-read"))]
+        {
+            // Gate elided: the value is ignored, always permit (record served).
+            assert!(admin_read_permit(&granted));
+            assert!(admin_read_permit(&denied));
+        }
+    }
+}
+
 /// The zenoh-hex zid rendering (`zid_to_zenoh_hex`) — re-exported so a consumer
 /// builds admin keyexprs (`@/<zid>/<whatami>/...`) without depending on
 /// `wz-session-core` directly.

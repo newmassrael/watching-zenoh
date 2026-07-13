@@ -224,6 +224,13 @@ adminspace-write = ["wz/adminspace-write"]
 # (its wz_peer_adminspace_to_pico_zget asserts the metrics leg is ABSENT), so the
 # metrics witness rides its own lane (Layer E6f) with its own demo build.
 adminspace-metrics = ["wz/adminspace-metrics"]
+# R311y276 (§5.23 adminspace-read) — the permissions.read GET gate on the
+# --config-queryable host. `--features routing-peer,adminspace-read` compiles the
+# gate; `--no-admin-read` at runtime then makes the admin queryable answer NOTHING
+# (the querier gets only the terminating Final). The gate resolves through the
+# library admin_read_permit (a real cfg(feature="adminspace-read") site), the
+# read-side mirror of adminspace-write. Layer E6g builds+drives the gate-ON binary.
+adminspace-read = ["wz/adminspace-read"]
 # R311y203 (§5.23 adminspace-introspection-handlers) — compiles the demo host's
 # per-app-tick introspection re-snapshot (forwarder.subscriptions/queryables
 # -> the shared AdminDeclaration buffer the --config-queryable handler replies from).

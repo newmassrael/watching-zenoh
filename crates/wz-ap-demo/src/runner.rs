@@ -1323,6 +1323,14 @@ pub(crate) struct PeerOpts {
     /// this; with the gate compiled out every PUT applies. Orthogonal to
     /// [`config_writable`](Self::config_writable) — host vs permit.
     pub config_write_permit: bool,
+    /// R311y276 (§5.23 `adminspace-read`) — DENY the `permissions.read` GET gate on
+    /// the [`config_queryable`](Self::config_queryable) host (`--no-admin-read`).
+    /// Under the `adminspace-read` cfg a denied host answers nothing (only the
+    /// terminating Final); the value is resolved through
+    /// [`admin_read_permit`](wz::runtime_tokio::admin_read_permit), so with the gate
+    /// compiled out it is a no-op (permissive read). The read-side mirror of
+    /// [`config_write_permit`](Self::config_write_permit).
+    pub no_admin_read: bool,
     /// R311y48 — originate a Put to this key each app tick carrying
     /// [`put_payload`](Self::put_payload) (the wire driver for a config-write
     /// PUT). Inert unless both are set.
@@ -1365,6 +1373,7 @@ pub(crate) async fn run_peer(
     let config_queryable = opts.config_queryable;
     let config_writable = opts.config_writable;
     let config_write_permit = opts.config_write_permit;
+    let no_admin_read = opts.no_admin_read;
     let put_key = opts.put_key.as_deref();
     let put_payload = opts.put_payload.as_deref();
     #[cfg(feature = "transport-multilink")]
@@ -1670,6 +1679,20 @@ pub(crate) async fn run_peer(
         // node's own declared subs/qabls from it per query (empty when the feature is
         // off — never refreshed — so the reply legs stay inert).
         let introspection_h = introspection.clone();
+        // R311y276 (§5.23 adminspace-read) — resolve the GET permit through the
+        // library admin_read_permit cfg site (the read-side mirror of the
+        // config-write host's admin_write_permit): --no-admin-read ->
+        // permissions.read=false -> under the adminspace-read cfg the handler answers
+        // nothing (answer_admin_query returns on !ctx.read, only the Final unwinds);
+        // with the gate compiled out it stays permissive (value ignored). Computed
+        // ONCE and captured by the per-GET closure.
+        let admin_read = wz::runtime_tokio::admin_read_permit(
+            &wz::runtime_tokio::adminspace::AdminSpacePermissions {
+                read: !no_admin_read,
+                ..Default::default()
+            },
+        );
+        log::info!("wz-ap-demo peer: adminspace read permit = {admin_read}");
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             let config_json = shared.borrow().to_admin_json();
             let ctx = AdminAnswerCtx {
@@ -1677,7 +1700,7 @@ pub(crate) async fn run_peer(
                 whatami: whatami_str,
                 version: &version,
                 locators: &locators,
-                read: true,
+                read: admin_read,
             };
             // R311y237 — the node's compiled-in plugin registry (wz-native subsystem
             // set; e.g. storage_manager under `storage-backend`). Empty without the

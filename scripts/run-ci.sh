@@ -5326,6 +5326,32 @@ layer_e6f_adminspace_metrics() {
         --test wz_peer_adminspace_metrics_to_pico_zget -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E6g — §5.23 adminspace-read GET-gate E2E (vs zenoh-pico) ─────────────
+#
+# The `permissions.read` GET gate (R311y36) driven from a FOREIGN client for the
+# first time. Needs its OWN demo binary built with
+# `--features routing-peer,adminspace-read` and run `--no-admin-read`: the admin
+# queryable then answers NOTHING and a pico z_get receives only the terminating
+# Final. The gate resolves through the library admin_read_permit (a
+# cfg(feature="adminspace-read") site, the read-side mirror of adminspace-write).
+# Distinct from E6b's binary (whose y270 test needs the record SERVED), so its own
+# lane. wz-unit-proven by admin_read_permit_tests + the y270 positive complement
+# (record served without the flag); this lane supplies the denied-path foreign
+# witness. The `wz_peer_` fn prefix keeps the default Layer E sweep's `--skip
+# wz_peer` from double-running it on an arbitrary-feature binary.
+#
+# SKIPs on the FOREIGN binary only (the pico CLI a machine may legitimately lack),
+# never on a wz one — the R311y265 rule; WZ_PICO_REQUIRE escalates that SKIP to a FAIL.
+layer_e6g_adminspace_read() {
+    (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-read --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+        _pico_cli_unavailable "Layer E6g (pico adminspace read-deny z_get)" || return 1
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_adminspace_read_deny_to_pico_zget -- --ignored --quiet) || return 1
+}
+
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
 #
 # The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
@@ -5643,6 +5669,7 @@ run_layer E6c layer_e6c_peer_multilink || overall=1
 run_layer E6d layer_e6d_peer_multilink_qos || overall=1
 run_layer E6e layer_e6e_adminspace_plugins || overall=1
 run_layer E6f layer_e6f_adminspace_metrics || overall=1
+run_layer E6g layer_e6g_adminspace_read || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1

@@ -412,7 +412,7 @@ jobs:
   # therefore stay local-only until that flakiness is root-caused, and A4's
   # EXECUTION line keeps saying so.
   interop:
-    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E7 + E8 + Z)
+    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E6g + E7 + E8 + Z)
     runs-on: ubuntu-22.04
     # A cold cache must build: the zenoh-pico CMake tree, the whole zenoh workspace in
     # release (zenohd AND the storage-manager plugin), four differently-featured
@@ -536,6 +536,13 @@ jobs:
         # demo binary (built WITH adminspace-metrics) is distinct from E6b's (which
         # asserts the metrics leg absent), so it cannot share that lane.
         run: bash scripts/run-ci.sh --layer E6f
+
+      - name: Layer E6g — adminspace read-gate deny vs zenoh-pico
+        # R311y276 — same rationale as E6e/E6f: the pico witness of the
+        # `adminspace-read` GET-deny gate would otherwise be LOCAL-ONLY. Its own demo
+        # binary (built WITH adminspace-read, run --no-admin-read) is distinct from
+        # E6b's (which needs the record SERVED), so it cannot share that lane.
+        run: bash scripts/run-ci.sh --layer E6g
 
       - name: Layer E7 — router-hat mesh (wz<->wz) + router adminspace vs zenoh-pico
         # R311y273 added the pico router-adminspace witness to this lane and wired the

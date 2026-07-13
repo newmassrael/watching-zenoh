@@ -195,6 +195,14 @@ fn main() -> ExitCode {
             // flag; without it the write is DENIED. Off by default. Orthogonal to
             // `--config-writable` (which HOSTS the write subscriber): host vs permit.
             let config_write_permit = rest.iter().any(|a| a == "--config-write-permit");
+            // R311y276 (§5.23 adminspace-read) — `--no-admin-read` DENIES the
+            // permissions.read GET gate on the `--config-queryable` host: under the
+            // `adminspace-read` cfg the admin queryable then answers nothing (the
+            // querier gets only the terminating Final). Default permissive (read:true,
+            // zenoh PermissionsConf default). Off by default; inert without
+            // `--config-queryable` (nothing hosts the admin GET) and, with the gate
+            // compiled out, a no-op (admin_read_permit ignores the value).
+            let no_admin_read = rest.iter().any(|a| a == "--no-admin-read");
             // R311y48 — `--put-key <keyexpr> --put-payload <text>`: originate a Put
             // carrying a SPECIFIC payload each app tick (vs `--publish`, which sends
             // a fixed marker). The wire driver a remote node uses to PUT another
@@ -268,6 +276,7 @@ fn main() -> ExitCode {
                     config_queryable,
                     config_writable,
                     config_write_permit,
+                    no_admin_read,
                     put_key,
                     put_payload,
                     #[cfg(feature = "transport-multilink")]
