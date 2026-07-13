@@ -35,8 +35,9 @@
 //! `route_successor_entry_key`, and the RouterForwarder self-dispatch host in
 //! wz-ap-demo/src/runner.rs:2482 all gate on it). The E7 binary is built WITH the
 //! feature for this lane; without it the router hosts no `@/<zid>/router/**`
-//! queryable at all, so pico's GET returns nothing and the test fails. That
-//! counterfactual is EXECUTED, not asserted (R311y273).
+//! queryable at all — it never logs `adminspace router legs hosted at`, so the
+//! test fails at the admin-root scrape (the barrier) before pico is even spawned.
+//! That counterfactual is EXECUTED, not asserted (R311y273).
 //!
 //! ## Which binary this rides
 //!

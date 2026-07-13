@@ -4397,8 +4397,14 @@ layer_q_qemu_mcu_e2e() {
         fi
 
         if ! grep -q "^${target}$" <<< "$installed"; then
-            echo "  Q.${machine} SKIP (rustup target ${target} absent;" \
-                 "rustup target add ${target})"
+            if [[ -n "${WZ_Q_REQUIRE:-}" ]]; then
+                echo "  Q.${machine} FAIL — required (WZ_Q_REQUIRE set) but rustup" \
+                     "target ${target} absent (provisioning regression)" >&2
+                fail=1
+            else
+                echo "  Q.${machine} SKIP (rustup target ${target} absent;" \
+                     "rustup target add ${target})"
+            fi
             continue
         fi
 
@@ -4611,7 +4617,13 @@ layer_q_qemu_mcu_e2e() {
     local mctarget
     for mctarget in thumbv7m-none-eabi thumbv7em-none-eabihf; do
         if ! grep -q "^${mctarget}$" <<< "$installed"; then
-            echo "  Q.5.${mctarget} SKIP (rustup target absent)"
+            if [[ -n "${WZ_Q_REQUIRE:-}" ]]; then
+                echo "  Q.5.${mctarget} FAIL — required (WZ_Q_REQUIRE set) but" \
+                     "rustup target absent (provisioning regression)" >&2
+                fail=1
+            else
+                echo "  Q.5.${mctarget} SKIP (rustup target absent)"
+            fi
             continue
         fi
         if WZ_LWIP_PORT="$lwip_port" cargo build --release \
@@ -4710,6 +4722,18 @@ layer_q_qemu_mcu_e2e() {
     done
 
     if [[ $any_built -eq 0 && $probe_built -eq 0 ]]; then
+        # R311y274 — the nothing-built backstop. WZ_Q_REQUIRE (set on the hosted
+        # mcu job, which PROVISIONS the targets) turns "measured zero bytes" into a
+        # FAIL: the footprint gate is the whole subject of R311y267, so it must not
+        # be the one lane that reports green having gated nothing. The per-sub-lane
+        # target-absent escalations above already FAIL individually under
+        # WZ_Q_REQUIRE; this catches the aggregate case a future SKIP path could
+        # reintroduce. Off (a host-only dev machine) it stays a soft SKIP.
+        if [[ -n "${WZ_Q_REQUIRE:-}" ]]; then
+            echo "Layer Q FAIL — required (WZ_Q_REQUIRE set) but nothing built" \
+                 "(no Layer Q rustup targets installed?); footprint measured 0 axes" >&2
+            return 1
+        fi
         echo "Layer Q SKIP (no Layer Q rustup targets installed)"
         return 0
     fi

@@ -272,14 +272,41 @@ if [[ -z "${_bt[$target]:-}" ]]; then
 fi
 
 # ─── prerequisite tooling + binary ─────────────────────────────────
+#
+# R311y274 — WZ_Q_REQUIRE escalates a prerequisite SKIP to a FAIL, mirroring
+# WZ_Z_REQUIRE / WZ_QZ_REQUIRE. On the hosted mcu job the toolchain + binutils
+# are PROVISIONED, so a missing binary or missing `size` is a provisioning
+# regression, not a legitimate host-lacks-the-tool skip — and this gate is the
+# whole subject of R311y267, so it must not be the one lane whose SKIP is green.
+# Off (a dev host without the cross toolchain) it stays a soft SKIP.
 if [[ ! -f "$bin" ]]; then
+    if [[ -n "${WZ_Q_REQUIRE:-}" ]]; then
+        echo "  footprint[$artifact] $target FAIL — required (WZ_Q_REQUIRE set)" \
+             "but binary missing: $bin" >&2
+        exit 1
+    fi
     echo "  footprint SKIP (binary missing: $bin)"
     exit 0
 fi
 if ! command -v arm-none-eabi-size >/dev/null 2>&1; then
+    if [[ -n "${WZ_Q_REQUIRE:-}" ]]; then
+        echo "  footprint[$artifact] $target FAIL — required (WZ_Q_REQUIRE set)" \
+             "but arm-none-eabi-size not on PATH" >&2
+        exit 1
+    fi
     echo "  footprint SKIP (arm-none-eabi-size not on PATH;" \
          "install binutils-arm-none-eabi)"
     exit 0
+fi
+# The path-purity gate below detects pollution with `strings`; a detection tool
+# that is ABSENT must FAIL, never silently pass a polluted binary (R311y274, the
+# whole-session review's Finding B2 — proven: with `strings` off PATH the gate
+# reported a clean +0 on a binary carrying the repo path). Unconditional: unlike
+# the binary/size prereqs there is no legitimate "measure without it" mode.
+if ! command -v strings >/dev/null 2>&1; then
+    echo "  footprint[$artifact] $target FAIL — strings not on PATH;" \
+         "cannot verify path purity (install binutils)" >&2
+    exit 1
 fi
 
 # ─── path-normalisation gate (the measurement's precondition) ───────
