@@ -1,0 +1,48 @@
+# Rust toolchain pin — the SSOT for every wz build (local + hosted CI).
+#
+# Why pinned, not `stable`:
+#
+# Layer Q footprint-gates the MCU artifacts on an ABSOLUTE .text byte count
+# with a +/-256 B band (scripts/check-footprint.sh). A byte-exact ROM gate is
+# only meaningful against a fixed compiler: rustc codegen drifts by a few
+# hundred bytes across releases, which is the same order as the band itself.
+# With an unpinned `stable`, a rustc release silently re-rolls the baseline and
+# the gate reports a compiler bump as a code regression.
+#
+# That is not hypothetical — it is why this file exists. On 2026-07-09 hosted CI
+# floated 1.96.1 -> 1.97.0 and the mcu-multicast-e2e .text grew ~230-330 B per
+# target with NO code change; Layer Q went red and stayed red for ~20 pushes
+# while the local pre-push run-ci (still on 1.96) stayed green. The cross-check
+# that settled it: at rustc 1.96 the local and CI .text agree to the byte
+# (51116 on thumbv7m), so the compiler was the only variable.
+#
+# This mirrors the reproducibility trade the project already makes for zenohd
+# (scripts/build-zenohd.sh pins zenoh 1.5.0's own channel 1.85.0 explicitly, via
+# `cargo +1.85.0`, which overrides this file and is unaffected by it).
+#
+# Bumping this pin is an explicit round, NOT a background drift: the bump and
+# the check-footprint.sh baseline rebase (+ the matching §6.7 / §6.9 footprint
+# caveats) land in the SAME commit, so the ledger records which compiler each
+# footprint number was measured under.
+#
+# `components` + `targets` live here, not in .github/workflows/ci.yml, because
+# they must follow the PINNED toolchain. Installing them onto `stable` while
+# cargo resolves this file would leave the pinned toolchain without the embedded
+# targets — and run-ci.sh SKIPs a target it cannot find, so the footprint gate
+# would go quietly green instead of failing.
+#
+# workspace MSRV (crates/Cargo.toml rust-version = 1.81) is a separate,
+# lower-bound contract for downstream consumers; this pin is the build compiler.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+targets = [
+    "thumbv6m-none-eabi",
+    "thumbv7m-none-eabi",
+    "thumbv7em-none-eabi",
+    "thumbv7em-none-eabihf",
+    "thumbv8m.base-none-eabi",
+    "thumbv8m.main-none-eabi",
+    "thumbv8m.main-none-eabihf",
+    "riscv32imac-unknown-none-elf",
+]

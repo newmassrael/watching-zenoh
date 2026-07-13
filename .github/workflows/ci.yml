@@ -89,13 +89,28 @@ jobs:
             clang \
             perl
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          # rust-version pinned to 1.75 in workspace Cargo.toml; the
-          # action's `stable` resolves to >=1.75 at runtime, so the
-          # workspace's rust-version field gates lower-bound.
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        # `rustup show` materialises the toolchain the repo pins — channel +
+        # components + targets, all declared in rust-toolchain.toml — and every
+        # cargo invocation inside the checkout then resolves to it.
+        #
+        # NOT dtolnay/rust-toolchain@stable (what this was until R311y267):
+        # `stable` FLOATS. On 2026-07-09 it floated 1.96 -> 1.97 mid-stream, and
+        # since rustc codegen size drifts across releases while Layer Q gates the
+        # MCU .text on an absolute byte count, hosted CI went red for ~20 pushes
+        # on a compiler bump that no commit asked for. The workspace
+        # `rust-version` field is an MSRV LOWER BOUND for consumers — it never
+        # pinned the build compiler, which is what a byte-exact footprint gate
+        # needs.
+        #
+        # The action's `components:` / `targets:` inputs are gone for a second,
+        # sharper reason: they attach to whatever toolchain the action installs,
+        # while cargo resolves the PINNED one from the toolchain file. Embedded
+        # targets would land on `stable` and be missing on the toolchain that
+        # actually builds — and run-ci.sh SKIPs a target it cannot find, so the
+        # footprint gate would go quietly GREEN instead of failing. A SKIP is
+        # green; the pin owns components + targets so it cannot happen.
+        run: rustup show
 
       - name: Cache Cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
@@ -425,8 +440,12 @@ jobs:
             libclang-dev \
             clang
 
-      - name: Install Rust toolchain (stable, for wz)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml, for wz)
+        # See the `ci` job's step of the same name — the pin is the SSOT for
+        # channel + components + targets. zenohd's own 1.85.0 channel is
+        # installed separately below and selected explicitly with `cargo
+        # +1.85.0`, which overrides the toolchain file and is unaffected by it.
+        run: rustup show
 
       - name: Install Rust toolchain 1.85.0 (zenoh 1.5.0's pinned channel)
         # scripts/build-zenohd.sh REQUIRES this exact channel and hard-errors
@@ -567,11 +586,14 @@ jobs:
             libnewlib-arm-none-eabi \
             qemu-system-arm
 
-      - name: Install Rust toolchain + embedded targets
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: thumbv6m-none-eabi, thumbv7m-none-eabi, thumbv7em-none-eabi, thumbv7em-none-eabihf, thumbv8m.base-none-eabi, thumbv8m.main-none-eabi, thumbv8m.main-none-eabihf, riscv32imac-unknown-none-elf
+      - name: Install Rust toolchain + embedded targets (pinned by rust-toolchain.toml)
+        # THE job this pin exists for: Layer Q's footprint gate lives here. The
+        # embedded target list moved into rust-toolchain.toml so it follows the
+        # PINNED toolchain — listed here (on a floating `stable`) it would be
+        # installed on a toolchain cargo does not use, leaving the real one
+        # without the targets, and run-ci.sh SKIPs a missing target: the gate
+        # would report green having measured nothing. See the `ci` job's step.
+        run: rustup show
 
       - name: Cache Cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
@@ -632,10 +654,9 @@ jobs:
             gcc-arm-none-eabi libnewlib-arm-none-eabi \
             qemu-system-arm xz-utils
 
-      - name: Install Rust toolchain + thumbv7m
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: thumbv7m-none-eabi
+      - name: Install Rust toolchain + thumbv7m (pinned by rust-toolchain.toml)
+        # thumbv7m comes from the pin's `targets` list. See the `ci` job's step.
+        run: rustup show
 
       - name: Set up Python 3.12 (Zephyr main requires >= 3.12)
         uses: actions/setup-python@v5
@@ -766,10 +787,12 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        # Windows + macOS. clippy comes from the pin's `components`. Pinning the
+        # compiler here also removes a lint-drift class this job was exposed to:
+        # a floating `stable` can newly fail `-D warnings` on a lint the new
+        # rustc introduced, on a commit that changed nothing. See the `ci` job.
+        run: rustup show
 
       - name: Cache Cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2

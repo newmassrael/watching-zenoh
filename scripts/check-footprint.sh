@@ -95,10 +95,26 @@ declare -A BASELINE_TEXT=(
     # Local-gcc figures; a CI-gcc follow-up rebase may shift them <=256 B
     # per the footprint-baseline-CI-gcc rule. Was: 19764 / 24852 / 24920 /
     # 25744 (R311y17).
-    ["thumbv6m-none-eabi"]=19772
-    ["thumbv7m-none-eabi"]=25352
-    ["thumbv7em-none-eabihf"]=25420
-    ["thumbv8m.main-none-eabi"]=26200
+    #
+    # R311y267 — REBASED ONTO A REPRODUCIBLE MEASUREMENT, and the "CI-gcc
+    # follow-up rebase" rule the R311y21 note above cites is RETIRED as false.
+    # arm-gcc was never the variable: the CI runner and this dev host carry the
+    # byte-identical gcc 10.3.1 / binutils 2.38 / newlib 3.3.0 packages. The
+    # two real variables were (1) an UNPINNED rustc in hosted CI, which floated
+    # 1.96 -> 1.97 on 2026-07-09 and moved codegen, and (2) ABSOLUTE BUILD PATHS
+    # embedded in .rodata (which berkeley `size` counts as `text`), so the
+    # number partly measured the build directory's path length. Both are now
+    # removed by construction: rust-toolchain.toml pins the compiler, and Layer Q
+    # builds with --remap-path-prefix (re-asserted per measurement by the
+    # path-normalisation gate below, which FAILs rather than silently measuring
+    # a path-polluted binary). These figures are therefore the same on this host
+    # and on the runner — verified byte-identical against an ubuntu:22.04
+    # container mounted at the CI runner's path. Was: 19772 / 25352 / 25420 /
+    # 26200 (R311y21, path-polluted local-only figures).
+    ["thumbv6m-none-eabi"]=19780
+    ["thumbv7m-none-eabi"]=25296
+    ["thumbv7em-none-eabihf"]=25360
+    ["thumbv8m.main-none-eabi"]=26148
 )
 declare -A BASELINE_DATA=(
     ["thumbv6m-none-eabi"]=4
@@ -172,8 +188,22 @@ declare -A BASELINE_MC_TEXT=(
     # kept cfg-free by design (no per-feature cfg-skew; the MCU pays the named
     # faithfulness-over-cost debt paid down later via the systematic Ownership seam,
     # not per-feature gating). Old: 50736/50888 (R311y21).
-    ["thumbv7m-none-eabi"]=50936
-    ["thumbv7em-none-eabihf"]=51148
+    # R311y267 — REBASED ONTO A REPRODUCIBLE MEASUREMENT. This artifact is where
+    # the defect surfaced: hosted CI's Layer Q was red for ~20 pushes (from
+    # e81d7a50, 2026-07-09) on a multicast .text the local pre-push run-ci read
+    # as in-band. The code never regressed. Two environment variables were being
+    # measured as if they were code — an unpinned rustc in CI (1.96 -> 1.97 on
+    # the very day the streak began) and the absolute build path embedded in
+    # .rodata. The same commit + same rustc measured 50964 built at /w, 51164 at
+    # /home/coin/watching-zenoh and 51344 at the runner's
+    # /home/runner/work/watching-zenoh/watching-zenoh — a 380 B spread on
+    # identical code against this +-256 B band, ordered purely by path length.
+    # rust-toolchain.toml + Layer Q's --remap-path-prefix remove both; the
+    # figures below are byte-identical on this host and in an ubuntu:22.04
+    # container mounted at the runner's path. Old: 50936/51148 (R311y215,
+    # path-polluted local-only figures).
+    ["thumbv7m-none-eabi"]=50956
+    ["thumbv7em-none-eabihf"]=51096
 )
 declare -A BASELINE_MC_DATA=(
     ["thumbv7m-none-eabi"]=4
@@ -243,9 +273,51 @@ if ! command -v arm-none-eabi-size >/dev/null 2>&1; then
     exit 0
 fi
 
+# ─── path-normalisation gate (the measurement's precondition) ───────
+#
+# rustc embeds ABSOLUTE build paths in the binary (panic `Location` strings for
+# local crates, cargo registry source paths for dependencies). They land in
+# .rodata, and the berkeley `size` format counts .rodata inside its `text`
+# column — so a binary built without --remap-path-prefix has a `text` that
+# partly measures THE LENGTH OF ITS OWN BUILD DIRECTORY PATH. The same commit
+# and rustc measured 50964 / 51164 / 51344 on mcu-multicast-e2e depending only
+# on where it was built (a container, this dev host, the CI runner): a 380 B
+# spread against a +/-256 B band, and the reason Layer Q sat red on hosted CI
+# for ~20 pushes while the local pre-push run-ci stayed green.
+#
+# run-ci.sh Layer Q exports footprint_remap_rustflags() for every MCU build.
+# This gate re-asserts the property on the ARTIFACT so the two cannot drift: a
+# binary built outside that path (a bare `cargo build`, a future lane that
+# forgets the export) FAILS here rather than being silently measured against a
+# baseline it is not comparable to. A SKIP would be green — hence a FAIL.
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+leaked=""
+for prefix in "$repo_root" "$cargo_home"; do
+    if strings "$bin" 2>/dev/null | grep -qF -- "$prefix"; then
+        leaked="${leaked:+$leaked, }$prefix"
+    fi
+done
+if [[ -n "$leaked" ]]; then
+    echo "  footprint[$artifact] $target FAIL — binary embeds absolute build paths" >&2
+    echo "    leaked prefix(es): $leaked" >&2
+    echo "    The .rodata path strings make .text depend on WHERE the binary was" >&2
+    echo "    built, so this measurement is not comparable to the baseline table." >&2
+    echo "    Build the footprint artifacts via 'scripts/run-ci.sh --layer Q'," >&2
+    echo "    which exports footprint_remap_rustflags() for exactly this reason." >&2
+    exit 1
+fi
+
 # ─── measure ───────────────────────────────────────────────────────
 # arm-none-eabi-size --format=berkeley output (line 2):
 #   text  data  bss  dec  hex  filename
+#
+# Provenance: the baseline is only meaningful against the toolchain it was
+# measured with, so the gate records what it measured with. rustc is pinned by
+# rust-toolchain.toml (codegen size drifts across releases — 1.96 -> 1.97 moved
+# this binary +48 B); arm-gcc + newlib compile the lwIP C half.
+echo "  footprint[$artifact] toolchain: $(rustc --version 2>/dev/null | cut -d' ' -f2)" \
+     "/ $(arm-none-eabi-gcc -dumpversion 2>/dev/null)"
 read -r meas_text meas_data meas_bss _ < <(
     arm-none-eabi-size --format=berkeley "$bin" \
         | awk 'NR==2 {print $1, $2, $3}'

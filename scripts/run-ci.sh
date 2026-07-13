@@ -382,6 +382,25 @@ fi
 # unmissable end-of-run summary. The pass/fail verdict is still the exit code.
 FAILED_LAYERS=()
 _runci_ts() { date +'%Y-%m-%dT%H:%M:%S%z'; }
+
+# ─── footprint build normalisation (SSOT) ──────────────────────────
+#
+# The rustc flags that make a footprint-gated binary's .text/.rodata
+# independent of WHERE it was built. Consumed by Layer Q (which exports them
+# for every MCU build) and re-asserted per measurement by
+# scripts/check-footprint.sh, which FAILs if either prefix still appears in the
+# ELF — so a binary built without these cannot be silently footprint-gated.
+#
+# The two prefixes are the only absolute paths rustc embeds: the workspace
+# (panic `Location` strings for local crates + the OUT_DIR generated sources)
+# and $CARGO_HOME (registry dependency sources). rustc already canonicalises
+# std/core to /rustc/<hash>. The replacement strings are arbitrary but must be
+# FIXED — their length is what the baseline encodes.
+footprint_remap_rustflags() {
+    local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+    echo "--remap-path-prefix=${repo_root}=/wz --remap-path-prefix=${cargo_home}=/cargo"
+}
+
 run_layer() {
     local name="$1"
     shift
@@ -4222,6 +4241,39 @@ layer_q_qemu_mcu_e2e() {
     # no-op on a host-only machine; on a machine that carries the
     # cross-toolchain it runs the MCU e2e + footprint regression gate on
     # every default sweep (closing the staleness window that opt-in left).
+    #
+    # ── Path-normalised builds — the footprint gate's precondition ──
+    #
+    # rustc embeds ABSOLUTE build paths in the binary (panic `Location`
+    # strings, cargo registry source paths). They land in .rodata, and
+    # `arm-none-eabi-size --format=berkeley` counts .rodata inside its `text`
+    # column — so an un-normalised footprint number partly measures THE LENGTH
+    # OF THE BUILD DIRECTORY PATH. Measured on mcu-multicast-e2e at one commit
+    # and one rustc: 50964 built at /w, 51164 at /home/coin/watching-zenoh, and
+    # 51344 at the CI runner's /home/runner/work/watching-zenoh/watching-zenoh
+    # — a 380 B spread on IDENTICAL code, against a +/-256 B band. That is what
+    # kept Layer Q red on hosted CI for ~20 pushes while the local pre-push
+    # run-ci stayed green: two machines gating one absolute-byte baseline they
+    # could never agree on.
+    #
+    # --remap-path-prefix rewrites those prefixes to fixed strings, so .text is
+    # environment-independent and one baseline governs every machine. Verified:
+    # this host and an ubuntu:22.04 container mounted at the CI runner's path
+    # (different $CARGO_HOME, different target dir) now emit a byte-identical
+    # 50956. check-footprint.sh re-asserts the property per measurement, so a
+    # build that bypasses this export FAILs the gate instead of silently
+    # measuring its own path length. The rust-toolchain.toml pin covers the
+    # other half (rustc codegen drift across releases).
+    #
+    # Safe to export over the deploy crates' `.cargo/config.toml`
+    # `target.*.rustflags` (env RUSTFLAGS replaces rather than merges them):
+    # every deploy MCU build.rs already emits `-Tlink.x` via
+    # `cargo:rustc-link-arg`, and those config entries are documented
+    # duplicates of exactly that (see deploy/mcu-noheap-probe/.cargo/config.toml).
+    local RUSTFLAGS
+    RUSTFLAGS="$(footprint_remap_rustflags)"
+    export RUSTFLAGS
+
     local installed
     installed="$(rustup target list --installed 2>/dev/null)"
     local has_qemu=0
