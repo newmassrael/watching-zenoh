@@ -107,10 +107,10 @@ declare -A BASELINE_TEXT=(
     # removed by construction: rust-toolchain.toml pins the compiler, and Layer Q
     # builds with --remap-path-prefix (re-asserted per measurement by the
     # path-normalisation gate below, which FAILs rather than silently measuring
-    # a path-polluted binary). These figures are therefore the same on this host
-    # and on the runner — verified byte-identical against an ubuntu:22.04
-    # container mounted at the CI runner's path. Was: 19772 / 25352 / 25420 /
-    # 26200 (R311y21, path-polluted local-only figures).
+    # a path-polluted binary). All four figures are confirmed byte-identical on
+    # the hosted runner (R311y268 read them back from the first green Layer Q).
+    # Was: 19772 / 25352 / 25420 / 26200 (R311y21, path-polluted local-only
+    # figures).
     ["thumbv6m-none-eabi"]=19780
     ["thumbv7m-none-eabi"]=25296
     ["thumbv7em-none-eabihf"]=25360
@@ -198,10 +198,19 @@ declare -A BASELINE_MC_TEXT=(
     # /home/coin/watching-zenoh and 51344 at the runner's
     # /home/runner/work/watching-zenoh/watching-zenoh — a 380 B spread on
     # identical code against this +-256 B band, ordered purely by path length.
-    # rust-toolchain.toml + Layer Q's --remap-path-prefix remove both; the
-    # figures below are byte-identical on this host and in an ubuntu:22.04
-    # container mounted at the runner's path. Old: 50936/51148 (R311y215,
-    # path-polluted local-only figures).
+    # rust-toolchain.toml + Layer Q's --remap-path-prefix remove both. thumbv7m
+    # is byte-identical everywhere (50956 on this host, in a runner-path
+    # container, and on the runner itself).
+    #
+    # thumbv7em-hf carries a KNOWN +4 B RESIDUAL: the runner reads 51100 against
+    # this host's 51096. R311y268 root-caused it by ELF diff — .rodata is
+    # IDENTICAL (the path-length term really is gone; that was the 380 B one) and
+    # the 4 B is .text alignment jitter, because cargo derives a crate metadata
+    # hash from the package PATH, which perturbs symbol hashes and thus padding.
+    # It is not proportional to path length (5 of the 6 gated axes are +0) and is
+    # 1.5% of the band, so it is carried, not chased. Do NOT read "reproducible"
+    # as "bit-identical": the unbounded term is eliminated, a few bytes of layout
+    # jitter are not. Old: 50936/51148 (R311y215, path-polluted local figures).
     ["thumbv7m-none-eabi"]=50956
     ["thumbv7em-none-eabihf"]=51096
 )

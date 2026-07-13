@@ -10,11 +10,16 @@
 # the gate reports a compiler bump as a code regression.
 #
 # That is not hypothetical — it is why this file exists. On 2026-07-09 hosted CI
-# floated 1.96.1 -> 1.97.0 and the mcu-multicast-e2e .text grew ~230-330 B per
-# target with NO code change; Layer Q went red and stayed red for ~20 pushes
-# while the local pre-push run-ci (still on 1.96) stayed green. The cross-check
-# that settled it: at rustc 1.96 the local and CI .text agree to the byte
-# (51116 on thumbv7m), so the compiler was the only variable.
+# floated 1.96.1 -> 1.97.0 and the mcu-multicast-e2e .text moved with NO code
+# change; Layer Q went red and stayed red for ~20 pushes while the local pre-push
+# run-ci (still on 1.96) stayed green. Measured in isolation, the 1.96 -> 1.97
+# codegen bump is ~+48 B on that binary.
+#
+# The compiler was NOT the whole story, and an early read of this incident that
+# said so was wrong: the larger term was the ABSOLUTE BUILD PATH baked into
+# .rodata (see scripts/run-ci.sh's footprint_remap_rustflags). Pinning rustc
+# fixes the half that is a compiler; --remap-path-prefix fixes the half that is
+# a filesystem. Both are needed.
 #
 # This mirrors the reproducibility trade the project already makes for zenohd
 # (scripts/build-zenohd.sh pins zenoh 1.5.0's own channel 1.85.0 explicitly, via
