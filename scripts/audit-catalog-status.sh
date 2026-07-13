@@ -118,15 +118,33 @@ for ct in subprocess.run(
         if mm:
             declared.add(mm.group(1))
 
+# R311y258 — gate sites, collected in ONE pass instead of one full-tree grep
+# PER ATOM. The prior shape called `grep -rIlE 'feature *= *"<atom>"' crates`
+# inside the per-atom loop, i.e. it re-scanned every .rs file in the workspace
+# 212 times (once per catalog atom) to answer 212 independent membership
+# questions against the SAME corpus. That is O(atoms x tree), and it cost 106s
+# of a 22.5-minute run-ci -- the second-slowest layer, entirely from re-reading
+# files it had already read.
+#
+# One grep now emits EVERY `feature = "..."` occurrence in crates/**/*.rs, and
+# the names are folded into a set; `has_gate` becomes an O(1) lookup. The
+# MATCHING SEMANTICS ARE UNCHANGED -- same `feature *= *"NAME"` pattern, same
+# corpus, same "any occurrence counts" rule (the pattern is deliberately not
+# anchored to `cfg(`, because a multi-line `any(...)` block puts the feature on
+# its own line and a same-line `cfg(` requirement would miss it). So the audit's
+# verdict for every atom is bit-identical; only the cost changes.
+_gate_names = set()
+_r = subprocess.run(
+    ["grep", "-rIhoE", r'feature *= *"[A-Za-z0-9_-]+"',
+     "crates", "--include=*.rs"],
+    capture_output=True, text=True)
+for _line in _r.stdout.splitlines():
+    _m = re.search(r'"([A-Za-z0-9_-]+)"', _line)
+    if _m:
+        _gate_names.add(_m.group(1))
+
 def has_gate(atom):
-    # robust: `feature = "atom"` appears (in .rs only inside cfg/cfg_attr);
-    # multi-line any(...) blocks put the feature on its own line, so a
-    # same-line `cfg(` requirement would miss them.
-    r = subprocess.run(
-        ["grep", "-rIlE", r'feature *= *"%s"' % re.escape(atom),
-         "crates", "--include=*.rs"],
-        capture_output=True, text=True)
-    return bool(r.stdout.strip())
+    return atom in _gate_names
 
 # R311y257 — invariant #5: the IMPLEMENTATION axis.
 #
