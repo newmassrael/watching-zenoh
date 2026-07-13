@@ -412,7 +412,7 @@ jobs:
   # therefore stay local-only until that flakiness is root-caused, and A4's
   # EXECUTION line keeps saying so.
   interop:
-    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E7 + E8 + Z)
+    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E7 + E8 + Z)
     runs-on: ubuntu-22.04
     # A cold cache must build: the zenoh-pico CMake tree, the whole zenoh workspace in
     # release (zenohd AND the storage-manager plugin), four differently-featured
@@ -528,6 +528,14 @@ jobs:
         # all-lanes count while leaving the executed count flat. That gap is the
         # signal; this closes it.
         run: bash scripts/run-ci.sh --layer E6e
+
+      - name: Layer E6f — adminspace metrics leg vs zenoh-pico
+        # R311y275 wired this lane here for the reason E6b/E6e's notes give: its pico
+        # z_get proof of `adminspace-metrics` would otherwise be LOCAL-ONLY, moving
+        # A4's all-lanes count but not the executed count that gates merges. Its own
+        # demo binary (built WITH adminspace-metrics) is distinct from E6b's (which
+        # asserts the metrics leg absent), so it cannot share that lane.
+        run: bash scripts/run-ci.sh --layer E6f
 
       - name: Layer E7 — router-hat mesh (wz<->wz) + router adminspace vs zenoh-pico
         # R311y273 added the pico router-adminspace witness to this lane and wired the

@@ -5300,6 +5300,32 @@ layer_e6e_adminspace_plugins() {
         --test wz_peer_adminspace_plugins_to_pico_zget -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E6f — §5.23 adminspace-metrics E2E (vs zenoh-pico) ──────────────────
+#
+# The `@/<zid>/<whatami>/metrics` OpenMetrics build-info leg (R311y35) read over the
+# wire by a FOREIGN decoder for the first time. Needs its OWN demo binary built with
+# `--features routing-peer,adminspace-metrics` — DISTINCT from E6b's binary, whose
+# wz_peer_adminspace_to_pico_zget asserts the metrics leg is ABSENT; folding metrics
+# into that binary would break y270's counterfactual. A pico z_get on
+# `@/<A_zid>/peer/metrics` decodes the `zenoh_build` gauge (metrics_text, byte-faithful
+# to zenoh adminspace.rs:714-720). No wz<->wz e2e is added — the leg is unit-proven
+# (declare_adminspace_metrics_get_returns_openmetrics_text); this lane supplies the
+# cross-impl witness. The `wz_peer_` fn prefix keeps the default Layer E sweep's
+# `--skip wz_peer` from double-running it on an arbitrary-feature binary.
+#
+# SKIPs on the FOREIGN binary only (the pico CLI a machine may legitimately lack),
+# never on a wz one — the R311y265 rule; WZ_PICO_REQUIRE escalates that skip to a
+# FAIL wherever the job provisions pico.
+layer_e6f_adminspace_metrics() {
+    (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-metrics --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+        _pico_cli_unavailable "Layer E6f (pico adminspace metrics z_get)" || return 1
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_adminspace_metrics_to_pico_zget -- --ignored --quiet) || return 1
+}
+
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
 #
 # The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
@@ -5616,6 +5642,7 @@ run_layer E6b layer_e6b_adminspace_introspection || overall=1
 run_layer E6c layer_e6c_peer_multilink || overall=1
 run_layer E6d layer_e6d_peer_multilink_qos || overall=1
 run_layer E6e layer_e6e_adminspace_plugins || overall=1
+run_layer E6f layer_e6f_adminspace_metrics || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1

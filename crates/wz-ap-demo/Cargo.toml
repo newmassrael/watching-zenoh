@@ -216,6 +216,14 @@ transport-qos = ["routing-peer", "wz/transport-qos"]
 # write applies, the pre-y51 path). The run_peer config-write handler holds the
 # cfg(feature="adminspace-write") site. Layer E6 builds the gate-ON binary.
 adminspace-write = ["wz/adminspace-write"]
+# R311y275 (§5.23 adminspace-metrics) — compiles the metrics leg into the demo
+# host: the `@/<zid>/<whatami>/metrics` OpenMetrics build-info branch lives in
+# wz-session-core `answer_admin_query` (the SSOT the --config-queryable host
+# calls), gated cfg(feature="adminspace-metrics"), so merely compiling this
+# feature answers the metrics GET — no run_peer flag needed. NOT in E6b's binary
+# (its wz_peer_adminspace_to_pico_zget asserts the metrics leg is ABSENT), so the
+# metrics witness rides its own lane (Layer E6f) with its own demo build.
+adminspace-metrics = ["wz/adminspace-metrics"]
 # R311y203 (§5.23 adminspace-introspection-handlers) — compiles the demo host's
 # per-app-tick introspection re-snapshot (forwarder.subscriptions/queryables
 # -> the shared AdminDeclaration buffer the --config-queryable handler replies from).
