@@ -64,6 +64,7 @@ const PAYLOAD: &str = "timestamped-hello-from-wz";
 const TS_TIME: u64 = 0x0102_0304_0506_0708;
 
 // wz-proves: pubsub-timestamp wz->pico
+// wz-proves: time-ntp64 wz->pico partial
 // wz-proves: pubsub-put wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub_attachment); Layer E runs via --ignored"]

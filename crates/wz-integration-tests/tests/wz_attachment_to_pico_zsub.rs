@@ -67,6 +67,7 @@ const SUB_KEYEXPR: &str = "demo/**";
 const PAYLOAD: &str = "attach-hello-from-wz";
 
 // wz-proves: pubsub-attachment wz->pico
+// wz-proves: attachment-bytes wz->pico
 // wz-proves: pubsub-put wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub_attachment); Layer E runs via --ignored"]

@@ -330,6 +330,11 @@ fn main() {
         // signature); `keyexpr-includes` is an ACTIVE atom whose cfg-gated
         // matcher had no cross-impl witness.
         .allowlist_function("_z_keyexpr_forward_includes")
+        // R311y263 — the NTP64 word COMPOSER. The wire codec for the word is proven by
+        // the Push differential, but `time-ntp64` is the word AND its construction: the
+        // (seconds, nanos) -> (secs << 32 | frac) layout is the half a byte-compare of an
+        // already-composed word cannot reach. pico's composer is the reference.
+        .allowlist_function("_z_timestamp_ntp64_from_time")
         // R299 — keyexpr canonicalization mirror. Cross-validates
         // wz-runtime-tokio's `keyexpr_canon::canonize_keyexpr` (R221
         // structural transform) against zenoh-pico's
