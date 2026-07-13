@@ -95,12 +95,14 @@ entries = inv if isinstance(inv, list) else inv.get("entries", inv.get("inventor
 # atom -> (status, section_ref), excluding presets (bundles, not atoms)
 atoms = {}
 section_ref = {}
+reason = {}
 for e in entries:
     aid = e.get("id") or e.get("inventory_id")
     if not aid or aid.startswith("preset-"):
         continue
     atoms[aid] = e.get("status")
     section_ref[aid] = e.get("section_ref")
+    reason[aid] = (e.get("reason") or "").strip()
 
 # ground truth: declared cargo [features] keys across the workspace
 declared = set()
@@ -126,8 +128,57 @@ def has_gate(atom):
         capture_output=True, text=True)
     return bool(r.stdout.strip())
 
+# R311y257 — invariant #5: the IMPLEMENTATION axis.
+#
+# `status` answers "is there a cfg knob?" -- it does NOT answer "is this
+# built?". Those are different questions, and conflating them made the
+# inventory unable to say what work remains: `reserved` lumps together the
+# already-built-but-always-on (FOUNDATIONAL), the genuinely unbuilt, the
+# deliberately excluded, and the built-under-another-name. The reason field
+# carried that distinction only as free prose, so answering "what's left?"
+# meant grepping English -- and two different greps disagreed (10 vs 27).
+#
+# The fix, within the closed Mnemosyne schema (no new field is permitted --
+# anti-patterns #9): the FIRST token of every non-active atom's `reason` must
+# be a tag from the closed set below, and the tag must agree with `status`.
+# The tags answer "is there remaining implementation work, and of what kind?"
+#
+#   FOUNDATIONAL  built, always-on, no cfg knob          -> no work
+#   PARTIAL       built (sometimes under another atom's  -> named residual
+#                 cargo feature), with a named residual
+#   UNVERIFIED    code portable by construction, but no  -> a CI lane, not code
+#                 lane proves it (e.g. platform-macos)
+#   UNBUILT       genuinely not implemented              -> all of it
+#   BEYOND-PICO   deferred by design (P4 full-zenoh)     -> deferred
+#   OUT-OF-SCOPE  deliberately excluded, re-openable     -> none, by decision
+#   OBVIATED      no wz analog BY CONSTRUCTION           -> nothing to build
+#   PHANTOM       does not exist in zenoh at all         -> nothing to build
+#
+# `active` needs no tag: it means built AND cfg-gated, so the implementation
+# axis is unambiguous (invariant #3 already pins it).
+#
+# "What work remains" is now a query, not a grep:
+#     UNBUILT + PARTIAL(residual) + UNVERIFIED(lanes)
+IMPL_TAGS = {
+    "FOUNDATIONAL": "reserved",
+    "PARTIAL":      "reserved",
+    "UNVERIFIED":   "reserved",
+    "UNBUILT":      "reserved",
+    "BEYOND-PICO":  "reserved",
+    "OUT-OF-SCOPE": "reserved",
+    "OBVIATED":     "deprecated",
+    "PHANTOM":      "deprecated",
+}
+
+def impl_tag(atom):
+    """First token of the reason, if it is a closed-set tag."""
+    r = reason.get(atom, "")
+    head = r.split(":")[0].split("(")[0].strip().upper()
+    return head if head in IMPL_TAGS else None
+
 fail_undeclared, fail_reserved_gated, fail_active_nogate = [], [], []
 fail_unlinked = []
+fail_untagged, fail_tag_status = [], []
 
 for atom in sorted(atoms):
     status = atoms[atom]
@@ -140,11 +191,35 @@ for atom in sorted(atoms):
         fail_active_nogate.append(atom)
     if not section_ref.get(atom):
         fail_unlinked.append(atom)
+    if status != "active":
+        tag = impl_tag(atom)
+        if tag is None:
+            fail_untagged.append(atom)
+        elif IMPL_TAGS[tag] != status:
+            fail_tag_status.append((atom, tag, status))
 
 ok = True
 active_n = sum(1 for a in atoms if atoms[a] == "active")
 print("=== catalog status truthfulness audit ===")
 print("  atoms=%d active=%d declared-cargo-features=%d" % (len(atoms), active_n, len(declared)))
+
+# The implementation-axis roll-up: what this whole invariant exists to make
+# answerable in one line.
+tally = {}
+for a in atoms:
+    if atoms[a] == "active":
+        continue
+    t = impl_tag(a)
+    if t:
+        tally[t] = tally.get(t, 0) + 1
+remaining = sorted(
+    a for a in atoms
+    if atoms[a] != "active" and impl_tag(a) in ("UNBUILT", "PARTIAL", "UNVERIFIED")
+)
+print("  implementation axis: active(built)=%d %s" % (
+    active_n, " ".join("%s=%d" % (k, tally[k]) for k in sorted(tally))))
+print("  REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) = %d: %s" % (
+    len(remaining), ", ".join(remaining) if remaining else "(none)"))
 
 if fail_undeclared:
     ok = False
@@ -169,6 +244,21 @@ if fail_unlinked:
     print("FAIL: catalog atom with NO section_ref to its feature_inventory section: %d" % len(fail_unlinked))
     for a in fail_unlinked:
         print("    - %s  (set-inventory-section-ref --id %s --section <its §5 domain section>)" % (a, a))
+
+if fail_untagged:
+    ok = False
+    print("FAIL: non-active atom whose reason does not START with an implementation tag: %d" % len(fail_untagged))
+    print("    (without the tag the inventory cannot say whether this atom is built,")
+    print("     so 'what work remains' degrades back to grepping English prose.)")
+    for a in fail_untagged:
+        print("    - %s  (prefix its reason with one of: %s)" % (a, " / ".join(sorted(IMPL_TAGS))))
+
+if fail_tag_status:
+    ok = False
+    print("FAIL: implementation tag disagrees with status: %d" % len(fail_tag_status))
+    for a, tag, status in fail_tag_status:
+        print("    - %s  tag=%s implies status=%s, but status=%s"
+              % (a, tag, IMPL_TAGS[tag], status))
 
 if ok:
     print("catalog status truthfulness OK")

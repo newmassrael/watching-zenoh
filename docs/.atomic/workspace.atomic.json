@@ -60297,6 +60297,68 @@
         "LOCAL: R311y256 atop R311y255 (fb70bd4) atop y254 (9721268) atop y253 (5909fa4) atop y252 (8534d74) atop origin/main=79c462e. 5 commits ahead after this commits. NOT pushed without explicit consent."
       ]
     },
+    "Round 311y257": {
+      "decision_summary": "R311y257 -- give the inventory an IMPLEMENTATION axis, so it can answer \"what work remains\" without grepping English. The user asked how many rounds are left to pico/AP-full; trying to answer surfaced a structural defect, not just a missing number. `status` (active / reserved / deprecated) answers \"is there a cfg knob?\" -- per the active-iff-cfg-toggle rule -- and does NOT answer \"is this built?\". Those are different questions, and `reserved` was silently lumping together four unrelated situations: already-built-but-always-on (FOUNDATIONAL), genuinely unbuilt, deliberately excluded, and built-under-a-different-atom's-cargo-feature. The only place that distinction lived was free prose in the `reason` field, so \"what is left\" degraded to grepping English -- and two different greps of mine disagreed (10 vs 27), which is how the defect was caught. The earlier \"~11 remaining atoms\" figure came from the unreliable grep and was RETRACTED rather than re-guessed. Fixed within the closed Mnemosyne schema, since adding a field is forbidden (anti-patterns #9): the FIRST token of every non-active atom's `reason` must now be a tag from a closed 8-set, and the tag must agree with `status`. FOUNDATIONAL (built, always-on, no knob) / PARTIAL (built, named residual) / UNVERIFIED (code portable by construction, no CI lane proves it -- work is a lane, not code) / UNBUILT (genuinely not implemented) / BEYOND-PICO (deferred by design) / OUT-OF-SCOPE (deliberately excluded) / OBVIATED (no wz analog by construction) / PHANTOM (does not exist in zenoh). `active` needs no tag: built AND gated is unambiguous. PARTIAL and UNVERIFIED were not invented for symmetry -- the data forced them: session-extqos is NOT unbuilt, it is BUILT under the differently-named `transport-qos` cargo feature with a named S4 residual (an error in my own earlier count, which had it as \"beyond-pico deferred\"); and platform-macos / platform-windows have NO code to write at all (std+tokio is portable by construction) -- what they lack is a CI lane. Forcing either into UNBUILT or FOUNDATIONAL would have made the inventory lie. All 218 atoms tagged, 51 by this round's prefixing pass and the rest already conformant, with ZERO original reason text lost (verified against the committed HEAD store). The invariant is enforced as #5 in scripts/audit-catalog-status.sh (Layer A3), which also now PRINTS the roll-up every run: \"REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) = 9\". So the question that started this is now a gate output, not a grep. full run-ci RUNCI_EXIT=0; validate_workspace orphan new=+0; active count UNCHANGED (no code touched).",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory only; no code touched): every non-active atom's `reason` now begins with a closed-set implementation tag. 51 entries were prefixed by this round via the typed `mnemosyne-cli set-inventory-status` primitive (looped, never a direct JSON edit); the remaining non-active entries already began with a conformant tag and were left untouched (the pass is idempotent). Legacy synonyms were NORMALIZED rather than double-prefixed (the \"REAL BACKLOG\" prefix introduced in R311y256 is exactly UNBUILT, so it was replaced, not stacked).",
+        "Six atoms had NO classifiable marker at all and were classified by direct read of their own reason text: platform-macos + platform-windows -> UNVERIFIED (their reasons already said \"std+tokio host-portable but NO wz CI lane -> unverified host; cfg=0\" -- there is no code to write, only a lane); platform-qnx -> OUT-OF-SCOPE (its reason: \"neither zenoh nor zenoh-pico has a QNX port\" -- outside the zenoh+pico catalog entirely, a 2nd-horizon candidate); routing-failover -> BEYOND-PICO (\"pico none -> P4-deferred\"); runtime-tokio-uring + runtime-zero-copy -> UNBUILT (genuinely unbuilt, but PERF concerns sourced from wz's own RFC/ARCHITECTURE, not protocol surface).",
+        "Two atoms were RECLASSIFIED against my own earlier count, which the tagging pass proved wrong: session-extqos -> PARTIAL, not \"beyond-pico deferred\" -- its reason records \"IMPL R311y215: the wz per-priority QoS transport is now BUILT under the transport-qos CARGO FEATURE ... session-extqos stays RESERVED (0 cfg(feature=session-extqos) sites -- the wz feature is named transport-qos)\", i.e. it is built under another atom's knob with a named S4 residual. session-stateless-accept -> BEYOND-PICO (its own reason says so, past the 250-char window my first survey scanned).",
+        "scripts/audit-catalog-status.sh: new invariant #5 (implementation axis), enforced inside the existing Layer A3 gate rather than as a new layer -- catalog-status truthfulness is the same concern, so it belongs in the same SSOT. It FAILS, naming the atom, when (a) a non-active atom's reason does not start with a closed-set tag, or (b) the tag disagrees with status (e.g. OBVIATED implies deprecated). The script's own header already claimed a \"FOUNDATIONAL marker in its reason\" convention -- it was documented but never enforced; this makes it real.",
+        "scripts/audit-catalog-status.sh: the audit now PRINTS the implementation roll-up on every run -- the per-tag tally plus the line \"REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) = N: <atom list>\". Answering \"what is left\" is now reading one CI line."
+      ],
+      "verification_bullets": [
+        "ZERO INFORMATION LOST -- the load-bearing check for a 51-entry prose rewrite. Every atom's post-round reason was diffed against the SAME atom's reason in the COMMITTED HEAD store (git show HEAD:docs/.atomic/workspace.atomic.json): for all 218, the original text is still present verbatim inside the new reason (the tag is a prefix, not a replacement). The only intentional edit is the \"REAL BACKLOG\" -> \"UNBUILT\" synonym normalization from R311y256, which is a rename of a prefix this project introduced one round earlier, not a loss of source-cited content.",
+        "Post-state verified by direct query: 218 atoms; untagged non-active atoms = 0; tag<->status violations = 0. Tally: active(built)=136, FOUNDATIONAL=54, PHANTOM=8, UNBUILT=6, OBVIATED=5, OUT-OF-SCOPE=4, UNVERIFIED=2, BEYOND-PICO=2, PARTIAL=1. (The audit script reports atoms=212 / active=130 because it excludes the 6 preset bundles, which are not atoms.)",
+        "The gate PASSES on the real tree and PRINTS the answer: \"catalog status truthfulness OK\" with \"REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) = 9: api-compat-c, api-compat-pico, platform-macos, platform-windows, plugin-dynamic-loading, runtime-tokio-uring, runtime-zero-copy, session-extqos, storage-backend-filesystem\". AUDIT_EXIT=0.",
+        "The gate FAILS on drift, proven in BOTH classes against doctored inventory copies (the store itself was never touched): (a) stripping the tag from api-compat-pico's reason -- the \"a new atom lands untagged\" case -- makes the audit exit non-zero with \"FAIL: non-active atom whose reason does not START with an implementation tag\", naming it; (b) flipping plugin-manager from deprecated to reserved while its reason still says OBVIATED makes it exit non-zero with \"FAIL: implementation tag disagrees with status\", naming the atom, its tag, and the status the tag implies. A gate that cannot fail is not a gate; both arms are exercised.",
+        "NEAR-MISS worth recording: the first attempt to prove drift-arm (b) reported a non-zero exit and was very nearly written up as 'caught'. It was not -- the fixture file had never been created (the command building it hit a 2-minute timeout mid-way), so the audit had died on a FileNotFoundError. A non-zero exit is NOT evidence a gate fired; the FAIL MESSAGE is. The arm was then re-run against a real fixture and produced the named failure quoted above. Judge a gate by what it PRINTS, not merely by its exit code.",
+        "The mutation path was the typed primitive throughout -- a loop over `mnemosyne-cli set-inventory-status --id ... --status ... --reason ...`. The sidecar JSON was NEVER edited directly (anti-patterns #6). Reasons were passed via `--reason \"$(cat FILE)\"` so backticked identifiers survive (feedback_ledger_decision_backtick_shell_eval).",
+        "INCIDENT, disclosed and repaired: while probing the CLI's flag names (the MCP tool takes `inventory_id`, the CLI takes `--id` -- a real skew), a probe call `set-inventory-status --id time-ntp64 --status reserved --reason \"X\"` was fired at a LIVE entry and OVERWROTE its 225-char reason with \"X\". There is no dry-run on a mutate primitive. Repaired immediately from the committed HEAD store, and the repair verified by diffing ALL 218 inventory entries against HEAD (0 differences) BEFORE proceeding with the round. Lesson recorded: never aim a mutate primitive at a live entry to discover its flags.",
+        "full run-ci RUNCI_EXIT=0 -- all required layers pass, INCLUDING Layer A3 which now carries invariant #5; judged by exit code. A catalog round MUST run full run-ci because A3 joins inventory <-> cargo.",
+        "validate_workspace: T1 orphan new=+0, style unchanged. No code, Cargo, or feature-gate change -- `active` count is UNCHANGED, so the A3 invariants #1-#4 (declared / reserved=>not-gated / active<=>gated / linked) are untouched by construction."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
+      "carry_forward_bullets": [
+        "R311y257 = the inventory now has an IMPLEMENTATION axis, so \"what work remains\" is a CI line instead of a grep. `status` only ever answered \"is there a cfg knob?\"; \"is it built?\" lived as free prose in `reason`, which is why two greps of the same store disagreed (10 vs 27) and why the \"~11 remaining atoms\" figure I gave earlier was RETRACTED. Fixed inside the closed schema (no new field -- anti-patterns #9): the first token of every non-active atom's reason must be one of 8 closed tags, and the tag must agree with status. Layer A3 (audit-catalog-status.sh) enforces it as invariant #5 and prints the roll-up every run.",
+        "ANSWER, now derived rather than estimated -- REMAINING WORK = 9: UNBUILT(6) api-compat-c, api-compat-pico, plugin-dynamic-loading, storage-backend-filesystem, runtime-tokio-uring, runtime-zero-copy · PARTIAL(1) session-extqos (residual = the S4 z64 QoSLink wire + the AP config->set_qos_offer negotiation) · UNVERIFIED(2) platform-macos, platform-windows (no code to write -- add CI lanes). Everything else is settled: 136 active + 54 FOUNDATIONAL are built; 8 PHANTOM + 5 OBVIATED have nothing to build; 4 OUT-OF-SCOPE + 2 BEYOND-PICO are excluded/deferred by decision.",
+        "WHAT THIS SAYS ABOUT THE NORTH STAR: the PROTOCOL surface is essentially complete. Of the 9, only api-compat-pico is protocol-catalogue work; the rest are FFI (2), perf (2), a storage backend (1), dlopen (1), an S4 residual (1) and two CI lanes. So atom count is NOT the bottleneck -- CROSS-IMPL PROOF is (~75% foreign-proven vs ~92% implemented), and the inventory still has NO axis tracking it. A witness/proof axis is the natural successor to this round: same shape (closed tags + a gate), applied to \"is this atom foreign-proven against real zenoh-pico / zenohd?\".",
+        "TWO OF MY OWN EARLIER COUNTS WERE WRONG and the tagging pass is what caught them: session-extqos is NOT \"beyond-pico deferred\" -- it is BUILT under the differently-named `transport-qos` cargo feature (0 cfg(feature=session-extqos) sites) with a named S4 residual, hence PARTIAL; and platform-macos/windows are not \"unbuilt\" -- there is no code to write, only a lane, hence UNVERIFIED. An atom being implemented under ANOTHER atom's cargo feature is a shape the inventory could not previously express.",
+        "LESSON (recorded in memory): a mutate primitive has no dry-run. Probing `set-inventory-status` for its flag names against a LIVE entry overwrote a real 225-char reason with the probe string \"X\". Recovered from the committed HEAD store and verified by diffing all 218 entries against HEAD before continuing. Probe on a scratch id, never on a live one.",
+        "LOCAL: R311y257 atop R311y256 (7b40416) atop y255 (fb70bd4) atop y254 (9721268) atop y253 (5909fa4) atop y252 (8534d74) atop origin/main=79c462e. 6 commits ahead after this commits. NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R311y257 -- give the inventory an IMPLEMENTATION axis, so it can answer \"what work remains\" without grepping English. The user asked how many rounds are left to pico/AP-full; trying to answer surfaced a structural defect, not just a missing number. `status` (active / reserved / deprecated) answers \"is there a cfg knob?\" -- per the active-iff-cfg-toggle rule -- and does NOT answer \"is this built?\". Those are different questions, and `reserved` was silently lumping together four unrelated situations: already-built-but-always-on (FOUNDATIONAL), genuinely unbuilt, deliberately excluded, and built-under-a-different-atom's-cargo-feature. The only place that distinction lived was free prose in the `reason` field, so \"what is left\" degraded to grepping English -- and two different greps of mine disagreed (10 vs 27), which is how the defect was caught. The earlier \"~11 remaining atoms\" figure came from the unreliable grep and was RETRACTED rather than re-guessed. Fixed within the closed Mnemosyne schema, since adding a field is forbidden (anti-patterns #9): the FIRST token of every non-active atom's `reason` must now be a tag from a closed 8-set, and the tag must agree with `status`. FOUNDATIONAL (built, always-on, no knob) / PARTIAL (built, named residual) / UNVERIFIED (code portable by construction, no CI lane proves it -- work is a lane, not code) / UNBUILT (genuinely not implemented) / BEYOND-PICO (deferred by design) / OUT-OF-SCOPE (deliberately excluded) / OBVIATED (no wz analog by construction) / PHANTOM (does not exist in zenoh). `active` needs no tag: built AND gated is unambiguous. PARTIAL and UNVERIFIED were not invented for symmetry -- the data forced them: session-extqos is NOT unbuilt, it is BUILT under the differently-named `transport-qos` cargo feature with a named S4 residual (an error in my own earlier count, which had it as \"beyond-pico deferred\"); and platform-macos / platform-windows have NO code to write at all (std+tokio is portable by construction) -- what they lack is a CI lane. Forcing either into UNBUILT or FOUNDATIONAL would have made the inventory lie. All 218 atoms tagged, 51 by this round's prefixing pass and the rest already conformant, with ZERO original reason text lost (verified against the committed HEAD store). The invariant is enforced as #5 in scripts/audit-catalog-status.sh (Layer A3), which also now PRINTS the roll-up every run: \"REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) = 9\". So the question that started this is now a gate output, not a grep. full run-ci RUNCI_EXIT=0; validate_workspace orphan new=+0; active count UNCHANGED (no code touched).",
+      "publishable_changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory only; no code touched): every non-active atom's `reason` now begins with a closed-set implementation tag. 51 entries were prefixed by this round via the typed `mnemosyne-cli set-inventory-status` primitive (looped, never a direct JSON edit); the remaining non-active entries already began with a conformant tag and were left untouched (the pass is idempotent). Legacy synonyms were NORMALIZED rather than double-prefixed (the \"REAL BACKLOG\" prefix introduced in R311y256 is exactly UNBUILT, so it was replaced, not stacked).",
+        "Six atoms had NO classifiable marker at all and were classified by direct read of their own reason text: platform-macos + platform-windows -> UNVERIFIED (their reasons already said \"std+tokio host-portable but NO wz CI lane -> unverified host; cfg=0\" -- there is no code to write, only a lane); platform-qnx -> OUT-OF-SCOPE (its reason: \"neither zenoh nor zenoh-pico has a QNX port\" -- outside the zenoh+pico catalog entirely, a 2nd-horizon candidate); routing-failover -> BEYOND-PICO (\"pico none -> P4-deferred\"); runtime-tokio-uring + runtime-zero-copy -> UNBUILT (genuinely unbuilt, but PERF concerns sourced from wz's own RFC/ARCHITECTURE, not protocol surface).",
+        "Two atoms were RECLASSIFIED against my own earlier count, which the tagging pass proved wrong: session-extqos -> PARTIAL, not \"beyond-pico deferred\" -- its reason records \"IMPL R311y215: the wz per-priority QoS transport is now BUILT under the transport-qos CARGO FEATURE ... session-extqos stays RESERVED (0 cfg(feature=session-extqos) sites -- the wz feature is named transport-qos)\", i.e. it is built under another atom's knob with a named S4 residual. session-stateless-accept -> BEYOND-PICO (its own reason says so, past the 250-char window my first survey scanned).",
+        "scripts/audit-catalog-status.sh: new invariant #5 (implementation axis), enforced inside the existing Layer A3 gate rather than as a new layer -- catalog-status truthfulness is the same concern, so it belongs in the same SSOT. It FAILS, naming the atom, when (a) a non-active atom's reason does not start with a closed-set tag, or (b) the tag disagrees with status (e.g. OBVIATED implies deprecated). The script's own header already claimed a \"FOUNDATIONAL marker in its reason\" convention -- it was documented but never enforced; this makes it real.",
+        "scripts/audit-catalog-status.sh: the audit now PRINTS the implementation roll-up on every run -- the per-tag tally plus the line \"REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) = N: <atom list>\". Answering \"what is left\" is now reading one CI line."
+      ],
+      "publishable_verification_bullets": [
+        "ZERO INFORMATION LOST -- the load-bearing check for a 51-entry prose rewrite. Every atom's post-round reason was diffed against the SAME atom's reason in the COMMITTED HEAD store (git show HEAD:docs/.atomic/workspace.atomic.json): for all 218, the original text is still present verbatim inside the new reason (the tag is a prefix, not a replacement). The only intentional edit is the \"REAL BACKLOG\" -> \"UNBUILT\" synonym normalization from R311y256, which is a rename of a prefix this project introduced one round earlier, not a loss of source-cited content.",
+        "Post-state verified by direct query: 218 atoms; untagged non-active atoms = 0; tag<->status violations = 0. Tally: active(built)=136, FOUNDATIONAL=54, PHANTOM=8, UNBUILT=6, OBVIATED=5, OUT-OF-SCOPE=4, UNVERIFIED=2, BEYOND-PICO=2, PARTIAL=1. (The audit script reports atoms=212 / active=130 because it excludes the 6 preset bundles, which are not atoms.)",
+        "The gate PASSES on the real tree and PRINTS the answer: \"catalog status truthfulness OK\" with \"REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) = 9: api-compat-c, api-compat-pico, platform-macos, platform-windows, plugin-dynamic-loading, runtime-tokio-uring, runtime-zero-copy, session-extqos, storage-backend-filesystem\". AUDIT_EXIT=0.",
+        "The gate FAILS on drift, proven in BOTH classes against doctored inventory copies (the store itself was never touched): (a) stripping the tag from api-compat-pico's reason -- the \"a new atom lands untagged\" case -- makes the audit exit non-zero with \"FAIL: non-active atom whose reason does not START with an implementation tag\", naming it; (b) flipping plugin-manager from deprecated to reserved while its reason still says OBVIATED makes it exit non-zero with \"FAIL: implementation tag disagrees with status\", naming the atom, its tag, and the status the tag implies. A gate that cannot fail is not a gate; both arms are exercised.",
+        "NEAR-MISS worth recording: the first attempt to prove drift-arm (b) reported a non-zero exit and was very nearly written up as 'caught'. It was not -- the fixture file had never been created (the command building it hit a 2-minute timeout mid-way), so the audit had died on a FileNotFoundError. A non-zero exit is NOT evidence a gate fired; the FAIL MESSAGE is. The arm was then re-run against a real fixture and produced the named failure quoted above. Judge a gate by what it PRINTS, not merely by its exit code.",
+        "The mutation path was the typed primitive throughout -- a loop over `mnemosyne-cli set-inventory-status --id ... --status ... --reason ...`. The sidecar JSON was NEVER edited directly (anti-patterns #6). Reasons were passed via `--reason \"$(cat FILE)\"` so backticked identifiers survive (feedback_ledger_decision_backtick_shell_eval).",
+        "INCIDENT, disclosed and repaired: while probing the CLI's flag names (the MCP tool takes `inventory_id`, the CLI takes `--id` -- a real skew), a probe call `set-inventory-status --id time-ntp64 --status reserved --reason \"X\"` was fired at a LIVE entry and OVERWROTE its 225-char reason with \"X\". There is no dry-run on a mutate primitive. Repaired immediately from the committed HEAD store, and the repair verified by diffing ALL 218 inventory entries against HEAD (0 differences) BEFORE proceeding with the round. Lesson recorded: never aim a mutate primitive at a live entry to discover its flags.",
+        "full run-ci RUNCI_EXIT=0 -- all required layers pass, INCLUDING Layer A3 which now carries invariant #5; judged by exit code. A catalog round MUST run full run-ci because A3 joins inventory <-> cargo.",
+        "validate_workspace: T1 orphan new=+0, style unchanged. No code, Cargo, or feature-gate change -- `active` count is UNCHANGED, so the A3 invariants #1-#4 (declared / reserved=>not-gated / active<=>gated / linked) are untouched by construction."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y257 = the inventory now has an IMPLEMENTATION axis, so \"what work remains\" is a CI line instead of a grep. `status` only ever answered \"is there a cfg knob?\"; \"is it built?\" lived as free prose in `reason`, which is why two greps of the same store disagreed (10 vs 27) and why the \"~11 remaining atoms\" figure I gave earlier was RETRACTED. Fixed inside the closed schema (no new field -- anti-patterns #9): the first token of every non-active atom's reason must be one of 8 closed tags, and the tag must agree with status. Layer A3 (audit-catalog-status.sh) enforces it as invariant #5 and prints the roll-up every run.",
+        "ANSWER, now derived rather than estimated -- REMAINING WORK = 9: UNBUILT(6) api-compat-c, api-compat-pico, plugin-dynamic-loading, storage-backend-filesystem, runtime-tokio-uring, runtime-zero-copy · PARTIAL(1) session-extqos (residual = the S4 z64 QoSLink wire + the AP config->set_qos_offer negotiation) · UNVERIFIED(2) platform-macos, platform-windows (no code to write -- add CI lanes). Everything else is settled: 136 active + 54 FOUNDATIONAL are built; 8 PHANTOM + 5 OBVIATED have nothing to build; 4 OUT-OF-SCOPE + 2 BEYOND-PICO are excluded/deferred by decision.",
+        "WHAT THIS SAYS ABOUT THE NORTH STAR: the PROTOCOL surface is essentially complete. Of the 9, only api-compat-pico is protocol-catalogue work; the rest are FFI (2), perf (2), a storage backend (1), dlopen (1), an S4 residual (1) and two CI lanes. So atom count is NOT the bottleneck -- CROSS-IMPL PROOF is (~75% foreign-proven vs ~92% implemented), and the inventory still has NO axis tracking it. A witness/proof axis is the natural successor to this round: same shape (closed tags + a gate), applied to \"is this atom foreign-proven against real zenoh-pico / zenohd?\".",
+        "TWO OF MY OWN EARLIER COUNTS WERE WRONG and the tagging pass is what caught them: session-extqos is NOT \"beyond-pico deferred\" -- it is BUILT under the differently-named `transport-qos` cargo feature (0 cfg(feature=session-extqos) sites) with a named S4 residual, hence PARTIAL; and platform-macos/windows are not \"unbuilt\" -- there is no code to write, only a lane, hence UNVERIFIED. An atom being implemented under ANOTHER atom's cargo feature is a shape the inventory could not previously express.",
+        "LESSON (recorded in memory): a mutate primitive has no dry-run. Probing `set-inventory-status` for its flag names against a LIVE entry overwrote a real 225-char reason with the probe string \"X\". Recovered from the committed HEAD store and verified by diffing all 218 entries against HEAD before continuing. Probe on a scratch id, never on a live one.",
+        "LOCAL: R311y257 atop R311y256 (7b40416) atop y255 (fb70bd4) atop y254 (9721268) atop y253 (5909fa4) atop y252 (8534d74) atop origin/main=79c462e. 6 commits ahead after this commits. NOT pushed without explicit consent."
+      ]
+    },
     "Round 311y26": {
       "decision_summary": "R311y26 -- FreeRTOS integration Round 2: crates/wz-runtime-freertos, the cooperative single-task PROFILE. Does NOT reimplement the executor or impl Runtime -- FreertosRuntime is a type alias for CoopRuntime<FreertosClock> (the audited wz-runtime-coop executor SSOT -- task pool/waker/timer queue -- reused verbatim, parameterised by the clock). Supplies ONLY the FreeRTOS seams: FreertosClock<TICK_HZ> (ClockSource over xTaskGetTickCount, const-generic over configTICK_RATE_HZ, mirrors SystickClock<CYCLES_PER_US>) + FreertosAllocator (GlobalAlloc over heap_4 pvPortMalloc/vPortFree, over-align-safe; deploy declares #[global_allocator]). Sync needs nothing (CoopRuntime uses critical_section; deploy supplies impl); net reuses NO_SYS lwip. Per the R311y25 lesson the CI lane (Layer G G.15, thumbv7m + WZ_FREERTOS_CONFIG) lands THIS round. Verified: cross-compile thumbv7m EXIT=0 + Layer G pass (G.14 + G.15 OK) + clippy(deny) + fmt + validate orphan new=+0. NEXT Round 3: boot + deploy/mcu-freertos-demo + QEMU mps2 e2e.",
       "changes_bullets": [
@@ -69329,7 +69391,7 @@
       "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh JWT auth method",
-      "reason": "zenoh PHANTOM (direct-read): NO jwt in zenoh transport auth -- establishment/ext/auth has only pubkey+usrpwd; the sole zenoh JWT is a media-type label in api/encoding.rs, not a Z_EXT_AUTH method. Nothing to mirror -> do NOT build. access closes to 5/6 textbook (6/6 unreachable by construction)."
+      "reason": "PHANTOM: zenoh PHANTOM (direct-read): NO jwt in zenoh transport auth -- establishment/ext/auth has only pubkey+usrpwd; the sole zenoh JWT is a media-type label in api/encoding.rs, not a Z_EXT_AUTH method. Nothing to mirror -> do NOT build. access closes to 5/6 textbook (6/6 unreachable by construction)."
     },
     "access-extauth-pubkey": {
       "status": "active",
@@ -69401,13 +69463,13 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "REAL BACKLOG (R311y256: the out-of-scope label is REMOVED by user decision 2026-07-13). zenoh-c-compatible C ABI (z_open/z_put/z_subscribe/z_get) over the wz AP surface. The prior class=out-of-scope cited \"separate-repo\" (zenoh ships this as the standalone zenoh-c repo via cbindgen) -- packaging, not impossibility. Under NO-DEFERRAL this is genuinely unbuilt work that belongs on the schedule. Additive FFI, AP/std-only (no no_std obligation). ORDER: after the cross-impl-proof push; pairs naturally with api-compat-pico (same FFI discipline, different profile). Source: zenoh 1.5.0 49c8a53 / zenoh-c."
+      "reason": "UNBUILT: (R311y256: the out-of-scope label is REMOVED by user decision 2026-07-13). zenoh-c-compatible C ABI (z_open/z_put/z_subscribe/z_get) over the wz AP surface. The prior class=out-of-scope cited \"separate-repo\" (zenoh ships this as the standalone zenoh-c repo via cbindgen) -- packaging, not impossibility. Under NO-DEFERRAL this is genuinely unbuilt work that belongs on the schedule. Additive FFI, AP/std-only (no no_std obligation). ORDER: after the cross-impl-proof push; pairs naturally with api-compat-pico (same FFI discipline, different profile). Source: zenoh 1.5.0 49c8a53 / zenoh-c."
     },
     "api-compat-pico": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "REAL BACKLOG (R311y256: the out-of-scope label is REMOVED by user decision 2026-07-13). zenoh-pico-compatible embedded C API (zp_*). The prior class=out-of-scope cited \"separate-repo\" (zenoh ships this as the standalone zenoh-pico repo) -- but a separate repo is zenoh's PACKAGING choice, not an impossibility, and under the NO-DEFERRAL north star a scoping choice belongs on the schedule, not on a shelf. This atom is the most awkward one to have shelved: the north star is literally \"zenoh + zenoh-pico FULL\". Genuinely unbuilt work. ORDER: after the cross-impl-proof push, per the user-decided SEQUENCE (zenoh+pico full -> then 2nd horizon). Ties to the no_std FFI surface and to pico-parity. Source: zenoh 1.5.0 49c8a53 / ~/zenoh-pico."
+      "reason": "UNBUILT: (R311y256: the out-of-scope label is REMOVED by user decision 2026-07-13). zenoh-pico-compatible embedded C API (zp_*). The prior class=out-of-scope cited \"separate-repo\" (zenoh ships this as the standalone zenoh-pico repo) -- but a separate repo is zenoh's PACKAGING choice, not an impossibility, and under the NO-DEFERRAL north star a scoping choice belongs on the schedule, not on a shelf. This atom is the most awkward one to have shelved: the north star is literally \"zenoh + zenoh-pico FULL\". Genuinely unbuilt work. ORDER: after the cross-impl-proof push, per the user-decided SEQUENCE (zenoh+pico full -> then 2nd horizon). Ties to the no_std FFI surface and to pico-parity. Source: zenoh 1.5.0 49c8a53 / ~/zenoh-pico."
     },
     "attachment-bytes": {
       "status": "active",
@@ -69509,13 +69571,13 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=config-change pub/sub (Notifier subscribe/notify); P=zenoh api/config.rs:173; C=prereq for hotreload; class=foundational"
+      "reason": "FOUNDATIONAL: F=config-change pub/sub (Notifier subscribe/notify); P=zenoh api/config.rs:173; C=prereq for hotreload; class=foundational"
     },
     "config-json-pointer-access": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=JSON-pointer get/set over config tree (insert_json5/remove/keys); P=zenoh config lib.rs:1163; C=no_std-feasible; class=foundational"
+      "reason": "FOUNDATIONAL: F=JSON-pointer get/set over config tree (insert_json5/remove/keys); P=zenoh config lib.rs:1163; C=no_std-feasible; class=foundational"
     },
     "config-mutate-runtime": {
       "status": "active",
@@ -69527,7 +69589,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=ConfigValidator veto/rewrite hook on config change; P=zenoh config lib.rs:389; C=inert w/o config-mutate+plugin-fw; class=foundational-inert"
+      "reason": "FOUNDATIONAL: F=ConfigValidator veto/rewrite hook on config change; P=zenoh config lib.rs:389; C=inert w/o config-mutate+plugin-fw; class=foundational-inert"
     },
     "declare-final": {
       "status": "active",
@@ -69575,43 +69637,43 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "sources/codecs/encoding.scxml octet-stream arm",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/octet-stream tag (id 3); P=zenoh; C=EncodingHint::APPLICATION_OCTET_STREAM const (data, not a toggle)"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/octet-stream tag (id 3); P=zenoh; C=EncodingHint::APPLICATION_OCTET_STREAM const (data, not a toggle)"
     },
     "encoding-cbor": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh application/cbor encoding",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/cbor tag (id 8); P=zenoh; C=EncodingHint::APPLICATION_CBOR const (data, not a toggle)"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/cbor tag (id 8); P=zenoh; C=EncodingHint::APPLICATION_CBOR const (data, not a toggle)"
     },
     "encoding-empty": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "sources/codecs/encoding.scxml empty arm",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=empty/default encoding tag = zenoh/bytes (id 0); P=zenoh encoding empty; C=EncodingHint::ZENOH_BYTES const (encoding identity is data, not a composable code path -- cfg-gating would be a dead-code stub per the §5.19 audit)"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=empty/default encoding tag = zenoh/bytes (id 0); P=zenoh encoding empty; C=EncodingHint::ZENOH_BYTES const (encoding identity is data, not a composable code path -- cfg-gating would be a dead-code stub per the §5.19 audit)"
     },
     "encoding-json": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh application/json encoding",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/json tag (id 5); P=zenoh; C=EncodingHint::APPLICATION_JSON const (data, not a toggle)"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/json tag (id 5); P=zenoh; C=EncodingHint::APPLICATION_JSON const (data, not a toggle)"
     },
     "encoding-mime": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh RFC 6838 full MIME registry",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=full 53-entry MIME id<->str table + from/to_mime parse; P=zenoh RFC 6838; C=encoding::mime_for_id / id_for_mime / encoding_from_mime / encoding_to_mime (superset of the bespoke encoding-* consts; data, not a toggle)"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=full 53-entry MIME id<->str table + from/to_mime parse; P=zenoh RFC 6838; C=encoding::mime_for_id / id_for_mime / encoding_from_mime / encoding_to_mime (superset of the bespoke encoding-* consts; data, not a toggle)"
     },
     "encoding-protobuf": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh application/protobuf encoding",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/protobuf tag (id 13); P=zenoh; C=EncodingHint::APPLICATION_PROTOBUF const (data, not a toggle)"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/protobuf tag (id 13); P=zenoh; C=EncodingHint::APPLICATION_PROTOBUF const (data, not a toggle)"
     },
     "encoding-utf8": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "sources/codecs/encoding.scxml text/plain arm",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=text/plain UTF-8 tag (id 4); P=zenoh; C=EncodingHint::TEXT_PLAIN const (data, not a toggle)"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=text/plain UTF-8 tag (id 4); P=zenoh; C=EncodingHint::TEXT_PLAIN const (data, not a toggle)"
     },
     "ext-pubsub-advanced-cache": {
       "status": "active",
@@ -69647,7 +69709,7 @@
       "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "DEPRECATED: FetchingSubscriberBuilder (querying_subscriber.rs:465) + FetchingSubscriber (querying_subscriber.rs:800) both #[deprecated] \"Use AdvancedPublisher and AdvancedSubscriber instead\"; QueryingSubscriber is a thin wrapper on it (fetch-closure + pending_fetches + MergeQueue timestamp-merge); covered by ext-pubsub-advanced-subscriber + advanced-history; publication-cache precedent; re-openable; class=deprecated"
+      "reason": "PHANTOM: DEPRECATED: FetchingSubscriberBuilder (querying_subscriber.rs:465) + FetchingSubscriber (querying_subscriber.rs:800) both #[deprecated] \"Use AdvancedPublisher and AdvancedSubscriber instead\"; QueryingSubscriber is a thin wrapper on it (fetch-closure + pending_fetches + MergeQueue timestamp-merge); covered by ext-pubsub-advanced-subscriber + advanced-history; publication-cache precedent; re-openable; class=deprecated"
     },
     "ext-pubsub-group-membership": {
       "status": "active",
@@ -69659,7 +69721,7 @@
       "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "DEPRECATED: zenoh-ext marks the whole QueryingSubscriber family #[deprecated] \"Use AdvancedPublisher and AdvancedSubscriber instead\" (querying_subscriber.rs:36/76/95); the session.get/liveliness.get history-fill is covered by ext-pubsub-advanced-history (advanced_subscriber.rs:763 startup @adv/** query); publication-cache (R311xu-excluded) + session-resumable (R311xz) precedent; re-openable beyond-zenoh; class=deprecated"
+      "reason": "PHANTOM: DEPRECATED: zenoh-ext marks the whole QueryingSubscriber family #[deprecated] \"Use AdvancedPublisher and AdvancedSubscriber instead\" (querying_subscriber.rs:36/76/95); the session.get/liveliness.get history-fill is covered by ext-pubsub-advanced-history (advanced_subscriber.rs:763 startup @adv/** query); publication-cache (R311xu-excluded) + session-resumable (R311xz) precedent; re-openable beyond-zenoh; class=deprecated"
     },
     "ext-pubsub-sample-miss-detection": {
       "status": "active",
@@ -69677,7 +69739,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs at R221",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=canonize fn; P=zenoh-pico _z_keyexpr_canonize; C=mandatory for outbound wire safety"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle; F=canonize fn; P=zenoh-pico _z_keyexpr_canonize; C=mandatory for outbound wire safety"
     },
     "keyexpr-dollar-star": {
       "status": "active",
@@ -69695,19 +69757,19 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "sources/algorithms/keyexpr_intersect.scxml at R297",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=intersect algorithm; P=zenoh _z_keyexpr_intersect; C=required for subscriber matching"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle; F=intersect algorithm; P=zenoh _z_keyexpr_intersect; C=required for subscriber matching"
     },
     "keyexpr-literal": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=baseline parse; P=zenoh keyexpr literal; C=indep, foundation for all wildcard variants"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle; F=baseline parse; P=zenoh keyexpr literal; C=indep, foundation for all wildcard variants"
     },
     "keyexpr-mapping": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/session_glue.rs KexprMappingTable",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=alias table; P=zenoh kexpr resolver; C=required when declare-keyexpr enabled"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle; F=alias table; P=zenoh kexpr resolver; C=required when declare-keyexpr enabled"
     },
     "keyexpr-wildcard-double": {
       "status": "active",
@@ -69731,7 +69793,7 @@
       "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "zenoh transport flow control",
-      "reason": "zenoh PHANTOM (direct-read, zenoh 49c8a53): grep flow-control / backpressure in io/zenoh-transport = 0 hits -- zenoh has NO link-level flow-control / backpressure signal. Its congestion-control is a DROP policy (block/drop when the tx queue fills), a separate concern already active as pubsub-congestion-control -- NOT backpressure. Nothing to mirror -> do NOT build (R311y0); re-openable beyond-zenoh superset candidate."
+      "reason": "PHANTOM: zenoh PHANTOM (direct-read, zenoh 49c8a53): grep flow-control / backpressure in io/zenoh-transport = 0 hits -- zenoh has NO link-level flow-control / backpressure signal. Its congestion-control is a DROP policy (block/drop when the tx queue fills), a separate concern already active as pubsub-congestion-control -- NOT backpressure. Nothing to mirror -> do NOT build (R311y0); re-openable beyond-zenoh superset candidate."
     },
     "link-fragment": {
       "status": "reserved",
@@ -69749,7 +69811,7 @@
       "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "zenoh transport tx cache",
-      "reason": "zenoh PHANTOM (direct-read, zenoh 49c8a53): no transport-level retransmit buffer -- grep retransmit / resend in io/zenoh-transport = 0 hits; reliability.rs is a SN-indexed ReliabilityQueue (RX ordering slots), not a TX retransmit-on-loss store. zenoh reliable-channel loss recovery is delegated to the underlying transport (TCP); best-effort is drop. wz mirrors this (SN ordering + lease, no app-level retransmit). Nothing to mirror -> do NOT build (R311y0); re-openable beyond-zenoh."
+      "reason": "PHANTOM: zenoh PHANTOM (direct-read, zenoh 49c8a53): no transport-level retransmit buffer -- grep retransmit / resend in io/zenoh-transport = 0 hits; reliability.rs is a SN-indexed ReliabilityQueue (RX ordering slots), not a TX retransmit-on-loss store. zenoh reliable-channel loss recovery is delegated to the underlying transport (TCP); best-effort is drop. wz mirrors this (SN ordering + lease, no app-level retransmit). Nothing to mirror -> do NOT build (R311y0); re-openable beyond-zenoh."
     },
     "liveliness-get": {
       "status": "active",
@@ -69851,25 +69913,25 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "crates/wz-runtime-tokio/src target",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=Linux syscalls; P=zenoh tokio default; C=baseline platform"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle; F=Linux syscalls; P=zenoh tokio default; C=baseline platform"
     },
     "platform-macos": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "zenoh macOS backend",
-      "reason": "target_os-routed (platform identity flows through Rust target_os, NOT a cargo feature, like platform-linux); std+tokio host-portable but NO wz CI lane -> unverified host. cfg=0. pico macos CMake profile exists"
+      "reason": "UNVERIFIED: target_os-routed (platform identity flows through Rust target_os, NOT a cargo feature, like platform-linux); std+tokio host-portable but NO wz CI lane -> unverified host. cfg=0. pico macos CMake profile exists"
     },
     "platform-qnx": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "OQ-W20 QNX-native runtime",
-      "reason": "INERT beyond-zenoh/pico: neither zenoh nor zenoh-pico has a QNX port; wz OQ-W20 future (QNX-native dispatch); niche RTOS, candidate for the 2nd-horizon AUTOSAR integration. cfg=0; re-openable"
+      "reason": "OUT-OF-SCOPE: INERT beyond-zenoh/pico: neither zenoh nor zenoh-pico has a QNX port; wz OQ-W20 future (QNX-native dispatch); niche RTOS, candidate for the 2nd-horizon AUTOSAR integration. cfg=0; re-openable"
     },
     "platform-windows": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "zenoh windows backend",
-      "reason": "target_os-routed (NOT a cargo feature, like platform-linux); std+tokio host-portable but NO wz CI lane -> unverified host. cfg=0. pico windows CMake profile exists"
+      "reason": "UNVERIFIED: target_os-routed (NOT a cargo feature, like platform-linux); std+tokio host-portable but NO wz CI lane -> unverified host. cfg=0. pico windows CMake profile exists"
     },
     "platform-zephyr": {
       "status": "active",
@@ -69887,7 +69949,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "REAL BACKLOG (R311y256: the out-of-scope label is REMOVED by user decision 2026-07-13). dlopen/.so runtime loading via libloading (zenoh dynamic_plugin.rs:30, vtable.rs:61). Genuinely unbuilt and genuinely buildable ON THE AP PROFILE -- the prior class=out-of-scope conflated \"no_std-impossible\" (true, and a legitimate MCU-profile exclusion) with \"not to be built at all\" (a scoping choice, which under NO-DEFERRAL belongs on the schedule). Note this is the ONE plugin atom that survives the obviation sweep: the other four (plugin-manager / host-trait / lifecycle / abi-compat, all deprecated in R311y256) exist only to SERVE dynamic loading, so if this is ever built they return with it. AP/std-only, unsafe-FFI. ORDER: after the cross-impl-proof push. Source: zenoh 1.5.0 49c8a53."
+      "reason": "UNBUILT: (R311y256: the out-of-scope label is REMOVED by user decision 2026-07-13). dlopen/.so runtime loading via libloading (zenoh dynamic_plugin.rs:30, vtable.rs:61). Genuinely unbuilt and genuinely buildable ON THE AP PROFILE -- the prior class=out-of-scope conflated \"no_std-impossible\" (true, and a legitimate MCU-profile exclusion) with \"not to be built at all\" (a scoping choice, which under NO-DEFERRAL belongs on the schedule). Note this is the ONE plugin atom that survives the obviation sweep: the other four (plugin-manager / host-trait / lifecycle / abi-compat, all deprecated in R311y256) exist only to SERVE dynamic loading, so if this is ever built they return with it. AP/std-only, unsafe-FFI. ORDER: after the cross-impl-proof push. Source: zenoh 1.5.0 49c8a53."
     },
     "plugin-host-trait": {
       "status": "deprecated",
@@ -69995,7 +70057,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "crates/wz-runtime-tokio/src/sample.rs",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=Sample receive surface; P=zenoh Sample; C=indep receive-side"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle; F=Sample receive surface; P=zenoh Sample; C=indep receive-side"
     },
     "pubsub-source-info": {
       "status": "active",
@@ -70097,13 +70159,13 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=router-grade FaceState (interest maps, query reverse-path, dispatch shell); P=zenoh face.rs:63,296; C=needs hat-multihat; class=foundational"
+      "reason": "FOUNDATIONAL: F=router-grade FaceState (interest maps, query reverse-path, dispatch shell); P=zenoh face.rs:63,296; C=needs hat-multihat; class=foundational"
     },
     "router-hat-multihat": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=HatTrait multi-hat polymorphism seam (per-face/resource/tables Box<dyn Any>); P=zenoh hat/mod.rs:78,272; C=prereq for all router atoms; class=foundational"
+      "reason": "FOUNDATIONAL: F=HatTrait multi-hat polymorphism seam (per-face/resource/tables Box<dyn Any>); P=zenoh hat/mod.rs:78,272; C=prereq for all router atoms; class=foundational"
     },
     "router-hat-router": {
       "status": "active",
@@ -70115,7 +70177,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=hash-based master-router election for dedup delivery; P=zenoh hat/router/mod.rs:244; C=needs hat-router; class=foundational"
+      "reason": "FOUNDATIONAL: F=hash-based master-router election for dedup delivery; P=zenoh hat/router/mod.rs:244; C=needs hat-router; class=foundational"
     },
     "router-multicast-faces": {
       "status": "active",
@@ -70127,49 +70189,49 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=start_router bootstrap (router-scoped listen/connect/scout); P=zenoh orchestrator.rs:230; FOUNDATIONAL (R311y238) -- the router-scoped bootstrap is SUBSUMED into the ACTIVE router-hat-router run_router_hat (runner.rs:2258: bind_endpoint(listen) + peer_loop(dial) + --connect-after reconcile) plus the always-on FOUNDATIONAL scouting-gossip link-state flood (scouting-gossip pulls routing-router) + locator binding; router-orchestration itself is NOT a separate cfg knob (0 cfg sites; router-orchestration = [] no-op facade in wz/Cargo.toml), so reserved-FOUNDATIONAL not active (active <=> a real cfg toggle, per the inventory active-iff-cfg-toggle rule). Done via composition of the active run-mode + the always-on gossip flood, not a togglable atom; class=foundational-reserved"
+      "reason": "FOUNDATIONAL: F=start_router bootstrap (router-scoped listen/connect/scout); P=zenoh orchestrator.rs:230; FOUNDATIONAL (R311y238) -- the router-scoped bootstrap is SUBSUMED into the ACTIVE router-hat-router run_router_hat (runner.rs:2258: bind_endpoint(listen) + peer_loop(dial) + --connect-after reconcile) plus the always-on FOUNDATIONAL scouting-gossip link-state flood (scouting-gossip pulls routing-router) + locator binding; router-orchestration itself is NOT a separate cfg knob (0 cfg sites; router-orchestration = [] no-op facade in wz/Cargo.toml), so reserved-FOUNDATIONAL not active (active <=> a real cfg toggle, per the inventory active-iff-cfg-toggle rule). Done via composition of the active run-mode + the always-on gossip flood, not a togglable atom; class=foundational-reserved"
     },
     "routing-client": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "crates/wz-ap-demo/src/main.rs client mode",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=client-only routing; P=zenoh client; C=indep mode, smallest topology footprint"
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle; F=client-only routing; P=zenoh client; C=indep mode, smallest topology footprint"
     },
     "routing-data-route-compute": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=router compute_data_route fan across 3 source types; P=zenoh hat/router/pubsub.rs:1215; C=BUILT+always-compiled inside RouterForwarder under the single routing-router-hat cfg unit (wz-runtime-tokio/src/lib.rs:858), no inner per-mechanism gate -- route_push/forward_push_tier/bridge_push_cross_mesh/deliver_to_client_subscribers + shared compute_push_forward core (C0-C4), master-gated; peer LinkstateForwarder compiles the twin data plane unconditionally (sibling-consistent) and zenoh compute_data_route is an unconditional per-hat trait method; a router computing no data route is degenerate; not separately toggleable; class=foundational (done, reserved -- active% understates completeness; A3-audit R311y159)"
+      "reason": "FOUNDATIONAL: F=router compute_data_route fan across 3 source types; P=zenoh hat/router/pubsub.rs:1215; C=BUILT+always-compiled inside RouterForwarder under the single routing-router-hat cfg unit (wz-runtime-tokio/src/lib.rs:858), no inner per-mechanism gate -- route_push/forward_push_tier/bridge_push_cross_mesh/deliver_to_client_subscribers + shared compute_push_forward core (C0-C4), master-gated; peer LinkstateForwarder compiles the twin data plane unconditionally (sibling-consistent) and zenoh compute_data_route is an unconditional per-hat trait method; a router computing no data route is degenerate; not separately toggleable; class=foundational (done, reserved -- active% understates completeness; A3-audit R311y159)"
     },
     "routing-failover": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh failover brokering",
-      "reason": "router-mode RUNTIME config peers_failover_brokering (zenoh-config defaults.rs:157=true / lib.rs:556 RouterRoutingConf; router/mod.rs failover_brokering); EMERGENT broker re-route via gossip+linkstate, NOT a compile-time feature; requires routing-router (P4); pico none -> P4-deferred, re-openable"
+      "reason": "BEYOND-PICO: router-mode RUNTIME config peers_failover_brokering (zenoh-config defaults.rs:157=true / lib.rs:556 RouterRoutingConf; router/mod.rs failover_brokering); EMERGENT broker re-route via gossip+linkstate, NOT a compile-time feature; requires routing-router (P4); pico none -> P4-deferred, re-openable"
     },
     "routing-interceptor-framework": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=pluggable InterceptorTrait+Chain+factory seam (generalizes ACL chain); P=zenoh interceptor/mod.rs:101; C=refactor of access interceptors; class=foundational"
+      "reason": "FOUNDATIONAL: F=pluggable InterceptorTrait+Chain+factory seam (generalizes ACL chain); P=zenoh interceptor/mod.rs:101; C=refactor of access interceptors; class=foundational"
     },
     "routing-interceptor-hotreload": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=version-keyed ArcSwap interceptor hot-reload + keyexpr cache; P=zenoh tables.rs:81 face.rs:151; C=needs interceptor-framework; class=foundational"
+      "reason": "FOUNDATIONAL: F=version-keyed ArcSwap interceptor hot-reload + keyexpr cache; P=zenoh tables.rs:81 face.rs:151; C=needs interceptor-framework; class=foundational"
     },
     "routing-interest-broker": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=router interest current-snapshot + DeclareFinal + future-push; P=zenoh hat/router/interests.rs:41; C=BUILT+always-compiled inside RouterForwarder under the single routing-router-hat cfg unit (lib.rs:858) -- respond_to_interest/dump_interest_*/emit_current_interest_replies/future_pushes + FutureSubStore/FutureQablStore (y141-y158), deliberately always-on (declare-interest partial->full); serves BOTH the data(subs) and query(qabls) planes inline so it is not orthogonal to them; peer respond_to_interest is ungated (sibling-consistent); removing it would reopen the pico write-filter reverse-data black-hole (R311y141); class=foundational (done, reserved; A3-audit R311y159)"
+      "reason": "FOUNDATIONAL: F=router interest current-snapshot + DeclareFinal + future-push; P=zenoh hat/router/interests.rs:41; C=BUILT+always-compiled inside RouterForwarder under the single routing-router-hat cfg unit (lib.rs:858) -- respond_to_interest/dump_interest_*/emit_current_interest_replies/future_pushes + FutureSubStore/FutureQablStore (y141-y158), deliberately always-on (declare-interest partial->full); serves BOTH the data(subs) and query(qabls) planes inline so it is not orthogonal to them; peer respond_to_interest is ungated (sibling-consistent); removing it would reopen the pico write-filter reverse-data black-hole (R311y141); class=foundational (done, reserved; A3-audit R311y159)"
     },
     "routing-interest-pending-gc": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=pending-current-interest GC + multihop DeclareFinal unwind; P=zenoh dispatcher/interests.rs:79; C=needs interest-broker; class=foundational"
+      "reason": "FOUNDATIONAL: F=pending-current-interest GC + multihop DeclareFinal unwind; P=zenoh dispatcher/interests.rs:79; C=needs interest-broker; class=foundational"
     },
     "routing-namespace": {
       "status": "active",
@@ -70187,13 +70249,13 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=router compute_query_route w/ complete-aggregation+graph distance; P=zenoh hat/router/queries.rs:1426; C=BUILT+always-compiled inside RouterForwarder under the single routing-router-hat cfg unit (lib.rs:858) -- route_request/forward_response/forward_response_final/client_qabls + PendingQueries/QueryFan (C5); peer forward_request is ungated too (sibling-consistent) and zenoh compute_query_route is an unconditional per-hat trait method; NOT honestly gateable at this compute granularity (respond_to_interest reads the qabl tables inline, so gating only route_request = an incoherent advertise-but-never-route router); a future pub/sub-only slim router would open a NEW coarse query-plane atom, not revive this one (frozen-ledger != scope-immutable); class=foundational (done, reserved; A3-audit R311y159)"
+      "reason": "FOUNDATIONAL: F=router compute_query_route w/ complete-aggregation+graph distance; P=zenoh hat/router/queries.rs:1426; C=BUILT+always-compiled inside RouterForwarder under the single routing-router-hat cfg unit (lib.rs:858) -- route_request/forward_response/forward_response_final/client_qabls + PendingQueries/QueryFan (C5); peer forward_request is ungated too (sibling-consistent) and zenoh compute_query_route is an unconditional per-hat trait method; NOT honestly gateable at this compute granularity (respond_to_interest reads the qabl tables inline, so gating only route_request = an incoherent advertise-but-never-route router); a future pub/sub-only slim router would open a NEW coarse query-plane atom, not revive this one (frozen-ledger != scope-immutable); class=foundational (done, reserved; A3-audit R311y159)"
     },
     "routing-route-cache": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=per-resource 3-way (routers/peers/clients) route cache get_or_set_route; P=zenoh resource.rs:147; C=needs hat-multihat; class=foundational"
+      "reason": "FOUNDATIONAL: F=per-resource 3-way (routers/peers/clients) route cache get_or_set_route; P=zenoh resource.rs:147; C=needs hat-multihat; class=foundational"
     },
     "routing-router": {
       "status": "active",
@@ -70223,7 +70285,7 @@
       "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "zenoh async-std backend",
-      "reason": "zenoh PHANTOM: zenoh moved to tokio-only; async-std appears only in the rest-plugin ignored-features list, no core executor; wz has no async-std code. tokio-only; re-openable beyond-zenoh"
+      "reason": "PHANTOM: zenoh PHANTOM: zenoh moved to tokio-only; async-std appears only in the rest-plugin ignored-features list, no core executor; wz has no async-std code. tokio-only; re-openable beyond-zenoh"
     },
     "runtime-coop": {
       "status": "active",
@@ -70247,13 +70309,13 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "docs/runtime-crate-tokio.md §4 io_uring opt-in",
-      "reason": "F=io_uring fixed-buf adapter; P=ARCHITECTURE §9.5 row 3; C=alternative reactor under runtime-tokio; ORTHOGONAL io_uring perf concern, NOT a transport-shm prereq (R311xn)"
+      "reason": "UNBUILT: F=io_uring fixed-buf adapter; P=ARCHITECTURE §9.5 row 3; C=alternative reactor under runtime-tokio; ORTHOGONAL io_uring perf concern, NOT a transport-shm prereq (R311xn)"
     },
     "runtime-zero-copy": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "RFC §5.E buffer pool",
-      "reason": "F=pool-slot Sample lifetime; P=RFC §5.E; C=opt-in perf over runtime-tokio-uring or runtime-coop; ORTHOGONAL to transport-shm (NOT a shm prereq — R311xn)"
+      "reason": "UNBUILT: F=pool-slot Sample lifetime; P=RFC §5.E; C=opt-in perf over runtime-tokio-uring or runtime-coop; ORTHOGONAL to transport-shm (NOT a shm prereq — R311xn)"
     },
     "scouting-active": {
       "status": "active",
@@ -70283,7 +70345,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "OQ-W23 ratify pending",
-      "reason": "INERT-reserved: beyond-zenoh/pico -- neither has a passive (listen-only) scouting mode; wz OQ-W23 future design, explicitly rejected at parse (ScoutingModeError::PassiveDeferred, scout_static.rs). cfg=0; re-openable"
+      "reason": "OUT-OF-SCOPE: INERT-reserved: beyond-zenoh/pico -- neither has a passive (listen-only) scouting mode; wz OQ-W23 future design, explicitly rejected at parse (ScoutingModeError::PassiveDeferred, scout_static.rs). cfg=0; re-openable"
     },
     "scouting-static": {
       "status": "active",
@@ -70307,7 +70369,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "zenoh Z_EXT_QOS",
-      "reason": "F=per-priority QoS on transport establishment (the zenoh Z_EXT_QOS capability catalogue; the wz IMPLEMENTATION vehicle is the transport-qos atom). P=zenoh DUAL ext on Init ONLY (Open inert): unit ext_qos (0x1, presence) XOR z64 ext_qos_link (0x1, priority-range + reliability), directional superset/subset containment (init.rs:144 / ext/qos.rs); enabling it splits the transport into Priority(8) x Reliability(2) per-(priority,reliability) SN streams (common/priority.rs:77 + universal/transport.rs:89). IMPL R311y215: the wz per-priority QoS transport is now BUILT under the `transport-qos` CARGO FEATURE (a compile-time knob -- the [AtomicTxSn;8]/[RxSn;8] conduit arrays must be statically sized for the MCU no-alloc profile; is_qos is the RUNTIME per-session flag WITHIN a transport-qos build) -- the Frame/Fragment ext_qos wire + per-priority SN conduits + priority-keyed reassembly + the unit-ext_qos Init negotiation, all cross-checked against zenoh 49c8a53. See the transport-qos atom. This SUPERSEDES the R311xz 'is_qos = a runtime config flag, not a cargo feature / wz pico-faithful 2-channel / BEYOND-PICO-deferred' framing (the user chose to build it properly). session-extqos stays RESERVED (0 cfg(feature=session-extqos) sites -- the wz feature is named transport-qos) as the establishment-capability catalogue whose RESIDUAL is deferred to R311y216 / S4: the z64 QoSLink priority-range wire semantics (S4 wz<->zenohd interop) + the AP WzConfig->set_qos_offer negotiation-from-config (until it lands is_qos never flips true so the wire stays DEFAULT-inert). pico still negotiates no unicast ext_qos (its per-priority conduit is JOIN/multicast-only), so transport-qos is a wz superset over the pico-parity baseline."
+      "reason": "PARTIAL: F=per-priority QoS on transport establishment (the zenoh Z_EXT_QOS capability catalogue; the wz IMPLEMENTATION vehicle is the transport-qos atom). P=zenoh DUAL ext on Init ONLY (Open inert): unit ext_qos (0x1, presence) XOR z64 ext_qos_link (0x1, priority-range + reliability), directional superset/subset containment (init.rs:144 / ext/qos.rs); enabling it splits the transport into Priority(8) x Reliability(2) per-(priority,reliability) SN streams (common/priority.rs:77 + universal/transport.rs:89). IMPL R311y215: the wz per-priority QoS transport is now BUILT under the `transport-qos` CARGO FEATURE (a compile-time knob -- the [AtomicTxSn;8]/[RxSn;8] conduit arrays must be statically sized for the MCU no-alloc profile; is_qos is the RUNTIME per-session flag WITHIN a transport-qos build) -- the Frame/Fragment ext_qos wire + per-priority SN conduits + priority-keyed reassembly + the unit-ext_qos Init negotiation, all cross-checked against zenoh 49c8a53. See the transport-qos atom. This SUPERSEDES the R311xz 'is_qos = a runtime config flag, not a cargo feature / wz pico-faithful 2-channel / BEYOND-PICO-deferred' framing (the user chose to build it properly). session-extqos stays RESERVED (0 cfg(feature=session-extqos) sites -- the wz feature is named transport-qos) as the establishment-capability catalogue whose RESIDUAL is deferred to R311y216 / S4: the z64 QoSLink priority-range wire semantics (S4 wz<->zenohd interop) + the AP WzConfig->set_qos_offer negotiation-from-config (until it lands is_qos never flips true so the wire stays DEFAULT-inert). pico still negotiates no unicast ext_qos (its per-priority conduit is JOIN/multicast-only), so transport-qos is a wz superset over the pico-parity baseline."
     },
     "session-extshm": {
       "status": "active",
@@ -70335,13 +70397,13 @@
       "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "OQ-Q14 resumable session",
-      "reason": "zenoh PHANTOM (direct-read, zenoh 49c8a53): grep `resum*` = 0 hits across commons/io/zenoh -- no resumption cookie/token/session-id continuity. zenoh reconnect = a fresh InitSyn/InitAck/OpenSyn/OpenAck handshake; the only continuity is zid-keyed transport reuse (manager.rs:710) + transport_multilink + lease-based link-swap, NOT resumption. pico = auto-reconnect via a fresh _z_open + app-layer declaration-cache replay (session.c:222-269), also not transport resumption. wz ALREADY has this faithful behavior (R267+ reconnect + replay_declarations). The prior 'OQ-Q14 resumable session' source is a MISLABEL -- log Q14 is an unrelated SCE algorithm/bounded-collection question. Nothing to mirror -> do NOT build (R311xz); re-openable beyond-zenoh superset candidate, NOT structurally impossible."
+      "reason": "PHANTOM: zenoh PHANTOM (direct-read, zenoh 49c8a53): grep `resum*` = 0 hits across commons/io/zenoh -- no resumption cookie/token/session-id continuity. zenoh reconnect = a fresh InitSyn/InitAck/OpenSyn/OpenAck handshake; the only continuity is zid-keyed transport reuse (manager.rs:710) + transport_multilink + lease-based link-swap, NOT resumption. pico = auto-reconnect via a fresh _z_open + app-layer declaration-cache replay (session.c:222-269), also not transport resumption. wz ALREADY has this faithful behavior (R267+ reconnect + replay_declarations). The prior 'OQ-Q14 resumable session' source is a MISLABEL -- log Q14 is an unrelated SCE algorithm/bounded-collection question. Nothing to mirror -> do NOT build (R311xz); re-openable beyond-zenoh superset candidate, NOT structurally impossible."
     },
     "session-stateless-accept": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "OQ-W15 stateless accept ratify",
-      "reason": "F=always-stateless acceptor via an encrypted SYN-cookie. P=zenoh (cookie.rs:29 / accept.rs:358-525): the acceptor is ALWAYS stateless (not a mode); InitAck carries a cookie bundling all negotiated state + a u64 nonce, protected by an AES BlockCipher keyed by a per-manager secret -- NOT an HMAC. The acceptor buffers only the nonce; OpenSyn echoes the cookie back, the acceptor decrypts + checks nonce-match -> rebuilds full state. CORRECTION: the prior 'cookie HMAC SHA256' framing (and OQ-W15) DIVERGES from zenoh's AES-cookie mechanism. C=BEYOND-PICO full-zenoh: the pico acceptor sends an EMPTY cookie + stays STATEFUL (no SYN-cookie). OQ-W15(a) answered (RNG/HMAC primitive ownership) but (b) the rate-limit defaults are post-Phase-A MCU-empirical-deferred. Substantial accept-FSM + cipher rework -> P4 full-zenoh scope (deferred R311xz; AP-side doable with std AES when scheduled)."
+      "reason": "BEYOND-PICO: F=always-stateless acceptor via an encrypted SYN-cookie. P=zenoh (cookie.rs:29 / accept.rs:358-525): the acceptor is ALWAYS stateless (not a mode); InitAck carries a cookie bundling all negotiated state + a u64 nonce, protected by an AES BlockCipher keyed by a per-manager secret -- NOT an HMAC. The acceptor buffers only the nonce; OpenSyn echoes the cookie back, the acceptor decrypts + checks nonce-match -> rebuilds full state. CORRECTION: the prior 'cookie HMAC SHA256' framing (and OQ-W15) DIVERGES from zenoh's AES-cookie mechanism. C=BEYOND-PICO full-zenoh: the pico acceptor sends an EMPTY cookie + stays STATEFUL (no SYN-cookie). OQ-W15(a) answered (RNG/HMAC primitive ownership) but (b) the rate-limit defaults are post-Phase-A MCU-empirical-deferred. Substantial accept-FSM + cipher rework -> P4 full-zenoh scope (deferred R311xz; AP-side doable with std AES when scheduled)."
     },
     "session-unicast-accept": {
       "status": "active",
@@ -70383,7 +70445,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "REAL BACKLOG (R311y256: the out-of-scope label is REMOVED -- the user's 2026-07-13 decision on api-compat/plugin-dynamic-loading applied consistently). Filesystem-backed Durable storage volume. The prior class=out-of-scope cited \"separate repo\" (zenoh-backend-filesystem) -- packaging, not impossibility -- while its OWN reason already conceded this is the \"lowest-dep Durable candidate, std-only\". It needs no third-party dependency at all, and the wz volume seam it plugs into (storage-backend-volume-trait / -capability / storage-mgr-config) is already FOUNDATIONAL and built. So this is the cheapest real Durable backend and the natural first one. Genuinely unbuilt work; AP/std-only, composed at build time via a cargo feature (no dynamic volume loading -- that atom is deprecated/obviated). ORDER: after the cross-impl-proof push. Source: zenoh 1.5.0 49c8a53."
+      "reason": "UNBUILT: (R311y256: the out-of-scope label is REMOVED -- the user's 2026-07-13 decision on api-compat/plugin-dynamic-loading applied consistently). Filesystem-backed Durable storage volume. The prior class=out-of-scope cited \"separate repo\" (zenoh-backend-filesystem) -- packaging, not impossibility -- while its OWN reason already conceded this is the \"lowest-dep Durable candidate, std-only\". It needs no third-party dependency at all, and the wz volume seam it plugs into (storage-backend-volume-trait / -capability / storage-mgr-config) is already FOUNDATIONAL and built. So this is the cheapest real Durable backend and the natural first one. Genuinely unbuilt work; AP/std-only, composed at build time via a cargo feature (no dynamic volume loading -- that atom is deprecated/obviated). ORDER: after the cross-impl-proof push. Source: zenoh 1.5.0 49c8a53."
     },
     "storage-backend-memory-volume": {
       "status": "reserved",
@@ -70473,19 +70535,19 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
       "source": "sources/codecs/timestamp.scxml",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xt); F=NTP64 timestamp word + codec; P=zenoh NTP64 timestamp; C=baseline timestamp shape, folded into pubsub-timestamp's wire codec + wall_clock_ntp64 -- the word format, not a knob."
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle (R311xt); F=NTP64 timestamp word + codec; P=zenoh NTP64 timestamp; C=baseline timestamp shape, folded into pubsub-timestamp's wire codec + wall_clock_ntp64 -- the word format, not a knob."
     },
     "time-system-clock": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
       "source": "crates/wz-runtime-core/src/time.rs",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=wall-clock NTP64 source (wall_clock_ntp64); P=zenoh SystemTime / uhlc system_time_clock; C=the physical clock the HLC WRAPS (its physical layer, NOT an alternative mutually-exclusive-with-HLC -- R311xt direct-read correction), the storage stack wall-clock SSOT."
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle; F=wall-clock NTP64 source (wall_clock_ntp64); P=zenoh SystemTime / uhlc system_time_clock; C=the physical clock the HLC WRAPS (its physical layer, NOT an alternative mutually-exclusive-with-HLC -- R311xt direct-read correction), the storage stack wall-clock SSOT."
     },
     "time-timestamp-source": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
       "source": "zenoh pluggable timestamp source",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xt); F=timestamp-source selection seam; P=zenoh Option<Arc<HLC>> (no pluggable-source trait upstream); C=realized as the FallbackStamp stamper (wall-clock vs HLC, picked by the time-hlc gate) at the storage fallback -- wz's only auto-stamp site; a general TimestampSource trait deferred until a 2nd consumer (publish auto-stamp)."
+      "reason": "FOUNDATIONAL: FOUNDATIONAL always-on, no cfg toggle (R311xt); F=timestamp-source selection seam; P=zenoh Option<Arc<HLC>> (no pluggable-source trait upstream); C=realized as the FallbackStamp stamper (wall-clock vs HLC, picked by the time-hlc gate) at the storage fallback -- wz's only auto-stamp site; a general TimestampSource trait deferred until a 2nd consumer (publish auto-stamp)."
     },
     "transport-batching": {
       "status": "active",
