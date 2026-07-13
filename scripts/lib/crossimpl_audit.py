@@ -116,40 +116,73 @@ def hosted_ci_layers() -> set[str]:
     return lanes
 
 
-def layer_e_skips() -> list[str]:
-    """The --skip substrings Layer E passes to libtest, derived from run-ci.sh.
+def run_ci_text() -> str:
+    return (REPO_ROOT / "scripts" / "run-ci.sh").read_text()
 
-    Layer E is the ONLY interop lane hosted CI runs, and it deliberately skips the test
-    families that belong to lanes hosted CI does not run. A test's name matching any of
-    these means Layer E does not execute it.
+
+def lane_bodies() -> dict[str, str]:
+    """lane id -> the shell body of the function that lane registers.
+
+    Derived from the `run_layer <ID> <fn>` registrations, so a lane renamed or added in
+    run-ci.sh is picked up automatically. Hardcoding the mapping here would be the very
+    prose-list-that-rots this axis exists to replace.
     """
-    txt = (REPO_ROOT / "scripts" / "run-ci.sh").read_text()
-    m = re.search(r"layer_e_ap_demo_round_trip\(\).*?\n}", txt, re.S)
-    return re.findall(r"--skip ([A-Za-z0-9_]+)", m.group(0)) if m else []
+    txt = run_ci_text()
+    out: dict[str, str] = {}
+    for lane, fn in re.findall(r"^run_layer (\S+) (\S+)", txt, re.M):
+        m = re.search(r"^%s\(\) \{.*?^\}" % re.escape(fn), txt, re.S | re.M)
+        if m:
+            out[lane] = m.group(0)
+    return out
+
+
+def lane_test_targets() -> dict[str, set[str]]:
+    """lane id -> the `--test <target>` names that lane runs explicitly."""
+    return {
+        lane: set(re.findall(r"--test ([A-Za-z0-9_]+)", body))
+        for lane, body in lane_bodies().items()
+    }
+
+
+def layer_e_skips() -> list[str]:
+    """The --skip substrings Layer E passes to libtest.
+
+    Layer E is the CATCH-ALL ignored-test lane (no `--test` target of its own): it runs
+    every #[ignore]d test in the crate EXCEPT the families that belong to dedicated lanes.
+    So a test's fn name matching any of these means Layer E does not execute it, and only
+    its dedicated lane can.
+    """
+    body = lane_bodies().get("E", "")
+    return re.findall(r"--skip ([A-Za-z0-9_]+)", body)
 
 
 def ci_executes(test, cf) -> bool:
     """Does hosted CI actually RUN this test?
 
-    A proof that never runs is not a proof. 64 of the 133 corpus tests are #[ignore]d,
-    and the lanes that would run them (Z / E2 / E6-E8 / M) are not in ci.yml -- hosted CI
-    does not even build zenohd. Counting those claims into a single `proven` number would
-    carry MORE false authority than the hand estimate this axis replaces, so the roll-up
-    reports the two populations separately.
+    A proof that never runs is not a proof, so the roll-up reports the executed and the
+    declared populations separately rather than fusing them. This is the predicate that
+    separates them, and it is DERIVED end to end -- the hosted lane set comes from
+    ci.yml's `run:` steps, and lane -> test-target comes from run-ci.sh -- so wiring a new
+    lane into the workflow moves the number without anyone editing this file.
 
-      - NOT #[ignore]d -> Layer C1 (`cargo test --workspace`) runs it on every push. This
-        is how the 25 `codec` files (the linked-pico-C byte-compares) execute.
-      - #[ignore]d     -> only Layer E among the hosted lanes runs ignored tests, and it
-                          skips by test-name substring.
+      - NOT #[ignore]d -> Layer C1 (`cargo test --workspace`) runs it. This is how the 26
+        `codec` files (the linked-pico-C differentials) execute on every push.
+      - #[ignore]d     -> a dedicated lane that names its `--test` target runs it, or
+                          Layer E's catch-all does (unless its fn name matches a --skip).
     """
     if not test.has_ignore:
         return "C1" in HOSTED
-    if "E" not in HOSTED:
-        return False
-    return not any(s in test.name for s in E_SKIPS)
+    target = cf.path.stem
+    for lane, targets in LANE_TARGETS.items():
+        if lane in HOSTED and target in targets:
+            return True
+    if "E" in HOSTED and not any(s in test.name for s in E_SKIPS):
+        return True
+    return False
 
 
 HOSTED = hosted_ci_layers()
+LANE_TARGETS = lane_test_targets()
 E_SKIPS = layer_e_skips()
 
 # Which binary a corpus test drives comes from the corpus module's CALL-GRAPH resolution

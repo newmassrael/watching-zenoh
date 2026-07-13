@@ -64,6 +64,32 @@ if [[ "${ZENOHD_FORCE_CRATES_IO:-0}" -ne 1 ]]; then
     done
 fi
 
+# Source A2 (R311y264) — a SOURCE TREE from a shallow clone of the pinned tag, for a
+# machine that has no cargo-git checkout to reuse (a hosted CI runner).
+#
+# Why not just fall to source B (crates.io) there: `cargo install` yields BINARIES, not
+# the storage-manager cdylib, so Layer Z's storage-replication interop test SKIPs — and a
+# SKIP is green. The lane would "run in CI" while one of its proofs never executed, which
+# is exactly the false-authority Layer A4 exists to stop (it reports proofs hosted CI
+# actually runs as a separate population precisely because a proof that never runs is not
+# a proof). Only a source tree can produce the plugin, so CI takes a source tree.
+#
+# Opt-in via ZENOHD_ALLOW_CLONE=1: a developer's machine keeps preferring the checkout it
+# already has and never pays a clone. The version assert below validates the clone the
+# same way it validates a checkout, so a mis-tagged tree fails fast rather than silently
+# building a divergent reference router.
+if [[ -z "$ZH" && "${ZENOHD_ALLOW_CLONE:-0}" -eq 1 ]]; then
+    SRC_TREE="$BUILD_DIR/zenoh-src"
+    if [[ ! -d "$SRC_TREE/.git" ]]; then
+        echo "build-zenohd: no cargo git checkout; cloning zenoh $ZENOHD_VERSION" >&2
+        rm -rf "$SRC_TREE"
+        mkdir -p "$(dirname "$SRC_TREE")"
+        git clone --depth 1 --branch "$ZENOHD_VERSION" \
+            https://github.com/eclipse-zenoh/zenoh "$SRC_TREE"
+    fi
+    ZH="$SRC_TREE"
+fi
+
 if [[ -n "$ZH" ]]; then
     # R311pj — assert the checkout's version matches the pinned ZENOHD_VERSION so
     # a cargo cache that later resolves a different zenoh fails fast here rather

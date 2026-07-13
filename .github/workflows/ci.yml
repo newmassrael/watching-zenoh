@@ -364,6 +364,119 @@ jobs:
         run: bash scripts/run-ci.sh --layer F
 
   # ─────────────────────────────────────────────────────────────────
+  # R311y264 — the CROSS-IMPL INTEROP job. Every lane here executes a
+  # cross-impl PROOF that hosted CI previously never ran.
+  #
+  # WHY THIS JOB EXISTS. Layer A4 (R311y259) reports the proof axis as TWO
+  # populations, because a proof that never runs is not a proof: 64 of the
+  # corpus's tests are #[ignore]d, and the lanes that execute them — E2 / E6 /
+  # E8 / Z — were not in this workflow. So the zenohd tier in particular ran
+  # ONLY on a developer's machine, at pre-push. A derived number resting on
+  # evidence hosted CI never executes carries MORE false authority than the
+  # hand estimate the axis replaced, which is precisely why A4 refuses to fuse
+  # the two counts. This job closes the gap by making the evidence execute.
+  #
+  # It is a SEPARATE job, not more steps on `ci`, for one reason: zenohd is a
+  # from-source build of an external release, and it must not eat the primary
+  # job's 30-minute budget. Its output is a pinned-version binary, so it caches
+  # to a near-zero steady-state cost and only a cold cache pays.
+  #
+  # NOT wired here, deliberately: Layer M (multicast). run-ci.sh marks it an
+  # "opt-in environment-flaky lane" — UDP multicast behaviour on a hosted
+  # runner is not something to bet a green build on, and a flaky gate is worse
+  # than an honest local-only one (no-flaky-ever). The multicast pico proofs
+  # therefore stay local-only until that flakiness is root-caused, and A4's
+  # EXECUTION line keeps saying so.
+  interop:
+    name: cross-impl proof lanes (E2 + E6 + E6b + E8 + Z)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        # cmake + libclang-dev: zenoh-pico-sys (cmake crate + bindgen), which the
+        # wz-integration-tests dev-dep pulls in even for the spawn-class lanes.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            libclang-dev \
+            clang
+
+      - name: Install Rust toolchain (stable, for wz)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust toolchain 1.85.0 (zenoh 1.5.0's pinned channel)
+        # scripts/build-zenohd.sh REQUIRES this exact channel and hard-errors
+        # without it — zenoh 1.5.0 pins it, and building zenohd on a different
+        # channel is not a reproducibility trade this project makes.
+        run: rustup toolchain install 1.85.0 --profile minimal
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates -> target
+          key: interop
+
+      - name: Cache the zenohd binary (pinned version)
+        # zenohd 1.5.0 is a FIXED external release, so the built binary is a pure
+        # function of the version — cache the artifact itself rather than paying
+        # a from-source build every run. Only a cold cache builds.
+        id: zenohd-cache
+        uses: actions/cache@v4
+        with:
+          path: target/zenohd
+          key: zenohd-1.5.0-ubuntu-22.04
+
+      - name: Build zenohd 1.5.0 + the storage-manager plugin (cache miss only)
+        if: steps.zenohd-cache.outputs.cache-hit != 'true'
+        # ZENOHD_ALLOW_CLONE=1 makes build-zenohd.sh take the SOURCE path (a shallow
+        # clone of the pinned tag) instead of falling to crates.io. That matters:
+        # `cargo install` yields the router BINARY but not the storage-manager
+        # cdylib, and without the plugin Layer Z's storage-replication leg SKIPs —
+        # green, and never executed. The lane would "run in CI" while one of its
+        # proofs quietly did not, which is the exact false-authority this whole axis
+        # exists to stop. Only a source tree produces the plugin, so CI builds from
+        # source. Cold cost is one build; the cache makes it ~zero thereafter.
+        env:
+          ZENOHD_ALLOW_CLONE: "1"
+        run: bash scripts/build-zenohd.sh
+
+      - name: Build zenoh-pico CLI binaries
+        run: bash scripts/build-zenoh-pico-cli.sh
+
+      - name: Layer E2 — facade-subset e2e vs zenoh-pico CLIs
+        # The six wz-e2e-* SUBSET binaries: each pins an explicit atom list and
+        # interoperates with a real pico CLI, which is what makes their proofs
+        # TIGHTLY bounded (a full wz-ap-demo carries ~130 atoms and can prove far
+        # less per test).
+        run: bash scripts/run-ci.sh --layer E2
+
+      - name: Layer E6 — peer mesh (incl. 3 zenoh-pico interop legs)
+        run: bash scripts/run-ci.sh --layer E6
+
+      - name: Layer E6b — adminspace introspection over the peer mesh
+        # wz<->wz today. Wired here because it is the PREREQUISITE for the
+        # adminspace cross-impl cluster: zenoh-pico HAS Z_FEATURE_ADMIN_SPACE, so
+        # a pico z_get can witness wz's adminspace — but only from a demo built
+        # with `routing-peer,adminspace-*`, which is what this lane builds. With
+        # the lane in hosted CI, that future proof executes here rather than
+        # landing local-only.
+        run: bash scripts/run-ci.sh --layer E6b
+
+      - name: Layer E8 — router-hat data plane vs a zenoh-pico subscriber
+        run: bash scripts/run-ci.sh --layer E8
+
+      - name: Layer Z — zenohd (zenoh-full) interop
+        # The ONLY proofs against the canonical Rust implementation. Until this
+        # step existed they ran on exactly one machine.
+        run: bash scripts/run-ci.sh --layer Z
+
+  # ─────────────────────────────────────────────────────────────────
   # R311iw — embedded cross-compile + QEMU job. Layer G (per-triple
   # no_std cross-compile of the wz crates) and Layer Q (QEMU mps2 /
   # microbit boot e2e + the ROM-footprint regression gate) need an ARM
