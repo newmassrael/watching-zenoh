@@ -5290,9 +5290,23 @@ layer_e6e_adminspace_plugins() {
 # federation E2E. The test fns carry the `wz_router_hat_` prefix so the default
 # Layer E sweep's `--skip wz_router` excludes them from the arbitrary-feature run.
 layer_e7_router_hat() {
-    (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
+    # R311y273 — the binary now also carries adminspace-router-linkstate (a superset
+    # of the prior router-hat-router; the router admin legs are additive, so the
+    # existing wz<->wz router mesh tests are unaffected) so the pico router-adminspace
+    # witness rides the same binary.
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,adminspace-router-linkstate --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_mesh -- --ignored --quiet) || return 1
+    # R311y273 — the CROSS-IMPL half: a pico z_get reads the router's link-state DOT +
+    # the computed route-successor table across a two-router federation. FULL (all three
+    # legs carry content once a second router exists; probed before the round). Guarded
+    # on the FOREIGN binary only (R311y265); WZ_PICO_REQUIRE escalates the skip.
+    if [[ -x target/zenoh-pico-cli/z_get ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_router_hat_adminspace_to_pico_zget -- --ignored --quiet) || return 1
+    else
+        _pico_cli_unavailable "Layer E7 (pico router adminspace z_get)" || return 1
+    fi
 }
 
 # ─── Layer E7b — router-connect-reconcile: runtime connect-list reconcile E2E ───

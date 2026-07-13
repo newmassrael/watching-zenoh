@@ -529,6 +529,16 @@ jobs:
         # signal; this closes it.
         run: bash scripts/run-ci.sh --layer E6e
 
+      - name: Layer E7 — router-hat mesh (wz<->wz) + router adminspace vs zenoh-pico
+        # R311y273 added the pico router-adminspace witness to this lane and wired the
+        # lane here so it EXECUTES in hosted CI — same reason as E6e above: a proof only
+        # local-to-pre-push moves A4's all-lanes count but not the executed count that
+        # gates merges. E7 was previously local-only by omission (its one historical
+        # flake, an in-run convergence tick-race, was fixed to a deterministic
+        # shutdown-peak assertion in R311y124); verified stable across repeated runs
+        # before wiring.
+        run: bash scripts/run-ci.sh --layer E7
+
       - name: Layer E8 — router-hat data plane vs a zenoh-pico subscriber
         run: bash scripts/run-ci.sh --layer E8
 
