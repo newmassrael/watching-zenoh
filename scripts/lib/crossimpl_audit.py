@@ -86,14 +86,34 @@ KIND_CLASS = corpus.KIND_CLASS
 #
 # Which lane carries which class is a small declared map; WHICH LANES HOSTED CI ACTUALLY
 # RUNS is derived from .github/workflows/ci.yml, so the disclosure cannot rot when the
-# workflow changes. Today: hosted CI never builds zenohd and never runs --layer Z, so
-# every zenohd proof executes only in the local full run-ci (which the pre-push hook
-# runs). That is disclosed, not hidden.
+# workflow changes. (R311y264 wired E2/E6/E6b/E8/Z in, and the printed line moved with it
+# without an edit here -- which is the property to keep.) The remaining hole is Layer M:
+# it is opt-in, so it runs on NO default path at all, not even the pre-push full run --
+# see opt_in_lanes(), and the PROVEN-WITH-NO-HOSTED-CI-WITNESS roll-up that names the
+# atoms resting on it.
 CLASS_LANES = {
     "codec": ["C1"],          # linked pico C; NOT #[ignore]d -- runs on every push
     "pico": ["E", "E2", "E6", "E7", "E8", "M"],
     "zenohd": ["Z"],
 }
+
+
+def opt_in_lanes() -> set[str]:
+    """Lanes that run on NO default path -- not hosted CI, and not the local full run-ci.
+
+    Layer M guards itself with `[[ "$ONLY_LAYER" != "M" && "${WZ_RUN_LAYER_M:-0}" -ne 1 ]]`,
+    so `run-ci.sh` with no arguments -- which is exactly what the pre-push hook runs --
+    SKIPs it. Calling that "local only" would be a lie: it is NOWHERE. The disclosure line
+    used to say "only in the local full run-ci (pre-push)" for M, which was false, and the
+    proofs whose ONLY witness lives there were counted in the headline `proven` with
+    nothing naming them. Derived from the guard itself so it cannot drift.
+    """
+    return {
+        lane
+        for lane, body in lane_bodies().items()
+        if re.search(r'ONLY_LAYER"? != "%s"' % re.escape(lane), body)
+        and re.search(r"WZ_RUN_LAYER_%s" % re.escape(lane.upper()), body)
+    }
 
 
 def hosted_ci_layers() -> set[str]:
@@ -243,9 +263,16 @@ def main() -> int:
 
     for cf in files:
         rel = str(cf.path.relative_to(REPO_ROOT))
-        pkg = cf.binary
+        # A file may drive several wz binaries; union their closures. A union is a
+        # SUPERSET, so containment can never produce a false FAIL -- only a weaker true
+        # one. (Picking one, as this used to, would have validated a tight subset
+        # binary's claims against wz-ap-demo's 110-feature union.)
+        pkg = "+".join(cf.binaries)
         if pkg not in closures:
-            closures[pkg] = fc.binary_closure(pkg)
+            merged: set[str] = set()
+            for b in cf.binaries:
+                merged |= fc.binary_closure(b)
+            closures[pkg] = frozenset(merged)
         closure = closures[pkg]
 
         for ln, txt in cf.stray_claims:
@@ -313,6 +340,13 @@ def main() -> int:
     # The dishonest case the split exists to expose: an atom whose ONLY witness hosted CI
     # runs is a `partial`, promoted to `proven` by a `full` claim on a test CI never runs.
     promoted_by_unrun = sorted(full & ci_partial_only)
+    # The STRICTLY WORSE population, which used to have no line at all and was visible
+    # only as an unexplained delta between the two headline counts: an atom sitting in
+    # `proven` with NO hosted-CI witness of any kind. Some of these are proven only by a
+    # lane that runs on no default path whatsoever (see opt_in_lanes) -- not hosted, not
+    # even the pre-push full run. A headline number resting on those is the exact false
+    # authority this axis exists to end, so it gets named.
+    proven_without_ci_witness = sorted(full - ci_full_only - ci_partial_only)
 
     ok = not (fail_name or fail_denominator or fail_foreign or fail_undeclared
               or fail_containment or fail_excluded or fail_kind or fail_malformed)
@@ -340,6 +374,12 @@ def main() -> int:
     print("     estimate this axis replaces. Counts, never a percentage: R311jl already ruled")
     print("     that a single number against an unnamed denominator is the error here, and")
     print("     these are NOT comparable to the legacy ~75% zenoh-pico-parity figure.)")
+    if proven_without_ci_witness:
+        print("  PROVEN WITH NO HOSTED-CI WITNESS AT ALL (%d): %s"
+              % (len(proven_without_ci_witness), ", ".join(proven_without_ci_witness)))
+        print("     (these sit in the headline `proven` on tests hosted CI does not run.")
+        print("      Check whether their lane runs on ANY default path -- an opt-in lane")
+        print("      like M is skipped by the pre-push full run too, i.e. it runs NOWHERE.)")
     if promoted_by_unrun:
         print("  PROMOTED BY A TEST HOSTED CI NEVER RUNS (%d): %s"
               % (len(promoted_by_unrun), ", ".join(promoted_by_unrun)))
@@ -349,13 +389,20 @@ def main() -> int:
     print("  witnesses-no-atom (declared `none`): %d" % len(none_tests))
 
     hosted = hosted_ci_layers()
+    opt_in = opt_in_lanes()
     for cls in sorted(CLASS_LANES):
         lanes = CLASS_LANES[cls]
         run_here = [x for x in lanes if x in hosted]
-        skipped = [x for x in lanes if x not in hosted]
+        local_only = [x for x in lanes if x not in hosted and x not in opt_in]
+        nowhere = [x for x in lanes if x not in hosted and x in opt_in]
         note = "hosted CI runs %s" % "/".join(run_here) if run_here else "NOT RUN in hosted CI"
-        if skipped:
-            note += "; %s only in the local full run-ci (pre-push)" % "/".join(skipped)
+        if local_only:
+            note += "; %s only in the local full run-ci (pre-push)" % "/".join(local_only)
+        if nowhere:
+            # An opt-in lane is skipped by `run-ci.sh` with no arguments, which is what the
+            # pre-push hook runs. Calling it "local only" would be a lie: it runs NOWHERE.
+            note += "; %s runs on NO default path (opt-in; not even the pre-push full run)" \
+                % "/".join(nowhere)
         print("  EXECUTION [%s]: %s" % (cls, note))
 
     if fail_malformed:

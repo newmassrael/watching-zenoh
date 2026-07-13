@@ -72,13 +72,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-if ! command -v mnemosyne-cli >/dev/null 2>&1; then
-    echo "audit-crossimpl-proof SKIP (mnemosyne-cli not on PATH)"
+# R311y266 — the gate's own kill switch, and why it now has a required mode.
+#
+# A missing mnemosyne-cli disarms A4 ENTIRELY: it exits 0 and every invariant goes
+# unchecked -- a malformed claim, an atom renamed out of the inventory, a wz<->wz test
+# claiming foreign proof, all land silently on a green build. And hosted CI installs
+# mnemosyne-cli behind a `|| { warning; skip }` fallback, so one network blip is all it
+# takes. A SKIP on a developer's box is honest (they may not have the tool); a SKIP where
+# the job PROVISIONS the tool is a provisioning regression masquerading as success. Same
+# rule as WZ_QZ_REQUIRE / WZ_Z_REQUIRE: "a should-run lane that SKIPs is the burn".
+_a4_unavailable() {
+    if [[ -n "${WZ_A4_REQUIRE:-}" ]]; then
+        echo "audit-crossimpl-proof FAIL — required (WZ_A4_REQUIRE set) but $1" >&2
+        exit 1
+    fi
+    echo "audit-crossimpl-proof SKIP ($1)"
     exit 0
+}
+
+if ! command -v mnemosyne-cli >/dev/null 2>&1; then
+    _a4_unavailable "mnemosyne-cli not on PATH"
 fi
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "audit-crossimpl-proof SKIP (python3 not on PATH)"
-    exit 0
+    _a4_unavailable "python3 not on PATH"
 fi
 
 INV_FILE="$(mktemp)"

@@ -242,6 +242,13 @@ def helper_classes() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
             by_helper[name] = classes
         if pkgs:
             pkgs_by_helper[name] = pkgs
+    if not chunks or not by_helper:
+        raise RuntimeError(
+            "crossimpl_corpus: resolved NO harness helpers from %s. The `pub mod common`"
+            " fn-indent split has broken (a reformat?), and every derived number would"
+            " silently shrink with the corpus. Fix the parser -- do not let this pass."
+            % LIB_RS
+        )
     return by_helper, pkgs_by_helper
 
 
@@ -265,7 +272,7 @@ class CorpusFile:
         self.path = path
         self.classes: set[str] = set()
         self.spawns_external = False
-        self.binary = IN_PROCESS_PKG
+        self.binaries: list[str] = [IN_PROCESS_PKG]
         self.tests: list[TestFn] = []
         self.stray_claims: list[tuple[int, str]] = []  # claims not attached to a #[test]
 
@@ -290,9 +297,12 @@ def scan_file(path: Path, by_helper: dict[str, set[str]],
     if PICO_FFI_CRATE in idents:
         cf.classes.add("codec")
     cf.spawns_external = bool(pkgs or (idents & set(FOREIGN_ROOTS)) or (idents & set(by_helper)))
-    # A file driving several wz binaries would make containment ambiguous; the union
-    # would be a superset (never a false FAIL) but weaker, so prefer the single one.
-    cf.binary = sorted(pkgs)[0] if len(pkgs) == 1 else (sorted(pkgs)[0] if pkgs else IN_PROCESS_PKG)
+    # A file may drive several wz binaries. Carry them ALL: the containment arm unions
+    # their closures, and a union is a superset, so it can never produce a false FAIL --
+    # only a weaker true one. Picking one (the previous behaviour, and the alphabetically
+    # first at that, which is wz-ap-demo with its 110-feature union) would have validated
+    # a tight subset binary's claims against the fattest closure in the tree.
+    cf.binaries = sorted(pkgs) if pkgs else [IN_PROCESS_PKG]
 
     # Attach claims to the #[test] fn they precede. A claim block is the run of comment
     # lines immediately above the attribute stack (mirrors how Layer C0 already reasons
@@ -330,6 +340,14 @@ def scan_file(path: Path, by_helper: dict[str, set[str]],
             j = idx
             fn_name = "?"
             has_ignore = False
+            # Attributes ABOVE the #[test] line count too: `#[ignore]` written first
+            # would otherwise leave has_ignore False, and the test would be reported as
+            # executing on every push via Layer C1 while cargo skipped it.
+            k = idx - 1
+            while k >= 0 and code_lines[k].strip().startswith("#["):
+                if code_lines[k].strip().startswith("#[ignore"):
+                    has_ignore = True
+                k -= 1
             while j < len(code_lines):
                 s = code_lines[j].strip()
                 if s.startswith("#[ignore"):

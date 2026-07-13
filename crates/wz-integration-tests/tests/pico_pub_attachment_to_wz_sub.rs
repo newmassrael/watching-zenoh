@@ -73,7 +73,7 @@ struct CapturedMeta {
 
 // wz-proves: pubsub-attachment pico->wz
 // wz-proves: attachment-bytes pico->wz
-// wz-proves: pubsub-encoding pico->wz
+// wz-proves: pubsub-encoding pico->wz partial
 // wz-proves: pubsub-timestamp pico->wz partial
 // wz-proves: pubsub-put pico->wz
 // wz-proves: declare-subscriber wz->pico

@@ -180,6 +180,15 @@ jobs:
         # the harness call graph) and to cargo's feature closure (which
         # mechanically refutes a claim for code that is not compiled in).
         # Top-level layer, so it needs its own yml step (same reason as A2).
+        #
+        # R311y266 — WZ_A4_REQUIRE=1: a missing mnemosyne-cli would otherwise
+        # disarm this gate ENTIRELY and exit 0, and the install step above is
+        # deliberately fault-tolerant (`|| warning; skip`), so one network blip
+        # would leave every invariant unchecked on a green build. Here the tool
+        # is provisioned, so its absence is a provisioning regression, not an
+        # honest skip — fail loudly instead.
+        env:
+          WZ_A4_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer A4
 
       - name: Layer B — verify-codegen.sh per codec
@@ -390,7 +399,16 @@ jobs:
   interop:
     name: cross-impl proof lanes (E2 + E6 + E6b + E8 + Z)
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    # A cold cache must build: the zenoh-pico CMake tree, the whole zenoh workspace in
+    # release (zenohd AND the storage-manager plugin), four differently-featured
+    # wz-ap-demo builds, the six wz-e2e-* subset binaries, and then Layer Z's serial
+    # zenohd sweep. 60 was optimistic; the steady state is cached and fast.
+    timeout-minutes: 120
+    env:
+      # A hosted lane that SKIPs green on a binary THIS JOB PROVISIONS is a provisioning
+      # regression wearing a green badge — and it lies twice, because Layer A4 reads
+      # "this lane is in ci.yml" as evidence its proofs executed.
+      WZ_PICO_REQUIRE: "1"
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -430,7 +448,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/zenohd
-          key: zenohd-1.5.0-ubuntu-22.04
+          # Keyed on the BUILD SCRIPT's content too, not just the version: a cache once
+          # populated without the storage-manager plugin (a run that fell back to the
+          # crates.io path) would otherwise strand that proof behind a green SKIP for as
+          # long as the key lives. Change the script, get a fresh cache.
+          key: zenohd-1.5.0-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh') }}
 
       - name: Build zenohd 1.5.0 + the storage-manager plugin (cache miss only)
         if: steps.zenohd-cache.outputs.cache-hit != 'true'
@@ -445,6 +467,16 @@ jobs:
         env:
           ZENOHD_ALLOW_CLONE: "1"
         run: bash scripts/build-zenohd.sh
+
+      - name: Assert zenohd + the storage plugin are actually present
+        # Trusting the cache is how a "restored" build quietly becomes a missing one. Layer
+        # Z's guards would SKIP green on either absence, and Layer A4 would keep counting
+        # its proofs as executed, so check before the lanes run rather than after.
+        run: |
+          test -x target/zenohd/zenohd \
+            || { echo "::error::zenohd missing after build/restore"; exit 1; }
+          test -f target/zenohd/libzenoh_plugin_storage_manager.so \
+            || { echo "::error::storage-manager plugin missing — the storage-replication proof would SKIP green"; exit 1; }
 
       - name: Build zenoh-pico CLI binaries
         run: bash scripts/build-zenoh-pico-cli.sh
@@ -474,6 +506,15 @@ jobs:
       - name: Layer Z — zenohd (zenoh-full) interop
         # The ONLY proofs against the canonical Rust implementation. Until this
         # step existed they ran on exactly one machine.
+        #
+        # WZ_Z_REQUIRE=1 turns every prereq SKIP in this lane into a FAIL. On a
+        # developer's box a SKIP is honest (zenohd is an external binary they may
+        # not have built). Here the steps above GUARANTEE it — and the storage
+        # plugin with it — so a SKIP would be a provisioning regression wearing a
+        # green badge, and it would lie twice: Layer A4 reads "this lane is in
+        # ci.yml" as evidence its proofs EXECUTED. Same rule as WZ_QZ_REQUIRE.
+        env:
+          WZ_Z_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer Z
 
   # ─────────────────────────────────────────────────────────────────

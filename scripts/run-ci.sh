@@ -3562,15 +3562,37 @@ layer_d_validate_deploy() {
 # Both are local-build artifacts. Layer E SKIPs gracefully when
 # either is missing (developer running --layer E without prep) and
 # surfaces the install hint instead of a hard failure.
+# R311y266 — the shared zenoh-pico-CLI prereq guard for the hosted proof lanes.
+#
+# E / E2 / E6 / E8 each SKIP green when the pico CLIs are absent. On a developer's box
+# that is honest: the CLIs are FOREIGN binaries built from a vendored submodule and a
+# machine may legitimately not have them. In the hosted jobs it is not honest -- a step
+# builds them, and Layer A4 reads "this lane is in ci.yml" as evidence its proofs
+# EXECUTED. Delete that build step and every one of these lanes would go green having
+# proved nothing, while A4 kept reporting them as executed. WZ_PICO_REQUIRE=1 (set in the
+# workflow) turns the skip into a failure. Same rule as WZ_QZ_REQUIRE / WZ_Z_REQUIRE.
+_pico_cli_unavailable() {
+    if [[ -n "${WZ_PICO_REQUIRE:-}" ]]; then
+        echo "  $1 FAIL — required (WZ_PICO_REQUIRE set) but the zenoh-pico CLI is not built" >&2
+        return 1
+    fi
+    echo "$1 SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+    return 0
+}
+
 layer_e_ap_demo_round_trip() {
-    if [[ ! -x crates/target/debug/wz-ap-demo && ! -x crates/target/release/wz-ap-demo ]]; then
-        echo "Layer E SKIP (wz-ap-demo not built; run: cd crates && cargo build -p wz-ap-demo)"
-        return 0
-    fi
     if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_sub_attachment || ! -x target/zenoh-pico-cli/z_pub_attachment ]]; then
-        echo "Layer E SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+        _pico_cli_unavailable "Layer E" || return 1
         return 0
     fi
+    # R311y265 — build the DEFAULT wz-ap-demo rather than SKIPping when it is absent,
+    # the same rule E2 / E6 / E8 / Z now follow: SKIP on a FOREIGN binary (a machine may
+    # legitimately lack the zenoh-pico CLI), never on a wz binary we can just build.
+    # Layer A4 treats "this lane is in ci.yml" as evidence its proofs EXECUTED, so a
+    # hosted lane that can SKIP green on a missing wz binary would make the number lie.
+    # The workflow still builds the demo explicitly before this lane; that step is now a
+    # belt to this brace rather than the only thing standing between CI and a silent SKIP.
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
     # R121e + R121f + R121f1 + R121g: bundle the integration tests
     # into a single cargo invocation so the compilation/link step
     # runs once and the lane timing stays predictable. `--test`
@@ -3697,41 +3719,30 @@ layer_e2_facade_subset_e2e() {
           || ! -x target/zenoh-pico-cli/z_queryable \
           || ! -x target/zenoh-pico-cli/z_liveliness \
           || ! -x target/zenoh-pico-cli/z_get_liveliness ]]; then
-        echo "Layer E2 SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+        _pico_cli_unavailable "Layer E2" || return 1
         return 0
     fi
-    # pubsub-only subset (R311fg) — wz publishes vs zenoh-pico z_sub.
-    if [[ ! -x crates/target/debug/wz-e2e-pubsub && ! -x crates/target/release/wz-e2e-pubsub ]]; then
-        echo "Layer E2 SKIP (wz-e2e-pubsub not built; run: cd crates && cargo build -p wz-e2e-pubsub)"
-        return 0
-    fi
-    # queryable-only subset — wz answers queries vs zenoh-pico z_get.
-    if [[ ! -x crates/target/debug/wz-e2e-queryable && ! -x crates/target/release/wz-e2e-queryable ]]; then
-        echo "Layer E2 SKIP (wz-e2e-queryable not built; run: cd crates && cargo build -p wz-e2e-queryable)"
-        return 0
-    fi
-    # zget-reply-only subset — wz issues queries vs zenoh-pico z_queryable.
-    if [[ ! -x crates/target/debug/wz-e2e-zget && ! -x crates/target/release/wz-e2e-zget ]]; then
-        echo "Layer E2 SKIP (wz-e2e-zget not built; run: cd crates && cargo build -p wz-e2e-zget)"
-        return 0
-    fi
-    # liveliness-subscriber-only subset — wz observes a token vs z_liveliness.
-    if [[ ! -x crates/target/debug/wz-e2e-liveliness && ! -x crates/target/release/wz-e2e-liveliness ]]; then
-        echo "Layer E2 SKIP (wz-e2e-liveliness not built; run: cd crates && cargo build -p wz-e2e-liveliness)"
-        return 0
-    fi
-    # liveliness-token declarer subset (R283) — wz answers a liveliness
-    # query vs z_get_liveliness.
-    if [[ ! -x crates/target/debug/wz-e2e-liveliness-token && ! -x crates/target/release/wz-e2e-liveliness-token ]]; then
-        echo "Layer E2 SKIP (wz-e2e-liveliness-token not built; run: cd crates && cargo build -p wz-e2e-liveliness-token)"
-        return 0
-    fi
-    # declare-observer subset (R311fo) — wz observes a foreign z_sub's
-    # proactive DeclSubscriber.
-    if [[ ! -x crates/target/debug/wz-e2e-declare-observer && ! -x crates/target/release/wz-e2e-declare-observer ]]; then
-        echo "Layer E2 SKIP (wz-e2e-declare-observer not built; run: cd crates && cargo build -p wz-e2e-declare-observer)"
-        return 0
-    fi
+    # R311y265 — the lane BUILDS its own wz binaries instead of SKIPping when they are
+    # absent, the same way E6 / E8 / Z build wz-ap-demo.
+    #
+    # This was a real false-green, and of exactly the kind this lane's proofs exist to
+    # prevent. The six wz-e2e-* subsets used to be prereq-SKIP guards, and NOTHING built
+    # them -- not run-ci.sh, not the workflow. A developer never noticed because the
+    # binaries linger in target/ from an earlier session. But R311y264 wired E2 into
+    # hosted CI, and Layer A4 derives "this lane runs in hosted CI" from ci.yml, so A4
+    # began counting E2's pico proofs as EXECUTED while a fresh runner would have SKIPped
+    # every one of them, green. A SKIP is green; that is the whole hazard.
+    #
+    # The distinction the guards should draw, and now do: SKIP on a FOREIGN binary (the
+    # zenoh-pico CLI is genuinely external and a machine may legitimately not have it),
+    # never on a wz binary we can just build.
+    (cd crates && cargo build --quiet \
+        -p wz-e2e-pubsub \
+        -p wz-e2e-queryable \
+        -p wz-e2e-zget \
+        -p wz-e2e-liveliness \
+        -p wz-e2e-liveliness-token \
+        -p wz-e2e-declare-observer) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_e2e_pubsub_to_zsub \
         --test wz_e2e_queryable_to_zget \
@@ -4771,6 +4782,23 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
 # when a developer voluntarily built zenohd to verify interop. The test
 # (tests/wz_to_zenohd_router.rs) locates zenohd via WZ_ZENOHD_BIN or the build
 # script's target/zenohd/zenohd default.
+# R311y265 — the Layer Z twin of `_qz_unavailable` (R311y25: "a should-run lane that
+# SKIPs is the burn"). Layer Z's prerequisites are EXTERNAL binaries, so a developer's
+# machine may legitimately lack them and a SKIP there is honest. The hosted `interop` job
+# is different: its steps GUARANTEE zenohd (source-built, so it also carries the
+# storage-manager plugin) and the zenoh-pico CLIs, so a SKIP there is a provisioning
+# regression masquerading as success — and it would lie twice, because Layer A4 treats
+# "this lane is in ci.yml" as evidence its proofs EXECUTED. That job sets WZ_Z_REQUIRE=1.
+# Returns 0 = skip-green, 1 = required-but-absent.
+_z_unavailable() {
+    if [[ -n "${WZ_Z_REQUIRE:-}" ]]; then
+        echo "  Layer Z FAIL — required (WZ_Z_REQUIRE set) but $1" >&2
+        return 1
+    fi
+    _z_unavailable "$1" || return 1
+    return 0
+}
+
 layer_z_zenohd_interop() {
     # Default gate (R311pt — opt-in axis retired). The "external binary,
     # never gates the default sweep" boundary is now expressed purely by
@@ -4780,11 +4808,11 @@ layer_z_zenohd_interop() {
     # deterministic (R311ou --test-threads=1 removed the starvation race).
     local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
     if [[ ! -x "$zenohd" ]]; then
-        echo "Layer Z SKIP: zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)"
+        _z_unavailable "zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)" || return 1
         return 0
     fi
     if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
-        echo "Layer Z SKIP: zenoh-pico z_sub not built (run: bash scripts/build-zenoh-pico-cli.sh)"
+        _z_unavailable "zenoh-pico z_sub not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
     # R311y140 — the router-hat interop leg 2 spawns z_pub too (a pico client of
@@ -4792,7 +4820,7 @@ layer_z_zenohd_interop() {
     # cli.sh builds z_pub + z_sub together, so this is a symmetry guard, not an
     # expected split — SKIP (not FAIL) on the near-impossible z_sub-without-z_pub.
     if [[ ! -x target/zenoh-pico-cli/z_pub ]]; then
-        echo "Layer Z SKIP: zenoh-pico z_pub not built (run: bash scripts/build-zenoh-pico-cli.sh)"
+        _z_unavailable "zenoh-pico z_pub not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
     # R311y147 — the router-hat interop leg 4 (QUERY plane) spawns the pico
@@ -4802,7 +4830,7 @@ layer_z_zenohd_interop() {
     # impossible symmetry guard as z_pub: build-zenoh-pico-cli.sh emits all CLIs
     # together, so a missing z_querier means a stale build -> SKIP, not FAIL.
     if [[ ! -x target/zenoh-pico-cli/z_querier ]]; then
-        echo "Layer Z SKIP: zenoh-pico z_querier not built (run: bash scripts/build-zenoh-pico-cli.sh)"
+        _z_unavailable "zenoh-pico z_querier not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
     # §5.21 token cross-impl leg — the router-hat token lifecycle leg spawns the
@@ -4812,7 +4840,7 @@ layer_z_zenohd_interop() {
     # build-zenoh-pico-cli.sh alongside z_liveliness; same near-impossible symmetry
     # guard as z_querier -> SKIP (not FAIL) on a stale build missing it.
     if [[ ! -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
-        echo "Layer Z SKIP: zenoh-pico z_sub_liveliness not built (run: bash scripts/build-zenoh-pico-cli.sh)"
+        _z_unavailable "zenoh-pico z_sub_liveliness not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
     # wz-ap-demo is the wz client (--connect zenohd) for the client-tier legs
@@ -4892,7 +4920,7 @@ layer_z_zenohd_interop() {
     # checkout); SKIP if absent (a crates.io-only zenohd has no plugin .so).
     local plugin="${WZ_STORAGE_MANAGER_SO:-$PWD/target/zenohd/libzenoh_plugin_storage_manager.so}"
     if [[ ! -f "$plugin" ]]; then
-        echo "Layer Z: storage-manager plugin not built ($plugin); SKIP the replication interop leg"
+        _z_unavailable "storage-manager plugin not built ($plugin)" || return 1
         return 0
     fi
     (cd crates && WZ_ZENOHD_BIN="$zenohd" WZ_STORAGE_MANAGER_SO="$plugin" \
@@ -5008,7 +5036,7 @@ layer_e6_peer_mesh() {
         (cd crates && cargo test -p wz-integration-tests \
             --test wz_peer_future_push_pico_interop -- --ignored --quiet --test-threads=1) || return 1
     else
-        echo "E6 SKIP: wz_peer_future_push_pico_interop (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+        _pico_cli_unavailable "E6 leg wz_peer_future_push_pico_interop" || return 1
     fi
     # The client-QUERYABLE hosting CROSS-IMPL e2e (the query-plane twin of the
     # future-push leg above): a pico z_queryable CLIENT of peer-A hosts demo/**; a pico
@@ -5020,7 +5048,7 @@ layer_e6_peer_mesh() {
         (cd crates && cargo test -p wz-integration-tests \
             --test wz_peer_qabl_pico_interop -- --ignored --quiet --test-threads=1) || return 1
     else
-        echo "E6 SKIP: wz_peer_qabl_pico_interop (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+        _pico_cli_unavailable "E6 leg wz_peer_qabl_pico_interop" || return 1
     fi
     # The TRANSIT-source client-delivery cross-impl e2e (3-peer line A->B->C, pico z_sub
     # on the terminal C): proves peer-C delivers a multi-hop (non-zero-routing-source)
@@ -5030,7 +5058,7 @@ layer_e6_peer_mesh() {
         (cd crates && cargo test -p wz-integration-tests \
             --test wz_peer_transit_push_pico_interop -- --ignored --quiet --test-threads=1) || return 1
     else
-        echo "E6 SKIP: wz_peer_transit_push_pico_interop (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+        _pico_cli_unavailable "E6 leg wz_peer_transit_push_pico_interop" || return 1
     fi
 }
 
@@ -5214,7 +5242,7 @@ layer_e7c_router_adminspace_linkstate() {
 # wz_router` from double-running it on an arbitrary-feature binary.
 layer_e8_router_hat_pico() {
     if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
-        echo "Layer E8 SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+        _pico_cli_unavailable "Layer E8" || return 1
         return 0
     fi
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
