@@ -3690,8 +3690,16 @@ layer_e_ap_demo_round_trip() {
     # peer SERVER that runs until SIGTERM — so the reject test's `.output()`
     # blocks forever (the R311qg lane-wiring gap a full run-ci surfaced). The
     # `wz_peer` substring keeps both out; they run only in E4 / E6.
+    # R311y278 — same for `wz_storage_host`: wz_storage_host_config_hotreload_state_flip_via_pico
+    # needs `--features adminspace-config-hotreload` (Layer E6h builds it) for the
+    # `--storage-host` run-mode. On THIS sweep's default binary that flag is rejected
+    # with exit 2, so the test's readiness barrier times out (the gap the y277 push's
+    # pre-push full run-ci surfaced: E6h ran the right binary, but this catch-all also
+    # ran it against the default one). The `wz_storage_host` substring keeps it out;
+    # it runs only in E6h.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
-        --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer)
+        --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
+        --skip wz_storage_host)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -5365,8 +5373,10 @@ layer_e6g_adminspace_read() {
 # add_storage (storage_started tracks !manager.is_empty(), never a bool flip), so a
 # green reply proves the compiled_plugins_dyn + RuntimeStorageManager wiring. clippy is
 # run on the feature build because it is the ONLY lane compiling the run-mode. The
-# `wz_storage_host_` fn prefix keeps the default Layer E sweep's `--skip wz_peer` /
-# `--skip wz_router` from touching it.
+# `wz_storage_host_` fn prefix is in the default Layer E sweep's `--skip` list (added
+# R311y278 alongside wz_peer / wz_router), so that catch-all does NOT run this test
+# against the default binary (where `--storage-host` is rejected exit-2 → the readiness
+# barrier would time out); it runs ONLY here on the feature build.
 #
 # SKIPs on the FOREIGN binaries only (the pico CLIs a machine may legitimately lack),
 # never on a wz one — the R311y265 rule; WZ_PICO_REQUIRE escalates that SKIP to a FAIL
