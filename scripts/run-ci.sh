@@ -5099,6 +5099,20 @@ layer_e6_peer_mesh() {
     # the reconfigure actually drives), so no extra build.
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_adminspace_config_write -- --ignored --quiet) || return 1
+    # R311y272 — the CROSS-IMPL half of the config write, on the SAME binary, and the
+    # first §5.23 leg where pico is the ENCODER (y270/y271 had pico decoding wz's admin
+    # replies). A pico z_put reconfigures A's live forwarder when the write permission is
+    # GRANTED, and is REJECTED by the permissions.write gate when it is not — both arms
+    # deterministic POSITIVE edges, never a wait-for-absence. The gate IS the atom: with
+    # adminspace-write compiled out, the apply arm still passes (the write plumbing is
+    # unguarded) while the deny arm fails, which is why the claim rests on the deny arm.
+    # Guarded on the FOREIGN binary only (R311y265); WZ_PICO_REQUIRE escalates the skip.
+    if [[ -x target/zenoh-pico-cli/z_put ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_adminspace_write_from_pico_zput -- --ignored --quiet) || return 1
+    else
+        _pico_cli_unavailable "Layer E6 (pico adminspace config-write z_put)" || return 1
+    fi
     # R311y165 — the STRONG peer-mode future-push CROSS-IMPL e2e (the leg-5 peer analog,
     # now that D4 gave the peer a client data plane): a pico z_pub CLIENT of peer-A
     # (pub-before-sub) + a pico z_sub CLIENT of peer-B; A pushes the future
