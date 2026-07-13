@@ -63,6 +63,8 @@ const PAYLOAD: &str = "timestamped-hello-from-wz";
 // A distinctive ntp64 `time` word; pico prints it verbatim in decimal.
 const TS_TIME: u64 = 0x0102_0304_0506_0708;
 
+// wz-proves: pubsub-timestamp wz->pico
+// wz-proves: pubsub-put wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub_attachment); Layer E runs via --ignored"]
 async fn wz_put_timestamp_decoded_by_pico_zsub_attachment() {

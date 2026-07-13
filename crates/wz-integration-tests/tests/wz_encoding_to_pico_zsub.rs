@@ -71,6 +71,8 @@ const PAYLOAD: &str = "encoded-hello-from-wz";
 // zenoh Encoding wire value: id (4 = text/plain) << 1, no schema bit.
 const TEXT_PLAIN_PACKED_ID: u32 = 8;
 
+// wz-proves: pubsub-encoding wz->pico partial
+// wz-proves: pubsub-put wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub_attachment); Layer E runs via --ignored"]
 async fn wz_put_encoding_decoded_by_pico_zsub_attachment() {

@@ -84,6 +84,8 @@ const REPLY_PAYLOAD: &str = "reply-from-wz-queryable";
 const SRC_EID: u32 = 90;
 const SRC_SN: u32 = 91;
 
+// wz-proves: query-reply wz->pico
+// wz-proves: pubsub-source-info wz->pico partial
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_get); Layer E runs via --ignored"]
 async fn wz_reply_source_info_decoded_by_pico_z_get() {

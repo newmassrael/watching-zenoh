@@ -71,6 +71,11 @@ struct CapturedMeta {
     fired: usize,
 }
 
+// wz-proves: pubsub-attachment pico->wz
+// wz-proves: pubsub-encoding pico->wz
+// wz-proves: pubsub-timestamp pico->wz partial
+// wz-proves: pubsub-put pico->wz
+// wz-proves: declare-subscriber wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_pub_attachment); Layer E runs via --ignored"]
 async fn wz_sub_decodes_pico_pub_attachment_metadata() {

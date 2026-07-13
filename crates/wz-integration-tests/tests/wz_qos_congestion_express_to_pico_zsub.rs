@@ -93,6 +93,9 @@ const PUBLISH_KEYEXPR: &str = "demo/qos";
 const SUB_KEYEXPR: &str = "demo/**";
 const PAYLOAD: &str = "qos-metadata-hello-from-wz";
 
+// wz-proves: pubsub-congestion-control wz->pico partial
+// wz-proves: pubsub-express wz->pico partial
+// wz-proves: pubsub-put wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub_attachment); Layer E runs via --ignored"]
 async fn wz_put_congestion_express_decoded_by_pico_zsub_attachment() {

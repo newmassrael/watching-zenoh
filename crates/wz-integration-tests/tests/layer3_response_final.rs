@@ -57,6 +57,7 @@ fn zenoh_pico_encode_response_final(request_id: u64) -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-response-final codec-parity partial
 #[test]
 fn layer3_response_final_default_byte_equivalent() {
     let wz = ResponseFinal::default().encode_to_vec();
@@ -69,6 +70,7 @@ fn layer3_response_final_default_byte_equivalent() {
     assert_eq!(wz, &[0x1A, 0x00], "default wire form is [MID, rid VLE 0]");
 }
 
+// wz-proves: codec-response-final codec-parity partial
 #[test]
 fn layer3_response_final_nonzero_rid_byte_equivalent() {
     // Single-byte VLE: any rid in [0, 127] encodes as a single byte
@@ -88,6 +90,7 @@ fn layer3_response_final_nonzero_rid_byte_equivalent() {
     assert_eq!(wz, &[0x1A, 0x42]);
 }
 
+// wz-proves: codec-response-final codec-parity partial
 #[test]
 fn layer3_response_final_multibyte_vle_rid_byte_equivalent() {
     // rid = 200 (= 0xC8) crosses the 7-bit VLE boundary, producing a

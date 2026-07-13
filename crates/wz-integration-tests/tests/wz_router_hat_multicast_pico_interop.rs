@@ -135,6 +135,16 @@ const PAYLOAD: &str = "WZ-ROUTER-MCAST-EGRESS-INTEROP-S4";
 /// ALIASED `Put` and broadcasts it, re-literalized, over its multicast EGRESS
 /// group to a foreign zenoh-pico `z_sub -m peer` — the router-multicast-faces
 /// atom's first cross-impl (foreign-subscriber) egress proof.
+// wz-proves: router-multicast-faces wz->pico
+// wz-proves: router-hat-router wz->pico partial
+// wz-proves: transport-multicast wz->pico
+// wz-proves: session-multicast wz->pico partial
+// wz-proves: codec-join wz->pico
+// wz-proves: codec-frame wz->pico
+// wz-proves: codec-push wz->pico
+// wz-proves: pubsub-put wz->pico
+// wz-proves: keyexpr-literal wz->pico
+// wz-proves: transport-link-udp wz->pico
 #[test]
 #[ignore = "binary-dep multicast e2e (wz-ap-demo --features router-multicast-faces + zenoh-pico z_sub); Layer M runs via --ignored"]
 fn wz_router_hat_multicast_egress_reaches_pico_zsub() {

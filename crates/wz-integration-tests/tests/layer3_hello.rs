@@ -80,6 +80,7 @@ fn zenoh_pico_encode_hello(
     }
 }
 
+// wz-proves: codec-hello codec-parity partial
 #[test]
 fn layer3_hello_l0_no_locators() {
     // parent.L=0 — locators absent on the wire.
@@ -101,6 +102,7 @@ fn layer3_hello_l0_no_locators() {
     assert_eq!(wz, pico);
 }
 
+// wz-proves: codec-hello codec-parity partial
 #[test]
 fn layer3_hello_l1_empty_locator_array() {
     // parent.L=1 with zero locators — body emits VLE(0) for the count
@@ -131,6 +133,7 @@ fn layer3_hello_l1_empty_locator_array() {
     assert_eq!(wz.last(), Some(&0x00), "VLE(num_locators=0) trailing byte");
 }
 
+// wz-proves: codec-hello codec-parity partial
 #[test]
 fn layer3_hello_l0_max_zid() {
     // 16-byte zid + parent.L=0 — exercises the cbyte.zid_len_m1=15

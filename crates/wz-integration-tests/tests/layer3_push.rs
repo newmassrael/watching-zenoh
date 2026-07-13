@@ -73,6 +73,7 @@ fn zenoh_pico_encode_push_default() -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-push codec-parity partial
 #[test]
 fn layer3_push_default_byte_equivalent() {
     let wz = Push::default().encode_to_vec();

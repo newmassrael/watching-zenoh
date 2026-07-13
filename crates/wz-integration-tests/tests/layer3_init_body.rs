@@ -122,6 +122,7 @@ fn zenoh_pico_encode_init(input: &InitInput) -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-init-body codec-parity partial
 #[test]
 fn layer3_init_body_s0_a0() {
     // No optional fields: body = version + cbyte + zid only.
@@ -153,6 +154,7 @@ fn layer3_init_body_s0_a0() {
     assert_eq!(wz, pico);
 }
 
+// wz-proves: codec-init-body codec-parity partial
 #[test]
 fn layer3_init_body_s1_a0() {
     // parent.S=1 only: + sn_res + batch_size.
@@ -185,6 +187,7 @@ fn layer3_init_body_s1_a0() {
     assert_eq!(wz, pico);
 }
 
+// wz-proves: codec-init-body codec-parity partial
 #[test]
 fn layer3_init_body_s0_a1() {
     // parent.A=1 only: + cookie.
@@ -217,6 +220,7 @@ fn layer3_init_body_s0_a1() {
     assert_eq!(wz, pico);
 }
 
+// wz-proves: codec-init-body codec-parity partial
 #[test]
 fn layer3_init_body_s1_a1() {
     // Both gates set: full body shape.

@@ -136,6 +136,8 @@ fn spawn_wz_peer_dialing(demo: &std::path::Path, port: u16) -> (ChildGuard, File
     (guard, stderr)
 }
 
+// wz-proves: routing-peer zenohd->wz partial
+// wz-proves: routing-peer wz->zenohd partial
 #[test]
 #[ignore = "binary-dep e2e (zenohd peer + wz-ap-demo --features routing-peer); Layer Z runs via --ignored"]
 fn wz_peer_federates_with_zenohd_at_linkstate_tier() {
@@ -199,6 +201,7 @@ fn wz_peer_federates_with_zenohd_at_linkstate_tier() {
     );
 }
 
+// wz-proves: routing-peer zenohd->wz partial
 #[test]
 #[ignore = "binary-dep e2e (zenohd peer + wz-ap-demo --features routing-peer); Layer Z runs via --ignored"]
 fn wz_peer_gossip_zenohd_yields_no_linkstate_edge() {

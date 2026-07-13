@@ -93,6 +93,13 @@ use wz_integration_tests::common::{
 
 /// wz dials zenohd as a client and reaches Established — the handshake
 /// interoperates with the reference router. Deterministic (no peer-timing race).
+// wz-proves: session-unicast-open wz->zenohd
+// wz-proves: codec-init-body wz->zenohd
+// wz-proves: codec-init-body zenohd->wz
+// wz-proves: codec-open-body wz->zenohd
+// wz-proves: codec-open-body zenohd->wz
+// wz-proves: transport-link-tcp wz->zenohd
+// wz-proves: transport-unicast wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (zenohd router); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_client_reaches_established_against_zenohd() {
@@ -148,6 +155,11 @@ fn wz_client_reaches_established_against_zenohd() {
 
 /// wz's Put routes through zenohd to a zenoh-pico `z_sub` — the data-plane
 /// cross-impl through the reference router.
+// wz-proves: codec-frame wz->zenohd
+// wz-proves: codec-push wz->zenohd
+// wz-proves: pubsub-put wz->zenohd
+// wz-proves: pubsub-put wz->pico
+// wz-proves: routing-client wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_publish_routes_through_zenohd_to_pico_zsub() {
@@ -238,6 +250,12 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub() {
 /// wz's ROUTED subscriber. wz declares the subscriber (`--key`, which emits a
 /// `Declare(DeclSubscriber)` since R311ou); zenohd, seeing wz's declared
 /// subscription, forwards the matching Put back to wz, whose callback fires.
+// wz-proves: declare-subscriber wz->zenohd
+// wz-proves: codec-declare wz->zenohd
+// wz-proves: codec-frame zenohd->wz
+// wz-proves: codec-push zenohd->wz
+// wz-proves: pubsub-sample zenohd->wz
+// wz-proves: routing-client wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_pub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_routed_subscribe_from_zenohd() {
@@ -343,6 +361,14 @@ fn wz_routed_subscribe_from_zenohd() {
 /// `Declare(DeclQueryable)` since R311ow); zenohd, seeing wz's declared
 /// queryable, forwards the matching `Query` to wz, whose handler replies, and
 /// the reply routes back to z_get. The declare_queryable sibling of leg 3.
+// wz-proves: declare-queryable wz->zenohd
+// wz-proves: codec-declare wz->zenohd
+// wz-proves: codec-request zenohd->wz
+// wz-proves: query-queryable wz->zenohd
+// wz-proves: query-reply wz->zenohd
+// wz-proves: query-reply wz->pico
+// wz-proves: codec-response wz->zenohd
+// wz-proves: routing-client wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_get); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_queryable_replies_via_zenohd_to_pico_zget() {
@@ -495,6 +521,11 @@ fn wz_queryable_replies_via_zenohd_to_pico_zget() {
 /// the token shows up as Alive. wz declares the token via `--declare-token` (the
 /// high-level `Session::declare_token`, which emits a `Declare(DeclToken)` and
 /// holds the RAII `LivelinessToken` for the demo's lifetime).
+// wz-proves: declare-token wz->zenohd
+// wz-proves: codec-declare wz->zenohd
+// wz-proves: liveliness-token wz->zenohd
+// wz-proves: liveliness-token wz->pico
+// wz-proves: routing-client wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_get_liveliness); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_liveliness_token_visible_via_zenohd_to_pico_zget_liveliness() {
@@ -666,6 +697,11 @@ fn spawn_ready_z_queryable(
 /// the client/requester (`wz-ap-demo --query` emits the outbound `Query` and
 /// `--on-query-reply-log` consumes + logs the inbound reply) and pico is the
 /// responder.
+// wz-proves: query-get wz->zenohd
+// wz-proves: codec-request wz->zenohd
+// wz-proves: query-reply zenohd->wz
+// wz-proves: codec-response zenohd->wz
+// wz-proves: routing-client wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_queryable); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_query_routed_to_pico_queryable_via_zenohd() {
@@ -832,6 +868,9 @@ fn spawn_declaring_z_liveliness(
 /// as z_sub / z_pub. The witness is on the WZ side (its single-writer env_logger
 /// stderr), so this leg is immune to the foreign-stdout block-buffering that
 /// `spawn_zenohd` works around for the foreign CLIs.
+// wz-proves: declare-interest wz->zenohd partial
+// wz-proves: codec-declare zenohd->wz
+// wz-proves: liveliness-subscriber zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_liveliness); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn pico_liveliness_token_visible_via_zenohd_to_wz_subscriber() {
@@ -952,6 +991,13 @@ fn pico_liveliness_token_visible_via_zenohd_to_wz_subscriber() {
 /// `ws` feature, R311pk); zenohd also listens on `tcp/` for its
 /// handshake-readiness probe. Mirrors
 /// [`wz_client_reaches_established_against_zenohd`] one transport over.
+// wz-proves: transport-link-ws wz->zenohd
+// wz-proves: session-unicast-open wz->zenohd
+// wz-proves: codec-init-body wz->zenohd
+// wz-proves: codec-init-body zenohd->wz
+// wz-proves: codec-open-body wz->zenohd
+// wz-proves: codec-open-body zenohd->wz
+// wz-proves: transport-unicast wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (zenohd router, WS); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_client_reaches_established_against_zenohd_over_ws() {
@@ -1026,6 +1072,12 @@ fn wz_client_reaches_established_against_zenohd_over_ws() {
 /// publishes over WS, the reference router decodes it off its `ws/` listener and
 /// forwards to the pico TCP subscriber. The same Put-burst + retried-zsub shape
 /// as [`wz_publish_routes_through_zenohd_to_pico_zsub`], one transport over.
+// wz-proves: transport-link-ws wz->zenohd
+// wz-proves: codec-frame wz->zenohd
+// wz-proves: codec-push wz->zenohd
+// wz-proves: pubsub-put wz->zenohd
+// wz-proves: pubsub-put wz->pico
+// wz-proves: routing-client wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (zenohd router WS + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_publish_routes_through_zenohd_to_pico_zsub_over_ws() {

@@ -36,6 +36,7 @@ fn zenoh_pico_encode_del_no_flags() -> Vec<u8> {
     }
 }
 
+// wz-proves: pubsub-delete codec-parity partial
 #[test]
 fn layer3_msg_del_no_flags_single_byte() {
     let wz = MsgDel {

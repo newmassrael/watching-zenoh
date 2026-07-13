@@ -190,6 +190,8 @@ async fn dial_with_pubkey(port: u16) -> Result<OpenedSession, OpenError> {
 /// decode) and NOT a `Decoding error` (which a malformed wire would produce). If
 /// a future zenoh implements `known_keys_file`, this test should be promoted to
 /// assert Established (the wire already interoperates).
+// wz-proves: access-extauth-pubkey wz->zenohd partial
+// wz-proves: session-extauth wz->zenohd partial
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenohd router + openssl); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 async fn wz_pubkey_wire_decodes_on_zenohd_blocked_only_by_known_keys_todo() {

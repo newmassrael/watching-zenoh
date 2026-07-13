@@ -212,6 +212,8 @@ fn spawn_router_hat_dialing(
 
 /// Leg 1 — the router-tier topology floor. wz `--router-hat` dials zenohd and
 /// converges its `routers_net` to 2, proving the cross-impl link-state exchange.
+// wz-proves: router-hat-router zenohd->wz
+// wz-proves: router-hat-router wz->zenohd partial
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_federates_with_zenohd_at_router_tier() {
@@ -261,6 +263,16 @@ fn wz_router_hat_federates_with_zenohd_at_router_tier() {
 
 /// Leg 2 — the data-plane acid test. A pico Put crosses the mixed-vendor router
 /// backbone (pico -> zenohd -> linkstate -> wz-router -> pico).
+// wz-proves: declare-subscriber wz->zenohd
+// wz-proves: codec-declare wz->zenohd
+// wz-proves: router-hat-router wz->zenohd partial
+// wz-proves: codec-frame zenohd->wz
+// wz-proves: codec-push zenohd->wz
+// wz-proves: router-hat-router zenohd->wz
+// wz-proves: declare-subscriber pico->wz
+// wz-proves: codec-declare pico->wz
+// wz-proves: codec-frame wz->pico
+// wz-proves: codec-push wz->pico
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_pub/z_sub + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_and_zenohd_federate_pico_data_across_the_backbone() {
@@ -394,6 +406,16 @@ fn wz_router_hat_and_zenohd_federate_pico_data_across_the_backbone() {
 /// none in the reverse case) is what makes the leg deterministic: a Put burst
 /// cannot rescue an already-active write filter (it emits zero wire traffic), so
 /// the publisher must not spawn until wz provably holds the remote sub.
+// wz-proves: codec-frame wz->zenohd
+// wz-proves: codec-push wz->zenohd
+// wz-proves: router-hat-router wz->zenohd partial
+// wz-proves: declare-subscriber zenohd->wz
+// wz-proves: codec-declare zenohd->wz
+// wz-proves: router-hat-router zenohd->wz
+// wz-proves: declare-interest pico->wz
+// wz-proves: codec-push pico->wz
+// wz-proves: declare-subscriber wz->pico
+// wz-proves: codec-declare wz->pico
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_pub/z_sub + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_and_zenohd_federate_pico_data_in_reverse() {
@@ -526,6 +548,17 @@ fn wz_router_hat_and_zenohd_federate_pico_data_in_reverse() {
 /// dispatched-!=-installed slack on the reverse route into zenohd. The primary
 /// proof — the reply crossing the backbone (+ transit `routed a query` + the
 /// foreign `Received Query`) — is independent of the deactivation timing.
+// wz-proves: codec-request wz->zenohd
+// wz-proves: router-hat-router wz->zenohd partial
+// wz-proves: declare-queryable zenohd->wz
+// wz-proves: codec-declare zenohd->wz
+// wz-proves: codec-response zenohd->wz
+// wz-proves: router-hat-router zenohd->wz
+// wz-proves: declare-interest pico->wz
+// wz-proves: codec-request pico->wz
+// wz-proves: declare-queryable wz->pico
+// wz-proves: codec-response wz->pico
+// wz-proves: query-reply wz->pico
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_and_zenohd_federate_a_pico_query() {
@@ -674,6 +707,16 @@ fn wz_router_hat_and_zenohd_federate_a_pico_query() {
 /// the pub-before-sub ordering that IS the discriminator); its `-n 30` burst is
 /// self-healing across the push, so puts dropped while the filter was active are
 /// followed by puts that flow once it deactivates.
+// wz-proves: declare-interest pico->wz partial
+// wz-proves: declare-subscriber wz->pico
+// wz-proves: codec-declare wz->pico
+// wz-proves: codec-push pico->wz
+// wz-proves: codec-frame wz->zenohd
+// wz-proves: codec-push wz->zenohd
+// wz-proves: router-hat-router wz->zenohd partial
+// wz-proves: declare-subscriber zenohd->wz
+// wz-proves: codec-declare zenohd->wz
+// wz-proves: router-hat-router zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_pub/z_sub + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_pushes_a_future_subscriber_to_a_pico_publisher() {
@@ -803,6 +846,16 @@ fn wz_router_hat_pushes_a_future_subscriber_to_a_pico_publisher() {
 /// querier's write-filter is answered by ZENOHD here, not wz). Transit-pinned on
 /// wz's `routed a query`: the querier dials only zenohd and the queryable only wz,
 /// so a reply implies the Query transited wz's router.
+// wz-proves: declare-queryable wz->zenohd
+// wz-proves: codec-declare wz->zenohd
+// wz-proves: codec-response wz->zenohd
+// wz-proves: query-reply wz->zenohd
+// wz-proves: router-hat-router wz->zenohd partial
+// wz-proves: codec-request zenohd->wz
+// wz-proves: router-hat-router zenohd->wz
+// wz-proves: declare-queryable pico->wz
+// wz-proves: codec-response pico->wz
+// wz-proves: codec-request wz->pico
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_and_zenohd_federate_a_pico_query_across_the_backbone() {
@@ -959,6 +1012,18 @@ fn wz_router_hat_and_zenohd_federate_a_pico_query_across_the_backbone() {
 /// (router_forward.rs) + the peer twins (linkstate_forward.rs
 /// `peer_link_down_undeclares_to_the_client_querier`,
 /// `peer_partial_qabl_withdrawal_downgrades_the_client_querier_same_id`).
+// wz-proves: declare-interest pico->wz partial
+// wz-proves: declare-queryable wz->pico
+// wz-proves: codec-declare wz->pico
+// wz-proves: codec-request wz->zenohd
+// wz-proves: router-hat-router wz->zenohd partial
+// wz-proves: declare-queryable zenohd->wz
+// wz-proves: codec-declare zenohd->wz
+// wz-proves: codec-response zenohd->wz
+// wz-proves: router-hat-router zenohd->wz
+// wz-proves: codec-request pico->wz
+// wz-proves: codec-response wz->pico
+// wz-proves: query-reply wz->pico
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_pushes_a_future_queryable_to_a_pico_querier() {
@@ -1107,6 +1172,13 @@ fn wz_router_hat_pushes_a_future_queryable_to_a_pico_querier() {
 /// deactivated) → KILL the queryable → "NO MORE matching queryables" (undeclare
 /// re-armed). The wz-side `pushed a future queryable` pins the deactivation was the
 /// FUTURE push (querier-before-queryable), making this the full-lifecycle acid test.
+// wz-proves: declare-undeclare wz->pico
+// wz-proves: declare-undeclare zenohd->wz
+// wz-proves: declare-queryable wz->pico
+// wz-proves: declare-interest pico->wz partial
+// wz-proves: codec-declare wz->pico
+// wz-proves: codec-declare zenohd->wz
+// wz-proves: router-hat-router zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_undeclare_re_arms_a_pico_queriers_write_filter() {
@@ -1258,6 +1330,16 @@ fn wz_router_hat_undeclare_re_arms_a_pico_queriers_write_filter() {
 /// keyexpr) cannot pass. The CURRENT-mode token readiness leg (token-before-
 /// subscriber, gating on a `learned a mesh token` witness) is deferred — it needs
 /// `z_sub_liveliness -h` and a mesh-token readiness accessor no leg here consumes.
+// wz-proves: routing-token-tables zenohd->wz
+// wz-proves: routing-token-tables wz->pico
+// wz-proves: declare-token zenohd->wz
+// wz-proves: declare-token wz->pico
+// wz-proves: declare-undeclare zenohd->wz
+// wz-proves: declare-undeclare wz->pico
+// wz-proves: declare-interest pico->wz partial
+// wz-proves: codec-declare zenohd->wz
+// wz-proves: codec-declare wz->pico
+// wz-proves: router-hat-router zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_sub_liveliness/z_liveliness + wz-ap-demo --features router-hat-router,routing-token-tables); run via Layer Z / --ignored"]
 fn wz_router_hat_token_lifecycle_reaches_a_pico_liveliness_subscriber() {

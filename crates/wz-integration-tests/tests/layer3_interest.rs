@@ -44,6 +44,7 @@ fn zenoh_pico_encode_interest_default() -> Vec<u8> {
     }
 }
 
+// wz-proves: declare-interest codec-parity partial
 #[test]
 fn layer3_interest_default_byte_equivalent() {
     let wz = Interest::default().encode_to_vec();

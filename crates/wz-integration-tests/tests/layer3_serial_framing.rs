@@ -148,6 +148,7 @@ fn pico_cobs_decode(input: &[u8]) -> Vec<u8> {
 /// emits is byte-for-byte identical to what pico emits, EOP included. If
 /// this holds for the whole corpus, the header / length / payload / CRC32
 /// layout, the COBS stuffing, and the EOP all agree with real pico.
+// wz-proves: transport-link-serial codec-parity partial
 #[test]
 fn wz_serial_frame_is_byte_identical_to_pico() {
     for (header, payload) in corpus() {
@@ -166,6 +167,7 @@ fn wz_serial_frame_is_byte_identical_to_pico() {
 /// and the streaming `SerialFrameReader` (fed byte-by-byte exactly as the
 /// `serial_pipeline` read driver does, yielding the frame at the `0x00`
 /// EOP). Proves wz consumes a real pico-emitted serial frame.
+// wz-proves: transport-link-serial pico->wz partial
 #[test]
 fn pico_serialized_frame_decodes_in_wz() {
     for (header, payload) in corpus() {
@@ -193,6 +195,7 @@ fn pico_serialized_frame_decodes_in_wz() {
 /// path feeds it (`rb` includes the EOP). Proves real pico consumes a
 /// wz-emitted serial frame: header, length-vs-decoded-size, and CRC32 all
 /// pass pico's own checks.
+// wz-proves: transport-link-serial wz->pico partial
 #[test]
 fn wz_serialized_frame_deserializes_in_pico() {
     for (header, payload) in corpus() {
@@ -211,6 +214,7 @@ fn wz_serialized_frame_deserializes_in_pico() {
 /// Primitive-level parity for the two foundations the frame is built from:
 /// COBS (round-trip both ways) and CRC32. Localizes a divergence to the
 /// exact primitive rather than only surfacing it at the full-frame level.
+// wz-proves: transport-link-serial codec-parity partial
 #[test]
 fn cobs_and_crc32_byte_parity_with_pico() {
     let inputs: Vec<Vec<u8>> = vec![

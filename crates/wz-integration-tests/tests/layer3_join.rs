@@ -99,6 +99,7 @@ fn zenoh_pico_encode_join(input: &JoinInput) -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-join codec-parity partial
 #[test]
 fn layer3_join_s0_basic() {
     let input = JoinInput {
@@ -129,6 +130,7 @@ fn layer3_join_s0_basic() {
     assert_eq!(wz, pico);
 }
 
+// wz-proves: codec-join codec-parity partial
 #[test]
 fn layer3_join_s1_with_size_negotiation() {
     let input = JoinInput {
@@ -166,6 +168,7 @@ fn layer3_join_s1_with_size_negotiation() {
 /// multicast glue divide before encoding. Same wire either way — this
 /// pins the two division homes byte-equal for the pico-default beacon
 /// (lease 10000ms = T=1 + VLE 10).
+// wz-proves: codec-join codec-parity partial
 #[test]
 fn layer3_join_t_flag_lease_in_seconds() {
     let input = JoinInput {
@@ -198,6 +201,7 @@ fn layer3_join_t_flag_lease_in_seconds() {
     assert_eq!(wz, pico);
 }
 
+// wz-proves: codec-join codec-parity partial
 #[test]
 fn layer3_join_vle_boundaries_on_sn() {
     // Same VLE boundary corpus as fragment/frame, applied to all

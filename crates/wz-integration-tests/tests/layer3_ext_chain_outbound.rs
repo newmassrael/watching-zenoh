@@ -181,6 +181,7 @@ fn wz_oracle_chain() -> Vec<ExtEntryOwned> {
         .collect()
 }
 
+// wz-proves: codec-init-body codec-parity partial
 #[test]
 fn encode_init_with_ext_chain_byte_equiv_to_pico() {
     let parent_flags_no_z = FLAG_T_INIT_S | FLAG_T_INIT_A;
@@ -209,6 +210,7 @@ fn encode_init_with_ext_chain_byte_equiv_to_pico() {
     );
 }
 
+// wz-proves: codec-init-body codec-parity partial
 #[test]
 fn encode_init_with_explicit_empty_chain_omits_z_flag_and_trailing_bytes() {
     let parent_flags = FLAG_T_INIT_S | FLAG_T_INIT_A;
@@ -241,6 +243,7 @@ fn encode_init_with_explicit_empty_chain_omits_z_flag_and_trailing_bytes() {
     assert_eq!(actual[0] & FLAG_T_Z, 0, "Z flag must be clear");
 }
 
+// wz-proves: none -- no foreign encoder called; asserts wz-side Z-flag bits only
 #[test]
 fn ext_chain_role_isolation() {
     // Setting InitSyn chain must not bleed into InitAck encode.
@@ -289,6 +292,7 @@ fn ext_chain_role_isolation() {
 /// reports `NeedMoreBytes` (closure of the R121f foreign-interop
 /// carry; see `default_init_patch_ext_entry` in session_glue for
 /// the wire-spec citation).
+// wz-proves: none -- no foreign encoder called; asserts wz bytes vs a literal
 #[test]
 fn default_session_actions_seed_init_chains_with_patch_extension() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);

@@ -111,6 +111,7 @@ fn pico_initack_with_chain() -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-init-body pico->wz partial
 #[test]
 fn parse_inbound_decodes_ext_chain_from_pico_wire() {
     let wire = pico_initack_with_chain();
@@ -166,6 +167,7 @@ fn parse_inbound_decodes_ext_chain_from_pico_wire() {
     }
 }
 
+// wz-proves: none -- hand-synthesized wire; no foreign code invoked
 #[test]
 fn ext_chain_overflow_rejects_unbounded_continuation() {
     // Synthesize a wire where every ext entry keeps Z=1 (no

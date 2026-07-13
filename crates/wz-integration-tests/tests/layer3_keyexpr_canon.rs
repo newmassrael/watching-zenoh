@@ -187,6 +187,7 @@ fn capture_both(input: &str) -> (Result<String, KeyexprCanonError>, Result<Strin
 
 // ── Handcrafted corpus — agreed subspace ───────────────────────
 
+// wz-proves: keyexpr-canon codec-parity partial
 #[test]
 fn canon_identity_on_already_canonical_input() {
     // No-op path: input survives byte-for-byte through both
@@ -203,6 +204,7 @@ fn canon_identity_on_already_canonical_input() {
     assert_agree("a/b/c/d/e");
 }
 
+// wz-proves: keyexpr-canon codec-parity partial
 #[test]
 fn canon_singleify_collapses_dollar_star_runs_in_dsl_chunks() {
     // `$*$*` and longer runs collapse to a single `$*` in chunks
@@ -214,6 +216,7 @@ fn canon_singleify_collapses_dollar_star_runs_in_dsl_chunks() {
     assert_agree("home/foo$*$*$*bar");
 }
 
+// wz-proves: keyexpr-canon codec-parity partial
 #[test]
 fn canon_lone_dollar_star_alone() {
     // Lone `$*` chunk lifts to `*`. Standalone or as a trailing
@@ -225,6 +228,7 @@ fn canon_lone_dollar_star_alone() {
     assert_agree("a/b/c/$*");
 }
 
+// wz-proves: keyexpr-canon codec-parity partial
 #[test]
 fn canon_drops_double_star_after_double_star() {
     // `**/**` collapses to one `**`. Both sides handle this
@@ -237,6 +241,7 @@ fn canon_drops_double_star_after_double_star() {
     assert_agree("a/**/**/**/b");
 }
 
+// wz-proves: keyexpr-canon codec-parity partial
 #[test]
 fn canon_rejects_invalid_grammar_single_violation() {
     // Each input has EXACTLY ONE grammar violation so wz's chunk-
@@ -257,6 +262,7 @@ fn canon_rejects_invalid_grammar_single_violation() {
 
 // ── Known wz/pico canon divergences (pinned for visibility) ────
 
+// wz-proves: none -- pins a wz/pico DIVERGENCE; a locked disagreement is not an interop proof
 #[test]
 fn canon_known_pico_anomaly_star_after_double_star() {
     // Pico bug #1: `**` followed by any `*`-shape chunk. Wz drops
@@ -289,6 +295,7 @@ fn canon_known_pico_anomaly_star_after_double_star() {
     }
 }
 
+// wz-proves: none -- pico SIGABRTs on these inputs; no foreign call, wz-side only
 #[test]
 fn canon_known_pico_anomaly_double_star_literal_star_aborts() {
     // Pico bug #3: `**` + literal + `*` triggers SIGABRT via
@@ -315,6 +322,7 @@ fn canon_known_pico_anomaly_double_star_literal_star_aborts() {
     assert_eq!(canonize_keyexpr("**/a/b/*").unwrap(), "**/a/b/*");
 }
 
+// wz-proves: none -- pins a wz/pico DIVERGENCE (wz Ok vs pico Err)
 #[test]
 fn canon_known_pico_anomaly_dsl_rewrite_chunk_walk_overrun() {
     // Pico bug #2: the main-canonize char-walk uses `c < end`
@@ -452,6 +460,7 @@ proptest! {
     /// divergences so within the AGREED subspace the two impls
     /// must return byte-equal output. A failure would mean a
     /// THIRD divergence class — the property is the gate for it.
+    // wz-proves: keyexpr-canon codec-parity partial
     #[test]
     fn keyexpr_canon_wz_pico_property(input in keyexpr_strategy()) {
         let wz_result = canonize_keyexpr(&input);

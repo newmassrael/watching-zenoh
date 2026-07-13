@@ -70,6 +70,7 @@ fn zenoh_pico_encode_response_default() -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-response codec-parity partial
 #[test]
 fn layer3_response_default_byte_equivalent() {
     let wz = Response::default().encode_to_vec();

@@ -70,6 +70,7 @@ fn zenoh_pico_encode_close(reason: u8) -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-close codec-parity
 #[test]
 fn layer3_close_byte_compare_canonical_reasons() {
     // Reasons sourced from zenoh-pico's `_z_close_reason_t` enum at
@@ -101,6 +102,7 @@ fn layer3_close_byte_compare_canonical_reasons() {
     }
 }
 
+// wz-proves: none -- asserts each encoder emits 1 byte vs the literal 1; the two byte vectors are never compared to each other, so it is a shape check, not a parity proof
 #[test]
 fn layer3_close_emits_exactly_one_byte() {
     // Pin the wire shape contract: a session-close body is exactly

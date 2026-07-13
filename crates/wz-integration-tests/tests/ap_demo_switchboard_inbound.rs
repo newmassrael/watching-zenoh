@@ -43,6 +43,7 @@ use wz_integration_tests::common::{
     PortReservation,
 };
 
+// wz-proves: pubsub-put pico->wz
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
 fn switchboard_value_path_against_zenoh_pico_z_put() {

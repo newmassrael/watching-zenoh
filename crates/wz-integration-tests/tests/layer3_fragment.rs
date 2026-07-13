@@ -92,6 +92,7 @@ fn zenoh_pico_encode_fragment(sn: u64, payload: &[u8]) -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-fragment codec-parity partial
 #[test]
 fn layer3_fragment_vle_width_boundaries() {
     // VLE u64 width boundaries (per RFC §5.B Appendix B base-128
@@ -133,6 +134,7 @@ fn layer3_fragment_vle_width_boundaries() {
     }
 }
 
+// wz-proves: codec-fragment codec-parity partial
 #[test]
 fn layer3_fragment_empty_payload_yields_vle_only() {
     // Pin the empty-payload contract: body reduces to VLE(sn) bytes

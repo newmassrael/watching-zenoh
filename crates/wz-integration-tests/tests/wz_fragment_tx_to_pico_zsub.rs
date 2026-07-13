@@ -110,6 +110,8 @@ fn frag_payload(len: usize) -> String {
     String::from_utf8(bytes).expect("alphanumeric is valid UTF-8")
 }
 
+// wz-proves: transport-fragmentation wz->pico partial
+// wz-proves: pubsub-put wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub); Layer E runs via --ignored"]
 async fn wz_tx_fragmented_put_reassembled_by_pico_zsub() {

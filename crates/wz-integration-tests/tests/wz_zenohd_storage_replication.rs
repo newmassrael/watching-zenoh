@@ -261,6 +261,17 @@ async fn connect_to_zenohd(port: u16) -> OpenedSession {
 /// An in-process wz storage replica converges to a zenohd that holds an entry
 /// it lacks: wz receives + decodes zenohd's replication digest, detects it
 /// diverges, pulls the entry off zenohd's aligner queryable, and lands it.
+// wz-proves: storage-replication zenohd->wz
+// wz-proves: storage-replication wz->zenohd partial
+// wz-proves: storage-aligner zenohd->wz
+// wz-proves: storage-aligner wz->zenohd partial
+// wz-proves: declare-subscriber wz->zenohd
+// wz-proves: keyexpr-wildcard-single wz->zenohd partial
+// wz-proves: query-get wz->zenohd
+// wz-proves: codec-request wz->zenohd
+// wz-proves: query-reply zenohd->wz
+// wz-proves: codec-response zenohd->wz
+// wz-proves: pubsub-sample zenohd->wz
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "binary-dep e2e (zenohd storage-manager replication); needs target/zenohd/{zenohd,libzenoh_plugin_storage_manager.so}; run via Layer Z / --ignored"]
 async fn wz_replica_converges_to_zenohd_storage_manager() {
@@ -391,6 +402,13 @@ async fn wz_replica_converges_to_zenohd_storage_manager() {
 /// `wildcard_puts` gains an entry), monotonic once pulled (a `BTreeMap` insert,
 /// never removed absent GC, which this test does not drive), with a generous
 /// budget over zenohd's 1s digest interval. ([[feedback-no-flaky-ever]])
+// wz-proves: storage-mgr-wildcard-updates zenohd->wz partial
+// wz-proves: storage-aligner zenohd->wz
+// wz-proves: storage-aligner wz->zenohd partial
+// wz-proves: storage-replication zenohd->wz partial
+// wz-proves: declare-subscriber wz->zenohd
+// wz-proves: query-get wz->zenohd
+// wz-proves: query-reply zenohd->wz
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "binary-dep e2e (zenohd storage-manager replication); needs target/zenohd/{zenohd,libzenoh_plugin_storage_manager.so}; run via Layer Z / --ignored"]
 async fn wz_replica_registers_wildcard_event_from_zenohd_storage_manager() {
@@ -562,6 +580,13 @@ fn zget_once(key: &str, port: u16) -> String {
 /// whole test (not a one-shot Put) and the aligner queryable stays declared for
 /// the session lifetime. Convergence is witnessed by an INDEPENDENT foreign pico
 /// `z_get` against zenohd's store.
+// wz-proves: storage-aligner wz->zenohd
+// wz-proves: declare-queryable wz->zenohd
+// wz-proves: query-queryable wz->zenohd
+// wz-proves: query-reply wz->zenohd
+// wz-proves: codec-response wz->zenohd
+// wz-proves: codec-request zenohd->wz
+// wz-proves: codec-declare wz->zenohd
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "binary-dep e2e (zenohd storage-manager replication); needs target/zenohd/{zenohd,libzenoh_plugin_storage_manager.so}; run via Layer Z / --ignored"]
 async fn zenohd_converges_to_wz_replica() {

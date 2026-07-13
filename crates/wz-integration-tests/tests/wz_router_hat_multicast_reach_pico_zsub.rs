@@ -104,6 +104,25 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, std::fs::File, u16) {
 /// because the wz `--router-hat` ingested the pico's `DeclareSubscriber` and
 /// advertised it into the unicast mesh (§5.21 sub plane, S2) — the cross-impl proof
 /// of reachability limit (a).
+// wz-proves: router-multicast-faces pico->wz partial
+// wz-proves: router-multicast-faces wz->pico partial
+// wz-proves: router-hat-router wz->pico partial
+// wz-proves: declare-subscriber pico->wz partial
+// wz-proves: codec-declare pico->wz partial
+// wz-proves: transport-multicast pico->wz
+// wz-proves: transport-multicast wz->pico
+// wz-proves: session-multicast pico->wz partial
+// wz-proves: session-multicast wz->pico partial
+// wz-proves: codec-join pico->wz
+// wz-proves: codec-join wz->pico
+// wz-proves: codec-frame pico->wz
+// wz-proves: codec-frame wz->pico
+// wz-proves: codec-push wz->pico
+// wz-proves: pubsub-put wz->pico
+// wz-proves: keyexpr-literal pico->wz
+// wz-proves: keyexpr-wildcard-double pico->wz partial
+// wz-proves: transport-link-udp pico->wz
+// wz-proves: transport-link-udp wz->pico
 #[test]
 #[ignore = "binary-dep multicast e2e (wz-ap-demo --features router-multicast-faces + zenoh-pico z_sub); Layer M runs via --ignored"]
 fn wz_router_hat_advertises_group_sub_reaches_pico_zsub() {

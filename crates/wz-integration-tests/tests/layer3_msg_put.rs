@@ -75,6 +75,7 @@ fn zenoh_pico_encode_put_no_flags(payload: &[u8]) -> Vec<u8> {
     }
 }
 
+// wz-proves: pubsub-put codec-parity partial
 #[test]
 fn layer3_msg_put_no_flags_payload_variants() {
     // VLE width boundary corpus on payload_len.
@@ -105,6 +106,7 @@ fn layer3_msg_put_no_flags_payload_variants() {
     }
 }
 
+// wz-proves: pubsub-put codec-parity partial
 #[test]
 fn layer3_msg_put_empty_payload_yields_header_and_zero_vle() {
     // Pin the canonical empty-PUT wire form: [0x01, 0x00] = MID + VLE(0).

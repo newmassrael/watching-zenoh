@@ -35,6 +35,7 @@ fn zenoh_pico_encode_keep_alive() -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-keep-alive codec-parity
 #[test]
 fn layer3_keep_alive_zero_bytes() {
     let wz = KeepAlive::default().encode_to_vec();

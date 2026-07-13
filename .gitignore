@@ -77,3 +77,6 @@ notes/
 # atomic store is the SSOT). Previously-tracked files are untracked via
 # `git rm --cached`; they stay on disk as local references.
 claudedocs/
+
+# Python bytecode from the scripts/lib gate modules
+__pycache__/

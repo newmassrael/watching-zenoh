@@ -93,6 +93,8 @@ struct InteropOutcome {
     byte_exact: bool,
 }
 
+// wz-proves: transport-fragmentation pico->wz
+// wz-proves: pubsub-put pico->wz
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_put); Layer E runs via --ignored"]
 async fn wz_acceptor_reassembles_pico_fragmented_put() {
@@ -115,6 +117,8 @@ async fn wz_acceptor_reassembles_pico_fragmented_put() {
     assert_eq!(o.deliveries, 1, "exactly one reassembled delivery");
 }
 
+// wz-proves: transport-fragmentation pico->wz
+// wz-proves: pubsub-put pico->wz
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_put); Layer E runs via --ignored"]
 async fn wz_acceptor_accepts_pico_put_over_legacy_256_bound() {

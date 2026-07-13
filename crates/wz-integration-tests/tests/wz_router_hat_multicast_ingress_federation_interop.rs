@@ -133,6 +133,15 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, std::fs::File, u16) {
 /// I3c — two wz router-hats sharing one multicast group + mesh-peered federate a
 /// foreign pico's group-injected Put into the mesh to an off-group subscriber,
 /// loop-free: EXACTLY ONE router (the elected DR) bridges the group into the mesh.
+// wz-proves: router-multicast-faces pico->wz
+// wz-proves: transport-multicast pico->wz
+// wz-proves: session-multicast pico->wz partial
+// wz-proves: codec-join pico->wz
+// wz-proves: codec-frame pico->wz
+// wz-proves: codec-push pico->wz
+// wz-proves: pubsub-put pico->wz
+// wz-proves: keyexpr-literal pico->wz
+// wz-proves: transport-link-udp pico->wz
 #[test]
 #[ignore = "binary-dep multicast e2e (wz-ap-demo --features router-multicast-faces + zenoh-pico z_pub); Layer M runs via --ignored"]
 fn wz_router_hat_multicast_ingress_federates_loop_safe_from_pico_zpub() {

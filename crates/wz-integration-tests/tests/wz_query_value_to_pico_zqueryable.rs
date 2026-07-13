@@ -79,6 +79,8 @@ const QABL_KEYEXPR: &str = "demo/**";
 // non-empty payload).
 const QUERY_VALUE: &str = "wz-query-value";
 
+// wz-proves: query-value wz->pico partial
+// wz-proves: query-get wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_queryable); Layer E runs via --ignored"]
 async fn wz_query_value_decoded_by_pico_z_queryable() {

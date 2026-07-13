@@ -143,6 +143,15 @@ async fn authenticate_until_ready(port: u16) -> OpenedSession {
     unreachable!("the loop returns or panics")
 }
 
+// wz-proves: access-extauth-usrpwd wz->zenohd
+// wz-proves: session-extauth wz->zenohd
+// wz-proves: session-extauth zenohd->wz
+// wz-proves: session-unicast-open wz->zenohd
+// wz-proves: codec-init-body wz->zenohd
+// wz-proves: codec-init-body zenohd->wz
+// wz-proves: codec-open-body wz->zenohd
+// wz-proves: codec-open-body zenohd->wz
+// wz-proves: transport-link-tcp wz->zenohd
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenohd router); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 async fn wz_authenticates_to_usrpwd_zenohd_with_correct_credentials() {
@@ -159,6 +168,10 @@ async fn wz_authenticates_to_usrpwd_zenohd_with_correct_credentials() {
     let _ = zenohd.child_mut().wait();
 }
 
+// wz-proves: access-extauth-usrpwd wz->zenohd
+// wz-proves: session-extauth wz->zenohd
+// wz-proves: session-extauth zenohd->wz
+// wz-proves: session-unicast-open wz->zenohd
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenohd router); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 async fn wz_rejected_by_usrpwd_zenohd_with_wrong_credentials() {

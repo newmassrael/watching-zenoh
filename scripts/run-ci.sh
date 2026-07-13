@@ -549,6 +549,15 @@ layer_a3_audit_catalog_status() {
     bash scripts/audit-catalog-status.sh
 }
 
+# ─── Layer A4 — cross-impl PROOF axis (R311y259) ────────────────────
+# A3 answers "is there a knob?" and "is it built?". A4 answers the question the north
+# star actually turns on: "is it PROVEN against a real foreign implementation?" It joins
+# the catalog to the interop corpus (derived from the harness call graph) and to cargo's
+# feature closure (which mechanically refutes a claim for code that is not compiled in).
+layer_a4_audit_crossimpl_proof() {
+    bash scripts/audit-crossimpl-proof.sh
+}
+
 # ─── Layer B — verify-codegen.sh per codec ──────────────────────────
 layer_b_verify_codegen() {
     if [[ $SKIP_CODEGEN -eq 1 ]]; then
@@ -755,16 +764,48 @@ layer_b2_regen_diff() {
 layer_c0_test_discipline() {
     local exit_code=0
     local violations_count=0
+    # R311y259 — the "does this test spawn an external binary?" predicate now comes from
+    # scripts/lib/crossimpl_corpus.py, which BOTH this layer and Layer A4 consume. The
+    # prior inline grep (`wz_ap_demo_binary()\|zenoh_pico_cli_binary(`) missed every test
+    # that reaches a binary through a wrapper helper -- concretely, pubkey_zenohd_interop
+    # and usrpwd_zenohd_interop spawn zenohd and nothing else, so their #[ignore]
+    # discipline was never actually gated. One predicate, two consumers, no drift.
+    #
+    # The list is materialised BEFORE the loop and its exit status checked. A process
+    # substitution (`done < <(python3 ...)`) does NOT propagate the producer's exit
+    # status, and `set -euo pipefail` does not catch it either: a python failure (no
+    # python3 on the runner, a UnicodeDecodeError on a new test file) would yield an
+    # empty list, zero loop iterations, zero violations -- and a GREEN "Layer C0 pass"
+    # having checked nothing. The predecessor (`find ... -name '*.rs'`) could not fail
+    # empty; this dependency has to be guarded to keep that property.
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "Layer C0 FAIL: python3 not on PATH (needed by scripts/lib/crossimpl_corpus.py)" >&2
+        return 1
+    fi
+    local spawn_list
+    spawn_list="$(mktemp)"
+    if ! python3 scripts/lib/crossimpl_corpus.py --list-spawn >"$spawn_list"; then
+        rm -f "$spawn_list"
+        echo "Layer C0 FAIL: crossimpl_corpus.py --list-spawn errored" >&2
+        return 1
+    fi
+    if [[ ! -s "$spawn_list" ]]; then
+        rm -f "$spawn_list"
+        echo "Layer C0 FAIL: the spawn-class corpus came back EMPTY -- the predicate is" >&2
+        echo "  broken, not the tree (there are binary-dep tests). Refusing to pass green." >&2
+        return 1
+    fi
     while IFS= read -r f; do
-        if ! grep -q 'wz_ap_demo_binary()\|zenoh_pico_cli_binary(' "$f"; then
-            continue
-        fi
         local report
+        # Both #[test] and #[tokio::test(...)] mark a test; the old awk matched only the
+        # former, so ~20 corpus files' #[ignore] discipline rode on convention, not a gate.
+        # The `^[[:space:]]*` anchor matches the shared parser's, so C0 and A4 agree on
+        # what a test IS -- an indented #[test] (inside a mod / proptest! block) must not
+        # be a test to one gate and invisible to the other.
         report=$(awk '
-            /^#\[test\]/ {
-                test_count++
+            /^[[:space:]]*#\[(test|tokio::test)/ {
                 test_line = NR
-                if ((getline next_line) > 0 && next_line ~ /^#\[ignore/) {
+                if ((getline next_line) > 0 && next_line ~ /^[[:space:]]*#\[ignore/) {
                     next
                 }
                 print FILENAME ":" test_line ": #[test] missing adjacent #[ignore]"
@@ -775,7 +816,8 @@ layer_c0_test_discipline() {
             violations_count=$((violations_count + 1))
             exit_code=1
         fi
-    done < <(find crates/wz-integration-tests/tests -maxdepth 1 -name '*.rs' | sort)
+    done <"$spawn_list"
+    rm -f "$spawn_list"
 
     if [[ $exit_code -ne 0 ]]; then
         echo "" >&2
@@ -5308,6 +5350,7 @@ run_layer 0 layer_0_preflight_lints || overall=1
 run_layer A layer_a_mnemosyne || overall=1
 run_layer A2 layer_a2_audit_mid_values || overall=1
 run_layer A3 layer_a3_audit_catalog_status || overall=1
+run_layer A4 layer_a4_audit_crossimpl_proof || overall=1
 run_layer B layer_b_verify_codegen || overall=1
 run_layer B2 layer_b2_regen_diff || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1

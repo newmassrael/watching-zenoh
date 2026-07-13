@@ -85,6 +85,8 @@ const PUBLISH_KEYEXPR: &str = "demo/prio";
 const SUB_KEYEXPR: &str = "demo/**";
 const PAYLOAD: &str = "prioritized-hello-from-wz";
 
+// wz-proves: pubsub-priority wz->pico
+// wz-proves: pubsub-put wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub_attachment); Layer E runs via --ignored"]
 async fn wz_put_priority_decoded_by_pico_zsub_attachment() {

@@ -64,6 +64,7 @@ fn zenoh_pico_encode_open(parent_flags: u8, lease: u64, initial_sn: u64, cookie:
     }
 }
 
+// wz-proves: codec-open-body codec-parity partial
 #[test]
 fn layer3_open_body_syn_cookie_present() {
     // parent.A=0 → cookie emitted (VLE len + bytes).
@@ -84,6 +85,7 @@ fn layer3_open_body_syn_cookie_present() {
     assert_eq!(wz_bytes, pico_bytes);
 }
 
+// wz-proves: codec-open-body codec-parity partial
 #[test]
 fn layer3_open_body_ack_no_cookie() {
     // parent.A=1 → cookie pair absent. Body = VLE(lease) + VLE(initial_sn) only.
@@ -103,6 +105,7 @@ fn layer3_open_body_ack_no_cookie() {
     assert_eq!(wz_bytes, pico_bytes);
 }
 
+// wz-proves: codec-open-body codec-parity partial
 #[test]
 fn layer3_open_body_vle_boundaries() {
     // Exercise VLE width boundaries for lease + initial_sn under

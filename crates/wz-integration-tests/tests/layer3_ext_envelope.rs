@@ -71,6 +71,7 @@ fn zenoh_pico_encode_oracle_envelope() -> Vec<u8> {
     }
 }
 
+// wz-proves: none -- real pico byte-parity but NO catalog atom names the generic ext TLV envelope
 #[test]
 fn layer3_ext_envelope_oracle_byte_equivalent_to_zenoh_pico() {
     let pico = zenoh_pico_encode_oracle_envelope();

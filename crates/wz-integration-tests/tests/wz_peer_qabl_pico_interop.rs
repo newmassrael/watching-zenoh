@@ -58,6 +58,14 @@ use wz_integration_tests::common::{
 /// -> pico z_querier (client of peer-B, queries demo/key): the query crosses the wz
 /// peer mesh to peer-A's co-attached client queryable and the reply returns — the
 /// §5.21 peer's cross-impl proof of the R311y177 client-queryable HOSTING plane.
+// wz-proves: routing-peer wz->pico partial
+// wz-proves: codec-request pico->wz
+// wz-proves: codec-request wz->pico
+// wz-proves: codec-response pico->wz
+// wz-proves: codec-response wz->pico
+// wz-proves: declare-queryable pico->wz partial
+// wz-proves: codec-declare pico->wz partial
+// wz-proves: keyexpr-wildcard-double pico->wz partial
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer + zenoh-pico z_queryable/z_querier); Layer E6 runs via --ignored"]
 fn wz_peer_hosts_a_pico_client_queryable_across_the_mesh() {

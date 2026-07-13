@@ -73,6 +73,8 @@ use wz_integration_tests::common::{
     PortReservation,
 };
 
+// wz-proves: pubsub-put wz->pico
+// wz-proves: session-unicast-open wz->pico
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
 fn wz_initiator_round_trip_against_zenoh_pico_z_sub_peer_listen() {

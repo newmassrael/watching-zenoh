@@ -37,6 +37,16 @@ use wz_integration_tests::common::{
     ChildGuard, PortReservation,
 };
 
+// wz-proves: liveliness-token wz->pico
+// wz-proves: declare-token wz->pico partial
+// wz-proves: codec-declare wz->pico partial
+// wz-proves: keyexpr-literal wz->pico
+// wz-proves: codec-frame wz->pico
+// wz-proves: transport-link-tcp wz->pico
+// wz-proves: transport-unicast wz->pico
+// wz-proves: session-unicast-accept wz->pico
+// wz-proves: codec-init-body wz->pico partial
+// wz-proves: codec-open-body wz->pico partial
 #[test]
 #[ignore = "binary-dep e2e (wz-e2e-liveliness-token + zenoh-pico CLI); Layer E2 runs via --ignored"]
 fn wz_e2e_liveliness_token_round_trip_against_zenoh_pico_z_get_liveliness() {

@@ -52,6 +52,16 @@ use wz_integration_tests::common::{
 /// pico z_sub (client of peer-B): wz-peer-A pushes a future subscriber to the pico
 /// publisher and re-injects its Put across the wz peer mesh to the pico subscriber —
 /// the §5.21 peer's first cross-impl (foreign-client) future-push + client data proof.
+// wz-proves: routing-peer wz->pico partial
+// wz-proves: pubsub-put pico->wz
+// wz-proves: pubsub-put wz->pico
+// wz-proves: codec-push pico->wz
+// wz-proves: codec-push wz->pico
+// wz-proves: declare-subscriber wz->pico partial
+// wz-proves: declare-subscriber pico->wz partial
+// wz-proves: codec-declare wz->pico partial
+// wz-proves: codec-declare pico->wz partial
+// wz-proves: keyexpr-wildcard-double pico->wz partial
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer + zenoh-pico z_pub/z_sub); Layer E6 runs via --ignored"]
 fn wz_peer_pushes_a_future_subscriber_and_reinjects_a_pico_publish_to_a_pico_sub() {

@@ -53,6 +53,12 @@ use wz_integration_tests::common::{
     PortReservation, Z_SUB_INIT_TIMEOUT,
 };
 
+// wz-proves: codec-frame wz->pico
+// wz-proves: codec-push wz->pico
+// wz-proves: keyexpr-literal wz->pico
+// wz-proves: session-unicast-accept wz->pico
+// wz-proves: transport-link-tcp wz->pico
+// wz-proves: transport-unicast wz->pico
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
 fn wz_publisher_del_round_trip_against_zenoh_pico_z_sub() {

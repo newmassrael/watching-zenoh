@@ -76,6 +76,8 @@ fn zenoh_pico_encode_declare_default() -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-declare codec-parity partial
+// wz-proves: declare-final codec-parity partial
 #[test]
 fn layer3_declare_default_byte_equivalent() {
     let wz = Declare::default().encode_to_vec();

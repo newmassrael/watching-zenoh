@@ -110,6 +110,14 @@ const WILDCARD_VALUE: &str = "wildcard-put-from-pico-over-the-wire";
 /// by an in-process wz `StorageService`, registered in its wildcard-PUT registry,
 /// and materialized over a pre-existing concrete key — the §5.24 LIVE-path
 /// cross-impl proof of the R311wt write-path override engine (slice 2).
+// wz-proves: storage-mgr-wildcard-updates pico->wz partial
+// wz-proves: storage-backend pico->wz partial
+// wz-proves: declare-keyexpr pico->wz partial
+// wz-proves: keyexpr-wildcard-double pico->wz partial
+// wz-proves: pubsub-put pico->wz
+// wz-proves: codec-push pico->wz
+// wz-proves: codec-declare pico->wz partial
+// wz-proves: session-unicast-accept wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_put); Layer E runs via --ignored"]
 async fn wz_storage_applies_a_pico_wildcard_update_over_the_wire() {

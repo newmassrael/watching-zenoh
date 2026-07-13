@@ -46,6 +46,12 @@ use wz_integration_tests::common::{
 /// wz --publish (peer-A) -> [wz peer A -> B(transit) -> C] -> pico z_sub (client of
 /// peer-C): the transit-sourced Put reaches the foreign pico subscriber 2 hops away —
 /// the §5.21 peer's cross-impl proof of the transit-source client-delivery fix.
+// wz-proves: routing-peer wz->pico partial
+// wz-proves: pubsub-put wz->pico
+// wz-proves: codec-push wz->pico
+// wz-proves: declare-subscriber pico->wz partial
+// wz-proves: codec-declare pico->wz partial
+// wz-proves: keyexpr-wildcard-double pico->wz partial
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer + zenoh-pico z_sub); Layer E6 runs via --ignored"]
 fn wz_peer_delivers_a_transit_sourced_push_to_a_pico_client_sub() {

@@ -172,6 +172,16 @@ jobs:
         # own yml step (same reason as A2).
         run: bash scripts/run-ci.sh --layer A3
 
+      - name: Layer A4 — cross-impl proof axis
+        # R311y259. A3 answers "is there a knob?" and "is it built?"; A4
+        # answers "is it PROVEN against a real foreign implementation?" —
+        # the question the north star ("zenoh + zenoh-pico FULL") actually
+        # turns on. Joins the catalog to the interop corpus (derived from
+        # the harness call graph) and to cargo's feature closure (which
+        # mechanically refutes a claim for code that is not compiled in).
+        # Top-level layer, so it needs its own yml step (same reason as A2).
+        run: bash scripts/run-ci.sh --layer A4
+
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 

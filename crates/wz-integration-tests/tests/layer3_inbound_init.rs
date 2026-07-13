@@ -124,6 +124,7 @@ impl BoxedLinkDriver for NoopDriver {
     fn close_blocking(&self) {}
 }
 
+// wz-proves: codec-init-body pico->wz partial
 #[test]
 fn parse_inbound_decodes_pico_initack_frame() {
     let cookie = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
@@ -164,6 +165,7 @@ fn parse_inbound_decodes_pico_initack_frame() {
     }
 }
 
+// wz-proves: codec-init-body pico->wz partial
 #[test]
 fn handle_inbound_populates_cookie_slot_from_initack() {
     let cookie = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
@@ -196,6 +198,7 @@ fn handle_inbound_populates_cookie_slot_from_initack() {
     );
 }
 
+// wz-proves: none -- empty-wire error path; no foreign code invoked
 #[test]
 fn parse_inbound_rejects_empty_wire() {
     match parse_inbound(&[]) {
@@ -205,6 +208,7 @@ fn parse_inbound_rejects_empty_wire() {
     }
 }
 
+// wz-proves: none -- hand-written wire; no foreign code invoked
 #[test]
 fn parse_inbound_surfaces_unknown_mid() {
     // MID=0x1F is outside the {INIT, OPEN, CLOSE} triad — the parser

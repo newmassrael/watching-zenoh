@@ -79,6 +79,7 @@ fn zenoh_pico_encode_request_default() -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-request codec-parity partial
 #[test]
 fn layer3_request_default_byte_equivalent() {
     let wz = Request::default().encode_to_vec();
@@ -132,6 +133,8 @@ fn zenoh_pico_encode_request_query_value(payload: &[u8]) -> Vec<u8> {
 /// `_ext_value.payload` set — proving the value ext (header `0x43`, the
 /// ExtZbuf/pico-`zsize` length prefix, `encoding || payload` body) and the inner
 /// Q_Z (0x80) flag compose byte-for-byte on the wire.
+// wz-proves: codec-request codec-parity partial
+// wz-proves: query-value codec-parity partial
 #[test]
 fn layer3_request_query_value_byte_equivalent() {
     use wz_session_core::request_build::RequestQueryBuilder;

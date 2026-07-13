@@ -85,6 +85,8 @@ const SUB_KEYEXPR: &str = "demo/**";
 const SRC_EID: u32 = 44;
 const SRC_SN: u32 = 55;
 
+// wz-proves: pubsub-delete wz->pico
+// wz-proves: pubsub-source-info wz->pico partial
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub_attachment); Layer E runs via --ignored"]
 async fn wz_del_source_info_decoded_by_pico_zsub_attachment() {

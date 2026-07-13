@@ -112,6 +112,14 @@ fn wz_mc_params() -> MulticastParams {
     }
 }
 
+// wz-proves: transport-multicast wz->pico
+// wz-proves: session-multicast wz->pico partial
+// wz-proves: codec-join wz->pico
+// wz-proves: codec-frame wz->pico
+// wz-proves: codec-push wz->pico
+// wz-proves: pubsub-put wz->pico
+// wz-proves: keyexpr-literal wz->pico
+// wz-proves: transport-link-udp wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep multicast e2e (zenoh-pico CLI z_sub); Layer M runs via --ignored"]
 async fn wz_publisher_reaches_pico_multicast_zsub() {

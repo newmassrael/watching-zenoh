@@ -84,6 +84,8 @@ const QABL_KEYEXPR: &str = "demo/**";
 const SRC_EID: u32 = 77;
 const SRC_SN: u32 = 88;
 
+// wz-proves: query-source-info wz->pico
+// wz-proves: query-get wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_queryable); Layer E runs via --ignored"]
 async fn wz_query_source_info_decoded_by_pico_z_queryable() {

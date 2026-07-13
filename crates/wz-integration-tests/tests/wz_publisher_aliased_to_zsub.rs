@@ -50,6 +50,8 @@ use wz_integration_tests::common::{
     Z_SUB_INIT_TIMEOUT,
 };
 
+// wz-proves: declare-keyexpr wz->pico
+// wz-proves: pubsub-put wz->pico
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
 fn wz_publisher_aliased_round_trip_against_zenoh_pico_z_sub() {

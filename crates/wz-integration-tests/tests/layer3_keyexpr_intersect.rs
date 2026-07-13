@@ -91,6 +91,8 @@ fn assert_agree(a: &str, b: &str) {
     );
 }
 
+// wz-proves: keyexpr-intersect codec-parity partial
+// wz-proves: keyexpr-literal codec-parity partial
 #[test]
 fn keyexpr_intersect_literal_pairs() {
     // Identical keyexprs trivially intersect; distinct literals do
@@ -105,6 +107,8 @@ fn keyexpr_intersect_literal_pairs() {
     assert_agree("a", "b");
 }
 
+// wz-proves: keyexpr-intersect codec-parity partial
+// wz-proves: keyexpr-wildcard-single codec-parity partial
 #[test]
 fn keyexpr_intersect_single_chunk_wildcard() {
     // `*` matches any single chunk. Exercises the chunk-level
@@ -120,6 +124,8 @@ fn keyexpr_intersect_single_chunk_wildcard() {
     assert_agree("home/*/temp", "*/sensor/temp"); // both-sides single-chunk wild
 }
 
+// wz-proves: keyexpr-intersect codec-parity partial
+// wz-proves: keyexpr-wildcard-double codec-parity partial
 #[test]
 fn keyexpr_intersect_double_star() {
     // `**` matches zero-or-more chunks. Exercises the `**` backtrack
@@ -138,6 +144,8 @@ fn keyexpr_intersect_double_star() {
     assert_agree("home/**", "office/**"); // both-sides ** with distinct lead literals
 }
 
+// wz-proves: keyexpr-intersect codec-parity partial
+// wz-proves: keyexpr-dollar-star codec-parity partial
 #[test]
 fn keyexpr_intersect_single_side_dsl() {
     // Intra-chunk `$*` on one side only. Exercises the
@@ -154,6 +162,8 @@ fn keyexpr_intersect_single_side_dsl() {
     assert_agree("a/$*A$*B$*", "a/BA"); // middles in reverse order — no fit
 }
 
+// wz-proves: keyexpr-intersect codec-parity partial
+// wz-proves: keyexpr-dollar-star codec-parity partial
 #[test]
 fn keyexpr_intersect_two_side_dsl_anchor_pairs() {
     // R296 core claim — two-side `$*` reduces to lead/trail anchor
@@ -172,6 +182,10 @@ fn keyexpr_intersect_two_side_dsl_anchor_pairs() {
     assert_agree("AB$*Z", "AX$*Z"); // byte-overlap lead but diverge
 }
 
+// wz-proves: keyexpr-intersect codec-parity partial
+// wz-proves: keyexpr-wildcard-single codec-parity partial
+// wz-proves: keyexpr-wildcard-double codec-parity partial
+// wz-proves: keyexpr-dollar-star codec-parity partial
 #[test]
 fn keyexpr_intersect_mixed_wildcards() {
     // Cross-products of `*`, `**`, and `$*` on different chunks of
@@ -188,6 +202,8 @@ fn keyexpr_intersect_mixed_wildcards() {
     assert_agree("**/*", "a/b/c/d");
 }
 
+// wz-proves: keyexpr-intersect codec-parity partial
+// wz-proves: keyexpr-wildcard-double codec-parity partial
 #[test]
 fn keyexpr_intersect_depth_edge_cases() {
     // Depth-mismatch + wildcard-absorb edge cases.
@@ -304,6 +320,11 @@ proptest! {
     /// handcrafted ~63-case corpus; this property closes the
     /// remaining gap by random fuzz over the canonical chunk-pattern
     /// generator.
+    // wz-proves: keyexpr-intersect codec-parity partial
+    // wz-proves: keyexpr-literal codec-parity partial
+    // wz-proves: keyexpr-wildcard-single codec-parity partial
+    // wz-proves: keyexpr-wildcard-double codec-parity partial
+    // wz-proves: keyexpr-dollar-star codec-parity partial
     #[test]
     fn keyexpr_intersect_wz_pico_property(
         a in keyexpr_strategy(),

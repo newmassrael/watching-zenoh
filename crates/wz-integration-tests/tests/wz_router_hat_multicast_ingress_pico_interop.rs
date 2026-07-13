@@ -101,6 +101,15 @@ const VALUE: &str = "WZ-MCAST-INGRESS-INTEROP-I2";
 /// subscriber: the wz router receives a foreign multicast peer's Put on its ingress
 /// group face and routes it to a wz client subscriber — the router-multicast-faces
 /// atom's first cross-impl (foreign-publisher) ingress proof.
+// wz-proves: router-multicast-faces pico->wz
+// wz-proves: transport-multicast pico->wz
+// wz-proves: session-multicast pico->wz partial
+// wz-proves: codec-join pico->wz
+// wz-proves: codec-frame pico->wz
+// wz-proves: codec-push pico->wz
+// wz-proves: pubsub-put pico->wz
+// wz-proves: keyexpr-literal pico->wz
+// wz-proves: transport-link-udp pico->wz
 #[test]
 #[ignore = "binary-dep multicast e2e (wz-ap-demo --features router-multicast-faces + zenoh-pico z_pub); Layer M runs via --ignored"]
 fn wz_router_hat_multicast_ingress_from_pico_zpub() {

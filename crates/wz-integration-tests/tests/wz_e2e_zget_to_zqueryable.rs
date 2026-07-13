@@ -43,6 +43,19 @@ use wz_integration_tests::common::{
     PortReservation,
 };
 
+// wz-proves: query-get wz->pico
+// wz-proves: codec-request wz->pico
+// wz-proves: keyexpr-literal wz->pico
+// wz-proves: query-reply pico->wz
+// wz-proves: codec-response pico->wz
+// wz-proves: codec-response-final pico->wz
+// wz-proves: codec-frame wz->pico
+// wz-proves: codec-frame pico->wz
+// wz-proves: transport-link-tcp wz->pico
+// wz-proves: transport-unicast wz->pico
+// wz-proves: session-unicast-accept wz->pico
+// wz-proves: codec-init-body wz->pico partial
+// wz-proves: codec-open-body wz->pico partial
 #[test]
 #[ignore = "binary-dep e2e (wz-e2e-zget + zenoh-pico CLI); Layer E2 runs via --ignored"]
 fn wz_e2e_zget_round_trip_against_zenoh_pico_z_queryable() {

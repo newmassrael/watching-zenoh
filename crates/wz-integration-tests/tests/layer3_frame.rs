@@ -78,6 +78,7 @@ fn zenoh_pico_encode_frame(sn: u64, payload: &[u8]) -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-frame codec-parity partial
 #[test]
 fn layer3_frame_vle_width_boundaries() {
     // Same VLE corpus as fragment but encoded via the frame path.
@@ -111,6 +112,7 @@ fn layer3_frame_vle_width_boundaries() {
     }
 }
 
+// wz-proves: codec-frame codec-parity partial
 #[test]
 fn layer3_frame_matches_fragment_when_no_extension() {
     // Cross-codec invariant: with header=0 (no Z flag, no

@@ -76,6 +76,7 @@ fn zenoh_pico_encode_scout(version: u8, what: u8, zid_bytes: &[u8]) -> Vec<u8> {
     }
 }
 
+// wz-proves: codec-scout codec-parity partial
 #[test]
 fn layer3_scout_no_zid() {
     // cbyte.I=0 → no zid bytes on the wire. Body = [version, cbyte].
@@ -95,6 +96,7 @@ fn layer3_scout_no_zid() {
     assert_eq!(wz_bytes, pico_bytes);
 }
 
+// wz-proves: codec-scout codec-parity partial
 #[test]
 fn layer3_scout_with_zid() {
     // cbyte.I=1 + zid_len_m1=2 → zid is 3 bytes.
@@ -114,6 +116,7 @@ fn layer3_scout_with_zid() {
     assert_eq!(wz_bytes, pico_bytes);
 }
 
+// wz-proves: codec-scout codec-parity partial
 #[test]
 fn layer3_scout_max_zid_16_bytes() {
     // Boundary: zid_len_m1=15 (max 4-bit value) → 16-byte zid.

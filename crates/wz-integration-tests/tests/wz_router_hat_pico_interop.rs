@@ -55,6 +55,12 @@ use wz_integration_tests::common::{
 /// wz publisher -> wz router-hat -> pico `z_sub`: the wz router routes a wz client's
 /// `Put` to a real zenoh-pico client subscriber — the §5.21 router's first
 /// cross-impl (foreign-client) data-plane proof.
+// wz-proves: router-hat-router wz->pico partial
+// wz-proves: declare-subscriber pico->wz partial
+// wz-proves: codec-declare pico->wz partial
+// wz-proves: pubsub-put wz->pico
+// wz-proves: codec-push wz->pico
+// wz-proves: keyexpr-wildcard-double pico->wz partial
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router + zenoh-pico z_sub); Layer E8 runs via --ignored"]
 fn wz_router_hat_routes_wz_publish_to_pico_zsub() {

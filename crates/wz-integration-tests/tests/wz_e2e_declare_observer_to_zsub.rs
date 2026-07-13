@@ -41,6 +41,15 @@ use wz_integration_tests::common::{
     ChildGuard, PortReservation,
 };
 
+// wz-proves: declare-subscriber pico->wz partial
+// wz-proves: codec-declare pico->wz partial
+// wz-proves: keyexpr-literal pico->wz
+// wz-proves: codec-frame pico->wz
+// wz-proves: transport-link-tcp pico->wz
+// wz-proves: transport-unicast pico->wz
+// wz-proves: session-unicast-accept wz->pico
+// wz-proves: codec-init-body wz->pico partial
+// wz-proves: codec-open-body wz->pico partial
 #[test]
 #[ignore = "binary-dep e2e (wz-e2e-declare-observer + zenoh-pico CLI); Layer E2 runs via --ignored"]
 fn wz_e2e_declare_observer_round_trip_against_zenoh_pico_z_sub() {
