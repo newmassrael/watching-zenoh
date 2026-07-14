@@ -71,6 +71,10 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-feat
 # by the rest-http-bridge feature. It carries its own wz-runtime-tokio feature
 # set; the facade also forwards them below so wz::runtime_tokio composes.
 wz-rest = { path = "../wz-rest", optional = true }
+# §5.27 api-compat-pico — the zenoh-pico-compatible C ABI (cdylib+rlib). It
+# depends on wz-runtime-tokio directly (NOT the facade) to avoid a package
+# cycle; the facade only re-exports it as `wz::capi_pico`.
+wz-capi-pico = { path = "../wz-capi-pico", optional = true, default-features = false }
 wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-features = false, features = ["alloc"] }
 # R311ax — wz-runtime-coop enters the facade as an optional dep.
 # The `runtime-coop` feature pulls this crate with its `alloc`
@@ -969,9 +973,12 @@ rest-http-bridge = [
 # subscriber + Put/Del receive features it calls through).
 rest-sse-subscribe = ["rest-http-bridge", "wz-rest?/rest-sse-subscribe"]
 
-# ----- §5.27 api-compat (2 atomic, all reserved) -----
+# ----- §5.27 api-compat (2 atomic: 1 active, 1 reserved) -----
 api-compat-c = []
-api-compat-pico = []
+# R311y284 — api-compat-pico BUILT: pulls the wz-capi-pico cdylib and
+# re-exports it as `wz::capi_pico` (src/lib.rs). Promoted from the `= []`
+# reserved placeholder to the real dep gate.
+api-compat-pico = ["dep:wz-capi-pico"]
 
 # ----- §5.1 transport additions (4 atomic: 3 active, 1 reserved) -----
 # R311y8/y9/y10 built the LAYER-1 trio active, each forwarding the

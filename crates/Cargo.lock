@@ -2368,6 +2368,7 @@ version = "0.1.0"
 dependencies = [
  "lwip-sys",
  "sce-rust-runtime",
+ "wz-capi-pico",
  "wz-link-lwip",
  "wz-rest",
  "wz-runtime-coop",
@@ -2406,6 +2407,14 @@ dependencies = [
  "wz-codecs",
  "wz-runtime-tokio",
  "wz-session-core",
+]
+
+[[package]]
+name = "wz-capi-pico"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "wz-runtime-tokio",
 ]
 
 [[package]]

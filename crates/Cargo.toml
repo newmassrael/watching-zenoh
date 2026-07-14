@@ -31,6 +31,10 @@
 resolver = "2"
 members = [
     "wz",
+    # §5.27 api-compat-pico — zenoh-pico-compatible C ABI (cdylib+rlib)
+    # wrapping the wz AP tokio Session. Reverse of the *-sys crates
+    # (which BIND to C); this crate EXPORTS a C ABI. AP/std-only.
+    "wz-capi-pico",
     "wz-codecs",
     "wz-codecs-test-support",
     "wz-codegen-build",

@@ -90,6 +90,13 @@ pub use wz_runtime_tokio as runtime_tokio;
 #[cfg(feature = "rest-http-bridge")]
 pub use wz_rest as rest;
 
+// §5.27 api-compat-pico — the zenoh-pico-compatible C ABI, re-exported as
+// `wz::capi_pico`. The cfg gate here is the atom's composition toggle (the
+// audit-catalog-status.sh A3 active-site); the whole wz-capi-pico crate is
+// elided when the feature is off.
+#[cfg(feature = "api-compat-pico")]
+pub use wz_capi_pico as capi_pico;
+
 // R311ax — runtime-coop namespace lands. Symmetric shape with the
 // AP-side `runtime_tokio` re-export so a generic consumer reading
 // `wz::runtime_tokio::TokioRuntime` and `wz::runtime_coop::CoopRuntime`

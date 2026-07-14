@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-capi-pico — §5.27 api-compat-pico, Round 1.
+#
+# A zenoh-pico-compatible C ABI (`z_*` / `zp_*` `#[no_mangle] extern "C"`
+# symbols) wrapping the wz AP `wz::runtime_tokio` `Session`. This is the
+# REVERSE of the `*-sys` crates (zenoh-pico-sys / freertos-sys bind TO a C
+# library); here wz EXPORTS a C ABI so a zenoh-pico C program can link the
+# wz cdylib as a binary drop-in.
+#
+# Round 1 scope: a complete core session + pub/sub slice (config, session
+# open/close, keyexpr-view, bytes/slice/string, publisher, session-put,
+# subscriber + closure). Follow-up rounds add get/queryable, liveliness,
+# scouting, attachments, and the full binary size-match audit for the
+# publisher/subscriber owned structs (their exact layout is
+# Z_FEATURE-flag dependent; R1 ships this crate's own header, so a program
+# compiled against THIS header is self-consistent).
+#
+# crate-type = ["cdylib", "rlib"]:
+#   - cdylib: the C ABI artifact a pico program links.
+#   - rlib:   required so the `wz` facade can `pub use wz_capi_pico as
+#             capi_pico` (a pure cdylib is not a linkable Rust dependency),
+#             and so the Round-1 gate `#[test]` (tests/pubsub_roundtrip.rs)
+#             can drive the exported symbols in-process.
+#
+# AP/std-only: no no_std obligation (the pico C ABI targets the AP profile;
+# the embedded MCU FFI surface is a separate later atom).
+
+[package]
+name = "wz-capi-pico"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "zenoh-pico-compatible C ABI (cdylib) wrapping the wz AP tokio Session — a binary drop-in for zenoh-pico C programs (§5.27 api-compat-pico R1)."
+
+[lib]
+name = "wz_capi_pico"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# Depend on wz-runtime-tokio DIRECTLY, not the `wz` facade: the facade
+# re-exports this crate (`wz::capi_pico`), so a facade dependency here would
+# form a package cycle Cargo rejects. wz-runtime-tokio's default feature
+# bundle already carries the full working unicast session — the handshake
+# codecs (init-body / open-body / frame / keep-alive / close), the session
+# open/accept/reconnect machinery, keyexpr matching (wildcard-double /
+# includes) that routes `demo/a` to a `demo/**` subscriber, declare-subscriber
+# and pubsub-put. An incomplete feature set fails the handshake with a
+# pre-Established Terminal, so Round 1 rides the proven default bundle;
+# trimming to the exact pub/sub subset is a follow-up refinement.
+wz-runtime-tokio = { path = "../wz-runtime-tokio" }
+
+[dependencies.tokio]
+version = "1"
+default-features = false
+features = ["rt-multi-thread", "sync", "macros"]
