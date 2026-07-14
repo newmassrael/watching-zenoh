@@ -765,6 +765,40 @@ impl<'a> QueryResponder<'a> {
         });
     }
 
+    /// R311y294 — the Del-arm mirror of [`Self::send_reply_keyed`]: emit a
+    /// Del-form reply stamped with an explicit, concrete reply keyexpr instead
+    /// of the query keyexpr the responder is bound to.
+    ///
+    /// This closes an ASYMMETRY, not a missing concept. The Put arm has carried
+    /// a keyed form since per-key replies landed, for the reason a wildcard
+    /// query needs it: a queryable asked under `a/**` must answer with each
+    /// CONCRETE key, not the pattern. A Del reply retracting one stored key has
+    /// exactly the same need — a storage clearing `a/b` in answer to a get on
+    /// `a/**` has no way to say so through [`Self::send_reply_del`], which can
+    /// only ever emit the bound (pattern) key.
+    ///
+    /// No codec work is involved: the `into_response` Del arm already encodes
+    /// under whatever `keyexpr_literal` the record carries, so this is that same
+    /// record with the caller's key. As with the Put arm, the caller must pass a
+    /// keyexpr the querier's query covers (the `reply ⊆ query` zenoh contract);
+    /// the seam does not re-check it.
+    ///
+    /// First consumer: `wz-capi-pico`'s `z_query_reply_del`, whose pico
+    /// counterpart takes an arbitrary keyexpr
+    /// (`~/zenoh-pico/include/zenoh-pico/api/primitives.h:2846`).
+    pub fn send_reply_keyed_del(&mut self, keyexpr: &str) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: keyexpr.into(),
+            body: ReplyBody::Del,
+            encoding: None,
+            timestamp: None,
+            responder: self.responder.clone(),
+            attachment: None,
+            source_info: None,
+        });
+    }
+
     /// R311y247 — the Del-arm mirror of [`Self::send_reply_keyed_sourced`]:
     /// emit a Del-form reply carrying the sample's `source_info` (the inner
     /// push-body source_info ext id 0x01). A Del body shares the push-body
@@ -899,6 +933,9 @@ impl ReplyOut for QueryResponder<'_> {
     }
     fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
         self.send_reply_keyed(keyexpr, payload);
+    }
+    fn reply_keyed_del(&mut self, keyexpr: &str) {
+        self.send_reply_keyed_del(keyexpr);
     }
     fn reply_keyed_stamped(
         &mut self,

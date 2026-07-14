@@ -27,3 +27,10 @@ pub const Z_ERR_NULL: ZResult = -127;
 /// taxonomy onto this single "invalid argument" code; exact per-call code
 /// parity is a follow-up refinement.
 pub const Z_ERR_INVALID: ZResult = -1;
+
+/// A reply keyexpr is not covered by the query it answers. Matches pico
+/// `_Z_ERR_KEYEXPR_NOT_MATCH` (`utils/result.h:63`) EXACTLY, rather than
+/// collapsing onto [`Z_ERR_INVALID`]: this is the one code a queryable is
+/// expected to branch on (`z_query_reply` is the only place pico raises it,
+/// `src/net/primitives.c:439`), so a C program that checks for it must see it.
+pub const Z_ERR_KEYEXPR_NOT_MATCH: ZResult = -108;

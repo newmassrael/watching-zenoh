@@ -67,6 +67,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
+use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session::{
@@ -402,16 +403,35 @@ impl SharedSession {
 
 /// The wz queryable options one C `z_queryable_options_t` maps to.
 ///
-/// `allowed_origin` stays at its `Locality::Any` default rather than being
-/// pinned Remote (the fan-out publish's choice, see `pubsub::put_options`).
-/// The two are not symmetric: a publish FANS to every face, so a local-capable
-/// one would fire the single C callback once per face and on the C thread. A
-/// queryable does not fan — it only ANSWERS a query that arrived at a face, and
-/// a loopback query can only originate from a `z_get` on that same face's
-/// session. Leaving `Any` therefore costs nothing today and keeps the in-process
-/// path available to `z_get`'s local arm rather than silently dropping it.
+/// `allowed_origin` is pinned `Locality::Remote`, mirroring the fan-out
+/// publish's choice (`pubsub::put_options`), for two independent reasons:
+///
+/// **Fidelity.** pico's `Z_FEATURE_LOCAL_QUERYABLE` defaults to **0**
+/// (`~/zenoh-pico/CMakeLists.txt:353`) — that is why its default
+/// `z_queryable_options_t` has no `allowed_origin` field at all (see
+/// [`crate::query::z_queryable_options_t`]). A default pico build has NO local
+/// queryable, so Remote-only IS the faithful default rather than a restriction.
+///
+/// **Soundness — and this one is load-bearing.** `Locality::Any::allows_local()`
+/// is TRUE (`wz-session-core/src/locality.rs:70-72`). The `unsafe impl Sync for
+/// CQueryClosure` rests on the C application thread never invoking the queryable
+/// handler; `Session::query` gates its in-process fan and its drain on
+/// `allows_local` (`session/mod.rs:1976, 2023`), which protects a Remote-only
+/// get but NOT a default-locality one. So an `Any` queryable would make that
+/// `unsafe impl` FALSE the moment `z_get` lands: a C-thread get would run
+/// `local_query` + `drain_deferred_fires` on the C thread while a drive thread
+/// ran `call` on another face — two `call(context)` at once on one C context,
+/// which is precisely the unsound-`Sync` bug R311y288 already fixed once on the
+/// publish plane. Pinning Remote makes the obligation MECHANICAL instead of a
+/// promise in prose that a future round can silently break.
+///
+/// Consequence, named: an in-process `z_get` will not reach this session's own
+/// queryable — matching pico's default build, and the same
+/// `Z_FEATURE_LOCAL_*` divergence already named for local subscriber delivery.
 fn queryable_options(complete: bool) -> QueryableOptions {
-    QueryableOptions::new().with_complete(complete)
+    QueryableOptions::new()
+        .with_complete(complete)
+        .with_allowed_origin(Locality::Remote)
 }
 
 /// The [`FaceForwarder`] the accept loop threads its held faces through. The

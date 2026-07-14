@@ -139,6 +139,28 @@ impl Drop for SessionState {
     }
 }
 
+/// Read the [`SessionState`] behind a loaned session, or `None` if the pointer
+/// or its handle slot is null.
+///
+/// Lives here, beside BOTH types it touches ([`SessionState`] and
+/// [`z_loaned_session_t`]), because every module that reaches a session needs
+/// it: `pubsub` and `query` each carried a byte-identical private copy until
+/// R311y294 folded them into this one.
+///
+/// # Safety
+/// `zs` must be null, or a valid `z_loaned_session_t` whose `_val` slot is a
+/// live `Box::into_raw::<SessionState>` pointer (what [`z_open`] installs).
+pub(crate) unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a SessionState> {
+    if zs.is_null() {
+        return None;
+    }
+    let val = (*zs)._val;
+    if val.is_null() {
+        return None;
+    }
+    Some(&*(val as *const SessionState))
+}
+
 /// pico's `Z_ZID_LENGTH` (`~/zenoh-pico/include/zenoh-pico/config.h.in:184`;
 /// `ZENOH_ID_SIZE` = 16, `protocol/core.h:59-62`).
 const ZID_LENGTH: usize = 16;

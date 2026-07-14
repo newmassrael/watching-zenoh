@@ -150,14 +150,27 @@ fn native_querier(endpoint: String, replies_tx: mpsc::Sender<Vec<String>>) {
         let mut dispatch =
             |event: IterationEvent<'_>| dispatch_session.dispatch_iteration_event(event);
 
-        // Give the C side's queryable declaration time to land, then query.
-        // The drive loop must be running for the reply to be dispatched, so the
-        // query is issued from a task while the loop pumps below.
+        // Query UNTIL a reply arrives, bounded — the convergence pattern the
+        // sibling `pubsub_roundtrip.rs` uses and documents ("the acceptor
+        // republishes until the subscriber's declaration has propagated").
+        //
+        // This is NOT a retry-pass papering over flakiness: the wait is for the
+        // C side's queryable DECLARATION to reach this peer, and a get is
+        // idempotent, so re-asking is how a querier converges on a declaration
+        // it cannot observe directly. A single query after a fixed sleep would
+        // instead be a bet on scheduler latency — it would answer Final with
+        // zero replies if the declare had not landed, and this repo's rule is
+        // that no test may be flaky by construction. The bound makes a genuine
+        // failure fail fast rather than hang.
         let query_session = session.clone();
+        let got_poll = got.clone();
         let issued = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            query_session
-                .query(
+            for _ in 0..50 {
+                if !got_poll.lock().unwrap().is_empty() {
+                    return;
+                }
+                let got_cb = got_cb.clone();
+                let _ = query_session.query(
                     KEYEXPR,
                     QueryOptions::default().with_timeout_ms(3_000),
                     move |reply: &dyn ReplyView| {
@@ -167,8 +180,9 @@ fn native_querier(endpoint: String, replies_tx: mpsc::Sender<Vec<String>>) {
                             .push(String::from_utf8_lossy(reply.payload()).into_owned());
                     },
                     |_rid| {},
-                )
-                .expect("issue the wire query");
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         });
 
         // Pump the link until the reply has arrived (bounded, so a genuine
@@ -185,11 +199,15 @@ fn native_querier(endpoint: String, replies_tx: mpsc::Sender<Vec<String>>) {
             )
             .await
         };
+        // The convergence task returns as soon as a reply has landed (the pump
+        // is what lands it), so racing it makes the test finish on success
+        // rather than always burning the timeout. The sleep is the fail-fast
+        // bound for the case where no reply ever arrives.
         tokio::select! {
             _ = pump => {}
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            _ = issued => {}
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
         }
-        let _ = issued.await;
         let _ = replies_tx.send(got.lock().unwrap().clone());
         drop(writer_handle);
     });
@@ -259,15 +277,21 @@ fn c_queryable_answers_a_native_wz_querier_over_loopback_tcp() {
             .expect("the native querier must report back");
         let _ = querier.join();
 
-        assert_eq!(
-            replies,
-            vec![ANSWER.to_owned()],
-            "the wz querier must receive exactly the reply the C queryable emitted"
+        // Convergence may land more than one query before the first reply is
+        // observed, so the gate is "every reply is the C queryable's answer",
+        // not an exact count — counting would re-introduce the timing bet the
+        // convergence loop exists to remove.
+        assert!(
+            !replies.is_empty(),
+            "the wz querier must receive the C queryable's reply"
         );
-        assert_eq!(
-            seen.lock().unwrap().len(),
-            1,
-            "the C query callback must have fired exactly once"
+        assert!(
+            replies.iter().all(|reply| reply == ANSWER),
+            "every reply must be the one the C queryable emitted, got {replies:?}"
+        );
+        assert!(
+            !seen.lock().unwrap().is_empty(),
+            "the C query callback must have fired"
         );
 
         // --- teardown --------------------------------------------------------

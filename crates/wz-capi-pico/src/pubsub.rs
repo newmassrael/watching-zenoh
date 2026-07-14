@@ -41,10 +41,10 @@ use crate::abi::{
 };
 use crate::bytes::ByteBuf;
 use crate::faces::{SharedSession, SubId};
-use crate::ffi::{guarded, SendPtr};
+use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
-use crate::session::{z_loaned_session_t, SessionState};
+use crate::session::{session_state, z_loaned_session_t};
 
 // --- opaque loaned sample --------------------------------------------------
 
@@ -109,33 +109,20 @@ impl z_owned_closure_sample_t {
     }
 }
 
-/// The Rust-side wrapper a subscription's callbacks share. Its `Drop` invokes
-/// the C `drop(context)` exactly once, satisfying the pico teardown contract.
+/// The Rust-side wrapper a subscription's callbacks share — the sample plane's
+/// instantiation of the shared [`crate::ffi::CClosure`] mechanism (which owns
+/// the `{context, call, drop}` shape and the drop-once `Drop`).
 ///
 /// One C subscription fans out to one wz callback PER FACE, so this is held
 /// behind an `Arc`: the C `drop(context)` runs when the last face's callback
 /// and the registry's SSOT entry have both released it.
-pub(crate) struct CClosure {
-    context: SendPtr,
-    call: z_closure_sample_callback_t,
-    drop: z_closure_drop_callback_t,
-}
-
-impl Drop for CClosure {
-    fn drop(&mut self) {
-        if let Some(dropfn) = self.drop.take() {
-            // SAFETY: pico contract — drop runs once, never concurrently with
-            // call. A panic across the C boundary is UB, so guard it.
-            let ctx = self.context.0;
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                dropfn(ctx);
-            }));
-        }
-    }
-}
+pub(crate) type CClosure = FfiClosure<z_closure_sample_callback_t>;
 
 // SAFETY: sharing one subscription's `CClosure` across a per-face callback
 // requires `Sync` (for `Arc<CClosure>` — and so each callback — to be `Send`).
+// Written per-plane rather than blanket-implemented on the generic, because the
+// argument below is specific to THIS plane (see `crate::ffi::CClosure`).
+//
 // Sharing `&CClosure` is sound because `call` is only ever invoked from the
 // session's single drive task: every face of a session is driven on ONE task
 // (the accept loop multiplexes its faces there via one `select!`; a dialed
@@ -353,18 +340,6 @@ pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<V
     Some(*buf)
 }
 
-/// Read the `SessionState` behind a loaned session.
-unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a SessionState> {
-    if zs.is_null() {
-        return None;
-    }
-    let val = (*zs)._val;
-    if val.is_null() {
-        return None;
-    }
-    Some(&*(val as *const SessionState))
-}
-
 fn put_options() -> PublishOptions {
     // `Locality::Remote`, not the `Any` default. A pico session's own `z_put`
     // is delivered to its OWN local subscribers at most ONCE
@@ -537,7 +512,7 @@ pub unsafe extern "C" fn z_internal_closure_sample_null(closure: *mut z_owned_cl
 pub unsafe extern "C" fn z_internal_closure_sample_check(
     closure: *const z_owned_closure_sample_t,
 ) -> bool {
-    !closure.is_null() && (*closure).call.is_some()
+    crate::ffi::guard_val(false, || !closure.is_null() && (*closure).call.is_some())
 }
 
 /// Borrow an owned closure (pico `z_closure_sample_loan`).
@@ -610,11 +585,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // early error return below drops it and frees the context; on success
         // it moves into the subscriber callback.
         let owned = &mut (*callback)._this;
-        let cclosure = CClosure {
-            context: SendPtr(owned.context),
-            call: owned.call,
-            drop: owned.drop,
-        };
+        let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
 
         let state = match session_state(zs) {

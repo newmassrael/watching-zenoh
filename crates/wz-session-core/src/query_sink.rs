@@ -271,6 +271,21 @@ pub trait ReplyOut {
     /// Emit a Del-form reply (the queryable signals deletion at the
     /// keyexpr).
     fn reply_del(&mut self);
+    /// R311y294 — emit a Del-form reply under an explicit, concrete reply
+    /// keyexpr instead of the responder's bound one. The Del-arm mirror of
+    /// [`Self::reply_keyed`], and needed for the same reason: a queryable
+    /// answering a WILDCARD query must retract each CONCRETE key, not the
+    /// pattern it was asked under.
+    ///
+    /// Default impl falls back to [`Self::reply_del`] (the bound keyexpr), so
+    /// impls that predate this seam stay valid and a single-key (exact) Del is
+    /// unaffected — the override matters only when the reply keyexpr differs
+    /// from the query keyexpr. Ungated, mirroring [`Self::reply_keyed`]: it adds
+    /// no wire arm the Del path did not already have.
+    fn reply_keyed_del(&mut self, keyexpr: &str) {
+        let _ = keyexpr;
+        self.reply_del();
+    }
     /// Emit an Err-form reply carrying an optional encoding id + schema.
     fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]);
     /// Attach a responder identity (`zid` + entity id) to every

@@ -138,6 +138,17 @@ mod test_fixtures;
 // impossible without reverting R311o's signature-stability ungating.
 pub use wz_session_core::keyexpr_canon;
 
+// R311y294 — the keyexpr MATCHING SSOT, re-exported on the `keyexpr_canon`
+// precedent above (unconditional: the module is alloc-gated in wz-session-core
+// and this crate is always-alloc). An AP consumer that must answer "does key A
+// intersect pattern B?" has to reach the ONE implementation rather than
+// re-deriving it — string equality against a pattern is the wildcard-blackhole
+// anti-pattern, and a second matcher is a second place for it to drift. First
+// external consumer: wz-capi-pico's `z_query_reply`, which enforces zenoh's
+// `reply ⊆ query` contract the way zenoh-pico does
+// (`_z_declared_keyexpr_intersects`, `~/zenoh-pico/src/net/primitives.c:438`).
+pub use wz_session_core::keyexpr_match;
+
 /// R223 — zenoh-style locality filter for subscribers and queryables.
 /// Mirrors zenoh-pico's `z_locality_t` enum and the
 /// `_z_locality_allows_local` / `_z_locality_allows_remote` helpers

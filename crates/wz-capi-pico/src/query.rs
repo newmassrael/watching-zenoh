@@ -34,10 +34,20 @@
 //! returns. A retained-responder + deferred-final concept must land in
 //! wz-session-core before an owned query can outlive its callback.
 //!
-//! `z_query_encoding` is withheld on the same principle: it returns a
-//! `z_loaned_encoding_t`, and the encoding type family is a separate follow-up
-//! round. A missing symbol is a link error; a stub returning null would be a
-//! silent lie.
+//! Two accessors are withheld on the same principle, each because it returns a
+//! type family this round does not build — a missing symbol is a link error,
+//! while a stub returning null would be a silent lie:
+//! - `z_query_encoding` → `z_loaned_encoding_t` (the encoding family).
+//! - `z_query_source_info` → `z_source_info_t` (the source-info family).
+//!
+//! That is the COMPLETE withheld set for a DEFAULT pico build, which is the
+//! configuration this crate's ABI targets. `z_queryable_id` looks like a third
+//! but is not: it is `#if defined(Z_FEATURE_UNSTABLE_API)`
+//! (`primitives.h:2884-2886`) and that flag defaults to 0
+//! (`~/zenoh-pico/CMakeLists.txt:316`), so a default build has no such symbol to
+//! match. Everything else in pico's default queryable surface is exported —
+//! including `z_query_accepts_replies`, which is the `_anyke` accessor
+//! [`z_query_reply`]'s coverage gate turns on.
 //!
 //! ## Reply accumulation
 //!
@@ -57,6 +67,7 @@ use std::cell::UnsafeCell;
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
+use wz_runtime_tokio::keyexpr_match;
 use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
 
 use crate::abi::{
@@ -64,10 +75,10 @@ use crate::abi::{
     z_view_string_t,
 };
 use crate::faces::{QblId, SharedSession};
-use crate::ffi::{guarded, SendPtr};
+use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
-use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
-use crate::session::{z_loaned_session_t, SessionState};
+use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_OK};
+use crate::session::{session_state, z_loaned_session_t};
 
 // --- pico enum-typed option fields -----------------------------------------
 //
@@ -78,6 +89,14 @@ use crate::session::{z_loaned_session_t, SessionState};
 // for layout only.
 type z_congestion_control_t = c_int;
 type z_priority_t = c_int;
+
+/// pico `Z_CONGESTION_CONTROL_BLOCK` (`api/constants.h:216`) — the value pico's
+/// `z_query_reply_options_default` writes (`src/api/api.c:2118,2181`). NOT 0:
+/// that is `Z_CONGESTION_CONTROL_DROP`, a different documented default.
+const Z_CONGESTION_CONTROL_BLOCK: z_congestion_control_t = 1;
+
+/// pico `Z_PRIORITY_DEFAULT` = `Z_PRIORITY_DATA` = 5 (`api/constants.h:247-250`).
+const Z_PRIORITY_DEFAULT: z_priority_t = 5;
 
 // --- opaque loaned query ---------------------------------------------------
 
@@ -90,14 +109,83 @@ pub struct z_loaned_query_t {
     _opaque: [u8; 0],
 }
 
+/// pico's `_anyke` selector-parameter key (`Z_SELECTOR_QUERY_MATCH`,
+/// `~/zenoh-pico/include/zenoh-pico/api/constants.h:18`).
+const ANYKE_PARAM: &[u8] = b"_anyke";
+
+/// pico's selector-parameter list separator (`_Z_QUERY_PARAMS_LIST_SEPARATOR`,
+/// `~/zenoh-pico/include/zenoh-pico/utils/query_params.h`).
+const PARAM_SEPARATOR: u8 = b';';
+
+/// Whether a query's selector parameters carry the `_anyke` key — pico's
+/// [`_z_parameters_has_anyke`](https://github.com/eclipse-zenoh/zenoh-pico)
+/// (`src/utils/query_params.c:46-70`), ported chunk-boundary rules and all.
+///
+/// This is how the RESPONDER learns `_anyke`: it is not a wire field but a
+/// SELECTOR PARAMETER. The querier's `accept_replies = Z_REPLY_KEYEXPR_ANY`
+/// makes the sender append `_anyke` to the parameter list
+/// (`src/protocol/codec/message.c:399-423`), and on reception `_implicit_anyke`
+/// is unconditionally false — pico's own comment says the flag "is signaled by
+/// the presence of the _anyke key in the parameters list, which is parsed
+/// later" (`codec/message.c:488-490`). So the responder-side derivation
+/// reduces to exactly this parse:
+/// `dst->_anyke = implicit_anyke || _z_parameters_has_anyke(...)`
+/// (`include/zenoh-pico/net/query.h:104`) with `implicit_anyke == false`.
+///
+/// The boundary checks are load-bearing and are why this is a real parse rather
+/// than a substring search: `_anyke` must start the list or follow a `;`, and
+/// must end the list or precede a `;`. Without them a parameter such as
+/// `no_anyke` or `_anykey=1` would be read as the flag.
+fn parameters_has_anyke(parameters: &[u8]) -> bool {
+    let mut start = 0usize;
+    while start <= parameters.len() {
+        let Some(offset) = parameters[start..]
+            .windows(ANYKE_PARAM.len())
+            .position(|window| window == ANYKE_PARAM)
+        else {
+            return false;
+        };
+        let pos = start + offset;
+        let end = pos + ANYKE_PARAM.len();
+        let left_ok = pos == 0 || parameters[pos - 1] == PARAM_SEPARATOR;
+        let right_ok = end == parameters.len() || parameters[end] == PARAM_SEPARATOR;
+        if left_ok && right_ok {
+            return true;
+        }
+        start = end + 1;
+    }
+    false
+}
+
+/// Whether `reply` is covered by the query — zenoh's `reply ⊆ query` contract as
+/// pico enforces it: `!query->_anyke && !_z_declared_keyexpr_intersects(...)`
+/// → `_Z_ERR_KEYEXPR_NOT_MATCH` (`~/zenoh-pico/src/net/primitives.c:437-440`).
+///
+/// INTERSECTION, never string equality. The query keyexpr a queryable is asked
+/// under is routinely a PATTERN (a queryable declared on `a/**` sees the
+/// querier's `a/**`), while its replies carry CONCRETE keys — so equality would
+/// reject the ordinary wildcard case, not an edge case. Routed through the one
+/// matching SSOT ([`wz_runtime_tokio::keyexpr_match`]) rather than re-derived.
+fn reply_keyexpr_is_covered(query_keyexpr: &str, reply: &str, anyke: bool) -> bool {
+    if anyke {
+        return true;
+    }
+    let query_chunks: Vec<&str> = query_keyexpr.split('/').collect();
+    let reply_chunks: Vec<&str> = reply.split('/').collect();
+    keyexpr_match::keyexpr_intersect_patterns(&query_chunks, &reply_chunks)
+}
+
 /// One reply the C callback asked for, held until the callback returns and the
 /// batch is flushed into the wz [`ReplyOut`].
 enum PendingReply {
     /// `z_query_reply` — a Put-form reply under an explicit keyexpr.
-    Put { keyexpr: String, payload: Vec<u8> },
-    /// `z_query_reply_del` — a Del-form reply under the query's own keyexpr
-    /// (see [`z_query_reply_del`] for why a differing keyexpr is rejected).
-    Del,
+    Put {
+        keyexpr: String,
+        payload: Vec<u8>,
+        attachment: Option<Vec<u8>>,
+    },
+    /// `z_query_reply_del` — a Del-form reply under an explicit keyexpr.
+    Del { keyexpr: String },
     /// `z_query_reply_err` — an Err-form reply.
     Err { payload: Vec<u8> },
 }
@@ -110,6 +198,11 @@ enum PendingReply {
 struct QueryMarshal {
     keyexpr: String,
     parameters: Vec<u8>,
+    /// pico's `_anyke`: whether this query accepts replies under ANY key rather
+    /// than only keys it covers. Derived from `parameters` at marshal time (see
+    /// [`parameters_has_anyke`]) — the same derivation pico does, and the gate
+    /// `z_query_reply` consults.
+    anyke: bool,
     payload: Vec<u8>,
     has_payload: bool,
     attachment: Vec<u8>,
@@ -146,9 +239,11 @@ impl QueryMarshal {
     fn new(view: &dyn QueryView) -> Self {
         let payload = view.payload().map(<[u8]>::to_vec);
         let attachment = view.attachment().map(<[u8]>::to_vec);
+        let parameters = view.parameters().map(<[u8]>::to_vec).unwrap_or_default();
         Self {
             keyexpr: view.keyexpr().to_owned(),
-            parameters: view.parameters().map(<[u8]>::to_vec).unwrap_or_default(),
+            anyke: parameters_has_anyke(&parameters),
+            parameters,
             has_payload: payload.is_some(),
             payload: payload.unwrap_or_default(),
             has_attachment: attachment.is_some(),
@@ -215,8 +310,17 @@ impl QueryMarshal {
     fn flush(&mut self, out: &mut dyn ReplyOut) {
         for reply in self.replies.get_mut().drain(..) {
             match reply {
-                PendingReply::Put { keyexpr, payload } => out.reply_keyed(&keyexpr, &payload),
-                PendingReply::Del => out.reply_del(),
+                PendingReply::Put {
+                    keyexpr,
+                    payload,
+                    attachment,
+                } => match attachment {
+                    // The attachment rides the reply only through the keyed
+                    // ATTACHED seam; `reply_keyed` has no slot for it.
+                    Some(att) => out.reply_keyed_attached(&keyexpr, &payload, None, &att),
+                    None => out.reply_keyed(&keyexpr, &payload),
+                },
+                PendingReply::Del { keyexpr } => out.reply_keyed_del(&keyexpr),
                 PendingReply::Err { payload } => out.reply_err(None, None, &payload),
             }
         }
@@ -277,59 +381,35 @@ impl z_owned_closure_query_t {
 }
 
 /// The Rust-side wrapper one C queryable's per-face callbacks share — the
-/// responder-side mirror of [`crate::pubsub::CClosure`]. Its `Drop` invokes the
-/// C `drop(context)` exactly once, when the last face's callback and the
-/// registry's SSOT entry have both released it.
-pub(crate) struct CQueryClosure {
-    context: SendPtr,
-    call: z_closure_query_callback_t,
-    drop: crate::pubsub::z_closure_drop_callback_t,
-}
+/// queryable plane's instantiation of the shared [`crate::ffi::CClosure`]
+/// mechanism. Its `Drop` invokes the C `drop(context)` exactly once, when the
+/// last face's callback and the registry's SSOT entry have both released it.
+pub(crate) type CQueryClosure = FfiClosure<z_closure_query_callback_t>;
 
-impl CQueryClosure {
-    /// Adopt a moved C closure's fields (the caller nulls the source).
-    pub(crate) fn new(
-        context: *mut c_void,
-        call: z_closure_query_callback_t,
-        drop: crate::pubsub::z_closure_drop_callback_t,
-    ) -> Self {
-        Self {
-            context: SendPtr(context),
-            call,
-            drop,
-        }
-    }
-}
-
-impl Drop for CQueryClosure {
-    fn drop(&mut self) {
-        if let Some(dropfn) = self.drop.take() {
-            // SAFETY: pico contract — drop runs once, never concurrently with
-            // call. A panic across the C boundary is UB, so guard it.
-            let ctx = self.context.0;
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                dropfn(ctx);
-            }));
-        }
-    }
-}
-
-// SAFETY: identical rationale to `pubsub::CClosure`'s, on the responder plane.
+// SAFETY: the responder plane's own argument, written here rather than granted
+// by a blanket impl on the generic (see `crate::ffi::CClosure`).
+//
 // Sharing one queryable's `CQueryClosure` across a per-face callback needs
 // `Sync` (so `Arc<CQueryClosure>`, and each callback, is `Send`). Sharing
 // `&CQueryClosure` is sound because `call` is only ever invoked from the
 // session's single drive task: every face of a session is driven on ONE task,
 // and the queryable handler fires from that task's inbound dispatch drain.
 //
-// It is load-bearing that the C application thread never invokes `call`. The
-// queryable plane's exposure to that is narrower than the subscriber plane's: a
-// queryable does not fan on publish, it only answers a query that ARRIVED at a
-// face. The one path that could stage a local queryable job on a C thread is
-// `Session::query`'s loopback arm — whose drain is gated on `allows_local`
-// (`wz-runtime-tokio/src/session/mod.rs:2023`, R311y290), so a Remote-only
-// `z_get` stages nothing and drains nothing on the C thread. `drop` runs only
-// when the last `Arc` is released, which cannot overlap a live `call` (a running
-// callback holds a reference).
+// It is load-bearing that the C application thread never invokes `call`, and
+// what makes that MECHANICAL rather than a promise is that this crate declares
+// every queryable `Locality::Remote` (`faces::queryable_options`). A Remote
+// queryable is unreachable from `Session::query`'s in-process fan
+// (`session/mod.rs:1976`, gated on the queryable registry's locality), so no
+// `z_get` on the C thread — whatever locality IT chooses — can run this handler
+// there. Relying instead on the get side passing `Locality::Remote` would be a
+// promise the next round could silently break; `Any::allows_local()` is true
+// (`wz-session-core/src/locality.rs:70-72`), so a default-locality get would
+// otherwise drain a local queryable job on the C thread while a drive thread ran
+// `call` on another face — two `call(context)`s at once on one C context, the
+// unsound-`Sync` bug R311y288 already fixed once on the publish plane.
+//
+// `drop` runs only when the last `Arc` is released, which cannot overlap a live
+// `call` (a running callback holds a reference).
 unsafe impl Sync for CQueryClosure {}
 
 /// Build the wz-side queryable handler for ONE face from a shared C closure.
@@ -521,8 +601,8 @@ pub unsafe extern "C" fn z_query_reply_options_default(options: *mut z_query_rep
         return;
     }
     (*options).encoding = std::ptr::null_mut();
-    (*options).congestion_control = 0;
-    (*options).priority = 5;
+    (*options).congestion_control = Z_CONGESTION_CONTROL_BLOCK;
+    (*options).priority = Z_PRIORITY_DEFAULT;
     (*options).timestamp = std::ptr::null_mut();
     (*options).is_express = false;
     (*options).attachment = std::ptr::null_mut();
@@ -547,8 +627,8 @@ pub unsafe extern "C" fn z_query_reply_del_options_default(
     if options.is_null() {
         return;
     }
-    (*options).congestion_control = 0;
-    (*options).priority = 5;
+    (*options).congestion_control = Z_CONGESTION_CONTROL_BLOCK;
+    (*options).priority = Z_PRIORITY_DEFAULT;
     (*options).timestamp = std::ptr::null_mut();
     (*options).is_express = false;
     (*options).attachment = std::ptr::null_mut();
@@ -689,18 +769,6 @@ unsafe fn declare_queryable_inner(
         .shared
         .declare_queryable(ke.clone(), complete, Arc::new(cclosure));
     Ok((state.shared.clone(), id, ke))
-}
-
-/// Read the `SessionState` behind a loaned session.
-unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a SessionState> {
-    if zs.is_null() {
-        return None;
-    }
-    let val = (*zs)._val;
-    if val.is_null() {
-        return None;
-    }
-    Some(&*(val as *const SessionState))
 }
 
 /// Declare a queryable (pico `z_declare_queryable`). Consumes the moved
@@ -845,6 +913,35 @@ pub unsafe extern "C" fn z_query_payload(
     }
 }
 
+/// pico `z_reply_keyexpr_t` (`api/constants.h:288-290`): the reply-keyexpr
+/// policy a query accepts.
+pub type z_reply_keyexpr_t = c_int;
+/// pico `Z_REPLY_KEYEXPR_ANY` — accept replies on any key (`constants.h:289`).
+pub const Z_REPLY_KEYEXPR_ANY: z_reply_keyexpr_t = 0;
+/// pico `Z_REPLY_KEYEXPR_MATCHING_QUERY` — accept only replies whose key
+/// intersects the query's (`constants.h:290`).
+pub const Z_REPLY_KEYEXPR_MATCHING_QUERY: z_reply_keyexpr_t = 1;
+
+/// Which replies this query accepts (pico `z_query_accepts_replies`,
+/// `src/api/api.c:469`): `_anyke ? ANY : MATCHING_QUERY`.
+///
+/// This is the accessor for the very flag [`z_query_reply`] gates on, so a C
+/// queryable can ask the same question the library asks before it rejects a
+/// reply with [`Z_ERR_KEYEXPR_NOT_MATCH`]. A null / spent query reports
+/// `MATCHING_QUERY`, the conservative answer (pico would dereference and
+/// crash).
+#[no_mangle]
+pub unsafe extern "C" fn z_query_accepts_replies(
+    query: *const z_loaned_query_t,
+) -> z_reply_keyexpr_t {
+    crate::ffi::guard_val(Z_REPLY_KEYEXPR_MATCHING_QUERY, || {
+        match query_marshal(query) {
+            Some(marshal) if marshal.anyke => Z_REPLY_KEYEXPR_ANY,
+            _ => Z_REPLY_KEYEXPR_MATCHING_QUERY,
+        }
+    })
+}
+
 /// Borrow the query's attachment (pico `z_query_attachment`). Null when the
 /// query carries no attachment ext.
 #[no_mangle]
@@ -861,73 +958,110 @@ pub unsafe extern "C" fn z_query_attachment(
 
 // --- z_query_reply family --------------------------------------------------
 
-/// Reply to a query (pico `z_query_reply`). Consumes the moved payload.
+/// Reply to a query (pico `z_query_reply`). Consumes the moved payload AND the
+/// moved `options->attachment`.
 ///
-/// The reply is accumulated and emitted when the callback returns; see the
-/// module doc for why that is observably identical to emitting inline.
+/// Enforces zenoh's `reply ⊆ query` contract exactly as pico does — see
+/// [`reply_keyexpr_is_covered`]. The reply is accumulated and emitted when the
+/// callback returns; see the module doc for why that is observably identical to
+/// emitting inline.
+///
+/// Of `options`, `attachment` is honoured; `encoding` and `timestamp` are
+/// unreachable (opaque, with no exported constructor — see
+/// [`z_query_reply_options_t`]); `congestion_control` / `priority` are documented
+/// ignored by pico itself. `is_express` is a NAMED DIVERGENCE: wz's [`ReplyOut`]
+/// has no express arm on any reply form, so the flag cannot be honoured and is
+/// dropped. It is a batching hint with no effect on delivery or content.
 #[no_mangle]
 pub unsafe extern "C" fn z_query_reply(
     query: *const z_loaned_query_t,
     keyexpr: *const z_loaned_keyexpr_t,
     payload: *mut z_moved_bytes_t,
-    _options: *const z_query_reply_options_t,
+    options: *const z_query_reply_options_t,
 ) -> ZResult {
     guarded(|| {
-        // Consume the moved payload FIRST so it is freed on every path (pico's
-        // "z_move consumes on all paths" contract).
+        // Consume BOTH moved arguments FIRST so they are freed on every path
+        // (pico's "z_move consumes on all paths" contract). The attachment is a
+        // moved `z_bytes` like the payload, and `z_bytes_*` IS exported — so a C
+        // program can build one, and failing to take it here would leak it.
         let buf = match crate::pubsub::take_moved_bytes(payload) {
             Some(b) => b,
             None => return Z_ERR_NULL,
+        };
+        let attachment = if options.is_null() {
+            None
+        } else {
+            crate::pubsub::take_moved_bytes((*options).attachment)
         };
         let marshal = match query_marshal(query) {
             Some(m) => m,
             None => return Z_ERR_INVALID,
         };
-        // A reply must be covered by the query the querier asked under (the
-        // `reply ⊆ query` zenoh contract). pico lets the queryable pass any
-        // keyexpr; wz's `reply_keyed` seam likewise does not re-check it, so
-        // this forwards the caller's key verbatim.
+        // pico dereferences `keyexpr` unconditionally (`_z_send_reply` passes it
+        // straight into `_z_declared_keyexpr_intersects`), so a null there is a
+        // caller bug that SEGFAULTS pico. Report it instead of inventing a
+        // fallback: silently substituting the query's own key would hide the bug
+        // and claim a pico semantic that does not exist.
         let ke = match keyexpr_str(keyexpr) {
             Some(k) => k.to_owned(),
-            // A null keyexpr means "reply under the query's own key".
-            None => marshal.keyexpr.clone(),
+            None => return Z_ERR_NULL,
         };
+        if !reply_keyexpr_is_covered(&marshal.keyexpr, &ke, marshal.anyke) {
+            return Z_ERR_KEYEXPR_NOT_MATCH;
+        }
         marshal.push_reply(PendingReply::Put {
             keyexpr: ke,
             payload: buf,
+            attachment,
         });
         Z_OK
     })
 }
 
-/// Reply to a query with a Del (pico `z_query_reply_del`).
+/// Reply to a query with a Del (pico `z_query_reply_del`). Consumes the moved
+/// `options->attachment`.
 ///
-/// NAMED DIVERGENCE (loud, not silent): wz's reply seam has no keyed-Del —
-/// [`ReplyOut::reply_del`] takes no keyexpr and always emits under the
-/// responder's bound (query) key, while pico's `z_query_reply_del` accepts an
-/// arbitrary one. A `keyexpr` equal to the query's is therefore honoured; a
-/// DIFFERENT one is unrepresentable and returns [`Z_ERR_INVALID`] rather than
-/// silently replying under the wrong key. Closing this needs a `reply_keyed_del`
-/// on the wz-session-core seam (and its codec arm) — an upstream round, tracked
-/// in the ledger carry.
+/// Takes an arbitrary reply keyexpr, as pico's does, and enforces the same
+/// `reply ⊆ query` rule as [`z_query_reply`]. An earlier cut of this round
+/// accepted only a keyexpr STRING-EQUAL to the query's and rejected the rest as
+/// a "named divergence" — that was wrong twice over: string equality against a
+/// query key that is routinely a PATTERN rejects the ordinary wildcard case, and
+/// the seam it claimed to be blocked on ([`ReplyOut::reply_keyed_del`]) was a
+/// ten-line addition to the Put arm's existing keyed family, not a missing
+/// concept. It was a cost-deferral wearing a divergence's clothes; the seam is
+/// now built, so there is nothing to diverge about.
 #[no_mangle]
 pub unsafe extern "C" fn z_query_reply_del(
     query: *const z_loaned_query_t,
     keyexpr: *const z_loaned_keyexpr_t,
-    _options: *const z_query_reply_del_options_t,
+    options: *const z_query_reply_del_options_t,
 ) -> ZResult {
     guarded(|| {
+        // Consume the moved attachment on every path (see `z_query_reply`).
+        // A Del reply carries no attachment through the wz seam, so this is a
+        // take-and-drop: the C side's contract is still honoured (its `z_bytes`
+        // is freed and its source nulled) and nothing leaks. The dropped
+        // attachment is the same named gap as the Put arm's `is_express`.
+        let attachment = if options.is_null() {
+            None
+        } else {
+            crate::pubsub::take_moved_bytes((*options).attachment)
+        };
+        drop(attachment);
         let marshal = match query_marshal(query) {
             Some(m) => m,
             None => return Z_ERR_INVALID,
         };
-        // A null keyexpr means "del under the query's own key".
-        if let Some(ke) = keyexpr_str(keyexpr) {
-            if ke != marshal.keyexpr {
-                return Z_ERR_INVALID;
-            }
+        // Null is a caller bug that segfaults pico — reported, not substituted
+        // (see `z_query_reply`).
+        let ke = match keyexpr_str(keyexpr) {
+            Some(k) => k.to_owned(),
+            None => return Z_ERR_NULL,
+        };
+        if !reply_keyexpr_is_covered(&marshal.keyexpr, &ke, marshal.anyke) {
+            return Z_ERR_KEYEXPR_NOT_MATCH;
         }
-        marshal.push_reply(PendingReply::Del);
+        marshal.push_reply(PendingReply::Del { keyexpr: ke });
         Z_OK
     })
 }
@@ -1001,6 +1135,44 @@ mod tests {
     /// deliberately restored, because the dead frame still held the old `Vec`.
     /// The address invariant is deterministic and fails the instant `bind` runs
     /// anywhere but the final location.
+    /// pico's `_anyke` is a SELECTOR PARAMETER, not a wire field, and the
+    /// boundary rules are what make it a parse rather than a substring search.
+    /// Ported from `~/zenoh-pico/src/utils/query_params.c:46-70`.
+    #[test]
+    fn anyke_parses_with_picos_parameter_boundary_rules() {
+        assert!(parameters_has_anyke(b"_anyke"));
+        assert!(parameters_has_anyke(b"a=1;_anyke"));
+        assert!(parameters_has_anyke(b"_anyke;a=1"));
+        assert!(parameters_has_anyke(b"a=1;_anyke;b=2"));
+        assert!(!parameters_has_anyke(b""));
+        assert!(!parameters_has_anyke(b"a=1"));
+        // The boundary rules earn their keep here: each of these CONTAINS
+        // "_anyke" and must NOT be read as the flag.
+        assert!(!parameters_has_anyke(b"no_anyke"));
+        assert!(!parameters_has_anyke(b"_anykey=1"));
+        assert!(!parameters_has_anyke(b"a=1;xx_anyke_yy;b=2"));
+        // ...but a real flag AFTER a decoy is still found (the scan continues).
+        assert!(parameters_has_anyke(b"_anykey=1;_anyke"));
+    }
+
+    /// The `reply ⊆ query` gate is an INTERSECTION, so a wildcard query admits
+    /// concrete replies — the ordinary case for a wildcard queryable, and the
+    /// one an earlier string-equality cut of this round rejected.
+    #[test]
+    fn reply_coverage_is_intersection_not_string_equality() {
+        // The case string equality got wrong: query is a PATTERN, reply concrete.
+        assert!(reply_keyexpr_is_covered("a/**", "a/b", false));
+        assert!(reply_keyexpr_is_covered("a/*", "a/b", false));
+        assert!(reply_keyexpr_is_covered("a/b", "a/b", false));
+        // Genuinely disjoint replies are rejected...
+        assert!(!reply_keyexpr_is_covered("a/**", "z/b", false));
+        assert!(!reply_keyexpr_is_covered("a/b", "a/c", false));
+        // ...unless the querier said it accepts any key (`_anyke`), which is
+        // exactly pico's `!query->_anyke && !intersects` short-circuit.
+        assert!(reply_keyexpr_is_covered("a/**", "z/b", true));
+        assert!(reply_keyexpr_is_covered("a/b", "a/c", true));
+    }
+
     #[test]
     fn bind_points_the_cached_views_at_this_marshals_own_fields() {
         let view = FakeQuery {

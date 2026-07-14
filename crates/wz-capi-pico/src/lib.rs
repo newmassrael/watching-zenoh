@@ -116,4 +116,10 @@ const _: () = {
     assert!(size_of::<query::z_owned_closure_query_t>() == 24);
     assert!(size_of::<query::z_queryable_options_t>() == 1);
     assert!(size_of::<query::z_query_reply_err_options_t>() == 8);
+    // The two whose layout is `Z_FEATURE_UNSTABLE_API`-conditional (a trailing
+    // `z_source_info_t *source_info`, `api/types.h:334-336,359-361`) — so the
+    // two most likely to drift. The flag defaults OFF (`#cmakedefine` +
+    // `CMakeLists.txt:316` = 0), which is the layout pinned here.
+    assert!(size_of::<query::z_query_reply_options_t>() == 40);
+    assert!(size_of::<query::z_query_reply_del_options_t>() == 32);
 };

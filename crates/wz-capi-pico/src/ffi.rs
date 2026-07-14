@@ -72,3 +72,62 @@ pub(crate) struct SendPtr(pub(crate) *mut std::ffi::c_void);
 // and non-aliased across the call/drop lifecycle; moving the opaque pointer
 // to the drive thread is what a native pico read task already does.
 unsafe impl Send for SendPtr {}
+
+/// A pico closure `{ context, call, drop }` adopted from the C side, generic
+/// over the plane's `call` signature.
+///
+/// pico's closure families (`sample`, `query`, and the `reply` a later round
+/// adds) are the SAME struct modulo the callback type, and share one lifecycle
+/// rule: `drop(context)` runs exactly once, at teardown, never concurrently
+/// with `call`. That rule is the whole mechanism, so it lives here once — a
+/// second hand-written copy is a second place for the drop-once discipline to
+/// drift.
+///
+/// **`Sync` is deliberately NOT implemented here.** Each plane must write its
+/// own `unsafe impl Sync for CClosure<ItsCallbackType>`, because the safety
+/// argument is per-plane and genuinely different: the subscriber plane's rests
+/// on the fan-out publish being `Locality::Remote`, the queryable plane's on the
+/// queryable being declared `Locality::Remote`. A blanket
+/// `unsafe impl<C> Sync for CClosure<C>` would silently hand that guarantee to
+/// the next plane before anyone had made its argument — which is exactly the
+/// class of bug R311y288 fixed on the publish plane. Rust allows `unsafe impl`
+/// on a concrete instantiation, so per-plane proofs cost nothing.
+///
+/// `C` is the plane's pico callback typedef, which is itself already an
+/// `Option<unsafe extern "C" fn(..)>` (a nullable C function pointer), so it is
+/// held directly rather than re-wrapped.
+pub(crate) struct CClosure<C> {
+    pub(crate) context: SendPtr,
+    pub(crate) call: C,
+    pub(crate) drop: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+}
+
+impl<C> CClosure<C> {
+    /// Adopt a moved C closure's fields. The caller nulls the source (pico's
+    /// consume-on-all-paths contract): from here this value owns the
+    /// responsibility to run `drop(context)`.
+    pub(crate) fn new(
+        context: *mut std::ffi::c_void,
+        call: C,
+        drop: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    ) -> Self {
+        Self {
+            context: SendPtr(context),
+            call,
+            drop,
+        }
+    }
+}
+
+impl<C> Drop for CClosure<C> {
+    fn drop(&mut self) {
+        if let Some(dropfn) = self.drop.take() {
+            // SAFETY: pico contract — drop runs once, never concurrently with
+            // call. A panic across the C boundary is UB, so guard it.
+            let ctx = self.context.0;
+            let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+                dropfn(ctx);
+            }));
+        }
+    }
+}
