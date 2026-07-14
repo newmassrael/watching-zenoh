@@ -9,20 +9,21 @@
 //! peer. Real pico instead binds, spawns an accept task, and returns
 //! immediately with zero peers (`~/zenoh-pico/src/api/api.c:882-942`,
 //! `src/transport/manager.c:98-130`), supports declaring subscribers before any
-//! peer connects (`src/transport/unicast/accept.c:148-149`), and holds up to
-//! `Z_LISTEN_MAX_CONNECTION_NB` = 10 CONCURRENT inbound peers in the one
-//! session (`accept.c:85-92`, `include/zenoh-pico/config.h.in:213`) — behaviour
-//! pico's own conformance test pins (`tests/z_test_peer_unicast.c`: 10
-//! concurrent connectors admitted, the 11th refused).
+//! peer connects (`src/transport/unicast/accept.c:148-149`), and holds multiple
+//! concurrent inbound peers in the one session. (pico caps that at 10 and
+//! refuses the 11th, `accept.c:85-92`; wz holds unbounded — a named divergence,
+//! see the `faces` module doc. These tests exercise 2 concurrent peers.)
 //!
 //! These tests drive the exported `z_*` symbols exactly as a pico C program
 //! would. Delivery is proven by bounded publish-until-received convergence
 //! loops (a subscriber declaration has to propagate first), so a genuine
-//! failure fails fast rather than hanging.
+//! failure fails fast rather than hanging. NOTE: `z_put`'s `Z_OK` return proves
+//! nothing about delivery (a put with zero faces is `Ok(0)`); delivery is
+//! always asserted via a received-sample check, never a put return code.
 
 use std::collections::BTreeSet;
 use std::ffi::{c_void, CStr, CString};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -268,15 +269,16 @@ fn declare_before_peer_is_replayed_when_a_peer_connects() {
 
 #[test]
 fn listener_holds_two_concurrent_peers_and_fans_out() {
-    // pico's listener holds up to Z_LISTEN_MAX_CONNECTION_NB = 10 CONCURRENT
-    // inbound peers in the ONE session and refuses only the 11th. A single-peer
-    // listener would leave the second dialer permanently unserved (its TCP
-    // connect lands in the backlog, but the zenoh handshake never runs, so its
-    // `z_open` errors after Z_TRANSPORT_CONNECT_TIMEOUT).
+    // pico's listener holds multiple concurrent inbound peers in the ONE
+    // session. A single-peer listener would leave the second dialer permanently
+    // unserved (its TCP connect lands in the backlog, but the zenoh handshake
+    // never runs, so its `z_open` errors after Z_TRANSPORT_CONNECT_TIMEOUT).
     //
     // Both directions are proven:
-    //  - listener -> N: ONE `z_put` on the listener reaches BOTH dialers
-    //    (publish fan-out across concurrent faces);
+    //  - listener -> N: the listener's puts reach BOTH dialer faces (publish
+    //    fan-out across concurrent faces — the loop sends repeatedly, so a given
+    //    dialer's flag may be set by any iteration; what is proven is that both
+    //    faces receive, not that a single put reaches both atomically);
     //  - N -> listener: each dialer's put reaches the listener's ONE subscriber
     //    (per-face inbound dispatch into the single C session).
     let port = free_port();
@@ -363,6 +365,168 @@ fn listener_holds_two_concurrent_peers_and_fans_out() {
         z_undeclare_subscriber(z_subscriber_move(&mut sub_two));
         z_undeclare_subscriber(z_subscriber_move(&mut lsub));
         close_session(&mut dialer_one);
+        close_session(&mut dialer_two);
+        close_session(&mut listener);
+    }
+}
+
+/// Records how many times the C `drop(context)` fired — the exactly-once
+/// invariant of a subscription that fans out to N per-face callbacks.
+struct DropCountCtx {
+    drops: Arc<AtomicUsize>,
+}
+
+unsafe extern "C" fn on_sample_noop(_sample: *const z_loaned_sample_t, _ctx: *mut c_void) {}
+
+unsafe extern "C" fn on_drop_count(ctx: *mut c_void) {
+    let ctx = Box::from_raw(ctx as *mut DropCountCtx);
+    ctx.drops.fetch_add(1, Ordering::SeqCst);
+}
+
+#[test]
+fn subscription_c_drop_fires_exactly_once_across_faces() {
+    // One C subscription declared on the listener fans out to a wz subscriber
+    // PER connected peer, each capturing a clone of the SAME `Arc<CClosure>`.
+    // The C `drop(context)` must fire exactly ONCE — never per-face (a
+    // use-after-free / double-free of the C context) and never zero (a leak) —
+    // when the subscription is undeclared and every per-face callback has
+    // released the shared closure. This asserts that crux invariant rather than
+    // arguing it from the `Arc` refcount.
+    let port = free_port();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(Mutex::new(BTreeSet::new()));
+
+    unsafe {
+        let mut listener = open_listen(port);
+
+        // Declare the drop-counting subscription BEFORE peers, so it is replayed
+        // onto each of the two faces (SSOT entry + 2 per-face subscribers = 3
+        // shared references to the one closure).
+        let ctx = Box::into_raw(Box::new(DropCountCtx {
+            drops: drops.clone(),
+        })) as *mut c_void;
+        let mut sub = declare_sub(
+            &listener,
+            c"demo/**",
+            Some(on_sample_noop),
+            Some(on_drop_count),
+            ctx,
+        );
+
+        let mut dialer_one = open_connect(port);
+        let mut dialer_two = open_connect(port);
+
+        // Drive both faces up + the replay onto each: a separate listener
+        // subscriber records both dialers' puts, so once both keyexprs are seen
+        // the drop-counting subscription has been replayed onto both faces too.
+        let wctx = Box::into_raw(Box::new(SetCtx { seen: seen.clone() })) as *mut c_void;
+        let mut witness = declare_sub(
+            &listener,
+            c"demo/**",
+            Some(on_sample_record_keyexpr),
+            Some(on_drop_set),
+            wctx,
+        );
+        let mut both = false;
+        for _ in 0..250 {
+            {
+                let s = seen.lock().unwrap();
+                if s.contains("demo/one") && s.contains("demo/two") {
+                    both = true;
+                    break;
+                }
+            }
+            put(&dialer_one, c"demo/one", c"x");
+            put(&dialer_two, c"demo/two", c"x");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(both, "both faces did not come up; test precondition unmet");
+
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "C drop fired before the subscription was undeclared"
+        );
+
+        // Undeclare the drop-counting subscription: SSOT entry + both per-face
+        // subscribers released → last `Arc` drop → C drop ONCE.
+        z_undeclare_subscriber(z_subscriber_move(&mut sub));
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "C drop must fire exactly once across N faces, saw {}",
+            drops.load(Ordering::SeqCst)
+        );
+
+        z_undeclare_subscriber(z_subscriber_move(&mut witness));
+        close_session(&mut dialer_one);
+        close_session(&mut dialer_two);
+        close_session(&mut listener);
+
+        // Teardown must not fire it again (undeclare already released it).
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "C drop fired again at session teardown (double drop)"
+        );
+    }
+}
+
+#[test]
+fn listener_survives_a_peer_disconnect_and_keeps_accepting() {
+    // A peer that connects and then closes drives `CApiForwarder::deregister ->
+    // face_down`, removing that face. The listener (and its subscription SSOT)
+    // must survive, and a subsequently-connecting peer must still be accepted
+    // and served — proving face_down does not tear down the C session and the
+    // accept loop keeps running.
+    let port = free_port();
+    let seen = Arc::new(Mutex::new(BTreeSet::new()));
+
+    unsafe {
+        let mut listener = open_listen(port);
+        let lctx = Box::into_raw(Box::new(SetCtx { seen: seen.clone() })) as *mut c_void;
+        let mut lsub = declare_sub(
+            &listener,
+            c"demo/**",
+            Some(on_sample_record_keyexpr),
+            Some(on_drop_set),
+            lctx,
+        );
+
+        // Peer 1 connects and delivers, then disconnects.
+        {
+            let mut dialer_one = open_connect(port);
+            let mut got = false;
+            for _ in 0..250 {
+                if seen.lock().unwrap().contains("demo/before") {
+                    got = true;
+                    break;
+                }
+                put(&dialer_one, c"demo/before", c"1");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(got, "peer 1 never delivered");
+            close_session(&mut dialer_one); // -> FaceDown -> face_down
+        }
+
+        // Peer 2 connects AFTER peer 1 left and must still be served.
+        let mut dialer_two = open_connect(port);
+        let mut got_after = false;
+        for _ in 0..250 {
+            if seen.lock().unwrap().contains("demo/after") {
+                got_after = true;
+                break;
+            }
+            put(&dialer_two, c"demo/after", c"2");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            got_after,
+            "the listener stopped accepting after a peer disconnected (saw {:?})",
+            seen.lock().unwrap()
+        );
+
+        z_undeclare_subscriber(z_subscriber_move(&mut lsub));
         close_session(&mut dialer_two);
         close_session(&mut listener);
     }

@@ -67,6 +67,14 @@ workspace = true
 # the loop itself is used here — no forwarding between faces (that is the
 # sibling `routing-routes` atom); this crate passes its own `FaceForwarder`
 # that lands each face in the C session's registry instead.
+#
+# Cargo feature unification: `routing-accept` was previously absent from the
+# workspace-unified build (no default enabler), so enabling it here compiles
+# `wz-runtime-tokio::accept_loop` into the shared graph for the whole workspace
+# in run-ci Layer C1/C2. It is ADDITIVE (`routing-accept` only gates
+# `pub mod accept_loop` and additive items, altering no other crate's existing
+# code paths), matching the precedent wz-integration-tests documents for its
+# storage/auth feature pins.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["routing-accept"] }
 
 # Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions

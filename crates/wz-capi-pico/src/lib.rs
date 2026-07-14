@@ -19,12 +19,14 @@
 //! ## The session model
 //!
 //! A pico session is a PEER SET, not a single link: a `connect` session holds
-//! one peer (the router it dialed), a `listen` session accepts up to
-//! `Z_LISTEN_MAX_CONNECTION_NB` = 10 CONCURRENT inbound peers. wz's unicast
-//! `Session` is one peer by construction, so the C handle here is a REGISTRY of
-//! per-face wz sessions plus the C-declared subscription SSOT replayed onto
-//! each face (the `faces` module). `z_open(listen)` therefore returns as soon as the
-//! endpoint is bound, with zero peers and no error, exactly as pico's does.
+//! one peer (the router it dialed), a `listen` session accepts multiple
+//! concurrent inbound peers. wz's unicast `Session` is one peer by
+//! construction, so the C handle here is a REGISTRY of per-face wz sessions
+//! plus the C-declared subscription SSOT replayed onto each face (the `faces`
+//! module). `z_open(listen)` therefore returns as soon as the endpoint is
+//! bound, with zero peers and no error, exactly as pico's does. (One named
+//! divergence: pico caps a listener at 10 peers and refuses the 11th; wz holds
+//! unbounded — see the `faces` module doc.)
 //!
 //! ## Surface
 //!

@@ -29,6 +29,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
+use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::sample::SampleKind;
 use wz_runtime_tokio::session::PublishOptions;
 use wz_runtime_tokio::sink::SampleView;
@@ -135,14 +136,21 @@ impl Drop for CClosure {
 
 // SAFETY: sharing one subscription's `CClosure` across a per-face callback
 // requires `Sync` (for `Arc<CClosure>` — and so each callback — to be `Send`).
-// Sharing `&CClosure` is sound here because `call` is only ever invoked from
-// the session's single drive task: every face of a session is driven on ONE
-// task (the accept loop multiplexes its faces there, and a dialed session has
-// exactly one), so two callbacks never run concurrently. `drop` runs only when
-// the last `Arc` is released, which by construction cannot overlap a live
-// callback — a running callback holds a reference. That is exactly pico's
-// closure contract: the callback fires from the read task, the drop from
-// teardown, never concurrently.
+// Sharing `&CClosure` is sound because `call` is only ever invoked from the
+// session's single drive task: every face of a session is driven on ONE task
+// (the accept loop multiplexes its faces there via one `select!`; a dialed
+// session has exactly one drive loop), and inbound dispatch is the ONLY caller
+// of `call`. It is load-bearing that the C application thread never invokes
+// `call`: the fan-out publishes are `Locality::Remote` (see `put_options`), so
+// `z_put` stages NO loopback fire and never drains a callback on the C thread.
+// Were the publishes local-capable, a C-thread `z_put` whose keyexpr matched a
+// subscription would drain that face's loopback fire on the C thread
+// concurrently with the drive thread's inbound dispatch on another face —
+// two `call(context)`s at once on one C context, the exact data race the pico
+// single-threaded-callback contract forbids. `drop` runs only when the last
+// `Arc` is released, which cannot overlap a live `call` (a running callback
+// holds a reference). That is pico's closure contract: the callback fires from
+// the read task, the drop from teardown, never concurrently.
 unsafe impl Sync for CClosure {}
 
 /// Build the wz-side subscriber callback for ONE face from a shared C closure.
@@ -354,7 +362,23 @@ unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Session
 }
 
 fn put_options() -> PublishOptions {
-    let mut opts = PublishOptions::default().with_reliability(Reliability::Reliable);
+    // `Locality::Remote`, not the `Any` default. A pico session's own `z_put`
+    // is delivered to its OWN local subscribers at most ONCE
+    // (`_z_write` -> `_z_session_deliver_push_locally`, gated on
+    // `Z_FEATURE_LOCAL_SUBSCRIBER`, `~/zenoh-pico/src/net/primitives.c:198-201`).
+    // Here the C session is N per-face wz sessions, each with its own observer
+    // carrying a replica of the subscription — so a local-capable publish would
+    // (a) fire the one C callback ONCE PER FACE (N duplicate local deliveries
+    // for a single `z_put`), and (b) drain that fire on the C thread, racing the
+    // drive thread's inbound dispatch on another face (see the `CClosure` Sync
+    // note). Remote-only sidesteps both: the fan-out reaches every PEER over the
+    // wire, and self-delivery to local subscribers is deferred as a named
+    // divergence (this crate has never implemented `Z_FEATURE_LOCAL_SUBSCRIBER`;
+    // a faithful build would deliver locally exactly once, at the registry
+    // level, serialized against inbound dispatch).
+    let mut opts = PublishOptions::default()
+        .with_reliability(Reliability::Reliable)
+        .with_locality(Locality::Remote);
     opts.kind = SampleKind::Put;
     opts
 }
@@ -601,22 +625,19 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // Record the subscription in the session's SSOT and declare it on every
         // face that is already up. With no peer yet — a listener before its
         // first connection — this declares nothing on the wire and still
-        // succeeds (pico's declare-before-peer); each face replays the SSOT as
-        // it comes up.
-        match state.shared.declare_subscriber(ke, Arc::new(cclosure)) {
-            Ok(id) => {
-                let boxed = Box::new(SubscriberState {
-                    shared: state.shared.clone(),
-                    id,
-                });
-                *subscriber = z_owned_subscriber_t {
-                    handle: Box::into_raw(boxed) as *mut c_void,
-                    _pad: [std::ptr::null_mut(); 3],
-                };
-                Z_OK
-            }
-            Err(_) => Z_ERR_GENERIC,
-        }
+        // records the entry (pico's declare-before-peer); each face replays the
+        // SSOT as it comes up. Recording the local entry always succeeds
+        // (mirrors pico's `_z_register_subscriber`).
+        let id = state.shared.declare_subscriber(ke, Arc::new(cclosure));
+        let boxed = Box::new(SubscriberState {
+            shared: state.shared.clone(),
+            id,
+        });
+        *subscriber = z_owned_subscriber_t {
+            handle: Box::into_raw(boxed) as *mut c_void,
+            _pad: [std::ptr::null_mut(); 3],
+        };
+        Z_OK
     })
 }
 

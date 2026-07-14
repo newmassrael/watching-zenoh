@@ -64,7 +64,7 @@ use wz_runtime_tokio::session_open::{
 };
 
 use crate::abi::{z_moved_config_t, z_owned_config_t};
-use crate::config::{ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY};
+use crate::config::{ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY};
 use crate::faces::{CApiForwarder, SharedSession, DIAL_FACE_ID};
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
@@ -207,6 +207,7 @@ async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
 /// the handshake has settled — pico's blocking client open.
 async fn drive_dial(
     endpoint: String,
+    whatami: WhatAmI,
     shared: Arc<SharedSession>,
     tx: mpsc::Sender<bool>,
     shutdown: Arc<Notify>,
@@ -227,7 +228,7 @@ async fn drive_dial(
             return;
         }
     };
-    let params = init_params(WhatAmI::Client, zid);
+    let params = init_params(whatami, zid);
     let opened = initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await;
     let OpenedSession {
         mut engine,
@@ -336,7 +337,11 @@ async fn drive_listen(
 /// Open a session: spawn the drive thread and wait for the role's open
 /// outcome. For `connect` that is the settled handshake; for `listen` it is
 /// only the bind.
-fn open_blocking(connect: Option<String>, listen: Option<String>) -> Result<SessionState, ZResult> {
+fn open_blocking(
+    connect: Option<String>,
+    listen: Option<String>,
+    dial_whatami: WhatAmI,
+) -> Result<SessionState, ZResult> {
     let clock = TokioTime::new();
     let shared = Arc::new(SharedSession::new(clock));
     let shutdown = Arc::new(Notify::new());
@@ -375,6 +380,7 @@ fn open_blocking(connect: Option<String>, listen: Option<String>) -> Result<Sess
                     (Some(endpoint), _) => {
                         drive_dial(
                             endpoint,
+                            dial_whatami,
                             drive_shared,
                             tx,
                             drive_shutdown,
@@ -449,13 +455,31 @@ pub unsafe extern "C" fn z_open(
 
         let connect = cfg.get(Z_CONFIG_CONNECT_KEY).map(str::to_owned);
         let listen = cfg.get(Z_CONFIG_LISTEN_KEY).map(str::to_owned);
+        // The dial role's whatami is config-driven, mirroring pico's
+        // `_z_config_get_mode` (`~/zenoh-pico/src/net/session.c:120-140`,
+        // default CLIENT): `mode=peer` opens a dialing PEER, otherwise CLIENT.
+        // (The listen role forces PEER regardless — pico force-inserts
+        // `MODE=PEER` for any listen config, session.c:98.)
+        let dial_whatami = match cfg.get(Z_CONFIG_MODE_KEY) {
+            Some("peer") => WhatAmI::Peer,
+            _ => WhatAmI::Client,
+        };
         drop(cfg);
 
         if connect.is_none() && listen.is_none() {
             return crate::result::Z_ERR_INVALID;
         }
+        // A config carrying BOTH connect and listen is pico's dual-role
+        // listen-and-dial peer (`session.c:99-108` appends the connect
+        // endpoints after forcing the listen endpoint to PEER mode). That
+        // hybrid — an N-face accept listener AND a dial face on one runtime —
+        // is a follow-up; reject it explicitly rather than SILENTLY dropping
+        // the listener (which is what picking one arm would do).
+        if connect.is_some() && listen.is_some() {
+            return crate::result::Z_ERR_INVALID;
+        }
 
-        match open_blocking(connect, listen) {
+        match open_blocking(connect, listen, dial_whatami) {
             Ok(state) => {
                 *zs = z_owned_session_t {
                     _val: Box::into_raw(Box::new(state)) as *mut c_void,

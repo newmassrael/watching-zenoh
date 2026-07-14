@@ -9,19 +9,28 @@
 //! pico models a session as a PEER LIST: `_z_transport_peer_unicast_slist_t
 //! *_peers` (`~/zenoh-pico/include/zenoh-pico/transport/transport.h:200`). A
 //! `client` session holds exactly one peer (the router it dialed); a `listen`
-//! peer session accepts up to `Z_LISTEN_MAX_CONNECTION_NB` = 10 CONCURRENT
-//! inbound peers (`src/transport/unicast/accept.c:85-92`,
-//! `include/zenoh-pico/config.h.in:213`) and refuses the 11th — behaviour
-//! pico's own conformance test pins (`tests/z_test_peer_unicast.c`: 10
-//! concurrent connectors all admitted, the 11th rejected).
+//! peer session accepts multiple CONCURRENT inbound peers.
+//!
+//! DIVERGENCE (named, not mirrored): pico caps a listener at
+//! `Z_LISTEN_MAX_CONNECTION_NB` = 10 and REFUSES the 11th before its handshake
+//! (`src/transport/unicast/accept.c:85-92`,
+//! `include/zenoh-pico/config.h.in:213`; pinned by
+//! `tests/z_test_peer_unicast.c` — 10 admitted, the 11th rejected). wz's
+//! `accept_loop` enforces NO connection cap and holds unbounded faces, so a
+//! program relying on the 11th `z_open` failing as back-pressure sees it
+//! succeed here. The cap is an embedded static-array-sizing artifact with no
+//! hosted-runtime rationale, so this is a deliberate superset, not a bug;
+//! matching it would need a configurable pre-handshake cap in `accept_loop`
+//! (which has no such knob today) and is deferred.
 //!
 //! wz models a unicast `Session` as exactly ONE peer (its engine is an
 //! `Engine<SessionFsmUnicastPolicy>`) and holds N peers as N sessions
 //! multiplexed on one accept loop ([`wz_runtime_tokio::accept_loop`]). So the
 //! C handle cannot BE a wz session; it is a REGISTRY of per-face wz sessions
 //! plus the C-declared subscription SSOT replayed onto each face as it comes
-//! up. `connect` fills exactly one face, `listen` fills up to N — the same
-//! shape pico's `_peers` list has for the same two roles.
+//! up. `connect` fills exactly one face, `listen` fills N — the same shape
+//! pico's `_peers` list has for the same two roles (see the cap divergence
+//! above).
 //!
 //! ## Why per-face sessions, not one shared observer
 //!
@@ -60,7 +69,9 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
-use wz_runtime_tokio::session::{PublishOptions, SubscribeOptions, Subscriber, TokioSession};
+use wz_runtime_tokio::session::{
+    PublishError, PublishOptions, SubscribeOptions, Subscriber, TokioSession,
+};
 use wz_runtime_tokio::session_glue::{IterationEvent, SessionLinkActions};
 use wz_runtime_tokio::sync::Mutex as WzMutex;
 
@@ -175,11 +186,17 @@ impl SharedSession {
     /// Publish to every connected peer (pico `z_put` / `z_publisher_put`
     /// semantics: the write goes to the session's whole peer set).
     ///
-    /// Zero faces is `Ok(0)`, not an error — a pico put with no peer connected
-    /// simply has no recipient. A real `Err` from wz's `publish` is a logical
-    /// rejection (e.g. the outbound keyexpr safety gate) that would fail
-    /// identically on every face, so the first one is propagated; a merely dead
-    /// link does not surface here (wz's wire leg is fire-and-forget).
+    /// Best-effort per face, matching pico's multi-peer send, which discards
+    /// each peer's send result and returns OK even if some/all peer sends fail
+    /// (`~/zenoh-pico/src/transport/common/tx.c:92-95,139-150` — contrast the
+    /// single-peer path's `_Z_RETURN_IF_ERR`). Concretely a face mid-teardown
+    /// yields `PublishError::TransportUnavailable` (the F2 gate — per-face and
+    /// transient); swallowing it and continuing means a healthy peer ordered
+    /// after it in the map still receives the sample. Only a DETERMINISTIC,
+    /// face-independent error — the payload/keyexpr overflowing the bounded
+    /// codec (`ExceedsCapacity`), which would fail identically on every face —
+    /// is surfaced. Zero faces is `Ok(0)`: a put with no peer connected simply
+    /// has no recipient (pico's empty peer list → OK).
     pub(crate) fn publish_all(
         &self,
         keyexpr: &str,
@@ -198,6 +215,10 @@ impl SharedSession {
         for session in sessions {
             match session.publish(keyexpr, payload, opts.clone()) {
                 Ok(n) => delivered += n,
+                // Per-face transient failure (link released / reconnecting):
+                // best-effort, keep delivering to the surviving faces.
+                Err(PublishError::TransportUnavailable) => {}
+                // Deterministic, face-independent: fails on every face.
                 Err(_) => return Err(()),
             }
         }
@@ -206,23 +227,21 @@ impl SharedSession {
 
     /// Record a C subscription in the SSOT and declare it on every live face.
     ///
-    /// With no face yet (a listener before its first peer) this declares
-    /// nothing on the wire and still succeeds — that is pico's
-    /// declare-before-peer, and [`Self::face_up`] replays it. But if faces DO
-    /// exist and every one rejected the declare, the subscription is dead on
-    /// arrival and the C caller must hear about it rather than get a silent
-    /// `Z_OK`.
-    pub(crate) fn declare_subscriber(
-        &self,
-        keyexpr: String,
-        closure: Arc<CClosure>,
-    ) -> Result<SubId, ()> {
+    /// The SSOT entry is the LOCAL registration and is recorded
+    /// unconditionally, mirroring pico: `_z_register_subscriber` records the
+    /// subscription in the session tables first and its wire announce to peers
+    /// is best-effort after (`~/zenoh-pico/src/net/primitives.c:209-248`). So a
+    /// per-face wire declare that fails (a face mid-teardown) is ignored exactly
+    /// as [`Self::face_up`] ignores a failed replay, and the SSOT entry persists
+    /// so every FUTURE face still gets it. With no face yet (a listener before
+    /// its first peer) this declares nothing on the wire and still records the
+    /// entry — pico's declare-before-peer. Infallible today; keyexpr canonicity
+    /// validation is a separate follow-up.
+    pub(crate) fn declare_subscriber(&self, keyexpr: String, closure: Arc<CClosure>) -> SubId {
         let mut guard = self.lock();
         let id = guard.next_sub_id;
         guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
 
-        let face_count = guard.faces.len();
-        let mut declared = 0usize;
         for face in guard.faces.values_mut() {
             if let Ok(sub) = face.session.declare_subscriber(
                 keyexpr.clone(),
@@ -230,18 +249,14 @@ impl SharedSession {
                 make_subscriber_callback(closure.clone()),
             ) {
                 face.subs.insert(id, sub);
-                declared += 1;
             }
-        }
-        if face_count > 0 && declared == 0 {
-            return Err(());
         }
         guard.subs.push(SubEntry {
             id,
             keyexpr,
             closure,
         });
-        Ok(id)
+        id
     }
 
     /// Drop a C subscription: remove it from the SSOT so no future face
