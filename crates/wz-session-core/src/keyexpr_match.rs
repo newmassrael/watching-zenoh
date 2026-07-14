@@ -50,9 +50,16 @@
 //!
 //! `keyexpr-includes` ([`keyexpr_includes_patterns`]) is a real toggle:
 //! the directional pattern⊇pattern predicate (zenoh-pico
-//! `_z_keyexpr_includes`) ships only under its feature. It has no
-//! internal consumer yet (exposed + tested + cross-compiled, awaiting a
-//! routing/aggregation caller — the bottom-up framework pattern).
+//! `_z_keyexpr_includes`) ships only under its feature. Its awaited
+//! `routing/aggregation caller` ARRIVED as [`keyexpr_includes_target`],
+//! which delegates here and is called on every ACL / routing coverage
+//! scan (`router_forward`, `linkstate_forward`,
+//! `interceptor::low_pass`, `wz-access-control`). R311y301: this said
+//! "no internal consumer yet" — the THIRD copy of that stale claim in
+//! this file, alongside the [`keyexpr_includes_patterns`] doc, while
+//! [`keyexpr_includes_target`]'s doc recorded the arrival. Three
+//! hand-maintained copies of one fact, two of them stale: the reason
+//! the impl axis belongs in a gated tag, not in prose.
 
 use crate::bounded::BoundedVec;
 
@@ -561,9 +568,17 @@ fn chunk_intersects(a: &str, b: &str) -> bool {
 /// * a-literal vs b-DSL ⇒ NO: a single literal cannot cover a DSL
 ///   set (which always denotes more than one string).
 ///
-/// Gated behind `keyexpr-includes`: ships only when selected. No
-/// internal consumer yet (exposed + tested, awaiting a routing /
-/// aggregation caller — the bottom-up framework pattern).
+/// Gated behind `keyexpr-includes`: ships only when selected. The
+/// awaited `routing / aggregation caller` ARRIVED — this is the engine
+/// behind [`keyexpr_includes_target`], which splits a rule into a
+/// bounded chunk buffer and delegates here, and which is called on
+/// every ACL / routing coverage scan (`router_forward`,
+/// `linkstate_forward`, `interceptor::low_pass`, `wz-access-control`).
+/// R311y301: this doc said "no internal consumer yet (exposed +
+/// tested, awaiting a routing / aggregation caller)" while
+/// [`keyexpr_includes_target`]'s own doc, ~140 lines up, already
+/// recorded itself AS that caller — two docs contradicting inside one
+/// file, and the Mnemosyne inventory mirrored the stale one.
 #[cfg(feature = "keyexpr-includes")]
 pub fn keyexpr_includes_patterns(a_chunks: &[&str], b_chunks: &[&str]) -> bool {
     includes_chunks(a_chunks, b_chunks)

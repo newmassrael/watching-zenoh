@@ -313,12 +313,23 @@ print("  atoms=%d active=%d declared-cargo-features=%d" % (len(atoms), active_n,
 #
 # Why UNAUDITED is counted rather than failed: tagging the 132 active atoms is
 # a per-atom CODE READ, not a prose transcription. The reason prose is known to
-# have rotted in BOTH directions -- storage-aligner's reason says "driver A8 +
-# facade forward A9 pending" against a live 1178-line driver and a shipped
-# facade forward, and keyexpr-includes' says "no internal consumer yet" against
-# 6 live consumers. Transcribing that prose into a typed tag would launder
-# stale prose into a field that LOOKS authoritative: prose rots, and a typed
-# tag certified by prose rots just as fast, only louder. So the tags are earned
+# rot in BOTH directions -- storage-aligner's says "driver A8 + facade forward
+# A9 pending" against a live 1178-line driver and a shipped facade forward
+# (understates); keyexpr-includes' said "no internal consumer yet" while its
+# engine was reached from 4 modules (understated too, retired by R311y301).
+#
+# R311y299 wrote a SIXTH copy of that keyexpr claim right here, and got it
+# wrong: it cited "6 live consumers" of a function the reason never names. The
+# atom gates TWO fns; the reason names keyexpr_includes_patterns, the consumers
+# belong to keyexpr_includes_target -- which turned out to DELEGATE to _patterns
+# (keyexpr_match.rs:449), so the conclusion held and the evidence did not.
+# R311y300 then "corrected" it to "the reason is CORRECT" off a grep that
+# excluded the defining file and therefore the only direct call site. Three
+# gradings, three methods, two wrong -- and both review agents made the FIRST
+# error independently. Grep tuning is not verification; reading the call graph
+# is. Transcribing prose into a typed tag would launder it into a field that
+# LOOKS authoritative: prose rots, and a typed tag certified by prose rots just
+# as fast, only louder. So the tags are earned
 # a batch at a time, and until UNAUDITED reaches 0 this gate reports what it
 # does not know instead of asserting a completeness it never checked. When
 # UNAUDITED hits 0, promote the active arm to fail_untagged (one-line change)
