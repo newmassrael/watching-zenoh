@@ -5,35 +5,46 @@
 //! shims — plus the async-drive bridge that makes a wz `Session` behave like a
 //! self-driving pico session.
 //!
-//! ## The drive bridge (the crux)
+//! ## The drive bridge
 //!
 //! wz has no `Session::open` and no self-driving session: a subscriber
-//! callback fires only while `drive_session_until_terminal`
-//! (`wz-runtime-tokio/src/session_glue.rs:729`) actively pumps the link,
-//! dispatching each `IterationEvent` into the SAME observer the subscriber
-//! registered on. pico's `z_open`, by contrast, returns immediately and the
-//! read/lease tasks run in the background.
+//! callback fires only while a drive loop actively pumps the link, dispatching
+//! each `IterationEvent` into the observer the subscriber registered on. pico's
+//! `z_open`, by contrast, returns and the read/lease work runs in the
+//! background (`~/zenoh-pico/src/api/api.c:882-942` starts the background
+//! executor inside `z_open`).
 //!
-//! Round 1 bridges this by owning a shared multi-thread tokio runtime and
-//! spawning one OS thread per session that `block_on`s the whole session
-//! lifecycle: establish link → open handshake → hand a `Session` clone back
-//! to the C caller → run the drive loop until `z_close` signals shutdown.
-//! `block_on` does not require the driven future to be `Send`, so the drive
-//! loop compiles regardless of the `Engine`/`InboundLink` auto-traits; only
-//! the writer task (already spawned by the open path) needs `Send`, which it
-//! has. The runtime is multi-thread so the socket writer task and the drive
-//! loop make progress concurrently while the C thread is between calls.
+//! This crate bridges that by owning one OS thread per session, running a
+//! multi-thread tokio runtime that `block_on`s the whole session lifecycle.
+//! `block_on` does not require the driven future to be `Send`, which the accept
+//! loop's per-face drive futures are not; the runtime is multi-thread so the
+//! socket writer tasks and the drive loop make progress while the C thread is
+//! between calls.
 //!
-//! `z_open` blocks until the session reaches Established (both dial and
-//! accept). This diverges from pico, whose `z_open` returns immediately and
-//! establishes in the background. In particular an acceptor (`listen` config)
-//! blocks INDEFINITELY and uncancellably until its first peer connects — there
-//! is no non-blocking accept or timeout in Round 1. A caller that needs a
-//! listener up before a peer exists must run `z_open` on its own thread (as
-//! the gate test does). A non-blocking background-accept listener is a
-//! follow-up refinement.
+//! ## The two roles, and what `z_open` blocks on
+//!
+//! The config's `connect` / `listen` keys pick the role, and each mirrors what
+//! real pico does:
+//!
+//! - **`connect` (dial, client)** — pico performs a synchronous outbound
+//!   InitSyn/InitAck/OpenSyn/OpenAck handshake and returns success, or an error
+//!   if the peer is unreachable (`src/transport/unicast/transport.c:280-287`).
+//!   So `z_open` here blocks until Established and lands exactly one peer
+//!   ([`DIAL_FACE_ID`]) in the registry.
+//! - **`listen` (accept, peer)** — pico forces PEER mode, does a non-blocking
+//!   `bind()` + `listen()`, spawns an async accept task, and **returns
+//!   immediately with zero peers and no error** (`src/net/session.c:87-118`,
+//!   `src/transport/manager.c:98-130`); the LISTEN branch runs no handshake at
+//!   all (`transport.c:294-311`). So `z_open` here returns as soon as the bind
+//!   succeeds, and peers are accepted in the background.
+//!
+//! Round 1 blocked the `listen` role until its first peer connected, which was
+//! both a divergence and an uncancellable hang (no `SessionState` existed yet,
+//! so `z_close` could not interrupt it). R2 removes it: the bind is the whole
+//! of `z_open(listen)`, and the accept loop races a cancellable shutdown.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -41,28 +52,27 @@ use std::thread::JoinHandle;
 
 use tokio::sync::Notify;
 
-use wz_runtime_tokio::observer::ApplicationLayerObserver;
+use wz_runtime_tokio::accept_loop::accept_loop;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session::TokioSession;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts, SigningKey,
     WhatAmI,
 };
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session, DialConfig,
-    OpenedSession, DEFAULT_OPEN_TICK_MS,
+    bind_endpoint, dial_endpoint, initiate_and_open_session, DialConfig, OpenedSession,
+    DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex as WzMutex;
 
 use crate::abi::{z_moved_config_t, z_owned_config_t};
 use crate::config::{ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY};
+use crate::faces::{CApiForwarder, SharedSession, DIAL_FACE_ID};
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
 
 // --- ABI structs (session owned = pico rc `{ void* _val; void* _cnt }`) ----
 
 /// Owned session (pico `z_owned_session_t`, 16 B rc). `_val` carries our
-/// `Box<SessionState>` handle; `_cnt` is unused in Round 1.
+/// `Box<SessionState>` handle; `_cnt` is unused.
 #[repr(C)]
 pub struct z_owned_session_t {
     pub(crate) _val: *mut c_void,
@@ -92,26 +102,28 @@ impl z_owned_session_t {
     }
 }
 
-// --- per-session runtime + state -------------------------------------------
+// --- per-session state -----------------------------------------------------
 
-/// The C session handle: a `Session` clone for `z_put` / `z_declare_*` calls
-/// made from the C thread, plus the drive thread's shutdown signal and join
-/// handle.
+/// The C session handle: the face registry + subscription SSOT the C thread
+/// declares and publishes through, plus the drive thread's shutdown signal and
+/// join handle.
 pub(crate) struct SessionState {
-    pub(crate) session: TokioSession,
+    pub(crate) shared: Arc<SharedSession>,
     shutdown: Arc<Notify>,
+    stop: Arc<AtomicBool>,
     driver: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl SessionState {
     /// Signal the drive loop to stop and join the driver thread. Idempotent.
     fn close(&self) {
-        // `notify_one` (NOT `notify_waiters`): the drive task registers its
-        // `.notified()` waiter only when the `select!` is first polled, which
-        // races the C thread reaching `z_close` right after `z_open` returns.
-        // `notify_one` stores a permit if no waiter is parked yet, so the
-        // shutdown is never lost; `notify_waiters` would drop it and the join
-        // below would block forever on a healthy link.
+        // The latch is set BEFORE the notify, and is what makes the close
+        // race-free: a `Notify` permit is single-use, so the latch covers a
+        // `z_close` landing before the shutdown future is ever polled, while
+        // `notify_one` (which stores a permit when no waiter is parked yet)
+        // covers one landing between that check and the await. `notify_waiters`
+        // would instead DROP the wakeup and the join below would hang.
+        self.stop.store(true, Ordering::SeqCst);
         self.shutdown.notify_one();
         if let Ok(mut guard) = self.driver.lock() {
             if let Some(handle) = guard.take() {
@@ -127,9 +139,44 @@ impl Drop for SessionState {
     }
 }
 
-/// Round-1 fixed session-init parameters (mirrors the wz-ap-demo defaults).
-/// `zid` is role-distinguished so a same-process dialer and acceptor never
-/// collide; per-process entropy is a follow-up refinement.
+/// pico's `Z_ZID_LENGTH` (`~/zenoh-pico/include/zenoh-pico/config.h.in:184`;
+/// `ZENOH_ID_SIZE` = 16, `protocol/core.h:59-62`).
+const ZID_LENGTH: usize = 16;
+
+/// A fresh session zid, mirroring pico's default.
+///
+/// pico generates one per session: `_z_session_get_zid` takes the zid from
+/// `Z_CONFIG_SESSION_ZID_KEY` when the config carries one, and otherwise
+/// generates a random `Z_ZID_LENGTH`-byte id
+/// (`~/zenoh-pico/src/api/api.c:846-855`). Round 1 instead hard-coded one zid
+/// per ROLE, so every dialer this library opened claimed the SAME identity —
+/// tolerable while a session held exactly one peer, but wrong for a listener
+/// meant to hold several DISTINCT ones, since zenoh identifies a peer by its
+/// zid.
+///
+/// Scope of the fix, measured rather than assumed: with this crate's feature set
+/// the collision is currently LATENT, not an observed break. `transport-multilink`
+/// (whose `join_link` aggregates same-zid links onto one logical session) is not
+/// in the default bundle, and `FaceForwarder::dedups_faces_by_zid` defaults to
+/// false, so two same-zid dialers are today still held as two faces — the
+/// multi-peer gate test passes either way. This is a fidelity fix that also
+/// closes that latent hazard, not a repair of a reproduced failure.
+///
+/// Honouring the `Z_CONFIG_SESSION_ZID_KEY` override is follow-up surface; this
+/// is pico's default path.
+///
+/// `None` on OS-entropy failure, which fails the open — the same choice
+/// wz-runtime-tokio already makes for signing-key entropy (`OpenError::
+/// AuthEntropy`, `session_open.rs:1241-1246`). Handing back a fixed id instead
+/// would reintroduce exactly the peer-collision this exists to prevent.
+fn fresh_zid() -> Option<Vec<u8>> {
+    let mut zid = vec![0u8; ZID_LENGTH];
+    getrandom::getrandom(&mut zid).ok()?;
+    Some(zid)
+}
+
+/// Fixed session-init parameters (mirrors the wz-ap-demo defaults), with a
+/// per-session [`fresh_zid`].
 fn init_params(whatami: WhatAmI, zid: Vec<u8>) -> SessionInitParams {
     SessionInitParams {
         version: 0x09,
@@ -146,47 +193,42 @@ fn init_params(whatami: WhatAmI, zid: Vec<u8>) -> SessionInitParams {
     }
 }
 
-/// The drive-thread body: establish the link, run the open handshake, hand a
-/// `Session` clone back through `tx`, then pump the session until `z_close`.
-async fn drive_session(
-    connect: Option<String>,
-    listen: Option<String>,
-    tx: mpsc::Sender<Option<TokioSession>>,
-    shutdown: Arc<Notify>,
-) {
-    let is_dial = connect.is_some();
-    let dialed = if let Some(endpoint) = &connect {
-        dial_endpoint(endpoint, &DialConfig::default()).await
-    } else if let Some(endpoint) = &listen {
-        accept_endpoint(endpoint).await
-    } else {
-        let _ = tx.send(None);
+/// The shutdown signal both roles race their drive against. See
+/// [`SessionState::close`] for why the latch and the notify are both needed.
+async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
+    if stop.load(Ordering::SeqCst) {
         return;
-    };
-    let dialed = match dialed {
+    }
+    shutdown.notified().await;
+}
+
+/// The `connect` role: dial, run the outbound handshake, land the one peer in
+/// the registry, then pump it until `z_close`. `tx` unblocks `z_open` only once
+/// the handshake has settled — pico's blocking client open.
+async fn drive_dial(
+    endpoint: String,
+    shared: Arc<SharedSession>,
+    tx: mpsc::Sender<bool>,
+    shutdown: Arc<Notify>,
+    stop: Arc<AtomicBool>,
+    clock: TokioTime,
+) {
+    let dialed = match dial_endpoint(&endpoint, &DialConfig::default()).await {
         Ok(link) => link,
         Err(_) => {
-            let _ = tx.send(None);
+            let _ = tx.send(false);
             return;
         }
     };
-
-    let session_clock = TokioTime::new();
-    // Role from the config: a `connect` endpoint dials as Client, a `listen`
-    // endpoint accepts as Peer (the pico z_open connect/listen split). Distinct
-    // zids so a same-process dialer and acceptor never collide.
-    let (whatami, zid) = if is_dial {
-        (WhatAmI::Client, vec![0x01, 0x02, 0x03, 0x04])
-    } else {
-        (WhatAmI::Peer, vec![0x05, 0x06, 0x07, 0x08])
+    let zid = match fresh_zid() {
+        Some(zid) => zid,
+        None => {
+            let _ = tx.send(false);
+            return;
+        }
     };
-    let params = init_params(whatami, zid);
-
-    let opened = if is_dial {
-        initiate_and_open_session(dialed, params, session_clock, None, DEFAULT_OPEN_TICK_MS).await
-    } else {
-        accept_and_open_session(dialed, params, session_clock, None, DEFAULT_OPEN_TICK_MS).await
-    };
+    let params = init_params(WhatAmI::Client, zid);
+    let opened = initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await;
     let OpenedSession {
         mut engine,
         actions,
@@ -196,25 +238,27 @@ async fn drive_session(
     } = match opened {
         Ok(opened) => opened,
         Err(_) => {
-            let _ = tx.send(None);
+            let _ = tx.send(false);
             return;
         }
     };
 
-    let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
-    let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(session_clock));
-
-    // Hand a clone to the C thread; if it hung up, abandon the open.
-    if tx.send(Some(session.clone())).is_err() {
+    // A dialed session has exactly one peer, so it occupies the single
+    // `DIAL_FACE_ID` slot; from here the C surface is role-agnostic (it fans
+    // over whatever faces the registry holds).
+    shared.face_up(DIAL_FACE_ID, &actions);
+    if tx.send(true).is_err() {
         return;
     }
 
     let mut driver = inbound;
     let timeouts = SessionTimeouts::spec_defaults();
-    let session_for_dispatch = session;
-    let mut dispatch = |event: IterationEvent<'_>| {
-        session_for_dispatch.dispatch_iteration_event(event);
-    };
+    let dispatch_shared = shared.clone();
+    // The `IterationEvent<'_>` annotation is load-bearing: `drive_session_until_terminal`
+    // needs a HIGHER-RANKED `FnMut(IterationEvent<'_>)`, and without it inference
+    // pins the closure to one specific lifetime ("implementation of `FnMut` is not
+    // general enough").
+    let mut dispatch = |event: IterationEvent<'_>| dispatch_shared.dispatch(DIAL_FACE_ID, event);
 
     tokio::select! {
         _ = drive_session_until_terminal(
@@ -222,32 +266,95 @@ async fn drive_session(
             &actions,
             &mut engine,
             None,
-            &session_clock,
+            &clock,
             &timeouts,
             &mut dispatch,
         ) => {}
-        _ = shutdown.notified() => {}
+        _ = shutdown_future(shutdown, stop) => {}
     }
 
+    shared.face_down(DIAL_FACE_ID);
     drop(writer_handle);
 }
 
-/// Open a session synchronously, blocking the calling (C) thread until the
-/// handshake reaches Established. Returns the C-side [`SessionState`].
+/// The `listen` role: bind, unblock `z_open` immediately, then hold N
+/// concurrent inbound peers until `z_close` — pico's non-blocking listener.
+async fn drive_listen(
+    endpoint: String,
+    shared: Arc<SharedSession>,
+    tx: mpsc::Sender<bool>,
+    shutdown: Arc<Notify>,
+    stop: Arc<AtomicBool>,
+    clock: TokioTime,
+) {
+    // Everything that can fail the open runs BEFORE the success signal below,
+    // so a failure is reported to the C caller rather than silently killing a
+    // listener it was told had opened.
+    let zid = match fresh_zid() {
+        Some(zid) => zid,
+        None => {
+            let _ = tx.send(false);
+            return;
+        }
+    };
+    let listener = match bind_endpoint(&endpoint).await {
+        Ok(listener) => listener,
+        Err(_) => {
+            let _ = tx.send(false);
+            return;
+        }
+    };
+    // The bind is the WHOLE of pico's `z_open(listen)`: it binds + listens,
+    // spawns an async accept task, and returns with zero peers and no error.
+    // Unblocking here — before any peer exists — is the R2 fix; Round 1 awaited
+    // the first peer instead, which was both a divergence and an uncancellable
+    // hang. It also means the endpoint IS bound once `z_open` returns, so a
+    // caller that dials it next cannot race the bind.
+    if tx.send(true).is_err() {
+        return;
+    }
+
+    // The accept loop holds every accepted peer as its own face and drives them
+    // all on this one task; `CApiForwarder` lands each in the registry and
+    // dispatches its inbound events into that face's own session. Shutdown is
+    // a future the loop races, so a `z_close` with NO peer ever connected
+    // unwinds a pending `accept()` cleanly.
+    let forwarder = CApiForwarder::new(shared);
+    let params = init_params(WhatAmI::Peer, zid);
+    let _summary = accept_loop(
+        listener,
+        params,
+        clock,
+        DEFAULT_OPEN_TICK_MS,
+        shutdown_future(shutdown, stop),
+        |_event| {},
+        &forwarder,
+    )
+    .await;
+}
+
+/// Open a session: spawn the drive thread and wait for the role's open
+/// outcome. For `connect` that is the settled handshake; for `listen` it is
+/// only the bind.
 fn open_blocking(connect: Option<String>, listen: Option<String>) -> Result<SessionState, ZResult> {
-    let (tx, rx) = mpsc::channel::<Option<TokioSession>>();
+    let clock = TokioTime::new();
+    let shared = Arc::new(SharedSession::new(clock));
     let shutdown = Arc::new(Notify::new());
-    let shutdown_drive = shutdown.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<bool>();
+
+    let drive_shared = shared.clone();
+    let drive_shutdown = shutdown.clone();
+    let drive_stop = stop.clone();
 
     // One dedicated multi-thread runtime PER session, owned by its driver
-    // thread: the `block_on` future need not be `Send` (so the drive loop
-    // compiles regardless of `Engine`/`InboundLink` auto-traits), while the
-    // socket writer task (spawned during open) and the I/O reactor run on the
-    // runtime's worker threads. Two workers suffice — the wz reference
-    // two-session loopback test drives to Established with `worker_threads=2`.
-    // A shared runtime driven by two `block_on`s starved the concurrent
-    // handshake (the acceptor timed out into a pre-Established Terminal);
-    // per-session isolation lets each session drive its own link to completion.
+    // thread: the `block_on` future need not be `Send` (the accept loop's
+    // per-face drive futures are not), while the socket writer tasks and the
+    // I/O reactor run on the runtime's worker threads. Two workers suffice —
+    // the wz reference two-session loopback test drives to Established with
+    // `worker_threads=2`. A shared runtime driven by two `block_on`s starved
+    // the concurrent handshake (the acceptor timed out into a pre-Established
+    // Terminal); per-session isolation lets each session drive its own links.
     let handle = std::thread::Builder::new()
         .name("wz-capi-pico-drive".to_owned())
         .spawn(move || {
@@ -259,24 +366,53 @@ fn open_blocking(connect: Option<String>, listen: Option<String>) -> Result<Sess
             {
                 Ok(rt) => rt,
                 Err(_) => {
-                    let _ = tx.send(None);
+                    let _ = tx.send(false);
                     return;
                 }
             };
-            rt.block_on(drive_session(connect, listen, tx, shutdown_drive));
+            rt.block_on(async move {
+                match (connect, listen) {
+                    (Some(endpoint), _) => {
+                        drive_dial(
+                            endpoint,
+                            drive_shared,
+                            tx,
+                            drive_shutdown,
+                            drive_stop,
+                            clock,
+                        )
+                        .await;
+                    }
+                    (None, Some(endpoint)) => {
+                        drive_listen(
+                            endpoint,
+                            drive_shared,
+                            tx,
+                            drive_shutdown,
+                            drive_stop,
+                            clock,
+                        )
+                        .await;
+                    }
+                    (None, None) => {
+                        let _ = tx.send(false);
+                    }
+                }
+            });
             // `rt` is dropped here, after the drive loop has returned.
         })
         .map_err(|_| Z_ERR_GENERIC)?;
 
     match rx.recv() {
-        Ok(Some(session)) => Ok(SessionState {
-            session,
+        Ok(true) => Ok(SessionState {
+            shared,
             shutdown,
+            stop,
             driver: StdMutex::new(Some(handle)),
         }),
         _ => {
-            // Open failed (link/handshake error, or the drive thread returned
-            // without a session). Join the finished thread and report.
+            // Open failed (bind / link / handshake error, or the drive thread
+            // returned without opening). Join the finished thread and report.
             let _ = handle.join();
             Err(Z_ERR_GENERIC)
         }
@@ -285,9 +421,10 @@ fn open_blocking(connect: Option<String>, listen: Option<String>) -> Result<Sess
 
 // --- z_open / z_close ------------------------------------------------------
 
-/// Open a session, consuming the moved config (pico `z_open`). Blocks until
-/// Established. The `options` pointer is accepted for ABI compatibility and
-/// ignored in Round 1.
+/// Open a session, consuming the moved config (pico `z_open`). A `connect`
+/// config blocks until Established; a `listen` config returns as soon as the
+/// bind succeeds. The `options` pointer is accepted for ABI compatibility and
+/// ignored.
 #[no_mangle]
 pub unsafe extern "C" fn z_open(
     zs: *mut z_owned_session_t,
@@ -303,7 +440,6 @@ pub unsafe extern "C" fn z_open(
         *zs = z_owned_session_t::null_value();
         let cfg_handle = (*config)._this.handle;
         if cfg_handle.is_null() {
-            *zs = z_owned_session_t::null_value();
             return Z_ERR_NULL;
         }
         // z_open consumes the config: take ownership and null the source so a
@@ -316,7 +452,6 @@ pub unsafe extern "C" fn z_open(
         drop(cfg);
 
         if connect.is_none() && listen.is_none() {
-            *zs = z_owned_session_t::null_value();
             return crate::result::Z_ERR_INVALID;
         }
 
@@ -328,10 +463,7 @@ pub unsafe extern "C" fn z_open(
                 };
                 Z_OK
             }
-            Err(code) => {
-                *zs = z_owned_session_t::null_value();
-                code
-            }
+            Err(code) => code,
         }
     })
 }
@@ -423,6 +555,12 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
 // wz's drive loop already performs the read + lease/keepalive work these pico
 // tasks start, so the exports are Z_OK shims. They are REQUIRED: a real pico
 // program calls them after `z_open`, and a missing symbol would fail to link.
+// This also matches pico 1.9.0, where the background executor is started inside
+// `z_open` by default and these are legacy: `zp_start_read_task` re-starts the
+// already-running executor and `zp_start_lease_task` is itself a literal no-op
+// (`~/zenoh-pico/src/api/api.c:2491-2509`; the options are documented
+// "Deprecated ... started automatically when session is created",
+// `include/zenoh-pico/api/types.h:179-184`).
 
 /// pico `zp_start_read_task` — no-op (the drive loop already reads).
 #[no_mangle]

@@ -55,9 +55,27 @@ workspace = true
 # open/accept/reconnect machinery, keyexpr matching (wildcard-double /
 # includes) that routes `demo/a` to a `demo/**` subscriber, declare-subscriber
 # and pubsub-put. An incomplete feature set fails the handshake with a
-# pre-Established Terminal, so Round 1 rides the proven default bundle;
-# trimming to the exact pub/sub subset is a follow-up refinement.
-wz-runtime-tokio = { path = "../wz-runtime-tokio" }
+# pre-Established Terminal, so this rides the proven default bundle; trimming
+# to the exact pub/sub subset is a follow-up refinement.
+#
+# `routing-accept` is added explicitly because it is NOT in the default bundle
+# (it is a selectable role atom, `wz-runtime-tokio/Cargo.toml`). It gates
+# `wz_runtime_tokio::accept_loop`, which Round 2 needs for the pico-faithful
+# LISTENER: pico's `z_open(listen)` returns immediately and then accepts up to
+# `Z_LISTEN_MAX_CONNECTION_NB` = 10 CONCURRENT inbound peers into the one
+# session, and the accept loop is wz's bind-once/hold-N-peers foundation. Only
+# the loop itself is used here — no forwarding between faces (that is the
+# sibling `routing-routes` atom); this crate passes its own `FaceForwarder`
+# that lands each face in the C session's registry instead.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["routing-accept"] }
+
+# Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions
+# sharing one are the SAME peer on the wire — a listener would dedup/aggregate
+# them instead of holding two faces. pico generates a random `Z_ZID_LENGTH` = 16
+# byte zid per session when the config carries no explicit one
+# (`~/zenoh-pico/src/api/api.c:846-855`). `getrandom` is the same OS-entropy
+# source wz-runtime-tokio already uses AP-side for signing-key entropy.
+getrandom = "0.2"
 
 [dependencies.tokio]
 version = "1"

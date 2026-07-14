@@ -3,26 +3,34 @@
 //
 //! Publisher, subscriber, sample-closure, `z_put`, and the sample accessors.
 //!
+//! A pico session holds a SET of peers, so every operation here fans over the
+//! session's face registry (the `faces` module) rather than binding one wz
+//! session: a `connect` session has exactly one face, a `listen` session up to
+//! N.
+//!
 //! - **publisher** (`z_declare_publisher` / `z_publisher_put` /
-//!   `z_undeclare_publisher`): a keyexpr bound to a `Session` clone; `put`
-//!   calls the sync `Session::publish`. wz has no RAII `Publisher` type, so
-//!   Round 1 models a publisher as exactly that binding (pico's publisher is
-//!   likewise a keyexpr + session with put options).
+//!   `z_undeclare_publisher`): a keyexpr bound to the session's registry; a put
+//!   calls the sync `Session::publish` on every connected face. wz has no RAII
+//!   `Publisher` type, so a publisher is exactly that binding (pico's publisher
+//!   is likewise a keyexpr + session with put options).
 //! - **subscriber** (`z_closure_sample` + `z_declare_subscriber` /
 //!   `z_undeclare_subscriber`): the C closure `{ context, call, drop }` is
-//!   wrapped in a `FnMut(&dyn SampleView)` handed to `Session::declare_-
-//!   subscriber`. On each delivery it marshals the view into a borrowed
-//!   `z_loaned_sample_t` and invokes `call`. The C `drop(context)` runs when
-//!   the subscriber is undeclared (the wrapper's `Drop`).
+//!   recorded in the session's subscription SSOT and wrapped — once per face —
+//!   in a `FnMut(&dyn SampleView)` handed to that face's
+//!   `Session::declare_subscriber`, so one C subscriber sees samples from every
+//!   peer. On each delivery it marshals the view into a borrowed
+//!   `z_loaned_sample_t` and invokes `call`. The C `drop(context)` runs once,
+//!   when the subscription is undeclared and the last face's callback has
+//!   released the shared closure.
 //! - **sample accessors** (`z_sample_keyexpr` / `z_sample_payload`): the
 //!   marshaled sample is opaque to the C code — it only borrows it (valid for
 //!   the duration of `call`) and reads the keyexpr / payload back out.
 
 use std::ffi::c_void;
+use std::sync::Arc;
 
-use wz_runtime_tokio::runtime_impl::TokioRuntime;
 use wz_runtime_tokio::sample::SampleKind;
-use wz_runtime_tokio::session::{PublishOptions, SubscribeOptions, Subscriber, TokioSession};
+use wz_runtime_tokio::session::PublishOptions;
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::Reliability;
 
@@ -31,6 +39,7 @@ use crate::abi::{
     z_owned_bytes_t,
 };
 use crate::bytes::ByteBuf;
+use crate::faces::{SharedSession, SubId};
 use crate::ffi::{guarded, SendPtr};
 use crate::keyexpr::keyexpr_str;
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
@@ -99,9 +108,13 @@ impl z_owned_closure_sample_t {
     }
 }
 
-/// The Rust-side wrapper the subscriber callback owns. Its `Drop` invokes the
-/// C `drop(context)` exactly once, satisfying the pico teardown contract.
-struct CClosure {
+/// The Rust-side wrapper a subscription's callbacks share. Its `Drop` invokes
+/// the C `drop(context)` exactly once, satisfying the pico teardown contract.
+///
+/// One C subscription fans out to one wz callback PER FACE, so this is held
+/// behind an `Arc`: the C `drop(context)` runs when the last face's callback
+/// and the registry's SSOT entry have both released it.
+pub(crate) struct CClosure {
     context: SendPtr,
     call: z_closure_sample_callback_t,
     drop: z_closure_drop_callback_t,
@@ -120,11 +133,71 @@ impl Drop for CClosure {
     }
 }
 
+// SAFETY: sharing one subscription's `CClosure` across a per-face callback
+// requires `Sync` (for `Arc<CClosure>` — and so each callback — to be `Send`).
+// Sharing `&CClosure` is sound here because `call` is only ever invoked from
+// the session's single drive task: every face of a session is driven on ONE
+// task (the accept loop multiplexes its faces there, and a dialed session has
+// exactly one), so two callbacks never run concurrently. `drop` runs only when
+// the last `Arc` is released, which by construction cannot overlap a live
+// callback — a running callback holds a reference. That is exactly pico's
+// closure contract: the callback fires from the read task, the drop from
+// teardown, never concurrently.
+unsafe impl Sync for CClosure {}
+
+/// Build the wz-side subscriber callback for ONE face from a shared C closure.
+///
+/// On each delivery it marshals the wz `SampleView` into a borrowed
+/// `z_loaned_sample_t` and invokes the C `call`. The marshal (and so the
+/// borrowed keyexpr / payload) is valid only for the duration of that call —
+/// pico's contract, which is why the C side must copy anything it keeps.
+pub(crate) fn make_subscriber_callback(
+    closure: Arc<CClosure>,
+) -> impl FnMut(&dyn SampleView) + Send + 'static {
+    move |view: &dyn SampleView| {
+        let call = match closure.call {
+            Some(f) => f,
+            None => return,
+        };
+        let keyexpr = view.keyexpr().to_owned();
+        let payload = view.payload().to_vec();
+        let mut marshal = SampleMarshal {
+            keyexpr,
+            payload,
+            loaned_keyexpr: z_loaned_keyexpr_t {
+                _start: std::ptr::null(),
+                _len: 0,
+            },
+            loaned_payload: z_loaned_bytes_t {
+                handle: std::ptr::null_mut(),
+                _pad: [std::ptr::null_mut(); 3],
+            },
+        };
+        marshal.loaned_keyexpr = z_loaned_keyexpr_t {
+            _start: marshal.keyexpr.as_ptr(),
+            _len: marshal.keyexpr.len(),
+        };
+        marshal.loaned_payload.handle = &marshal.payload as *const Vec<u8> as *mut c_void;
+        let sample_ptr = &marshal as *const SampleMarshal as *const z_loaned_sample_t;
+        // SAFETY: `call` is the C callback; `marshal` outlives the call and the
+        // borrowed sample is valid only for its duration (pico contract).
+        // `context` travels with the drive dispatch. A panic unwinding OUT of
+        // the C callback across this `extern "C"` boundary is UB and would tear
+        // down the drive thread, so it is caught here — the drive loop survives
+        // a misbehaving callback.
+        let ctx = closure.context.0;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            call(sample_ptr, ctx);
+        }));
+    }
+}
+
 // --- publisher -------------------------------------------------------------
 
-/// Behind a `z_owned_publisher_t` handle: a keyexpr bound to a session clone.
+/// Behind a `z_owned_publisher_t` handle: a keyexpr bound to the session's
+/// face registry, so a put fans out to every connected peer.
 struct PublisherState {
-    session: TokioSession,
+    shared: Arc<SharedSession>,
     keyexpr: String,
 }
 
@@ -161,10 +234,20 @@ impl z_owned_publisher_t {
 
 // --- subscriber ------------------------------------------------------------
 
-/// Behind a `z_owned_subscriber_t` handle: the RAII wz subscriber. Dropping it
-/// undeclares the subscriber (and drops the callback → C `drop(context)`).
+/// Behind a `z_owned_subscriber_t` handle: the C subscription's id in the
+/// session's SSOT. Dropping it retracts the subscription — removing it from
+/// the SSOT (so no future face replays it) and dropping every live face's wz
+/// subscriber, which emits each wire undeclare and releases the last closure
+/// reference (→ the C `drop(context)`).
 struct SubscriberState {
-    _subscriber: Subscriber<TokioRuntime>,
+    shared: Arc<SharedSession>,
+    id: SubId,
+}
+
+impl Drop for SubscriberState {
+    fn drop(&mut self) {
+        self.shared.undeclare_subscriber(self.id);
+    }
 }
 
 /// Owned subscriber (pico `z_owned_subscriber_t`). Handle model (see publisher).
@@ -303,7 +386,7 @@ pub unsafe extern "C" fn z_put(
             Some(k) => k,
             None => return Z_ERR_INVALID,
         };
-        match state.session.publish(ke, &buf, put_options()) {
+        match state.shared.publish_all(ke, &buf, &put_options()) {
             Ok(_) => Z_OK,
             Err(_) => Z_ERR_GENERIC,
         }
@@ -333,7 +416,7 @@ pub unsafe extern "C" fn z_declare_publisher(
             None => return Z_ERR_INVALID,
         };
         let boxed = Box::new(PublisherState {
-            session: state.session.clone(),
+            shared: state.shared.clone(),
             keyexpr: ke,
         });
         *publisher = z_owned_publisher_t {
@@ -362,7 +445,10 @@ pub unsafe extern "C" fn z_publisher_put(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        match state.session.publish(&state.keyexpr, &buf, put_options()) {
+        match state
+            .shared
+            .publish_all(&state.keyexpr, &buf, &put_options())
+        {
             Ok(_) => Z_OK,
             Err(_) => Z_ERR_GENERIC,
         }
@@ -512,56 +598,17 @@ pub unsafe extern "C" fn z_declare_subscriber(
             None => return Z_ERR_INVALID,
         };
 
-        let rust_cb = move |view: &dyn SampleView| {
-            // Reference the whole `cclosure` first so the (RFC-2229 disjoint)
-            // capture takes the entire `CClosure` — which is `Send` — rather
-            // than reaching into the non-`Send` raw `context` pointer. This
-            // also keeps the `CClosure` owned by the callback, so its `Drop`
-            // (the C `drop(context)`) runs when the subscriber is undeclared.
-            let cb = &cclosure;
-            let call = match cb.call {
-                Some(f) => f,
-                None => return,
-            };
-            let keyexpr = view.keyexpr().to_owned();
-            let payload = view.payload().to_vec();
-            let mut marshal = SampleMarshal {
-                keyexpr,
-                payload,
-                loaned_keyexpr: z_loaned_keyexpr_t {
-                    _start: std::ptr::null(),
-                    _len: 0,
-                },
-                loaned_payload: z_loaned_bytes_t {
-                    handle: std::ptr::null_mut(),
-                    _pad: [std::ptr::null_mut(); 3],
-                },
-            };
-            marshal.loaned_keyexpr = z_loaned_keyexpr_t {
-                _start: marshal.keyexpr.as_ptr(),
-                _len: marshal.keyexpr.len(),
-            };
-            marshal.loaned_payload.handle = &marshal.payload as *const Vec<u8> as *mut c_void;
-            let sample_ptr = &marshal as *const SampleMarshal as *const z_loaned_sample_t;
-            // SAFETY: `call` is the C callback; `marshal` outlives the call and
-            // the borrowed sample is valid only for its duration (pico
-            // contract). `context` travels with the (single-threaded per the
-            // pico closure contract) drive dispatch. A panic unwinding OUT of
-            // the C callback across this `extern "C"` boundary is UB and would
-            // tear down the drive thread, so it is caught here — the drive loop
-            // survives a misbehaving callback.
-            let ctx = cb.context.0;
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                call(sample_ptr, ctx);
-            }));
-        };
-
-        match state
-            .session
-            .declare_subscriber(ke, SubscribeOptions::default(), rust_cb)
-        {
-            Ok(sub) => {
-                let boxed = Box::new(SubscriberState { _subscriber: sub });
+        // Record the subscription in the session's SSOT and declare it on every
+        // face that is already up. With no peer yet — a listener before its
+        // first connection — this declares nothing on the wire and still
+        // succeeds (pico's declare-before-peer); each face replays the SSOT as
+        // it comes up.
+        match state.shared.declare_subscriber(ke, Arc::new(cclosure)) {
+            Ok(id) => {
+                let boxed = Box::new(SubscriberState {
+                    shared: state.shared.clone(),
+                    id,
+                });
                 *subscriber = z_owned_subscriber_t {
                     handle: Box::into_raw(boxed) as *mut c_void,
                     _pad: [std::ptr::null_mut(); 3],

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! # wz-capi-pico — §5.27 api-compat-pico, Round 1
+//! # wz-capi-pico — §5.27 api-compat-pico
 //!
 //! A zenoh-pico-compatible C ABI (`z_*` / `zp_*` `#[no_mangle] extern "C"`
 //! symbols) wrapping the wz AP `wz::runtime_tokio` `Session`, so a zenoh-pico
@@ -11,12 +11,22 @@
 //! The binary-drop-in design is sound: pico defines the owned-type operations
 //! as EXTERN symbols in `api.c` (not `static inline`), so these `#[no_mangle]`
 //! exports replace them at link time, and idiomatic pico code touches the
-//! owned structs only through those ops. Round 1 VALIDATES the ABI end-to-end
-//! wz-to-wz over loopback TCP (see `tests/pubsub_roundtrip.rs`); interop
-//! against a separately-compiled zenoh-pico binary is deferred to a cc
-//! round-trip test (a follow-up round).
+//! owned structs only through those ops. The ABI is VALIDATED end-to-end
+//! wz-to-wz over loopback TCP (`tests/pubsub_roundtrip.rs`,
+//! `tests/listener_multipeer.rs`); interop against a separately-compiled
+//! zenoh-pico binary is deferred to a cc round-trip test (a follow-up round).
 //!
-//! ## Round 1 surface
+//! ## The session model
+//!
+//! A pico session is a PEER SET, not a single link: a `connect` session holds
+//! one peer (the router it dialed), a `listen` session accepts up to
+//! `Z_LISTEN_MAX_CONNECTION_NB` = 10 CONCURRENT inbound peers. wz's unicast
+//! `Session` is one peer by construction, so the C handle here is a REGISTRY of
+//! per-face wz sessions plus the C-declared subscription SSOT replayed onto
+//! each face (the `faces` module). `z_open(listen)` therefore returns as soon as the
+//! endpoint is bound, with zero peers and no error, exactly as pico's does.
+//!
+//! ## Surface
 //!
 //! A complete core session + pub/sub slice:
 //! - **config**: `z_config_default`, `zp_config_insert` (connect/listen keys
@@ -58,6 +68,7 @@
 pub mod abi;
 pub mod bytes;
 pub mod config;
+mod faces;
 mod ffi;
 pub mod keyexpr;
 pub mod pubsub;
