@@ -333,10 +333,14 @@ print("  implementation axis: %s" % (
     " ".join("%s=%d" % (k, tally[k]) for k in sorted(tally)) or "(nothing tagged)"))
 print("  impl axis UNAUDITED (active, no tag) = %d of %d active" % (
     len(unaudited), active_n))
-print("  REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) >= %d%s: %s" % (
-    len(remaining),
-    "  [LOWER BOUND -- %d unaudited active atoms not counted]" % len(unaudited)
-    if unaudited else "  [EXACT -- every atom's impl axis is tagged]",
+# R311y300 — the >= lives INSIDE the conditional. It was outside, so the EXACT
+# branch printed ">= N [EXACT]" -- an inequality asserting exactness, in the one
+# gate whose entire thesis is not overstating what it knows.
+print("  REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) %s: %s" % (
+    ">= %d  [LOWER BOUND -- %d unaudited active atoms not counted]"
+    % (len(remaining), len(unaudited))
+    if unaudited else
+    "= %d  [EXACT -- every atom's impl axis is tagged]" % len(remaining),
     ", ".join(remaining) if remaining else "(none)"))
 
 if fail_undeclared:

@@ -83,8 +83,9 @@ FOREIGN_NON_OBSERVABLE = {
 # `status == "active"` OR this set, and audit-catalog-status.sh only permits COMPLETE
 # on status=active -- so the first disjunct always carries it and this one is never
 # consulted. That inertness is load-bearing on A3 actually running: if A3 is disarmed
-# and a reserved atom is tagged COMPLETE, it silently leaves `built`, shrinks the
-# denominator, and INFLATES the proven percentage with nothing failing. R311y299 gave
+# and a reserved atom is tagged COMPLETE, it silently leaves `built`, shrinking the
+# denominator and the unproven count with nothing failing (R311y300: NOT "inflates the
+# proven percentage" -- this gate prints counts, never a percentage, per R311jl). R311y299 gave
 # A3 a WZ_A3_REQUIRE mode for exactly this class of forfeit. If COMPLETE is ever
 # widened to reserved, it MUST be added here in the same commit.
 IMPL_TAGS_BUILT = {"FOUNDATIONAL", "PARTIAL"}

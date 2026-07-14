@@ -113,10 +113,16 @@ jobs:
         # mnemosyne-cli install it printed "SKIP ... OK" and exited 0, which
         # reads as a PASS. This workflow has no Layer A4 step at all, so
         # nothing else here reads the inventory and the forfeit was total.
-        # Mirrors Layer A's MNEMOSYNE_SKIP guard (:104-106): when the tool is
-        # absent the step is VISIBLY skipped rather than silently green; when
-        # it is present, WZ_A3_REQUIRE makes a skip impossible.
-        if: env.MNEMOSYNE_SKIP != '1'
+        #
+        # R311y300 — deliberately NO `if: env.MNEMOSYNE_SKIP != '1'` guard,
+        # unlike Layer A above. R311y299 first added one, which was the same
+        # forfeit relabelled: MNEMOSYNE_SKIP is set ONLY by the install
+        # fallback (:88-90), so the guard and WZ_A3_REQUIRE are DISJOINT --
+        # install fails => step skipped => the require-mode never evaluates =>
+        # green release with A3 never run. This job PROVISIONS mnemosyne-cli,
+        # so its absence is a provisioning regression, not an honest skip, and
+        # a release must not ship with the only inventory<->source gate
+        # disarmed. Matches ci.yml, which had it right.
         env:
           WZ_A3_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer A3

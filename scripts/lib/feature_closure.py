@@ -26,7 +26,16 @@ It refutes; it never confirms. Three gaps are inherent:
   - **Non-active atoms are exempt.** A FOUNDATIONAL atom has zero `cfg(feature=..)` sites
     (Layer A3 invariant #2), so its code is compiled whether or not the feature is
     enabled — "not in the closure" therefore does not mean "not in the binary", and the
-    arm must not fire on it. 37 of the 160 denominator atoms are in this class.
+    arm must not fire on it. (R311y300 removed a hardcoded "37 of the 160 denominator
+    atoms" here: the live denominator was already 162 and nothing gated the number, so
+    it rotted silently — the same defect class R311y299 found in audit-catalog-status.sh's
+    own examples. Layer A4 PRINTS the live denominator every run; read it there.)
+    CAVEAT, and it is load-bearing: "zero cfg sites" is invariant #2's guarantee about
+    the atom's OWN feature name — it does NOT imply the code is always-on. session-extqos
+    is reserved with 0 own cfg sites yet gated by 155 `transport-qos` sites, so it is
+    elidable and the "compiled regardless" inference above is FALSE for it. It is not
+    FOUNDATIONAL today (it is PARTIAL), so this exemption does not currently reach it —
+    but the premise is narrower than the bullet's phrasing suggests.
   - **In-process tests have a broad closure.** A test that drives no wz binary links the
     `wz-integration-tests` dev-dependency graph, which enables ~83 wz features. For those
     45 corpus files the arm can refute very little.
