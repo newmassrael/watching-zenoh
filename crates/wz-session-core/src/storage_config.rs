@@ -70,18 +70,23 @@ pub struct StorageConfig {
     /// manager resolves it to a [`crate::storage_volume::Volume`].
     pub volume_id: String,
     /// Whether this storage is AUTHORITATIVE for its keyexpr (a "complete"
-    /// queryable that fully owns the space) vs partial. zenoh `complete`. NOTE
-    /// (honest status): nothing reads this field yet — the `storage-mgr-complete-flag`
-    /// behavior (R311y59) currently drives the queryable from a `declare_with_backend`
-    /// param, NOT from here; threading this field into the service is the
-    /// composition follow-up.
+    /// queryable that fully owns the space) vs partial. zenoh `complete`. WIRED
+    /// (R311y61): the live `StorageService::declare_with_backend` reads this field
+    /// into `QueryableOptions::with_complete(storage_queryable_complete(config.complete))`
+    /// (the `storage-mgr-complete-flag` gate), retiring the R311y59 standalone
+    /// `complete` param. (Pre-y61 this field was inert — the note here used to say
+    /// so; it is now the SSOT the queryable's COMPLETE bit flows from.)
     pub complete: bool,
     /// An optional keyexpr prefix to STRIP from a key before storing (and
     /// re-prepend on read), so a storage can hold keys relative to a mount point.
-    /// zenoh `strip_prefix`. NOTE (honest status): the `storage-mgr-strip-prefix`
-    /// LOGIC exists (R311y58 `storage_strip_prefix`) but is NOT yet applied to a
-    /// live key path from this field — wiring it (and the §5.11 backend Option-key
-    /// for the exact-prefix case) is the follow-up that closes the R311wt gap e2e.
+    /// zenoh `strip_prefix`. WIRED (R311y61): the live service applies this field
+    /// via `StorageState::with_strip_prefix(backend, config.strip_prefix)` (under
+    /// the `storage-mgr-strip-prefix` feature) to the capture + query key path,
+    /// including the §5.11 backend `Option`-key for the exact-prefix (mount-root)
+    /// case; the composed strip-on-capture / restore-on-query is proven e2e through
+    /// the manager (wz-runtime-tokio `storage_manager_service` tests). (Pre-y61 the
+    /// logic existed but was not applied from this field — the note here used to
+    /// say so.)
     pub strip_prefix: Option<String>,
     /// The stale-metadata GC schedule (the `storage-mgr-garbage-collection` atom).
     pub garbage_collection: GarbageCollectionConfig,

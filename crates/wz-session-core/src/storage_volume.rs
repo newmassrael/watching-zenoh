@@ -27,13 +27,17 @@
 //! kernel seam.
 //!
 //! NOTE (honest status): applying a config's `key_expr` / `strip_prefix` /
-//! `complete` to the live key path is the storage manager / service's job and is
-//! NOT YET WIRED — `MemoryVolume` accepts the config but does not consult it, and
-//! no caller drives a non-default config through this seam yet (the R311y55 carry's
-//! composition follow-up). The architectural split is faithful to zenoh (its
-//! MemoryBackend also creates a bare store; strip/complete are applied by the
-//! service layer, `storage-manager/lib.rs:429`/`475`), but zenoh's MemoryBackend
-//! DOES retain the config for its admin-status, which wz's seam does not.
+//! `complete` to the live key path is the storage manager / SERVICE's job, NOT the
+//! volume's — `MemoryVolume::create_storage` deliberately makes a BARE backend and
+//! does not consult the config beyond it (the architectural split, faithful to
+//! zenoh, whose MemoryBackend likewise creates a bare store; strip/complete are
+//! applied by the service layer, `storage-manager/lib.rs:429`/`475`). What WAS a
+//! standing gap when this note was written — no caller driving a non-default config
+//! through the service — is now CLOSED (R311y61): `StorageService::declare_with_backend`
+//! applies `config.strip_prefix` / `config.complete`, and `RuntimeStorageManager`
+//! drives a `create_storage`-produced backend through it per `StorageConfig`, proven
+//! e2e (wz-runtime-tokio `storage_manager_service` tests). zenoh's MemoryBackend also
+//! retains the config for its admin-status, which wz's runtime-agnostic seam does not.
 
 use crate::storage_backend::{History, MemoryStorage, StorageBackend};
 use crate::storage_config::StorageConfig;
