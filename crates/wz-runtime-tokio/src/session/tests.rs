@@ -7129,3 +7129,74 @@ fn queryable_staged_before_undeclare_suppressed_but_final_still_sent() {
         "the ResponseFinal is still emitted — the requester is not starved"
     );
 }
+
+// R311y290 — `query`'s deferred-fire drain is gated on `allows_local`, mirroring
+// `publish`. The gate matters for a caller whose inbound dispatch runs on a
+// DIFFERENT thread from the one calling `query` (wz-capi-pico drives its peer
+// faces on a drive thread while a C application thread calls `z_get`): an
+// UNGATED drain takes the WHOLE per-session queue, so a Remote-only query would
+// run another plane's staged subscriber callback on the querying thread,
+// concurrently with the drive thread running its own — the same callback context
+// on two threads at once. Everything `query` itself stages is loopback-only, so
+// gating costs a Remote-only query nothing.
+#[test]
+fn remote_only_query_does_not_drain_another_planes_staged_fire() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (session, _driver) = build_session();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_cb = fired.clone();
+    let _sub = session
+        .declare_subscriber(
+            "demo/**",
+            SubscribeOptions::default(),
+            move |_v: &dyn wz_session_core::sink::SampleView| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("declare_subscriber");
+
+    // Stage a loopback fire WITHOUT draining it — exactly the window the drive
+    // loop is in between its `dispatch_event` and its `drain_deferred_fires`.
+    let sample =
+        super::publish_common::build_loopback_sample("demo/a", b"payload", &PublishOptions::put());
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .subscribers
+        .local_publish(&sample);
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "precondition: the fire is staged, not yet drained"
+    );
+
+    // A Remote-only query must NOT drain it.
+    let opts = QueryOptions {
+        allowed_destination: Locality::Remote,
+        ..Default::default()
+    };
+    let issued = session.query(
+        "q/**",
+        opts,
+        |_r: &dyn wz_session_core::reply_sink::ReplyView| {},
+        |_rid: u64| {},
+    );
+    // Non-vacuity: the query must actually have reached the drain site. A query
+    // that errored early would leave the fire staged for the wrong reason.
+    assert!(
+        issued.is_ok(),
+        "precondition: the query must succeed so it reaches the drain site"
+    );
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "a Remote-only query drained another plane's staged fire — the R311y290 \
+         gate is gone, and a foreign caller's callback can now run on two threads"
+    );
+
+    // The drive loop's drain still runs it.
+    assert_eq!(session.drain_deferred_fires(), 1);
+    assert_eq!(fired.load(Ordering::SeqCst), 1);
+}

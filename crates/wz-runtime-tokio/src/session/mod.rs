@@ -1993,18 +1993,29 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 }
             }
 
-            // R311lg — drain the fires this call staged (the loopback
-            // `deliver_local_reply` path and, R311li, the deferred
-            // local queryable handler jobs — whose replies deliver
-            // back into the local reply registry and drain in this
-            // same pass) so local replies run synchronously on the
-            // caller thread, outside the observer lock, before `query`
-            // returns. An overlapping drive-loop drain is lossless
-            // (the cell backlog hands the overlapped call to the
-            // active drainer).
-            self.drain_deferred_fires();
-
+            // R311y290 — BOTH drains are gated on `allows_local`, mirroring
+            // [`Self::publish`], which drains only inside its `allows_local()`
+            // arm ("a Remote-only publish stages nothing"). Everything this call
+            // stages is loopback-only (the `deliver_local_reply` path + the
+            // deferred local queryable handler jobs), so a Remote-only query has
+            // nothing of its OWN to drain — but an UNGATED drain here still takes
+            // the whole per-session queue and would run ANOTHER plane's staged
+            // fires (e.g. a subscriber callback) on THIS caller's thread. That is
+            // a real hazard for a caller whose dispatch runs on a different
+            // thread (wz-capi-pico drives faces on a drive thread while a C app
+            // thread calls `z_get`): the same callback context would run on two
+            // threads at once. Gating restores "only the drive loop drains".
+            // No existing caller passes `Locality::Remote` to `query` (every
+            // `Locality::Remote` in the tree is a `PublishOptions`), so this is a
+            // no-op for the current tree.
             if allows_local {
+                // R311lg — drain the fires this call staged so local replies run
+                // synchronously on the caller thread, outside the observer lock,
+                // before `query` returns. An overlapping drive-loop drain is
+                // lossless (the cell backlog hands the overlapped call to the
+                // active drainer).
+                self.drain_deferred_fires();
+
                 // R311li — the synthetic loopback Final closes the
                 // loopback half of the pending entry's
                 // `remaining_finals` counter AFTER the drain above ran
@@ -2202,10 +2213,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             }
 
             // R311lg / R311li — drain + post-drain loopback Final; see
-            // `Session::query` for the ordering rationale.
-            self.drain_deferred_fires();
-
+            // `Session::query` for the ordering rationale and for why R311y290
+            // gates BOTH drains on `allows_local`.
             if allows_local {
+                self.drain_deferred_fires();
+
                 R::with_mutex_mut(&self.observer, |observer| {
                     observer.replies.deliver_local_final(rid);
                 });
