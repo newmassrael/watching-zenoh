@@ -775,9 +775,9 @@ where
     F: FnMut(IterationEvent<'_>),
     T: TimeSource,
 {
-    // Nothing ever notifies this, and `next_ms` is constant `None`, so the
-    // loop below arms exactly what it armed before R311y296.
-    let never = tokio::sync::Notify::new();
+    // A constant-`None` deadline with no revision source: the wake `min` below
+    // is unchanged and the re-arm branch is not even constructed, so this is
+    // byte-identical to the pre-R311y296 loop at zero per-iteration cost.
     drive_session_until_terminal_with_extra_deadline(
         driver,
         actions,
@@ -788,10 +788,25 @@ where
         on_event,
         ExtraDeadline {
             next_ms: || None,
-            revised: &never,
+            revised: None,
         },
     )
     .await
+}
+
+/// The `revised` wake of an [`ExtraDeadline`], or a future that never
+/// completes when there is none.
+///
+/// The `None` arm is unreachable in [`drive_session_until_terminal_with_extra_deadline`]
+/// (its `select!` precondition gates the call on `is_some`), but the helper
+/// stays TOTAL rather than unwrapping: a future refactor that drops the
+/// precondition then degrades to "never re-arm" — a late sweep — instead of a
+/// panic on the data plane.
+async fn notified_or_pending(revised: Option<&tokio::sync::Notify>) {
+    match revised {
+        Some(notify) => notify.notified().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// R311y296 — a caller-owned deadline the drive loop folds into its
@@ -822,8 +837,19 @@ pub struct ExtraDeadline<'a, G> {
     /// both is the caller's contract, exactly as it already is for
     /// [`crate::session::Session::query`]'s own deadline arithmetic.
     pub next_ms: G,
-    /// Notified when `next_ms` may have changed.
-    pub revised: &'a tokio::sync::Notify,
+    /// Notified when `next_ms` may have changed, or `None` for a caller
+    /// whose deadline never changes asynchronously.
+    ///
+    /// `Option` rather than an always-present never-notified `Notify`, and
+    /// that is a real cost rather than a style choice: the loop arms this
+    /// once per ITERATION — i.e. once per inbound frame on the data plane —
+    /// and `Notified::poll` takes the `Notify`'s internal waiter lock to
+    /// register, then takes it again to deregister when the `select!` drops
+    /// it. `None` makes the branch's `select!` precondition false, so tokio
+    /// never constructs the future at all and the ~97 pre-existing callers
+    /// of [`drive_session_until_terminal`] pay literally nothing — which is
+    /// what lets that delegation claim to be free rather than merely cheap.
+    pub revised: Option<&'a tokio::sync::Notify>,
 }
 
 /// R311y296 — [`drive_session_until_terminal`] plus a caller-owned
@@ -965,7 +991,12 @@ where
                     // possibly much shorter, wake. A spurious wake is harmless
                     // (it just recomputes), which is why the signal needs no
                     // payload and no exactly-once discipline.
-                    _ = deadline_revised.notified() => {}
+                    //
+                    // The precondition is what keeps this free for callers with
+                    // no revision source: tokio evaluates the branch expression
+                    // ONLY when the precondition holds, so `None` costs no
+                    // `Notified` register/deregister per iteration.
+                    _ = notified_or_pending(deadline_revised), if deadline_revised.is_some() => {}
                     outcome = poll_and_dispatch_one(driver, actions, engine) => {
                         // §5.21 routing-namespace — strip the DIRECT decoded
                         // FramePayload before dispatch. Covers BOTH the

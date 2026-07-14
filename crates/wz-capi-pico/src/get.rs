@@ -34,6 +34,50 @@
 //! it, face 1 answering (and its entry dropping) before face 2's `query` is
 //! issued would take the refcount to zero and complete the get early.
 //!
+//! ## THE CONSOLIDATION DIVERGENCE (read this before trusting `z_get_options_t`)
+//!
+//! **`consolidation` is transmitted on the wire and has NO client-side effect
+//! here. It is the DEFAULT path, not a corner case.**
+//!
+//! pico consolidates on the QUERIER. Under `Z_CONSOLIDATION_MODE_LATEST` it does
+//! not run the reply callback per reply at all
+//! (`~/zenoh-pico/src/session/query.c:178-181` — `if (pen_qry->_consolidation !=
+//! Z_CONSOLIDATION_MODE_LATEST) callback(...)`); it caches replies deduped by
+//! keyexpr keeping the newest timestamp (`query.c:143-172`) and delivers the
+//! survivors at the LAST final (`query.c:239-247`). And LATEST is what the
+//! default `AUTO` resolves to whenever the selector carries no `_time=`
+//! (`src/net/primitives.c:567-573`, default set at `src/api/api.c:1725`).
+//!
+//! So: a stock pico `z_get` against two queryables answering on ONE key delivers
+//! **one** reply; this crate delivers **two**, interleaved as they land rather
+//! than batched before the completion. `MONOTONIC` is NOT part of this gap —
+//! pico's `drop` flag there gates only the cache store, never the callback at
+//! `query.c:179`, so pico delivers every reply under MONOTONIC too and wz
+//! matches.
+//!
+//! **Why it is not fixed here, and where it belongs.** Consolidation is a wz
+//! CORE concept, not a binding one: `ConsolidationMode` lives in
+//! `wz-session-core::query_mode` and `Session::query` already accepts
+//! `with_consolidation(..)`, so wz's own Rust API has exactly the same gap — a
+//! fix in this crate would leave that unfixed and duplicate a core concern at the
+//! ABI layer. The real home is the pending-reply table
+//! ([`wz_session_core::reply::ReplyRegistry`]), which is where pico puts it. Two
+//! things must land there first, and neither is a binding detail:
+//! 1. a reply TIMESTAMP on the [`ReplyView`] seam — the wire decode has it and
+//!    discards it (`wz-session-core/src/reply.rs`, `timestamp: _`), and without
+//!    it "keep the newest" is undecidable;
+//! 2. a bounded per-pending reply cache that the no-alloc MCU profile can carry
+//!    (`ReplyRegistry` is `BoundedVec`-backed by construction).
+//!
+//! The inventory's `query-consolidation` atom claimed `C=indep reply dedup`;
+//! R311y296 corrected that reason to say what is actually built (the Q_C wire
+//! ext) and what is not, rather than leave the SSOT asserting a behaviour no
+//! code implements. The atom stays `active` — that is right on the A3 invariant,
+//! since the ext IS a real cfg knob gating real code — because the A3 grammar
+//! has no "active but half-built" tag (its `PARTIAL` tag requires `reserved`,
+//! and a reserved atom must have zero cfg sites, which this one does not). The
+//! honesty therefore lives in the reason's prose and here, not in a status flip.
+//!
 //! ## What is deliberately NOT exported, and why that is loud
 //!
 //! Same principle as the responder half: a symbol this round cannot honour is
@@ -320,16 +364,50 @@ pub(crate) type CReplyClosure = FfiClosure<z_closure_reply_callback_t>;
 // thread.
 unsafe impl Sync for CReplyClosure {}
 
+/// The querier-side `accept_replies` gate — pico's
+/// `if (!pen_qry->_anyke && !_z_keyexpr_intersects(&pen_qry->_key, keyexpr))`
+/// -> discard the reply (`~/zenoh-pico/src/session/query.c:121-127`).
+///
+/// This is the RECEIVE half of `accept_replies`, and it is on by default:
+/// `_anyke` is false unless the caller asked for `Z_REPLY_KEYEXPR_ANY`
+/// (`primitives.c:575-578`), and the default is `Z_REPLY_KEYEXPR_MATCHING_QUERY`
+/// (`api/constants.h:291`). [`transmit_parameters`] is the SEND half; a getter
+/// with only the send half would still surface a reply on a key disjoint from
+/// its query, which pico silently drops.
+///
+/// It matters precisely because this crate is a drop-in against FOREIGN peers:
+/// R3a's responder already enforces `reply ⊆ query` before emitting
+/// ([`crate::query::z_query_reply`]), so a wz↔wz deployment never exercises this
+/// — but a real pico/zenoh peer is exactly what pico defends against here, and
+/// it is the deployment the crate exists for.
+///
+/// Routed through the SAME intersection SSOT the responder side uses
+/// ([`crate::query::reply_keyexpr_is_covered`]) rather than re-derived, so the
+/// two halves cannot drift apart.
+struct ReplyGate {
+    /// The keyexpr the get asked under — pico's `pen_qry->_key`.
+    query_keyexpr: String,
+    /// pico's `pen_qry->_anyke`: set when the caller passed
+    /// `Z_REPLY_KEYEXPR_ANY` OR wrote `_anyke` into the selector itself
+    /// (`primitives.c:575-578` ORs the two).
+    anyke: bool,
+}
+
 /// Fire the C reply callback for one inbound reply on one face.
 ///
 /// Marshals the wz [`ReplyView`] into a borrowed `z_loaned_reply_t` and invokes
 /// `call`. The marshal is valid only for that call — pico's contract, which is
 /// why the C side must copy anything it keeps.
-fn fire_reply(closure: &CReplyClosure, view: &dyn ReplyView) {
+fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn ReplyView) {
     let call = match closure.call {
         Some(f) => f,
         None => return,
     };
+    // pico drops a reply the query does not accept BEFORE building it
+    // (`query.c:121-127`) — the callback never sees it.
+    if !crate::query::reply_keyexpr_is_covered(&gate.query_keyexpr, view.keyexpr(), gate.anyke) {
+        return;
+    }
     let mut marshal = ReplyMarshal::new(view);
     // Bind AFTER the move out of `new` — final address only here.
     marshal.bind();
@@ -510,6 +588,73 @@ pub unsafe extern "C" fn z_get_options_default(options: *mut z_get_options_t) {
     (*options).accept_replies = crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY;
 }
 
+// --- query-option constructors ---------------------------------------------
+//
+// pico's seven option constructors (`~/zenoh-pico/src/api/api.c:442-462`,
+// declared `include/zenoh-pico/api/primitives.h:1021-1080`). All are UNGATED —
+// they sit outside every `#if` in both files — so a default build has all seven
+// and a drop-in must too.
+//
+// R311y296 exports them because they are the idiomatic way a pico program fills
+// `z_get_options_t`: `opts.consolidation = z_query_consolidation_none();` is the
+// documented form, and without these it fails to link. Six of the seven sit
+// squarely in the basic `z_get` flow — far more mainstream than the querier
+// family this round deliberately withholds — and this crate's own docs cite
+// `z_reply_keyexpr_default()` and `z_query_consolidation_default()` as the
+// authority for the defaults while not exporting them, which was incoherent.
+
+/// pico `z_query_target_default` (`api.c:442`) — `Z_QUERY_TARGET_DEFAULT`.
+#[no_mangle]
+pub extern "C" fn z_query_target_default() -> z_query_target_t {
+    Z_QUERY_TARGET_BEST_MATCHING
+}
+
+/// pico `z_reply_keyexpr_default` (`api.c:444`) — `Z_REPLY_KEYEXPR_DEFAULT`,
+/// which is `Z_REPLY_KEYEXPR_MATCHING_QUERY` (`api/constants.h:291`), NOT ANY.
+#[no_mangle]
+pub extern "C" fn z_reply_keyexpr_default() -> z_reply_keyexpr_t {
+    crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY
+}
+
+/// pico `z_query_consolidation_auto` (`api.c:446-448`).
+#[no_mangle]
+pub extern "C" fn z_query_consolidation_auto() -> z_query_consolidation_t {
+    z_query_consolidation_t {
+        mode: Z_CONSOLIDATION_MODE_AUTO,
+    }
+}
+
+/// pico `z_query_consolidation_latest` (`api.c:450-462` family).
+#[no_mangle]
+pub extern "C" fn z_query_consolidation_latest() -> z_query_consolidation_t {
+    z_query_consolidation_t {
+        mode: Z_CONSOLIDATION_MODE_LATEST,
+    }
+}
+
+/// pico `z_query_consolidation_monotonic`.
+#[no_mangle]
+pub extern "C" fn z_query_consolidation_monotonic() -> z_query_consolidation_t {
+    z_query_consolidation_t {
+        mode: Z_CONSOLIDATION_MODE_MONOTONIC,
+    }
+}
+
+/// pico `z_query_consolidation_none`.
+#[no_mangle]
+pub extern "C" fn z_query_consolidation_none() -> z_query_consolidation_t {
+    z_query_consolidation_t {
+        mode: Z_CONSOLIDATION_MODE_NONE,
+    }
+}
+
+/// pico `z_query_consolidation_default` (`api.c:462`) — an alias of
+/// [`z_query_consolidation_auto`], not of `_none`.
+#[no_mangle]
+pub extern "C" fn z_query_consolidation_default() -> z_query_consolidation_t {
+    z_query_consolidation_auto()
+}
+
 /// The effective timeout for a get, applying pico's `0 → default` rewrite
 /// (`src/api/api.c:1762-1764`).
 ///
@@ -575,7 +720,12 @@ fn get_options(
     // (`src/net/primitives.c:567-573`): `_time=` in the selector → NONE (a
     // time-ranged query wants every matching sample), else LATEST. So AUTO never
     // reaches the wire, which is why wz's `ConsolidationMode` has no `Auto`
-    // variant to map onto — the resolution is ported here rather than deferred.
+    // variant to map onto.
+    //
+    // ⚠ Only the RESOLUTION is ported. The resolved mode's client-side EFFECT is
+    // a NAMED DIVERGENCE — see `THE CONSOLIDATION DIVERGENCE` in the module doc.
+    // Do not read the `with_consolidation` call below as honouring the mode: it
+    // sets the wire ext and nothing else.
     let resolved = if consolidation == Z_CONSOLIDATION_MODE_AUTO {
         if parameters_has_time_selector(&parameters) {
             Z_CONSOLIDATION_MODE_NONE
@@ -591,9 +741,16 @@ fn get_options(
             opts = opts.with_consolidation(ConsolidationMode::Monotonic)
         }
         Z_CONSOLIDATION_MODE_LATEST => opts = opts.with_consolidation(ConsolidationMode::Latest),
-        // Any other value is out of pico's enum; pico would send the raw byte.
-        // Leaving it unset elides the ext (pico's `!= DEFAULT` predicate,
-        // `codec/message.c:402`), the conservative reading.
+        // Out of pico's enum (a caller writing a raw int). NAMED DIVERGENCE,
+        // stated precisely because an earlier comment here got its own citation
+        // backwards: pico's encode predicate is `_consolidation !=
+        // Z_CONSOLIDATION_MODE_DEFAULT` (`codec/message.c:401`) and DEFAULT is
+        // AUTO = -1 (`constants.h:184,188`), which `primitives.c:567-573` has
+        // ALREADY resolved away by this point — so for a get the predicate can
+        // never elide, and pico emits Q_C with the raw byte (e.g. 7). wz's
+        // `ConsolidationMode` is a closed enum with no raw arm, so it emits no
+        // Q_C at all. Garbage in, so not worth an upstream raw-byte escape
+        // hatch; named rather than silently "conservative".
         _ => {}
     }
 
@@ -672,6 +829,24 @@ unsafe fn get_inner(
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_get_options_t,
 ) -> ZResult {
+    // Consume the moved payload / attachment FIRST — before the null-callback
+    // return below, which is a path they must also be freed on. `z_bytes_*` IS
+    // exported, so a C program can build these; taking them only after the
+    // callback check would leak both on `z_get(zs, ke, p, NULL, &opts)` and
+    // leave the caller's `z_owned_bytes_t` non-null, so ownership would be
+    // ambiguous rather than merely leaked. The sibling `z_put` takes its bytes
+    // first for the same reason. There is no pico behaviour to mirror here
+    // (pico derefs the null callback and crashes); the standard is this
+    // function's own consume-on-EVERY-path contract.
+    let (payload, attachment) = if options.is_null() {
+        (None, None)
+    } else {
+        (
+            crate::pubsub::take_moved_bytes((*options).payload),
+            crate::pubsub::take_moved_bytes((*options).attachment),
+        )
+    };
+
     if callback.is_null() {
         return Z_ERR_NULL;
     }
@@ -684,17 +859,6 @@ unsafe fn get_inner(
     let owned = &mut (*callback)._this;
     let cclosure = Arc::new(CReplyClosure::new(owned.context, owned.call, owned.drop));
     *owned = z_owned_closure_reply_t::null_value();
-
-    // Consume the moved payload / attachment on every path too. `z_bytes_*` IS
-    // exported, so a C program can build these and failing to take them leaks.
-    let (payload, attachment) = if options.is_null() {
-        (None, None)
-    } else {
-        (
-            crate::pubsub::take_moved_bytes((*options).payload),
-            crate::pubsub::take_moved_bytes((*options).attachment),
-        )
-    };
 
     let state = match session_state(zs) {
         Some(s) => s,
@@ -736,6 +900,16 @@ unsafe fn get_inner(
     };
     let params = transmit_parameters(params_in, accept_replies);
 
+    // pico's `pen_qry->_anyke` is the OR of the option and the selector the
+    // caller wrote by hand: `_anyke_in_parameters || _anyke_option`
+    // (`~/zenoh-pico/src/net/primitives.c:575-582`). Read off `params` -- which
+    // `transmit_parameters` has already normalised -- so the receive gate and
+    // the transmitted bytes cannot disagree.
+    let gate = Arc::new(ReplyGate {
+        query_keyexpr: ke.clone(),
+        anyke: parameters_has_anyke(&params),
+    });
+
     let opts = get_options(
         target,
         consolidation,
@@ -745,7 +919,7 @@ unsafe fn get_inner(
         attachment,
     );
 
-    fan_get(&state.shared.clone(), &ke, &opts, cclosure)
+    fan_get(&state.shared.clone(), &ke, &opts, cclosure, gate)
 }
 
 /// Fan one C get across every connected face, returning `Z_OK`.
@@ -772,10 +946,12 @@ fn fan_get(
     keyexpr: &str,
     opts: &QueryOptions,
     closure: Arc<CReplyClosure>,
+    gate: Arc<ReplyGate>,
 ) -> ZResult {
     let guard = closure.clone();
     for (session, revised) in shared.face_sessions_with_wake() {
         let per_face = closure.clone();
+        let per_face_gate = gate.clone();
         // Only `on_reply` carries the `Arc`. `on_final` needs no body at all:
         // completion is signalled by the pending entry's sink being DROPPED
         // (which drops this closure and releases the clone), and that happens on
@@ -785,7 +961,7 @@ fn fan_get(
         let issued = session.query(
             keyexpr,
             opts.clone(),
-            move |view: &dyn ReplyView| fire_reply(&per_face, view),
+            move |view: &dyn ReplyView| fire_reply(&per_face, &per_face_gate, view),
             |_rid| {},
         );
         // A per-face issue error (a face mid-teardown) is swallowed, matching
@@ -818,13 +994,16 @@ fn fan_get(
 /// `strlen` delegation to [`z_get_with_parameters_substr`]
 /// (`src/api/api.c:1743-1746`).
 ///
-/// Of `options`: `payload`, `attachment`, `target`, `consolidation`,
-/// `timeout_ms` and `accept_replies` are honoured. `encoding` is unreachable
-/// (opaque, no exported constructor). `congestion_control` / `priority` /
-/// `is_express` are carried for layout and dropped — a NAMED DIVERGENCE: they
-/// map to a `_z_n_qos_t` on pico's Request (`api.c:1773`), and wz's
-/// `QueryOptions` has no QoS arm to route them to. They affect scheduling and
-/// batching, not delivery or content.
+/// Of `options`: `payload`, `attachment`, `target`, `timeout_ms` and
+/// `accept_replies` are honoured — the last on BOTH halves (the `_anyke`
+/// selector append and the receive-side [`ReplyGate`]).
+///
+/// `consolidation` is TRANSMITTED but not applied: see `THE CONSOLIDATION
+/// DIVERGENCE` in the module doc. `encoding` is unreachable (opaque, no exported
+/// constructor). `congestion_control` / `priority` / `is_express` are carried for
+/// layout and dropped — a NAMED DIVERGENCE: they map to a `_z_n_qos_t` on pico's
+/// Request (`api.c:1773`), and wz's `QueryOptions` has no QoS arm to route them
+/// to. They affect scheduling and batching, not delivery or content.
 #[no_mangle]
 pub unsafe extern "C" fn z_get(
     zs: *const z_loaned_session_t,
@@ -980,6 +1159,61 @@ mod tests {
                 "a MATCHING_QUERY get's selector {sent:?} must NOT parse as _anyke"
             );
         }
+    }
+
+    /// The RECEIVE half of `accept_replies`: a reply the query does not accept
+    /// is dropped before the C callback ever sees it, pico's
+    /// `!_anyke && !_z_keyexpr_intersects` (`~/zenoh-pico/src/session/query.c:121`).
+    ///
+    /// It is an INTERSECTION, so a wildcard get admits concrete replies — the
+    /// ordinary case, not an edge one. Shares the responder side's SSOT, so this
+    /// also pins the two halves against drifting apart.
+    #[test]
+    fn the_reply_gate_drops_what_the_query_does_not_accept() {
+        let matching = crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY;
+        let any = crate::query::Z_REPLY_KEYEXPR_ANY;
+
+        // The default is MATCHING_QUERY, so the gate is ON by default.
+        let gate = |ke: &str, accept| ReplyGate {
+            query_keyexpr: ke.to_owned(),
+            anyke: parameters_has_anyke(&transmit_parameters(b"", accept)),
+        };
+
+        let g = gate("a/**", matching);
+        assert!(
+            !g.anyke,
+            "MATCHING_QUERY is the default and leaves anyke off"
+        );
+        assert!(crate::query::reply_keyexpr_is_covered(
+            &g.query_keyexpr,
+            "a/b",
+            g.anyke
+        ));
+        assert!(
+            !crate::query::reply_keyexpr_is_covered(&g.query_keyexpr, "z/b", g.anyke),
+            "a reply on a disjoint key must be dropped — pico's query.c:121"
+        );
+
+        // ANY switches the gate off wholesale, on both halves at once.
+        let g = gate("a/**", any);
+        assert!(
+            g.anyke,
+            "Z_REPLY_KEYEXPR_ANY must reach the receive gate too"
+        );
+        assert!(crate::query::reply_keyexpr_is_covered(
+            &g.query_keyexpr,
+            "z/b",
+            g.anyke
+        ));
+
+        // pico ORs the option with a hand-written selector
+        // (`primitives.c:575-582`), so `_anyke` in the caller's own parameters
+        // opens the gate even under MATCHING_QUERY.
+        let g = ReplyGate {
+            query_keyexpr: "a/**".to_owned(),
+            anyke: parameters_has_anyke(&transmit_parameters(b"_anyke", matching)),
+        };
+        assert!(g.anyke, "a hand-written _anyke selector must open the gate");
     }
 
     /// pico resolves AUTO on the client: `_time=` in the selector → NONE, else

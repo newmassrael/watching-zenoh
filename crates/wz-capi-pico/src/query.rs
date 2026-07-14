@@ -166,7 +166,7 @@ pub(crate) fn parameters_has_anyke(parameters: &[u8]) -> bool {
 /// querier's `a/**`), while its replies carry CONCRETE keys — so equality would
 /// reject the ordinary wildcard case, not an edge case. Routed through the one
 /// matching SSOT ([`wz_runtime_tokio::keyexpr_match`]) rather than re-derived.
-fn reply_keyexpr_is_covered(query_keyexpr: &str, reply: &str, anyke: bool) -> bool {
+pub(crate) fn reply_keyexpr_is_covered(query_keyexpr: &str, reply: &str, anyke: bool) -> bool {
     if anyke {
         return true;
     }

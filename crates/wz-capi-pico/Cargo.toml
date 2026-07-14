@@ -75,7 +75,25 @@ workspace = true
 # `pub mod accept_loop` and additive items, altering no other crate's existing
 # code paths), matching the precedent wz-integration-tests documents for its
 # storage/auth feature pins.
-wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["routing-accept"] }
+# `query-timeout` is selected EXPLICITLY, not inherited. The dependency edge
+# runs the wrong way for us — `query-timeout = ["query-get"]`, never the
+# reverse — so `query-get` alone leaves `QueryOptions::with_timeout_ms` a
+# SIGNATURE-STABLE NO-OP (`session/querier.rs`). The get plane's completion
+# rests entirely on that timeout: without it `timeout_ms` stays 0 ->
+# `deadline_ms = None` -> the pending entry survives every sweep -> the reply
+# closure's `Arc` never releases -> the C `drop(context)` (pico's completion
+# signal) NEVER fires for a get to a silent peer. That failure is SILENT: the
+# crate would still compile clean, and even the `get_timeout_ms` unit test
+# would still pass, because it tests the mapping one layer above the loss.
+# Contrast `sweep_expired_queries` / `next_reply_deadline_ms`, which are
+# `#[cfg(feature = "query-get")]` and so fail LOUDLY. Today the feature arrives
+# via wz-runtime-tokio's default bundle, but this crate's own note above plans
+# to trim that bundle — so the plane names what it structurally requires
+# instead of relying on a bundle it does not control.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
+    "routing-accept",
+    "query-timeout",
+] }
 
 # Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions
 # sharing one are the SAME peer on the wire — a listener would dedup/aggregate

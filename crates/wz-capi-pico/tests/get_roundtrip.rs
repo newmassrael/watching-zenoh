@@ -15,17 +15,24 @@
 //!
 //! The get plane's hard part is not the happy path — it is COMPLETION. pico
 //! signals a get's end by running the reply closure's `drop(context)` exactly
-//! once, and there are four independent ways a get can end: a real
-//! `ResponseFinal`, a timeout, the peer's face dying, and having no peer at all.
+//! once, and there are five independent ways a get can end: a real
+//! `ResponseFinal`, a timeout, the peer's face dying, `z_close`, and having no
+//! peer at all.
 //! [`wz_capi_pico::get`] handles all four with ONE mechanism (the shared
 //! `Arc`'s refcount), so each test below fixes one of those paths against the
 //! designs that would break it:
 //!
 //! - [`c_get_completes_at_its_timeout_when_the_peer_never_finals`] — the sweep
 //!   gate, and the reason the drive loop grew an extra-deadline hook at all.
+//! - [`c_dialed_get_completes_at_its_timeout_when_the_peer_never_finals`] — the
+//!   same gate for the `connect` role, which reaches the extra-deadline by
+//!   SEPARATE wiring and so can regress on its own.
 //! - [`c_get_completes_promptly_when_the_face_dies_mid_flight`] — the case an
 //!   N-finals COUNTER hangs on forever (a dead face's pending entry is dropped,
 //!   never swept, so it fires no final).
+//! - [`c_close_completes_an_in_flight_get`] — the fifth way a get ends, and the
+//!   one the refcount does NOT reach by itself (the accept loop's shutdown never
+//!   deregisters its faces).
 //! - [`c_get_with_no_peer_completes_immediately_without_a_reply`] — the
 //!   zero-faces path, which must not wait for a deadline.
 //! - [`c_get_fans_every_face_and_completes_once`] — the fan, and the reason the
@@ -55,7 +62,8 @@ use wz_capi_pico::{
     z_loaned_bytes_t, z_loaned_reply_t, z_open, z_owned_closure_reply_t, z_owned_config_t,
     z_owned_session_t, z_owned_slice_t, z_reply_is_ok, z_reply_ok, z_sample_kind, z_sample_payload,
     z_session_drop, z_session_loan, z_session_move, z_slice_data, z_slice_drop, z_slice_len,
-    z_slice_loan, z_slice_move, zp_config_insert, Z_CONFIG_LISTEN_KEY, Z_OK, Z_SAMPLE_KIND_PUT,
+    z_slice_loan, z_slice_move, zp_config_insert, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_OK,
+    Z_SAMPLE_KIND_PUT,
 };
 
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
@@ -67,7 +75,8 @@ use wz_runtime_tokio::session_glue::{
     WhatAmI,
 };
 use wz_runtime_tokio::session_open::{
-    dial_endpoint, initiate_and_open_session, DialConfig, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session, DialConfig,
+    OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex as WzMutex;
 
@@ -272,6 +281,15 @@ fn init_params(whatami: WhatAmI) -> SessionInitParams {
     }
 }
 
+/// The signals a silent peer waits on.
+///
+/// `notify_one`, never `notify_waiters` — the production code makes the same
+/// choice for the same reason (`get::fan_get`): `notify_waiters` DROPS the
+/// signal when no waiter is parked, so it would need an unstated ordering
+/// argument ("the peer is definitely inside its `select!` by now") that a later
+/// refactor could quietly break, turning a lost signal into a confusing
+/// assertion failure. `notify_one` stores a permit, so no argument is required.
+///
 /// What a [`native_peer`] should do once its handshake has settled.
 enum PeerBehaviour {
     /// Declare a queryable answering `answer`, and keep driving.
@@ -570,7 +588,7 @@ fn c_get_completes_at_its_timeout_when_the_peer_never_finals() {
 
         // Now the peer stops reading — but holds its socket open, so the face
         // stays up and the query below is simply never answered.
-        go_silent.notify_waiters();
+        go_silent.notify_one();
         // Let the silence take effect before issuing the get under test.
         std::thread::sleep(Duration::from_millis(200));
 
@@ -611,7 +629,7 @@ fn c_get_completes_at_its_timeout_when_the_peer_never_finals() {
             Z_OK
         );
         z_session_drop(z_session_move(&mut zs));
-        die.notify_waiters();
+        die.notify_one();
         let _ = peer.join();
     }
 }
@@ -712,7 +730,7 @@ fn c_get_completes_promptly_when_the_face_dies_mid_flight() {
         // Go silent so the get below is genuinely IN FLIGHT (unanswered) when
         // the face dies — otherwise the peer would just answer it and the test
         // would prove nothing about face death.
-        go_silent.notify_waiters();
+        go_silent.notify_one();
         std::thread::sleep(Duration::from_millis(200));
 
         let issued_at = Instant::now();
@@ -727,7 +745,7 @@ fn c_get_completes_promptly_when_the_face_dies_mid_flight() {
         // Kill the PEER: its socket closes, so the C side's face goes down and
         // takes its pending table (and the `on_reply` closure holding the Arc
         // clone) with it.
-        die.notify_waiters();
+        die.notify_one();
 
         let elapsed = probe
             .await_completion(issued_at, Duration::from_secs(15))
@@ -736,10 +754,19 @@ fn c_get_completes_promptly_when_the_face_dies_mid_flight() {
                  counter it would hang, because a dropped pending entry fires no \
                  final",
             );
+        // 2 s, not 10 s. The bound has to discriminate the mechanism, not just
+        // "faster than the timeout": if the socket close ever regressed, the
+        // face would STILL go down — via lease expiry — and a 10 s bound would
+        // pass deterministically. `last_inbound_at` freezes when the peer goes
+        // silent, the lease is 10 s (`session.rs` init_params), and the get is
+        // issued ~200 ms after that, so the lease path lands at ~9800 ms. The
+        // intended socket-close path lands in milliseconds; 2 s sits ~5x clear
+        // of the fallback while leaving ample headroom for a loaded machine.
         assert!(
-            elapsed < Duration::from_secs(10),
-            "face death must complete the get PROMPTLY, not on its 30 s timeout \
-             (took {elapsed:?})"
+            elapsed < Duration::from_secs(2),
+            "face death must complete the get from the PEER's socket closing \
+             (milliseconds), not from the 10 s lease expiring and not from the \
+             30 s timeout (took {elapsed:?})"
         );
         assert_eq!(
             probe.completions.load(Ordering::SeqCst),
@@ -756,6 +783,226 @@ fn c_get_completes_promptly_when_the_face_dies_mid_flight() {
             Z_OK
         );
         z_session_drop(z_session_move(&mut zs));
+        let _ = peer.join();
+    }
+}
+
+/// A wz-native peer that LISTENS, completes one handshake, and then never reads
+/// again — the far end for the `connect`-role tests.
+///
+/// It deliberately never drives: `accept_and_open_session` settles the
+/// handshake (so the C dialer's `z_open` returns and its face is up), and then
+/// the link is simply held open with nothing answering. That makes the C side's
+/// face UP and permanently SILENT with no convergence step needed.
+///
+/// `bound_tx` fires once the listener is bound, so the dialer cannot race the
+/// bind.
+fn native_silent_listener(endpoint: String, bound_tx: mpsc::Sender<()>) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async move {
+        let clock = TokioTime::new();
+        // `accept_endpoint` binds then accepts; signalling before it means the
+        // dialer may still beat the bind, so the C side retries its open below.
+        let _ = bound_tx.send(());
+        let accepted = match accept_endpoint(&endpoint).await {
+            Ok(link) => link,
+            Err(_) => return,
+        };
+        let opened = accept_and_open_session(
+            accepted,
+            init_params(WhatAmI::Peer),
+            clock,
+            None,
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await;
+        let Ok(opened) = opened else { return };
+        // Hold the link open, read nothing, answer nothing. Dropping `opened`
+        // would close the socket and take the C side's face down, which is the
+        // one thing that must NOT happen here.
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        drop(opened);
+    });
+}
+
+/// THE DIAL-ROLE SWEEP GATE — the `connect` twin of
+/// [`c_get_completes_at_its_timeout_when_the_peer_never_finals`].
+///
+/// This is not redundant with it. The two roles reach the drive loop's
+/// extra-deadline by SEPARATE wiring: `listen` goes through `accept_loop` ->
+/// `drive_face` -> the `FaceForwarder::next_extra_deadline_ms` /
+/// `deadline_revised` hooks, while `connect` hand-rolls its own closure and its
+/// own `deadline_revised` lookup in `session::drive_dial`. Either can regress
+/// alone, and `revised.as_deref().unwrap_or(&never)` degrades SILENTLY to a
+/// ~3333 ms-late get rather than failing — so an untested path is an
+/// unprotected one. And `connect` is the ORDINARY pico get client (a `z_get` to
+/// a router), i.e. the path that matters most.
+///
+/// Fully deterministic with no convergence step: `z_open(connect)` blocks until
+/// Established and registers the face before it returns, so the face is
+/// provably up the moment the open succeeds.
+#[test]
+fn c_dialed_get_completes_at_its_timeout_when_the_peer_never_finals() {
+    let port = free_port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+
+    let (bound_tx, bound_rx) = mpsc::channel();
+    let peer = std::thread::spawn(move || native_silent_listener(endpoint, bound_tx));
+    bound_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the native listener must bind");
+
+    unsafe {
+        // Retry the open to cover the residual bind race — a transport
+        // establishment retry, the same one `pubsub_roundtrip.rs` documents,
+        // not a flake.
+        let mut zs: z_owned_session_t = std::mem::zeroed();
+        let mut opened = false;
+        for _ in 0..250 {
+            let mut cfg: z_owned_config_t = std::mem::zeroed();
+            assert_eq!(z_config_default(&mut cfg), Z_OK);
+            assert_eq!(
+                zp_config_insert(
+                    z_config_loan_mut(&mut cfg),
+                    Z_CONFIG_CONNECT_KEY,
+                    connect.as_ptr()
+                ),
+                Z_OK
+            );
+            if z_open(&mut zs, z_config_move(&mut cfg), std::ptr::null()) == Z_OK {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(opened, "the C dialer's z_open never succeeded");
+        // z_open(connect) returned Z_OK, so the handshake settled and the face
+        // is registered — no convergence needed.
+
+        let issued_at = Instant::now();
+        let probe = issue_get(z_session_loan(&zs), 500);
+        let elapsed = probe
+            .await_completion(issued_at, Duration::from_secs(8))
+            .expect(
+                "a DIALED get whose peer never Finals MUST still complete at its \
+                 timeout — the connect role wires its own extra-deadline and can \
+                 regress independently of the listen role",
+            );
+
+        probe.assert_no_callback_errors();
+        assert!(
+            probe.replies().is_empty(),
+            "a silent peer sends no reply, so the reply callback must never fire"
+        );
+        assert_eq!(probe.completions.load(Ordering::SeqCst), 1);
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "the get must end on its 500 ms TIMEOUT, not instantly (took {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_millis(2_500),
+            "the dial role's sweep must run on the get's OWN deadline; ~3333 ms \
+             means drive_dial's ExtraDeadline is not wired (took {elapsed:?})"
+        );
+
+        assert_eq!(
+            z_close(z_session_loan_mut_of(&mut zs), std::ptr::null()),
+            Z_OK
+        );
+        z_session_drop(z_session_move(&mut zs));
+    }
+    let _ = peer.join();
+}
+
+/// `z_close` must END every in-flight get — pico's `_z_session_close` ->
+/// `_z_flush_pending_queries` (`~/zenoh-pico/src/session/utils.c:194`).
+///
+/// Before R311y296's `clear_faces`, the `listen` role's shutdown broke out of
+/// the accept loop WITHOUT deregistering its faces, so the registry kept every
+/// face's session — and every pending entry's `Arc` — alive with no drive thread
+/// left to sweep it. The completion then fired only at `z_session_drop`, and
+/// never at all for a program that keeps the handle (`z_close` does not free
+/// it). The dial role already did the right thing, so identical C code completed
+/// on `connect` and hung on `listen`.
+///
+/// The 30 s `timeout_ms` is what makes this test mean something: nothing but the
+/// close can complete the get inside the bound.
+#[test]
+fn c_close_completes_an_in_flight_get() {
+    let port = free_port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    const ANSWER: &str = "answer-before-close";
+
+    unsafe {
+        let mut zs = open_c_listener(port);
+        let go_silent = Arc::new(tokio::sync::Notify::new());
+        let go_silent_peer = go_silent.clone();
+        let die = Arc::new(tokio::sync::Notify::new());
+        let die_peer = die.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            native_peer(
+                endpoint,
+                PeerBehaviour::AnswerThenGoSilent {
+                    answer: ANSWER.to_owned(),
+                    go_silent: go_silent_peer,
+                    die: die_peer,
+                },
+                ready_tx,
+            )
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the native peer must declare its queryable");
+        converge_face_up(z_session_loan(&zs), ANSWER);
+
+        // Silence the peer so the get is genuinely in flight at close time.
+        go_silent.notify_one();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let issued_at = Instant::now();
+        let probe = issue_get(z_session_loan(&zs), 30_000);
+        assert!(!probe.is_complete(), "the get must still be in flight");
+
+        assert_eq!(
+            z_close(z_session_loan_mut_of(&mut zs), std::ptr::null()),
+            Z_OK
+        );
+
+        // `z_close` is synchronous (it joins the drive thread, then clears the
+        // registry), so the completion has already fired by the time it returns.
+        assert!(
+            probe.is_complete(),
+            "z_close MUST end every in-flight get, as pico's \
+             _z_flush_pending_queries does — without clear_faces the registry \
+             outlives the drive thread and the get hangs until z_session_drop"
+        );
+        let elapsed = probe
+            .await_completion(issued_at, Duration::from_secs(1))
+            .expect("already complete");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the close completes the get, not the 30 s timeout (took {elapsed:?})"
+        );
+        assert_eq!(probe.completions.load(Ordering::SeqCst), 1);
+
+        // A get issued AFTER close sees an empty peer set and completes at once
+        // — pico's behaviour for a closed session. Before clear_faces this
+        // found the orphaned faces and hung forever.
+        let after = issue_get(z_session_loan(&zs), 30_000);
+        assert!(
+            after.is_complete(),
+            "a get after z_close must complete immediately (empty peer set), not hang"
+        );
+        assert!(after.replies().is_empty());
+
+        z_session_drop(z_session_move(&mut zs));
+        die.notify_one();
         let _ = peer.join();
     }
 }

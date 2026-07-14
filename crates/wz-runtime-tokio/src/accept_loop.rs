@@ -866,7 +866,6 @@ async fn drive_face(
     // notifies when a get is issued. The face is `register`ed before this runs
     // (`Step::Opened`), so `deadline_revised` resolves to the real signal
     // rather than the inert fallback.
-    let never = tokio::sync::Notify::new();
     let revised = forwarder.deadline_revised(face.id);
     let outcome = drive_session_until_terminal_with_extra_deadline(
         &mut opened.inbound,
@@ -878,7 +877,7 @@ async fn drive_face(
         |event| forwarder.forward(face.id, event),
         ExtraDeadline {
             next_ms: || forwarder.next_extra_deadline_ms(face.id),
-            revised: revised.as_deref().unwrap_or(&never),
+            revised: revised.as_deref(),
         },
     )
     .await;

@@ -130,6 +130,18 @@ impl SessionState {
                 let _ = handle.join();
             }
         }
+        // Drop every face, which ENDS every in-flight `z_get` — pico's
+        // `_z_session_close` -> `_z_flush_pending_queries`
+        // (`~/zenoh-pico/src/session/utils.c:194`). See
+        // [`SharedSession::clear_faces`] for why this is load-bearing rather
+        // than tidiness: without it a get outstanding at `z_close` never fires
+        // its completion, and one issued after `z_close` hangs forever.
+        //
+        // Ordering is the whole safety argument: the driver thread is JOINED
+        // above, so no drive-thread callback can race the C `drop(context)`
+        // this runs. Idempotent — a second `close` (or the `Drop` impl) finds
+        // the registry already empty.
+        self.shared.clear_faces();
     }
 }
 
@@ -292,9 +304,7 @@ async fn drive_dial(
     // have made the sweep late exactly where it matters most.
     let deadline_shared = shared.clone();
     let next_deadline = move || deadline_shared.next_reply_deadline_ms(DIAL_FACE_ID);
-    // `face_up` above registered the face, so its re-arm signal exists; the
-    // fallback is unreachable and inert either way.
-    let never = Notify::new();
+    // `face_up` above registered the face, so its re-arm signal exists.
     let revised = shared.deadline_revised(DIAL_FACE_ID);
 
     tokio::select! {
@@ -308,7 +318,7 @@ async fn drive_dial(
             &mut dispatch,
             ExtraDeadline {
                 next_ms: next_deadline,
-                revised: revised.as_deref().unwrap_or(&never),
+                revised: revised.as_deref(),
             },
         ) => {}
         _ = shutdown_future(shutdown, stop) => {}

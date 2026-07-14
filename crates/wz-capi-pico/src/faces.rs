@@ -226,6 +226,45 @@ impl SharedSession {
         drop(removed);
     }
 
+    /// Drop EVERY face — what `z_close` runs once its drive thread has joined.
+    ///
+    /// # Why `z_close` must do this, and why it is not merely tidy
+    ///
+    /// This is pico's `_z_session_close` → `_z_flush_pending_queries`
+    /// (`~/zenoh-pico/src/session/utils.c:194`, `src/session/query.c:276-283`):
+    /// closing a session ENDS every in-flight get, running each pending query's
+    /// drop handler.
+    ///
+    /// Without it a `z_get` outstanding at `z_close` would never complete. The
+    /// accept loop's shutdown path breaks out and drops its own per-face
+    /// `OpenedSession`s, but it never calls `deregister` — that runs only when a
+    /// face's own drive finishes (`accept_loop.rs`, the `Step::Driven` arm). So
+    /// the registry's `FaceEntry`s — each holding its OWN `TokioSession`, hence
+    /// its own `ReplyRegistry` and every pending entry's `Arc` clone — would
+    /// outlive the drive thread with nothing left to sweep them. The C
+    /// `drop(context)`, which IS the get's completion signal, would fire only at
+    /// `z_session_drop`, and never at all for a program that keeps the handle
+    /// (`z_close` does not free it). A `z_get` issued AFTER `z_close` would be
+    /// worse: it would find the orphaned faces, register a deadlined entry, and
+    /// hang forever — where pico completes it at once (a closed session has an
+    /// empty peer set).
+    ///
+    /// It also removes a role asymmetry that made identical C code behave
+    /// differently: the DIAL role already drops its face explicitly after its
+    /// drive returns (`session::drive_dial`), so only `listen` leaked.
+    ///
+    /// Running the C `drop(context)` on the calling (C) thread is sound here and
+    /// is pico's own behaviour: by the time this runs the drive thread has been
+    /// joined, so no `call` can be in flight to race it — and the `Arc` refcount
+    /// serialises it regardless (see the `unsafe impl Sync for CReplyClosure`).
+    pub(crate) fn clear_faces(&self) {
+        // Take OUTSIDE the lock, drop OUTSIDE the lock — the standing
+        // discipline: dropping a face runs the C `drop(context)` for any
+        // closure it held the last reference to.
+        let faces = std::mem::take(&mut self.lock().faces);
+        drop(faces);
+    }
+
     /// One inbound iteration event for `id` — dispatched into that face's own
     /// session (and so its own observer, keeping the peer's keyexpr alias id
     /// space private to it), then that face's expired `z_get`s are swept.
