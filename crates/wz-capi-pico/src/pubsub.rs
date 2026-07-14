@@ -287,6 +287,14 @@ pub unsafe extern "C" fn z_put(
     _options: *const c_void,
 ) -> ZResult {
     guarded(|| {
+        // Consume the moved payload FIRST so it is freed on every path (pico's
+        // "z_move consumes on all paths" contract): the owned `Vec` is dropped
+        // on any early error below, and `take_moved_bytes` already nulled the
+        // caller's source struct.
+        let buf = match take_moved_bytes(payload) {
+            Some(b) => b,
+            None => return Z_ERR_NULL,
+        };
         let state = match session_state(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
@@ -294,10 +302,6 @@ pub unsafe extern "C" fn z_put(
         let ke = match keyexpr_str(keyexpr) {
             Some(k) => k,
             None => return Z_ERR_INVALID,
-        };
-        let buf = match take_moved_bytes(payload) {
-            Some(b) => b,
-            None => return Z_ERR_NULL,
         };
         match state.session.publish(ke, &buf, put_options()) {
             Ok(_) => Z_OK,
@@ -348,12 +352,14 @@ pub unsafe extern "C" fn z_publisher_put(
     _options: *const c_void,
 ) -> ZResult {
     guarded(|| {
-        let state = match handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
-        };
+        // Consume the moved payload first (pico consume-on-all-paths contract):
+        // dropped + source nulled even if the publisher handle is invalid.
         let buf = match take_moved_bytes(payload) {
             Some(b) => b,
+            None => return Z_ERR_NULL,
+        };
+        let state = match handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) {
+            Some(s) => s,
             None => return Z_ERR_NULL,
         };
         match state.session.publish(&state.keyexpr, &buf, put_options()) {
@@ -485,6 +491,18 @@ pub unsafe extern "C" fn z_declare_subscriber(
         if subscriber.is_null() || callback.is_null() {
             return Z_ERR_NULL;
         }
+        // Consume the moved closure FIRST (pico consume-on-all-paths contract):
+        // the `CClosure` now owns the C `drop(context)` responsibility, so an
+        // early error return below drops it and frees the context; on success
+        // it moves into the subscriber callback.
+        let owned = &mut (*callback)._this;
+        let cclosure = CClosure {
+            context: SendPtr(owned.context),
+            call: owned.call,
+            drop: owned.drop,
+        };
+        *owned = z_owned_closure_sample_t::null_value();
+
         let state = match session_state(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
@@ -493,15 +511,6 @@ pub unsafe extern "C" fn z_declare_subscriber(
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
         };
-
-        // Consume the moved closure.
-        let owned = &mut (*callback)._this;
-        let cclosure = CClosure {
-            context: SendPtr(owned.context),
-            call: owned.call,
-            drop: owned.drop,
-        };
-        *owned = z_owned_closure_sample_t::null_value();
 
         let rust_cb = move |view: &dyn SampleView| {
             // Reference the whole `cclosure` first so the (RFC-2229 disjoint)

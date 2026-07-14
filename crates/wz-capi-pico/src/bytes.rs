@@ -326,6 +326,13 @@ pub unsafe extern "C" fn z_string_len(string: *const z_loaned_string_t) -> usize
 /// `{ start, len }`, so "take" copies the borrowed bytes into a fresh owned
 /// `StringState` (there is no transferable handle in a borrow) and clears the
 /// source view.
+///
+/// Caveat: if `src` was obtained via `z_string_loan[_mut]` on an owned string,
+/// it points at that owned string's cached self-view; clearing it here leaves
+/// that owned string's subsequent `z_string_loan` returning an empty
+/// `{ null, 0 }` view (the owned `StringState` box is untouched and still
+/// freed on drop — no leak, no double-free). Idiomatic pico "take from loaned"
+/// is applied to a fresh loaned handle, not an owned string's self-view.
 #[no_mangle]
 pub unsafe extern "C" fn z_string_take_from_loaned(
     dst: *mut z_owned_string_t,
