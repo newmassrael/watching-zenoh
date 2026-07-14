@@ -3110,8 +3110,14 @@ layer_c1bf_cargo_clippy_all_features() {
 #      test, corrupt-file quarantine, long-key regression, name sanitization),
 #      with a >=1-passed guard so a future module rename cannot silently turn a
 #      name-filtered `cargo test` into a green no-op ([[feedback-a-skip-is-green]]);
-#   2. clippy-gate the cfg (`--all-targets`) with the feature on;
-#   3. clippy-gate the LIB under `--no-default-features --features
+#   2. R311y280 — cargo TEST the COMPOSITION + DURABILITY of the fs backend
+#      through the LIVE driver (RuntimeStorageManager add_storage -> StorageService
+#      capture + queryable -> FilesystemStorage -> disk -> manager restart -> served),
+#      with its MemoryVolume-loses-it discriminator, under the fuller feature combo
+#      (storage-mgr-multi-storage-host + pubsub-allow-loop + declare-subscriber); a
+#      >=1-passed guard again forbids a zero-test false-green;
+#   3. clippy-gate the cfg (`--all-targets`) with the feature on;
+#   4. clippy-gate the LIB under `--no-default-features --features
 #      storage-backend-filesystem` — the module composes standalone over the
 #      minimal seam forward.
 layer_c1bg_cargo_test_storage_backend_filesystem() {
@@ -3122,6 +3128,15 @@ layer_c1bg_cargo_test_storage_backend_filesystem() {
     echo "$out"
     grep -qE 'test result: ok\. [1-9][0-9]* passed' <<< "$out" \
         || { echo "  C1bg FAIL: 0 filesystem_storage tests ran (filter matched nothing)"; return 1; }
+    # R311y280 — the live-driver composition + durability proof (+ its discriminator).
+    local comp
+    comp="$(cd crates && cargo test -p wz-runtime-tokio \
+        --features storage-mgr-multi-storage-host,storage-backend-filesystem,pubsub-allow-loop,declare-subscriber \
+        --lib manager_restart --quiet 2>&1)" \
+        || { echo "$comp"; return 1; }
+    echo "$comp"
+    grep -qE 'test result: ok\. [1-9][0-9]* passed' <<< "$comp" \
+        || { echo "  C1bg FAIL: 0 manager_restart composition tests ran (filter matched nothing)"; return 1; }
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features storage-backend-filesystem --quiet -- -D warnings \

@@ -518,4 +518,128 @@ mod tests {
             "the bath mount yields no replies (isolation: bath empty, kitchen unmatched)"
         );
     }
+
+    // A real loopback GET over a manager-hosted storage: drive the declared
+    // queryable callbacks inline (SessionLocal) and record every (keyexpr,
+    // payload) reply. The closure is `Send + 'static`, hence the Arc<Mutex<..>>.
+    #[cfg(feature = "storage-backend-filesystem")]
+    fn loopback_get(session: &TokioSession, keyexpr: &str) -> Vec<(String, Vec<u8>)> {
+        use crate::reply_sink::ReplyView;
+        use crate::session::QueryOptions;
+        use wz_session_core::locality::Locality;
+
+        let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+        let rec = Arc::clone(&replies);
+        session
+            .query(
+                keyexpr,
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                move |reply: &dyn ReplyView| {
+                    rec.lock()
+                        .expect("reply recorder poisoned")
+                        .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
+                },
+                |_rid| {},
+            )
+            .expect("loopback query fires the declared queryables inline");
+        let recorded = replies.lock().expect("reply recorder poisoned").clone();
+        recorded
+    }
+
+    // R311y280 — the COMPOSITION + DURABILITY proof: the storage-backend-filesystem
+    // backend, driven through the REAL live path (RuntimeStorageManager -> add_storage
+    // -> StorageService capture subscriber + queryable -> FilesystemStorage -> disk),
+    // survives a manager restart. The isolated y279 backend unit test proves the
+    // backend round-trips on disk; THIS proves the composed live service serves the
+    // persisted value after a fresh manager re-hosts it (per composition-over-isolated-atoms).
+    #[cfg(feature = "storage-backend-filesystem")]
+    #[test]
+    fn filesystem_volume_composes_durably_across_a_manager_restart() {
+        use crate::filesystem_storage::FilesystemVolume;
+        use crate::session::PublishOptions;
+        use wz_session_core::locality::Locality;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = StorageConfig::new("durable", "demo/**", "fs");
+
+        // Session 1: host an fs-backed storage, capture a Put over the live path.
+        {
+            let session = make_session();
+            let mut mgr = RuntimeStorageManager::new();
+            mgr.register_volume("fs", Box::new(FilesystemVolume::new(dir.path())));
+            mgr.add_storage(&session, &cfg, vec![0x01])
+                .expect("host an fs-backed storage");
+            let fired = session
+                .publish(
+                    "demo/a",
+                    b"v1",
+                    PublishOptions::put().with_locality(Locality::SessionLocal),
+                )
+                .expect("loopback put");
+            assert_eq!(fired, 1, "the fs storage's capture subscriber fired");
+            assert_eq!(
+                loopback_get(&session, "demo/a"),
+                vec![(String::from("demo/a"), b"v1".to_vec())],
+                "the value is served live from the fs-backed storage"
+            );
+        } // drop: the capture subscriber is undeclared + the backend dropped; the dir persists.
+
+        // Session 2: a FRESH manager + fs volume on the SAME dir serves the value
+        // persisted before the restart -- with NO new put it can only come from
+        // disk (load-on-open), through a freshly-declared queryable.
+        {
+            let session = make_session();
+            let mut mgr = RuntimeStorageManager::new();
+            mgr.register_volume("fs", Box::new(FilesystemVolume::new(dir.path())));
+            mgr.add_storage(&session, &cfg, vec![0x01])
+                .expect("re-host over the same dir");
+            assert_eq!(
+                loopback_get(&session, "demo/a"),
+                vec![(String::from("demo/a"), b"v1".to_vec())],
+                "the fs-backed storage served the pre-restart value -- durable through the live driver"
+            );
+        }
+    }
+
+    // The DISCRIMINATOR for the durability proof above: the identical flow on a
+    // (Volatile) MemoryVolume LOSES the value across the restart, so the fs test
+    // proves persistence, not merely that a value round-trips within one session.
+    #[cfg(feature = "storage-backend-filesystem")]
+    #[test]
+    fn memory_volume_does_not_survive_a_manager_restart() {
+        use crate::session::PublishOptions;
+        use wz_session_core::locality::Locality;
+
+        let cfg = StorageConfig::new("volatile", "demo/**", "mem");
+        {
+            let session = make_session();
+            let mut mgr = RuntimeStorageManager::new();
+            mgr.register_volume("mem", Box::new(MemoryVolume));
+            mgr.add_storage(&session, &cfg, vec![0x01])
+                .expect("host a memory storage");
+            session
+                .publish(
+                    "demo/a",
+                    b"v1",
+                    PublishOptions::put().with_locality(Locality::SessionLocal),
+                )
+                .expect("loopback put");
+            assert_eq!(
+                loopback_get(&session, "demo/a"),
+                vec![(String::from("demo/a"), b"v1".to_vec())],
+                "served live in-session"
+            );
+        }
+        {
+            let session = make_session();
+            let mut mgr = RuntimeStorageManager::new();
+            mgr.register_volume("mem", Box::new(MemoryVolume));
+            mgr.add_storage(&session, &cfg, vec![0x01])
+                .expect("re-host a fresh memory storage");
+            assert!(
+                loopback_get(&session, "demo/a").is_empty(),
+                "a Volatile memory storage starts empty after a restart -- the value is gone"
+            );
+        }
+    }
 }
