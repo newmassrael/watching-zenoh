@@ -37,7 +37,17 @@
 //! ## THE CONSOLIDATION DIVERGENCE (read this before trusting `z_get_options_t`)
 //!
 //! **`consolidation` is transmitted on the wire and has NO client-side effect
-//! here. It is the DEFAULT path, not a corner case.**
+//! here. For a C caller this is the DEFAULT path, not a corner case** — because
+//! THIS crate resolves AUTO -> LATEST itself (see `get_options`) before handing
+//! the mode to `Session::query`.
+//!
+//! Be precise about the blast radius, because R311y296 first wrote this section
+//! and overstated it: "the default get path" is true of pico and of THIS crate,
+//! and FALSE of wz's Rust API. wz has no `Auto` variant and
+//! `QueryOptions.consolidation` defaults to `None` = no consolidation
+//! (`session/querier.rs`), so a wz Rust caller that never sets a mode is
+//! unaffected; only an explicit `with_consolidation(Latest)` is a silent no-op.
+//! Conflating the two smuggles an API-default DECISION in as an observation.
 //!
 //! pico consolidates on the QUERIER. Under `Z_CONSOLIDATION_MODE_LATEST` it does
 //! not run the reply callback per reply at all
@@ -58,16 +68,32 @@
 //! **Why it is not fixed here, and where it belongs.** Consolidation is a wz
 //! CORE concept, not a binding one: `ConsolidationMode` lives in
 //! `wz-session-core::query_mode` and `Session::query` already accepts
-//! `with_consolidation(..)`, so wz's own Rust API has exactly the same gap — a
-//! fix in this crate would leave that unfixed and duplicate a core concern at the
-//! ABI layer. The real home is the pending-reply table
-//! ([`wz_session_core::reply::ReplyRegistry`]), which is where pico puts it. Two
-//! things must land there first, and neither is a binding detail:
+//! `with_consolidation(..)`, so wz's own Rust API has the same no-op — a fix in
+//! this crate would leave that standing and duplicate a core concern at the ABI
+//! layer. The home is `wz-session-core`, as an `alloc`-gated
+//! `ConsolidatingSink<S: ReplySink>` DECORATOR on the R311gb-3c
+//! [`ReplySink`][wz_session_core::reply_sink::ReplySink] seam — NOT a cache
+//! field on `Pending`. That seam's `fire_final_for` already fires `on_final`
+//! exactly when `remaining_finals` hits zero, i.e. it already computes the
+//! instant pico flushes at; a decorator inherits that for free, leaves `Pending`
+//! byte-identical, and costs the no-alloc profile nothing.
+//!
+//! Two things must land first, and neither is a binding detail:
 //! 1. a reply TIMESTAMP on the [`ReplyView`] seam — the wire decode has it and
-//!    discards it (`wz-session-core/src/reply.rs`, `timestamp: _`), and without
-//!    it "keep the newest" is undecidable;
-//! 2. a bounded per-pending reply cache that the no-alloc MCU profile can carry
-//!    (`ReplyRegistry` is `BoundedVec`-backed by construction).
+//!    discards it (`wz-session-core/src/reply.rs`, `timestamp: _`). Without it
+//!    LATEST is not merely undecidable, it is SILENTLY LOSSY: an absent
+//!    timestamp reads as 0 and pico's `0 <= 0` compare drops every reply after
+//!    the first on a keyexpr.
+//! 2. pinning the `ext-pubsub-advanced-*` recovery GETs to
+//!    `ConsolidationMode::None`. Their `_sn=` range replies all share ONE
+//!    keyexpr, so LATEST would collapse an N-sample gap recovery to one sample.
+//!    pico writes that opt-out explicitly
+//!    (`~/zenoh-pico/src/api/advanced_subscriber.c:915`); wz has not.
+//!
+//! no-alloc LATEST is a NAMED NON-divergence rather than a gap: pico's cache is
+//! unbounded HEAP (`~/zenoh-pico/src/collections/list.c:262`), so there is no
+//! no-alloc design to port — pico's "MCU" profile has an allocator and wz's
+//! no-alloc profile is a strictly stronger target the reference never had.
 //!
 //! The inventory's `query-consolidation` atom claimed `C=indep reply dedup`;
 //! R311y296 corrected that reason to say what is actually built (the Q_C wire
