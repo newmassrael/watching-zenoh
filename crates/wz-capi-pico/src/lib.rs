@@ -74,6 +74,7 @@ mod faces;
 mod ffi;
 pub mod keyexpr;
 pub mod pubsub;
+pub mod query;
 pub mod result;
 pub mod session;
 
@@ -90,6 +91,7 @@ pub use bytes::*;
 pub use config::*;
 pub use keyexpr::*;
 pub use pubsub::*;
+pub use query::*;
 pub use result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 pub use session::*;
 
@@ -107,4 +109,11 @@ const _: () = {
     assert!(size_of::<abi::z_view_keyexpr_t>() == 48);
     assert!(size_of::<abi::z_view_string_t>() == 32);
     assert!(size_of::<pubsub::z_owned_closure_sample_t>() == 24);
+    // R3 query plane. The closure families share `{ context, call, drop }`
+    // (`~/zenoh-pico/include/zenoh-pico/api/types.h:730-750`), so 24 B like
+    // closure_sample; `z_queryable_options_t` is `{ bool complete; }` in a
+    // default pico build (`Z_FEATURE_LOCAL_QUERYABLE` = 0, CMakeLists.txt:353).
+    assert!(size_of::<query::z_owned_closure_query_t>() == 24);
+    assert!(size_of::<query::z_queryable_options_t>() == 1);
+    assert!(size_of::<query::z_query_reply_err_options_t>() == 8);
 };

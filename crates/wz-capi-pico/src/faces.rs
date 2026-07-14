@@ -70,16 +70,23 @@ use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session::{
-    PublishError, PublishOptions, SubscribeOptions, Subscriber, TokioSession,
+    PublishError, PublishOptions, Queryable, QueryableOptions, SubscribeOptions, Subscriber,
+    TokioSession,
 };
 use wz_runtime_tokio::session_glue::{IterationEvent, SessionLinkActions};
 use wz_runtime_tokio::sync::Mutex as WzMutex;
 
 use crate::pubsub::{make_subscriber_callback, CClosure};
+use crate::query::{make_queryable_callback, CQueryClosure};
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries.
 /// It keys the per-face wz [`Subscriber`]s this one C subscription spawned.
 pub(crate) type SubId = u64;
+
+/// A C-level queryable id — what a `z_owned_queryable_t` handle carries. The
+/// responder-side mirror of [`SubId`], keying the per-face wz [`Queryable`]s
+/// one C queryable declaration spawned.
+pub(crate) type QblId = u64;
 
 /// The face id the dial (`connect`) role occupies. A dialed session has
 /// exactly one peer, so it needs no id space of its own; the accept role's
@@ -93,6 +100,7 @@ pub(crate) const DIAL_FACE_ID: u64 = 0;
 struct FaceEntry {
     session: TokioSession,
     subs: BTreeMap<SubId, Subscriber<TokioRuntime>>,
+    qbls: BTreeMap<QblId, Queryable<TokioRuntime>>,
 }
 
 /// A C-declared subscription — the SSOT replayed onto every face that comes
@@ -105,11 +113,26 @@ struct SubEntry {
     closure: Arc<CClosure>,
 }
 
+/// A C-declared queryable — the responder-side SSOT, replayed onto every face
+/// exactly as [`SubEntry`] is. pico does the same for the responder plane:
+/// a new peer is sent the session's current queryable declarations
+/// (`_z_interest_send_decl_queryable`,
+/// `~/zenoh-pico/src/session/interest.c`), so a queryable declared before any
+/// peer connected still answers that peer's queries.
+struct QblEntry {
+    id: QblId,
+    keyexpr: String,
+    complete: bool,
+    closure: Arc<CQueryClosure>,
+}
+
 #[derive(Default)]
 struct Inner {
     faces: BTreeMap<u64, FaceEntry>,
     subs: Vec<SubEntry>,
     next_sub_id: SubId,
+    qbls: Vec<QblEntry>,
+    next_qbl_id: QblId,
 }
 
 /// The registry behind a `z_owned_session_t`, shared between the C thread
@@ -140,8 +163,8 @@ impl SharedSession {
     }
 
     /// A face reached Established: build its session and replay the whole
-    /// subscription SSOT onto it (pico's push-declarations-to-the-new-peer,
-    /// `accept.c:148-149`).
+    /// declaration SSOT — subscriptions AND queryables — onto it (pico's
+    /// push-declarations-to-the-new-peer, `accept.c:148-149`).
     pub(crate) fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>) {
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock));
@@ -157,7 +180,32 @@ impl SharedSession {
                 subs.insert(entry.id, sub);
             }
         }
-        guard.faces.insert(id, FaceEntry { session, subs });
+        let mut qbls = BTreeMap::new();
+        for entry in &guard.qbls {
+            if let Ok(qbl) = session.declare_queryable(
+                entry.keyexpr.clone(),
+                queryable_options(entry.complete),
+                make_queryable_callback(entry.closure.clone()),
+            ) {
+                qbls.insert(entry.id, qbl);
+            }
+        }
+        // Drop any replaced entry OUTSIDE the lock: `insert` returns the
+        // previous `FaceEntry` for this id, whose teardown drops subscribers /
+        // queryables and may release the last `Arc<CClosure>` — running the C
+        // `drop(context)` under the registry lock. A fresh face id makes this
+        // `None` in practice; the discipline is uniform rather than
+        // conditional on that.
+        let replaced = guard.faces.insert(
+            id,
+            FaceEntry {
+                session,
+                subs,
+                qbls,
+            },
+        );
+        drop(guard);
+        drop(replaced);
     }
 
     /// A face left the live set (peer Close / link loss).
@@ -288,6 +336,82 @@ impl SharedSession {
         drop(dropped);
         drop(dropped_entry);
     }
+
+    /// Record a C queryable in the SSOT and declare it on every live face —
+    /// the responder-side mirror of [`Self::declare_subscriber`], with the
+    /// same declare-before-peer semantics (no face yet → the entry is still
+    /// recorded and every future face replays it).
+    ///
+    /// Per-face rid independence makes cross-face request-id collision
+    /// unrepresentable rather than merely unlikely: each face's wz session
+    /// allocates its own request ids (`alloc_next_request_id` is per
+    /// `SessionLinkActions`), so two peers querying concurrently cannot
+    /// correlate onto one another's reply chain.
+    pub(crate) fn declare_queryable(
+        &self,
+        keyexpr: String,
+        complete: bool,
+        closure: Arc<CQueryClosure>,
+    ) -> QblId {
+        let mut guard = self.lock();
+        let id = guard.next_qbl_id;
+        guard.next_qbl_id = guard.next_qbl_id.wrapping_add(1);
+
+        for face in guard.faces.values_mut() {
+            if let Ok(qbl) = face.session.declare_queryable(
+                keyexpr.clone(),
+                queryable_options(complete),
+                make_queryable_callback(closure.clone()),
+            ) {
+                face.qbls.insert(id, qbl);
+            }
+        }
+        guard.qbls.push(QblEntry {
+            id,
+            keyexpr,
+            complete,
+            closure,
+        });
+        id
+    }
+
+    /// Drop a C queryable: remove it from the SSOT so no future face replays
+    /// it, and drop every face's wz queryable for it (each emitting its wire
+    /// `Declare(UndeclQueryable)`). Mirror of [`Self::undeclare_subscriber`],
+    /// including the drop-outside-the-lock discipline.
+    pub(crate) fn undeclare_queryable(&self, id: QblId) {
+        let mut dropped = Vec::new();
+        let mut dropped_entry = None;
+        {
+            let mut guard = self.lock();
+            if let Some(pos) = guard.qbls.iter().position(|entry| entry.id == id) {
+                dropped_entry = Some(guard.qbls.remove(pos));
+            }
+            for face in guard.faces.values_mut() {
+                if let Some(qbl) = face.qbls.remove(&id) {
+                    dropped.push(qbl);
+                }
+            }
+        }
+        // Drop OUTSIDE the lock — see `undeclare_subscriber`: the last
+        // `Arc<CQueryClosure>` release runs the C `drop(context)`.
+        drop(dropped);
+        drop(dropped_entry);
+    }
+}
+
+/// The wz queryable options one C `z_queryable_options_t` maps to.
+///
+/// `allowed_origin` stays at its `Locality::Any` default rather than being
+/// pinned Remote (the fan-out publish's choice, see `pubsub::put_options`).
+/// The two are not symmetric: a publish FANS to every face, so a local-capable
+/// one would fire the single C callback once per face and on the C thread. A
+/// queryable does not fan — it only ANSWERS a query that arrived at a face, and
+/// a loopback query can only originate from a `z_get` on that same face's
+/// session. Leaving `Any` therefore costs nothing today and keeps the in-process
+/// path available to `z_get`'s local arm rather than silently dropping it.
+fn queryable_options(complete: bool) -> QueryableOptions {
+    QueryableOptions::new().with_complete(complete)
 }
 
 /// The [`FaceForwarder`] the accept loop threads its held faces through. The

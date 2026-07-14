@@ -336,7 +336,11 @@ impl_handle_ownership7!(
 // --- helpers ---------------------------------------------------------------
 
 /// Take ownership of a moved payload's bytes, nulling the source.
-unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<Vec<u8>> {
+///
+/// # Safety
+/// `payload` must be null or a valid `z_moved_bytes_t` whose handle is a live
+/// `Box::into_raw::<ByteBuf>` pointer.
+pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<Vec<u8>> {
     if payload.is_null() {
         return None;
     }
