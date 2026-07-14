@@ -719,13 +719,42 @@ use wz_session_core::reassembly_dispatch::sweep_reporting;
 /// (R262) was removed after R264 relocated the sole production
 /// consumer ([`crate::reply::ReplyRegistry::sweep_timed_out`]) to
 /// a dedicated peer task. Every remaining caller passed a no-op
-/// closure, so the parameter was dead surface; sub-second sweep
-/// cadence belongs in a peer task that does not race
+/// closure, so the parameter was dead surface. That YAGNI removal
+/// stands, and R268's own note that a hook may return "when an
+/// actual consumer materialises" is the live clause.
+///
+/// R311y295 — but R268's stated REASON is now stale, and it was
+/// actively misleading a round that needed the truth, so it is
+/// corrected here rather than left to mislead the next one. R268
+/// argued the hook "belongs in a peer task that does not race
 /// `poll_and_dispatch_one` (which is not cancel-safe for
-/// length-prefixed drivers — cancelling between the u16 length
-/// read and the payload read drops captured bytes). Future
-/// per-iteration observability uses can re-introduce a similar
-/// hook when an actual consumer materialises (YAGNI hold).
+/// length-prefixed drivers — cancelling between the u16 length read
+/// and the payload read drops captured bytes)". Two things falsify
+/// that today:
+///
+/// - **The one length-prefixed driver was FIXED.** R311et hoisted
+///   the partial-read buffers into `&mut self` ([`crate::ReadState`])
+///   over cancel-safe `AsyncReadExt::read`, precisely so a dropped
+///   `poll_event` keeps its offset — and its doc names R264's
+///   10x/s sweep cancellation as the fixture that surfaced it. So
+///   the hazard R268 cites is the very hazard R311et closed.
+/// - **No other driver is length-prefixed.** `udp_pipeline` /
+///   `ws_pipeline` / `quic_datagram_pipeline` are datagram flows with
+///   no reassembly, and `serial_pipeline::poll_event` documents its
+///   own cancel-safety (its partial state lives in the framer / tty
+///   buffer). The clause never applied to them.
+///
+/// Cancellation is also not hypothetical or new: this loop's own
+/// `tokio::select!` below ALREADY drops an in-flight
+/// `poll_and_dispatch_one` on every lease / keepalive wake. A finer
+/// wake deadline changes that cancellation's FREQUENCY, not its
+/// correctness.
+///
+/// So a future consumer needing a sub-second cadence (e.g. a C-ABI
+/// binding whose callbacks are only sound on the drive thread, and
+/// which therefore CANNOT sweep from a peer task) should fold its
+/// deadline into this loop's existing wake `min` rather than route
+/// around a hazard that no longer exists.
 pub async fn drive_session_until_terminal<D, F, T>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,
