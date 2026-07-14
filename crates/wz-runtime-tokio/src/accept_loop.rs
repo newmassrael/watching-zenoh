@@ -85,9 +85,20 @@ use wz_runtime_core::TimeSource;
 use crate::link_pipeline::accept_tcp_on;
 use crate::runtime_impl::TokioTime;
 use crate::session_glue::{
-    drive_session_until_terminal, DriverOutcome, IterationEvent, SessionInitParams,
-    SessionLinkActions, SessionTimeouts,
+    drive_session_until_terminal_with_extra_deadline, DriverOutcome, ExtraDeadline, IterationEvent,
+    SessionInitParams, SessionLinkActions, SessionTimeouts,
 };
+// R311y296 — the plain (no-extra-deadline) drive is now reached only by the
+// aggregated-secondary-link path and this module's own tests. `drive_face` —
+// the registered-face path, and the only one a `FaceForwarder` hook can key on
+// — threads `next_extra_deadline_ms` instead. A JOINED link is deliberately
+// left on the plain drive: it shares the primary's session (and so its pending
+// table), is never `register`ed as its own face, and the forwarder maps its
+// events back to the primary via `register_joined` — so it has no per-face
+// deadline of its own to arm, and the primary's drive already arms that
+// session's.
+#[cfg(any(test, feature = "transport-multilink"))]
+use crate::session_glue::drive_session_until_terminal;
 use crate::session_open::{
     accept_and_open_session, initiate_and_open_session, DialedLink, OpenError, OpenedSession,
 };
@@ -318,6 +329,54 @@ pub trait FaceForwarder {
     /// no timer. Read ONCE when the loop starts (a fixed cadence, not a per-tick
     /// query).
     fn tick_period(&self) -> Option<Duration> {
+        None
+    }
+
+    /// R311y296 — when the face `id` next needs its drive loop to wake, as an
+    /// ABSOLUTE monotonic-ms deadline on that face's clock epoch, or `None`
+    /// (the default) to impose no wake. Polled once per drive iteration and
+    /// folded into that face's Established wake `min` (see
+    /// [`crate::session_glue::drive_session_until_terminal_with_extra_deadline`]).
+    ///
+    /// The extension point for a forwarder with a PER-FACE, DATA-DEPENDENT
+    /// deadline — the sibling of [`tick_period`](Self::tick_period), and
+    /// deliberately not the same seam: `tick_period` is one fixed cadence read
+    /// once at loop start, which is a poll. This is a deadline the forwarder
+    /// recomputes from its own state, so the loop wakes when there is actually
+    /// something due and not before.
+    ///
+    /// `wz-capi-pico` is the consumer: it returns its face's earliest pending
+    /// `z_get` deadline ([`crate::session::Session::next_reply_deadline_ms`]),
+    /// because its C reply closures may only be fired from the drive thread and
+    /// so its timeout sweep cannot live in a task of its own. Without the hook
+    /// the sweep would run on the keepalive cadence (~3333 ms for a 10 s lease),
+    /// making a `timeout_ms = 100` get 33x late.
+    ///
+    /// Runs on the loop's single task with the same borrow discipline as the
+    /// other hooks (no `RefCell` held across an `.await`).
+    fn next_extra_deadline_ms(&self, _id: FaceId) -> Option<u64> {
+        None
+    }
+
+    /// R311y296 — the signal that face `id`'s
+    /// [`next_extra_deadline_ms`](Self::next_extra_deadline_ms) may have
+    /// CHANGED, so its drive loop should re-arm. `None` (the default) means the
+    /// forwarder's deadline never changes asynchronously and the loop need
+    /// never be woken to re-read it.
+    ///
+    /// This is the half that is easy to omit and impossible to work around: the
+    /// deadline is only READ when the loop arms its wake, and the loop is
+    /// normally parked in `select!` on the PREVIOUS wake — up to a keepalive
+    /// period (~3333 ms) away. A `z_get` issued from the C application thread
+    /// while the loop is parked would therefore not be seen until that old wake
+    /// fired, which is exactly the lateness the deadline exists to remove. The
+    /// forwarder notifies; the loop re-iterates and re-arms.
+    ///
+    /// An `Arc` rather than a borrow because a forwarder builds it per face
+    /// (the C session's registry owns one per face) rather than holding it as a
+    /// field. Signal with `notify_one`, not `notify_waiters` — see
+    /// [`crate::session_glue::ExtraDeadline`].
+    fn deadline_revised(&self, _id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
         None
     }
 
@@ -801,7 +860,15 @@ async fn drive_face(
     forwarder: &dyn FaceForwarder,
 ) -> (Face, DriverOutcome) {
     let timeouts = SessionTimeouts::spec_defaults();
-    let outcome = drive_session_until_terminal(
+    // R311y296 — the forwarder's per-face deadline joins this face's wake
+    // `min`. Every stock forwarder keeps both `None` defaults, so their arming
+    // is unchanged; `wz-capi-pico`'s returns its pending-`z_get` deadline and
+    // notifies when a get is issued. The face is `register`ed before this runs
+    // (`Step::Opened`), so `deadline_revised` resolves to the real signal
+    // rather than the inert fallback.
+    let never = tokio::sync::Notify::new();
+    let revised = forwarder.deadline_revised(face.id);
+    let outcome = drive_session_until_terminal_with_extra_deadline(
         &mut opened.inbound,
         &opened.actions,
         &mut opened.engine,
@@ -809,6 +876,10 @@ async fn drive_face(
         &opened.clock,
         &timeouts,
         |event| forwarder.forward(face.id, event),
+        ExtraDeadline {
+            next_ms: || forwarder.next_extra_deadline_ms(face.id),
+            revised: revised.as_deref().unwrap_or(&never),
+        },
     )
     .await;
     opened.drain_to_close().await;

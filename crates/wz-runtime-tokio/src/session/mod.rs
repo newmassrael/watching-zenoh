@@ -969,6 +969,35 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         swept
     }
 
+    /// R311y296 — when the earliest pending query is due, on this
+    /// Session's own monotonic scale, or `None` when nothing is pending
+    /// with a deadline.
+    ///
+    /// The wake-arm companion to [`Self::sweep_expired_queries`]: that
+    /// one enforces a deadline that has already passed, this one says
+    /// when to come back and enforce it. A driver that owns a wake
+    /// `select!` folds this into its deadline `min` (see
+    /// [`crate::session_glue::drive_session_until_terminal_with_extra_deadline`])
+    /// so the sweep runs when a query is actually due rather than on
+    /// whatever unrelated cadence the driver's other deadlines impose.
+    ///
+    /// The value shares the epoch of [`Self::clock`], so it is directly
+    /// comparable with the `clock.now_monotonic_ms()` a drive loop
+    /// reads — as long as the application threads the same `Arc<T>`
+    /// into both `Session::new` and the drive loop, the contract
+    /// [`Self::query`] already documents for its own deadline
+    /// computation.
+    ///
+    /// Read-only and cheap (`O(n)` over a bounded table); takes the
+    /// observer lock, so it must NOT be called from inside a closure
+    /// that already holds it.
+    #[cfg(feature = "query-get")]
+    pub fn next_reply_deadline_ms(&self) -> Option<u64> {
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.replies.next_deadline_ms()
+        })
+    }
+
     /// R311cy — borrow the Session-owned clock (R311cw fold-in
     /// stored `clock: Arc<T>`). Callers that need to thread the same
     /// monotonic epoch into a peer task (sweep_task,

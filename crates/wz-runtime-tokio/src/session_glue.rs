@@ -755,6 +755,12 @@ use wz_session_core::reassembly_dispatch::sweep_reporting;
 /// which therefore CANNOT sweep from a peer task) should fold its
 /// deadline into this loop's existing wake `min` rather than route
 /// around a hazard that no longer exists.
+///
+/// R311y296 — that consumer materialised (`wz-capi-pico`'s `z_get`),
+/// and the hook R268 pre-authorised is
+/// [`drive_session_until_terminal_with_extra_deadline`]. This function
+/// is now its inert-source delegation, which is why its signature — and
+/// every one of its ~97 call sites — is unchanged.
 pub async fn drive_session_until_terminal<D, F, T>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,
@@ -762,13 +768,124 @@ pub async fn drive_session_until_terminal<D, F, T>(
     max_iters: Option<usize>,
     clock: &T,
     timeouts: &SessionTimeouts,
-    mut on_event: F,
+    on_event: F,
 ) -> DriverOutcome
 where
     D: LinkDriver,
     F: FnMut(IterationEvent<'_>),
     T: TimeSource,
 {
+    // Nothing ever notifies this, and `next_ms` is constant `None`, so the
+    // loop below arms exactly what it armed before R311y296.
+    let never = tokio::sync::Notify::new();
+    drive_session_until_terminal_with_extra_deadline(
+        driver,
+        actions,
+        engine,
+        max_iters,
+        clock,
+        timeouts,
+        on_event,
+        ExtraDeadline {
+            next_ms: || None,
+            revised: &never,
+        },
+    )
+    .await
+}
+
+/// R311y296 — a caller-owned deadline the drive loop folds into its
+/// Established wake, for work that must happen ON the drive thread at a
+/// time the loop cannot know by itself.
+///
+/// Both halves are load-bearing, and the second is the one that is easy
+/// to miss:
+///
+/// - `next_ms` answers "when is your next deadline" and is polled once
+///   per iteration, as the loop arms its wake.
+/// - `revised` answers "your answer to that just changed". Without it
+///   the deadline could only ever be READ at an iteration boundary — and
+///   the loop is normally parked in `select!` on the PREVIOUS wake, up to
+///   a full keepalive period (~3333 ms for a 10 s lease) away. A deadline
+///   registered while it is parked would simply not be seen until then,
+///   which is precisely the lateness the fold exists to remove. Notifying
+///   makes the loop re-iterate and re-arm on the new, shorter deadline.
+///
+/// Use `Notify::notify_one` rather than `notify_waiters` to signal: the
+/// loop is not always parked in the `revised` arm (it may be running a
+/// callback), and `notify_one` stores a permit so a signal raised in that
+/// window is honoured at the next arm instead of being lost. Waking
+/// spuriously is always safe — the loop simply recomputes.
+pub struct ExtraDeadline<'a, G> {
+    /// Absolute monotonic-ms deadline on the drive loop's `clock` epoch,
+    /// or `None` to impose no wake. Threading the SAME clock instance into
+    /// both is the caller's contract, exactly as it already is for
+    /// [`crate::session::Session::query`]'s own deadline arithmetic.
+    pub next_ms: G,
+    /// Notified when `next_ms` may have changed.
+    pub revised: &'a tokio::sync::Notify,
+}
+
+/// R311y296 — [`drive_session_until_terminal`] plus a caller-owned
+/// deadline source folded into the loop's Established wake `min`.
+///
+/// `next_extra_deadline` is polled once per iteration when the loop arms
+/// its Established wake, and returns an ABSOLUTE monotonic-ms deadline on
+/// `clock`'s epoch, or `None` to impose no wake. When it wins the `min`,
+/// the loop wakes at that instant and reports the wake as the ordinary
+/// lease / keepalive event (`kind = None`) — both of those checks are
+/// deadline-self-guarded and truthfully report "within window", which is
+/// the tolerance the arm was already built with. So the extra deadline
+/// adds NO new [`IterationEvent`] variant and no new observer contract: a
+/// caller reads its own state in `on_event`, which is where the work it
+/// armed the wake for belongs.
+///
+/// ## Why a caller-owned deadline rather than a peer task
+///
+/// The consumer this exists for is `wz-capi-pico`: its C closure contexts
+/// are only sound to invoke from the drive thread, so its pending-query
+/// sweep — which FIRES those closures — cannot run on a task of its own.
+/// The constraint is STRUCTURAL rather than conventional: this loop's
+/// future is `!Send` (the SCE `Engine` owns bare `Box<dyn FnMut()>` with
+/// no `+ Send`), so a per-face `tokio::spawn` does not compile, while a
+/// sweep task would compile fine and be unsound.
+///
+/// Cadence is the whole point. In silent-Established the loop's own wake
+/// is the keepalive one — baseline + `adopted_lease_ms / 3`, i.e. ~3333 ms
+/// for capi-pico's 10 s lease — and a query timeout is by definition
+/// traffic-free, so nothing else wakes the loop. Honouring a caller's
+/// `timeout_ms = 100` off that cadence would be 33x late.
+///
+/// ## Scope, stated precisely
+///
+/// The fold is on the ESTABLISHED arm only — the branch where
+/// [`HandshakeDeadlineTracker`] disarms. While a handshake deadline is
+/// armed it still wins, so an extra deadline falling inside a handshake
+/// phase is honoured at that phase's (short, spec-default) cadence
+/// instead. That is not a gap in practice: both capi-pico paths register
+/// their face only after the session is Established, so no query can be
+/// pending during the initial handshake.
+#[allow(clippy::too_many_arguments)]
+pub async fn drive_session_until_terminal_with_extra_deadline<D, F, T, G>(
+    driver: &mut D,
+    actions: &Arc<SessionLinkActions>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    max_iters: Option<usize>,
+    clock: &T,
+    timeouts: &SessionTimeouts,
+    mut on_event: F,
+    extra: ExtraDeadline<'_, G>,
+) -> DriverOutcome
+where
+    D: LinkDriver,
+    F: FnMut(IterationEvent<'_>),
+    T: TimeSource,
+    G: FnMut() -> Option<u64>,
+{
+    let ExtraDeadline {
+        next_ms: mut next_extra_deadline,
+        revised: deadline_revised,
+    } = extra;
     // R311il — host-owned handshake deadline tracker (the arming-key
     // staleness logic lives once in wz-session-core; see
     // [`HandshakeDeadlineTracker`]). The engine-free FSM arms no
@@ -825,12 +942,16 @@ where
                 let ka_dl = keepalive_wake_deadline(actions);
                 #[cfg(not(feature = "transport-keepalive"))]
                 let ka_dl: Option<u64> = None;
-                match (lease_dl, ka_dl) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, None) => a,
-                    (None, b) => b,
-                }
-                .map(|d| (d, None))
+                // R311y296 — the caller's extra deadline joins the same `min`.
+                // With the default `|| None` source this is byte-identical to
+                // the prior two-way match: `flatten` drops every `None`, so a
+                // no-extra-deadline caller still arms exactly
+                // `min(lease_dl, ka_dl)` (and `None` when both are absent).
+                [lease_dl, ka_dl, next_extra_deadline()]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                    .map(|d| (d, None))
             }
         };
         match deadline {
@@ -838,6 +959,13 @@ where
                 let now_ms = clock.now_monotonic_ms();
                 let remaining_ms = deadline_ms.saturating_sub(now_ms);
                 tokio::select! {
+                    // R311y296 — the caller revised its extra deadline while we
+                    // were parked on the OLD one. Fall through with no work: the
+                    // loop head recomputes `deadline` and re-arms on the new,
+                    // possibly much shorter, wake. A spurious wake is harmless
+                    // (it just recomputes), which is why the signal needs no
+                    // payload and no exactly-once discipline.
+                    _ = deadline_revised.notified() => {}
                     outcome = poll_and_dispatch_one(driver, actions, engine) => {
                         // §5.21 routing-namespace — strip the DIRECT decoded
                         // FramePayload before dispatch. Covers BOTH the

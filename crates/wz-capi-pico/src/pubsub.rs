@@ -26,7 +26,7 @@
 //!   marshaled sample is opaque to the C code — it only borrows it (valid for
 //!   the duration of `call`) and reads the keyexpr / payload back out.
 
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
 use wz_runtime_tokio::locality::Locality;
@@ -60,11 +60,73 @@ pub struct z_loaned_sample_t {
 /// The owned marshal behind a borrowed `z_loaned_sample_t` during one
 /// callback. Owns copies of the keyexpr + payload so they outlive the wz
 /// `SampleView` borrow, and caches the two loaned views the accessors return.
-struct SampleMarshal {
+///
+/// Shared with the reply plane: `z_reply_ok` hands back a `z_loaned_sample_t`,
+/// so [`crate::get`] marshals a reply's Put/Del body into this same type rather
+/// than a parallel one — the accessors below then serve both planes, which is
+/// what keeps `z_sample_keyexpr` / `z_sample_payload` / `z_sample_kind` a single
+/// definition instead of two that can drift.
+pub(crate) struct SampleMarshal {
     keyexpr: String,
     payload: Vec<u8>,
+    kind: z_sample_kind_t,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
+}
+
+impl SampleMarshal {
+    /// Build the marshal with its cached views still UNBOUND — [`Self::bind`]
+    /// must run once the value has reached its final address. See
+    /// [`crate::query::QueryMarshal::bind`] for why the split is load-bearing
+    /// (an earlier cut bound inside a by-value constructor and handed C a
+    /// pointer into the dead constructor frame).
+    pub(crate) fn new(keyexpr: String, payload: Vec<u8>, kind: z_sample_kind_t) -> Self {
+        Self {
+            keyexpr,
+            payload,
+            kind,
+            loaned_keyexpr: z_loaned_keyexpr_t {
+                _start: std::ptr::null(),
+                _len: 0,
+            },
+            loaned_payload: z_loaned_bytes_t {
+                handle: std::ptr::null_mut(),
+                _pad: [std::ptr::null_mut(); 3],
+            },
+        }
+    }
+
+    /// Point the cached views at this marshal's own fields. MUST run only once
+    /// the marshal sits at its FINAL address.
+    pub(crate) fn bind(&mut self) {
+        self.loaned_keyexpr = z_loaned_keyexpr_t {
+            _start: self.keyexpr.as_ptr(),
+            _len: self.keyexpr.len(),
+        };
+        self.loaned_payload.handle = &self.payload as *const Vec<u8> as *mut c_void;
+    }
+
+    /// This marshal viewed as the borrowed `z_loaned_sample_t` the C side gets.
+    pub(crate) fn as_loaned(&self) -> *const z_loaned_sample_t {
+        self as *const SampleMarshal as *const z_loaned_sample_t
+    }
+}
+
+/// pico `z_sample_kind_t` (`api/constants.h:164-168`): how the sample was
+/// issued. A plain C enum, so it occupies an `int`.
+pub type z_sample_kind_t = c_int;
+/// pico `Z_SAMPLE_KIND_PUT` = 0 (`constants.h:165`), also
+/// `Z_SAMPLE_KIND_DEFAULT`.
+pub const Z_SAMPLE_KIND_PUT: z_sample_kind_t = 0;
+/// pico `Z_SAMPLE_KIND_DELETE` = 1 (`constants.h:166`).
+pub const Z_SAMPLE_KIND_DELETE: z_sample_kind_t = 1;
+
+/// The pico kind constant for a wz [`SampleKind`].
+pub(crate) fn sample_kind_of(kind: SampleKind) -> z_sample_kind_t {
+    match kind {
+        SampleKind::Put => Z_SAMPLE_KIND_PUT,
+        SampleKind::Del => Z_SAMPLE_KIND_DELETE,
+    }
 }
 
 // --- C closure callback types ----------------------------------------------
@@ -154,26 +216,15 @@ pub(crate) fn make_subscriber_callback(
             Some(f) => f,
             None => return,
         };
-        let keyexpr = view.keyexpr().to_owned();
-        let payload = view.payload().to_vec();
-        let mut marshal = SampleMarshal {
-            keyexpr,
-            payload,
-            loaned_keyexpr: z_loaned_keyexpr_t {
-                _start: std::ptr::null(),
-                _len: 0,
-            },
-            loaned_payload: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
-            },
-        };
-        marshal.loaned_keyexpr = z_loaned_keyexpr_t {
-            _start: marshal.keyexpr.as_ptr(),
-            _len: marshal.keyexpr.len(),
-        };
-        marshal.loaned_payload.handle = &marshal.payload as *const Vec<u8> as *mut c_void;
-        let sample_ptr = &marshal as *const SampleMarshal as *const z_loaned_sample_t;
+        let mut marshal = SampleMarshal::new(
+            view.keyexpr().to_owned(),
+            view.payload().to_vec(),
+            sample_kind_of(view.kind()),
+        );
+        // Bind AFTER the move out of `new` — the marshal is at its final
+        // address only here. See `SampleMarshal::bind`.
+        marshal.bind();
+        let sample_ptr = marshal.as_loaned();
         // SAFETY: `call` is the C callback; `marshal` outlives the call and the
         // borrowed sample is valid only for its duration (pico contract).
         // `context` travels with the drive dispatch. A panic unwinding OUT of
@@ -669,4 +720,27 @@ pub unsafe extern "C" fn z_sample_payload(
     }
     let marshal = &*(sample as *const SampleMarshal);
     &marshal.loaned_payload as *const z_loaned_bytes_t
+}
+
+/// How the sample was issued — Put or Delete (pico `z_sample_kind`).
+///
+/// R311y296 exports this because the REPLY plane made it load-bearing rather
+/// than merely nice to have: `z_reply_ok` hands the C side a
+/// `z_loaned_sample_t`, and R3a's `z_query_reply_del` can emit a Del reply, so
+/// without this accessor a C getter could not distinguish a delete reply from a
+/// Put carrying an empty payload. R1 shipped only `z_sample_keyexpr` /
+/// `z_sample_payload` because a pub/sub-only surface had no Del to observe
+/// (`z_delete` rides pico's `Z_FEATURE_PUBLICATION` gate and is still not
+/// exported), which left a hole the moment the two planes composed.
+///
+/// A null / spent sample reports `Z_SAMPLE_KIND_PUT`, which is pico's own
+/// `Z_SAMPLE_KIND_DEFAULT` (pico would dereference and crash).
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_kind(sample: *const z_loaned_sample_t) -> z_sample_kind_t {
+    crate::ffi::guard_val(Z_SAMPLE_KIND_PUT, || {
+        if sample.is_null() {
+            return Z_SAMPLE_KIND_PUT;
+        }
+        (*(sample as *const SampleMarshal)).kind
+    })
 }

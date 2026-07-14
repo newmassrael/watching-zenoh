@@ -941,6 +941,37 @@ impl<C: ReplySink> ReplyRegistry<C> {
         swept
     }
 
+    /// R311y296 — the EARLIEST absolute deadline among the pending
+    /// entries, or `None` when nothing is pending with a deadline.
+    ///
+    /// The read-side companion to [`Self::sweep_timed_out`]: the sweep
+    /// answers "what has expired by `now_ms`", this answers "when is
+    /// the next thing due". A driver that owns a wake `select!` folds
+    /// this into its deadline `min` so it wakes exactly when a pending
+    /// query is due, rather than discovering the expiry on whatever
+    /// unrelated cadence its other deadlines happen to impose.
+    ///
+    /// That difference is the reason this exists rather than the
+    /// callers polling: `wz-capi-pico`'s C-ABI binding may only run its
+    /// C callbacks on the drive thread (its closure contexts are not
+    /// `Sync` across an arbitrary thread), so it cannot sweep from a
+    /// peer task; and the drive loop's own Established cadence is the
+    /// keepalive wake — `adopted_lease_ms / 3`, i.e. ~3333 ms for a
+    /// 10 s lease. Without this the loop would honour a caller's
+    /// `timeout_ms = 100` up to 33x late. `deadline_ms` is private to
+    /// [`Pending`], so no accessor could be composed from outside.
+    ///
+    /// Entries with `deadline_ms == None` (the `timeout_ms == 0`
+    /// "never expire" path) are skipped, exactly as the sweep skips
+    /// them: they impose no wake. `O(n)` over a table bounded by
+    /// [`caps::MAX_PENDING_QUERIES`], and read once per wake-arm.
+    pub fn next_deadline_ms(&self) -> Option<u64> {
+        self.pending
+            .iter()
+            .filter_map(|entry| entry.deadline_ms)
+            .min()
+    }
+
     /// R239 — shared reply fan body for wire ([`Self::dispatch_response`])
     /// and loopback ([`Self::deliver_local_reply`]) origins. Each
     /// pending entry whose `rid == inbound.rid` fires its `on_reply`
@@ -2252,6 +2283,65 @@ mod tests {
             }
             other => panic!("expected Err, got {other:?}"),
         }
+    }
+
+    // ── R311y296 next_deadline_ms unit tests ──
+
+    /// The wake-arm read: earliest deadline wins, `None` entries impose no
+    /// wake, and an empty table arms nothing.
+    #[test]
+    fn next_deadline_ms_reports_the_earliest_pending_deadline() {
+        let mut reg = ReplyRegistry::new();
+        assert_eq!(reg.next_deadline_ms(), None, "an empty table arms no wake");
+
+        reg.register(1, 1, Some(3000), |_| {}, |_| {});
+        assert_eq!(reg.next_deadline_ms(), Some(3000));
+
+        // A LATER registration with an EARLIER deadline must win — the table
+        // is registration-ordered, so this is the case a "first entry" read
+        // would get wrong.
+        reg.register(2, 1, Some(1500), |_| {}, |_| {});
+        assert_eq!(
+            reg.next_deadline_ms(),
+            Some(1500),
+            "the earliest deadline arms the wake regardless of insertion order"
+        );
+
+        // `deadline_ms == None` is the timeout_ms == 0 never-expires path: it
+        // imposes no wake, exactly as `sweep_timed_out` never sweeps it.
+        reg.register(3, 1, None, |_| {}, |_| {});
+        assert_eq!(
+            reg.next_deadline_ms(),
+            Some(1500),
+            "a never-expiring entry must not arm a wake"
+        );
+    }
+
+    /// Sweeping the earliest entry re-arms on the next one, and a table
+    /// holding only never-expiring entries arms nothing — the two transitions
+    /// a drive loop's wake `min` depends on.
+    #[test]
+    fn next_deadline_ms_re_arms_after_a_sweep() {
+        let mut reg = ReplyRegistry::new();
+        reg.register(1, 1, Some(1000), |_| {}, |_| {});
+        reg.register(2, 1, Some(2000), |_| {}, |_| {});
+        reg.register(3, 1, None, |_| {}, |_| {});
+        assert_eq!(reg.next_deadline_ms(), Some(1000));
+
+        assert_eq!(reg.sweep_timed_out(1000), 1, "the boundary entry expires");
+        assert_eq!(
+            reg.next_deadline_ms(),
+            Some(2000),
+            "the wake re-arms on the next-earliest deadline"
+        );
+
+        assert_eq!(reg.sweep_timed_out(2000), 1);
+        assert_eq!(
+            reg.next_deadline_ms(),
+            None,
+            "only the never-expiring entry remains, so nothing arms a wake"
+        );
+        assert!(!reg.is_empty(), "...but it is still pending");
     }
 
     // ── R261 sweep_timed_out unit tests ──

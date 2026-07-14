@@ -66,6 +66,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
+use tokio::sync::Notify;
+
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
@@ -102,6 +104,11 @@ struct FaceEntry {
     session: TokioSession,
     subs: BTreeMap<SubId, Subscriber<TokioRuntime>>,
     qbls: BTreeMap<QblId, Queryable<TokioRuntime>>,
+    /// R311y296 — the signal that this face's drive loop should re-arm its wake
+    /// because a `z_get` just registered a pending query with a nearer deadline
+    /// than whatever the loop is currently parked on. Owned per face because
+    /// each face has its own session, pending table, and drive wake.
+    revised: Arc<Notify>,
 }
 
 /// A C-declared subscription — the SSOT replayed onto every face that comes
@@ -203,6 +210,7 @@ impl SharedSession {
                 session,
                 subs,
                 qbls,
+                revised: Arc::new(Notify::new()),
             },
         );
         drop(guard);
@@ -220,16 +228,60 @@ impl SharedSession {
 
     /// One inbound iteration event for `id` — dispatched into that face's own
     /// session (and so its own observer, keeping the peer's keyexpr alias id
-    /// space private to it).
+    /// space private to it), then that face's expired `z_get`s are swept.
+    ///
+    /// # The sweep must live HERE, and only here
+    ///
+    /// This is the `on_event` path — the drive thread — for BOTH roles (the
+    /// dial role's own drive closure and, via [`CApiForwarder::forward`], every
+    /// accepted face). That is the one thread on which a C closure may be
+    /// invoked, and sweeping a timed-out `z_get` FIRES the C reply closure's
+    /// `on_final`. Calling [`TokioSession::sweep_expired_queries`] from the C
+    /// application thread instead — e.g. straight out of `z_get` — would run
+    /// that closure's `drop`/final concurrently with a drive-thread `call` on
+    /// another face: two C callbacks at once on one context, which is exactly
+    /// the unsound-`Sync` bug R311y288 fixed on the publish plane.
+    ///
+    /// The hazard is real rather than theoretical, and it is NOT contained by
+    /// the `Locality::Remote` pin that protects the queryable plane: unlike
+    /// [`TokioSession::query`], whose in-process fan and drain are both gated on
+    /// `allows_local`, `sweep_expired_queries`' `drain_deferred_fires` is
+    /// UNGATED (`session/mod.rs`) — it takes the whole per-session deferred
+    /// queue and runs it on the CALLING thread whatever the locality. So the
+    /// only thing keeping it sound is the caller, and the caller is this
+    /// function.
+    ///
+    /// Cadence comes from the wake this face arms via
+    /// [`CApiForwarder::next_extra_deadline_ms`] /
+    /// [`Self::next_reply_deadline_ms`], so an expiring `z_get` wakes the drive
+    /// loop and lands here on time rather than on the ~3333 ms keepalive
+    /// cadence. Sweeping on EVERY event (not only a deadline wake) is
+    /// deliberate: it is idempotent and cheap when nothing is expired, and it
+    /// means inbound traffic also clears the table.
     pub(crate) fn dispatch(&self, id: u64, event: IterationEvent<'_>) {
         // Clone the session out of the lock first: the dispatch fires the C
         // subscriber callback, which may re-enter this session (`z_put` from
         // inside a callback is a supported pico pattern), so holding the lock
-        // across it would deadlock.
+        // across it would deadlock. The sweep below fires the C reply
+        // closure's final and is re-entrant the same way, so it too runs with
+        // the lock released.
         let session = self.lock().faces.get(&id).map(|face| face.session.clone());
         if let Some(session) = session {
             session.dispatch_iteration_event(event);
+            session.sweep_expired_queries();
         }
+    }
+
+    /// When face `id`'s earliest pending `z_get` is due, or `None` if it has
+    /// none — the wake [`Self::dispatch`]'s sweep rides on.
+    ///
+    /// Per-face because each face has its OWN session (and so its own pending
+    /// table): a `z_get` fans one wz `query` per face, and each face's drive
+    /// loop arms only its own deadline. A face with no pending get arms
+    /// nothing, so an idle session's cadence is unchanged.
+    pub(crate) fn next_reply_deadline_ms(&self, id: u64) -> Option<u64> {
+        let session = self.lock().faces.get(&id).map(|face| face.session.clone());
+        session.and_then(|session| session.next_reply_deadline_ms())
     }
 
     /// Publish to every connected peer (pico `z_put` / `z_publisher_put`
@@ -252,14 +304,7 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, ()> {
-        let sessions: Vec<TokioSession> = {
-            let guard = self.lock();
-            guard
-                .faces
-                .values()
-                .map(|face| face.session.clone())
-                .collect()
-        };
+        let sessions = self.face_sessions();
         let mut delivered = 0usize;
         for session in sessions {
             match session.publish(keyexpr, payload, opts.clone()) {
@@ -272,6 +317,42 @@ impl SharedSession {
             }
         }
         Ok(delivered)
+    }
+
+    /// A snapshot of every connected face's session, taken OUT of the registry
+    /// lock — what a fan-out operation iterates.
+    ///
+    /// Returning a snapshot rather than lending the guard is the crate's
+    /// standing locking discipline made reusable: every fan (`publish_all`,
+    /// `z_get`) may invoke C code, and a pico callback is allowed to re-enter
+    /// the session, so walking `guard.faces` while calling into a face would
+    /// deadlock the non-reentrant mutex.
+    pub(crate) fn face_sessions(&self) -> Vec<TokioSession> {
+        self.lock()
+            .faces
+            .values()
+            .map(|face| face.session.clone())
+            .collect()
+    }
+
+    /// A snapshot of every connected face's session PAIRED with its re-arm
+    /// signal — what [`crate::get::fan_get`] iterates.
+    ///
+    /// Paired rather than looked up per face afterwards because the two must
+    /// come from the same snapshot: a face that leaves the registry between the
+    /// two reads would otherwise have its query issued and its wake never
+    /// notified.
+    pub(crate) fn face_sessions_with_wake(&self) -> Vec<(TokioSession, Arc<Notify>)> {
+        self.lock()
+            .faces
+            .values()
+            .map(|face| (face.session.clone(), face.revised.clone()))
+            .collect()
+    }
+
+    /// Face `id`'s drive-loop re-arm signal (see [`FaceEntry::revised`]).
+    pub(crate) fn deadline_revised(&self, id: u64) -> Option<Arc<Notify>> {
+        self.lock().faces.get(&id).map(|face| face.revised.clone())
     }
 
     /// Record a C subscription in the SSOT and declare it on every live face.
@@ -462,5 +543,24 @@ impl FaceForwarder for CApiForwarder {
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
         self.shared.dispatch(id.0, event);
+    }
+
+    /// Arm this face's drive loop on its earliest pending `z_get` deadline, so
+    /// [`SharedSession::dispatch`]'s sweep runs when a get is actually due.
+    ///
+    /// Without this the accepted faces would sweep only on the keepalive wake
+    /// (~3333 ms for this crate's 10 s lease), because a query timing out is by
+    /// definition traffic-free — so nothing else would wake the loop and a
+    /// `timeout_ms = 100` get would report its final 33x late.
+    fn next_extra_deadline_ms(&self, id: FaceId) -> Option<u64> {
+        self.shared.next_reply_deadline_ms(id.0)
+    }
+
+    /// Let a C-thread `z_get` wake this face's drive loop so it re-arms on the
+    /// new pending query's deadline. Without it the deadline above would only
+    /// be re-read at the loop's next wake — the keepalive one, ~3333 ms away —
+    /// and every get issued into an idle session would be that late.
+    fn deadline_revised(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
+        self.shared.deadline_revised(id.0)
     }
 }

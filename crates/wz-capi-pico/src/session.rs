@@ -55,8 +55,8 @@ use tokio::sync::Notify;
 use wz_runtime_tokio::accept_loop::accept_loop;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts, SigningKey,
-    WhatAmI,
+    drive_session_until_terminal_with_extra_deadline, ExtraDeadline, IterationEvent,
+    SessionInitParams, SessionTimeouts, SigningKey, WhatAmI,
 };
 use wz_runtime_tokio::session_open::{
     bind_endpoint, dial_endpoint, initiate_and_open_session, DialConfig, OpenedSession,
@@ -282,9 +282,23 @@ async fn drive_dial(
     // pins the closure to one specific lifetime ("implementation of `FnMut` is not
     // general enough").
     let mut dispatch = |event: IterationEvent<'_>| dispatch_shared.dispatch(DIAL_FACE_ID, event);
+    // R311y296 — the dial role does NOT go through `accept_loop`, so the
+    // `FaceForwarder::next_extra_deadline_ms` hook that arms the accepted
+    // faces' wakes cannot reach it; this closure is the dial role's equivalent,
+    // passed straight to the drive. Both roles therefore sweep expired `z_get`s
+    // on their own drive thread at the deadline rather than on the ~3333 ms
+    // keepalive cadence — a `connect` session is the ordinary pico get client
+    // (a `z_get` to a router), so leaving this path on the plain drive would
+    // have made the sweep late exactly where it matters most.
+    let deadline_shared = shared.clone();
+    let next_deadline = move || deadline_shared.next_reply_deadline_ms(DIAL_FACE_ID);
+    // `face_up` above registered the face, so its re-arm signal exists; the
+    // fallback is unreachable and inert either way.
+    let never = Notify::new();
+    let revised = shared.deadline_revised(DIAL_FACE_ID);
 
     tokio::select! {
-        _ = drive_session_until_terminal(
+        _ = drive_session_until_terminal_with_extra_deadline(
             &mut driver,
             &actions,
             &mut engine,
@@ -292,6 +306,10 @@ async fn drive_dial(
             &clock,
             &timeouts,
             &mut dispatch,
+            ExtraDeadline {
+                next_ms: next_deadline,
+                revised: revised.as_deref().unwrap_or(&never),
+            },
         ) => {}
         _ = shutdown_future(shutdown, stop) => {}
     }

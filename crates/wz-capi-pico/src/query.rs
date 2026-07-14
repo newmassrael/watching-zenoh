@@ -87,16 +87,16 @@ use crate::session::{session_state, z_loaned_session_t};
 // "Deprecated: ignored, taken from query" on the reply options
 // (`~/zenoh-pico/include/zenoh-pico/api/types.h:318-321`), so they are carried
 // for layout only.
-type z_congestion_control_t = c_int;
-type z_priority_t = c_int;
+pub type z_congestion_control_t = c_int;
+pub type z_priority_t = c_int;
 
 /// pico `Z_CONGESTION_CONTROL_BLOCK` (`api/constants.h:216`) — the value pico's
 /// `z_query_reply_options_default` writes (`src/api/api.c:2118,2181`). NOT 0:
 /// that is `Z_CONGESTION_CONTROL_DROP`, a different documented default.
-const Z_CONGESTION_CONTROL_BLOCK: z_congestion_control_t = 1;
+pub(crate) const Z_CONGESTION_CONTROL_BLOCK: z_congestion_control_t = 1;
 
 /// pico `Z_PRIORITY_DEFAULT` = `Z_PRIORITY_DATA` = 5 (`api/constants.h:247-250`).
-const Z_PRIORITY_DEFAULT: z_priority_t = 5;
+pub(crate) const Z_PRIORITY_DEFAULT: z_priority_t = 5;
 
 // --- opaque loaned query ---------------------------------------------------
 
@@ -111,11 +111,11 @@ pub struct z_loaned_query_t {
 
 /// pico's `_anyke` selector-parameter key (`Z_SELECTOR_QUERY_MATCH`,
 /// `~/zenoh-pico/include/zenoh-pico/api/constants.h:18`).
-const ANYKE_PARAM: &[u8] = b"_anyke";
+pub(crate) const ANYKE_PARAM: &[u8] = b"_anyke";
 
 /// pico's selector-parameter list separator (`_Z_QUERY_PARAMS_LIST_SEPARATOR`,
 /// `~/zenoh-pico/include/zenoh-pico/utils/query_params.h`).
-const PARAM_SEPARATOR: u8 = b';';
+pub(crate) const PARAM_SEPARATOR: u8 = b';';
 
 /// Whether a query's selector parameters carry the `_anyke` key — pico's
 /// [`_z_parameters_has_anyke`](https://github.com/eclipse-zenoh/zenoh-pico)
@@ -136,7 +136,7 @@ const PARAM_SEPARATOR: u8 = b';';
 /// than a substring search: `_anyke` must start the list or follow a `;`, and
 /// must end the list or precede a `;`. Without them a parameter such as
 /// `no_anyke` or `_anykey=1` would be read as the flag.
-fn parameters_has_anyke(parameters: &[u8]) -> bool {
+pub(crate) fn parameters_has_anyke(parameters: &[u8]) -> bool {
     let mut start = 0usize;
     while start <= parameters.len() {
         let Some(offset) = parameters[start..]
