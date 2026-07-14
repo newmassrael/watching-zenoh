@@ -2005,9 +2005,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // thread (wz-capi-pico drives faces on a drive thread while a C app
             // thread calls `z_get`): the same callback context would run on two
             // threads at once. Gating restores "only the drive loop drains".
-            // No existing caller passes `Locality::Remote` to `query` (every
-            // `Locality::Remote` in the tree is a `PublishOptions`), so this is a
-            // no-op for the current tree.
+            //
+            // Blast radius, stated precisely (R311y291 corrects R311y290, which
+            // claimed this was "provably a no-op because no caller passes Remote
+            // to query" — false: `with_allowed_destination` is the QUERY-side
+            // setter, `with_locality` the PUBLISH-side one, and ~19 in-tree TEST
+            // callers do pass `Locality::Remote` here). No in-tree PRODUCTION
+            // caller passes `Locality::Remote` to `query`; the Remote query
+            // callers are tests that stage nothing before this point, so draining
+            // an empty queue made the gate OBSERVABLY inert for them (294/294 lib,
+            // 72/72 query-filtered) — an empirical result, not a proof. It is not
+            // statically guaranteed either: `GroupOptions::with_get_locality` and
+            // `AdvancedSubscriberOptions::get_locality` are public knobs that can
+            // carry `Remote` into `query` at runtime. What IS guaranteed is the
+            // property this gate exists for: a Remote query stages nothing of its
+            // own, so skipping the drain can lose none of ITS fires.
             if allows_local {
                 // R311lg — drain the fires this call staged so local replies run
                 // synchronously on the caller thread, outside the observer lock,

@@ -7139,6 +7139,17 @@ fn queryable_staged_before_undeclare_suppressed_but_final_still_sent() {
 // concurrently with the drive thread running its own — the same callback context
 // on two threads at once. Everything `query` itself stages is loopback-only, so
 // gating costs a Remote-only query nothing.
+//
+// All three features are preconditions, not decoration: `pubsub-allow-loop` is a
+// COMPILE need (`build_loopback_sample` is gated on it), while `declare-subscriber`
+// and `query-get` are RUNTIME needs — both methods are signature-stable and return
+// `FeatureDisabled` when off, so without the gate this would compile and then fail
+// at the `.expect` / `assert!(issued.is_ok())` in the Layer C1j subset lanes.
+#[cfg(all(
+    feature = "query-get",
+    feature = "declare-subscriber",
+    feature = "pubsub-allow-loop"
+))]
 #[test]
 fn remote_only_query_does_not_drain_another_planes_staged_fire() {
     use std::sync::atomic::{AtomicUsize, Ordering};
