@@ -55,7 +55,6 @@
 
 use std::cell::UnsafeCell;
 use std::ffi::{c_int, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
@@ -118,35 +117,36 @@ struct QueryMarshal {
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
-    /// Cleared just before the callback frame returns. A `z_query_reply` on a
-    /// pointer the C side stashed and reused after its callback returned is
-    /// then a loud [`Z_ERR_INVALID`] instead of a silent write into a spent
-    /// marshal.
+    /// Reply accumulator.
     ///
-    /// Atomic rather than a `Cell` because the C side may well be
-    /// multi-threaded: a `Cell` read from a thread other than the callback's
-    /// would itself be a data race, so the check meant to catch misuse would
-    /// be UB. This closes the realistic misuse — a retained pointer used while
-    /// the frame is still live. It cannot close the frame-already-returned
-    /// case, where reading the flag is a use-after-free no in-process check can
-    /// intercept; that case is UB in pico too (its loaned query is valid only
-    /// for the callback unless taken via the owned family, which this round
-    /// deliberately does not export — see the module doc).
-    valid: AtomicBool,
-    /// Reply accumulator. `UnsafeCell` because the accessors receive
-    /// `*const z_loaned_query_t` and must append: the pico closure contract
-    /// makes the callback single-threaded for one query, and the marshal is
-    /// reachable only through the pointer handed to that one callback, so no
-    /// aliasing `&mut` exists while it runs.
+    /// `UnsafeCell` because the accessors receive `*const z_loaned_query_t` and
+    /// must append. The soundness anchor is pico's callback contract, and it is
+    /// the ONLY anchor: one query's callback — and any `z_query_reply` on its
+    /// loaned query — runs on the session's single read task, so no aliasing
+    /// borrow exists while it runs. Here that task is the face's drive thread.
+    ///
+    /// This marshal is valid for exactly the duration of one `call`, the same
+    /// scope pico gives its own `z_loaned_query_t`. Using the pointer after the
+    /// callback returns, or from another thread, is undefined behaviour — in
+    /// pico too, whose loaned query is only escapable via
+    /// `z_query_take_from_loaned` (the owned family this round deliberately
+    /// withholds; see the module doc). We add no tripwire for that: an earlier
+    /// cut carried a `valid` flag cleared at callback return, but with a
+    /// callback-scoped marshal the flag can never usefully fire — after the
+    /// frame dies, READING the flag is itself the use-after-free it was meant
+    /// to intercept. Keeping it would have documented a protection that does
+    /// not exist, which is worse than pico's honest silence.
     replies: UnsafeCell<Vec<PendingReply>>,
 }
 
 impl QueryMarshal {
-    /// Build the marshal for one inbound query.
+    /// Build the marshal for one inbound query, with its cached views still
+    /// UNBOUND — [`Self::bind`] must run once the value has reached its final
+    /// address. Splitting the two is load-bearing; see `bind`.
     fn new(view: &dyn QueryView) -> Self {
         let payload = view.payload().map(<[u8]>::to_vec);
         let attachment = view.attachment().map(<[u8]>::to_vec);
-        let mut marshal = Self {
+        Self {
             keyexpr: view.keyexpr().to_owned(),
             parameters: view.parameters().map(<[u8]>::to_vec).unwrap_or_default(),
             has_payload: payload.is_some(),
@@ -165,18 +165,39 @@ impl QueryMarshal {
                 handle: std::ptr::null_mut(),
                 _pad: [std::ptr::null_mut(); 3],
             },
-            valid: AtomicBool::new(true),
             replies: UnsafeCell::new(Vec::new()),
+        }
+    }
+
+    /// Point the cached views at this marshal's own fields.
+    ///
+    /// MUST run only once the marshal sits at its FINAL address, and must not
+    /// be folded back into [`Self::new`]. `loaned_payload.handle` /
+    /// `loaned_attachment.handle` store the address of the `Vec` STRUCT (that
+    /// is what [`crate::abi::handle_ref`] reconstructs a `&Vec<u8>` from), and
+    /// a struct field's address moves with the struct. `new` returns `Self` by
+    /// value, so binding inside it would record `new`'s frame and hand C a
+    /// pointer into a dead frame the moment the value is moved out — return-
+    /// value optimisation is not a language guarantee and does not save it.
+    ///
+    /// `loaned_keyexpr._start` would in fact survive (`String::as_ptr` is the
+    /// HEAP buffer, which a move does not relocate — the same distinction
+    /// [`crate::bytes`] documents), and that asymmetry is exactly what made an
+    /// earlier binding-inside-`new` pass its test: the test read only the
+    /// keyexpr. Both are bound here so the rule is uniform rather than
+    /// per-field reasoning.
+    ///
+    /// Sibling shapes in this crate, for orientation: `SampleMarshal`
+    /// (`pubsub.rs`) is built in the callback frame and never moved;
+    /// [`QueryableState`] binds after its `Box::new`. Both reach the same
+    /// invariant — bind at the final address.
+    fn bind(&mut self) {
+        self.loaned_keyexpr = z_loaned_keyexpr_t {
+            _start: self.keyexpr.as_ptr(),
+            _len: self.keyexpr.len(),
         };
-        // Point the cached views at the owned copies now that they have their
-        // final address (the same two-step `SampleMarshal` uses).
-        marshal.loaned_keyexpr = z_loaned_keyexpr_t {
-            _start: marshal.keyexpr.as_ptr(),
-            _len: marshal.keyexpr.len(),
-        };
-        marshal.loaned_payload.handle = &marshal.payload as *const Vec<u8> as *mut c_void;
-        marshal.loaned_attachment.handle = &marshal.attachment as *const Vec<u8> as *mut c_void;
-        marshal
+        self.loaned_payload.handle = &self.payload as *const Vec<u8> as *mut c_void;
+        self.loaned_attachment.handle = &self.attachment as *const Vec<u8> as *mut c_void;
     }
 
     /// Append a reply the C callback asked for.
@@ -211,11 +232,7 @@ unsafe fn query_marshal<'a>(query: *const z_loaned_query_t) -> Option<&'a QueryM
     if query.is_null() {
         return None;
     }
-    let marshal = &*(query as *const QueryMarshal);
-    if !marshal.valid.load(Ordering::SeqCst) {
-        return None;
-    }
-    Some(marshal)
+    Some(&*(query as *const QueryMarshal))
 }
 
 // --- C closure types -------------------------------------------------------
@@ -331,6 +348,9 @@ pub(crate) fn make_queryable_callback(
             None => return,
         };
         let mut marshal = QueryMarshal::new(view);
+        // Bind AFTER the move out of `new` — the marshal is at its final
+        // address only here. See `QueryMarshal::bind`.
+        marshal.bind();
         let query_ptr = &marshal as *const QueryMarshal as *const z_loaned_query_t;
         // SAFETY: `call` is the C callback; `marshal` outlives the call and the
         // borrowed query is valid only for its duration (pico contract).
@@ -342,10 +362,6 @@ pub(crate) fn make_queryable_callback(
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             call(query_ptr, ctx);
         }));
-        // Spend the marshal BEFORE flushing: from here a stashed pointer is a
-        // loud `Z_ERR_INVALID` rather than a reply appended to a batch that has
-        // already been drained (which would be silently lost).
-        marshal.valid.store(false, Ordering::SeqCst);
         marshal.flush(out);
     }
 }
@@ -937,4 +953,94 @@ pub unsafe extern "C" fn z_query_reply_err(
         marshal.push_reply(PendingReply::Err { payload: buf });
         Z_OK
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `QueryView` carrying a value payload + an attachment.
+    struct FakeQuery {
+        keyexpr: String,
+        payload: Vec<u8>,
+        attachment: Vec<u8>,
+    }
+
+    impl QueryView for FakeQuery {
+        fn keyexpr(&self) -> &str {
+            &self.keyexpr
+        }
+        fn parameters(&self) -> Option<&[u8]> {
+            None
+        }
+        fn attachment(&self) -> Option<&[u8]> {
+            Some(&self.attachment)
+        }
+        fn payload(&self) -> Option<&[u8]> {
+            Some(&self.payload)
+        }
+        fn rid(&self) -> u64 {
+            7
+        }
+    }
+
+    /// The cached views must point at THIS marshal's own fields — the address
+    /// invariant `bind` exists to establish.
+    ///
+    /// Regression gate for the bug an earlier cut shipped: `QueryMarshal::new`
+    /// bound `loaned_payload.handle` to `&self.payload` — the address of the
+    /// `Vec` STRUCT — and then returned `Self` BY VALUE, so the handle pointed
+    /// into `new`'s dead frame and `z_query_payload` handed C a `Vec`
+    /// reconstructed from freed stack. `loaned_keyexpr` hid it (`String::as_ptr`
+    /// is the heap buffer, which a move does not relocate) and the wire test
+    /// reads only the keyexpr, so the suite stayed green over UB.
+    ///
+    /// This asserts the ADDRESS, not the bytes, and that distinction is the
+    /// whole point: reading a dangling handle is UB that routinely *appears* to
+    /// work — a read-back assertion was tried first and passed even with the bug
+    /// deliberately restored, because the dead frame still held the old `Vec`.
+    /// The address invariant is deterministic and fails the instant `bind` runs
+    /// anywhere but the final location.
+    #[test]
+    fn bind_points_the_cached_views_at_this_marshals_own_fields() {
+        let view = FakeQuery {
+            keyexpr: "demo/q".to_owned(),
+            payload: b"value-payload".to_vec(),
+            attachment: b"att".to_vec(),
+        };
+        // Exactly the shape `make_queryable_callback` uses: construct, move out
+        // of `new`, then bind at the final address.
+        let mut marshal = QueryMarshal::new(&view);
+        marshal.bind();
+
+        assert_eq!(
+            marshal.loaned_payload.handle as usize, &marshal.payload as *const Vec<u8> as usize,
+            "the cached payload view must address THIS marshal's Vec, not a moved-from copy's"
+        );
+        assert_eq!(
+            marshal.loaned_attachment.handle as usize,
+            &marshal.attachment as *const Vec<u8> as usize,
+            "the cached attachment view must address THIS marshal's Vec"
+        );
+        assert_eq!(
+            marshal.loaned_keyexpr._start as usize,
+            marshal.keyexpr.as_ptr() as usize,
+            "the cached keyexpr view must address THIS marshal's string buffer"
+        );
+
+        // The accessors built on those views resolve to the query's bytes.
+        let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
+        unsafe {
+            let buf = handle_ref::<z_loaned_bytes_t, Vec<u8>>(z_query_payload(query))
+                .expect("the cached payload view must resolve");
+            assert_eq!(buf.as_slice(), b"value-payload");
+            let buf = handle_ref::<z_loaned_bytes_t, Vec<u8>>(z_query_attachment(query))
+                .expect("the cached attachment view must resolve");
+            assert_eq!(buf.as_slice(), b"att");
+            assert_eq!(
+                crate::keyexpr::keyexpr_str(z_query_keyexpr(query)),
+                Some("demo/q")
+            );
+        }
+    }
 }
