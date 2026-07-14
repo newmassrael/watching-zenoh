@@ -70,6 +70,47 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      # R311y297 — reclaim the runner's preinstalled software before anything
+      # else. THIS JOB HAS NO OTHER DISK HEADROOM: it builds the whole
+      # workspace, then ~20 more feature-subset lanes (C1b..C1i, C4, C4b),
+      # each of which is a DISTINCT feature set and so a DISTINCT set of
+      # artifacts in `crates/target` — plus zenoh-pico's CLI binaries and
+      # wz-ap-demo for the Layer E interop lanes. Debug artifacts dominate,
+      # and the total grows monotonically as atoms land.
+      #
+      # R311y296 is what tipped it over: the run passed EVERY layer through
+      # E5 and then died with `System.IO.IOException: No space left on
+      # device` while the Actions runner was writing its OWN diagnostic log.
+      # No wz gate failed. The prior green run (y291) had already taken 25m31s
+      # against `timeout-minutes: 30`, so both ceilings were being approached
+      # at once and nothing reported either.
+      #
+      # ubuntu-22.04 ships ~25-30 GB of software this job never uses. Pruning
+      # it is the standard remedy and costs ~15s. Safe for THIS job
+      # specifically: it uses only `actions/checkout` + `Swatinem/rust-cache`,
+      # its Rust comes from rustup and its python3 from apt (`/usr/bin`), so
+      # nothing here lives in the hosted tool cache. (The Zephyr job DOES use
+      # `actions/setup-python`, which is why this step is not hoisted to a
+      # shared spot — it is scoped to the job whose disk actually overflowed.)
+      #
+      # The `df -h` bracket is not decoration. The failure above was
+      # undiagnosable from the log precisely because nothing ever reported
+      # free space; a future squeeze should be visible BEFORE it is fatal.
+      - name: Free runner disk space (headroom for the feature-matrix lanes)
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          # `|| true` throughout: a path absent on a future runner image must
+          # not fail the build — this step is headroom, not a gate.
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          echo "=== free space AFTER prune ==="
+          df -h /
+
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
         with:
