@@ -226,6 +226,14 @@ jobs:
         # status drift that neither the cargo-feature CI lanes nor
         # validate-workspace can see. Top-level layer, so it needs its
         # own yml step (same reason as A2).
+        #
+        # R311y299 — WZ_A3_REQUIRE=1, for the same reason A4 got it in
+        # R311y266 (and A3 should have got it then): a missing mnemosyne-cli
+        # disarmed this gate ENTIRELY and exited 0, while the install step
+        # above is deliberately fault-tolerant. The tool IS provisioned here,
+        # so its absence is a provisioning regression, not an honest skip.
+        env:
+          WZ_A3_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer A3
 
       - name: Layer A4 — cross-impl proof axis

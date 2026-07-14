@@ -569,7 +569,10 @@ layer_a3_audit_catalog_status() {
 }
 
 # ─── Layer A4 — cross-impl PROOF axis (R311y259) ────────────────────
-# A3 answers "is there a knob?" and "is it built?". A4 answers the question the north
+# A3 answers "is there a knob?" and -- for every atom whose impl axis has been
+# TAGGED -- "is it built?". R311y299: that second half is a LOWER BOUND, not a
+# total; A3 reports its unaudited remainder rather than asserting completeness.
+# A4 answers the question the north
 # star actually turns on: "is it PROVEN against a real foreign implementation?" It joins
 # the catalog to the interop corpus (derived from the harness call graph) and to cargo's
 # feature closure (which mechanically refutes a claim for code that is not compiled in).

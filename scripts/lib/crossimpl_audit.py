@@ -74,6 +74,19 @@ FOREIGN_NON_OBSERVABLE = {
     "pubsub-allow-loop": "same-process delivery; zero wz-session-core sites, so it emits no bytes",
 }
 
+# A SECOND, independent copy of tag knowledge (audit-catalog-status.sh:234 holds the
+# closed set; its grammar is embedded in a bash heredoc and cannot be imported). The
+# two must be changed together -- R311y299 carry: single-source the tag set.
+#
+# Why COMPLETE is deliberately ABSENT here: it means "built", so omitting it looks
+# like a bug. It is inert because `built` (see main()) admits an atom via
+# `status == "active"` OR this set, and audit-catalog-status.sh only permits COMPLETE
+# on status=active -- so the first disjunct always carries it and this one is never
+# consulted. That inertness is load-bearing on A3 actually running: if A3 is disarmed
+# and a reserved atom is tagged COMPLETE, it silently leaves `built`, shrinks the
+# denominator, and INFLATES the proven percentage with nothing failing. R311y299 gave
+# A3 a WZ_A3_REQUIRE mode for exactly this class of forfeit. If COMPLETE is ever
+# widened to reserved, it MUST be added here in the same commit.
 IMPL_TAGS_BUILT = {"FOUNDATIONAL", "PARTIAL"}
 KIND_CLASS = corpus.KIND_CLASS
 

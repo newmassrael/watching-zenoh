@@ -54,13 +54,24 @@
 # holds for them since they carry no cfg(feature=...) site. The
 # FOUNDATIONAL/inert distinction is documentation (reason + feature_inventory
 # §5), not a gate input. Examples of foundational reserved atoms:
-#   keyexpr-canon / -literal / -mapping / -intersect / -includes /
-#   -wildcard-single / -wildcard-double / -dollar-star  (matchers in
+#   keyexpr-canon / -literal / -mapping / -intersect  (matchers in
 #       wz-session-core/src/keyexpr_match.rs, always-on on every match path)
 #   pubsub-sample        (Sample receive surface; cfg-off would API-break)
 #   time-system-clock    (wall-clock source; HLC is the future toggle)
 #   routing-client       (unicast client-only; peer/router are future)
 #   platform-linux       (routed by Rust target_os cfg, not a cargo feature)
+#
+# R311y299 — this example list had ROTTED, and the rot is the whole point.
+# It also named keyexpr-includes / -wildcard-single / -wildcard-double /
+# -dollar-star as foundational-reserved. R311jf gave all four a real cfg
+# toggle in keyexpr_match.rs and flipped them to status=active (live:
+# 11 / 7 / 17 / 7 cfg sites respectively), and this comment was never
+# updated. 4 of the 12 normative examples in THIS file -- the file whose
+# entire purpose is to stop the impl axis living in un-checked prose --
+# were themselves un-checked prose asserting a status the store refutes.
+# Nothing gates a comment. That is the same defect class this gate exists
+# to catch, one level up, and it is why the impl axis moves into a typed
+# tag the gate reads (invariant #5) rather than into more prose.
 #
 # Adding a new toggleable feature => it MUST carry a cfg(feature=...) gate
 # and be status=active. A new always-on capability => status=reserved with
@@ -73,13 +84,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-if ! command -v mnemosyne-cli >/dev/null 2>&1; then
-    echo "audit-catalog-status SKIP (mnemosyne-cli not on PATH)"
+# R311y299 — the gate's own kill switch, and why it now has a required mode.
+#
+# A missing mnemosyne-cli disarmed A3 ENTIRELY: it exited 0 and every invariant
+# went unchecked. Hosted CI installs mnemosyne-cli behind a `|| { warning; skip }`
+# fallback, so one network blip disarmed the ONLY gate that joins the inventory to
+# the source tree -- and release.yml runs A3 with no MNEMOSYNE_SKIP guard and has
+# no A4 step at all, so nothing there would notice. A SKIP on a developer's box is
+# honest (they may not have the tool); a SKIP where the job PROVISIONS the tool is
+# a provisioning regression masquerading as success. Same rule as WZ_A4_REQUIRE /
+# WZ_QZ_REQUIRE / WZ_Z_REQUIRE: "a should-run lane that SKIPs is the burn".
+_a3_unavailable() {
+    if [[ -n "${WZ_A3_REQUIRE:-}" ]]; then
+        echo "audit-catalog-status FAIL — required (WZ_A3_REQUIRE set) but $1" >&2
+        exit 1
+    fi
+    echo "audit-catalog-status SKIP ($1)"
     exit 0
+}
+
+if ! command -v mnemosyne-cli >/dev/null 2>&1; then
+    _a3_unavailable "mnemosyne-cli not on PATH"
 fi
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "audit-catalog-status SKIP (python3 not on PATH)"
-    exit 0
+    _a3_unavailable "python3 not on PATH"
 fi
 
 INV_FILE="$(mktemp)"
@@ -172,31 +200,65 @@ def has_gate(atom):
 #   OBVIATED      no wz analog BY CONSTRUCTION           -> nothing to build
 #   PHANTOM       does not exist in zenoh at all         -> nothing to build
 #
-# `active` needs no tag: it means built AND cfg-gated, so the implementation
-# axis is unambiguous (invariant #3 already pins it).
+# R311y299 — the premise that used to stand here was FALSE, and it cost the
+# audit its headline number. It read:
 #
-# "What work remains" is now a query, not a grep:
-#     UNBUILT + PARTIAL(residual) + UNVERIFIED(lanes)
+#     "`active` needs no tag: it means built AND cfg-gated, so the
+#      implementation axis is unambiguous (invariant #3 already pins it)."
+#
+# Invariant #3 pins `active <=> >=1 cfg site`. That asserts A KNOB EXISTS. It
+# says NOTHING about whether the capability behind the knob is finished --
+# and :39-43 of this file says so outright: `active` means EXACTLY "a real
+# composition toggle the user can flip" -- NOTHING ELSE. The two comments
+# contradicted each other, and the exempting one won at :212/:228/:235: an
+# atom that was active + cfg-gated + HALF-BUILT was invisible to REMAINING
+# WORK by construction.
+#
+# The grammar then made the truth unsayable. PARTIAL mapped to `reserved`,
+# and `reserved` requires ZERO cfg sites (invariant #2) -- so an atom with a
+# real knob COULD NOT be marked PARTIAL. R311y296 found query-consolidation
+# half-built (Q_C transmit wired, apply-half unbuilt), had nowhere in the
+# grammar to put it, and wrote it into prose. The grammar forced that.
+#
+# The fix: tag -> status becomes a RELATION (a set of admissible statuses)
+# instead of a function, so the product of the two axes is expressible.
+# PARTIAL widens to active; COMPLETE is the new "active, built, no residual".
+#
+# The tag is REQUIRED on every non-active atom. On an ACTIVE atom it is
+# OPTIONAL-BUT-COUNTED (reported as UNAUDITED), deliberately -- see the
+# UNAUDITED note at the roll-up below. It is NOT silently skipped.
+#
+# "What work remains" is a query, not a grep -- but only over the atoms whose
+# impl axis has actually been audited:
+#     UNBUILT + PARTIAL(residual) + UNVERIFIED(lanes)   >= a LOWER BOUND
 IMPL_TAGS = {
-    "FOUNDATIONAL": "reserved",
-    "PARTIAL":      "reserved",
-    "UNVERIFIED":   "reserved",
-    "UNBUILT":      "reserved",
-    "BEYOND-PICO":  "reserved",
-    "OUT-OF-SCOPE": "reserved",
-    "OBVIATED":     "deprecated",
-    "PHANTOM":      "deprecated",
+    "COMPLETE":     {"active"},
+    "FOUNDATIONAL": {"reserved"},
+    "PARTIAL":      {"reserved", "active"},
+    "UNVERIFIED":   {"reserved"},
+    "UNBUILT":      {"reserved"},
+    "BEYOND-PICO":  {"reserved"},
+    "OUT-OF-SCOPE": {"reserved"},
+    "OBVIATED":     {"deprecated"},
+    "PHANTOM":      {"deprecated"},
 }
+
+# Tags that assert remaining implementation work of some kind.
+TAGS_REMAINING = ("UNBUILT", "PARTIAL", "UNVERIFIED")
+
+def _head(atom):
+    """The reason's first token, whether or not it is a legal tag."""
+    r = reason.get(atom) or ""
+    return r.split(":")[0].split("(")[0].strip().upper()
 
 def impl_tag(atom):
     """First token of the reason, if it is a closed-set tag."""
-    r = reason.get(atom, "")
-    head = r.split(":")[0].split("(")[0].strip().upper()
-    return head if head in IMPL_TAGS else None
+    return _head(atom) if _head(atom) in IMPL_TAGS else None
 
 fail_undeclared, fail_reserved_gated, fail_active_nogate = [], [], []
 fail_unlinked = []
-fail_untagged, fail_tag_status = [], []
+fail_untagged, fail_tag_status, fail_bad_tag = [], [], []
+unaudited = []
 
 for atom in sorted(atoms):
     status = atoms[atom]
@@ -209,35 +271,73 @@ for atom in sorted(atoms):
         fail_active_nogate.append(atom)
     if not section_ref.get(atom):
         fail_unlinked.append(atom)
-    if status != "active":
-        tag = impl_tag(atom)
-        if tag is None:
-            fail_untagged.append(atom)
-        elif IMPL_TAGS[tag] != status:
+
+    tag = impl_tag(atom)
+    if tag is not None:
+        # The tag -> status RELATION: a tag is legal on a SET of statuses.
+        if status not in IMPL_TAGS[tag]:
             fail_tag_status.append((atom, tag, status))
+    elif status != "active":
+        # R311y299 — separate "typo'd a tag" from "wrote no tag". impl_tag()
+        # returns None for both, so the old single message misdiagnosed
+        # `BEYOND_PICO` / `OUT OF SCOPE` as a MISSING tag and printed the
+        # wrong instruction. A head token that is ALL-CAPS and tag-shaped but
+        # not in the closed set is a typo; anything else is genuinely untagged.
+        head = _head(atom)
+        if head and re.fullmatch(r"[A-Z][A-Z _-]{2,}", head):
+            fail_bad_tag.append((atom, head))
+        else:
+            fail_untagged.append(atom)
+    else:
+        # status == "active" and no tag. NOT a failure yet -- but NOT silently
+        # skipped either, which is exactly what this gate did until R311y299.
+        unaudited.append(atom)
 
 ok = True
 active_n = sum(1 for a in atoms if atoms[a] == "active")
 print("=== catalog status truthfulness audit ===")
 print("  atoms=%d active=%d declared-cargo-features=%d" % (len(atoms), active_n, len(declared)))
 
-# The implementation-axis roll-up: what this whole invariant exists to make
-# answerable in one line.
+# The implementation-axis roll-up.
+#
+# R311y299 — this used to print `active(built)=132` and a bare
+# `REMAINING WORK = N`, having skipped every active atom (:228-230 of the old
+# file). Both were assertions the audit had never checked: `active` means "has
+# a knob", so `active(built)=132` restated the knob count while CLAIMING the
+# build count, and REMAINING WORK excluded 132 of 212 atoms by construction.
+# The number was not merely incomplete -- it was presented as complete.
+#
+# It is now reported as a LOWER BOUND with the unaudited remainder named. The
+# tally counts every TAGGED atom regardless of status (an active PARTIAL is
+# remaining work exactly as much as a reserved one).
+#
+# Why UNAUDITED is counted rather than failed: tagging the 132 active atoms is
+# a per-atom CODE READ, not a prose transcription. The reason prose is known to
+# have rotted in BOTH directions -- storage-aligner's reason says "driver A8 +
+# facade forward A9 pending" against a live 1178-line driver and a shipped
+# facade forward, and keyexpr-includes' says "no internal consumer yet" against
+# 6 live consumers. Transcribing that prose into a typed tag would launder
+# stale prose into a field that LOOKS authoritative: prose rots, and a typed
+# tag certified by prose rots just as fast, only louder. So the tags are earned
+# a batch at a time, and until UNAUDITED reaches 0 this gate reports what it
+# does not know instead of asserting a completeness it never checked. When
+# UNAUDITED hits 0, promote the active arm to fail_untagged (one-line change)
+# and the bound becomes exact.
 tally = {}
 for a in atoms:
-    if atoms[a] == "active":
-        continue
     t = impl_tag(a)
     if t:
         tally[t] = tally.get(t, 0) + 1
-remaining = sorted(
-    a for a in atoms
-    if atoms[a] != "active" and impl_tag(a) in ("UNBUILT", "PARTIAL", "UNVERIFIED")
-)
-print("  implementation axis: active(built)=%d %s" % (
-    active_n, " ".join("%s=%d" % (k, tally[k]) for k in sorted(tally))))
-print("  REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) = %d: %s" % (
-    len(remaining), ", ".join(remaining) if remaining else "(none)"))
+remaining = sorted(a for a in atoms if impl_tag(a) in TAGS_REMAINING)
+print("  implementation axis: %s" % (
+    " ".join("%s=%d" % (k, tally[k]) for k in sorted(tally)) or "(nothing tagged)"))
+print("  impl axis UNAUDITED (active, no tag) = %d of %d active" % (
+    len(unaudited), active_n))
+print("  REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) >= %d%s: %s" % (
+    len(remaining),
+    "  [LOWER BOUND -- %d unaudited active atoms not counted]" % len(unaudited)
+    if unaudited else "  [EXACT -- every atom's impl axis is tagged]",
+    ", ".join(remaining) if remaining else "(none)"))
 
 if fail_undeclared:
     ok = False
@@ -271,12 +371,20 @@ if fail_untagged:
     for a in fail_untagged:
         print("    - %s  (prefix its reason with one of: %s)" % (a, " / ".join(sorted(IMPL_TAGS))))
 
+if fail_bad_tag:
+    ok = False
+    print("FAIL: reason STARTS with an unrecognized tag-shaped token (typo?): %d"
+          % len(fail_bad_tag))
+    for a, head in fail_bad_tag:
+        print("    - %s  head=`%s` is not in the closed set (%s)"
+              % (a, head, " / ".join(sorted(IMPL_TAGS))))
+
 if fail_tag_status:
     ok = False
-    print("FAIL: implementation tag disagrees with status: %d" % len(fail_tag_status))
+    print("FAIL: implementation tag is not legal on this status: %d" % len(fail_tag_status))
     for a, tag, status in fail_tag_status:
-        print("    - %s  tag=%s implies status=%s, but status=%s"
-              % (a, tag, IMPL_TAGS[tag], status))
+        print("    - %s  tag=%s is legal on {%s}, but status=%s"
+              % (a, tag, ", ".join(sorted(IMPL_TAGS[tag])), status))
 
 if ok:
     print("catalog status truthfulness OK")

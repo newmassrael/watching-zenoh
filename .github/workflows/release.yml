@@ -109,6 +109,16 @@ jobs:
         run: bash scripts/run-ci.sh --layer A2
 
       - name: Layer A3 — catalog status truthfulness
+        # R311y299 — A3 ran here UNGUARDED and un-required: on a failed
+        # mnemosyne-cli install it printed "SKIP ... OK" and exited 0, which
+        # reads as a PASS. This workflow has no Layer A4 step at all, so
+        # nothing else here reads the inventory and the forfeit was total.
+        # Mirrors Layer A's MNEMOSYNE_SKIP guard (:104-106): when the tool is
+        # absent the step is VISIBLY skipped rather than silently green; when
+        # it is present, WZ_A3_REQUIRE makes a skip impossible.
+        if: env.MNEMOSYNE_SKIP != '1'
+        env:
+          WZ_A3_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer A3
 
       - name: Layer B — verify-codegen.sh per codec
