@@ -3173,7 +3173,7 @@ layer_c1bg_cargo_test_storage_backend_filesystem() {
 layer_c1bh_cargo_test_storage_host_dir() {
     local out
     out="$(cd crates && cargo test -p wz-ap-demo \
-        --features storage-backend-filesystem storage_host_volume --quiet 2>&1)" \
+        --features storage-backend-filesystem --bin wz-ap-demo storage_host_volume --quiet 2>&1)" \
         || { echo "$out"; return 1; }
     echo "$out"
     grep -qE 'test result: ok\. [1-9][0-9]* passed' <<< "$out" \

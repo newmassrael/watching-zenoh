@@ -464,6 +464,24 @@ fn quarantine_name(file: &str) -> String {
     format!("{file}{CORRUPT_SUFFIX}")
 }
 
+/// The on-disk frame encodes every field length as a `u32` (see the format
+/// table in [`deserialize`]). That is the frame's invariant: no single key /
+/// zid / schema / payload exceeds `u32::MAX` bytes — which no zenoh/pico wire
+/// value can (there is no ~4 GiB single sample in this system). This helper
+/// makes the invariant explicit: a `debug_assert` catches a violation in debug
+/// builds, and for every reachable length `n as u32 == n`, so the release path
+/// (and the on-disk bytes) are unchanged. Without the guard an oversized field
+/// would silently truncate its length prefix and be quarantined on reopen — a
+/// silent divergence from the in-memory [`MemoryStorage`]; the assert documents
+/// and (in debug) traps that.
+fn len_u32(n: usize) -> u32 {
+    debug_assert!(
+        n <= u32::MAX as usize,
+        "wz-fs-storage: field length {n} exceeds the u32 on-disk frame limit"
+    );
+    n as u32
+}
+
 /// Serialize `(key, data)` to the self-describing on-disk frame (see the
 /// format table in [`deserialize`]). Little-endian; a trailing FNV-1a
 /// checksum over every preceding byte detects a torn / bit-rotted file.
@@ -474,12 +492,12 @@ fn serialize(key: Option<&str>, data: &StoredData) -> Vec<u8> {
         None => out.push(0),
         Some(k) => {
             out.push(1);
-            out.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            out.extend_from_slice(&len_u32(k.len()).to_le_bytes());
             out.extend_from_slice(k.as_bytes());
         }
     }
     out.extend_from_slice(&data.timestamp.time.to_le_bytes());
-    out.extend_from_slice(&(data.timestamp.zid.len() as u32).to_le_bytes());
+    out.extend_from_slice(&len_u32(data.timestamp.zid.len()).to_le_bytes());
     out.extend_from_slice(&data.timestamp.zid);
     match &data.encoding {
         None => out.push(0),
@@ -490,13 +508,13 @@ fn serialize(key: Option<&str>, data: &StoredData) -> Vec<u8> {
                 None => out.push(0),
                 Some(s) => {
                     out.push(1);
-                    out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+                    out.extend_from_slice(&len_u32(s.len()).to_le_bytes());
                     out.extend_from_slice(s.as_bytes());
                 }
             }
         }
     }
-    out.extend_from_slice(&(data.payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(&len_u32(data.payload.len()).to_le_bytes());
     out.extend_from_slice(&data.payload);
     let checksum = fnv1a64(&out);
     out.extend_from_slice(&checksum.to_le_bytes());
