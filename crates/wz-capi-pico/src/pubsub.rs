@@ -537,10 +537,14 @@ pub unsafe extern "C" fn z_declare_subscriber(
             // SAFETY: `call` is the C callback; `marshal` outlives the call and
             // the borrowed sample is valid only for its duration (pico
             // contract). `context` travels with the (single-threaded per the
-            // pico closure contract) drive dispatch.
-            unsafe {
-                call(sample_ptr, cb.context.0);
-            }
+            // pico closure contract) drive dispatch. A panic unwinding OUT of
+            // the C callback across this `extern "C"` boundary is UB and would
+            // tear down the drive thread, so it is caught here — the drive loop
+            // survives a misbehaving callback.
+            let ctx = cb.context.0;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                call(sample_ptr, ctx);
+            }));
         };
 
         match state

@@ -193,6 +193,7 @@ z_loaned_string_t *z_string_loan_mut(z_owned_string_t *obj);
 z_moved_string_t *z_string_move(z_owned_string_t *obj);
 void z_string_take(z_owned_string_t *dst, z_moved_string_t *src);
 void z_string_drop(z_moved_string_t *obj);
+z_result_t z_string_take_from_loaned(z_owned_string_t *dst, z_loaned_string_t *src);
 
 /* --- publisher --- */
 z_result_t z_declare_publisher(const z_loaned_session_t *zs, z_owned_publisher_t *publisher,

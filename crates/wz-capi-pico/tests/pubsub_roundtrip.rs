@@ -26,12 +26,13 @@ use std::time::Duration;
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_to_slice, z_close, z_closure_sample, z_config_default,
     z_config_loan_mut, z_config_move, z_declare_subscriber, z_keyexpr_as_view_string,
-    z_loaned_bytes_t, z_loaned_sample_t, z_open, z_owned_config_t, z_owned_session_t,
-    z_owned_slice_t, z_owned_subscriber_t, z_put, z_sample_keyexpr, z_sample_payload,
-    z_session_drop, z_session_loan, z_session_loan_mut, z_session_move, z_slice_data, z_slice_drop,
-    z_slice_len, z_slice_loan, z_slice_move, z_string_data, z_string_len, z_undeclare_subscriber,
-    z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t, z_view_string_loan,
-    z_view_string_t, zp_config_insert, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_OK,
+    z_loaned_bytes_t, z_loaned_sample_t, z_loaned_session_t, z_open, z_owned_config_t,
+    z_owned_session_t, z_owned_slice_t, z_owned_subscriber_t, z_put, z_sample_keyexpr,
+    z_sample_payload, z_session_drop, z_session_loan, z_session_loan_mut, z_session_move,
+    z_slice_data, z_slice_drop, z_slice_len, z_slice_loan, z_slice_move, z_string_data,
+    z_string_len, z_undeclare_subscriber, z_view_keyexpr_from_str, z_view_keyexpr_loan,
+    z_view_keyexpr_t, z_view_string_loan, z_view_string_t, zp_config_insert, Z_CONFIG_CONNECT_KEY,
+    Z_CONFIG_LISTEN_KEY, Z_OK,
 };
 
 const PAYLOAD: &[u8] = b"hello-wz-capi-pico";
@@ -225,6 +226,215 @@ fn subscriber_receives_publish_over_loopback_tcp() {
     );
 
     // Teardown: undeclare (runs the C drop), close, drop.
+    unsafe {
+        z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber));
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+    }
+
+    acceptor.join().expect("acceptor thread panicked");
+}
+
+// --- publish-from-callback (echo) --------------------------------------------
+// A subscriber callback runs on the drive thread (inside the tokio runtime).
+// A common pico pattern is to publish in response to a received sample. This
+// test asserts that `z_put` from inside `on_sample` delivers (i.e. does NOT
+// panic / poison / kill the session's drive thread).
+
+/// Dialer context: publish an echo back from inside the callback.
+struct EchoDialerCtx {
+    session: *const z_loaned_session_t,
+    got: Arc<AtomicBool>,
+}
+
+/// Acceptor context: record that the echo arrived.
+struct FlagCtx {
+    flag: Arc<AtomicBool>,
+}
+
+unsafe extern "C" fn on_sample_echo(_sample: *const z_loaned_sample_t, ctx: *mut c_void) {
+    let ctx = &*(ctx as *const EchoDialerCtx);
+    // Publish an echo from WITHIN the callback (drive thread / in-runtime).
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    if z_view_keyexpr_from_str(&mut ke, c"echo/reply".as_ptr()) == Z_OK {
+        let mut payload = std::mem::zeroed();
+        if z_bytes_copy_from_str(&mut payload, c"echo-back".as_ptr()) == Z_OK {
+            let _ = z_put(
+                ctx.session,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_bytes_move(&mut payload),
+                std::ptr::null(),
+            );
+        }
+    }
+    ctx.got.store(true, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn on_echo_at_acceptor(_sample: *const z_loaned_sample_t, ctx: *mut c_void) {
+    let ctx = &*(ctx as *const FlagCtx);
+    ctx.flag.store(true, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn on_drop_echo(ctx: *mut c_void) {
+    drop(Box::from_raw(
+        ctx as *const EchoDialerCtx as *mut EchoDialerCtx,
+    ));
+}
+unsafe extern "C" fn on_drop_flag(ctx: *mut c_void) {
+    drop(Box::from_raw(ctx as *const FlagCtx as *mut FlagCtx));
+}
+
+#[test]
+fn publish_from_subscriber_callback_delivers_echo() {
+    let port = free_port();
+    let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+
+    let echo_received = Arc::new(AtomicBool::new(false));
+    let echo_received_acc = echo_received.clone();
+
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let acceptor = std::thread::spawn(move || unsafe {
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                Z_CONFIG_LISTEN_KEY,
+                listen.as_ptr()
+            ),
+            Z_OK
+        );
+        let _ = started_tx.send(());
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+            Z_OK,
+            "acceptor z_open failed"
+        );
+
+        // Subscribe for the echo the dialer's callback will publish.
+        let ctx = Box::into_raw(Box::new(FlagCtx {
+            flag: echo_received_acc.clone(),
+        })) as *mut c_void;
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(
+                &mut closure,
+                Some(on_echo_at_acceptor),
+                Some(on_drop_flag),
+                ctx
+            ),
+            Z_OK
+        );
+        let mut eke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut eke, c"echo/**".as_ptr()), Z_OK);
+        let mut echo_sub: z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_subscriber(
+                z_session_loan(&session),
+                &mut echo_sub,
+                z_view_keyexpr_loan(&eke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK
+        );
+
+        // Publish demo/a until the echo comes back (bounded).
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, c"demo/a".as_ptr()), Z_OK);
+        for _ in 0..250 {
+            if echo_received_acc.load(Ordering::SeqCst) {
+                break;
+            }
+            let mut payload = std::mem::zeroed();
+            assert_eq!(
+                z_bytes_copy_from_str(&mut payload, c"trigger".as_ptr()),
+                Z_OK
+            );
+            let _ = z_put(
+                z_session_loan(&session),
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_bytes_move(&mut payload),
+                std::ptr::null(),
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut echo_sub));
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+    });
+
+    started_rx.recv().unwrap();
+
+    let mut session: z_owned_session_t = unsafe { std::mem::zeroed() };
+    let mut opened = false;
+    for _ in 0..250 {
+        unsafe {
+            let mut cfg: z_owned_config_t = std::mem::zeroed();
+            assert_eq!(z_config_default(&mut cfg), Z_OK);
+            assert_eq!(
+                zp_config_insert(
+                    z_config_loan_mut(&mut cfg),
+                    Z_CONFIG_CONNECT_KEY,
+                    connect.as_ptr()
+                ),
+                Z_OK
+            );
+            if z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()) == Z_OK {
+                opened = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(opened, "dialer z_open never succeeded");
+
+    let got = Arc::new(AtomicBool::new(false));
+    let ctx = Box::into_raw(Box::new(EchoDialerCtx {
+        session: unsafe { z_session_loan(&session) },
+        got: got.clone(),
+    })) as *mut c_void;
+    let mut subscriber: z_owned_subscriber_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(&mut closure, Some(on_sample_echo), Some(on_drop_echo), ctx),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, c"demo/**".as_ptr()), Z_OK);
+        assert_eq!(
+            z_declare_subscriber(
+                z_session_loan(&session),
+                &mut subscriber,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK
+        );
+    }
+
+    // The acceptor sets echo_received only if the dialer's callback z_put
+    // actually delivered the echo -- i.e. publish-from-callback worked.
+    let mut ok = false;
+    for _ in 0..500 {
+        if echo_received.load(Ordering::SeqCst) {
+            ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ok,
+        "echo from the subscriber callback never reached the acceptor \
+         (publish-from-callback failed)"
+    );
+    assert!(got.load(Ordering::SeqCst), "dialer callback never fired");
+
     unsafe {
         z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber));
         z_close(z_session_loan_mut(&mut session), std::ptr::null());

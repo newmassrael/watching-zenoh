@@ -8,6 +8,14 @@
 //! C program can link the wz cdylib as a binary drop-in. This is the reverse
 //! of the `*-sys` crates (which bind TO a C library); this crate EXPORTS one.
 //!
+//! The binary-drop-in design is sound: pico defines the owned-type operations
+//! as EXTERN symbols in `api.c` (not `static inline`), so these `#[no_mangle]`
+//! exports replace them at link time, and idiomatic pico code touches the
+//! owned structs only through those ops. Round 1 VALIDATES the ABI end-to-end
+//! wz-to-wz over loopback TCP (see `tests/pubsub_roundtrip.rs`); interop
+//! against a separately-compiled zenoh-pico binary is deferred to a cc
+//! round-trip test (a follow-up round).
+//!
 //! ## Round 1 surface
 //!
 //! A complete core session + pub/sub slice:
@@ -71,3 +79,19 @@ pub use keyexpr::*;
 pub use pubsub::*;
 pub use result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 pub use session::*;
+
+// Compile-time byte-compat guard: turn the "byte-match" size claims (see
+// [`abi`]) into an enforced gate, so a future field/padding drift fails the
+// build instead of silently diverging from zenoh-pico's LP64 layouts.
+const _: () = {
+    use core::mem::size_of;
+    assert!(size_of::<session::z_owned_session_t>() == 16);
+    assert!(size_of::<session::z_loaned_session_t>() == 16);
+    assert!(size_of::<abi::z_owned_config_t>() == 32);
+    assert!(size_of::<abi::z_owned_bytes_t>() == 32);
+    assert!(size_of::<abi::z_owned_slice_t>() == 32);
+    assert!(size_of::<abi::z_owned_string_t>() == 32);
+    assert!(size_of::<abi::z_view_keyexpr_t>() == 48);
+    assert!(size_of::<abi::z_view_string_t>() == 32);
+    assert!(size_of::<pubsub::z_owned_closure_sample_t>() == 24);
+};

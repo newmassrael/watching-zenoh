@@ -25,9 +25,13 @@
 //! loop make progress concurrently while the C thread is between calls.
 //!
 //! `z_open` blocks until the session reaches Established (both dial and
-//! accept). An acceptor therefore blocks until its first peer connects;
-//! a non-blocking listener that accepts in the background is a follow-up
-//! refinement.
+//! accept). This diverges from pico, whose `z_open` returns immediately and
+//! establishes in the background. In particular an acceptor (`listen` config)
+//! blocks INDEFINITELY and uncancellably until its first peer connects — there
+//! is no non-blocking accept or timeout in Round 1. A caller that needs a
+//! listener up before a peer exists must run `z_open` on its own thread (as
+//! the gate test does). A non-blocking background-accept listener is a
+//! follow-up refinement.
 
 use std::ffi::c_void;
 use std::sync::mpsc;
@@ -102,7 +106,13 @@ pub(crate) struct SessionState {
 impl SessionState {
     /// Signal the drive loop to stop and join the driver thread. Idempotent.
     fn close(&self) {
-        self.shutdown.notify_waiters();
+        // `notify_one` (NOT `notify_waiters`): the drive task registers its
+        // `.notified()` waiter only when the `select!` is first polled, which
+        // races the C thread reaching `z_close` right after `z_open` returns.
+        // `notify_one` stores a permit if no waiter is parked yet, so the
+        // shutdown is never lost; `notify_waiters` would drop it and the join
+        // below would block forever on a healthy link.
+        self.shutdown.notify_one();
         if let Ok(mut guard) = self.driver.lock() {
             if let Some(handle) = guard.take() {
                 let _ = handle.join();
@@ -288,6 +298,9 @@ pub unsafe extern "C" fn z_open(
         if zs.is_null() || config.is_null() {
             return Z_ERR_NULL;
         }
+        // Always-initialize the out-param (pico contract) before any fallible
+        // work, so a caller reading `*zs` on an error path sees a null session.
+        *zs = z_owned_session_t::null_value();
         let cfg_handle = (*config)._this.handle;
         if cfg_handle.is_null() {
             *zs = z_owned_session_t::null_value();

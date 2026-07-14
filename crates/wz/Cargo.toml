@@ -977,8 +977,10 @@ rest-sse-subscribe = ["rest-http-bridge", "wz-rest?/rest-sse-subscribe"]
 api-compat-c = []
 # R311y284 — api-compat-pico BUILT: pulls the wz-capi-pico cdylib and
 # re-exports it as `wz::capi_pico` (src/lib.rs). Promoted from the `= []`
-# reserved placeholder to the real dep gate.
-api-compat-pico = ["dep:wz-capi-pico"]
+# reserved placeholder to the real dep gate. Also turns on `runtime-tokio`
+# so the runtime-XOR guard (lib.rs, keyed on the runtime-tokio feature) still
+# fires against runtime-coop — the crate is inherently the AP/tokio profile.
+api-compat-pico = ["dep:wz-capi-pico", "runtime-tokio"]
 
 # ----- §5.1 transport additions (4 atomic: 3 active, 1 reserved) -----
 # R311y8/y9/y10 built the LAYER-1 trio active, each forwarding the

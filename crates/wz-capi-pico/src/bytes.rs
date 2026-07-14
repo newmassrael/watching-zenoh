@@ -321,6 +321,33 @@ pub unsafe extern "C" fn z_string_len(string: *const z_loaned_string_t) -> usize
     guard_val(0, || if string.is_null() { 0 } else { (*string)._len })
 }
 
+/// Adopt a loaned string into an owned one, emptying the source view (pico
+/// `z_string_take_from_loaned`). The string loaned form is a borrowed
+/// `{ start, len }`, so "take" copies the borrowed bytes into a fresh owned
+/// `StringState` (there is no transferable handle in a borrow) and clears the
+/// source view.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_take_from_loaned(
+    dst: *mut z_owned_string_t,
+    src: *mut z_loaned_string_t,
+) -> ZResult {
+    guarded(|| {
+        if dst.is_null() || src.is_null() {
+            return Z_ERR_NULL;
+        }
+        let start = (*src)._start;
+        let len = (*src)._len;
+        if start.is_null() {
+            return Z_ERR_NULL;
+        }
+        let bytes = std::slice::from_raw_parts(start, len);
+        store_string(dst, StringState::boxed(bytes));
+        (*src)._start = std::ptr::null();
+        (*src)._len = 0;
+        Z_OK
+    })
+}
+
 // --- clone (deep copy) ----------------------------------------------------
 
 /// Deep-copy a payload (pico `z_bytes_clone`).
