@@ -334,6 +334,22 @@ print("  atoms=%d active=%d declared-cargo-features=%d" % (len(atoms), active_n,
 # does not know instead of asserting a completeness it never checked. When
 # UNAUDITED hits 0, promote the active arm to fail_untagged (one-line change)
 # and the bound becomes exact.
+#
+# R311y302 -- one part of UNAUDITED is BLOCKED, not merely pending, and the
+# blocker is a missing reference rather than missing effort. The §5.11-storage
+# and §5.24-storage-backend atoms (14 modules across wz-session-core and
+# wz-runtime-tokio) anchor their design to zenoh's
+# `zenoh-plugin-storage-manager` and `zenoh-backend-traits`. Neither is a cargo
+# dependency of anything, so no build provisions them, and they are typically
+# absent from a dev machine's cargo caches. Those atoms therefore cannot be
+# graded against the upstream they mirror without a deliberate checkout of the
+# zenoh `plugins/` tree, and CLAUDE.md forbids asserting zenoh state from
+# memory. They stay UNAUDITED until the reference is provisioned -- which is the
+# honest state, and exactly what this counter exists to show. §5.12-codec, by
+# contrast, anchors to zenoh's CORE crates (registry-provisioned by any build)
+# and to the in-repo vendored zenoh-pico, so it was gradable and is done. (Exact
+# reference-source paths are machine-local and live in CLAUDE.md's External
+# references section, not hardcoded here.)
 tally = {}
 for a in atoms:
     t = impl_tag(a)

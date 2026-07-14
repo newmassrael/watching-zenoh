@@ -193,10 +193,36 @@ in-file SPDX headers.
 
 ## External references
 
-- SCE source: `/home/coin/scxml-core-engine/` — read directly when SCE
-  state is in question, do not infer from memory.
-- Zenoh upstream (1.5.0): `/home/coin/.cargo/git/checkouts/zenoh-*/49c8a53/`
-- zenoh-pico upstream: `~/zenoh-pico/`
+These are **reference sources, not dependencies** — wz is a from-scratch
+reimplementation, so nothing below is a cargo dep of this workspace. Read them
+directly whenever SCE / Zenoh state is in question; never infer from memory
+(see Response style).
+
+**Machine-local absolute paths are deliberately NOT recorded in this file.**
+This file is committed: a path that is correct on one clone is wrong on the
+next, it leaks the author's home layout, and nothing gates it. R311y302 is the
+proof — the absolute zenoh checkout path that used to live here had silently
+rotted to a directory that no longer exists, and it was cited for months.
+Resolve the paths per machine and keep them in agent memory or a local
+untracked note.
+
+- **SCE** — the codegen engine; pinned, and read-only from wz sessions.
+- **Zenoh 1.5.0 (Rust)** — the CORE crates (`zenoh`, `zenoh-protocol`,
+  `zenoh-codec`, `zenoh-buffers`, `zenoh-keyexpr`, `zenoh-config`,
+  `zenoh-link-*`) land in the local cargo **registry cache** as a side effect
+  of building; `cargo fetch` if absent. This is what §5.12-codec / §5.1-transport
+  anchor to, and it is why those domains are gradable.
+- **Zenoh STORAGE upstream — not obtainable that way, and it BLOCKS work.**
+  `zenoh-plugin-storage-manager` and `zenoh-backend-traits` are nobody's cargo
+  dependency, so no build ever provisions them. The §5.11-storage /
+  §5.24-storage-backend atoms and `adminspace.rs` anchor to them — 14 modules
+  cite the plugin by path — so **their A3 impl axis cannot be graded** without a
+  deliberate checkout of the `zenoh` repo's `plugins/` tree at the pinned
+  version. Until then those atoms stay A3-UNAUDITED, which is the honest state,
+  not a gap to paper over. The read-directly rule is NOT waived by the reference
+  being inconvenient.
+- **zenoh-pico** — vendored in-repo at `vendor/zenoh-pico/`, so unlike the
+  others this one is always available to every clone.
 
 ## Response style
 
