@@ -439,6 +439,14 @@ storage-backend = [
 # available so a `StorageService::declare_with_backend(.., HistoryStorage)`
 # is usable end-to-end. Implies storage-backend.
 storage-history = ["storage-backend", "wz-session-core/storage-history"]
+# R311y279 — storage-backend-filesystem (§5.24): a durable, filesystem-backed
+# Volume/StorageBackend (the `filesystem_storage` module). It only IMPLEMENTS the
+# storage seam, so it forwards ONLY the wz-session-core kernel seam
+# (`StorageBackend`/`Volume`/`StorageConfig`/`StoredData`), NOT the runtime
+# `storage-backend` driver (the StorageService + its query/pubsub/transport deps
+# a bare backend never touches). std-only; no new third-party dep (uses `log` +
+# the dev-only `tempfile` already in the tree).
+storage-backend-filesystem = ["wz-session-core/storage-backend"]
 # Round 311vm — storage-replication (§5.11 storage, replication driver). The
 # digest publisher/subscriber DRIVER (`storage_replication_service`). Forwards
 # the no_std kernel digest stack (wz-session-core/storage-replication =

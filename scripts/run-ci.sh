@@ -3097,6 +3097,37 @@ layer_c1bf_cargo_clippy_all_features() {
             --quiet -- -D warnings) || return 1
     done
 }
+# ─── Layer C1bg — storage-backend-filesystem: durable fs Volume/Storage ─
+#
+# R311y279: `storage-backend-filesystem` (OFF in the default set) is a durable,
+# filesystem-backed Volume/StorageBackend (the `filesystem_storage` module in
+# wz-runtime-tokio), forwarding ONLY the no_std storage seam
+# (wz-session-core/storage-backend), NOT the runtime storage driver. C1bf's
+# `--all-features` clippy already COMPILES the module; what no lane does is
+# EXECUTE the durability tests (the atom's whole claim). This lane runs them:
+#   1. cargo TEST the module's unit tests under the feature (put/get/delete, the
+#      None mount-root slot, key<->filename round-trip, the DURABILITY reopen
+#      test, corrupt-file quarantine, long-key regression, name sanitization),
+#      with a >=1-passed guard so a future module rename cannot silently turn a
+#      name-filtered `cargo test` into a green no-op ([[feedback-a-skip-is-green]]);
+#   2. clippy-gate the cfg (`--all-targets`) with the feature on;
+#   3. clippy-gate the LIB under `--no-default-features --features
+#      storage-backend-filesystem` — the module composes standalone over the
+#      minimal seam forward.
+layer_c1bg_cargo_test_storage_backend_filesystem() {
+    local out
+    out="$(cd crates && cargo test -p wz-runtime-tokio \
+        --features storage-backend-filesystem --lib filesystem_storage --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    echo "$out"
+    grep -qE 'test result: ok\. [1-9][0-9]* passed' <<< "$out" \
+        || { echo "  C1bg FAIL: 0 filesystem_storage tests ran (filter matched nothing)"; return 1; }
+    (cd crates \
+        && cargo clippy -p wz-runtime-tokio --all-targets \
+            --features storage-backend-filesystem --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features \
+            --features storage-backend-filesystem --quiet -- -D warnings)
+}
 layer_c2_cargo_clippy() {
     # Stage 4b — exclude wz-session-lwip (no_std-engine crate, mutually
     # exclusive with tokio's http-send in a unified graph; isolated clippy
@@ -5690,6 +5721,7 @@ run_layer C1o layer_c1o_keyexpr_gating_behavior || overall=1
 run_layer C1p layer_c1p_multicast || overall=1
 run_layer C1q layer_c1q_multicast_glue || overall=1
 run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
+run_layer C1bg layer_c1bg_cargo_test_storage_backend_filesystem || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1

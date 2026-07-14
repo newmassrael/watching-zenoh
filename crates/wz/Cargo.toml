@@ -878,7 +878,11 @@ config-plugin-validator = []
 # ----- §5.24 storage-backend + manager (13 atomic, all reserved) -----
 storage-backend-capability = []
 storage-backend-external-db = []
-storage-backend-filesystem = []
+# R311y279 — storage-backend-filesystem is now a real durable backend; forward
+# to the wz-runtime-tokio cfg site (the `filesystem_storage` module) rather than
+# a no-op `= []` (the facade-forward-separate-edit dead-stub trap). AP-only: the
+# durable Volume/Storage is a std/filesystem role beyond the MCU client profile.
+storage-backend-filesystem = ["wz-runtime-tokio?/storage-backend-filesystem"]
 storage-backend-memory-volume = []
 storage-backend-rocksdb = []
 storage-backend-volume-trait = []

@@ -1016,6 +1016,17 @@ pub mod timestamp_source;
 #[cfg(feature = "storage-backend")]
 pub mod storage_service;
 
+/// R311y279 — the `storage-backend-filesystem` atom (§5.24 storage): a durable,
+/// filesystem-backed [`filesystem_storage::FilesystemVolume`] /
+/// [`filesystem_storage::FilesystemStorage`] — the wz counterpart of zenoh's
+/// `zenoh-backend-filesystem`. It implements the no_std storage seam
+/// ([`wz_session_core::storage_backend`] / [`wz_session_core::storage_volume`])
+/// with an in-memory mirror kept write-through-consistent (fsync'd) with one
+/// file per key, so the store survives a restart. std-only; lives here (not the
+/// no_std kernel) because it uses [`std::fs`]. Opt-in — never in `default`.
+#[cfg(feature = "storage-backend-filesystem")]
+pub mod filesystem_storage;
+
 /// R311y69 — `ext-pubsub-advanced-cache` (§5.25): the publisher-side
 /// sample ring + the `@adv` queryable answering `_sn` / `_max` recovery
 /// and history selectors from it.
