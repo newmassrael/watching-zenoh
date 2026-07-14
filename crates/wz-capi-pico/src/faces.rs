@@ -264,18 +264,29 @@ impl SharedSession {
     /// its wire undeclare).
     pub(crate) fn undeclare_subscriber(&self, id: SubId) {
         let mut dropped = Vec::new();
+        let mut dropped_entry = None;
         {
             let mut guard = self.lock();
-            guard.subs.retain(|entry| entry.id != id);
+            // Remove the SSOT entry into a binding rather than `retain`-dropping
+            // it in place: with no live face (a listener that never had a peer,
+            // or one whose per-face declares all failed) the entry holds the
+            // LAST `Arc<CClosure>`, so dropping it here would run the C
+            // `drop(context)` under the lock.
+            if let Some(pos) = guard.subs.iter().position(|entry| entry.id == id) {
+                dropped_entry = Some(guard.subs.remove(pos));
+            }
             for face in guard.faces.values_mut() {
                 if let Some(sub) = face.subs.remove(&id) {
                     dropped.push(sub);
                 }
             }
         }
-        // Drop OUTSIDE the lock: this releases the last `Arc<CClosure>` and
-        // runs the C `drop(context)`, which must not re-enter a held lock.
+        // Drop OUTSIDE the lock: releasing the last `Arc<CClosure>` — whether
+        // the final per-face subscriber or the SSOT entry — runs the C
+        // `drop(context)`, which must not run under the registry lock (a drop
+        // that re-enters the session would deadlock the non-reentrant mutex).
         drop(dropped);
+        drop(dropped_entry);
     }
 }
 

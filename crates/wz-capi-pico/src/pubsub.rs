@@ -621,6 +621,18 @@ pub unsafe extern "C" fn z_declare_subscriber(
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
         };
+        // Reject a non-canonical / pico-unsafe keyexpr UP FRONT (e.g. the
+        // `**/c/*` three-family bug), returning `Z_ERR_INVALID` rather than
+        // recording a dead SSOT entry that never matches yet reports `Z_OK`.
+        // This is the same outbound gate wz's own `Session::declare_subscriber`
+        // applies per face — hoisted here so the verdict is uniform whether or
+        // not a peer is connected yet (the registry declares best-effort per
+        // face, so a per-face reject would otherwise be swallowed). `cclosure`
+        // is already owned, so this early return drops it and runs the C
+        // `drop(context)` (consume-on-all-paths).
+        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+            return Z_ERR_INVALID;
+        }
 
         // Record the subscription in the session's SSOT and declare it on every
         // face that is already up. With no peer yet — a listener before its

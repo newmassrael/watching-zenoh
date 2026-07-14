@@ -36,7 +36,7 @@ use wz_capi_pico::{
     z_session_drop, z_session_loan, z_session_loan_mut, z_session_move, z_string_data,
     z_string_len, z_subscriber_move, z_undeclare_subscriber, z_view_keyexpr_from_str,
     z_view_keyexpr_loan, z_view_keyexpr_t, z_view_string_loan, z_view_string_t, zp_config_insert,
-    Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_OK,
+    Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_ERR_INVALID, Z_OK,
 };
 
 // --- closure contexts ------------------------------------------------------
@@ -528,6 +528,51 @@ fn listener_survives_a_peer_disconnect_and_keeps_accepting() {
 
         z_undeclare_subscriber(z_subscriber_move(&mut lsub));
         close_session(&mut dialer_two);
+        close_session(&mut listener);
+    }
+}
+
+#[test]
+fn declare_subscriber_rejects_a_pico_unsafe_keyexpr() {
+    // A non-canonical / pico-unsafe keyexpr (the `**/c/*` three-family bug) must
+    // be rejected with Z_ERR_INVALID up front — NOT silently recorded as a dead
+    // subscription that never matches yet reports Z_OK. The moved closure must
+    // still be consumed on the error path (its C drop runs), per pico's
+    // z_move consume-on-all-paths contract.
+    let port = free_port();
+    let dropped = Arc::new(AtomicUsize::new(0));
+
+    unsafe {
+        let mut listener = open_listen(port);
+
+        let ctx = Box::into_raw(Box::new(DropCountCtx {
+            drops: dropped.clone(),
+        })) as *mut c_void;
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(&mut closure, Some(on_sample_noop), Some(on_drop_count), ctx),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, c"**/c/*".as_ptr()), Z_OK);
+        let mut sub: z_owned_subscriber_t = std::mem::zeroed();
+        let rc = z_declare_subscriber(
+            z_session_loan(&listener),
+            &mut sub,
+            z_view_keyexpr_loan(&ke),
+            z_closure_sample_move(&mut closure),
+            std::ptr::null(),
+        );
+        assert_eq!(
+            rc, Z_ERR_INVALID,
+            "a pico-unsafe keyexpr must be rejected, not silently recorded"
+        );
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "the moved closure must be consumed (C drop runs) on the reject path"
+        );
+
         close_session(&mut listener);
     }
 }
