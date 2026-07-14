@@ -256,6 +256,12 @@ adminspace-config-hotreload = ["wz/adminspace-config-hotreload"]
 # `storage-backend` (which reaches wz-runtime-tokio's cfg site `compiled_plugins`
 # checks). NOT in `default`; Layer E6e builds the demo with it for the plugins E2E.
 storage-backend = ["wz/storage-backend"]
+# R311y282 — the storage-host's DURABLE backing: forwards the facade
+# `storage-backend-filesystem` so `--storage-host-dir <dir>` registers a
+# FilesystemVolume and maps hosted storages onto it (durable across a host
+# restart). Composes the storage-host run-mode (`adminspace-config-hotreload`);
+# NOT in `default`. Layer C1bh builds + tests the demo with it.
+storage-backend-filesystem = ["wz/storage-backend-filesystem", "adminspace-config-hotreload"]
 # P4 §5.21 — the FOUNDATION feature (routing-accept precedent): forwards the facade
 # `routing-router-hat`, which pulls `routing-peer` transitively + compiles the
 # library `RouterForwarder`. It no longer gates a demo run-mode directly (the

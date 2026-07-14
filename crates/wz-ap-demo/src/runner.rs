@@ -2890,6 +2890,28 @@ pub(crate) async fn run_router_hat(
     Ok(())
 }
 
+/// R311y282 — the `volume_id` the storage-host maps its hosted storages onto,
+/// per the operator's `--storage-host-dir` choice: a durable `"fs"` when a dir
+/// is given AND the `storage-backend-filesystem` backend is compiled, else the
+/// volatile default `"mem"`. Zenoh-faithful: the storage VOLUME is a HOST /
+/// deployment concern (a config-file / CLI choice), NOT a client wire selection
+/// — zenoh storages are configured on the router, not picked over a live
+/// connection. So `--storage-host-dir` is the operator declaring "this host's
+/// storages are durable", not a per-`storage-add` wire field (that wire field is
+/// the deferred §5.23 follow-up, `adminspace.rs` `parse_storage_add_payload`).
+///
+/// Gated on `adminspace-config-hotreload` — its only caller is the storage-host
+/// run-mode (`run_storage_host`, same gate); on a build without it the fn would
+/// be dead code (`-D warnings` reject).
+#[cfg(feature = "adminspace-config-hotreload")]
+fn storage_host_volume_id(dir: Option<&str>) -> &'static str {
+    match dir {
+        #[cfg(feature = "storage-backend-filesystem")]
+        Some(_) => "fs",
+        _ => "mem",
+    }
+}
+
 /// R311y277 (§5.23 `adminspace-config-hotreload` ACTIVATION) — the storage-HOSTING
 /// run-mode (`--storage-host <listen>`): the config-diff-driven storage lifecycle
 /// driven END-TO-END over the wire by a stock zenoh-pico client. A pico `z_put`
@@ -2939,7 +2961,7 @@ pub(crate) async fn run_router_hat(
 /// sufficient for the plugins-STATE witness (which reads `!manager.is_empty()`) and
 /// MUST NOT be read as a claim that the storage serves cross-connection data.
 #[cfg(feature = "adminspace-config-hotreload")]
-pub(crate) async fn run_storage_host(listen: &str) -> io::Result<()> {
+pub(crate) async fn run_storage_host(listen: &str, storage_dir: Option<String>) -> io::Result<()> {
     use std::sync::atomic::Ordering::Relaxed;
 
     use wz::runtime_tokio::adminspace::{
@@ -2996,6 +3018,28 @@ pub(crate) async fn run_storage_host(listen: &str) -> io::Result<()> {
     // ..)` call below (TokioSession's TokioRuntime / TokioTime).
     let mut manager = RuntimeStorageManager::new();
     manager.register_volume("mem", Box::new(MemoryVolume));
+    // R311y282 — the operator's durability choice. `--storage-host-dir <dir>` ALSO
+    // registers a durable FilesystemVolume under "fs" and maps every hosted storage
+    // onto it (zenoh-faithful: the storage VOLUME is a host/deployment concern, not a
+    // client wire field). Without the dir (or without the fs backend feature) storages
+    // stay on the volatile "mem" volume — the pre-y282 behavior, unchanged.
+    let hosted_volume_id = storage_host_volume_id(storage_dir.as_deref());
+    #[cfg(feature = "storage-backend-filesystem")]
+    if let Some(ref dir) = storage_dir {
+        use wz::runtime_tokio::filesystem_storage::FilesystemVolume;
+        manager.register_volume("fs", Box::new(FilesystemVolume::new(dir.clone())));
+        log::info!(
+            "wz-ap-demo storage-host: durable filesystem volume 'fs' rooted at {dir} \
+             (hosted storages persist across a host restart)"
+        );
+    }
+    #[cfg(not(feature = "storage-backend-filesystem"))]
+    if storage_dir.is_some() {
+        log::warn!(
+            "wz-ap-demo storage-host: --storage-host-dir ignored (build without the \
+             `storage-backend-filesystem` feature); storages are volatile"
+        );
+    }
     // The flag the GET handler reads; shared with the Send+'static handler via Arc.
     let storage_started = Arc::new(AtomicBool::new(false));
     // The intent stash the config-write handler fills, drained + applied in the
@@ -3146,6 +3190,8 @@ pub(crate) async fn run_storage_host(listen: &str) -> io::Result<()> {
         let dispatch_pending = pending.clone();
         let dispatch_started = storage_started.clone();
         let dispatch_zid = node_zid.clone();
+        // The operator-chosen host volume every AddStorage is mapped onto (Copy).
+        let dispatch_volume_id = hosted_volume_id;
         let mut dispatch =
             |event: IterationEvent<'_>| {
                 // Fires the admin GET queryable + config-write subscriber; the config-write
@@ -3166,7 +3212,14 @@ pub(crate) async fn run_storage_host(listen: &str) -> io::Result<()> {
                     match intent {
                         AdminConfigWrite::AddStorage { name, .. } => {
                             match intent.to_storage_config() {
-                                Some(cfg) => {
+                                Some(mut cfg) => {
+                                    // Map the storage onto the operator-chosen host
+                                    // volume: durable "fs" under --storage-host-dir,
+                                    // else the wire default "mem". The wire always
+                                    // encodes volume_id="mem" (explicit client volume
+                                    // selection is the deferred §5.23 follow-up), so the
+                                    // HOST's flag is what decides durability.
+                                    cfg.volume_id = dispatch_volume_id.to_string();
                                     match manager.add_storage(
                                         &session_for_dispatch,
                                         &cfg,
@@ -3257,4 +3310,21 @@ pub(crate) async fn run_storage_host(listen: &str) -> io::Result<()> {
         // HOISTED manager (and any storage it holds) survives — the NAMED zombie bound.
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "adminspace-config-hotreload"))]
+mod storage_host_volume_tests {
+    use super::storage_host_volume_id;
+
+    #[test]
+    fn dir_selects_fs_when_feature_on_else_mem() {
+        // No dir -> always the volatile default.
+        assert_eq!(storage_host_volume_id(None), "mem");
+        // A dir -> durable "fs" iff the fs backend is compiled; otherwise the
+        // flag is inert (the host warns) and storages stay volatile.
+        #[cfg(feature = "storage-backend-filesystem")]
+        assert_eq!(storage_host_volume_id(Some("/tmp/wz-store")), "fs");
+        #[cfg(not(feature = "storage-backend-filesystem"))]
+        assert_eq!(storage_host_volume_id(Some("/tmp/wz-store")), "mem");
+    }
 }

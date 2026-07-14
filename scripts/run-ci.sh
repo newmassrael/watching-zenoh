@@ -3143,6 +3143,46 @@ layer_c1bg_cargo_test_storage_backend_filesystem() {
         && cargo clippy -p wz-runtime-tokio --no-default-features \
             --features storage-backend-filesystem --quiet -- -D warnings)
 }
+# ─── Layer C1bh — wz-ap-demo storage-host durable backing (--storage-host-dir) ─
+#
+# R311y282: `--storage-host-dir <dir>` lets the storage-host run-mode register a
+# durable FilesystemVolume and map hosted storages onto it (zenoh-faithful: the
+# storage VOLUME is a host/deployment concern). A wire durable-SERVE proof is
+# BLOCKED by the per-client-Session "zombie storage" wall (a stock pico z_put and
+# z_get are separate one-shot connections; a hosted storage does not serve data
+# across the connection boundary — the same wall that walls the cross-impl A4
+# frontier), so this is proven at the LEVEL that is honestly reachable + CI-safe
+# (a C1-class cargo-test/clippy lane, NOT a fragile Layer E `--ignored` binary
+# variant): the arg -> volume_id selection seam is unit-tested, and the fs branch
+# of the live run-mode is compile + clippy gated. This lane:
+#   1. cargo TEST the `storage_host_volume_id` mapping under the feature (a >=1
+#      -passed guard forbids a zero-test false-green);
+#   2. clippy-gate the demo with `storage-backend-filesystem` ON (the fs volume
+#      registration + config-volume mapping branch);
+#   3. clippy-gate the demo with only `adminspace-config-hotreload` (the
+#      not(fs) inert-warning arm);
+#   4. clippy-gate the demo on DEFAULT features (hotreload OFF) -- the arm where
+#      `storage_host_volume_id` has NO caller, so a missing cfg gate on it would be
+#      dead-code under the workspace `-D warnings` deny. This leg exists because the
+#      first cut of R311y282 shipped that exact break: the fs-ON / hotreload-ON legs
+#      all COMPILE the caller, so only the default arm catches an un-gated helper
+#      (a green-local-gate-is-not-green / a-SKIP-is-green lesson -- the lane must
+#      clippy the arm that can regress, not only the feature-ON arms).
+# (It does NOT drive the demo binary, so there is no Layer-E feature-variant uplift
+# hazard -- a `cargo test` binary is a different artifact from the driven bin.)
+layer_c1bh_cargo_test_storage_host_dir() {
+    local out
+    out="$(cd crates && cargo test -p wz-ap-demo \
+        --features storage-backend-filesystem storage_host_volume --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    echo "$out"
+    grep -qE 'test result: ok\. [1-9][0-9]* passed' <<< "$out" \
+        || { echo "  C1bh FAIL: 0 storage_host_volume tests ran (filter matched nothing)"; return 1; }
+    (cd crates \
+        && cargo clippy -p wz-ap-demo --features storage-backend-filesystem --quiet -- -D warnings \
+        && cargo clippy -p wz-ap-demo --features adminspace-config-hotreload --quiet -- -D warnings \
+        && cargo clippy -p wz-ap-demo --quiet -- -D warnings)
+}
 layer_c2_cargo_clippy() {
     # Stage 4b — exclude wz-session-lwip (no_std-engine crate, mutually
     # exclusive with tokio's http-send in a unified graph; isolated clippy
@@ -5737,6 +5777,7 @@ run_layer C1p layer_c1p_multicast || overall=1
 run_layer C1q layer_c1q_multicast_glue || overall=1
 run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C1bg layer_c1bg_cargo_test_storage_backend_filesystem || overall=1
+run_layer C1bh layer_c1bh_cargo_test_storage_host_dir || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1
