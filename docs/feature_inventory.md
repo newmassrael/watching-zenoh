@@ -4,13 +4,21 @@
 >
 > R408 retired this document as a parsed/validated surface. The SSOT is the
 > atomic store; this file is an un-gated R301-era snapshot that nothing keeps
-> in sync, and it has drifted accordingly. Measured at R311y315:
+> in sync, and it has drifted accordingly. Measured at R311y315 (re-derive
+> before quoting: parse each `` - `atom` `` bullet, cut at the NEXT bullet so a
+> status cannot be read off a neighbour, and diff against
+> `mnemosyne-cli query --list-inventory --json`):
 >
-> - **63 of its 135 status labels (47%) disagree with the store.**
-> - **84 atoms exist in the store that this file never lists.**
+> - **65 of its 141 status labels (46%) disagree with the store.**
+> - **77 of the store's 219 atoms are never listed here at all.**
 > - Its §5.9 Query section enumerates **10** atoms; the store has **11**
 >   (`query-value`, added R311y248, is absent here). That omission is the
 >   known origin of a wrong denominator that a later round carried as fact.
+>
+> Those counts are themselves a citation and will rot — that is the point of
+> this banner, not an exception to it. R311y315 wrote them wrong on the first
+> pass (63/135 and 84) because the parse required the status to sit on the
+> same LINE as the atom name and six bullets wrap. Derive; do not quote.
 >
 > To answer "which atoms exist / what is this atom's status", derive it:
 >
