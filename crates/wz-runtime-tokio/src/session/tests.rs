@@ -1326,7 +1326,9 @@ fn publish_with_priority_propagates_band_to_loopback_sample() {
     );
 }
 
-/// R311y-item3 — under `pubsub-priority`, `publish_qos` FOLDS its explicit band
+/// R311y-item3 — under `pubsub-qos` (R311y314: said `pubsub-priority`, the
+/// pre-y307 name; the cfg below has always been the merged gate), `publish_qos`
+/// FOLDS its explicit band
 /// into the single `opts.qos` source (was band-agnostic on the loopback leg
 /// pre-item3, the y232 stopgap), so the loopback Sample now OBSERVES the band.
 /// This `SessionLocal` publish proves the observable half of the fold; the
@@ -6485,8 +6487,11 @@ fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
 /// band — the exact split this closes. The multicast tx item exposes the band as
 /// a struct field (unlike the unicast wire-byte-buried form), so this is the leg
 /// where the `publish -> priority_band() -> tx band` chain is directly
-/// observable. Needs `pubsub-priority` (with_priority) + `transport-multicast`
-/// (the tx-item harness); the both-transports+pubsub-priority run-ci lane runs it.
+/// observable. Needs `pubsub-qos` (with_priority) + `transport-multicast`
+/// (the tx-item harness); the both-transports+`pubsub-priority` run-ci lane runs
+/// it, reaching the gate through that alias. R311y314: this said the test
+/// "needs pubsub-priority" while its own cfg below reads `pubsub-qos` -- the
+/// alias is sufficient, never necessary.
 #[cfg(all(
     feature = "transport-multicast",
     feature = "codec-push",

@@ -1256,11 +1256,15 @@ layer_c1bb_cargo_test_qos() {
 #      `opts.qos` source. RUN `publish_with_priority_routes_multicast_conduit_band`
 #      + clippy under the both-transports+`pubsub-priority` combo (the multicast
 #      tx-item harness needs `transport-multicast`; `with_priority` + the
-#      `publish_qos` fold-arm need `pubsub-priority`; multicast-only+pubsub-priority
+#      `publish_qos` fold-arm need `pubsub-qos`, which the `pubsub-priority`
+#      alias pulls in (R311y314: this said the fold-arm "needs pubsub-priority" --
+#      the alias is sufficient, never necessary; the arm is cfg(pubsub-qos));
+#      multicast-only+pubsub-priority
 #      is a pre-existing incompatible combo — the SessionRuntime ActionsHandle GAT
 #      is `transport-unicast`-gated — so both transports are required). This is the
 #      only lane that exercises `with_priority` on the multicast conduit AND the
-#      pubsub-priority arm of the `publish_qos` fold.
+#      `pubsub-qos` arm of the `publish_qos` fold (reached here via the
+#      `pubsub-priority` alias, which this lane composes).
 layer_c1bc_cargo_test_mcast_qos() {
     (cd crates \
         && cargo test -p wz-session-core --features transport-qos,codec-push,session-multicast,pubsub-put --lib qos_emit_tests --quiet \
@@ -2561,10 +2565,19 @@ layer_c1bj_cargo_test_loopback_metadata_gates() {
 # short-circuits; parameters_view = None). The first (maximal) invocation
 # keeps both markers ON, cfg'ing that module out, so only this lane RUNS
 # it. (It also re-runs reply::decode_isolation_tests — harmless.)
+# R311y314 — arm 2 is a bare whole-crate `cargo test`: ZERO surviving tests would
+# report green, which is the construction C1bi's own comment calls "a skip
+# reporting green" rather than a gate proof. R311y313 tagged query-reply COMPLETE
+# citing this arm as its OFF proof, so the arm now asserts the surviving COUNT:
+# reply::decode_isolation_tests is `not(pubsub-put) + not(pubsub-delete) +
+# not(query-reply)`-gated, so its 2 NEGs exist ONLY in this subset. If a future
+# round widens any of those three gates the module vanishes and this goes red,
+# instead of the suite silently shrinking to nothing.
 layer_c1e_cargo_test_query() {
     (cd crates \
         && cargo test -p wz-session-core --features query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-source-info,codec-response-final --quiet \
-        && cargo test -p wz-session-core --features query-queryable --quiet)
+        && cargo test -p wz-session-core --features query-queryable --quiet \
+        && test "$(cargo test -p wz-session-core --features query-queryable --lib reply::decode_isolation_tests -- --list 2>/dev/null | grep -c ': test')" = "2")
 }
 
 # ─── Layer C1f — cargo test -p wz-session-core (reply dispatch plane) ──
@@ -2601,10 +2614,22 @@ layer_c1e_cargo_test_query() {
 # C1 workspace union (which depended on wz-runtime-tokio's defaults forwarding
 # both features — exactly the "silent drop on a defaults change" this lane
 # guards against).
+# R311y314 — arm 2 (the R311fn pure-getter arm) was likewise a bare `cargo test`.
+# R311y313 cites it as query-reply's ON proof -- the arm showing this atom ALONE,
+# with no publisher marker, enables the reply-body decode. A bare invocation
+# cannot show that: it passes just as green if `mod tests` cfg's out entirely,
+# which is exactly the R311fn regression (before it, the module required
+# pubsub-put+pubsub-delete, so the getter arm had ZERO unit coverage and a revert
+# to `_ => return` stayed green). The two asserts below are the discriminator:
+# the module EXISTS under query-reply and VANISHES without it. Measured at
+# R311y314: 32 vs 0. The ON side is `-gt 0`, not an exact count, so adding a reply
+# test does not falsely red this lane; the load-bearing assert is the `= "0"`.
 layer_c1f_cargo_test_reply() {
     (cd crates \
         && cargo test -p wz-session-core --features codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete,query-queryable,pubsub-attachment,pubsub-encoding,query-reply --quiet \
-        && cargo test -p wz-session-core --no-default-features --features alloc,codec-response,codec-response-final,query-reply --quiet)
+        && cargo test -p wz-session-core --no-default-features --features alloc,codec-response,codec-response-final,query-reply --quiet \
+        && test "$(cargo test -p wz-session-core --no-default-features --features alloc,codec-response,codec-response-final,query-reply --lib reply::tests -- --list 2>/dev/null | grep -c ': test')" -gt 0 \
+        && test "$(cargo test -p wz-session-core --no-default-features --features alloc,codec-response,codec-response-final --lib reply::tests -- --list 2>/dev/null | grep -c ': test')" = "0")
 }
 
 # ─── Layer C1g — cargo test -p wz-session-core (observer dispatch plane) ─

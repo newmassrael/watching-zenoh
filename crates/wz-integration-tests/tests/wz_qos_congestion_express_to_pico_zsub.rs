@@ -53,7 +53,7 @@
 //! with no receiver-observable proxy) — that effect is the independent
 //! `transport-batching` axis.
 //!
-//! ## Why `Block`(1) + `express`(1) and not the default
+//! ## Why `RealTime`(1) + `Block`(1) + `express`(1) and not the default
 //!
 //! pico's default sample qos is `_Z_N_QOS_DEFAULT._val = 5`
 //! (`src/protocol/definitions/network.c` 22) = priority `Data`(5), congestion
@@ -63,12 +63,19 @@
 //! wz DROPPED the qos byte on the wire, pico would decode the default and
 //! print `with congestion: 0` + `with express: 0`. wz's
 //! `build_push_outer_extensions` SUPPRESSES the ext when the byte equals
-//! `QosLevel::DEFAULT` (0x05); `QosLevel::from_parts(Data, Block, true)` packs
-//! to 0x1D (`5 | 1<<3 | 1<<4`), which is != DEFAULT, so the ext IS emitted and
-//! pico decodes congestion `1` + express `1`. So `with congestion: 1` +
-//! `with express: 1` genuinely discriminate "propagated" from "dropped"
-//! (which prints the default `0`/`0`) — the same discriminating shape as the
-//! y240 priority witness (`RealTime`(1) vs the default `5`).
+//! `QosLevel::DEFAULT` (0x05); `QosLevel::from_parts(RealTime, Block, true)`
+//! packs to 0x19 (`1 | 1<<3 | 1<<4`), which is != DEFAULT, so the ext IS
+//! emitted and pico decodes priority `1` + congestion `1` + express `1`. All
+//! three genuinely discriminate "propagated" from "dropped", which would print
+//! the defaults `5` / `0` / `0`.
+//!
+//! R311y314 — this section said `from_parts(Data, Block, true)` packing to
+//! `0x1D`, and closed by calling this "the same discriminating shape AS the y240
+//! priority witness". Both went stale the moment R311y312 promoted the publish to
+//! `RealTime`: the byte is 0x19, and this test no longer RESEMBLES the y240
+//! witness, it SUBSUMES it. y312 rewrote the `## Scope` section 24 lines above --
+//! where it even called out an identically stale union claim as "left stale here"
+//! -- and did not re-read the rest of its own module doc.
 //!
 //! ## The witness
 //!
@@ -86,8 +93,10 @@
 //! Mirrors `wz_priority_to_pico_zsub.rs` (in-test wz acceptor +
 //! `Session::publish` over the accepted session, `select!` drive-vs-scenario,
 //! pico CLI dial-in with accept-retry + a subscriber-declared readiness gate +
-//! a 150 ms republish cadence). The only deltas: the `with_qos` publish and
-//! the `with congestion: 1` + `with express: 1` assertions.
+//! a 150 ms republish cadence). The only deltas: the `with_qos` publish and the
+//! `with priority: 1` + `with congestion: 1` + `with express: 1` assertions
+//! (R311y314: this omitted `with priority: 1`, the assertion R311y312 exists to
+//! add and the one that makes this file's claim a FULL proof of the byte).
 
 use std::process::{Command, Stdio};
 use std::sync::Arc;

@@ -384,7 +384,12 @@ platform-qnx = []
 platform-windows = []
 platform-zephyr = ["dep:wz-runtime-zephyr"]
 
-# ----- domain: pubsub (11 atomic, 10 active / 1 reserved) -----
+# ----- domain: pubsub (12 atomic, 8 active / 4 FOUNDATIONAL-reserved) -----
+# R311y314 — was "11 atomic, 10 active / 1 reserved", the pre-R311y307 count.
+# y307 merged priority/congestion-control/express into pubsub-qos and demoted the
+# three to FOUNDATIONAL-reserved aliases, so 12 = 8 active + 4 reserved (the 3
+# aliases + the pubsub-sample anchor). The body below already described the merge;
+# only this header still stated the count it dissolved.
 # R311cc — active features forward to wz-runtime-tokio (-put/-delete
 # msg body variants, -allow-loop loopback, -attachment / -timestamp /
 # -encoding / -source-info Sample optional field populators, -qos the

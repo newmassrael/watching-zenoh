@@ -24,9 +24,37 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # ── The DENOMINATOR, declared and gated ─────────────────────────────────────────
 #
 # `built` (= active + FOUNDATIONAL + PARTIAL, from the R311y257 implementation axis)
-# is NOT the denominator: 25 of those atoms cannot be witnessed by ANY foreign peer,
-# ever, by construction. Leaving them in would manufacture an unproven list that can
-# never reach zero -- and a gate nobody can close is a gate everyone learns to ignore.
+# is NOT the denominator: the atoms below are excluded, because leaving them in would
+# manufacture an unproven list that can never reach zero -- and a gate nobody can
+# close is a gate everyone learns to ignore. NO COUNT IS WRITTEN HERE, deliberately
+# (R311y314): this line used to say "25 of those atoms", R311y312 added 3 and did not
+# update it, and the script PRINTS the real size four lines into its own stdout
+# ("denominator = built(N) - foreign-NON-observable(28) = ..."). A count in a comment
+# is a citation that nothing greps -- exactly the defect class R311y310 exists to
+# name. `len(FOREIGN_NON_OBSERVABLE)` is the SSOT; read the stdout, not this header.
+#
+# R311y314 -- WHAT THIS SET ACTUALLY MEANS, reconciled with what it PRACTISES.
+# The predicate stated below ("no foreign peer can produce or observe ANY difference")
+# is TRUE of the substrate/seam/local-state entries and FALSE of the alias entries,
+# and has been false since link-fragment / link-batching landed -- toggling
+# `link-batching = ["transport-batching"]` demonstrably changes the wire, because the
+# alias PULLS its vehicle. So this set holds TWO categories, and only the first
+# matches the predicate:
+#   (1) genuinely non-observable  -- host substrate, executor choice, internal seams,
+#                                    local-only state. No peer can ever witness them.
+#   (2) aliases / re-views        -- observable, but the observable BELONGS TO a
+#                                    counted vehicle atom. Counting both double-counts
+#                                    ONE artifact (link-frame's reason says exactly
+#                                    that). Exclusion here is DE-DUPLICATION, not
+#                                    non-observability.
+# Category (2) costs falsifiability and the cost is real: A4-6 makes this set
+# falsifiable by evidence ("witness one and the gate fails"), but a category-(2) entry
+# CAN be witnessed -- the witness simply gets filed under the vehicle. For the qos
+# trio the witness exists in this very tree (wz_qos_congestion_express_to_pico_zsub
+# asserts a pico peer decoding all three bits) and reports as `pubsub-qos`. So A4-6
+# cannot refute a category-(2) entry; only a human re-reading the vehicle mapping can.
+# If you add to category (2), the burden is to show the named vehicle EXISTS, is in
+# the denominator, and carries the proof -- a scripted cross-check of that is owed.
 #
 # So the exclusion is DECLARED here, per atom, with its reason -- and then made
 # FALSIFIABLE by invariant A4-6: if any corpus test ever does witness one of these,
@@ -380,9 +408,12 @@ def main() -> int:
                 # R311y312 — the reason stated here USED to be "its code is compiled
                 # unconditionally, whether or not its `= []` cargo key happens to be
                 # enabled". That is FALSE of every alias-shaped FOUNDATIONAL in the tree,
-                # which is 18 of the 57 (link-batching = ["transport-batching"],
-                # link-fragment, attachment-encoding-aware, the 9 locator-* forwards, and
-                # post-y307 the pubsub-qos aliases): their key is NOT `= []` and their
+                # which is 18 of the 57 (8 locator-* forwards, attachment-encoding-aware,
+                # keyexpr-canon, link-batching, link-fragment, liveliness-historical-samples,
+                # scouting-gossip, scouting-multicast, and post-y307 the three pubsub-qos
+                # aliases -- R311y314 corrected this list, which said "9 locator-*" for 8
+                # and omitted four members; DERIVE it, do not trust the prose): their key
+                # is NOT `= []` and their
                 # vehicle's code IS elided when the vehicle feature is off. The exemption
                 # is still correct, but for the narrower reason above -- the atom names no
                 # cfg site, so containment over ITS name is vacuous either way. The

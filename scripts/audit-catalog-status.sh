@@ -204,9 +204,17 @@ def has_gate(atom):
 #
 # R311y311 — FOUNDATIONAL's gloss above used to read "built, always-on, no cfg
 # knob". That was FALSE of 18 of its own 57 members, and had been since before
-# R311y307: link-batching = ["transport-batching"], link-fragment,
-# attachment-encoding-aware, the 9 locator-* forwards and (post-y307) the three
-# pubsub-qos aliases are all cargo ALIASES, not always-compiled code. Their code
+# R311y307. The 18, DERIVED (R311y314 -- the list first written here was hand-
+# transcribed and wrong: it said "the 9 locator-*" for 8 and omitted four
+# members, which is this file's own defect class): 8 locator-* forwards (quic /
+# serial / tcp / tls / udp / unixsock / vsock / ws -- NOT locator-iface, which is
+# a forward but is `active`, so not one of the 57), plus attachment-encoding-aware,
+# keyexpr-canon, link-batching = ["transport-batching"], link-fragment,
+# liveliness-historical-samples, scouting-gossip = ["routing-router"],
+# scouting-multicast = ["transport-link-udp"], and (post-y307) the three
+# pubsub-qos aliases. All are cargo ALIASES, not always-compiled code.
+# Re-derive rather than trust this list:
+#   FOUNDATIONAL atoms whose cargo key is not `= []`. Their code
 # is elided when the vehicle atom's feature is off, so "always-on" is simply not
 # the property they share. What they DO share with the empty-key members -- and
 # what the tag has always MEANT in practice -- is "no cfg knob OF ITS OWN":

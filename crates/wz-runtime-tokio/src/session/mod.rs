@@ -645,17 +645,32 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// per-priority conduit; a non-QoS session / group clamps back to DEFAULT
     /// downstream, so this behaves exactly like [`Self::publish`] there.
     ///
-    /// R311y-item3 — under `pubsub-priority` the explicit band is FOLDED into
+    /// R311y-item3 — under `pubsub-qos` the explicit band is FOLDED into
     /// the single `opts.qos` source via
     /// [`PublishOptions::with_priority`](PublishOptions::with_priority) and the
     /// call delegates to [`Self::publish`], so the app-observable Push qos ext /
     /// loopback `Sample.priority` and the conduit band CANNOT diverge (closing
     /// the y226 two-input smell — `with_qos(low)` + `publish_qos(high)` no longer
     /// desyncs; the explicit band now wins for BOTH legs). Without
-    /// `pubsub-priority` there is no observable qos byte to desync, so the band
+    /// `pubsub-qos` there is no observable qos byte to desync, so the band
     /// threads straight to the WIRE conduit (the transport-qos-only path this
     /// method exists for). The signature stays feature-independent
     /// (signature-stability rule) — only the internal routing branches.
+    ///
+    /// R311y314 — this doc said `pubsub-priority`, twice, and was FALSE from
+    /// R311y307 onward: that round merged the priority/congestion/express trio
+    /// into `pubsub-qos`, which is what the arm below actually gates. The claim
+    /// "without `pubsub-priority` there is no observable qos byte" is refuted by
+    /// a subset this repo BUILDS — Layer C1bi runs
+    /// `--features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop,pubsub-qos`,
+    /// no `pubsub-priority`, and the whole byte rides. The alias only IMPLIES the
+    /// gate; it is sufficient, never necessary. Recorded rather than silently
+    /// corrected because R311y310-y312 rebuilt the §5.8 inventory reasons, the
+    /// section prose and the proof axis and then declared the merge "consistent
+    /// on all four legs" — while THIS rustdoc, cited by `pubsub-qos`'s own
+    /// inventory reason as evidence of its gate, still asserted the semantics the
+    /// merge dissolved. A merge moves the gate; the claims about it sit in prose
+    /// no gate reads. Grep the OLD atom name everywhere, in the same round.
     pub fn publish_qos(
         &self,
         keyexpr: &str,
@@ -680,7 +695,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// (band derived from `opts` via
     /// [`PublishOptions::priority_band`](PublishOptions::priority_band)) and
     /// [`Self::publish_qos`] (explicit band, folded into `opts` under
-    /// `pubsub-priority`). Factored out so both entry points share the remote +
+    /// `pubsub-qos` — R311y314; said `pubsub-priority`, an alias, pre-y307). Factored out so both entry points share the remote +
     /// loopback leg logic and only the frame band differs; the remote leg hands
     /// `priority` to [`Self::send_network_message_qos`].
     fn publish_prioritized(
