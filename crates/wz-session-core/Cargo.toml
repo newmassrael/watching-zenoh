@@ -367,9 +367,35 @@ pubsub-attachment = ["attachment-bytes"]
 pubsub-timestamp = []
 pubsub-encoding = []
 pubsub-source-info = []
-pubsub-priority = []
-pubsub-congestion-control = []
-pubsub-express = []
+
+# R311y307 — the Push QoS extension (network ext id 0x01, ENC_ZINT) is ONE
+# compile unit. `pubsub-qos` gates its encode (`build_push_outer_extensions`)
+# and its decode (`pubsub::dispatch_push` -> `extract_qos`); the three
+# sub-fields it packs — priority (bits 0-2) / congestion `nodrop` (bit 3) /
+# express (bit 4), `sample.rs` `QosLevel` — ride that one byte and are NOT
+# separately cfg-gateable: one ext, one encode gate, one decode gate, and a
+# single `Option<QosLevel>` on the app-facing `Sample`, in which a per-field
+# "absent" is unrepresentable.
+#
+# Before y307 the three were separate cargo features whose gates covered only
+# the typed `PublishOptions` setters while the encode/decode gates were their
+# `any(..)` UNION, so composing any ONE of them put all three sub-fields on
+# the wire — falsifying each one's "without it the sub-field cannot ride the
+# wire" doc claim in every mixed subset. Merging makes union == feature, so
+# the un-composed state is unrepresentable rather than masked late.
+#
+# The three keep their cargo keys as aliases (catalog atoms with no own cfg
+# site => reserved + FOUNDATIONAL, the `liveliness-historical-samples` /
+# `pubsub-sample` precedent) so an existing `--features pubsub-priority`
+# consumer keeps working. Their RUNTIME knobs survive unchanged as the
+# `pubsub-qos`-gated `with_priority` / `with_congestion_control` /
+# `with_express` setters — zenoh / zenoh-pico expose all three as runtime
+# options with NO compile knob, so wz stays a superset (1 compile knob + 3
+# runtime knobs).
+pubsub-qos = []
+pubsub-priority = ["pubsub-qos"]
+pubsub-congestion-control = ["pubsub-qos"]
+pubsub-express = ["pubsub-qos"]
 
 # R311if — static scouting mode (docs/scouting-fsm.md §2.4.3). Gates the
 # `scout_static` module: the `ScoutingMode` discriminator + the

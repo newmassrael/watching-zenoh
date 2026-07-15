@@ -6944,11 +6944,7 @@ mod tests {
     /// Gated on the same qos-byte subset as its only callers (the R311y226
     /// tests) so a routing-peer build WITHOUT the qos-byte features does
     /// not carry it as dead code (Layer C1ba's ML_DEPLOY_FEATURES combo).
-    #[cfg(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    ))]
+    #[cfg(feature = "pubsub-qos")]
     fn forwarded_qos(frame: &[u8]) -> Option<wz_session_core::sample::QosLevel> {
         use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
         let InboundFrame::Frame { payload, .. } =
@@ -6969,11 +6965,7 @@ mod tests {
     /// `Priority::DEFAULT` when the Push carries no qos ext. Gated with
     /// [`forwarded_qos`] on the qos-byte subset (its only callers are the
     /// R311y226 tests).
-    #[cfg(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    ))]
+    #[cfg(feature = "pubsub-qos")]
     fn forwarded_priority(frame: &[u8]) -> wz_session_core::qos::Priority {
         let mut sample = wz_session_core::sample::Sample::new_put("k", Vec::<u8>::new());
         if let Some(q) = forwarded_qos(frame) {
@@ -8567,11 +8559,7 @@ mod tests {
     // Gated on the same qos-byte subset as the emit/decode path
     // (build_push_outer_extensions / extract_qos): off-subset the ext is
     // neither emitted nor decoded, so the RealTime assertion would not hold.
-    #[cfg(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    ))]
+    #[cfg(feature = "pubsub-qos")]
     #[test]
     fn publish_qos_emits_per_message_qos_ext_observable_as_sample_priority() {
         // R311y226 — a prioritized publish stamps the per-message Push qos ext
@@ -10199,11 +10187,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    ))]
+    #[cfg(feature = "pubsub-qos")]
     #[test]
     fn forward_push_preserves_the_per_message_qos_ext_on_transit() {
         // R311y226 — a transit re-forward (reliteralize_push, clone-based) must

@@ -387,17 +387,25 @@ platform-zephyr = ["dep:wz-runtime-zephyr"]
 # ----- domain: pubsub (11 atomic, 10 active / 1 reserved) -----
 # R311cc — active features forward to wz-runtime-tokio (-put/-delete
 # msg body variants, -allow-loop loopback, -attachment / -timestamp /
-# -encoding / -source-info Sample optional field populators, -priority /
-# -congestion-control / -express QoS-byte projection). 1 reserved
-# (-sample) stays declaration-only.
+# -encoding / -source-info Sample optional field populators, -qos the
+# packed QoS-byte ext). R311y307 — -priority / -congestion-control /
+# -express are now ALIASES composing `pubsub-qos` (the three sub-fields
+# share one packed byte and one ext, so they carry no own cfg site);
+# they stay declared as catalog atoms (reserved + FOUNDATIONAL) and their
+# runtime knobs survive as the `pubsub-qos`-gated per-field setters.
+# 1 reserved (-sample) stays declaration-only.
 pubsub-allow-loop = ["wz-runtime-tokio?/pubsub-allow-loop"]
 pubsub-attachment = ["attachment-bytes", "wz-runtime-tokio?/pubsub-attachment"]
-pubsub-congestion-control = ["wz-runtime-tokio?/pubsub-congestion-control"]
+pubsub-congestion-control = ["pubsub-qos", "wz-runtime-tokio?/pubsub-congestion-control"]
 pubsub-delete = ["wz-runtime-tokio?/pubsub-delete"]
 pubsub-encoding = ["wz-runtime-tokio?/pubsub-encoding"]
-pubsub-express = ["wz-runtime-tokio?/pubsub-express"]
-pubsub-priority = ["session-extqos", "wz-runtime-tokio?/pubsub-priority"]
+pubsub-express = ["pubsub-qos", "wz-runtime-tokio?/pubsub-express"]
+# `session-extqos` stays on the priority alias only (NOT on -qos): it is a
+# pre-y307 asymmetry among the three siblings, unrelated to the merge, and
+# is a no-op declaration today (session-extqos is reserved / 0 cfg sites).
+pubsub-priority = ["session-extqos", "pubsub-qos", "wz-runtime-tokio?/pubsub-priority"]
 pubsub-put = ["wz-runtime-tokio?/pubsub-put"]
+pubsub-qos = ["wz-runtime-tokio?/pubsub-qos"]
 pubsub-sample = []
 pubsub-source-info = ["wz-runtime-tokio?/pubsub-source-info"]
 pubsub-timestamp = ["wz-runtime-tokio?/pubsub-timestamp"]

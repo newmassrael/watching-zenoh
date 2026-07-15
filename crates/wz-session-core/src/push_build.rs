@@ -40,16 +40,12 @@ use crate::metadata::PushMetadata;
 use crate::source_info_ext::encode_source_info_ext_entry;
 #[cfg(any(
     feature = "pubsub-source-info",
-    feature = "pubsub-priority",
-    feature = "pubsub-congestion-control",
-    feature = "pubsub-express"
+    feature = "pubsub-qos",
+    feature = "pubsub-qos",
+    feature = "pubsub-qos"
 ))]
 use wz_codecs::ext_entry::ExtEntryOwnedVariant;
-#[cfg(any(
-    feature = "pubsub-priority",
-    feature = "pubsub-congestion-control",
-    feature = "pubsub-express"
-))]
+#[cfg(feature = "pubsub-qos")]
 use wz_codecs::ext_zint::ExtZint;
 
 /// R121e — build a `Push` network-message with a literal keyexpr
@@ -405,15 +401,14 @@ fn build_body_extensions(
 /// attachment on the body chain (`_z_push_body_encode_extensions`).
 fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<Vec<ExtEntryOwned>> {
     let mut exts: Vec<ExtEntryOwned> = Vec::new();
-    // Push outer QoS ext (id 0x01) — gated on any of the three QoS-byte
-    // features (the single ext byte packs priority / congestion-control /
-    // express). The subscriber-side decode is gated on the same `any(...)`
+    // Push outer QoS ext (id 0x01) — gated on `pubsub-qos`, the ONE compile
+    // unit for the ext (its single byte packs priority / congestion-control /
+    // express, so they compose together or not at all; R311y307 merged the
+    // three former per-field features into this one because their gates
+    // covered only the typed setters while this encode path gated on their
+    // UNION). The subscriber-side decode gates on the same single feature
     // (pubsub.rs), so off-subset both ends agree the wire carries no QoS.
-    #[cfg(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    ))]
+    #[cfg(feature = "pubsub-qos")]
     // R311y226 — suppress the DEFAULT-byte ext (priority Data / Drop /
     // no-express, raw 0x05) so a plain publish stays wire-identical to
     // the metadata-stripped baseline. The wz analog of zenoh-pico's
@@ -433,11 +428,7 @@ fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<V
             });
         }
     }
-    #[cfg(not(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    )))]
+    #[cfg(not(feature = "pubsub-qos"))]
     let _ = qos;
     if exts.is_empty() {
         return None;
@@ -782,11 +773,7 @@ mod tests {
         feature = "pubsub-timestamp",
         feature = "pubsub-encoding",
         feature = "pubsub-source-info",
-        any(
-            feature = "pubsub-priority",
-            feature = "pubsub-congestion-control",
-            feature = "pubsub-express"
-        )
+        feature = "pubsub-qos"
     ))]
     use wz_codecs::push::Push;
     #[cfg(all(
@@ -794,11 +781,7 @@ mod tests {
         feature = "pubsub-timestamp",
         feature = "pubsub-encoding",
         feature = "pubsub-source-info",
-        any(
-            feature = "pubsub-priority",
-            feature = "pubsub-congestion-control",
-            feature = "pubsub-express"
-        )
+        feature = "pubsub-qos"
     ))]
     use wz_codecs_test_support::TestWire;
     // QosLevel + TimestampHint are named ungated by push_metadata_is_empty;
@@ -959,14 +942,7 @@ mod tests {
         assert!(!del.z(), "Z flag clear with no extensions");
     }
 
-    #[cfg(all(
-        feature = "codec-push",
-        any(
-            feature = "pubsub-priority",
-            feature = "pubsub-congestion-control",
-            feature = "pubsub-express"
-        )
-    ))]
+    #[cfg(all(feature = "codec-push", feature = "pubsub-qos"))]
     #[test]
     fn build_push_outer_extensions_emits_qos_with_zint_body() {
         let exts = build_push_outer_extensions(Some(QosLevel::from_raw(0b0001_1010)))
@@ -986,14 +962,7 @@ mod tests {
         assert!(build_push_outer_extensions(None).is_none());
     }
 
-    #[cfg(all(
-        feature = "codec-push",
-        any(
-            feature = "pubsub-priority",
-            feature = "pubsub-congestion-control",
-            feature = "pubsub-express"
-        )
-    ))]
+    #[cfg(all(feature = "codec-push", feature = "pubsub-qos"))]
     #[test]
     fn build_push_outer_extensions_suppresses_default_qos_byte() {
         // R311y226 — the DEFAULT byte (Data/Drop/no-express, raw 0x05) is
@@ -1297,11 +1266,7 @@ mod tests {
         assert!(!with_qos.is_empty());
     }
 
-    #[cfg(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    ))]
+    #[cfg(feature = "pubsub-qos")]
     #[test]
     fn build_push_literal_with_meta_sets_push_header_z_bit_when_qos_attached() {
         let meta = PushMetadata {
@@ -1327,11 +1292,7 @@ mod tests {
         feature = "pubsub-timestamp",
         feature = "pubsub-encoding",
         feature = "pubsub-source-info",
-        any(
-            feature = "pubsub-priority",
-            feature = "pubsub-congestion-control",
-            feature = "pubsub-express"
-        )
+        feature = "pubsub-qos"
     ))]
     #[test]
     fn build_push_literal_with_meta_round_trips_through_codec_encode_decode() {
@@ -1414,11 +1375,7 @@ mod tests {
         feature = "pubsub-timestamp",
         feature = "pubsub-encoding",
         feature = "pubsub-source-info",
-        any(
-            feature = "pubsub-priority",
-            feature = "pubsub-congestion-control",
-            feature = "pubsub-express"
-        )
+        feature = "pubsub-qos"
     ))]
     #[test]
     fn build_push_del_literal_with_meta_round_trips_metadata_minus_encoding() {

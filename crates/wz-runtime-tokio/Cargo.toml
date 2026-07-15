@@ -1075,14 +1075,25 @@ session-matching = ["wz-session-core/session-matching"]
 #                        source_info-ext encode in build_body_extensions
 #                        (session_glue). Feature-off: nothing is set on
 #                        PublishOptions nor written to the wire.
-#   pubsub-priority / pubsub-congestion-control / pubsub-express — BOTH
-#                        sides. Any one composes the single packed QoS
-#                        byte. Forwards to wz-session-core for the inbound
-#                        Sample.qos projection (any-of decode) AND gates
-#                        the local SEND vertical: `PublishOptions::with_qos`
-#                        setter (session.rs) + build_push_outer_extensions
-#                        (session_glue), both gated on `any(...)` of the
-#                        three. Feature-off: nothing is set nor written.
+#   pubsub-qos         — BOTH sides. The ONE compile unit for the Push QoS
+#                        ext (network ext id 0x01): forwards to
+#                        wz-session-core for the inbound Sample.qos
+#                        projection AND gates the local SEND vertical
+#                        (`PublishOptions::with_qos` + the three per-field
+#                        setters + build_push_outer_extensions).
+#                        Feature-off: no qos is set, none is written, and
+#                        an inbound qos ext projects to `Sample.qos = None`.
+#   pubsub-priority / pubsub-congestion-control / pubsub-express — R311y307:
+#                        aliases that compose `pubsub-qos`; NO own cfg site
+#                        (reserved + FOUNDATIONAL in the catalog). The three
+#                        sub-fields share ONE packed byte, so they are not
+#                        separately gateable — their RUNTIME knobs are the
+#                        `pubsub-qos`-gated `with_priority` /
+#                        `with_congestion_control` / `with_express` setters.
+#                        Before y307 they were separate features whose gates
+#                        covered only the setters while encode/decode gated
+#                        on their UNION, so composing any one put all three
+#                        on the wire.
 #   pubsub-encoding    — BOTH sides. Forwards to wz-session-core for the
 #                        inbound Sample.encoding projection (Put only;
 #                        zenoh-pico `_z_msg_del_t` has no encoding slot)
@@ -1112,9 +1123,10 @@ pubsub-attachment = ["wz-session-core/pubsub-attachment"]
 pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
 pubsub-encoding = ["wz-session-core/pubsub-encoding"]
 pubsub-source-info = ["wz-session-core/pubsub-source-info"]
-pubsub-priority = ["wz-session-core/pubsub-priority"]
-pubsub-congestion-control = ["wz-session-core/pubsub-congestion-control"]
-pubsub-express = ["wz-session-core/pubsub-express"]
+pubsub-qos = ["wz-session-core/pubsub-qos"]
+pubsub-priority = ["pubsub-qos", "wz-session-core/pubsub-priority"]
+pubsub-congestion-control = ["pubsub-qos", "wz-session-core/pubsub-congestion-control"]
+pubsub-express = ["pubsub-qos", "wz-session-core/pubsub-express"]
 # R311xt — §5.18 time-hlc: the Hybrid Logical Clock timestamp source, the
 # wz mirror of zenoh's `Option<Arc<uhlc::HLC>>` on the Runtime
 # (zenoh/src/net/runtime/mod.rs:147 — an HLC is created when `timestamping`

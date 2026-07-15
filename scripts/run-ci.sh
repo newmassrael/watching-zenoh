@@ -2432,11 +2432,12 @@ layer_c1z_cargo_test_storage_driver() {
 #
 # R311el/R311em: two invocations gate both cfg arms of the metadata-
 # projection wire-ups. The first omits pubsub-encoding, pubsub-source-info
-# AND the three QoS-byte features (pubsub-priority/-congestion-control/
-# -express) — it builds the cfg-off populators (body_encoding = None,
+# AND the QoS-byte feature (R311y307: `pubsub-qos`, formerly the three
+# pubsub-priority/-congestion-control/-express features it merged) — it
+# builds the cfg-off populators (body_encoding = None,
 # body_source_info = None, qos = None) under deny-warnings and runs the
 # cautious-fire dedup tests that hold with that metadata absent. The
-# second adds pubsub-encoding + pubsub-source-info + all three QoS
+# second adds pubsub-encoding + pubsub-source-info + the QoS
 # features — it builds the encoding projection + extract_source_info +
 # extract_qos paths and runs the self-echo suppression tests that only
 # engage when the wire source_info is decoded. The maximal-preset lanes
@@ -2458,6 +2459,44 @@ layer_c1d_cargo_test_pubsub() {
         && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-encoding,pubsub-source-info,pubsub-priority,pubsub-congestion-control,pubsub-express --quiet \
         && cargo test -p wz-session-core --features codec-push,pubsub-put --quiet \
         && cargo test -p wz-session-core --features codec-push,pubsub-delete --quiet)
+}
+
+# ─── Layer C1bi — pubsub-qos: the merged QoS-byte gate (R311y307) ───────
+#
+# The QoS ext (network id 0x01) packs priority / congestion / express into
+# ONE byte, so R311y307 merged the three former per-field features into the
+# single `pubsub-qos` compile unit and demoted them to aliases (catalog:
+# reserved + FOUNDATIONAL). This lane pins the two properties that merge
+# rests on — both are NEGATIVE assertions, because the defect y307 fixed
+# was invisible to every build-only / clippy-only arm that already covered
+# these subsets (a subset that compiles proves nothing about what the gate
+# lets onto the wire).
+#
+#   arm 1 (gate ON, canonical knob): the qos encode/decode paths compile and
+#     the build_push_outer_extensions tests RUN — raw-faithful, unmasked
+#     (a decoded byte is recorded as the peer sent it; y307 deliberately
+#     does NOT per-field mask, which would make wz report a QoS never sent).
+#   arm 2 (gate OFF): the SAME test filter must select ONLY the ungated
+#     `returns_none_without_qos` — i.e. the qos-gated tests must VANISH.
+#     `--exact` on a gated-out test name would pass vacuously, so this arm
+#     asserts the surviving COUNT via the filter, which is what makes the
+#     OFF arm a real gate proof rather than a skip reporting green.
+#   arm 3 (alias composition): `--features pubsub-express` ALONE must
+#     compose pubsub-qos, so the qos tests execute. This is the arm that
+#     would have caught the y307 defect: pre-merge, composing express alone
+#     silently enabled the whole byte while each sibling's doc claimed its
+#     sub-field "cannot ride the wire" without its own feature.
+#   arm 4 (wz-runtime-tokio side): C1d is `-p wz-session-core` only and
+#     never builds the crate where `PublishOptions::with_qos` and the three
+#     per-field setters live, so the gate's API surface needs its own arm.
+layer_c1bi_cargo_test_pubsub_qos() {
+    (cd crates \
+        && cargo test -p wz-session-core --no-default-features --features alloc,codec-push,pubsub-qos --lib push_build::tests::build_push_outer_extensions --quiet \
+        && test "$(cargo test -p wz-session-core --no-default-features --features alloc,codec-push --lib push_build::tests::build_push_outer_extensions -- --list 2>/dev/null | grep -c ': test')" = "1" \
+        && cargo test -p wz-session-core --no-default-features --features alloc,codec-push,pubsub-express --lib push_build::tests::build_push_outer_extensions --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop,pubsub-qos --lib --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop,pubsub-qos --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --quiet -- -D warnings)
 }
 
 # ─── Layer C1e — cargo test -p wz-session-core (query dispatch plane) ──
@@ -5781,6 +5820,7 @@ run_layer C1q layer_c1q_multicast_glue || overall=1
 run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C1bg layer_c1bg_cargo_test_storage_backend_filesystem || overall=1
 run_layer C1bh layer_c1bh_cargo_test_storage_host_dir || overall=1
+run_layer C1bi layer_c1bi_cargo_test_pubsub_qos || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1

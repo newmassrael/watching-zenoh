@@ -145,11 +145,7 @@ use crate::network_message::NetworkMessage;
 #[cfg(all(
     feature = "alloc",
     any(feature = "pubsub-put", feature = "pubsub-delete"),
-    any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    )
+    feature = "pubsub-qos"
 ))]
 use crate::sample::extract_qos;
 #[cfg(all(
@@ -774,23 +770,23 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             };
         let outer_exts: &[wz_codecs::ext_entry::ExtEntryOwned] =
             push.extensions.as_deref().unwrap_or(&[]);
-        // R311em — the outer QoS extension is a single packed byte
-        // (priority / congestion-control / express are bit views of the
-        // same _z_qos_t._val). The subscriber-side projection therefore
-        // gates on `any` of the three QoS-byte consumers; with all three
-        // off the build never decodes the QoS ext and Sample.qos stays
-        // None (field declared for signature stability, R311g1).
-        #[cfg(any(
-            feature = "pubsub-priority",
-            feature = "pubsub-congestion-control",
-            feature = "pubsub-express"
-        ))]
+        // R311em / R311y307 — the outer QoS extension is a single packed
+        // byte (priority / congestion-control / express are bit views of
+        // the same _z_qos_t._val), so the subscriber-side projection gates
+        // on the one `pubsub-qos` compile unit that owns the ext. Off, the
+        // build never decodes the QoS ext and Sample.qos stays None (field
+        // declared for signature stability, R311g1).
+        //
+        // The projection is all-or-nothing BY DESIGN: a decoded byte is
+        // recorded exactly as the peer sent it, never per-field masked. The
+        // bits already arrived; rewriting one to a local default would make
+        // wz report a QoS the peer never sent — a divergence from zenoh and
+        // zenoh-pico that the all-features-on cross-impl proofs could never
+        // observe. Absence (`None`) is honest; a fabricated value is not.
+        // This is why the three sub-fields cannot be separately gated here.
+        #[cfg(feature = "pubsub-qos")]
         let qos = extract_qos(outer_exts);
-        #[cfg(not(any(
-            feature = "pubsub-priority",
-            feature = "pubsub-congestion-control",
-            feature = "pubsub-express"
-        )))]
+        #[cfg(not(feature = "pubsub-qos"))]
         let qos: Option<crate::sample::QosLevel> = {
             let _ = outer_exts;
             None
@@ -3241,11 +3237,7 @@ mod tests {
         push
     }
 
-    #[cfg(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    ))]
+    #[cfg(feature = "pubsub-qos")]
     #[test]
     fn inbound_put_qos_is_projected_when_a_qos_consumer_on() {
         let mut registry = SubscriberRegistry::new();
@@ -3271,11 +3263,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    )))]
+    #[cfg(not(feature = "pubsub-qos"))]
     #[test]
     fn inbound_put_qos_is_dropped_when_all_qos_consumers_off() {
         let mut registry = SubscriberRegistry::new();

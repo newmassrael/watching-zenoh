@@ -941,11 +941,7 @@ fn record_loopback_samples(session: &TokioSession, pattern: &str) -> Arc<Mutex<V
     feature = "pubsub-timestamp",
     feature = "pubsub-encoding",
     feature = "pubsub-source-info",
-    any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    )
+    feature = "pubsub-qos"
 ))]
 #[test]
 fn publish_options_with_metadata_setters_chain() {
@@ -1081,14 +1077,7 @@ fn publish_loopback_propagates_attachment_to_sample() {
     assert_eq!(s[0].attachment.as_deref(), Some(&b"attach-payload"[..]));
 }
 
-#[cfg(all(
-    feature = "pubsub-allow-loop",
-    any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    )
-))]
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-qos"))]
 #[test]
 fn publish_loopback_propagates_qos_to_sample() {
     let (session, _driver) = build_session();
@@ -1114,7 +1103,7 @@ fn publish_loopback_propagates_qos_to_sample() {
 /// AND the same byte is what the app observes via `Sample.priority`, so the two
 /// former inputs cannot diverge. Also pins the bit-preservation contract (only
 /// the low-3-bit priority field is rewritten; congestion + express survive).
-#[cfg(feature = "pubsub-priority")]
+#[cfg(feature = "pubsub-qos")]
 #[test]
 fn publish_options_with_priority_is_single_source_band() {
     use wz_session_core::qos::{CongestionControl, Priority};
@@ -1156,11 +1145,7 @@ fn publish_options_with_priority_is_single_source_band() {
 /// merges ONLY its own sub-field, the three compose in any order, and the
 /// untouched sub-fields fall back to the wire-DEFAULT byte (0x05 = Data / Drop /
 /// no-express) rather than a zeroed `Control` byte.
-#[cfg(all(
-    feature = "pubsub-priority",
-    feature = "pubsub-congestion-control",
-    feature = "pubsub-express"
-))]
+#[cfg(all(feature = "pubsub-qos", feature = "pubsub-qos", feature = "pubsub-qos"))]
 #[test]
 fn publish_options_typed_qos_knobs_merge_independently() {
     use wz_session_core::qos::{CongestionControl, Priority};
@@ -1215,7 +1200,7 @@ fn publish_options_typed_qos_knobs_merge_independently() {
 /// (the conduit leg is proven by
 /// `publish_with_priority_routes_multicast_conduit_band`); together they show one
 /// `with_priority` feeds both legs from a single source.
-#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-priority"))]
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-qos"))]
 #[test]
 fn publish_with_priority_propagates_band_to_loopback_sample() {
     use wz_session_core::qos::Priority;
@@ -1242,7 +1227,7 @@ fn publish_with_priority_propagates_band_to_loopback_sample() {
 /// conduit half follows because the fold delegates to `publish` (conduit proven
 /// by `publish_with_priority_routes_multicast_conduit_band`). Closes the
 /// two-source smell — `with_qos(low)` + `publish_qos(high)` can no longer desync.
-#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-priority"))]
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-qos"))]
 #[test]
 fn publish_qos_folds_band_into_observable_sample() {
     use wz_session_core::qos::Priority;
@@ -1268,11 +1253,7 @@ fn publish_qos_folds_band_into_observable_sample() {
     feature = "pubsub-timestamp",
     feature = "pubsub-encoding",
     feature = "pubsub-source-info",
-    any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    )
+    feature = "pubsub-qos"
 ))]
 #[test]
 fn publish_loopback_propagates_all_metadata_in_one_chain() {
@@ -6403,7 +6384,7 @@ fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
 #[cfg(all(
     feature = "transport-multicast",
     feature = "codec-push",
-    feature = "pubsub-priority"
+    feature = "pubsub-qos"
 ))]
 #[test]
 fn publish_with_priority_routes_multicast_conduit_band() {

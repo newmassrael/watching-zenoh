@@ -31,12 +31,13 @@ use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo,
 // R311y-item3 — `Priority` is the transport conduit band + the QoS byte's
 // priority sub-field. Ungated import: the always-compiled `priority_band`
 // accessor below reads it on every profile (the `with_priority` setter is
-// `pubsub-priority`-gated, but the derived-band read is not).
-// R311y255 — `CongestionControl` is named ONLY by the
-// `pubsub-congestion-control`-gated `PublishOptions::with_congestion_control`
-// signature, so the import follows that gate. (`Priority` below stays ungated:
-// the always-compiled `priority_band()` names it regardless of feature.)
-#[cfg(feature = "pubsub-congestion-control")]
+// `pubsub-qos`-gated, but the derived-band read is not — the band is the
+// independent `transport-qos` axis).
+// R311y255 / R311y307 — `CongestionControl` is named ONLY by the
+// `pubsub-qos`-gated `PublishOptions::with_congestion_control` signature, so
+// the import follows that gate. (`Priority` above stays ungated: the
+// always-compiled `priority_band()` names it regardless of feature.)
+#[cfg(feature = "pubsub-qos")]
 use wz_session_core::qos::CongestionControl;
 use wz_session_core::qos::Priority;
 // `build_loopback_sample` is the sole `Sample` consumer here, so the import
@@ -136,8 +137,7 @@ pub struct PublishOptions {
     /// zenoh-pico mirror: the Push outer `_Z_MSG_EXT_ENC_ZINT | 0x01`
     /// extension carrying priority + congestion-control + express
     /// packed into one byte. Wire-side propagation is built (R233,
-    /// `build_push_outer_extensions`, gated on any of `pubsub-priority`
-    /// / `pubsub-congestion-control` / `pubsub-express`; the ext is
+    /// `build_push_outer_extensions`, gated on `pubsub-qos`; the ext is
     /// suppressed when the byte equals `QosLevel::DEFAULT`). All three
     /// sub-fields are foreign-proven: PRIORITY — R311y240
     /// (`wz_priority_to_pico_zsub`, pico `z_sample_priority`);
@@ -249,19 +249,21 @@ impl PublishOptions {
     /// control / express byte). Mirrors zenoh-pico's
     /// `_Z_MSG_EXT_ENC_ZINT | 0x01` Push outer extension.
     ///
-    /// Gated on any of the three QoS-byte features (`pubsub-priority` /
-    /// `pubsub-congestion-control` / `pubsub-express`) — the single
-    /// outer-ext byte packs all three, so any one of them composes the
-    /// `build_push_outer_extensions` encode path. With none of them on,
-    /// the send-side emits no QoS ext (and the subscriber-side decode is
-    /// gated on the same `any(...)`), so offering the setter would
-    /// silently drop the byte. The `qos` field stays (struct stability);
-    /// only the populator gates.
-    #[cfg(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    ))]
+    /// R311y307 — gated on `pubsub-qos`, the ONE compile unit for the Push
+    /// QoS ext: the single outer-ext byte packs priority / congestion /
+    /// express, so they compose together or not at all. Feature-off, the
+    /// send-side emits no QoS ext and the subscriber-side decode projects
+    /// `Sample.qos = None`, so offering the setter would silently drop the
+    /// byte. The `qos` field stays (struct stability); only the populator
+    /// gates.
+    ///
+    /// Before y307 this was gated on the UNION `any(pubsub-priority,
+    /// pubsub-congestion-control, pubsub-express)` while each sibling's
+    /// per-field setter gated on itself — so composing any ONE of the three
+    /// handed the caller this whole-byte setter and put all three sub-fields
+    /// on the wire, falsifying each sibling's "without it the sub-field
+    /// cannot ride the wire" claim in every mixed subset.
+    #[cfg(feature = "pubsub-qos")]
     pub fn with_qos(mut self, qos: QosLevel) -> Self {
         self.qos = Some(qos);
         self
@@ -280,16 +282,31 @@ impl PublishOptions {
     /// mirroring zenoh's single `QoSType` (`resolve_put`) and the already-unified
     /// peer path [`LinkstateForwarder::publish_qos`](crate::linkstate_forward).
     ///
-    /// Gated on `pubsub-priority` (the priority-observability feature). Without
-    /// it the priority sub-field cannot ride the wire, so a transport-qos-only
-    /// build drives the conduit band via
-    /// [`Session::publish_qos`](super::Session::publish_qos) instead.
+    /// R311y307 — gated on `pubsub-qos` (the QoS-ext compile unit), NOT on a
+    /// per-field `pubsub-priority` gate. The three sub-fields share ONE packed
+    /// byte, one ext, one encode gate and one decode gate, and the app-facing
+    /// `Sample` carries a single `Option<QosLevel>` in which a per-field
+    /// "absent" is unrepresentable — so priority is not separately gateable.
+    /// `pubsub-priority` survives as an ALIAS composing `pubsub-qos` (catalog
+    /// atom, reserved + FOUNDATIONAL); this setter is its runtime knob.
+    ///
+    /// The pre-y307 doc claimed "without `pubsub-priority` the priority
+    /// sub-field cannot ride the wire". That was FALSE in every mixed subset:
+    /// [`with_qos`](Self::with_qos) gated on the sibling UNION and
+    /// [`QosLevel::from_parts`] is ungated, so composing `pubsub-express`
+    /// alone was enough to put priority bits on the wire. Without `pubsub-qos`
+    /// the claim is now structurally true — there is no QoS encode path at all.
+    ///
+    /// A `pubsub-qos`-off build still drives the transport conduit band via
+    /// [`Session::publish_qos`](super::Session::publish_qos): the band is the
+    /// independent `transport-qos` axis (`sn.rs` per-priority `RxSn` conduits),
+    /// deliberately NOT gated here.
     ///
     /// R311y255 — the bit surgery moved to [`QosLevel::with_priority`]: this
     /// setter open-coded the `& !0x07` priority mask, which quietly falsified
     /// [`QosLevel::from_parts`]'s "the layout lives once" claim. It now merges
     /// through the SSOT, and its congestion / express siblings below do the same.
-    #[cfg(feature = "pubsub-priority")]
+    #[cfg(feature = "pubsub-qos")]
     pub fn with_priority(mut self, p: Priority) -> Self {
         self.qos = Some(self.qos_base().with_priority(p));
         self
@@ -309,9 +326,12 @@ impl PublishOptions {
     /// priority and express they did not want to change. That asymmetry (a typed
     /// `with_priority` but no typed congestion / express) is what this closes.
     ///
-    /// Gated on `pubsub-congestion-control`, mirroring `with_priority`'s gate on
-    /// `pubsub-priority` — without it the bit cannot ride the wire.
-    #[cfg(feature = "pubsub-congestion-control")]
+    /// R311y307 — gated on `pubsub-qos`, the shared QoS-ext compile unit (see
+    /// [`with_priority`](Self::with_priority) for why the three sub-fields are
+    /// not separately gateable). `pubsub-congestion-control` survives as an
+    /// alias composing it. The pre-y307 "without it the bit cannot ride the
+    /// wire" claim was false in mixed subsets.
+    #[cfg(feature = "pubsub-qos")]
     pub fn with_congestion_control(mut self, c: CongestionControl) -> Self {
         self.qos = Some(self.qos_base().with_congestion(c));
         self
@@ -323,8 +343,10 @@ impl PublishOptions {
     /// [`with_congestion_control`](Self::with_congestion_control); also
     /// foreign-proven by R311y242.
     ///
-    /// Gated on `pubsub-express`, mirroring the sibling gates.
-    #[cfg(feature = "pubsub-express")]
+    /// R311y307 — gated on `pubsub-qos`, the shared QoS-ext compile unit (see
+    /// [`with_priority`](Self::with_priority)); `pubsub-express` survives as an
+    /// alias composing it.
+    #[cfg(feature = "pubsub-qos")]
     pub fn with_express(mut self, express: bool) -> Self {
         self.qos = Some(self.qos_base().with_express(express));
         self
@@ -338,11 +360,7 @@ impl PublishOptions {
     /// R311y226 named).
     ///
     /// Gated on the union of the three, matching the setters that call it.
-    #[cfg(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    ))]
+    #[cfg(feature = "pubsub-qos")]
     fn qos_base(&self) -> QosLevel {
         self.qos.unwrap_or(QosLevel::DEFAULT)
     }

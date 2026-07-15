@@ -300,14 +300,7 @@ use crate::reply_sink::ReplyView;
 //     the always-compiled option tests; `TimestampHint` / `QosLevel` ride only
 //     the feature-gated `with_timestamp` / `with_qos` loopback tests, so each
 //     ANDs in the populator's own feature gate to stay subset-clean.
-#[cfg(all(
-    test,
-    any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    )
-))]
+#[cfg(all(test, feature = "pubsub-qos"))]
 use crate::sample::QosLevel;
 #[cfg(test)]
 use crate::sample::Reliability;
@@ -673,11 +666,11 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // R311y-item3 — fold into the single `opts.qos` source when the
         // observable qos byte exists, else thread the band directly to the
         // conduit. `publish` re-derives the identical band via `priority_band()`.
-        #[cfg(feature = "pubsub-priority")]
+        #[cfg(feature = "pubsub-qos")]
         {
             self.publish(keyexpr, payload, opts.with_priority(priority))
         }
-        #[cfg(not(feature = "pubsub-priority"))]
+        #[cfg(not(feature = "pubsub-qos"))]
         {
             self.publish_prioritized(keyexpr, payload, opts, priority)
         }
