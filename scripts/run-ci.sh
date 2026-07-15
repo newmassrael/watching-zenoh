@@ -2540,7 +2540,7 @@ query_timeout_pub_field_cannot_bypass_the_query_timeout_gate"
     local got
     got=$(cd crates && cargo test -p wz-runtime-tokio --no-default-features \
         --features "$feats" --lib pub_field -- --list 2>/dev/null \
-        | sed -n 's/^session::tests::\([a-z_]*\): test$/\1/p' | sort)
+        | sed -n 's/^session::tests::\([a-z0-9_]*\): test$/\1/p' | sort)
     if [ "$got" != "$(printf '%s' "$expected" | sort)" ]; then
         echo "  C1bk FAIL: the pub-field NEG set drifted (cfg elided a guard, or one was renamed)"
         echo "    expected:"; printf '%s\n' "$expected" | sort | sed 's/^/      /'
