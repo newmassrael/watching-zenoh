@@ -2032,7 +2032,19 @@ layer_c1as_cargo_test_reply_source_info() {
 #
 # R311y248: query-value is a brand-new off-default wz-session-core feature — the
 # querier's attached VALUE ext (payload + encoding, id 0x03 ENC_ZBUF, the
-# "Q_B / Q_E" wire codec slots). No default / other lane enables it, so its
+# "Q_B / Q_E" wire codec slots).
+#
+# R311y318 — the header used to justify this lane with "No default / other lane
+# enables it". FALSE since R311y250, which added query-value to
+# wz-runtime-tokio's default: Layer C1's `cargo test --workspace` unifies it ON
+# and runs the ON-branch. Flagged as R311y315 carry (d) and carried unpaid
+# through y316/y317. (This correction's own first draft then claimed the lane
+# runs `--no-default-features`. It does not — measured. Read the command, not
+# the header; that is the whole lesson here.) What the lane still earns is
+# NARROWER and real: `-p wz-session-core` with a PRECISE feature set, where
+# Layer C1's `--workspace` unifies every member's features into session-core at
+# once. A defect that needs query-value ON while some other atom is OFF is
+# masked by that unification and fails here first. Its
 # encode/decode SSOT (query_value_ext) unit tests + the builder -> dispatch ->
 # QueryView surface test + the gated request_build / query.rs / query_sink.rs
 # code would be never-run / never-compiled-on in CI (the recurring feature-gated-

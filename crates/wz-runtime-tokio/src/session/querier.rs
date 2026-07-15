@@ -256,10 +256,15 @@ impl QueryOptions {
         self
     }
 
-    /// Pin a per-query timeout in milliseconds. `0` leaves the
-    /// default in place. Wire-side enforcement lands with the R240+
-    /// ReplyRegistry timeout sweep; loopback ignores the value
-    /// (synchronous round-trip).
+    /// Pin a per-query timeout in milliseconds. `0` leaves the default in
+    /// place. Loopback ignores the value (synchronous round-trip).
+    ///
+    /// R311y318 — this said "Wire-side enforcement lands with the R240+
+    /// ReplyRegistry timeout sweep", i.e. future work. It is not: the sweep
+    /// ships as [`Session::sweep_expired_queries`], and every relay hop honours
+    /// the wire ext via `request_routing_context::read_request_timeout_ms`.
+    /// R311y317 retracted the SAME fossil on the field doc 144 lines up and
+    /// missed this one — a retraction lands where the author is looking.
     ///
     /// R311o — signature-stable; body cfg-gated on
     /// `feature = "query-timeout"`; a no-op when off, so the builder chain
@@ -313,37 +318,6 @@ impl QueryOptions {
         n
     }
 
-    /// R240 — extract the wire-encoder-facing metadata bundle from a
-    /// QueryOptions instance so [`Session::query`] can hand it to
-    /// [`crate::session_glue::SessionLinkActions::send_request_query_with_meta`]
-    /// without the lower module learning about [`Locality`] /
-    /// `allowed_destination` (those stay on the dispatch-time
-    /// surface). R311y250 — the `payload` + `encoding` slots now thread
-    /// too: they collapse into the single [`QueryMetadata::value`] wire
-    /// unit `(encoding, payload)` that `build_request_query_with_meta`
-    /// stamps onto `RequestQueryBuilder::query_value` (the Q_B / Q_E value
-    /// ext 0x03; codec landed R311y248).
-    ///
-    /// Clones owned slots (attachment Vec), so the allocation cost is
-    /// amortised against the wire frame's existing copies. R311y252 — a
-    /// `Locality::Any` query now extracts TWICE per [`Session::query`] call: once
-    /// for the wire branch, and once inside `build_loopback_query`, which trims
-    /// the bundle to the queryable-observable Query-body slots before reusing the
-    /// same `build_request_query_with_meta` SSOT. (A `Remote`-only or
-    /// `SessionLocal`-only query still extracts once — only the branch it routes
-    /// to runs.) The second extraction is one struct clone on the non-hot
-    /// loopback branch, taken deliberately so the loopback does not re-derive the
-    /// Query ext-chain assembly.
-    ///
-    /// R311y317 — this used to claim it "mirrors R233's
-    /// `PublishOptions::push_metadata` pattern verbatim". That had stopped
-    /// being true: R311y309 moved `push_metadata` onto `metadata_gated!` after
-    /// an ungated pub-field `qos` changed Frame count + SN with the feature
-    /// off, and the query side never followed. It mirrors it again now, via
-    /// the `effective_*` accessors above.
-    ///
-    /// R311o — private helper, cfg-gated like [`Self::expected_finals`].
-    #[cfg(feature = "query-get")]
     /// R311y317 — the three runtime-only atoms' slots as every consumer must
     /// read them: the field when the atom is on, its wire-elision sentinel when
     /// off.
@@ -417,6 +391,37 @@ impl QueryOptions {
         }
     }
 
+    /// R240 — extract the wire-encoder-facing metadata bundle from a
+    /// QueryOptions instance so [`Session::query`] can hand it to
+    /// [`crate::session_glue::SessionLinkActions::send_request_query_with_meta`]
+    /// without the lower module learning about [`Locality`] /
+    /// `allowed_destination` (those stay on the dispatch-time
+    /// surface). R311y250 — the `payload` + `encoding` slots now thread
+    /// too: they collapse into the single [`QueryMetadata::value`] wire
+    /// unit `(encoding, payload)` that `build_request_query_with_meta`
+    /// stamps onto `RequestQueryBuilder::query_value` (the Q_B / Q_E value
+    /// ext 0x03; codec landed R311y248).
+    ///
+    /// Clones owned slots (attachment Vec), so the allocation cost is
+    /// amortised against the wire frame's existing copies. R311y252 — a
+    /// `Locality::Any` query now extracts TWICE per [`Session::query`] call: once
+    /// for the wire branch, and once inside `build_loopback_query`, which trims
+    /// the bundle to the queryable-observable Query-body slots before reusing the
+    /// same `build_request_query_with_meta` SSOT. (A `Remote`-only or
+    /// `SessionLocal`-only query still extracts once — only the branch it routes
+    /// to runs.) The second extraction is one struct clone on the non-hot
+    /// loopback branch, taken deliberately so the loopback does not re-derive the
+    /// Query ext-chain assembly.
+    ///
+    /// R311y317 — this used to claim it "mirrors R233's
+    /// `PublishOptions::push_metadata` pattern verbatim". That had stopped
+    /// being true: R311y309 moved `push_metadata` onto `metadata_gated!` after
+    /// an ungated pub-field `qos` changed Frame count + SN with the feature
+    /// off, and the query side never followed. It mirrors it again now, via
+    /// the `effective_*` accessors above.
+    ///
+    /// R311o — private helper, cfg-gated like [`Self::expected_finals`].
+    #[cfg(feature = "query-get")]
     pub(super) fn query_metadata(&self) -> QueryMetadata {
         QueryMetadata {
             target: self.effective_target(),
