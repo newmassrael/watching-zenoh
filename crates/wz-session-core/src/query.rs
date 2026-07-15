@@ -3246,11 +3246,22 @@ mod tests {
     /// drives the TX builder: that one cannot pin this fixture, because the
     /// builder is exactly what the feature-off build cannot call.
     ///
-    /// CAVEAT, named not paid: the only lane composing this module's gate WITH
-    /// `query-value` is Layer C1be, which is absent from ci.yml (R311y315 carry
-    /// (d)) — so this anti-vacuity guard is LOCAL-ONLY while the feature-off
-    /// assertion it guards runs hosted under C1e. A fixture rot that only CI
-    /// would catch is not caught.
+    /// SCOPE, because the first draft of this comment overstated it: the twin
+    /// pins the ext ID and the body layout (`encoding || payload`) — mutating
+    /// either makes it fail. It does NOT pin the header `enc` bits or
+    /// `value_len`: `decode_query_value_ext` matches the in-memory
+    /// `ExtEntryOwnedVariant::CodecZenohExtZbuf` and reads `value.as_slice()`,
+    /// so a fixture built as an owned struct is never serialized and no wire
+    /// header is exercised. Those two properties are pinned instead by
+    /// `query_value_ext::tests::encode_query_value_ext_wraps_in_enc_zbuf_envelope`,
+    /// against the SSOT rather than against this fixture.
+    ///
+    /// Hosted: Layer C1's `cargo test --workspace` unifies `query-value` ON
+    /// (wz-runtime-tokio's default forward + wz-integration-tests' dev-dep,
+    /// resolver = "2"), so this twin runs there — verified by listing C1's
+    /// tests, not by reading the lane. R311y316's first draft claimed the
+    /// opposite ("LOCAL-ONLY … only Layer C1be"), inventing a coverage hole
+    /// that does not exist; review caught it.
     #[cfg(feature = "query-value")]
     #[test]
     fn hand_composed_value_ext_fixture_surfaces_when_query_value_on() {
@@ -3279,19 +3290,26 @@ mod tests {
     }
 
     /// R311y316 — the feature-off drop proof `query-value` lacked. Its three
-    /// ext-backed siblings each had one: `query-source-info` above, and
-    /// `query-attachment` / `query-selector-parameters` via
-    /// `inbound_query_attachment_is_dropped_when_query_attachment_off` /
-    /// `inbound_query_parameters_are_dropped_when_query_selector_parameters_off`
-    /// in `mod request_decode_isolation_tests`. This atom was tagged COMPLETE on
-    /// a code read alone, with `extract_query_value`'s `not(query-value)` arm the
-    /// only feature-off site in the tree.
+    /// projection-gated siblings each had one, all three in
+    /// `mod request_decode_isolation_tests` BELOW (not in this module):
+    /// `inbound_query_source_info_is_dropped_when_query_source_info_off`,
+    /// `inbound_query_attachment_is_dropped_when_query_attachment_off`,
+    /// `inbound_query_parameters_are_dropped_when_query_selector_parameters_off`.
+    /// This atom was tagged COMPLETE on a code read alone, with
+    /// `extract_query_value`'s `not(query-value)` arm the only feature-off site
+    /// in the tree.
+    ///
+    /// Home is `mod tests`, NOT the isolation module, and deliberately: neither
+    /// gate mentions `query-value`, so either would run this — but this module's
+    /// gate keeps `query-attachment` / `query-selector-parameters` /
+    /// `query-source-info` ON, so the value ext is proven dropped while the ext
+    /// chain is genuinely walked for sibling exts. The isolation module's
+    /// `not(query-attachment), not(query-selector-parameters)` profile is the
+    /// narrower build.
     ///
     /// Verified by running each lane's exact feature set: hosted Layer C1e's
     /// first invocation and local Layer C1as both compose this module's gate
-    /// with `query-value` absent, so this test runs there. Layer C1be builds the
-    /// atom ON, so it carries the twin above instead — this direction is the one
-    /// that is hosted.
+    /// with `query-value` absent.
     ///
     /// Falsified, not merely observed green: deleting `extract_query_value`'s
     /// `not(query-value)` short-circuit (and ungating `query_value_ext`, which

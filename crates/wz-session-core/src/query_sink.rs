@@ -56,19 +56,22 @@ use alloc::boxed::Box;
 /// accessors are unconditional plain types" — written when the trait had
 /// four, and left stale through the four that followed.)
 ///
-/// **Feature relationship, stated once for all five ext-backed accessors**
-/// ([`Self::parameters`], [`Self::attachment`], [`Self::source_info`],
-/// [`Self::payload`], [`Self::encoding`]): each atom's feature gates the
-/// DISPATCHER's projection — `query::extract_query_{attachment,
-/// source_info, value}` and the `parameters_view` slice — never the
-/// accessor, which stays ungated for signature stability. So on the
-/// wire-dispatch path a build without the feature never surfaces that ext
-/// to a handler, while an impl handed a value by its own caller (a literal
-/// [`BorrowedQuery`], a link-runtime query) returns what it was handed. The
-/// feature gates the projection, not what the contract can express — the
-/// same hedge [`ReplyOut`]'s emit-side notes carry ("or a sink that does
-/// not carry it"). Per-accessor docs below therefore describe the VALUE and
-/// leave the gate to this paragraph.
+/// **Feature relationship, stated once for all five projection-gated
+/// accessors** ([`Self::parameters`], [`Self::attachment`],
+/// [`Self::source_info`], [`Self::payload`], [`Self::encoding`]): each
+/// atom's feature gates the DISPATCHER's projection — `extract_query_`
+/// `{attachment, source_info, value}` for the four ext-chain values, and the
+/// `parameters_view` slice for [`Self::parameters`], which is a top-level
+/// `Query` codec field beside `extensions` rather than an ext. No atom
+/// feature gates the accessor itself (`source_info` / `encoding` are gated,
+/// but on `alloc` — type availability, not the atom). So on the
+/// wire-dispatch path a build without the feature never surfaces that ext or
+/// field to a handler, while an impl handed a value by its own caller (a
+/// literal [`BorrowedQuery`], a link-runtime query) returns what it was
+/// handed. The feature gates the projection, not what the contract can
+/// express — the emit-side mirror of the hedge [`ReplyOut`]'s notes carry
+/// ("or a sink that does not carry it"). Per-accessor docs below therefore
+/// describe the VALUE and leave the gate to this paragraph.
 pub trait QueryView {
     /// Resolved keyexpr literal (peer DECLARE table lookup already
     /// applied). Always non-empty — an un-resolvable keyexpr drops the
