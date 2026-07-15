@@ -451,6 +451,12 @@ query-selector-parameters = ["wz-runtime-tokio?/query-selector-parameters"]
 query-source-info = ["wz-runtime-tokio?/query-source-info"]
 query-target = ["wz-runtime-tokio?/query-target"]
 query-timeout = ["wz-runtime-tokio?/query-timeout"]
+# R311y315 — the facade forward R311y248 never added. query-value existed in
+# wz-session-core and wz-runtime-tokio (and in the latter's default) but was
+# unreachable from the `wz` facade, so the atom was not composable from the
+# top-level crate and domain-query could not name it. The missing forward is
+# the ROOT CAUSE of the stale "10 query atoms" census, not a symptom of it.
+query-value = ["wz-runtime-tokio?/query-value"]
 
 # ----- domain: routing (6 atomic, 0 active / 6 reserved) -----
 # R311ci — audit-only ratify. wz-runtime-tokio is unicast client-only;
@@ -1115,6 +1121,13 @@ domain-pubsub = [
     "pubsub-express",
     "pubsub-priority",
     "pubsub-put",
+    # R311y315 — pubsub-qos is the R311y307 merge VEHICLE; -priority /
+    # -congestion-control / -express are aliases that each depend on it, so
+    # it was already enabled transitively and this line changes no build.
+    # It is named because a domain list that omits a domain atom is a census
+    # that disagrees with the store, and that is how the pre-merge count of
+    # eleven survived. Derive this list; do not hand-maintain it from memory.
+    "pubsub-qos",
     "pubsub-sample",
     "pubsub-source-info",
     "pubsub-timestamp",
@@ -1130,6 +1143,10 @@ domain-query = [
     "query-source-info",
     "query-target",
     "query-timeout",
+    # R311y315 — query-value (added R311y248) was missing here for the same
+    # reason it was missing from docs/feature_inventory.md: both are
+    # hand-maintained censuses. The store has 11 query atoms, not 10.
+    "query-value",
 ]
 domain-routing = [
     "routing-client",

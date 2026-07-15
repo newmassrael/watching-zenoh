@@ -1173,7 +1173,7 @@
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
       "decision_status": "active",
-      "intent": "Query domain catalog: 11 atomic features, all active toggles; 0 reserved. Impl axis: 1 COMPLETE (query-reply, R311y313), 1 PARTIAL (query-consolidation, R311y296), 9 UNAUDITED.",
+      "intent": "Query domain catalog: 11 atomic features, all active toggles; 0 reserved. Impl axis (R311y315): 4 COMPLETE, 1 PARTIAL (query-consolidation, R311y296), 6 UNAUDITED.",
       "rationale_bullets": [
         "Composable framework lens: each query capability is one atomic feature toggle.",
         "R307 wired 6 features; R311cj adds 3 (-attachment, -selector-parameters, -reply-err).",
@@ -1194,7 +1194,9 @@
       "caveats_bullets": [
         "query-attachment cfg-off: QueryEvent.attachment always None (signature stable).",
         "query-reply-err cfg-off: ReplyEmitter::reply_err silent no-op (combined with -queryable gate).",
-        "R311y314: prose said 10 atoms / query-source-info reserved; store says 11, all active."
+        "R311y314: prose said 10 atoms / query-source-info reserved; store says 11, all active.",
+        "R311y315: QueryEvent + ReplyEmitter caveats above cite DEAD symbols (query_event module retired).",
+        "R311y315: query-reply-err gates the staged QueryReply::Err variant, not the trait seam alone."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",

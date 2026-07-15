@@ -1,5 +1,30 @@
 # Feature inventory — composable framework atomic + preset catalog
 
+> **RETIRED RENDER — DO NOT COUNT, CITE, OR DERIVE A SET FROM THIS FILE.**
+>
+> R408 retired this document as a parsed/validated surface. The SSOT is the
+> atomic store; this file is an un-gated R301-era snapshot that nothing keeps
+> in sync, and it has drifted accordingly. Measured at R311y315:
+>
+> - **63 of its 135 status labels (47%) disagree with the store.**
+> - **84 atoms exist in the store that this file never lists.**
+> - Its §5.9 Query section enumerates **10** atoms; the store has **11**
+>   (`query-value`, added R311y248, is absent here). That omission is the
+>   known origin of a wrong denominator that a later round carried as fact.
+>
+> To answer "which atoms exist / what is this atom's status", derive it:
+>
+> ```
+> mnemosyne-cli query --list-inventory        # the atom set + statuses
+> mnemosyne-cli query --inventory <atom-id>   # one atom
+> ./scripts/audit-catalog-status.sh --layer A3
+> ```
+>
+> Kept only as R301-era narrative: the naming convention (§2), the 3-test
+> definitions (§3), the conflict policy (§4), and the preset *contracts*
+> (§6). Those are design reasoning and do not rot the way a census does.
+> Everything shaped like a list of atoms below is a historical snapshot.
+
 **Status.** R301 entry. First-pass catalog of ~140 atomic features
 across 19 domains plus 6 initial semver-named presets. Materializes
 the composable-framework north star (R267 ratify, R299+ refined) by
@@ -13,12 +38,20 @@ emission mechanism (`<sce:requires feature="X"/>` SCXML attribute,
 `Cargo.toml::[features]` table, etc.) is referenced as the R302+
 open carry — §7 and §8 below are placeholders.
 
-**Inputs (normative).** zenoh upstream 1.5.0 (vendored at
-`~/.cargo/git/checkouts/zenoh-*/49c8a53/`); zenoh-pico
-(`~/zenoh-pico/`); zenoh-cpp public API shape as the cross-feature
-consistency anchor; current wz-runtime-tokio / wz-codecs /
-wz-runtime-core / sources/{algorithms,codecs,session,links}
-implementation snapshot at HEAD `5f2b3cc` (R300 close).
+**Inputs (historical, NOT normative).** zenoh upstream 1.5.0; zenoh-pico;
+zenoh-cpp public API shape as the cross-feature consistency anchor; and a
+wz implementation snapshot pinned at HEAD `5f2b3cc` (R300 close) — that
+pin is why everything below is a snapshot rather than a description of
+today's tree.
+
+R311y315 — the machine-local absolute paths that used to appear here
+(a `~/.cargo/git/checkouts/zenoh-*/…` checkout and `~/zenoh-pico/`) are
+REMOVED. They are the exact failure CLAUDE.md's "External references"
+rule was written against after R311y302: a path correct on one clone is
+wrong on the next, it leaks the author's home layout, and nothing gates
+it, so it rots silently while still being cited. Both had in fact rotted
+— zenoh-pico is now vendored in-repo at `vendor/zenoh-pico/`. Resolve
+reference paths per machine; never commit them.
 
 **Outputs.** ~140 atomic feature names following the
 `<domain>-<capability>` convention, with each entry labelled

@@ -450,3 +450,14 @@ if ok:
     sys.exit(0)
 sys.exit(1)
 PY
+
+# R311y315 — domain census. The invariants above check each atom against its
+# own cfg gate; nothing checked the facade's `domain-<X>` LISTS against the
+# store's atom set. `domain-query` had omitted `query-value` since R311y248 —
+# because the wz facade never forwarded it — and that omission is the traced
+# origin of a "10 query atoms" denominator a later round audited against.
+# An un-gated census rots exactly like an un-gated line number.
+#
+# Runs under `set -e` after the tag audit: a new divergence exits non-zero and
+# Layer A3 (hosted in ci.yml) fails with it.
+python3 "$SCRIPT_DIR/lib/domain_census.py" "$REPO_ROOT/crates"
