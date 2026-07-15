@@ -189,7 +189,9 @@ def has_gate(atom):
 # be a tag from the closed set below, and the tag must agree with `status`.
 # The tags answer "is there remaining implementation work, and of what kind?"
 #
-#   FOUNDATIONAL  built, always-on, no cfg knob          -> no work
+#   FOUNDATIONAL  built, no cfg knob OF ITS OWN         -> no work
+#                 (either always-compiled, or delivered
+#                  whole under another atom's feature)
 #   PARTIAL       built (sometimes under another atom's  -> named residual
 #                 cargo feature), with a named residual
 #   UNVERIFIED    code portable by construction, but no  -> a CI lane, not code
@@ -199,6 +201,24 @@ def has_gate(atom):
 #   OUT-OF-SCOPE  deliberately excluded, re-openable     -> none, by decision
 #   OBVIATED      no wz analog BY CONSTRUCTION           -> nothing to build
 #   PHANTOM       does not exist in zenoh at all         -> nothing to build
+#
+# R311y311 — FOUNDATIONAL's gloss above used to read "built, always-on, no cfg
+# knob". That was FALSE of 18 of its own 57 members, and had been since before
+# R311y307: link-batching = ["transport-batching"], link-fragment,
+# attachment-encoding-aware, the 9 locator-* forwards and (post-y307) the three
+# pubsub-qos aliases are all cargo ALIASES, not always-compiled code. Their code
+# is elided when the vehicle atom's feature is off, so "always-on" is simply not
+# the property they share. What they DO share with the empty-key members -- and
+# what the tag has always MEANT in practice -- is "no cfg knob OF ITS OWN":
+# zero solo cfg(feature=..) sites, which is exactly invariant #2. The gloss is
+# widened to say that. This re-classifies NOTHING (per :74, nothing gates a
+# comment; IMPL_TAGS is the gate input) and no number moves. It is recorded
+# because R311y311 first mis-read the alias shape as a taxonomy HOLE and nearly
+# added a SUBSUMED tag that would have been a pure synonym of FOUNDATIONAL in
+# all three consumers -- IMPL_TAGS, IMPL_TAGS_BUILT, TAGS_REMAINING -- while
+# forcing a 6+ atom retag for zero change in any query answer. The tag was
+# right; the prose next to it had rotted. Note the irony against :66-79 below,
+# which is a monument to this exact defect class one level up.
 #
 # R311y299 — the premise that used to stand here was FALSE, and it cost the
 # audit its headline number. It read:
