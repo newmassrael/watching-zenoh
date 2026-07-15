@@ -1179,9 +1179,9 @@
         "R307 wired 6 features; R311cj adds 3 (-attachment, -selector-parameters, -reply-err).",
         "R311y248 added query-value; R311y314 re-derived the domain FROM THE STORE: 11, not 10.",
         "query-source-info is ACTIVE: R311y314 corrected prose that predated its wire-up.",
-        "All active features signature-stable on cfg-off (R311g1).",
-        "Impl axis (R311y315): COMPLETE -reply, -reply-err, -source-info, -value; PARTIAL -consolidation.",
-        "R311y315: the bullet here used to restate the impl axis and went stale against the intent."
+        "All active features signature-stable on cfg-off (R311g1) -- a signature, never a gate.",
+        "R311y318: the impl-axis membership list is GONE, not updated. Derive it; --layer A3.",
+        "R311y315 flagged this bullet as stale-prone and left it a list; it rotted again in 3 rounds."
       ],
       "outputs_bullets": [
         "Active set (11): -get, -queryable, -reply, -consolidation, -target, -timeout (R307).",
