@@ -522,13 +522,18 @@ impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
                 }
             }
             ConsolidationMode::Latest => {
-                // Cache only; the flush happens in `on_final`. That covers the
-                // TIMEOUT path too, and for free: `ReplyRegistry::sweep_timed_out`
-                // fires the swept entry's `on_final`, so an expired Latest query
-                // drains its cache rather than dropping it. zenoh reaches the same
-                // place by a different road — its timeout task flushes explicitly
-                // (api/session.rs) because its cache hangs off the query state,
-                // not off a sink.
+                // Cache only; the flush happens at the end, via `flush_latest` —
+                // reached from `on_final` on the normal path and from
+                // `on_timeout` on the expired one.
+                //
+                // R311y323 review — this said the timeout path was covered "for
+                // free" because the sweep fired `on_final`. That was true when it
+                // was written and is now the reasoning `on_timeout`'s override
+                // exists to REFUTE: the sweep fires `on_timeout`, and taking the
+                // free ride (the trait default's `on_reply` -> `on_final`) would
+                // emit the Timeout error BEFORE the flush. zenoh flushes first.
+                // A comment describing a bug as a convenience is how the y321 Err
+                // bug shipped; see the override.
                 if self.displaces_cached(reply) {
                     self.cache_reply(reply);
                 }
@@ -594,6 +599,27 @@ mod tests {
             self.finals += 1;
             self.last_final_rid = rid;
         }
+    }
+
+    /// R311y323 review — the DEFAULT `on_timeout` on the NO-ALLOC profile.
+    ///
+    /// `timeout_reply`'s doc justifies its design as "ungated and no-alloc-safe
+    /// ... so the MCU profile gets the same timeout signal as AP", but y323's
+    /// only default-`on_timeout` test lived in `consolidating_sink_tests`, which
+    /// is `#[cfg(feature = "alloc")]` — so the profile the design claim is ABOUT
+    /// had zero coverage of it. This module is the ungated one (its
+    /// `CountingReplySink` exists precisely to run on both profiles), so the
+    /// claim is tested where it is made.
+    #[test]
+    fn default_on_timeout_synthesizes_the_error_on_the_no_alloc_profile() {
+        let mut sink = CountingReplySink::default();
+        sink.on_timeout(11);
+        assert_eq!(sink.replies, 1, "the default must synthesize one reply");
+        assert_eq!(sink.last_kind, ReplyKind::Err);
+        assert_eq!(sink.last_len, b"Timeout".len());
+        assert_eq!(sink.last_rid, 11);
+        assert_eq!(sink.finals, 1, "and then the final");
+        assert_eq!(sink.last_final_rid, 11);
     }
 
     #[test]

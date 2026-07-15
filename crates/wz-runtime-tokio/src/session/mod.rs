@@ -3854,9 +3854,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// deadline (it stays pending until the peer's `DeclFinal` arrives);
     /// a non-zero value arms a timeout the host sweeps via
     /// `LivelinessGetRegistry::sweep_timed_out` (the wz-ap-demo sweep
-    /// ticker drives it alongside the reply registry; F3), firing
-    /// `on_final` if the peer never terminates the snapshot so the
-    /// pending slot cannot leak. Because a get is one-shot (unlike a
+    /// ticker drives it alongside the reply registry; F3), terminating the
+    /// get if the peer never terminates the snapshot so the pending slot
+    /// cannot leak. R311y323 — the sweep delivers a synthetic
+    /// `Err("Timeout")` reply BEFORE that final, so a caller can tell an
+    /// expired snapshot from one the peer really closed. Because a get is one-shot (unlike a
     /// re-fireable subscription) this surface enforces the
     /// [`Self::is_established`] gate — an Interest emitted mid-handshake
     /// is silently discarded by the peer and the snapshot would hang

@@ -104,9 +104,13 @@ struct PendingGet<C: ReplySink> {
     /// as `clock.now_monotonic_ms() + timeout_ms`). `None` means the
     /// get never times out (it stays pending until the peer's
     /// `Declare(DeclFinal)` arrives). A `Some(d)` entry is swept by
-    /// [`LivelinessGetRegistry::sweep_timed_out`] when `now_ms >= d`,
-    /// firing `on_final` exactly as a real terminator would so an
-    /// unanswered get cannot leak its slot. Mirrors
+    /// [`LivelinessGetRegistry::sweep_timed_out`] when `now_ms >= d` so an
+    /// unanswered get cannot leak its slot. R311y323 — this said the sweep fires
+    /// `on_final` "exactly as a real terminator would", which was the whole point
+    /// and is now false: the sweep fires `on_timeout`, so a swept get is
+    /// DISTINGUISHABLE from a real terminator (it carries a synthetic
+    /// `Err("Timeout")` first). The slot still cannot leak — `on_timeout` ends in
+    /// the same final. Mirrors
     /// [`crate::reply::ReplyRegistry`]'s per-pending deadline.
     deadline_ms: Option<u64>,
 }
@@ -269,17 +273,26 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
         self.fire_final_for(interest_id)
     }
 
-    /// Fire `on_final` + drop every pending get whose `deadline_ms` is at
-    /// or before `now_ms`. Returns the number of gets swept (zero in the
-    /// common case where nothing has timed out). Entries with
+    /// Fire [`ReplySink::on_timeout`] + drop every pending get whose
+    /// `deadline_ms` is at or before `now_ms`. Returns the number of gets swept
+    /// (zero in the common case where nothing has timed out). Entries with
     /// `deadline_ms == None` never expire. `now_ms` is caller-supplied
     /// (typically `clock.now_monotonic_ms()`) so the test surface stays
-    /// deterministic. Mirror of
-    /// [`crate::reply::ReplyRegistry::sweep_timed_out`] — the fired
-    /// `on_final` carries the entry's `interest_id` only, so a callback
-    /// cannot distinguish "timed out" from a normal terminator via the
-    /// argument (opaque-cause, same architectural pick as the reply
-    /// registry).
+    /// deterministic.
+    ///
+    /// Mirror of [`crate::reply::ReplyRegistry::sweep_timed_out`], including
+    /// R311y323's reversal of the opaque-cause pick the two registries shared.
+    /// This doc read "the fired `on_final` carries the entry's `interest_id`
+    /// only, so a callback cannot distinguish 'timed out' from a normal
+    /// terminator". It can now: an expired get announces itself with a synthetic
+    /// `Err("Timeout")` before its final. zenoh does the same for a liveliness
+    /// query off its own `liveliness_queries` table (api/session.rs) — this leg
+    /// is upstream parity, not a z_get nicety spilling over.
+    ///
+    /// It takes `on_timeout`'s DEFAULT (synthesize, then final), which is the
+    /// faithful shape here: a liveliness get has no consolidation, so there is
+    /// no cache to flush first — exactly why zenoh's liveliness timeout arm has
+    /// no flush while its z_get arm does.
     pub fn sweep_timed_out(&mut self, now_ms: u64) -> usize {
         // R311ig — no-alloc drain-partition via the shared
         // `BoundedVec::drain_partition` seam (mirror of

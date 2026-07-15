@@ -999,21 +999,31 @@ impl<C: ReplySink> ReplyRegistry<C> {
         self.fire_final_for(rid);
     }
 
-    /// R261 — fire `on_final` + drop every pending entry whose
-    /// caller-supplied `deadline_ms` is at or before `now_ms`. Returns
-    /// the number of pending entries swept (zero if no entry has
-    /// timed out, which is the common case when the production sweep
-    /// runs on every drive_session iteration).
+    /// R261 — fire [`crate::reply_sink::ReplySink::on_timeout`] + drop every
+    /// pending entry whose caller-supplied `deadline_ms` is at or before
+    /// `now_ms`. Returns the number of pending entries swept (zero if no entry
+    /// has timed out, which is the common case when the production sweep runs on
+    /// every drive_session iteration).
     ///
-    /// The fired `on_final` carries the entry's `rid` only — the
-    /// callback cannot distinguish "timed out" from a normal Final via
-    /// the rid argument. This matches the R261 architectural pick
-    /// (opaque cause, FinalCallback signature unchanged): callers that
-    /// need a timeout signal observe it indirectly by inspecting their
-    /// own outstanding-rid map at sweep time, or by treating the
-    /// `on_final` as a stream-terminated signal regardless of cause.
-    /// Future rounds may extend `FinalCallback` to carry an explicit
-    /// `FinalCause` enum if a concrete user need arises (R261 carry).
+    /// R311y323 — R261's OPAQUE-CAUSE PICK IS REVERSED AND ITS CARRY IS
+    /// DISCHARGED. This doc read: "the callback cannot distinguish 'timed out'
+    /// from a normal Final via the rid argument ... Future rounds may extend
+    /// `FinalCallback` to carry an explicit `FinalCause` enum if a concrete user
+    /// need arises (R261 carry)." The concrete need was parity: zenoh does not
+    /// close a timed-out query quietly — it synthesizes `Err(ReplyError::new(
+    /// "Timeout", ..))` to the caller (api/session.rs), and so does its
+    /// liveliness twin, and so does a wz ROUTER on a reaped branch
+    /// (`synthesize_expired_query_returns`). The local leg was the last one
+    /// staying silent.
+    ///
+    /// The reversal deliberately did NOT take R261's proposed shape. A
+    /// `FinalCause` enum on the final would have been a wz invention; zenoh
+    /// models the cause as a synthetic Err REPLY that PRECEDES the terminator.
+    /// So the sweep fires `on_timeout`, whose default synthesizes exactly that
+    /// ([`crate::reply_sink::timeout_reply`]) and then the final. A caller no
+    /// longer has to infer the cause from its own outstanding-rid map; one that
+    /// ignores replies still sees the final, so the stream-terminated reading
+    /// stays valid.
     ///
     /// Entries with `deadline_ms == None` (the `QueryOptions::timeout_ms
     /// == 0` "never expire" path) are skipped — they remain pending

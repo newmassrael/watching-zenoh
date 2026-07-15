@@ -143,9 +143,15 @@ pub struct QueryOptions {
     /// trips on the loopback branch.
     ///
     /// R311y317 — this said the sweep was "a future R240+" one. It is not
-    /// future: [`Session::sweep_expired_queries`] cancels the pending entry and
-    /// fires `on_final` synthetically once the deadline passes, and a relay hop
-    /// honours the wire ext through `read_request_timeout_ms`. Do NOT read this
+    /// future: [`Session::sweep_expired_queries`] cancels the pending entry once
+    /// the deadline passes, and a relay hop honours the wire ext through
+    /// `read_request_timeout_ms`. R311y323 — y317's own wording here, "fires
+    /// `on_final` synthetically", is now stale: the sweep fires `on_timeout`, so
+    /// an expired query delivers a synthetic `Err("Timeout")` and THEN its final.
+    /// (This field's doc has now been the site of two retractions and y318 left a
+    /// warning 144 lines down saying a retraction lands where the author is
+    /// looking. y323 read that warning only after review caught it here.) Do NOT
+    /// read this
     /// field directly — [`QueryOptions::effective_timeout_ms`] is the gate; a
     /// raw read is what let a `query-timeout`-off build arm the deadline.
     pub timeout_ms: u32,
@@ -495,8 +501,11 @@ impl QueryOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LivelinessGetOptions {
     /// Snapshot timeout in milliseconds. `0` = no timeout. A non-zero
-    /// value arms the driver-loop sweep to fire `on_final` if the peer
+    /// value arms the driver-loop sweep to terminate the get if the peer
     /// never terminates the snapshot, so the pending slot cannot leak.
+    /// R311y323 — the sweep fires `on_timeout`, not a bare `on_final`: an
+    /// expired snapshot delivers a synthetic `Err("Timeout")` and then its
+    /// final, matching zenoh's liveliness timeout arm.
     pub timeout_ms: u32,
 }
 
