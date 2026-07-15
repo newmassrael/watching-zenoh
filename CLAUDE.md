@@ -249,7 +249,9 @@ genre가 atomic ledger의 carry_forward와 중복이라 제거됨 — 시작 프
    `mnemosyne-cli query` / `query_section` 으로 latest impact_refs 추적
    (R408: `docs/GENERATED.md` 렌더는 폐기됨; store 가 단일 소스)
 4. `git status` + `git log --oneline -5` 로 미푸시 commit + 최근 활동 확인
-5. SCE 상태가 작업에 필요하면 `/home/coin/scxml-core-engine/` 직접 read
+5. SCE 상태가 작업에 필요하면 SCE 소스를 직접 read (경로는 머신-로컬 —
+   External references 규칙에 따라 여기 하드코딩하지 않음; agent memory /
+   `vendor/sce`에서 확인)
 
 실행 시 "kickoff 시작" 만 짧게 알리고 중간 단계별 verbose 보고는 생략.
 종료 후 carry 우선순위 + 다음 단계 제안.
