@@ -1903,8 +1903,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // is the contract every production caller honours (see
             // wz-ap-demo/src/runner.rs which builds one `session_clock`
             // and forks it through both call sites).
-            let deadline_ms = (opts.timeout_ms > 0)
-                .then(|| self.clock.now_monotonic_ms() + opts.timeout_ms as u64);
+            // R311y317 — read the timeout through the gated accessor, NOT the
+            // pub field: `opts.timeout_ms` bypasses `with_timeout_ms`'s gate,
+            // and this site never touches `query_metadata`, so gating only the
+            // wire threading would leave this deadline armed with
+            // `query-timeout` off while every wire-byte test stayed green.
+            let t = opts.effective_timeout_ms();
+            let deadline_ms = (t > 0).then(|| self.clock.now_monotonic_ms() + t as u64);
 
             // R311lg — DEFERRED FIRE (the R311lf lock-free callback
             // invariant on the reply/final plane): the registry stores
@@ -2166,8 +2171,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // both `Session::new` and `drive_session_until_terminal`
             // receive the same `Arc<T>` instance (the wz-ap-demo runner
             // is the production-side fixture that honours this).
-            let deadline_ms = (opts.timeout_ms > 0)
-                .then(|| self.clock.now_monotonic_ms() + opts.timeout_ms as u64);
+            // R311y317 — read the timeout through the gated accessor, NOT the
+            // pub field: `opts.timeout_ms` bypasses `with_timeout_ms`'s gate,
+            // and this site never touches `query_metadata`, so gating only the
+            // wire threading would leave this deadline armed with
+            // `query-timeout` off while every wire-byte test stayed green.
+            let t = opts.effective_timeout_ms();
+            let deadline_ms = (t > 0).then(|| self.clock.now_monotonic_ms() + t as u64);
 
             // R311lg — deferred staging sink; same lock-free callback
             // contract + tail drain as `Session::query`.

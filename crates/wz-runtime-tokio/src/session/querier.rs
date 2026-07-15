@@ -258,13 +258,17 @@ impl QueryOptions {
     /// (synchronous round-trip).
     ///
     /// R311o — signature-stable; body cfg-gated on
-    /// `feature = "query-timeout"`; silent no-op when off (field
-    /// stays at the `0` "never-expire" sentinel). The `deadline_ms`
-    /// register-time computation in `Session::query` stays
-    /// unconditional under `query-get`; this setter is the only user
-    /// surface that can flip `timeout_ms` above zero, so disabling
-    /// the feature pins the field to the sentinel without breaking
-    /// the builder chain.
+    /// `feature = "query-timeout"`; a no-op when off, so the builder chain
+    /// stays callable unconditionally.
+    ///
+    /// R311y317 RETRACTS this doc's prior claim that "this setter is the only
+    /// user surface that can flip `timeout_ms` above zero". It is not: the
+    /// field is `pub`, and `#[non_exhaustive]` does not block assignment. That
+    /// claim is why the gate sat here alone; measured, a pub-field write put
+    /// the timeout ext on the wire AND armed the local deadline with the atom
+    /// off. Both consumers now read [`QueryOptions::effective_timeout_ms`],
+    /// which is the enforcement point — this setter is a convenience, not a
+    /// gate.
     #[cfg_attr(not(feature = "query-timeout"), allow(unused_mut))]
     pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
         #[cfg(feature = "query-timeout")]
@@ -325,15 +329,94 @@ impl QueryOptions {
     /// `SessionLocal`-only query still extracts once — only the branch it routes
     /// to runs.) The second extraction is one struct clone on the non-hot
     /// loopback branch, taken deliberately so the loopback does not re-derive the
-    /// Query ext-chain assembly. Mirrors R233's
-    /// [`PublishOptions::push_metadata`] pattern verbatim.
+    /// Query ext-chain assembly.
+    ///
+    /// R311y317 — this used to claim it "mirrors R233's
+    /// `PublishOptions::push_metadata` pattern verbatim". That had stopped
+    /// being true: R311y309 moved `push_metadata` onto `metadata_gated!` after
+    /// an ungated pub-field `qos` changed Frame count + SN with the feature
+    /// off, and the query side never followed. It mirrors it again now, via
+    /// the `effective_*` accessors above.
     ///
     /// R311o — private helper, cfg-gated like [`Self::expected_finals`].
     #[cfg(feature = "query-get")]
+    /// R311y317 — the three runtime-only atoms' slots as every consumer must
+    /// read them: the field when the atom is on, its wire-elision sentinel when
+    /// off.
+    ///
+    /// WHY an accessor rather than the setter's body gate. `target` /
+    /// `consolidation` / `timeout_ms` are `pub` fields, and `#[non_exhaustive]`
+    /// blocks only struct-literal construction, NOT assignment onto a
+    /// `QueryOptions::get()` value — so `with_target` & kin's body gates are
+    /// bypassable. Measured, not argued: with each atom off, a pub-field write
+    /// put Q_T (`0x34`), Q_C (`0x23`) and the timeout ext (`0x26`) on the wire.
+    ///
+    /// WHY HERE and not downstream, which is the whole reason this domain
+    /// diverged from its siblings: `query-target` / `-consolidation` /
+    /// `-timeout` are runtime-tokio-only features (`Cargo.toml`: terminal, no
+    /// `wz-session-core/` forward), so session-core's TX SSOT
+    /// `build_request_query_with_meta` CANNOT gate them — it gates the other
+    /// four slots (value / source-info / attachment / selector-parameters)
+    /// precisely because those forward to features it owns. This accessor is
+    /// the last hop that knows these three atoms exist.
+    ///
+    /// Same shape R311y308/y309 closed on the push side after an ungated
+    /// pub-field `qos` changed Frame count + SN with the feature off; the
+    /// `metadata_gated!` / `push_metadata` pair is that fix. This is its query
+    /// twin, in the [`crate::session::liveliness`] `effective_history` idiom —
+    /// an accessor rather than `metadata_gated!` because `timeout_ms` has a
+    /// SECOND consumer that never touches [`Self::query_metadata`]: the
+    /// `deadline_ms` computation in `Session::query` / the aliased get path
+    /// reads the field directly. A `query_metadata`-local gate would fix the
+    /// wire and leave the local ReplyRegistry deadline armed — with every
+    /// wire-byte test green.
+    #[cfg(feature = "query-get")]
+    pub(super) fn effective_target(&self) -> Option<QueryTarget> {
+        #[cfg(feature = "query-target")]
+        {
+            self.target
+        }
+        #[cfg(not(feature = "query-target"))]
+        {
+            None
+        }
+    }
+
+    /// See [`Self::effective_target`]. `None` elides Q_C → peer decodes
+    /// `Z_CONSOLIDATION_MODE_AUTO`.
+    #[cfg(feature = "query-get")]
+    pub(super) fn effective_consolidation(&self) -> Option<ConsolidationMode> {
+        #[cfg(feature = "query-consolidation")]
+        {
+            self.consolidation
+        }
+        #[cfg(not(feature = "query-consolidation"))]
+        {
+            None
+        }
+    }
+
+    /// See [`Self::effective_target`]. `0` is the wire-elision sentinel
+    /// (zenoh-pico's `_z_n_msg_request_needed_exts` predicate
+    /// `msg->_ext_timeout_ms != 0`) AND the "never-expire" sentinel the
+    /// `deadline_ms` computation keys on — one accessor covers both consumers,
+    /// which is the point.
+    #[cfg(feature = "query-get")]
+    pub(super) fn effective_timeout_ms(&self) -> u32 {
+        #[cfg(feature = "query-timeout")]
+        {
+            self.timeout_ms
+        }
+        #[cfg(not(feature = "query-timeout"))]
+        {
+            0
+        }
+    }
+
     pub(super) fn query_metadata(&self) -> QueryMetadata {
         QueryMetadata {
-            target: self.target,
-            consolidation: self.consolidation,
+            target: self.effective_target(),
+            consolidation: self.effective_consolidation(),
             attachment: self.attachment.clone(),
             parameters: self.parameters.clone(),
             source_info: self.source_info.clone(),
@@ -362,7 +445,7 @@ impl QueryOptions {
                     self.payload.clone().unwrap_or_default(),
                 )),
             },
-            timeout_ms: self.timeout_ms,
+            timeout_ms: self.effective_timeout_ms(),
         }
     }
 }

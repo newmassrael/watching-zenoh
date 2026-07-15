@@ -2729,6 +2729,47 @@ fn query_with_target_is_silent_noop_when_query_target_feature_disabled() {
     );
 }
 
+/// R311y317 — the guard above pins the SETTER; this one pins the FIELD.
+/// `QueryOptions.target` is a `pub` field, and `#[non_exhaustive]` blocks
+/// only struct-literal construction, not assignment onto a
+/// `QueryOptions::get()` value — so an external caller reaches the same slot
+/// without ever calling the gated `with_target`. Every downstream hop is
+/// ungated: `query_metadata()` copies the field, and session-core's
+/// `build_request_query_with_meta` threads it through `request_target`
+/// (session-core cannot gate it — `query-target` is not one of its features,
+/// unlike query-value / -source-info / -attachment / -selector-parameters,
+/// whose threading IS cfg-gated there).
+///
+/// So the runtime layer is the LAST hop that knows this feature exists, and
+/// the wire is the consequence: this is the emit-path shape R311y315 closed
+/// for `QueryResponder::send_err`, not the read-surface shape R311y316 ruled
+/// benign for `BorrowedQuery`.
+#[cfg(all(feature = "query-get", not(feature = "query-target")))]
+#[test]
+fn query_target_pub_field_cannot_bypass_the_query_target_gate() {
+    let (session, driver) = build_session();
+    let mut opts = QueryOptions::get().with_allowed_destination(Locality::Remote);
+    // NOT with_target() — the gated setter is deliberately not called.
+    opts.target = Some(QueryTarget::AllComplete);
+    session
+        .query("home/temp", opts, |_| {}, |_| {})
+        .expect("query-get feature is ON in this test build");
+    let session_frame = driver.frame_bytes(0);
+
+    let (actions2, driver2) = recording_actions();
+    let rid = actions2.alloc_next_request_id();
+    actions2
+        .send_request_query(rid, 0, Some("home/temp"))
+        .unwrap();
+    let baseline = driver2.frame_bytes(0);
+
+    assert_eq!(
+        session_frame, baseline,
+        "with query-target OFF, assigning the pub `target` field must not \
+             reach the wire: no build without the atom may emit Q_T"
+    );
+}
+
 /// R311hu — NEG / isolation counterpart for `query-consolidation`
 /// (see the `query-target` guard above for the rationale). With the
 /// feature off, `QueryOptions::with_consolidation` is a
@@ -2814,6 +2855,78 @@ fn query_with_timeout_ms_is_silent_noop_when_query_timeout_feature_disabled() {
         "with query-timeout OFF, with_timeout_ms() must be a no-op: the \
              wire frame must equal the bare no-metadata baseline (no timeout \
              ext on the wire) and no local deadline is armed"
+    );
+}
+
+/// R311y317 — field-path twin of the guard above (see
+/// `query_target_pub_field_cannot_bypass_the_query_target_gate` for why the
+/// setter guard does not cover this): `QueryOptions.timeout_ms` is a `pub`
+/// field, so a caller reaches the slot without the gated `with_timeout_ms`.
+#[cfg(all(feature = "query-get", not(feature = "query-timeout")))]
+#[test]
+fn query_timeout_pub_field_cannot_bypass_the_query_timeout_gate() {
+    let (session, driver) = build_session();
+    let mut opts = QueryOptions::get().with_allowed_destination(Locality::Remote);
+    // NOT with_timeout_ms() — the gated setter is deliberately not called.
+    opts.timeout_ms = 1_000;
+    session
+        .query("home/temp", opts, |_| {}, |_| {})
+        .expect("query-get feature is ON in this test build");
+    let session_frame = driver.frame_bytes(0);
+
+    let (actions2, driver2) = recording_actions();
+    let rid = actions2.alloc_next_request_id();
+    actions2
+        .send_request_query(rid, 0, Some("home/temp"))
+        .unwrap();
+    let baseline = driver2.frame_bytes(0);
+
+    assert_eq!(
+        session_frame, baseline,
+        "with query-timeout OFF, assigning the pub `timeout_ms` field must \
+             not reach the wire: no build without the atom may emit the \
+             timeout ext"
+    );
+
+    // The SECOND observable, and the reason this atom needs a gated accessor
+    // rather than a gate at the wire threading: `Session::query` computes
+    // `deadline_ms` straight off `opts.timeout_ms`, never touching
+    // `query_metadata()`. A wire-only fix leaves this armed and the assertion
+    // above still passes — so the wire check alone cannot guard this atom.
+    assert_eq!(
+        session.next_reply_deadline_ms(),
+        None,
+        "with query-timeout OFF, the pub-field write must not arm the local \
+             ReplyRegistry deadline either"
+    );
+}
+
+/// R311y317 — field-path twin for `query-consolidation` (see
+/// `query_target_pub_field_cannot_bypass_the_query_target_gate`).
+#[cfg(all(feature = "query-get", not(feature = "query-consolidation")))]
+#[test]
+fn query_consolidation_pub_field_cannot_bypass_the_gate() {
+    let (session, driver) = build_session();
+    let mut opts = QueryOptions::get().with_allowed_destination(Locality::Remote);
+    // NOT with_consolidation() — the gated setter is deliberately not called.
+    opts.consolidation = Some(ConsolidationMode::Latest);
+    session
+        .query("home/temp", opts, |_| {}, |_| {})
+        .expect("query-get feature is ON in this test build");
+    let session_frame = driver.frame_bytes(0);
+
+    let (actions2, driver2) = recording_actions();
+    let rid = actions2.alloc_next_request_id();
+    actions2
+        .send_request_query(rid, 0, Some("home/temp"))
+        .unwrap();
+    let baseline = driver2.frame_bytes(0);
+
+    assert_eq!(
+        session_frame, baseline,
+        "with query-consolidation OFF, assigning the pub `consolidation` \
+             field must not reach the wire: no build without the atom may \
+             emit Q_C"
     );
 }
 
