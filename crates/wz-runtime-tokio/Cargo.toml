@@ -1222,8 +1222,19 @@ keyexpr-includes = ["wz-session-core/keyexpr-includes"]
 #                                 cfg-off: callback observes None.
 #   query-selector-parameters   — Query.parameters slice projection in
 #                                 dispatch. cfg-off: parameters_view = None.
-#   query-reply-err             — Err-form reply emit via ReplyEmitter
-#                                 (combined with query-queryable gate).
+#   query-reply-err             — the QUERYABLE's application-level Err
+#                                 reply. R311y315: this line used to say
+#                                 "via ReplyEmitter (combined with the
+#                                 query-queryable gate)". Both halves were
+#                                 false — ReplyEmitter is a retired symbol
+#                                 (its whole query_event module is gone),
+#                                 and every production cfg site is a SOLO
+#                                 query-reply-err gate; the only combined
+#                                 gate is a test's. The gate sits on the
+#                                 staged QueryReply::Err variant. It does
+#                                 NOT gate the Response(Err) codec, which
+#                                 codec-response owns and routing-peer's
+#                                 query-timeout path emits through.
 # query-source-info (10th feature): the outbound Query source_info stamp
 # is wired via build_request_query_with_meta ->
 # RequestQueryBuilder::query_source_info (there is no dedicated

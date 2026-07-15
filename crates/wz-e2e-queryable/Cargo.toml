@@ -11,7 +11,7 @@
 # project rejects), and a Cargo feature subset cannot be pinned
 # per-[[bin]]. The textbook shape is a separate, intrinsically
 # single-plane binary: this one uses ONLY the queryable surface
-# (declare_queryable + ReplyEmitter), so it compiles cleanly under the
+# (declare_queryable + ReplyOut), so it compiles cleanly under the
 # queryable-only subset with ZERO cfg, and its manifest pins that subset
 # verbatim.
 #
@@ -67,7 +67,8 @@ path = "src/main.rs"
 #     core every wz-e2e-* binary pins.
 #
 # query-reply-err is intentionally NOT pinned: this binary emits only a
-# Put-form reply (ReplyEmitter::reply), never the Err-form variant, so
+# Put-form reply (ReplyOut::reply — R311y315: this said ReplyEmitter::reply,
+# a symbol retired with its whole query_event module), never the Err form, so
 # the smallest subset that exercises THIS binary omits it. (The C4b
 # `queryable-only` BUILD subset lists it because that matrix guards the
 # full queryable plane's type-checking, not one binary's wire path.)

@@ -6,19 +6,23 @@
 > atomic store; this file is an un-gated R301-era snapshot that nothing keeps
 > in sync, and it has drifted accordingly. Measured at R311y315 (re-derive
 > before quoting: parse each `` - `atom` `` bullet, cut at the NEXT bullet so a
-> status cannot be read off a neighbour, and diff against
-> `mnemosyne-cli query --list-inventory --json`):
+> status cannot be read off a neighbour, diff against
+> `mnemosyne-cli query --list-inventory --json`, and drop the six `preset-*`
+> rows — those are bundles, not atoms, and they live in §6 as headings rather
+> than bullets, so a bullet-parse reports them absent when they are present):
 >
 > - **65 of its 141 status labels (46%) disagree with the store.**
-> - **77 of the store's 219 atoms are never listed here at all.**
+> - **71 of the store's 213 atoms are never listed here at all.**
 > - Its §5.9 Query section enumerates **10** atoms; the store has **11**
 >   (`query-value`, added R311y248, is absent here). That omission is the
 >   known origin of a wrong denominator that a later round carried as fact.
 >
 > Those counts are themselves a citation and will rot — that is the point of
-> this banner, not an exception to it. R311y315 wrote them wrong on the first
-> pass (63/135 and 84) because the parse required the status to sit on the
-> same LINE as the atom name and six bullets wrap. Derive; do not quote.
+> this banner, not an exception to it, and R311y315 proved it the hard way by
+> getting the second number wrong TWICE before an adversarial review landed it.
+> First `84`: the parse demanded the status sit on the atom's own LINE and six
+> bullets wrap. Then `77 of 219`: `--list-inventory` returns 219 *entries* =
+> 213 atoms + 6 presets, and the presets are listed here. Derive; do not quote.
 >
 > To answer "which atoms exist / what is this atom's status", derive it:
 >

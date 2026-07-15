@@ -47,13 +47,58 @@ import json
 import subprocess
 import sys
 
-# Domains whose list already disagreed with the store at R311y315, with the
-# per-domain count measured at that point. A row is a promise to audit, not a
-# blessing. Shrink this dict; never grow it without a recorded reason.
+# Domains whose list already disagreed with the store at R311y315. A row is a
+# promise to audit, not a blessing. Shrink this dict; never grow it without a
+# recorded reason.
+#
+# Each row pins the exact SET of omitted atoms, never a count. R311y315's first
+# draft pinned `len(missing)` and an adversarial review broke it in one move:
+# rename an atom in the store, touch no Cargo.toml, and the count stays equal so
+# a brand-new omission passes green — the gate built to stop census rot, rotting
+# by the very mechanism it exists to catch. A COUNT IS A CITATION. Pin the set.
 CARRY = {
-    "domain-routing": (9, "not yet established whether the 9 omissions are intentional"),
-    "domain-storage": (13, "storage-backend-* / storage-mgr-* sub-namespaces; unaudited"),
-    "domain-transport": (5, "not yet established whether the 5 omissions are intentional"),
+    "domain-routing": (
+        {
+            "routing-data-route-compute",
+            "routing-interceptor-framework",
+            "routing-interceptor-hotreload",
+            "routing-interest-broker",
+            "routing-interest-pending-gc",
+            "routing-namespace",
+            "routing-query-route-compute",
+            "routing-route-cache",
+            "routing-token-tables",
+        },
+        "not yet established whether these omissions are intentional",
+    ),
+    "domain-storage": (
+        {
+            "storage-backend-capability",
+            "storage-backend-external-db",
+            "storage-backend-filesystem",
+            "storage-backend-memory-volume",
+            "storage-backend-rocksdb",
+            "storage-backend-volume-trait",
+            "storage-mgr-complete-flag",
+            "storage-mgr-config",
+            "storage-mgr-dynamic-volume-loading",
+            "storage-mgr-garbage-collection",
+            "storage-mgr-multi-storage-host",
+            "storage-mgr-strip-prefix",
+            "storage-mgr-wildcard-updates",
+        },
+        "storage-backend-* / storage-mgr-* sub-namespaces; unaudited",
+    ),
+    "domain-transport": (
+        {
+            "transport-link-quic-datagram",
+            "transport-link-unixpipe",
+            "transport-multilink",
+            "transport-qos",
+            "transport-stats",
+        },
+        "not yet established whether these omissions are intentional",
+    ),
 }
 
 
@@ -73,14 +118,20 @@ def facade_features(manifest_dir):
 
 
 def store_atoms():
-    """Inventory atom ids from the Mnemosyne store (the SSOT)."""
+    """Atom ids from the Mnemosyne store (the SSOT), EXCLUDING presets.
+
+    `--list-inventory` returns inventory ENTRIES, which is atoms + `preset-*`
+    bundles. Layer A3 draws the same line ("excluding presets (bundles, not
+    atoms)") and prints the atom count; conflating the two is how R311y315's
+    banner reported the store as having 219 atoms when it has 213.
+    """
     out = subprocess.run(
         ["mnemosyne-cli", "query", "--list-inventory", "--json"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
-    return {row["id"] for row in json.loads(out)}
+    return {r["id"] for r in json.loads(out) if not r["id"].startswith("preset-")}
 
 
 def audit(manifest_dir):
@@ -92,29 +143,52 @@ def audit(manifest_dir):
         prefix = name[len("domain-") :] + "-"
         # `dep:x` and `crate/feat` entries are plumbing, not atom names.
         listed = {f for f in feats[name] if not f.startswith("dep:") and "/" not in f}
-        missing = sorted({a for a in atoms if a.startswith(prefix)} - listed)
+        missing = {a for a in atoms if a.startswith(prefix)} - listed
         if not missing:
             continue
-        if name in CARRY and len(missing) == CARRY[name][0]:
+        expected = CARRY[name][0] if name in CARRY else set()
+        if missing == expected:
             carried.append((name, missing))
         else:
-            new_divergence.append((name, missing))
+            # Set difference, so a rename shows as one appeared + one resolved
+            # rather than hiding inside an unchanged count.
+            new_divergence.append((name, missing - expected, expected - missing))
 
     for name, missing in carried:
         print(f"  domain census carry: {name} omits {len(missing)} atom(s) "
               f"-- {CARRY[name][1]}")
-    for name, missing in new_divergence:
-        expected = CARRY.get(name, (0, ""))[0]
-        drift = f" (carry expected {expected})" if name in CARRY else ""
-        print(f"  domain census FAIL: {name} omits {len(missing)}{drift}: "
-              f"{', '.join(missing)}")
+    for name, appeared, resolved in new_divergence:
+        if appeared:
+            print(f"  domain census FAIL: {name} omits atom(s) no carry covers: "
+                  f"{', '.join(sorted(appeared))}")
+        if resolved:
+            print(f"  domain census FAIL: {name} no longer omits "
+                  f"{', '.join(sorted(resolved))} -- the carry row is stale; "
+                  f"drop those entries from CARRY to record the progress")
 
-    print(f"  domain census: {len(carried)} carried / {len(new_divergence)} new")
-    if new_divergence:
-        print("  A domain list that omits a domain atom is a census that disagrees")
-        print("  with the store. Either add the atom (check the wz facade actually")
-        print("  FORWARDS it -- a missing forward is why query-value was absent), or")
-        print("  audit the omission and add a CARRY row stating the reason.")
+    # The subset check above asks "does the list name every atom?". A census can
+    # also disagree the other way: name something the store does not have. That
+    # is latent today (zero phantoms across every domain-*) but it is the same
+    # lie, so it is checked rather than assumed.
+    phantom = []
+    for name in sorted(k for k in feats if k.startswith("domain-")):
+        prefix = name[len("domain-") :] + "-"
+        listed = {f for f in feats[name] if not f.startswith("dep:") and "/" not in f}
+        extra = sorted(f for f in listed if f.startswith(prefix) and f not in atoms)
+        if extra:
+            phantom.append((name, extra))
+            print(f"  domain census FAIL: {name} names non-atom(s): {', '.join(extra)}")
+
+    print(f"  domain census: {len(carried)} carried / "
+          f"{len(new_divergence) + len(phantom)} new")
+    if new_divergence or phantom:
+        print("  A domain list is a census; disagreeing with the store is a lie with")
+        print("  a number attached. To fix an OMISSION add the atom -- and check the")
+        print("  wz facade actually FORWARDS it, since a missing forward, not a lazy")
+        print("  list, is why query-value was absent. To record PROGRESS on a carried")
+        print("  row, delete the resolved atoms from that row's set in CARRY. To defer")
+        print("  an omission, add it to CARRY with the reason it is deferred -- never")
+        print("  a reason invented to silence the row.")
         return 1
     return 0
 
