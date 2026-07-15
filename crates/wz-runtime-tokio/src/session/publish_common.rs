@@ -410,14 +410,38 @@ impl PublishOptions {
     ///
     /// W3 — `codec-push`-gated for the same reason as
     /// [`Self::reliable_bool`]: only the gated remote legs consume it.
+    ///
+    /// R311y309 — every field is threaded through its OWN gate, exactly as
+    /// the loopback leg does. The wire ENCODER already drops an un-composed
+    /// field at its SSOT gate-point, so gating here is redundant for the
+    /// bytes — but NOT for `qos`, and that is the point. `PushMetadata` is
+    /// itself a consumer surface: `PushMetadata::is_express`
+    /// (`wz_session_core::metadata`) reads the copied `qos` UNGATED, and
+    /// `Session::publish` feeds it to `send_network_message_qos`, where the
+    /// `transport-batching` seam drains the open batch window immediately.
+    /// So with `pubsub-qos` OFF, a `qos` written through the pub field
+    /// produced NO wire QoS byte (correct) yet still changed the Frame count
+    /// and SN sequence on the wire (wrong) — a wire-observable effect of an
+    /// un-composed feature.
+    ///
+    /// R311y308 claimed these fields were "INERT feature-off on BOTH legs"
+    /// because `push_metadata` and `build_loopback_sample` are the only two
+    /// consumers of `PublishOptions`' fields. True but one level too shallow:
+    /// it enumerated consumers of the FIELDS, not consumers of the
+    /// `PushMetadata` this function PRODUCES. Gating the copies makes the
+    /// claim true rather than nearly-true.
+    ///
+    /// `priority_band` deliberately still reads `self.qos` ungated — that is
+    /// the independent `transport-qos` conduit axis (R311y307), whose real
+    /// gate is the runtime-negotiated `is_qos()`, not a compile feature.
     #[cfg(feature = "codec-push")]
     pub(super) fn push_metadata(&self) -> PushMetadata {
         PushMetadata {
-            timestamp: self.timestamp.clone(),
-            encoding: self.encoding.clone(),
-            source_info: self.source_info.clone(),
-            attachment: self.attachment.clone(),
-            qos: self.qos,
+            timestamp: gated_timestamp(self.timestamp.clone()),
+            encoding: gated_encoding(self.encoding.clone()),
+            source_info: gated_source_info(self.source_info.clone()),
+            attachment: gated_attachment(self.attachment.clone()),
+            qos: gated_qos(self.qos),
         }
     }
 }
@@ -505,9 +529,19 @@ impl From<SendWireError> for PublishError {
     }
 }
 
-/// R311y308 — the per-field loopback gates. Each returns the staged value
-/// only when the SAME feature the wire path gates is composed, else `None`,
-/// so a `SessionLocal` publish surfaces exactly what a `Remote` one would.
+/// R311y308 / R311y309 — the per-field metadata gates, shared by the loopback
+/// leg and by `push_metadata` (the wire leg's producer). Each returns the
+/// staged value only when the SAME feature the wire path gates is composed,
+/// else `None`.
+///
+/// The parity is per-FEATURE, not per-CONTENT: a `SessionLocal` publish
+/// surfaces the same fields a `Remote` one would COMPOSE, but not necessarily
+/// the same values. The wire encoder additionally suppresses a DEFAULT QoS
+/// byte (`build_push_outer_extensions`, mirroring pico's `has_qos_ext`), so a
+/// staged `QosLevel::DEFAULT` surfaces as `Some(DEFAULT)` on loopback and
+/// `None` through a wire round-trip. y308's "surfaces exactly what a Remote
+/// one would" overstated that; the Reply-side model this mirrors bounds its
+/// own claim the same narrow way.
 ///
 /// Mirrors the already-correct Reply-side idiom
 /// (`wz_session_core::reply::loopback_put_attachment` / `loopback_put_encoding`),
@@ -520,19 +554,30 @@ impl From<SendWireError> for PublishError {
 /// set nor written". The wire leg always dropped it correctly, so this was
 /// a loopback-only, process-local divergence, never a wire one.
 ///
-/// With these gates the fields are INERT feature-off on BOTH legs: the wire
-/// path already gates at its three SSOT points (`gated_timestamp_field` /
-/// `gated_encoding_field` / `build_body_extensions`), and `push_metadata`
-/// plus this function are the only two consumers. `priority_band` also reads
+/// R311y309 CORRECTION — y308 claimed here that the fields were "INERT
+/// feature-off on BOTH legs" because `push_metadata` and
+/// `build_loopback_sample` are the only two consumers of `PublishOptions`'
+/// fields. That enumeration was one level too shallow: it counted consumers of
+/// the FIELDS, not of the `PushMetadata` that `push_metadata` PRODUCES.
+/// `PushMetadata::is_express` read the copied `qos` ungated and fed the
+/// `transport-batching` drain, so a `pubsub-qos`-off build with a pub-field
+/// `qos` write emitted no QoS byte yet still changed the Frame count and SN
+/// sequence — wire-observable. y309 routes `push_metadata` through these same
+/// gates, which is what makes the inert claim true. Both consumers are now
+/// gated; the wire encoder's three SSOT points (`gated_timestamp_field` /
+/// `gated_encoding_field` / `build_body_extensions`) remain the byte-level
+/// backstop. `priority_band` also reads
 /// `qos` and stays deliberately ungated — that is the independent
 /// `transport-qos` conduit axis (R311y307).
 ///
 /// NB the parity claim, stated as narrowly as the Reply-side model states
 /// its own: it is about the loopback CONTENT matching the wire content when
 /// both legs exist, not about which legs a given subset compiles.
-macro_rules! loopback_gated {
+macro_rules! metadata_gated {
     ($name:ident, $feat:literal, $ty:ty) => {
-        #[cfg(feature = "pubsub-allow-loop")]
+        // Gated on the UNION of the two consumers below (the loopback leg and
+        // `push_metadata`), so each arm exists exactly where it is called.
+        #[cfg(any(feature = "pubsub-allow-loop", feature = "codec-push"))]
         fn $name(v: Option<$ty>) -> Option<$ty> {
             #[cfg(feature = $feat)]
             {
@@ -547,11 +592,11 @@ macro_rules! loopback_gated {
     };
 }
 
-loopback_gated!(loopback_timestamp, "pubsub-timestamp", TimestampHint);
-loopback_gated!(loopback_encoding, "pubsub-encoding", EncodingHint);
-loopback_gated!(loopback_source_info, "pubsub-source-info", SourceInfo);
-loopback_gated!(loopback_attachment, "pubsub-attachment", Vec<u8>);
-loopback_gated!(loopback_qos, "pubsub-qos", QosLevel);
+metadata_gated!(gated_timestamp, "pubsub-timestamp", TimestampHint);
+metadata_gated!(gated_encoding, "pubsub-encoding", EncodingHint);
+metadata_gated!(gated_source_info, "pubsub-source-info", SourceInfo);
+metadata_gated!(gated_attachment, "pubsub-attachment", Vec<u8>);
+metadata_gated!(gated_qos, "pubsub-qos", QosLevel);
 
 /// R232 — shared loopback Sample assembly for
 /// [`Session::publish`](super::Session::publish) and
@@ -579,24 +624,24 @@ pub(super) fn build_loopback_sample(
         SampleKind::Del => Sample::new_del(keyexpr),
     };
     sample = sample.with_reliability(opts.reliability);
-    if let Some(ts) = loopback_timestamp(opts.timestamp.clone()) {
+    if let Some(ts) = gated_timestamp(opts.timestamp.clone()) {
         sample = sample.with_timestamp(ts);
     }
     // Encoding is Put-only on the wire; mirror the constraint on
     // loopback so a caller mis-attaching encoding to a Del kind sees
     // the same "encoding=None" the wire path would project.
     if opts.kind == SampleKind::Put {
-        if let Some(enc) = loopback_encoding(opts.encoding.clone()) {
+        if let Some(enc) = gated_encoding(opts.encoding.clone()) {
             sample = sample.with_encoding(enc);
         }
     }
-    if let Some(si) = loopback_source_info(opts.source_info.clone()) {
+    if let Some(si) = gated_source_info(opts.source_info.clone()) {
         sample = sample.with_source_info(si);
     }
-    if let Some(att) = loopback_attachment(opts.attachment.clone()) {
+    if let Some(att) = gated_attachment(opts.attachment.clone()) {
         sample = sample.with_attachment(att);
     }
-    if let Some(qos) = loopback_qos(opts.qos) {
+    if let Some(qos) = gated_qos(opts.qos) {
         sample = sample.with_qos(qos);
     }
     sample

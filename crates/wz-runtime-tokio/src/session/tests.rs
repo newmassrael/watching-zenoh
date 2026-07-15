@@ -986,6 +986,30 @@ fn publish_options_with_metadata_setters_chain() {
 // Each arm is `not(feature)`-gated, so it only compiles in a subset that omits
 // that feature — Layer C1bj drives those subsets. Without such a lane these
 // tests never build and the gate would be unproven [[a skip is green]].
+// R311y309 — the WIRE-METADATA gate NEG, the sibling of the loopback NEGs
+// below. `push_metadata` is what the remote leg hands to the Push builder, and
+// `PushMetadata::is_express` reads its `qos` UNGATED, feeding the
+// transport-batching drain — so before y309 a pub-field `qos` write in a
+// `pubsub-qos`-off build produced no wire QoS byte yet still changed the Frame
+// count and SN sequence. Asserting on `push_metadata()` pins the gate at the
+// producer, which is where the leak was.
+#[cfg(all(feature = "codec-push", not(feature = "pubsub-qos")))]
+#[test]
+fn push_metadata_drops_qos_when_feature_off() {
+    let mut opts = PublishOptions::put();
+    // the express bit (1 << 4) — the sub-field with a transport-visible effect
+    opts.qos = Some(crate::sample::QosLevel::from_raw(1 << 4));
+    let meta = opts.push_metadata();
+    assert!(
+        meta.qos.is_none(),
+        "pubsub-qos off: a pub-field-written qos must not reach PushMetadata"
+    );
+    assert!(
+        !meta.is_express(),
+        "pubsub-qos off: the express bit must not drive the transport-batching drain"
+    );
+}
+
 #[cfg(all(feature = "pubsub-allow-loop", not(feature = "pubsub-timestamp")))]
 #[test]
 fn loopback_drops_timestamp_when_feature_off() {
@@ -1227,7 +1251,7 @@ fn publish_options_with_priority_is_single_source_band() {
 /// merges ONLY its own sub-field, the three compose in any order, and the
 /// untouched sub-fields fall back to the wire-DEFAULT byte (0x05 = Data / Drop /
 /// no-express) rather than a zeroed `Control` byte.
-#[cfg(all(feature = "pubsub-qos", feature = "pubsub-qos", feature = "pubsub-qos"))]
+#[cfg(feature = "pubsub-qos")]
 #[test]
 fn publish_options_typed_qos_knobs_merge_independently() {
     use wz_session_core::qos::{CongestionControl, Priority};

@@ -880,6 +880,53 @@ jobs:
   # this workflow's enumerated --layer set, so they run only in a local full
   # sweep, not on the hosted ci job. The Linux-only-ness is enforced at the
   # Cargo `[target.'cfg(...)']` layer, not by a hosted lane.
+  feature-gates:
+    name: feature-gate lanes (C1bi + C1bj)
+    runs-on: ubuntu-22.04
+    # Its OWN runner, deliberately NOT the `ci` job. That job is at BOTH of
+    # its ceilings: 26m22s against `timeout-minutes: 30`, and its own comment
+    # above declares "THIS JOB HAS NO OTHER DISK HEADROOM" — every extra
+    # feature-subset lane is a DISTINCT feature set and so a DISTINCT set of
+    # `crates/target` artifacts. C1bi + C1bj add 13 such subsets between them.
+    # Hanging them off `ci` would trade a real gate for a flaky timeout; a
+    # parallel job costs runner minutes but zero critical-path wall clock.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (with submodules)
+        # `recursive`: wz-session-core compiles against sce_forge_runtime from
+        # vendor/sce, so the lanes below do not build without it.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake libclang-dev clang perl
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        # Same reasoning as the ci job: `rustup show` materialises the PINNED
+        # toolchain. Never a floating `stable` — see that job's note.
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      # R311y309 — these two lanes existed from R311y307/y308 but ran ONLY in a
+      # local sweep, which is the repo's #1 hazard class: a gate that never runs
+      # hosted reports success by silence. Both were proven by FALSIFICATION
+      # locally (neuter the gate -> the lane goes red), so hosting them converts
+      # a real proof into a continuously enforced one.
+      - name: Layer C1bi — pubsub-qos merged gate (R311y307)
+        run: bash scripts/run-ci.sh --layer C1bi
+
+      - name: Layer C1bj — Push loopback metadata gates (R311y308)
+        run: bash scripts/run-ci.sh --layer C1bj
+
   portability:
     name: portability (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

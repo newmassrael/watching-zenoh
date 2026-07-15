@@ -2526,6 +2526,8 @@ layer_c1bj_cargo_test_loopback_metadata_gates() {
         && cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop,pubsub-timestamp,pubsub-encoding,pubsub-source-info,pubsub-qos --lib loopback_drops_ --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop,pubsub-timestamp,pubsub-encoding,pubsub-source-info,pubsub-attachment --lib loopback_drops_ --quiet \
         && test "$(cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --lib loopback_drops_ -- --list 2>/dev/null | grep -c ': test')" = "5" \
+        && cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --lib push_metadata_drops_qos --quiet \
+        && test "$(cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --lib push_metadata_drops_qos -- --list 2>/dev/null | grep -c ': test')" = "1" \
         && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --quiet -- -D warnings)
 }
 

@@ -886,7 +886,7 @@ mod tests {
             put.z(),
             "Z flag must be set when body extensions are present"
         );
-        if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &exts[0].body {
+        if let wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &exts[0].body {
             // First byte of source_info payload is `(zidlen - 1) << 4`.
             assert_eq!(z.value[0], (4 - 1) << 4);
             assert_eq!(&z.value[1..5], &[0x11, 0x22, 0x33, 0x44]);
@@ -913,7 +913,7 @@ mod tests {
         assert_eq!(exts.len(), 2, "source_info + attachment = 2 entries");
         assert_eq!(exts[0].header & 0x4F, 0x41, "source_info first");
         assert_eq!(exts[1].header & 0x4F, 0x43, "attachment second");
-        if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &exts[1].body {
+        if let wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &exts[1].body {
             assert_eq!(z.value, b"attach-payload");
         } else {
             panic!("attachment must use ExtZbuf body");
@@ -954,7 +954,7 @@ mod tests {
         assert_eq!(exts.len(), 1);
         // ENC_ZINT(0x20) | id_qos(0x01); no M, no Z (single ext).
         assert_eq!(exts[0].header & 0x2F, 0x21);
-        if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &exts[0].body {
+        if let wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZint(z) = &exts[0].body {
             assert_eq!(z.value, 0b0001_1010);
         } else {
             panic!("qos must use ExtZint body");
@@ -1335,7 +1335,7 @@ mod tests {
             .as_deref()
             .expect("outer ext chain present");
         assert_eq!(outer.len(), 1);
-        if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &outer[0].body {
+        if let wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZint(z) = &outer[0].body {
             assert_eq!(z.value, 0b0001_1010);
         } else {
             panic!("qos outer ext must decode to ExtZint");
