@@ -300,8 +300,9 @@ pub struct ApplicationLayerObserver {
     /// R311y321 — the sink is wrapped in a
     /// [`ConsolidatingSink`](crate::reply_sink::ConsolidatingSink). The registry
     /// stores ONE `C` for every pending, so the wrapper is universal and
-    /// `ConsolidationMode::None` (what `register` pins) is a passthrough; only a
-    /// z_get that names a mode via `register_consolidating` consolidates.
+    /// `ConsolidationMode::None` (what `register` pins) is a passthrough. A
+    /// z_get that names a mode wraps its own sink and calls `register_sink`
+    /// directly — see `Session::query` in `wz-runtime-tokio`.
     pub replies:
         ReplyRegistry<crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>>,
     /// R311r — staging buffers are unconditional so the observer

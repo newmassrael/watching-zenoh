@@ -149,10 +149,30 @@ pub struct BorrowedReply<'a> {
     /// Encoding hint for an Err reply, if any.
     pub err_encoding: Option<(u32, Option<&'a str>)>,
     /// A8b — attachment carried by a Put reply (the inner-MsgPut push-body ext
-    /// id 0x03), or `None`. Carried so a synthesised [`BorrowedReply`] is a
-    /// FULL [`ReplyView`] — i.e. `InboundReply::from_view` is lossless for a
-    /// `BorrowedReply` source too, not only the wire `InboundReply` (the A8c
-    /// session-review gap).
+    /// id 0x03), or `None`. Carried so `InboundReply::from_view` preserves the
+    /// attachment for a `BorrowedReply` source too, not only for the wire
+    /// `InboundReply` (the A8c session-review gap).
+    ///
+    /// R311y321 — SCOPE CORRECTION. This used to claim the attachment field made
+    /// a synthesised `BorrowedReply` "a FULL `ReplyView`", i.e. `from_view`
+    /// lossless. It never was: `BorrowedReply` has no `source_info` field
+    /// either, so it rides `ReplyView`'s `None` default and `from_view` has
+    /// silently dropped source_info from this source since R311y78. y321 widened
+    /// the same hole with `timestamp`. The honest statement is per-field, and
+    /// the two missing ones are named here rather than left for the next round
+    /// to trip over: **`from_view` is lossless for `rid` / `keyexpr` / `kind` /
+    /// `payload` / `err_encoding` / `attachment` / `put_encoding`, and LOSSY for
+    /// `source_info` and `timestamp`.**
+    ///
+    /// Both absentees are `alloc`-gated types (`sample::SourceInfo`,
+    /// `sample::TimestampHint`) while this struct is ungated, so adding them
+    /// means `#[cfg]`-gated fields and a cfg at every construction site — which
+    /// is why neither was added. Nothing consolidates a `BorrowedReply` today
+    /// (its two production sites are `declare::liveliness_get`, which carries no
+    /// side-bands and owns its own pending table, and the aligner's test
+    /// module), so this is latent. It stops being latent the moment a
+    /// `BorrowedReply` reaches a `ConsolidatingSink`: consolidation ORDERS BY
+    /// timestamp, and every such reply would read as unstamped.
     pub attachment: Option<&'a [u8]>,
     /// A8b — value encoding carried by a Put reply (`packed_id` + schema), or
     /// `None`. The Put-arm twin of [`Self::err_encoding`].
@@ -386,23 +406,55 @@ impl<S: ReplySink> ConsolidatingSink<S> {
 impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
     fn on_reply(&mut self, reply: &dyn ReplyView) {
         use crate::query_mode::ConsolidationMode;
+        // An Err reply is NEVER consolidated — forwarded immediately, in every
+        // mode, and never cached.
+        //
+        // This is zenoh's shape, and zenoh expresses it STRUCTURALLY rather than
+        // as a rule: its consolidation match lives entirely inside
+        // `send_response`'s `ResponseBody::Reply` arm, while `ResponseBody::Err`
+        // is a DISJOINT arm that calls `callback.call(new_reply)` directly
+        // (api/session.rs, the two arms of the payload match). It could not
+        // consolidate an Err even if it wanted to: `Reply.result`'s `Err` variant
+        // is a bare `ReplyError { payload, encoding }` with NO keyexpr, and the
+        // consolidation arms key the cache on `result.unwrap().key_expr` — which
+        // is unreachable for an Err by construction.
+        //
+        // wz cannot borrow that structure: `InboundReply` gives EVERY arm a
+        // `keyexpr_literal` (the wire dispatcher resolves it before the body
+        // match), so an Err arrives here fully cache-able and the type system
+        // does not stop it. The guard has to be explicit.
+        //
+        // R311y321 review — the first cut of this method had no guard and
+        // reasoned, wrongly, that an Err "ties with an unstamped Put and is
+        // forwarded — matching zenoh, which runs every reply through the same
+        // match". zenoh does not run every reply through the same match, and the
+        // consequences were data loss on the default pico path in BOTH
+        // directions: against a stamped Put the Err failed `displaces_cached` and
+        // was silently swallowed; against an unstamped Put it won the tie and
+        // EVICTED the good reply. The comment was the artifact that hid it — it
+        // argued from the tie rule and never checked the upstream arm split.
+        if reply.kind() == ReplyKind::Err {
+            self.inner.on_reply(reply);
+            return;
+        }
         match self.mode {
             ConsolidationMode::None => self.inner.on_reply(reply),
             ConsolidationMode::Monotonic => {
                 // zenoh's arm: cache AND forward when this is not stale; drop
-                // outright when it is. An Err reply carries no keyexpr-versioned
-                // body, but it still keys by keyexpr and stamps as `None`, so it
-                // ties with an unstamped Put and is forwarded — matching zenoh,
-                // which runs every reply through the same match.
+                // outright when it is.
                 if self.displaces_cached(reply) {
                     self.cache_reply(reply);
                     self.inner.on_reply(reply);
                 }
             }
             ConsolidationMode::Latest => {
-                // Cache only. The flush happens in `on_final` — this is why a
-                // Latest z_get that never receives its final delivers nothing,
-                // exactly as zenoh (whose timeout path flushes explicitly).
+                // Cache only; the flush happens in `on_final`. That covers the
+                // TIMEOUT path too, and for free: `ReplyRegistry::sweep_timed_out`
+                // fires the swept entry's `on_final`, so an expired Latest query
+                // drains its cache rather than dropping it. zenoh reaches the same
+                // place by a different road — its timeout task flushes explicitly
+                // (api/session.rs) because its cache hangs off the query state,
+                // not off a sink.
                 if self.displaces_cached(reply) {
                     self.cache_reply(reply);
                 }
@@ -584,6 +636,95 @@ mod consolidating_sink_tests {
         fn on_final(&mut self, rid: u64) {
             self.finals.push(rid);
         }
+    }
+
+    fn err(keyexpr: &str, payload: &[u8]) -> InboundReply {
+        InboundReply {
+            rid: 1,
+            keyexpr_literal: keyexpr.to_string(),
+            body: InboundReplyBody::Err {
+                encoding: None,
+                payload: payload.to_vec(),
+            },
+        }
+    }
+
+    /// R311y321 review — an Err reply must NEVER be consolidated. zenoh handles
+    /// Err in a DISJOINT arm of `send_response` that calls the callback directly;
+    /// its consolidation match is unreachable for an Err by construction (an
+    /// `Err` result has no keyexpr to key the cache on). wz gives every arm a
+    /// keyexpr, so nothing stops an Err from entering the cache but an explicit
+    /// guard.
+    ///
+    /// Without the guard this loses data in BOTH directions, on the DEFAULT pico
+    /// path (AUTO -> LATEST): against a stamped Put the Err fails
+    /// `displaces_cached` and vanishes; against an unstamped Put it wins the tie
+    /// and evicts the good reply. The first cut of `on_reply` had no guard and no
+    /// Err test — the absent test is why it shipped.
+    #[test]
+    fn err_is_never_consolidated_in_any_mode() {
+        for mode in [
+            ConsolidationMode::None,
+            ConsolidationMode::Monotonic,
+            ConsolidationMode::Latest,
+        ] {
+            // (a) a STAMPED Put already cached must not swallow the Err.
+            let mut rec = Recorder::default();
+            {
+                let mut sink = ConsolidatingSink::new(mode, &mut rec);
+                sink.on_reply(&put("a/b", b"data", Some(ts(10))));
+                sink.on_reply(&err("a/b", b"boom"));
+                sink.on_final(1);
+            }
+            let payloads: Vec<Vec<u8>> = rec.delivered.iter().map(|(_, p)| p.clone()).collect();
+            assert!(
+                payloads.contains(&b"boom".to_vec()),
+                "{mode:?}: the Err was swallowed by a stamped cached Put"
+            );
+            assert!(
+                payloads.contains(&b"data".to_vec()),
+                "{mode:?}: the Put was lost"
+            );
+
+            // (b) an UNSTAMPED Put must not be evicted by the Err's tie.
+            let mut rec = Recorder::default();
+            {
+                let mut sink = ConsolidatingSink::new(mode, &mut rec);
+                sink.on_reply(&put("a/b", b"data", None));
+                sink.on_reply(&err("a/b", b"boom"));
+                sink.on_final(1);
+            }
+            let payloads: Vec<Vec<u8>> = rec.delivered.iter().map(|(_, p)| p.clone()).collect();
+            assert!(
+                payloads.contains(&b"boom".to_vec()),
+                "{mode:?}: the Err was lost"
+            );
+            assert!(
+                payloads.contains(&b"data".to_vec()),
+                "{mode:?}: the Err EVICTED an unstamped Put"
+            );
+        }
+    }
+
+    /// The Err guard must not become a consolidation bypass for its keyexpr: two
+    /// Errs on one key are BOTH forwarded (zenoh forwards each as it lands), and
+    /// an Err must not poison the cache slot a later Put needs.
+    #[test]
+    fn err_neither_caches_nor_blocks_a_later_put() {
+        let mut rec = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut rec);
+            sink.on_reply(&err("a/b", b"e1"));
+            sink.on_reply(&err("a/b", b"e2"));
+            sink.on_reply(&put("a/b", b"data", Some(ts(10))));
+            sink.on_final(1);
+        }
+        let payloads: Vec<Vec<u8>> = rec.delivered.iter().map(|(_, p)| p.clone()).collect();
+        assert_eq!(
+            payloads,
+            alloc::vec![b"e1".to_vec(), b"e2".to_vec(), b"data".to_vec()],
+            "both Errs forward immediately; the Put still consolidates and flushes"
+        );
     }
 
     fn ts(time: u64) -> TimestampHint {

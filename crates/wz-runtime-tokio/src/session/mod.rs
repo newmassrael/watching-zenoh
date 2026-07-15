@@ -174,8 +174,13 @@ use crate::sync::Mutex;
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 fn build_loopback_query(opts: &QueryOptions) -> wz_codecs::query::QueryOwned {
     // Carry only the queryable-observable Query-body slots (parameters +
-    // value / source_info / attachment); target / consolidation / timeout are
-    // loopback-inert (see the doc note) so they stay at their `Default` sentinels.
+    // value / source_info / attachment); target / consolidation / timeout stay
+    // at their `Default` sentinels. R311y321 review — this comment used to call
+    // all three "loopback-inert (see the doc note)", and the doc note it pointed
+    // at now refutes two thirds of that: `consolidation` is applied (at the
+    // requester's sink, on both origins) and `target`'s absence is the
+    // `query-target` atom's PARTIAL residual, not inertness. Only `timeout` is
+    // genuinely inert here. Read the doc note above, not this line.
     let full = opts.query_metadata();
     let meta = wz_session_core::metadata::QueryMetadata {
         parameters: full.parameters,

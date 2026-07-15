@@ -1219,7 +1219,6 @@ impl<C: ReplySink> ReplyRegistry<C> {
 /// funnels through the un-gated `register_sink`, so the AP register
 /// surface composes in any `alloc` subset (`BoxedReplySink` is itself
 /// `alloc`-gated).
-#[cfg(feature = "alloc")]
 /// R311y321 — the AP registry's sink type is now
 /// `ConsolidatingSink<BoxedReplySink>` rather than a bare `BoxedReplySink`.
 ///
@@ -1232,6 +1231,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
 /// exactly the shape the apply-half plan ruled out: `Pending` stays
 /// byte-identical and the no-alloc profile, which composes its own closed-`enum`
 /// sink, never instantiates this impl at all.
+#[cfg(feature = "alloc")]
 impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
     /// New empty AP registry backed by heap-boxed closures
     /// ([`BoxedReplySink`]), each wrapped in a [`ConsolidatingSink`]. The
@@ -1266,49 +1266,29 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> ReplyHandle {
-        // R311y321 — signature UNCHANGED; every existing caller (liveliness_get,
-        // the aligner's query plumbing, the tests) keeps registering a
+        // R311y321 — signature UNCHANGED; every caller of THIS method
+        // (liveliness_get, the aligner's query plumbing, the tests) registers a
         // non-consolidating pending and gets byte-identical behaviour, because
-        // `passthrough` pins `ConsolidationMode::None`. A z_get that carries a
-        // mode calls `register_consolidating` instead.
-        self.register_consolidating(
-            rid,
-            expected_finals,
-            deadline_ms,
-            crate::query_mode::ConsolidationMode::None,
-            on_reply,
-            on_final,
-        )
-    }
-
-    /// R311y321 — register a pending z_get whose inbound replies are
-    /// consolidated with `mode` before reaching `on_reply`.
-    ///
-    /// The apply-half entry point: [`register`](Self::register) is this with
-    /// `ConsolidationMode::None`. Separated rather than added as a parameter to
-    /// `register` so the existing seam keeps its signature (the callers that do
-    /// not consolidate — liveliness, alignment plumbing — should not have to
-    /// name a mode they have no opinion about).
-    ///
-    /// `Latest` delivers NOTHING until `on_final`; see [`ConsolidatingSink`] for
-    /// the per-mode contract and the two named pico divergences.
-    pub fn register_consolidating(
-        &mut self,
-        rid: u64,
-        expected_finals: u32,
-        deadline_ms: Option<u64>,
-        mode: crate::query_mode::ConsolidationMode,
-        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
-    ) -> ReplyHandle {
-        // AP backing: `register_sink` is infallible here (the BoundedVec
-        // pending table grows past the advisory `N`), so the convenience
-        // wrapper keeps its `ReplyHandle` signature.
+        // `passthrough` pins `ConsolidationMode::None`.
+        //
+        // A z_get that carries a mode does NOT come through here: it builds its
+        // own `ConsolidatingSink::new(mode, ..)` and calls `register_sink`
+        // directly (`wz-runtime-tokio` session/mod.rs), because by that point it
+        // holds a built sink (`deferred_reply_sink` wraps the closures with the
+        // deferred-staging cell), not the raw closures this method takes.
+        //
+        // R311y321 review — the first cut added a `register_consolidating(..,
+        // mode, on_reply, on_final)` beside this one and two comments claiming
+        // the z_get path used it. Grep refuted both: nothing called it with a
+        // non-`None` mode, and nothing could — the closure-taking shape does not
+        // fit the one caller that has an opinion about the mode. It was public
+        // API invented for a caller that does not exist, so it is gone rather
+        // than documented.
         self.register_sink(
             rid,
             expected_finals,
             deadline_ms,
-            ConsolidatingSink::new(mode, BoxedReplySink::new(on_reply, on_final)),
+            ConsolidatingSink::passthrough(BoxedReplySink::new(on_reply, on_final)),
         )
         .expect("register on the alloc backing never exceeds declared capacity")
     }
