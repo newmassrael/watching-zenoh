@@ -3177,6 +3177,159 @@ mod tests {
             "the single shared reply_out accumulates both replies"
         );
     }
+
+    /// A `Request(Query)` carrying a VALUE ext (id 0x03 ENC_ZBUF) whose body is
+    /// pico `_z_value_encode`'s inner content (`encoding || payload`), per the
+    /// `crate::query_value_ext` module docs.
+    ///
+    /// Hand-composed rather than routed through the SSOT encoder: both
+    /// `query_value_ext` (lib.rs, gated `all(alloc, query-value)`) and
+    /// `RequestQueryBuilder::query_value` sit behind the atom's own gate, so the
+    /// feature-off build cannot name either. `request_query_with_source_info` in
+    /// `mod request_decode_isolation_tests` needs no such mirror: its
+    /// `source_info_ext` encoder is shared with pubsub-source-info and stays
+    /// reachable with the query atom off. Mirrors the ext-composition shape of
+    /// the sibling `request_query_with_attachment` above.
+    ///
+    /// The twin below pins this fixture against vacuity: with `query-value` off
+    /// `extract_query_value` returns `None` WITHOUT inspecting the chain, so a
+    /// malformed ext would satisfy the feature-off assertion just as well as a
+    /// real one — and would keep satisfying it if the gate were later deleted.
+    fn request_query_with_value(
+        rid: u64,
+        suffix: Option<&str>,
+        payload: &[u8],
+        encoding: &crate::sample::EncodingHint,
+    ) -> RequestOwned {
+        let suffix_len = suffix.map(|s| s.len() as u64);
+        let keyexpr = Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len,
+                suffix,
+            }),
+        };
+        // Per `crate::query_value_ext`: the ext body is pico `_z_value_encode`'s
+        // inner content — `encoding_encode || payload` — with the surrounding
+        // `ExtZbuf` `value_len` supplying pico's leading `zsize(total_len)`.
+        let mut body = encoding.to_codec().encode_to_vec();
+        body.extend_from_slice(payload);
+        let mut ext = ExtEntry::default();
+        ext.set_ext_id(0x03); // QUERY_VALUE_EXT_ID
+        ext.set_enc(2); // ENC_ZBUF
+        ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+            value_len: body.len() as u64,
+            value: &body,
+        });
+        let mut query = Query::default().try_into_owned().unwrap();
+        query.header |= 0x80;
+        query.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        let mut request = Request {
+            header: 0x1c,
+            rid,
+            keyexpr,
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+        .try_into_owned()
+        .unwrap();
+        request.body = RequestOwnedVariant::CodecZenohQuery(query);
+        request
+    }
+
+    /// Anti-vacuity twin of `inbound_query_value_is_dropped_when_query_value_off`:
+    /// proves `request_query_with_value` composes a REAL, decodable VALUE ext by
+    /// showing the ON build surfaces it. Without this, the feature-off assertion
+    /// would pass on a malformed fixture and gate nothing.
+    ///
+    /// Distinct from `query_value_surfaces_on_queryview_through_dispatch`, which
+    /// drives the TX builder: that one cannot pin this fixture, because the
+    /// builder is exactly what the feature-off build cannot call.
+    ///
+    /// CAVEAT, named not paid: the only lane composing this module's gate WITH
+    /// `query-value` is Layer C1be, which is absent from ci.yml (R311y315 carry
+    /// (d)) — so this anti-vacuity guard is LOCAL-ONLY while the feature-off
+    /// assertion it guards runs hosted under C1e. A fixture rot that only CI
+    /// would catch is not caught.
+    #[cfg(feature = "query-value")]
+    #[test]
+    fn hand_composed_value_ext_fixture_surfaces_when_query_value_on() {
+        let mut reg = QueryableRegistry::new();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let s = seen.clone();
+        reg.register("home/temp", move |event, _responder| {
+            if event.payload() == Some(&b"fixture-value"[..]) {
+                s.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let encoding = crate::sample::EncodingHint {
+            packed_id: 0x0B,
+            schema: Some("json".to_string()),
+        };
+        let req = request_query_with_value(15, Some("home/temp"), b"fixture-value", &encoding);
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "the fixture IS a decodable VALUE ext — so the feature-off twin is not vacuous"
+        );
+    }
+
+    /// R311y316 — the feature-off drop proof `query-value` lacked. Its three
+    /// ext-backed siblings each had one: `query-source-info` above, and
+    /// `query-attachment` / `query-selector-parameters` via
+    /// `inbound_query_attachment_is_dropped_when_query_attachment_off` /
+    /// `inbound_query_parameters_are_dropped_when_query_selector_parameters_off`
+    /// in `mod request_decode_isolation_tests`. This atom was tagged COMPLETE on
+    /// a code read alone, with `extract_query_value`'s `not(query-value)` arm the
+    /// only feature-off site in the tree.
+    ///
+    /// Verified by running each lane's exact feature set: hosted Layer C1e's
+    /// first invocation and local Layer C1as both compose this module's gate
+    /// with `query-value` absent, so this test runs there. Layer C1be builds the
+    /// atom ON, so it carries the twin above instead — this direction is the one
+    /// that is hosted.
+    ///
+    /// Falsified, not merely observed green: deleting `extract_query_value`'s
+    /// `not(query-value)` short-circuit (and ungating `query_value_ext`, which
+    /// the deletion requires) makes this assertion fail.
+    #[cfg(not(feature = "query-value"))]
+    #[test]
+    fn inbound_query_value_is_dropped_when_query_value_off() {
+        let mut reg = QueryableRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        reg.register("home/temp", move |event, _responder| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if event.payload().is_some() || event.encoding().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let encoding = crate::sample::EncodingHint {
+            packed_id: 0x0B,
+            schema: Some("json".to_string()),
+        };
+        let req = request_query_with_value(15, Some("home/temp"), b"fixture-value", &encoding);
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "queryable still fires — only the value fields are dropped"
+        );
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            0,
+            "wire VALUE must NOT reach QueryView when query-value is off"
+        );
+    }
 }
 
 // ── receive-side query metadata field-drop NEG ──
