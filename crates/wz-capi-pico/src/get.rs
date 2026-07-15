@@ -34,61 +34,55 @@
 //! it, face 1 answering (and its entry dropping) before face 2's `query` is
 //! issued would take the refcount to zero and complete the get early.
 //!
-//! ## THE CONSOLIDATION DIVERGENCE (read this before trusting `z_get_options_t`)
+//! ## CONSOLIDATION — the gap is CLOSED, and one divergence remains (R311y321)
 //!
-//! **`consolidation` is transmitted on the wire and has NO client-side effect
-//! here. For a C caller this is the DEFAULT path, not a corner case** — because
-//! THIS crate resolves AUTO -> LATEST itself (see `get_options`) before handing
-//! the mode to `Session::query`.
+//! **RETRACTED.** Everything this section said before R311y321 rested on
+//! "`consolidation` is transmitted on the wire and has NO client-side effect
+//! here", and that is no longer true. `wz-session-core::reply_sink` now carries
+//! an `alloc`-gated `ConsolidatingSink<S: ReplySink>` decorator on the
+//! R311gb-3c [`ReplySink`][wz_session_core::reply_sink::ReplySink] seam, and
+//! `Session::query` installs it with the query's own mode. The old text is not
+//! amended in place because it was load-bearing in the wrong direction: it told
+//! the reader NOT to trust the mode.
 //!
-//! Be precise about the blast radius, because R311y296 first wrote this section
-//! and overstated it: "the default get path" is true of pico and of THIS crate,
-//! and FALSE of wz's Rust API. wz has no `Auto` variant and
-//! `QueryOptions.consolidation` defaults to `None` = no consolidation
-//! (`session/querier.rs`), so a wz Rust caller that never sets a mode is
-//! unaffected; only an explicit `with_consolidation(Latest)` is a silent no-op.
-//! Conflating the two smuggles an API-default DECISION in as an observation.
+//! What is true now:
 //!
-//! pico consolidates on the QUERIER. Under `Z_CONSOLIDATION_MODE_LATEST` it does
-//! not run the reply callback per reply at all
-//! (`~/zenoh-pico/src/session/query.c:178-181` — `if (pen_qry->_consolidation !=
-//! Z_CONSOLIDATION_MODE_LATEST) callback(...)`); it caches replies deduped by
-//! keyexpr keeping the newest timestamp (`query.c:143-172`) and delivers the
-//! survivors at the LAST final (`query.c:239-247`). And LATEST is what the
-//! default `AUTO` resolves to whenever the selector carries no `_time=`
-//! (`src/net/primitives.c:567-573`, default set at `src/api/api.c:1725`).
+//! - **LATEST works, and that closes the C API's DEFAULT path.**
+//!   `z_get_options_default` is `Z_CONSOLIDATION_MODE_AUTO`
+//!   (`vendor/zenoh-pico/src/api/api.c:1725` -> `:462` -> `:446`); this crate
+//!   resolves AUTO -> LATEST exactly as pico's `primitives.c:567-573` does
+//!   (`_time=` in the selector -> NONE, else LATEST); wz caches per keyexpr and
+//!   flushes at the terminal final, as pico does (`query.c:143-172` stores,
+//!   `:239-247` flushes). A stock `z_get` against two queryables answering ONE
+//!   key now delivers **one** reply through this crate, as it does through pico.
 //!
-//! So: a stock pico `z_get` against two queryables answering on ONE key delivers
-//! **one** reply; this crate delivers **two**, interleaved as they land rather
-//! than batched before the completion. `MONOTONIC` is NOT part of this gap —
-//! pico's `drop` flag there gates only the cache store, never the callback at
-//! `query.c:179`, so pico delivers every reply under MONOTONIC too and wz
-//! matches.
+//! - **MONOTONIC now DIVERGES from pico, deliberately.** wz suppresses a stale
+//!   reply — it forwards only when the arrival is at least as recent as the last
+//!   one forwarded for that keyexpr. **pico forwards every reply under
+//!   MONOTONIC**: its `drop` flag gates only the cache store, never the callback
+//!   at `query.c:179` (`if (_consolidation != Z_CONSOLIDATION_MODE_LATEST)
+//!   callback(...)`), which makes pico's MONOTONIC observably identical to NONE
+//!   and its cache dead weight. wz follows ZENOH here
+//!   (`zenoh-1.5.0/src/api/session.rs`, the `ConsolidationMode::Monotonic` arm
+//!   returns no callback for a stale reply).
 //!
-//! **Why it is not fixed here, and where it belongs.** Consolidation is a wz
-//! CORE concept, not a binding one: `ConsolidationMode` lives in
-//! `wz-session-core::query_mode` and `Session::query` already accepts
-//! `with_consolidation(..)`, so wz's own Rust API has the same no-op — a fix in
-//! this crate would leave that standing and duplicate a core concern at the ABI
-//! layer. The home is `wz-session-core`, as an `alloc`-gated
-//! `ConsolidatingSink<S: ReplySink>` DECORATOR on the R311gb-3c
-//! [`ReplySink`][wz_session_core::reply_sink::ReplySink] seam — NOT a cache
-//! field on `Pending`. That seam's `fire_final_for` already fires `on_final`
-//! exactly when `remaining_finals` hits zero, i.e. it already computes the
-//! instant pico flushes at; a decorator inherits that for free, leaves `Pending`
-//! byte-identical, and costs the no-alloc profile nothing.
+//!   The pre-y321 text asserted "`MONOTONIC` is NOT part of this gap ... wz
+//!   matches" — true when wz applied nothing, and now false BY CHOICE. A C
+//!   caller that relinks a pico app against wz and uses
+//!   `Z_CONSOLIDATION_MODE_MONOTONIC` will see stale replies suppressed where
+//!   pico delivered them. The wire is unaffected (both emit the MONOTONIC byte;
+//!   pico's encode predicate is `_consolidation != Z_CONSOLIDATION_MODE_DEFAULT`,
+//!   `codec/message.c:402-412`).
 //!
-//! Two things must land first, and neither is a binding detail:
-//! 1. a reply TIMESTAMP on the [`ReplyView`] seam — the wire decode has it and
-//!    discards it (`wz-session-core/src/reply.rs`, `timestamp: _`). Without it
-//!    LATEST is not merely undecidable, it is SILENTLY LOSSY: an absent
-//!    timestamp reads as 0 and pico's `0 <= 0` compare drops every reply after
-//!    the first on a keyexpr.
-//! 2. pinning the `ext-pubsub-advanced-*` recovery GETs to
-//!    `ConsolidationMode::None`. Their `_sn=` range replies all share ONE
-//!    keyexpr, so LATEST would collapse an N-sample gap recovery to one sample.
-//!    pico writes that opt-out explicitly
-//!    (`~/zenoh-pico/src/api/advanced_subscriber.c:915`); wz has not.
+//!   **Why diverge rather than mirror.** Preserving pico's behaviour needs the
+//!   wire ext and the local mode to be settable INDEPENDENTLY — pico puts
+//!   MONOTONIC on the wire, so "pico-faithful" means wire=MONOTONIC with no
+//!   local effect, which `with_consolidation` cannot express. That would mean a
+//!   new public axis on `QueryOptions` existing solely for this quirk, to
+//!   preserve what reads as an upstream bug (the `drop` pico computes and then
+//!   ignores). wz's north star is a zenoh+pico SUPERSET, not a pico mirror: a
+//!   MONOTONIC that cannot suppress anything is a mode in name only. Named here
+//!   rather than silently absorbed.
 //!
 //! no-alloc LATEST is a NAMED NON-divergence rather than a gap: pico's cache is
 //! unbounded HEAP (`~/zenoh-pico/src/collections/list.c:262`), so there is no
@@ -748,10 +742,13 @@ fn get_options(
     // reaches the wire, which is why wz's `ConsolidationMode` has no `Auto`
     // variant to map onto.
     //
-    // ⚠ Only the RESOLUTION is ported. The resolved mode's client-side EFFECT is
-    // a NAMED DIVERGENCE — see `THE CONSOLIDATION DIVERGENCE` in the module doc.
-    // Do not read the `with_consolidation` call below as honouring the mode: it
-    // sets the wire ext and nothing else.
+    // R311y321 — the resolved mode is now HONOURED, not merely transmitted: the
+    // `with_consolidation` call below sets the wire ext AND selects the
+    // reception-side `ConsolidatingSink` mode, so AUTO -> LATEST here means a
+    // default `z_get` consolidates per keyexpr exactly as pico's does. The
+    // pre-y321 comment said the opposite ("it sets the wire ext and nothing
+    // else"), which was true then and is retracted now. MONOTONIC is the one
+    // mode that deliberately diverges from pico — see the module doc.
     let resolved = if consolidation == Z_CONSOLIDATION_MODE_AUTO {
         if parameters_has_time_selector(&parameters) {
             Z_CONSOLIDATION_MODE_NONE

@@ -31,8 +31,12 @@ use super::*;
 /// `parameters` / `attachment` / `source_info` / `value` to a SessionLocal
 /// queryable identically to the wire path — `build_loopback_query` reuses the
 /// same `build_request_query_with_meta` SSOT and lifts out its Query body, so
-/// both origins carry the same ext chain (`target` / `consolidation` /
-/// `timeout_ms` stay loopback-inert by design).
+/// both origins carry the same ext chain. R311y321 — the parenthetical here
+/// used to read "(`target` / `consolidation` / `timeout_ms` stay loopback-inert
+/// by design)"; see `build_loopback_query`'s own doc comment (session/mod.rs)
+/// for the per-slot truth. In short: `consolidation` is no longer inert (it is
+/// applied at the requester's sink, on both origins), and `target`'s inertness
+/// was never "by design" — it is the `query-target` atom's PARTIAL residual.
 ///
 /// `#[non_exhaustive]` so future rounds add fields without breaking
 /// callers. Construct via [`QueryOptions::get`] (or `default`) plus
@@ -63,16 +67,41 @@ pub struct QueryOptions {
     /// elides the wire byte → zenoh-pico decodes
     /// `Z_QUERY_TARGET_DEFAULT` = `BEST_MATCHING`. `Some(target)`
     /// sets the Q_T flag and emits the target byte per
-    /// [`crate::session_glue::QueryTarget`]. Loopback ignores
-    /// target (single-host fan-out has no selection axis).
+    /// [`crate::session_glue::QueryTarget`].
+    ///
+    /// R311y321 — the claim "Loopback ignores target (single-host
+    /// fan-out has no selection axis)" is REFUTED, by direct read of
+    /// zenoh 1.5.0 rather than by argument: `Session::handle_query`
+    /// applies `(queryable.complete || target != AllComplete)`
+    /// UNCONDITIONALLY — its `local` flag gates only the LOCALITY leg —
+    /// and the SessionLocal call site passes the caller's real target,
+    /// not a default. So the selection axis exists on a single host:
+    /// `AllComplete` means "only queryables that declared themselves
+    /// complete", which is a property of the queryable, not of the
+    /// topology.
+    ///
+    /// wz still drops target on the loopback leg
+    /// (`build_loopback_query` trims it), so an `AllComplete` local
+    /// query fires every matching queryable, complete or not. That is a
+    /// KNOWN divergence carried by the `query-target` atom (PARTIAL),
+    /// not a design decision — do not re-derive it from this field's
+    /// old comment.
     pub target: Option<QueryTarget>,
-    /// Reply consolidation hint propagated to the peer. `None`
-    /// (default) elides → zenoh-pico decodes
-    /// `Z_CONSOLIDATION_MODE_AUTO`. `Some(mode)` sets the Q_C flag
-    /// and emits the consolidation byte per
-    /// [`crate::session_glue::ConsolidationMode`]. Loopback ignores
-    /// consolidation (single-source replies have no duplicate to
-    /// fold).
+    /// Reply consolidation hint. `None` (default) elides → zenoh-pico
+    /// decodes `Z_CONSOLIDATION_MODE_AUTO`. `Some(mode)` sets the Q_C
+    /// flag and emits the consolidation byte per
+    /// [`crate::session_glue::ConsolidationMode`].
+    ///
+    /// R311y321 — RETRACTED: "Loopback ignores consolidation
+    /// (single-source replies have no duplicate to fold)". Both halves
+    /// were wrong. The mode is APPLIED on receive now (the
+    /// `ConsolidatingSink` decorator wraps the pending's sink, which
+    /// serves BOTH origins), and a single local queryable can perfectly
+    /// well answer one keyexpr with several versions — that is what a
+    /// `History::All` storage does, and it is the case consolidation
+    /// exists for. zenoh consolidates its own SessionLocal replies for
+    /// the same reason: they re-enter through the querying session's
+    /// reply path like any other.
     pub consolidation: Option<ConsolidationMode>,
     /// Optional Query-body payload — the querier's attached VALUE (with
     /// the optional `encoding` below). The Q_B codec landed R311y248

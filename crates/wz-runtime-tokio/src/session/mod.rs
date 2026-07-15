@@ -126,11 +126,25 @@ use crate::sync::Mutex;
 /// duplicated here.
 ///
 /// Only the queryable-observable Query-BODY slots are carried: `target` /
-/// `consolidation` / `timeout_ms` stay out of the loopback meta (a loopback
-/// queryable never inspects them — `target` / `timeout_ms` are Request-level
-/// exts a single-host fan-out has no relay to honour, and `consolidation` folds
-/// duplicate replies the single-source loopback cannot produce), so the trimmed
-/// meta also emits no discarded Request-level ext chain.
+/// `consolidation` / `timeout_ms` stay out of the loopback meta, so the trimmed
+/// meta also emits no discarded Request-level ext chain. Per slot, R311y321 —
+/// the pre-y321 rationale was one sentence and two thirds of it were wrong:
+///
+/// - `consolidation` — CORRECTLY absent, but NOT because "the single-source
+///   loopback cannot produce duplicate replies": it can, and that is the whole
+///   point of a `History::All` storage answering one keyexpr with N versions.
+///   It is absent because consolidation is a REQUESTER-side concern that the
+///   queryable never reads — it is applied by the `ConsolidatingSink` wrapping
+///   the pending's sink, which serves the loopback origin exactly as it serves
+///   the wire.
+/// - `timeout_ms` — correctly absent: the deadline is armed on the pending
+///   entry from the option directly, never through this body.
+/// - `target` — WRONGLY absent. The old text called it "a Request-level ext a
+///   single-host fan-out has no relay to honour"; zenoh's `handle_query` applies
+///   `(queryable.complete || target != AllComplete)` on its LOCAL path too, so
+///   the selection axis is real on one host. Dropping it here means an
+///   `AllComplete` loopback query fires incomplete queryables. Carried as the
+///   `query-target` atom's PARTIAL residual; not a design decision.
 ///
 /// The `rid = 0` / literal-id 0 envelope `build_request_query_with_meta` wraps
 /// the body in is discarded: the loopback rid + resolved keyexpr ride the
