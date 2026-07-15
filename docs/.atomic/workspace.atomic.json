@@ -1173,7 +1173,7 @@
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
       "decision_status": "active",
-      "intent": "Query domain catalog: 11 atomic features, all active toggles; 0 reserved. Impl axis (R311y315): 4 COMPLETE, 1 PARTIAL (query-consolidation, R311y296), 6 UNAUDITED.",
+      "intent": "Query domain catalog: 11 atomic features, all active toggles; 0 reserved. Impl-axis counts NOT restated here — the R311y315 line rotted within 3 rounds; derive via audit-catalog-status.sh --layer A3.",
       "rationale_bullets": [
         "Composable framework lens: each query capability is one atomic feature toggle.",
         "R307 wired 6 features; R311cj adds 3 (-attachment, -selector-parameters, -reply-err).",
@@ -1197,7 +1197,8 @@
         "query-reply-err cfg-off: ReplyEmitter::reply_err silent no-op (combined with -queryable gate).",
         "R311y314: prose said 10 atoms / query-source-info reserved; store says 11, all active.",
         "R311y315: QueryEvent + ReplyEmitter caveats above cite DEAD symbols (query_event module retired).",
-        "R311y315: query-reply-err gates the staged QueryReply::Err variant, not the trait seam alone."
+        "R311y315: query-reply-err gates the staged QueryReply::Err variant, not the trait seam alone.",
+        "R311y318: -target/-timeout COMPLETE; their gate was a bypassable pub field."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -64053,6 +64054,124 @@
         "UNPUSHED: y316 (8 commits) + y317. Nothing since y315 has been verified hosted."
       ]
     },
+    "Round 311y318": {
+      "decision_summary": "R311y318 -- read the leg y317 refused to tag on, and it turned out CORRECT, so\ntwo atoms are now COMPLETE and the round's real work was hosting the gate rather\nthan fixing anything. WHAT WAS ASKED: y317 closed a wire-observable hole\n(query-target / -consolidation / -timeout emitted their bytes on builds without\nthem) but declined to tag, because a tag needs both legs and the router leg was\nunread. y315's query-reply-err reason had flagged that routing-peer synthesizes a\nTimeout Err, so query-timeout might carry a router-side leg gated on the wrong\natom. WHAT THE READ FOUND: the opposite of a hole. These atoms have NO\nqueryable-seam leg by design -- QueryTarget appears nowhere in query.rs /\nquery_sink.rs and QueryView exposes neither accessor, because a target is a\nROUTING hint, not handler input. The consumers are two routers,\nlinkstate_forward (gated routing-peer) and router_forward (gated\nrouting-router-hat), reading through request_routing_context's ungated readers.\nNEITHER router file names any of the three atoms: 0 occurrences, measured. That\nis exactly R311y315's ruling -- gate the atom that OWNS the route -- and it is\nright: a relay must honour a peer's target/timeout regardless of whether THIS\nbuild can emit one, the same reason InboundReplyBody::Err must decode a foreign\nErr. So the legs are: EMIT gated on the atom (y317), CONSUME gated on the router\natom, and for query-timeout a THIRD leg -- the local deadline -- also gated on\nthe atom (y317). query-timeout is the atom with more than two legs, which is why\nthe obvious fix would have missed one. THE ROUND'S ACTUAL DELIVERABLE: y317's\ngate was LOCAL-ONLY. Layer C1j (the consumer-plane behaviour matrix that runs\nthe zget-reply-only subset) is absent from ci.yml, and no other hosted lane\ncomposes query-get WITHOUT the three atoms -- Layer C1's --workspace unifies them\nON, which cfg's all three NEGs out. So the fix was proven by falsification and\nthen guarded by nothing. The precedent settled it without my having to invent\nanything: the feature-gates job exists because R311y309 hosted C1bi + C1bj -- the\nPUBSUB-side gates of this exact shape -- and its comment states the rule\nverbatim: \"a gate that never runs hosted reports success by silence\". Layer C1bk\nis the query twin, hosted there. It compares the NEG test SET rather than a\ncount, because R311y315 shipped a gate whose CARRY pinned len() and a rename\npassed green; the set-comparison is itself falsified both ways (rename a guard ->\nred, cfg-elide one -> red). ALSO: the feature-gates job NAME enumerated its lanes\n(\"C1bi + C1bj\") and went stale the moment C1bk landed -- it names the genre now.\nAnd §5.9's intent carried \"4 COMPLETE / 1 PARTIAL / 6 UNAUDITED (R311y315)\",\nwhich this round made false; the counts are gone rather than updated.",
+      "changes_bullets": [
+        "run-ci.sh: NEW Layer C1bk -- the query pub-field NEG gates, set-compared",
+        "ci.yml: host C1bk in feature-gates; job name named a lane list, now a genre",
+        "store: query-target COMPLETE -- both legs read, emit gated, router owns consume",
+        "store: query-timeout COMPLETE -- three legs: emit, local deadline, relay consume",
+        "store: query-consolidation stays PARTIAL; only its emit-half bypass is closed",
+        "store §5.9: intent drops the impl-axis census; caveat records the two tags",
+        "querier.rs: retract \"a future R240+ sweep\" -- sweep_expired_queries exists"
+      ],
+      "verification_bullets": [
+        "router leg measured, not inferred: 0 occurrences of the 3 atoms in either router",
+        "C1bk falsified BOTH ways: rename a guard -> red; cfg-elide a guard -> red",
+        "C1bk green after restore; ci.yml parses, 3 layer steps in feature-gates",
+        "A3 re-derived: COMPLETE 41->43, UNAUDITED 69->67, truthfulness OK, census 3/0 new",
+        "wz-runtime-tokio 294 lib tests pass; fmt + check green",
+        "consolidation reason preserved byte-for-byte (3024 chars) then appended; probed 4 anchors",
+        "validate-workspace orphan +0, T3 warn 4; ledger entries 1324 -> 1325"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "carry_forward_bullets": [
+        "NOT EARNED, do not read the tags wider than they are: query-target/-timeout are",
+        "COMPLETE on the atom's OWN legs. Neither tag says the ROUTER's honouring of the",
+        "hint is correct -- that is routing-peer / routing-router-hat's tag, unread here.",
+        "If someone later audits routing-peer, the target fan-out selection",
+        "(select_best_matching, the All / AllComplete arms) is its evidence, not this",
+        "atom's.",
+        "NEXT: §5.9 has 4 UNAUDITED left -- query-attachment, -get, -queryable,",
+        "-selector-parameters. -attachment and -selector-parameters are the cheap pair:",
+        "both already have a drop proof in query::request_decode_isolation_tests AND their",
+        "TX threading is cfg-gated in session-core (they forward, so the TX SSOT can name",
+        "them) -- so the pub-field bypass class CANNOT apply to them. Verify that claim",
+        "rather than trusting this sentence; it is the same reasoning that made -target",
+        "look safe.",
+        "OPEN, unmeasured: pubsub-priority / -express / -congestion-control gate ZERO code",
+        "(grep for their cfg = 0 hits); they only imply pubsub-qos and every setter gates",
+        "on pubsub-qos. Either a correct alias shape or three atoms whose claims are",
+        "unearned. Measure the split; do not assume.",
+        "UNPAID, carried: (a) 20 of feature_inventory's 51 store sections are TITLE-ONLY",
+        "(§1-§4, §7-§9, §5.21/22/24-27); the markdown is the ONLY copy of §1-§4 and a store",
+        "carry row already admits it (\"populate atomic fields for 39 outline-only",
+        "sub-sections\"), contradicting CLAUDE.md's \"migration completed at Round 27\" for",
+        "this doc. (b) 3 wz-session-core tests FAIL (not skip) under query-queryable",
+        "without keyexpr-wildcard-single/-double; PRE-EXISTING, stash-verified. (c) the 3",
+        "domain_census CARRY rows (routing 9 / storage 13 / transport 5) are \"not yet",
+        "established\" -- audit them; never invent a reason to silence one, and never",
+        "invent one either (y316 shipped a fabricated debt). (d) y314's three: the FNO",
+        "alias vehicle cross-check script, the wz_priority_to_pico_zsub keep-or-delete",
+        "call, the force-enable set script.",
+        "CI: ~51 local-only C1* lanes remain. C1bk is the 3rd gate hosted via the",
+        "feature-gates parallel job; that job is the template for paying the rest down",
+        "without touching the `ci` job's 26m/30m + no-disk-headroom ceilings.",
+        "UNPUSHED AND UNVERIFIED HOSTED: y316 + y317 + y318, ~14 commits. Nothing since",
+        "y315 has seen a hosted run. C1bk itself has never run hosted -- it is a NEW lane,",
+        "so its first hosted execution is unproven. A green local gate is not a green gate."
+      ],
+      "publishable_decision_summary": "R311y318 -- read the leg y317 refused to tag on, and it turned out CORRECT, so\ntwo atoms are now COMPLETE and the round's real work was hosting the gate rather\nthan fixing anything. WHAT WAS ASKED: y317 closed a wire-observable hole\n(query-target / -consolidation / -timeout emitted their bytes on builds without\nthem) but declined to tag, because a tag needs both legs and the router leg was\nunread. y315's query-reply-err reason had flagged that routing-peer synthesizes a\nTimeout Err, so query-timeout might carry a router-side leg gated on the wrong\natom. WHAT THE READ FOUND: the opposite of a hole. These atoms have NO\nqueryable-seam leg by design -- QueryTarget appears nowhere in query.rs /\nquery_sink.rs and QueryView exposes neither accessor, because a target is a\nROUTING hint, not handler input. The consumers are two routers,\nlinkstate_forward (gated routing-peer) and router_forward (gated\nrouting-router-hat), reading through request_routing_context's ungated readers.\nNEITHER router file names any of the three atoms: 0 occurrences, measured. That\nis exactly R311y315's ruling -- gate the atom that OWNS the route -- and it is\nright: a relay must honour a peer's target/timeout regardless of whether THIS\nbuild can emit one, the same reason InboundReplyBody::Err must decode a foreign\nErr. So the legs are: EMIT gated on the atom (y317), CONSUME gated on the router\natom, and for query-timeout a THIRD leg -- the local deadline -- also gated on\nthe atom (y317). query-timeout is the atom with more than two legs, which is why\nthe obvious fix would have missed one. THE ROUND'S ACTUAL DELIVERABLE: y317's\ngate was LOCAL-ONLY. Layer C1j (the consumer-plane behaviour matrix that runs\nthe zget-reply-only subset) is absent from ci.yml, and no other hosted lane\ncomposes query-get WITHOUT the three atoms -- Layer C1's --workspace unifies them\nON, which cfg's all three NEGs out. So the fix was proven by falsification and\nthen guarded by nothing. The precedent settled it without my having to invent\nanything: the feature-gates job exists because R311y309 hosted C1bi + C1bj -- the\nPUBSUB-side gates of this exact shape -- and its comment states the rule\nverbatim: \"a gate that never runs hosted reports success by silence\". Layer C1bk\nis the query twin, hosted there. It compares the NEG test SET rather than a\ncount, because R311y315 shipped a gate whose CARRY pinned len() and a rename\npassed green; the set-comparison is itself falsified both ways (rename a guard ->\nred, cfg-elide one -> red). ALSO: the feature-gates job NAME enumerated its lanes\n(\"C1bi + C1bj\") and went stale the moment C1bk landed -- it names the genre now.\nAnd §5.9's intent carried \"4 COMPLETE / 1 PARTIAL / 6 UNAUDITED (R311y315)\",\nwhich this round made false; the counts are gone rather than updated.",
+      "publishable_changes_bullets": [
+        "run-ci.sh: NEW Layer C1bk -- the query pub-field NEG gates, set-compared",
+        "ci.yml: host C1bk in feature-gates; job name named a lane list, now a genre",
+        "store: query-target COMPLETE -- both legs read, emit gated, router owns consume",
+        "store: query-timeout COMPLETE -- three legs: emit, local deadline, relay consume",
+        "store: query-consolidation stays PARTIAL; only its emit-half bypass is closed",
+        "store §5.9: intent drops the impl-axis census; caveat records the two tags",
+        "querier.rs: retract \"a future R240+ sweep\" -- sweep_expired_queries exists"
+      ],
+      "publishable_verification_bullets": [
+        "router leg measured, not inferred: 0 occurrences of the 3 atoms in either router",
+        "C1bk falsified BOTH ways: rename a guard -> red; cfg-elide a guard -> red",
+        "C1bk green after restore; ci.yml parses, 3 layer steps in feature-gates",
+        "A3 re-derived: COMPLETE 41->43, UNAUDITED 69->67, truthfulness OK, census 3/0 new",
+        "wz-runtime-tokio 294 lib tests pass; fmt + check green",
+        "consolidation reason preserved byte-for-byte (3024 chars) then appended; probed 4 anchors",
+        "validate-workspace orphan +0, T3 warn 4; ledger entries 1324 -> 1325"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "publishable_carry_forward_bullets": [
+        "NOT EARNED, do not read the tags wider than they are: query-target/-timeout are",
+        "COMPLETE on the atom's OWN legs. Neither tag says the ROUTER's honouring of the",
+        "hint is correct -- that is routing-peer / routing-router-hat's tag, unread here.",
+        "If someone later audits routing-peer, the target fan-out selection",
+        "(select_best_matching, the All / AllComplete arms) is its evidence, not this",
+        "atom's.",
+        "NEXT: §5.9 has 4 UNAUDITED left -- query-attachment, -get, -queryable,",
+        "-selector-parameters. -attachment and -selector-parameters are the cheap pair:",
+        "both already have a drop proof in query::request_decode_isolation_tests AND their",
+        "TX threading is cfg-gated in session-core (they forward, so the TX SSOT can name",
+        "them) -- so the pub-field bypass class CANNOT apply to them. Verify that claim",
+        "rather than trusting this sentence; it is the same reasoning that made -target",
+        "look safe.",
+        "OPEN, unmeasured: pubsub-priority / -express / -congestion-control gate ZERO code",
+        "(grep for their cfg = 0 hits); they only imply pubsub-qos and every setter gates",
+        "on pubsub-qos. Either a correct alias shape or three atoms whose claims are",
+        "unearned. Measure the split; do not assume.",
+        "UNPAID, carried: (a) 20 of feature_inventory's 51 store sections are TITLE-ONLY",
+        "(§1-§4, §7-§9, §5.21/22/24-27); the markdown is the ONLY copy of §1-§4 and a store",
+        "carry row already admits it (\"populate atomic fields for 39 outline-only",
+        "sub-sections\"), contradicting CLAUDE.md's \"migration completed at Round 27\" for",
+        "this doc. (b) 3 wz-session-core tests FAIL (not skip) under query-queryable",
+        "without keyexpr-wildcard-single/-double; PRE-EXISTING, stash-verified. (c) the 3",
+        "domain_census CARRY rows (routing 9 / storage 13 / transport 5) are \"not yet",
+        "established\" -- audit them; never invent a reason to silence one, and never",
+        "invent one either (y316 shipped a fabricated debt). (d) y314's three: the FNO",
+        "alias vehicle cross-check script, the wz_priority_to_pico_zsub keep-or-delete",
+        "call, the force-enable set script.",
+        "CI: ~51 local-only C1* lanes remain. C1bk is the 3rd gate hosted via the",
+        "feature-gates parallel job; that job is the template for paying the rest down",
+        "without touching the `ci` job's 26m/30m + no-disk-headroom ceilings.",
+        "UNPUSHED AND UNVERIFIED HOSTED: y316 + y317 + y318, ~14 commits. Nothing since",
+        "y315 has seen a hosted run. C1bk itself has never run hosted -- it is a NEW lane,",
+        "so its first hosted execution is unproven. A green local gate is not a green gate."
+      ]
+    },
     "Round 311y32": {
       "decision_summary": "R311y32 -- Zephyr Z3 (platform-zephyr ACTIVE flip; the LAST RTOS port completes). A genuine cfg(feature='platform-zephyr') site in crates/wz/src/lib.rs (pub use wz_runtime_zephyr as runtime_zephyr) promotes platform-zephyr reserved->active -- same target_os rationale as platform-freertos R311y28 (target_os=none cannot split a Zephyr deploy from bare-metal on thumbv7m, so the RTOS is an opt-in cfg knob, not target_os-routed). The wz facade gains an optional wz-runtime-zephyr dep + platform-zephyr=['dep:wz-runtime-zephyr'] (was '= []') + the runtime-tokio+platform-zephyr compile_error guard (the R311y30 lib.rs comment prereserved it; the illegal AP+MCU combo is now unrepresentable). deploy/zephyr-app rewired to consume wz::runtime_zephyr (direct wz-runtime-zephyr dep dropped), mirroring R311y28's mcu-freertos-demo rewire -- the deploy proves the gate (Layer Qz still boots PASS; guard negative-tested). Inventory reserved->active + §5.14 updated (2 active / 5 reserved; R311y28 history preserved). A3 active 96->97, consistent (active <=> >=1 cfg site). Cooperative single-task profile honesty (=pico Z_FEATURE_MULTI_THREAD=0); native multi-task re-openable. validate orphan new=+0, T3 warn unchanged. Zephyr track COMPLETE (Z1 y29 + y30 + Z2 y31 + Z3 y32); FreeRTOS + Zephyr = both RTOS ports done.",
       "changes_bullets": [
@@ -73487,7 +73606,7 @@
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "crates/wz-runtime-tokio/src/query.rs ConsolidationMode",
-      "reason": "PARTIAL: F=None/Monotonic/Latest/Auto enum; P=zenoh ConsolidationMode; C=Q_C wire-ext emit ONLY. R311y296 corrected the prior C=indep reply dedup (wz applies NO client-side consolidation). R311y298 DESIGN review corrects R311y296's own framing, which overstated: \"the apply gap is the DEFAULT get path\" is true of PICO, NOT of wz. wz has no Auto variant and QueryOptions.consolidation defaults to None=no-consolidation (querier.rs:76, tests.rs:1488), so a wz Rust caller that never sets a mode is UNAFFECTED; only an explicit with_consolidation(Latest) is a no-op (wz-rest/src/bridge.rs:140-146 is the sole in-tree such caller, and it wants the fix). capi-pico IS affected on its default path because it resolves AUTO->LATEST itself (get.rs:729-736) before calling with_consolidation. Making wz's None mean AUTO is a SEPARATE decision, NOT part of the apply-half, and it is unsafe today: it would silently collapse ext-pubsub-advanced-recovery's _sn-range GETs (advanced_subscriber.rs:909/1003/1050) from N samples to one-per-keyexpr; pico needs an explicit opt-out for exactly this (~/zenoh-pico/src/api/advanced_subscriber.c:915) that wz has not written. active is correct on the A3 invariant (the Q_C ext is a real cfg knob; 8 cfg sites). R311y299 widened the A3 grammar -- tag->status is now a RELATION, so PARTIAL is legal on an active atom -- and this atom is the FIRST tagged under it, code-verified rather than transcribed: transmit = request_build.rs:75 emits the Q_C ext (bit 5 _Z_FLAG_Z_Q_C), apply = zero ConsolidatingSink/consolidat hits in reply_sink.rs. The prior '>=7 active atoms are in the same position' was a PROSE ESTIMATE; R311y299 replaced it with a counted UNAUDITED remainder (131 active atoms still untagged), each of which must be earned by a code read, not by transcribing this reason's siblings. Apply-half plan (3 increments): R1 a ReplyView timestamp seam (the wire decode has it and discards it at reply.rs:536; standalone value -- closes the booked gap at advanced_subscriber.rs:930-938; without it LATEST is not undefined but SILENTLY LOSSY, since absent ts reads 0 and pico's 0<=0 drops); R2 pin the advanced-subscriber GETs to None; R3 an alloc-gated ConsolidatingSink<S: ReplySink> DECORATOR in wz-session-core reply_sink.rs -- NOT a Pending cache field -- riding the R311gb-3c DIP seam whose fire_final_for already computes pico's exact flush point, so Pending stays byte-identical and no-alloc pays zero. no-alloc LATEST is a NAMED non-divergence: pico's cache is unbounded heap (collections/list.c:262) so there is nothing to port, and D=1 needs 8.9KB inline against thumbv6m's 16KB SRAM. MONOTONIC is NOT a gap (pico's drop flag gates only its cache, never the callback -- observably identical to NONE; do not \"fix\" it, and storage_aligner_service.rs:401-403 has a comment that will mislead the implementer into breaking the aligner). Timeout: pico DISCARDS the cache, zenoh flushes + synthesizes Err(Timeout) -- a real upstream divergence to decide, not assume. Close: both discard."
+      "reason": "PARTIAL: F=None/Monotonic/Latest/Auto enum; P=zenoh ConsolidationMode; C=Q_C wire-ext emit ONLY. R311y296 corrected the prior C=indep reply dedup (wz applies NO client-side consolidation). R311y298 DESIGN review corrects R311y296's own framing, which overstated: \"the apply gap is the DEFAULT get path\" is true of PICO, NOT of wz. wz has no Auto variant and QueryOptions.consolidation defaults to None=no-consolidation (querier.rs:76, tests.rs:1488), so a wz Rust caller that never sets a mode is UNAFFECTED; only an explicit with_consolidation(Latest) is a no-op (wz-rest/src/bridge.rs:140-146 is the sole in-tree such caller, and it wants the fix). capi-pico IS affected on its default path because it resolves AUTO->LATEST itself (get.rs:729-736) before calling with_consolidation. Making wz's None mean AUTO is a SEPARATE decision, NOT part of the apply-half, and it is unsafe today: it would silently collapse ext-pubsub-advanced-recovery's _sn-range GETs (advanced_subscriber.rs:909/1003/1050) from N samples to one-per-keyexpr; pico needs an explicit opt-out for exactly this (~/zenoh-pico/src/api/advanced_subscriber.c:915) that wz has not written. active is correct on the A3 invariant (the Q_C ext is a real cfg knob; 8 cfg sites). R311y299 widened the A3 grammar -- tag->status is now a RELATION, so PARTIAL is legal on an active atom -- and this atom is the FIRST tagged under it, code-verified rather than transcribed: transmit = request_build.rs:75 emits the Q_C ext (bit 5 _Z_FLAG_Z_Q_C), apply = zero ConsolidatingSink/consolidat hits in reply_sink.rs. The prior '>=7 active atoms are in the same position' was a PROSE ESTIMATE; R311y299 replaced it with a counted UNAUDITED remainder (131 active atoms still untagged), each of which must be earned by a code read, not by transcribing this reason's siblings. Apply-half plan (3 increments): R1 a ReplyView timestamp seam (the wire decode has it and discards it at reply.rs:536; standalone value -- closes the booked gap at advanced_subscriber.rs:930-938; without it LATEST is not undefined but SILENTLY LOSSY, since absent ts reads 0 and pico's 0<=0 drops); R2 pin the advanced-subscriber GETs to None; R3 an alloc-gated ConsolidatingSink<S: ReplySink> DECORATOR in wz-session-core reply_sink.rs -- NOT a Pending cache field -- riding the R311gb-3c DIP seam whose fire_final_for already computes pico's exact flush point, so Pending stays byte-identical and no-alloc pays zero. no-alloc LATEST is a NAMED non-divergence: pico's cache is unbounded heap (collections/list.c:262) so there is nothing to port, and D=1 needs 8.9KB inline against thumbv6m's 16KB SRAM. MONOTONIC is NOT a gap (pico's drop flag gates only its cache, never the callback -- observably identical to NONE; do not \"fix\" it, and storage_aligner_service.rs:401-403 has a comment that will mislead the implementer into breaking the aligner). Timeout: pico DISCARDS the cache, zenoh flushes + synthesizes Err(Timeout) -- a real upstream divergence to decide, not assume. Close: both discard. R311y318 — the EMIT half's gate was BYPASSABLE until R311y317 and is now closed + hosted; the PARTIAL verdict is UNCHANGED, because the gap this tag names is the APPLY half and no amount of emit-gating touches it. QueryOptions.consolidation is a pub field and #[non_exhaustive] blocks only struct-literal construction, not assignment, so with the atom OFF a pub-field write put Q_C on the wire (measured: bytes 35,2) — the setter's body gate was never the enforcement point. The gate now sits on effective_consolidation(), the last hop that knows: query-consolidation is a wz-runtime-tokio TERMINAL feature with no wz-session-core forward, so the TX SSOT build_request_query_with_meta cannot name it (it gates the four slots that DO forward). Same shape R311y308/y309 closed on the push side. Proof: query_consolidation_pub_field_cannot_bypass_the_gate, hosted in Layer C1bk. The '8 cfg sites' count above predates y317 and will have moved — recount it rather than quoting it."
     },
     "query-get": {
       "status": "active",
@@ -73529,13 +73648,13 @@
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "crates/wz-runtime-tokio/src/query.rs QueryTarget",
-      "reason": "F=Best/All/AllComplete enum; P=zenoh QueryTarget; C=indep query routing knob"
+      "reason": "COMPLETE: F=the querier's reply-target hint (BestMatching / All / AllComplete) — the Q_T flag + target byte, Request ext TARGET_EXT_ID as a zint over the shared Z64 ext body; P=zenoh QueryTarget, pico's omit-on-BEST_MATCHING default (ext_target written only when != Z_QUERY_TARGET_BEST_MATCHING); C=cfg knob gating the EMIT decision only — the atom does not own the routing that consumes it. BOTH LEGS READ, R311y318: (1) EMIT — QueryOptions.target -> effective_target() -> QueryMetadata.target -> build_request_query_with_meta -> RequestQueryBuilder::request_target -> ext. Wire parity vs pico proven by build_request_query_with_target_emits_zenoh_pico_compatible_wire_bytes, and the ext ORDER by request_query_builder_request_qos_target_timeout_chain_order_matches_zenoh_pico. (2) CONSUME — the atom deliberately has NO queryable-seam leg: QueryTarget appears nowhere in query.rs / query_sink.rs and QueryView exposes no target accessor, because a target is a ROUTING hint, not handler input. Its consumers are the two routers — linkstate_forward (gated routing-peer) and router_forward (gated routing-router-hat, which pulls routing-peer) — which read it via request_routing_context::read_request_target and apply it to fan-out selection (select_best_matching / the QueryTarget::All + AllComplete arms). NEITHER router file names query-target: 0 occurrences in both, measured. That is CORRECT and must not be \"fixed\": a relay must honour a peer's target regardless of whether THIS build can emit one, exactly as R311y315 ruled for the router's Timeout Err — gate the atom that OWNS the route. WHAT R311y317 EARNED, and why the tag could not have been given before it: the emit gate was BYPASSABLE. QueryOptions.target is a pub field and #[non_exhaustive] blocks only struct-literal construction, not assignment onto a QueryOptions::get() value — so with the atom OFF, a pub-field write put Q_T on the wire (measured: bytes 52,2 and header 124->252). The gate had to move to the runtime layer because query-target is a wz-runtime-tokio TERMINAL feature with no wz-session-core forward, so the TX SSOT build_request_query_with_meta cannot name it — unlike query-value / -source-info / -attachment / -selector-parameters, whose threading IT gates. Same shape R311y308/y309 closed on the push side. PROOF: query_target_pub_field_cannot_bypass_the_query_target_gate (field path, y317) beside query_with_target_is_silent_noop_when_query_target_feature_disabled (setter path, pre-existing), both in the zget-reply-only subset. HOSTED as of R311y318: Layer C1bk in the feature-gates job, whose --list set-comparison is itself falsified both ways (rename a guard -> red; cfg-elide one -> red). Before that no hosted lane composed query-get WITHOUT this atom."
     },
     "query-timeout": {
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "crates/wz-runtime-tokio/src/query.rs timeout option",
-      "reason": "F=per-query deadline; P=zenoh GetOptions::timeout; C=indep client-side"
+      "reason": "COMPLETE: F=the querier's per-query timeout in ms — Request ext TIMEOUT_EXT_ID 0x06 (pico's _Z_MSG_EXT_ENC_ZINT | 0x06, network.c:150-155), a zint over the shared Z64 ext body; 0 is the elision sentinel per pico's _z_n_msg_request_needed_exts predicate (msg->_ext_timeout_ms != 0) AND the local never-expire sentinel; P=zenoh GetOptions::timeout, honoured by every relay hop (route_query: ext_timeout.unwrap_or(queries_default_timeout)); C=cfg knob gating this build's emit + its own deadline arming — not the sweep, and not the relay's. THREE LEGS READ, R311y318, because this atom is the one with more than two: (1) EMIT — QueryOptions.timeout_ms -> effective_timeout_ms() -> QueryMetadata.timeout_ms -> build_request_query_with_meta -> request_timeout_ms -> ext. Wire parity vs pico by build_request_query_with_timeout_ms_emits_zenoh_pico_compatible_wire_bytes; ext order by request_query_builder_request_qos_target_timeout_chain_order_matches_zenoh_pico. (2) LOCAL DEADLINE — the leg that nearly escaped: Session::query and the aliased get path compute deadline_ms straight off the option, NEVER through query_metadata, and hand it to ReplyRegistry::register_sink; Session::sweep_expired_queries then cancels the pending entry and drains a synthetic on_final. Both sites now read effective_timeout_ms (R311y317). The sweep itself is query-get-gated, correctly: it is inert when nothing arms a deadline, and it belongs to the registry, not to this atom. (3) RELAY CONSUME — request_routing_context::read_request_timeout_ms, consumed only by linkstate_forward (routing-peer) and router_forward (routing-router-hat) for THEIR pending deadline. Neither names query-timeout: 0 occurrences, measured. Correct per gate-the-atom-that-owns-the-route (R311y315) — a relay must honour a peer's timeout regardless of this build's emit capability. WHAT R311y317 EARNED: the gate was BYPASSABLE on BOTH local legs. timeout_ms is a pub field and #[non_exhaustive] does not block assignment, so with the atom OFF a pub-field write put the timeout ext on the wire (measured: 38,232,7 = varint 1000, header 124->252) AND armed the local deadline. THE TRAP, named because the obvious fix walks into it: gating only the wire threading fixes the bytes and leaves the deadline armed, with every wire-byte test GREEN — falsified by hand (revert only the deadline half: the wire assertion passes, the deadline assertion fails). That is why the gate is an accessor consumed by all three local readers, not a query_metadata-local cfg. RETRACTED: querier.rs claimed \"this setter is the only user surface that can flip timeout_ms above zero\" (false — the pub field is another; that claim is WHY the gate sat there alone) and called the sweep \"a future R240+\" one (it exists). PROOF: query_timeout_pub_field_cannot_bypass_the_query_timeout_gate asserts BOTH observables — the wire frame equals the bare baseline, AND next_reply_deadline_ms() is None. HOSTED as of R311y318 in Layer C1bk (feature-gates job); before that no hosted lane composed query-get WITHOUT this atom."
     },
     "query-value": {
       "status": "active",

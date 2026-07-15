@@ -110,11 +110,15 @@ pub struct QueryOptions {
     /// `z_query_source_info` decodes `eid: 77 sn: 88`).
     pub source_info: Option<SourceInfo>,
     /// Query timeout in milliseconds (`0` = default = use
-    /// `Z_GET_TIMEOUT_DEFAULT`). Used by a future R240+
-    /// ReplyRegistry-side timeout sweep that cancels the pending
-    /// entry and fires `on_final` synthetically when the deadline
-    /// passes without a peer Final. Loopback is synchronous so the
-    /// timeout never trips on the loopback branch.
+    /// `Z_GET_TIMEOUT_DEFAULT`). Loopback is synchronous so the timeout never
+    /// trips on the loopback branch.
+    ///
+    /// R311y317 — this said the sweep was "a future R240+" one. It is not
+    /// future: [`Session::sweep_expired_queries`] cancels the pending entry and
+    /// fires `on_final` synthetically once the deadline passes, and a relay hop
+    /// honours the wire ext through `read_request_timeout_ms`. Do NOT read this
+    /// field directly — [`QueryOptions::effective_timeout_ms`] is the gate; a
+    /// raw read is what let a `query-timeout`-off build arm the deadline.
     pub timeout_ms: u32,
 }
 
