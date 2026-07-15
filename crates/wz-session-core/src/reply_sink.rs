@@ -114,6 +114,22 @@ pub trait ReplyView {
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
         None
     }
+    /// R311y321 — the inline body timestamp (`MsgPut` / `MsgDel` T-flag
+    /// `_Z_FLAG_Z_*_T`) a Put or Del reply carried, or `None` for Err, for a
+    /// reply that carried none, or when `pubsub-timestamp` is off (the decode
+    /// is gated on both the wire and loopback legs).
+    ///
+    /// What a `Latest` / `Monotonic` consolidating querier orders versions by.
+    /// Without it consolidation is not undefined but SILENTLY LOSSY: an absent
+    /// stamp reads as 0 and pico's `0 <= 0` comparison drops the sample.
+    ///
+    /// Default `None` so impls predating the seam stay valid. `alloc`-gated —
+    /// [`crate::sample::TimestampHint`] lives in the `alloc`-gated `sample`
+    /// module — exactly like [`Self::source_info`].
+    #[cfg(feature = "alloc")]
+    fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
+        None
+    }
 }
 
 /// A [`ReplyView`] over loose borrowed fields — the canonical impl for a

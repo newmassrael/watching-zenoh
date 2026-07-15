@@ -185,8 +185,15 @@ pub enum InboundReplyBody {
     /// Successful data reply — `MsgPut` inner body. Payload bytes
     /// flow through verbatim. The `attachment` + `encoding` side-bands on
     /// the MsgPut envelope are surfaced (A8b — the receive twin of the A8a
-    /// emit seam); the timestamp side-band is still not surfaced here (the
-    /// aligner orders by the metadata in the attachment, not a reply ts).
+    /// emit seam).
+    ///
+    /// R311y321 — the `timestamp` side-band is surfaced too. The prior text
+    /// here read "still not surfaced (the aligner orders by the metadata in
+    /// the attachment, not a reply ts)": true of the aligner, but it was a
+    /// statement about ONE consumer standing in for the field's whole
+    /// contract. wz already EMITS a reply timestamp (`gated_reply_timestamp`,
+    /// response_build.rs), so dropping it on receive made `pubsub-timestamp`
+    /// send-only on the reply leg while the push leg carried both directions.
     Put {
         /// The reply value bytes.
         payload: Vec<u8>,
@@ -208,6 +215,12 @@ pub enum InboundReplyBody {
         /// advanced-recovery subscriber re-keys / reorders a recovered
         /// (retransmitted) sample by.
         source_info: Option<crate::sample::SourceInfo>,
+        /// R311y321 — the inline `MsgPut` timestamp (T-flag `_Z_FLAG_Z_P_T`),
+        /// or `None` when the reply carried none or `pubsub-timestamp` is off
+        /// (the decode is gated, mirroring the reply emit seam). What a
+        /// `Latest` / `Monotonic` consolidating querier orders versions by, and
+        /// what a `History::All` storage stamps each replied version with.
+        timestamp: Option<crate::sample::TimestampHint>,
     },
     /// Delete-keyexpr reply — `MsgDel` inner body. Carries no payload bytes
     /// (the wire-form `MsgDel` body has only a header + optional timestamp +
@@ -220,6 +233,11 @@ pub enum InboundReplyBody {
         /// inner-body source_info ext (id 0x01), or `None` when the reply had
         /// no source_info or `reply-source-info` is off.
         source_info: Option<crate::sample::SourceInfo>,
+        /// R311y321 — the inline `MsgDel` timestamp (T-flag `_Z_FLAG_Z_D_T`).
+        /// Mirrors the Put arm: the wire-form `MsgDel` body carries an optional
+        /// timestamp of its own, and a consolidating querier must order a
+        /// tombstone against the Put versions it competes with.
+        timestamp: Option<crate::sample::TimestampHint>,
     },
     /// Error reply — `Response.Err` arm. `encoding` mirrors the wire
     /// `Encoding { packed_id, schema_len, schema }` minus the
@@ -308,9 +326,18 @@ impl ReplyView for InboundReply {
     }
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
         match &self.body {
-            InboundReplyBody::Put { source_info, .. } | InboundReplyBody::Del { source_info } => {
-                source_info.as_ref()
+            InboundReplyBody::Put { source_info, .. }
+            | InboundReplyBody::Del { source_info, .. } => source_info.as_ref(),
+            InboundReplyBody::Err { .. } => None,
+        }
+    }
+    fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
+        match &self.body {
+            InboundReplyBody::Put { timestamp, .. } | InboundReplyBody::Del { timestamp, .. } => {
+                timestamp.as_ref()
             }
+            // An Err reply has no inline push body, so no T-flag slot exists to
+            // carry a stamp — the Err arm mirrors `source_info`'s.
             InboundReplyBody::Err { .. } => None,
         }
     }
@@ -334,9 +361,11 @@ impl InboundReply {
                     .put_encoding()
                     .map(|(id, schema)| (id, schema.map(String::from))),
                 source_info: view.source_info().cloned(),
+                timestamp: view.timestamp().cloned(),
             },
             ReplyKind::Del => InboundReplyBody::Del {
                 source_info: view.source_info().cloned(),
+                timestamp: view.timestamp().cloned(),
             },
             ReplyKind::Err => InboundReplyBody::Err {
                 encoding: view
@@ -412,6 +441,28 @@ fn loopback_put_source_info(
     }
 }
 
+/// R311y321 — gate a loopback reply's staged timestamp on the SAME
+/// `pubsub-timestamp` feature the wire decode uses, so a SessionLocal reply
+/// surfaces the same version stamp a wire (Remote) reply would (and with the
+/// gate off neither carries one). The timestamp twin of
+/// [`loopback_put_source_info`]. Serves the Put AND Del arms — the staged
+/// [`QueryReply::Reply`] holds one `timestamp` slot regardless of body arm,
+/// exactly as it holds one `source_info` slot.
+#[cfg(all(feature = "query-queryable", feature = "alloc"))]
+fn loopback_reply_timestamp(
+    timestamp: Option<crate::sample::TimestampHint>,
+) -> Option<crate::sample::TimestampHint> {
+    #[cfg(feature = "pubsub-timestamp")]
+    {
+        timestamp
+    }
+    #[cfg(not(feature = "pubsub-timestamp"))]
+    {
+        let _ = timestamp;
+        None
+    }
+}
+
 /// A8b — extract an inbound Put reply's body attachment (push-body ext id
 /// 0x03) for the [`InboundReplyBody::Put`] slot, gated on `pubsub-attachment`
 /// (the wire policy: with the gate off the reply carries no attachment,
@@ -474,6 +525,45 @@ fn reply_body_source_info(
     }
 }
 
+/// R311y321 — extract an inbound reply BODY's inline timestamp (the `MsgPut` /
+/// `MsgDel` T-flag field `_Z_FLAG_Z_*_T` 0x20) for the
+/// [`InboundReplyBody::Put`] / [`InboundReplyBody::Del`] slot. The timestamp is
+/// an inline body field on BOTH arms (not an ext), so — like
+/// [`reply_body_source_info`] — ONE helper serves both; it takes the decoded
+/// field rather than the ext chain.
+///
+/// Gated on `pubsub-timestamp`, the same knob that gates every other leg of the
+/// field: WIRE send (`gated_timestamp_field`, push_build.rs), WIRE push receive
+/// (`dispatch_push`'s Put / Del arms, pubsub.rs), LOOPBACK (`gated_timestamp`,
+/// publish_common.rs) and REPLY send (`gated_reply_timestamp`,
+/// response_build.rs). Reply RECEIVE was the one leg that did not exist: the
+/// atom could EMIT a reply timestamp and never observe one, so a `History::All`
+/// storage's per-version stamps (zenoh `q.reply(..).timestamp(entry.timestamp)`)
+/// were dropped on arrival. Reuses the [`crate::sample::TimestampHint::from_codec`]
+/// projection SSOT — the same one `dispatch_push` uses on the push receive leg.
+#[cfg(all(
+    feature = "codec-response",
+    feature = "alloc",
+    any(
+        feature = "pubsub-put",
+        feature = "pubsub-delete",
+        feature = "query-reply"
+    )
+))]
+fn reply_body_timestamp(
+    ts: Option<&wz_codecs::timestamp::TimestampOwned>,
+) -> Option<crate::sample::TimestampHint> {
+    #[cfg(feature = "pubsub-timestamp")]
+    {
+        ts.map(crate::sample::TimestampHint::from_codec)
+    }
+    #[cfg(not(feature = "pubsub-timestamp"))]
+    {
+        let _ = ts;
+        None
+    }
+}
+
 /// A8b — extract an inbound Put reply's value encoding (E-flag) in the
 /// `(packed_id, schema)` shape the [`InboundReplyBody::Put`] slot mirrors
 /// from the Err arm, gated on `pubsub-encoding`.
@@ -529,11 +619,16 @@ impl From<QueryReply> for InboundReply {
                 keyexpr_literal,
                 body,
                 encoding,
-                // The timestamp side-band is still not surfaced on receive
-                // (out of scope — the aligner orders by the metadata in the
-                // attachment, not a reply T-flag); responder is envelope-level
-                // identity the AP consumer surface does not expose either way.
-                timestamp: _,
+                // R311y321 — the timestamp side-band IS surfaced now, through
+                // `loopback_reply_timestamp`, matching the wire decode's
+                // `reply_body_timestamp`. The prior text here read "out of
+                // scope — the aligner orders by the metadata in the
+                // attachment, not a reply T-flag": that was one consumer's
+                // needs standing in for the field's contract, and it left the
+                // loopback path unable to represent what the wire path emits.
+                timestamp,
+                // responder is envelope-level identity the AP consumer surface
+                // does not expose either way.
                 responder: _,
                 attachment,
                 // R311y78 — surface the recovery source_info (id 0x01) onto the
@@ -554,12 +649,14 @@ impl From<QueryReply> for InboundReply {
                         attachment: loopback_put_attachment(attachment),
                         encoding: loopback_put_encoding(encoding),
                         source_info: loopback_put_source_info(source_info),
+                        timestamp: loopback_reply_timestamp(timestamp),
                     },
                     // R311y81 — a Del recovery reply re-keys via the same
                     // source_info the Put arm carries (the staged QueryReply
                     // holds it regardless of body arm), gated reply-source-info.
                     ReplyBody::Del => InboundReplyBody::Del {
                         source_info: loopback_put_source_info(source_info),
+                        timestamp: loopback_reply_timestamp(timestamp),
                     },
                 };
                 Self {
@@ -806,10 +903,16 @@ impl<C: ReplySink> ReplyRegistry<C> {
                     attachment: put_reply_attachment(put),
                     encoding: put_reply_encoding(put),
                     source_info: reply_body_source_info(put.extensions.as_ref()),
+                    // R311y321 — the reply RECEIVE leg of `pubsub-timestamp`.
+                    // The codec already decodes `MsgPutOwned.timestamp`; this
+                    // arm simply never read it, so every inbound reply stamp
+                    // was dropped on the floor.
+                    timestamp: reply_body_timestamp(put.timestamp.as_ref()),
                 },
                 #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => InboundReplyBody::Del {
                     source_info: reply_body_source_info(del.extensions.as_ref()),
+                    timestamp: reply_body_timestamp(del.timestamp.as_ref()),
                 },
                 // Default arm carries a runtime tag whose MID falls
                 // outside {MsgPut, MsgDel}. zenoh-pico's inner-body
@@ -1393,6 +1496,61 @@ mod tests {
     /// through `dispatch_response`, so the `InboundReply` surfaces the
     /// attachment (the storage aligner's `AlignmentReply` carrier) AND the
     /// value encoding. Proves emit and receive agree on the wire shape.
+    /// R311y321 — the reply RECEIVE leg of `pubsub-timestamp`. A reply built
+    /// with `ResponseReplyBuilder::timestamp` decodes back through
+    /// `dispatch_response`, so the `InboundReply` surfaces the stamp the peer
+    /// sent. Before y321 the emit leg existed (`gated_reply_timestamp`) and the
+    /// receive leg did NOT — wz could stamp a reply and never observe one, so a
+    /// `History::All` storage's per-version stamps were dropped on arrival and
+    /// `Latest` consolidation had nothing to order by. The timestamp twin of
+    /// [`dispatch_response_surfaces_put_attachment_and_encoding`]: it proves
+    /// emit and receive agree on the wire shape.
+    #[cfg(all(
+        feature = "codec-response",
+        feature = "pubsub-timestamp",
+        feature = "query-reply"
+    ))]
+    #[test]
+    fn dispatch_response_surfaces_put_timestamp() {
+        use crate::reply_sink::ReplyView;
+        use crate::response_build::ResponseReplyBuilder;
+        use crate::sample::TimestampHint;
+
+        let mut reg = ReplyRegistry::new();
+        let captured: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_cb = captured.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            move |reply| {
+                captured_cb
+                    .lock()
+                    .unwrap()
+                    .push(InboundReply::from_view(reply))
+            },
+            |_| {},
+        );
+
+        let ts = TimestampHint {
+            time: 0x0102_0304_0506_0708,
+            zid: alloc::vec![0xaa, 0xbb, 0xcc, 0xdd],
+        };
+        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"stored-value")
+            .timestamp(&ts)
+            .build()
+            .unwrap();
+        reg.dispatch_response(&resp, &HashMap::new());
+
+        let snapshot = captured.lock().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            snapshot[0].timestamp(),
+            Some(&ts),
+            "the peer's reply stamp must survive the wire decode"
+        );
+    }
+
     #[cfg(all(
         feature = "codec-response",
         feature = "pubsub-attachment",
@@ -1441,6 +1599,7 @@ mod tests {
                 attachment,
                 encoding,
                 source_info: _,
+                timestamp: _,
             } => {
                 assert_eq!(payload, b"stored-value");
                 assert_eq!(attachment.as_deref(), Some(&b"align-reply"[..]));
@@ -1647,6 +1806,7 @@ mod tests {
                 attachment,
                 encoding,
                 source_info: _,
+                timestamp: _,
             } => {
                 assert!(payload.is_empty(), "metadata-only reply: empty payload");
                 assert_eq!(
@@ -2031,6 +2191,7 @@ mod tests {
                 attachment: None,
                 encoding: None,
                 source_info: None,
+                timestamp: None,
             },
         };
         reg.deliver_local_reply(&inbound);
@@ -2059,7 +2220,10 @@ mod tests {
         let inbound = InboundReply {
             rid: 99,
             keyexpr_literal: "home/temp".to_string(),
-            body: InboundReplyBody::Del { source_info: None },
+            body: InboundReplyBody::Del {
+                source_info: None,
+                timestamp: None,
+            },
         };
         reg.deliver_local_reply(&inbound);
         assert_eq!(count.load(Ordering::SeqCst), 0);
@@ -2236,6 +2400,7 @@ mod tests {
                 attachment,
                 encoding,
                 source_info: _,
+                timestamp: _,
             } => {
                 assert_eq!(payload, b"value");
                 assert_eq!(attachment.as_deref(), Some(&b"align"[..]));
@@ -2262,7 +2427,13 @@ mod tests {
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 12);
         assert_eq!(inbound.keyexpr_literal, "sensors/b");
-        assert_eq!(inbound.body, InboundReplyBody::Del { source_info: None });
+        assert_eq!(
+            inbound.body,
+            InboundReplyBody::Del {
+                source_info: None,
+                timestamp: None,
+            }
+        );
         // responder is intentionally dropped in projection (loopback
         // mirrors the wire branch's information loss exactly — the
         // consumer InboundReply surface does not expose responder).
@@ -2823,6 +2994,89 @@ mod decode_isolation_tests {
             fired.load(Ordering::SeqCst),
             1,
             "inbound Reply(Err) still fires (Err arm is unconditional)"
+        );
+    }
+}
+
+/// R311y321 — the reply-plane twin of `pubsub.rs`'s
+/// `metadata_decode_isolation_tests`. With `query-reply` ON but
+/// `pubsub-timestamp` OFF, `dispatch_response`'s Put / Del arms must yield
+/// `None` for the stamp EVEN THOUGH the wire body carries one: the codec
+/// `MsgPut.timestamp` / `MsgDel.timestamp` fields are ungated (struct
+/// stability), so a foreign peer — zenoh and pico both stamp a `History::All`
+/// reply — can hand this build a stamp it never opted into. An un-gating
+/// regression would leak the field into the `InboundReply`.
+///
+/// The emit-side `gated_reply_timestamp` guard cannot catch that: it only
+/// proves what THIS build SENDS. Receive is the other half, and until y321 it
+/// did not exist at all — the arm never read the field, so there was nothing to
+/// gate and nothing to leak. Adding the receive leg is what makes this NEG
+/// load-bearing.
+///
+/// LANE: the run-ci C1d `--features codec-response,query-reply` arm builds
+/// exactly this profile (the reply plane with every metadata feature OFF) and
+/// was added with this module. The pre-y321 C1d arms are pubsub-plane only
+/// (`codec-push,pubsub-put` / `codec-push,pubsub-delete`), and NEITHER compiles
+/// `codec-response`, so without the new arm these tests would never run —
+/// a proof that never runs is not a proof.
+#[cfg(test)]
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-response",
+    feature = "query-reply",
+    not(feature = "pubsub-timestamp"),
+))]
+mod reply_timestamp_decode_isolation_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A wire `Response(Reply(Put))` carrying an inline timestamp (time +
+    /// 4-byte zid), hand-built because `ResponseReplyBuilder::timestamp` routes
+    /// through `gated_reply_timestamp` and would elide it in this profile. The
+    /// codec field is ungated, so this is constructible with the feature off —
+    /// which is precisely the foreign-peer shape being guarded.
+    fn stamped_put_response(rid: u64, keyexpr: &str) -> wz_codecs::response::ResponseOwned {
+        let zid = [0x01u8, 0x02, 0x03, 0x04];
+        let put = wz_codecs::msg_put::MsgPut {
+            timestamp: Some(wz_codecs::timestamp::Timestamp {
+                time: 0x0102_0304_0506_0708,
+                zid_len: zid.len() as u64,
+                zid: &zid,
+            }),
+            ..wz_codecs::msg_put::MsgPut::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        let mut resp =
+            crate::response_build::ResponseReplyBuilder::new(rid, 0, Some(keyexpr), b"v")
+                .build()
+                .unwrap();
+        if let wz_codecs::response::ResponseOwnedVariant::CodecZenohReply(reply) = &mut resp.body {
+            reply.body = wz_codecs::reply::ReplyOwnedVariant::CodecZenohMsgPut(put);
+        }
+        resp
+    }
+
+    #[test]
+    fn inbound_reply_timestamp_is_dropped_when_pubsub_timestamp_off() {
+        let mut reg = ReplyRegistry::new();
+        let seen: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        reg.register(
+            7,
+            1,
+            None,
+            move |reply| seen_cb.lock().unwrap().push(reply.timestamp().is_some()),
+            |_| {},
+        );
+
+        reg.dispatch_response(&stamped_put_response(7, "home/temp"), &HashMap::new());
+
+        let got = seen.lock().unwrap();
+        assert_eq!(got.len(), 1, "the reply itself must still be delivered");
+        assert!(
+            !got[0],
+            "pubsub-timestamp is OFF: the peer's stamp must not reach the InboundReply"
         );
     }
 }

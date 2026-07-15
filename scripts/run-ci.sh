@@ -2469,12 +2469,25 @@ layer_c1z_cargo_test_storage_driver() {
 # would escape CI. Layer F proves the OFF feature shrinks the binary;
 # these prove the OFF variant fires no subscriber callback while the ON
 # variant still dispatches.
+#
+# R311y321 — the 5th arm is the REPLY plane's metadata-OFF subset, the twin of
+# arms 3/4 for `reply::reply_timestamp_decode_isolation_tests`. Arms 1-4 are all
+# pubsub-plane: NONE of them enables `codec-response`, so none compiles
+# `dispatch_response` at all, and a reply-plane isolation guard placed in `mod
+# tests` would never run anywhere. `query-reply` (= `codec-response`) with every
+# `pubsub-*` metadata feature OFF is the profile that compiles the reply decode
+# arms while their timestamp gate is off. It mirrors `zget-reply-only` in
+# `_wz_consumer_plane_subsets` on the ONE axis this arm guards; it is not the
+# whole row (no `codec-response-final` / `query-get` — this arm dispatches a
+# Response directly and needs neither), so it is deliberately narrower rather
+# than a hand-copy that can silently diverge (the C1bk mistake, R311y319).
 layer_c1d_cargo_test_pubsub() {
     (cd crates \
         && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet \
         && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-encoding,pubsub-source-info,pubsub-priority,pubsub-congestion-control,pubsub-express --quiet \
         && cargo test -p wz-session-core --features codec-push,pubsub-put --quiet \
-        && cargo test -p wz-session-core --features codec-push,pubsub-delete --quiet)
+        && cargo test -p wz-session-core --features codec-push,pubsub-delete --quiet \
+        && cargo test -p wz-session-core --features codec-response,query-reply --quiet)
 }
 
 # ─── Layer C1bi — pubsub-qos: the merged QoS-byte gate (R311y307) ───────
