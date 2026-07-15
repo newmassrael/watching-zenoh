@@ -86,15 +86,17 @@
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
-// `Vec` is used only by the owned-attachment arms of `dispatch_push`
-// (`pubsub-put` / `pubsub-delete`); gate the import to that exact
-// condition so alloc-but-no-pubsub-put/delete subsets don't see an
-// unused import.
-#[cfg(all(
-    feature = "alloc",
-    any(feature = "pubsub-put", feature = "pubsub-delete")
-))]
-use alloc::vec::Vec;
+// R311y308 — `Vec` is NOT imported at module scope. Its production uses in
+// `dispatch_push` are fully qualified (`alloc::vec::Vec`, the form already
+// used by `own_zid` / `set_own_zid` below), because a module-scope import
+// would have to be gated on *which cfg arm happens to NAME the type* — the
+// `not(pubsub-attachment)` annotations name it, while the ON arm's
+// `.map(<[u8]>::to_vec)` does not, and only the `pubsub-delete` arm names
+// `Vec::new()`. The pre-y308 gate `any(pubsub-put, pubsub-delete)` encoded
+// that coupling WRONG (its comment claimed the opposite of the truth) and
+// broke `alloc + pubsub-put + pubsub-attachment` with an unused import —
+// a subset no lane built until Layer C1bj. Fully qualifying removes the
+// coupling rather than restating it in a longer cfg.
 
 #[cfg(feature = "alloc")]
 use hashbrown::HashMap;
@@ -680,7 +682,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     let body_attachment = decode_attachment_ext(body_exts, ATTACHMENT_EXT_ID_PUSH)
                         .map(<[u8]>::to_vec);
                     #[cfg(not(feature = "pubsub-attachment"))]
-                    let body_attachment: Option<Vec<u8>> = {
+                    let body_attachment: Option<alloc::vec::Vec<u8>> = {
                         let _ = body_exts;
                         None
                     };
@@ -746,7 +748,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     let body_attachment = decode_attachment_ext(body_exts, ATTACHMENT_EXT_ID_PUSH)
                         .map(<[u8]>::to_vec);
                     #[cfg(not(feature = "pubsub-attachment"))]
-                    let body_attachment: Option<Vec<u8>> = {
+                    let body_attachment: Option<alloc::vec::Vec<u8>> = {
                         let _ = body_exts;
                         None
                     };
@@ -759,7 +761,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     };
                     (
                         SampleKind::Del,
-                        Vec::new(),
+                        alloc::vec::Vec::new(),
                         body_timestamp,
                         None,
                         body_attachment,

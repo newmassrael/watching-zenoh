@@ -2499,6 +2499,36 @@ layer_c1bi_cargo_test_pubsub_qos() {
         && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --quiet -- -D warnings)
 }
 
+# ─── Layer C1bj — Push loopback metadata gates (R311y308) ──────────────
+#
+# `build_loopback_sample` threads PublishOptions' metadata into the loopback
+# Sample. Until y308 it copied all five fields UNGATED while the wire leg
+# gated each on its own feature, so a field written through the PUB FIELD
+# (the gated `with_*` setter is absent in these subsets, but
+# `#[non_exhaustive]` blocks only struct-literal construction, not field
+# assignment) reached a loopback subscriber in a build that never composed
+# the feature — falsifying the manifest's "Feature-off: nothing is set nor
+# written". Loopback-only / process-local; the wire leg was always correct.
+#
+# The `loopback_drops_*_when_feature_off` NEGs are `not(feature)`-gated, so
+# they compile ONLY in a subset that omits the feature. The default and
+# maximal lanes have every metadata feature ON, which cfg's all five OUT —
+# so without THIS lane they would never build and the gate would be unproven.
+# Each arm below omits exactly one metadata feature while keeping
+# pubsub-allow-loop (the compile precondition of build_loopback_sample), so
+# each NEG runs in exactly one arm. The final arm omits all of them at once
+# and also clippy-gates that subset.
+layer_c1bj_cargo_test_loopback_metadata_gates() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop,pubsub-encoding,pubsub-source-info,pubsub-attachment,pubsub-qos --lib loopback_drops_ --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop,pubsub-timestamp,pubsub-source-info,pubsub-attachment,pubsub-qos --lib loopback_drops_ --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop,pubsub-timestamp,pubsub-encoding,pubsub-attachment,pubsub-qos --lib loopback_drops_ --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop,pubsub-timestamp,pubsub-encoding,pubsub-source-info,pubsub-qos --lib loopback_drops_ --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop,pubsub-timestamp,pubsub-encoding,pubsub-source-info,pubsub-attachment --lib loopback_drops_ --quiet \
+        && test "$(cargo test -p wz-runtime-tokio --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --lib loopback_drops_ -- --list 2>/dev/null | grep -c ': test')" = "5" \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --quiet -- -D warnings)
+}
+
 # ─── Layer C1e — cargo test -p wz-session-core (query dispatch plane) ──
 #
 # R311dx: same shape as C1c/C1d. The migrated QueryableRegistry test
@@ -5821,6 +5851,7 @@ run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C1bg layer_c1bg_cargo_test_storage_backend_filesystem || overall=1
 run_layer C1bh layer_c1bh_cargo_test_storage_host_dir || overall=1
 run_layer C1bi layer_c1bi_cargo_test_pubsub_qos || overall=1
+run_layer C1bj layer_c1bj_cargo_test_loopback_metadata_gates || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1

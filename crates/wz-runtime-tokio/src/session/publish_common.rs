@@ -505,6 +505,54 @@ impl From<SendWireError> for PublishError {
     }
 }
 
+/// R311y308 — the per-field loopback gates. Each returns the staged value
+/// only when the SAME feature the wire path gates is composed, else `None`,
+/// so a `SessionLocal` publish surfaces exactly what a `Remote` one would.
+///
+/// Mirrors the already-correct Reply-side idiom
+/// (`wz_session_core::reply::loopback_put_attachment` / `loopback_put_encoding`),
+/// which the Push loopback never got: before y308 `build_loopback_sample`
+/// copied all five metadata fields UNGATED, so with e.g. `pubsub-timestamp`
+/// off a `PublishOptions.timestamp` written through the pub field (the
+/// gated `with_timestamp` setter is absent, but `#[non_exhaustive]` blocks
+/// only struct-literal construction, not field assignment) reached the
+/// loopback `Sample` — falsifying the manifest's "Feature-off: nothing is
+/// set nor written". The wire leg always dropped it correctly, so this was
+/// a loopback-only, process-local divergence, never a wire one.
+///
+/// With these gates the fields are INERT feature-off on BOTH legs: the wire
+/// path already gates at its three SSOT points (`gated_timestamp_field` /
+/// `gated_encoding_field` / `build_body_extensions`), and `push_metadata`
+/// plus this function are the only two consumers. `priority_band` also reads
+/// `qos` and stays deliberately ungated — that is the independent
+/// `transport-qos` conduit axis (R311y307).
+///
+/// NB the parity claim, stated as narrowly as the Reply-side model states
+/// its own: it is about the loopback CONTENT matching the wire content when
+/// both legs exist, not about which legs a given subset compiles.
+macro_rules! loopback_gated {
+    ($name:ident, $feat:literal, $ty:ty) => {
+        #[cfg(feature = "pubsub-allow-loop")]
+        fn $name(v: Option<$ty>) -> Option<$ty> {
+            #[cfg(feature = $feat)]
+            {
+                v
+            }
+            #[cfg(not(feature = $feat))]
+            {
+                let _ = v;
+                None
+            }
+        }
+    };
+}
+
+loopback_gated!(loopback_timestamp, "pubsub-timestamp", TimestampHint);
+loopback_gated!(loopback_encoding, "pubsub-encoding", EncodingHint);
+loopback_gated!(loopback_source_info, "pubsub-source-info", SourceInfo);
+loopback_gated!(loopback_attachment, "pubsub-attachment", Vec<u8>);
+loopback_gated!(loopback_qos, "pubsub-qos", QosLevel);
+
 /// R232 — shared loopback Sample assembly for
 /// [`Session::publish`](super::Session::publish) and
 /// [`Session::publish_aliased`](super::Session::publish_aliased).
@@ -513,6 +561,9 @@ impl From<SendWireError> for PublishError {
 /// attached to [`PublishOptions`] via `with_*` setters, and leaves the
 /// Del-encoding slot empty (zenoh-pico `_z_msg_del_t` carries no
 /// encoding so the loopback parity mirrors that wire constraint).
+///
+/// R311y308 — every metadata field now flows through its `loopback_*` gate
+/// above, so an un-composed field cannot reach the loopback Sample.
 ///
 /// Keeps the metadata-threading rules in one place so a future R232
 /// follow-up that adjusts the propagation policy (e.g. validating QoS
@@ -528,24 +579,24 @@ pub(super) fn build_loopback_sample(
         SampleKind::Del => Sample::new_del(keyexpr),
     };
     sample = sample.with_reliability(opts.reliability);
-    if let Some(ts) = opts.timestamp.clone() {
+    if let Some(ts) = loopback_timestamp(opts.timestamp.clone()) {
         sample = sample.with_timestamp(ts);
     }
     // Encoding is Put-only on the wire; mirror the constraint on
     // loopback so a caller mis-attaching encoding to a Del kind sees
     // the same "encoding=None" the wire path would project.
     if opts.kind == SampleKind::Put {
-        if let Some(enc) = opts.encoding.clone() {
+        if let Some(enc) = loopback_encoding(opts.encoding.clone()) {
             sample = sample.with_encoding(enc);
         }
     }
-    if let Some(si) = opts.source_info.clone() {
+    if let Some(si) = loopback_source_info(opts.source_info.clone()) {
         sample = sample.with_source_info(si);
     }
-    if let Some(att) = opts.attachment.clone() {
+    if let Some(att) = loopback_attachment(opts.attachment.clone()) {
         sample = sample.with_attachment(att);
     }
-    if let Some(qos) = opts.qos {
+    if let Some(qos) = loopback_qos(opts.qos) {
         sample = sample.with_qos(qos);
     }
     sample

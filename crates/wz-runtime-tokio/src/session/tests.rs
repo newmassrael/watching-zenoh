@@ -974,6 +974,88 @@ fn publish_options_with_metadata_setters_chain() {
     assert_eq!(opts.qos.unwrap().raw, 0b0001_1010);
 }
 
+// R311y308 — the loopback gate NEG. Each metadata field is written through the
+// PUB FIELD, deliberately bypassing the gated `with_*` setter that does not
+// exist in this subset (`#[non_exhaustive]` blocks struct-literal construction,
+// NOT field assignment — that is the exact back door y308 closed). Before y308
+// `build_loopback_sample` copied all five fields ungated, so each assertion
+// below was `Some(..)` in a build that never composed the feature, falsifying
+// the manifest's "Feature-off: nothing is set nor written". The wire leg always
+// dropped them; this was loopback-only, process-local.
+//
+// Each arm is `not(feature)`-gated, so it only compiles in a subset that omits
+// that feature — Layer C1bj drives those subsets. Without such a lane these
+// tests never build and the gate would be unproven [[a skip is green]].
+#[cfg(all(feature = "pubsub-allow-loop", not(feature = "pubsub-timestamp")))]
+#[test]
+fn loopback_drops_timestamp_when_feature_off() {
+    let mut opts = PublishOptions::put();
+    opts.timestamp = Some(crate::sample::TimestampHint {
+        time: 0x1122_3344_5566_7788,
+        zid: vec![0xAA],
+    });
+    let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
+    assert!(
+        s.timestamp.is_none(),
+        "pubsub-timestamp off: a pub-field-written timestamp must not reach the loopback Sample"
+    );
+}
+
+#[cfg(all(feature = "pubsub-allow-loop", not(feature = "pubsub-encoding")))]
+#[test]
+fn loopback_drops_encoding_when_feature_off() {
+    let mut opts = PublishOptions::put();
+    opts.encoding = Some(crate::sample::EncodingHint {
+        packed_id: 13,
+        schema: Some("application/json".into()),
+    });
+    let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
+    assert!(
+        s.encoding.is_none(),
+        "pubsub-encoding off: a pub-field-written encoding must not reach the loopback Sample"
+    );
+}
+
+#[cfg(all(feature = "pubsub-allow-loop", not(feature = "pubsub-source-info")))]
+#[test]
+fn loopback_drops_source_info_when_feature_off() {
+    let mut opts = PublishOptions::put();
+    opts.source_info = Some(crate::sample::SourceInfo::new(
+        &[0x01, 0x02, 0x03, 0x04],
+        7,
+        42,
+    ));
+    let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
+    assert!(
+        s.source_info.is_none(),
+        "pubsub-source-info off: a pub-field-written source_info must not reach the loopback Sample"
+    );
+}
+
+#[cfg(all(feature = "pubsub-allow-loop", not(feature = "pubsub-attachment")))]
+#[test]
+fn loopback_drops_attachment_when_feature_off() {
+    let mut opts = PublishOptions::put();
+    opts.attachment = Some(b"meta".to_vec());
+    let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
+    assert!(
+        s.attachment.is_none(),
+        "pubsub-attachment off: a pub-field-written attachment must not reach the loopback Sample"
+    );
+}
+
+#[cfg(all(feature = "pubsub-allow-loop", not(feature = "pubsub-qos")))]
+#[test]
+fn loopback_drops_qos_when_feature_off() {
+    let mut opts = PublishOptions::put();
+    opts.qos = Some(crate::sample::QosLevel::from_raw(0b0001_1010));
+    let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
+    assert!(
+        s.qos.is_none(),
+        "pubsub-qos off: a pub-field-written qos must not reach the loopback Sample"
+    );
+}
+
 #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
 #[test]
 fn publish_loopback_propagates_timestamp_to_sample() {

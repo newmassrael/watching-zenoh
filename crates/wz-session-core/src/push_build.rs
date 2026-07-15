@@ -32,18 +32,22 @@ use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
 use crate::metadata::PushMetadata;
 
-// `ExtEntryOwnedVariant` is named only by the source_info (ZBuf) and qos
-// (ZInt) construction branches; gate the import to their union so a
-// codec-push subset without those metadata features carries no unused
-// import.
 #[cfg(feature = "pubsub-source-info")]
 use crate::source_info_ext::encode_source_info_ext_entry;
-#[cfg(any(
-    feature = "pubsub-source-info",
-    feature = "pubsub-qos",
-    feature = "pubsub-qos",
-    feature = "pubsub-qos"
-))]
+// R311y308 — `ExtEntryOwnedVariant` is named by the QoS (ZInt) construction
+// branch ONLY, so the import follows `pubsub-qos` alone.
+//
+// The pre-y308 gate was `any(pubsub-source-info, <the QoS trio>)` with a
+// comment claiming source_info names the variant too. That went stale at
+// R311ek, which moved the source_info full-entry construction behind
+// `encode_source_info_ext_entry` (source_info now receives a finished
+// `ExtEntryOwned` and never names the variant). The stale union broke
+// `pubsub-source-info` ON + `pubsub-qos` OFF with an unused import — a
+// subset no lane built until Layer C1bj surfaced it. Same class as the
+// `alloc::vec::Vec` gate in `pubsub.rs`: an import gate that encodes
+// *which cfg arm happens to name a type* drifts the moment that arm is
+// refactored, and only an unbuilt subset pays.
+#[cfg(feature = "pubsub-qos")]
 use wz_codecs::ext_entry::ExtEntryOwnedVariant;
 #[cfg(feature = "pubsub-qos")]
 use wz_codecs::ext_zint::ExtZint;
