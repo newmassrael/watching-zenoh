@@ -2503,6 +2503,55 @@ layer_c1bi_cargo_test_pubsub_qos() {
         && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features transport-unicast,codec-push,pubsub-put,pubsub-allow-loop --quiet -- -D warnings)
 }
 
+# ─── Layer C1bk — Query pub-field gates (R311y317) ─────────────────────
+#
+# The QUERY twin of C1bj, three domains and nine rounds later. Same shape,
+# worse blast radius: on the push side y308's leak was loopback-only /
+# process-local, but here `query-target` / `-consolidation` / `-timeout` put
+# their bytes ON THE WIRE in a build that does not contain the atom — Q_T
+# (0x34), Q_C (0x23), the timeout ext (0x26) — because `QueryOptions`' fields
+# are `pub` and `#[non_exhaustive]` blocks only struct-literal construction,
+# not assignment. y317 moved the gate onto the `effective_*` accessors.
+#
+# Why these three and not their four siblings: `query-value` /
+# `-source-info` / `-attachment` / `-selector-parameters` forward to
+# same-named wz-session-core features, so the TX SSOT
+# (`build_request_query_with_meta`) gates them downstream and no pub-field
+# write survives. `query-target` / `-consolidation` / `-timeout` are
+# runtime-tokio TERMINAL features — session-core cannot name them — so the
+# runtime accessor is the last hop that knows, and this lane is its only
+# proof.
+#
+# The NEGs are `not(feature)`-gated, so they compile ONLY in a subset that
+# omits the atom. Every hosted lane has these features ON (Layer C1's
+# `--workspace` unifies them), which cfg's all three OUT — so without THIS
+# lane they never build and the gate is unproven [[a skip is green]]. The
+# subset is `zget-reply-only` from the `_wz_consumer_plane_subsets` SSOT.
+#
+# The `--list` assertion pins the SET, not a count: R311y315 shipped a gate
+# whose CARRY pinned `len()`, so a rename kept the number equal and a real
+# omission passed green. Three names, compared exactly.
+layer_c1bk_cargo_test_query_pub_field_gates() {
+    local base="transport-unicast,transport-link-tcp,session-unicast-open,session-unicast-accept,codec-frame,codec-keep-alive,codec-init-body,codec-open-body,codec-close,keyexpr-canon"
+    local feats="$base,codec-response,codec-response-final,query-get,query-reply"
+    local expected="query_consolidation_pub_field_cannot_bypass_the_gate
+query_target_pub_field_cannot_bypass_the_query_target_gate
+query_timeout_pub_field_cannot_bypass_the_query_timeout_gate"
+    local got
+    got=$(cd crates && cargo test -p wz-runtime-tokio --no-default-features \
+        --features "$feats" --lib pub_field -- --list 2>/dev/null \
+        | sed -n 's/^session::tests::\([a-z_]*\): test$/\1/p' | sort)
+    if [ "$got" != "$(printf '%s' "$expected" | sort)" ]; then
+        echo "  C1bk FAIL: the pub-field NEG set drifted (cfg elided a guard, or one was renamed)"
+        echo "    expected:"; printf '%s\n' "$expected" | sort | sed 's/^/      /'
+        echo "    got:";      printf '%s\n' "$got" | sed 's/^/      /'
+        return 1
+    fi
+    (cd crates \
+        && cargo test -p wz-runtime-tokio --no-default-features --features "$feats" --lib pub_field --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features "$feats" --quiet -- -D warnings)
+}
+
 # ─── Layer C1bj — Push loopback metadata gates (R311y308) ──────────────
 #
 # `build_loopback_sample` threads PublishOptions' metadata into the loopback
@@ -5879,6 +5928,7 @@ run_layer C1bg layer_c1bg_cargo_test_storage_backend_filesystem || overall=1
 run_layer C1bh layer_c1bh_cargo_test_storage_host_dir || overall=1
 run_layer C1bi layer_c1bi_cargo_test_pubsub_qos || overall=1
 run_layer C1bj layer_c1bj_cargo_test_loopback_metadata_gates || overall=1
+run_layer C1bk layer_c1bk_cargo_test_query_pub_field_gates || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1

@@ -881,13 +881,16 @@ jobs:
   # sweep, not on the hosted ci job. The Linux-only-ness is enforced at the
   # Cargo `[target.'cfg(...)']` layer, not by a hosted lane.
   feature-gates:
-    name: feature-gate lanes (C1bi + C1bj)
+    name: feature-gate NEG lanes (subsets no other job composes)
     runs-on: ubuntu-22.04
     # Its OWN runner, deliberately NOT the `ci` job. That job is at BOTH of
     # its ceilings: 26m22s against `timeout-minutes: 30`, and its own comment
     # above declares "THIS JOB HAS NO OTHER DISK HEADROOM" — every extra
     # feature-subset lane is a DISTINCT feature set and so a DISTINCT set of
-    # `crates/target` artifacts. C1bi + C1bj add 13 such subsets between them.
+    # `crates/target` artifacts. The lanes below add roughly a dozen such
+    # subsets between them. (R311y317: the job name used to enumerate its
+    # lanes as "C1bi + C1bj"; it went stale the moment C1bk landed, so it now
+    # names the genre. The step list below is the enumeration.)
     # Hanging them off `ci` would trade a real gate for a flaky timeout; a
     # parallel job costs runner minutes but zero critical-path wall clock.
     timeout-minutes: 30
@@ -926,6 +929,17 @@ jobs:
 
       - name: Layer C1bj — Push loopback metadata gates (R311y308)
         run: bash scripts/run-ci.sh --layer C1bj
+
+      # R311y317 — the QUERY twin of C1bj, hosted for the reason stated above
+      # and one degree worse: y308's push leak was loopback-only, but
+      # query-target / -consolidation / -timeout reached THE WIRE in builds
+      # without the atom. The lane was proven by falsification (cut the gate ->
+      # red) and its `--list` set-comparison is itself falsified both ways
+      # (rename a guard -> red; cfg-elide one -> red). Its subset composes
+      # query-get WITHOUT the three atoms, which no other hosted lane does:
+      # Layer C1's `--workspace` unifies them ON and cfg's all three NEGs out.
+      - name: Layer C1bk — Query pub-field gates (R311y317)
+        run: bash scripts/run-ci.sh --layer C1bk
 
   portability:
     name: portability (${{ matrix.os }})
