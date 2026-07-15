@@ -34,19 +34,22 @@
 //!
 //! ## Wildcard support (R311wt slice-1: aligner ext) + remaining divergences
 //!
-//! - **Wildcard actions — DECODED (slice-1), not yet PRODUCED/APPLIED.** zenoh's
+//! - **Wildcard actions — DECODED + APPLIED, still not PRODUCED.** zenoh's
 //!   `Action` has four variants — `Put`, `Delete`, `WildcardPut(ke)`,
 //!   `WildcardDelete(ke)` (log.rs:43-49) — because its storage applies wildcard
-//!   updates (a `put test/** 1` overriding a whole subtree). R311wt slice-1
-//!   gives wz's [`Action`] all four variants and round-trips them on the wire,
-//!   RETIRING the prior `UnsupportedAction` residual that dropped a whole reply
-//!   containing a wildcard event. wz does not yet PRODUCE a wildcard event (its
-//!   write path treats a wildcard key as literal) nor APPLY a decoded one (it is
-//!   skipped in [`crate::storage_state`]): the write-path override engine
-//!   (`storage-mgr-wildcard-updates`) is slice 2 and the align-path apply is
-//!   slice 3. Until then a decoded wildcard event is a known non-converging
-//!   residual — but the batched NON-wildcard events in the same reply now
-//!   converge (previously the whole reply was dropped).
+//!   updates (a `put test/** 1` overriding a whole subtree). wz's [`Action`]
+//!   has all four and round-trips them on the wire. R311y303 correction (this
+//!   doc had gone stale): the align-path APPLY (slice 3) IS implemented — a
+//!   received `WildcardDelete`/`WildcardPut` materializes via
+//!   `storage_state.rs` (`materialize_wildcard`, behind
+//!   `storage-mgr-wildcard-updates`); with that feature OFF a received wildcard
+//!   event is skipped, as slice 1 did. The remaining, PERMANENT divergence is
+//!   PRODUCTION: wz keeps no replication log of wildcard events (it recomputes
+//!   buckets from the `latest` snapshot), so its aligner re-advertises only the
+//!   concrete keys a wildcard materialized onto, never the wildcard log-entry
+//!   itself — a wildcard log-key fingerprint stays divergent from a real zenohd
+//!   peer (the AV5 residual on the `storage-aligner` inventory atom). Concrete
+//!   `Put`/`Delete` converge fully in both directions.
 //! - **`timestamp_last_non_wildcard_update` — now a real field (slice-1).** zenoh's
 //!   `EventMetadata` carries this extra timestamp (log.rs:104) to order wildcard
 //!   updates against the non-wildcard events they override. R311wt slice-1

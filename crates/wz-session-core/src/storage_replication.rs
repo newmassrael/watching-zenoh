@@ -692,13 +692,17 @@ pub fn build_digest<'a>(
 /// side reads the other's bytes (both directions), so the hand-rolled format
 /// is pinned to the exact library + serde structure zenoh uses.
 ///
-/// Residual (honest scope): a fully LIVE digest exchange with a running
-/// `zenoh-plugin-storage-manager` replica is not yet exercised — it needs the
-/// plugin provisioned (not in the repo CI harness) and, for actual
-/// convergence, the aligner (a replica that diffs wz's digest replies with an
-/// alignment query, which wz answers only once the storage-aligner track
-/// lands). The byte-level compatibility this module guarantees is the
-/// prerequisite; the live exchange is the storage-aligner track's territory.
+/// R311y303 correction (this residual had gone stale): a fully LIVE digest
+/// exchange with a running `zenoh-plugin-storage-manager` replica IS now
+/// exercised — the hosted Layer Z interop test `wz_zenohd_storage_replication`
+/// runs wz against a real zenohd 1.5.0 with replication enabled, and its
+/// storage-manager plugin presence is asserted in CI so the lane cannot
+/// SKIP-green. It proves both directions (wz decodes zenohd's digest and
+/// diffs; wz's ASK pull interoperates with zenohd's aligner) with the config
+/// fingerprint hard-pinned to zenohd's golden value before any I/O. The
+/// remaining publisher-side residuals (propagation-delay pre-sleep, publish
+/// jitter, interval-boundary alignment) are deferred tuning, not correctness —
+/// see the `storage-replication` inventory atom.
 ///
 /// ## Byte layout (bincode 1.3 default: LE, fixint, `u64` lengths)
 ///
