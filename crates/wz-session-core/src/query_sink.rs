@@ -48,11 +48,27 @@ use alloc::boxed::Box;
 /// query each `impl` it instead of being re-projected into a third
 /// struct (DIP + ISP).
 ///
-/// All four accessors are unconditional plain types — every profile
-/// reads the resolved keyexpr, the optional URL-style parameters, the
-/// optional attachment blob, and the correlation request id. The returns
-/// borrow from the dispatcher's per-callback stack frame; a handler that
-/// retains the data past the call must copy it explicitly.
+/// Six of the eight accessors are unconditional plain types; `source_info`
+/// and `encoding` are `alloc`-only because their return types live in the
+/// `alloc`-gated `sample` module. The returns borrow from the dispatcher's
+/// per-callback stack frame; a handler that retains the data past the call
+/// must copy it explicitly. (R311y316: this paragraph read "All four
+/// accessors are unconditional plain types" — written when the trait had
+/// four, and left stale through the four that followed.)
+///
+/// **Feature relationship, stated once for all five ext-backed accessors**
+/// ([`Self::parameters`], [`Self::attachment`], [`Self::source_info`],
+/// [`Self::payload`], [`Self::encoding`]): each atom's feature gates the
+/// DISPATCHER's projection — `query::extract_query_{attachment,
+/// source_info, value}` and the `parameters_view` slice — never the
+/// accessor, which stays ungated for signature stability. So on the
+/// wire-dispatch path a build without the feature never surfaces that ext
+/// to a handler, while an impl handed a value by its own caller (a literal
+/// [`BorrowedQuery`], a link-runtime query) returns what it was handed. The
+/// feature gates the projection, not what the contract can express — the
+/// same hedge [`ReplyOut`]'s emit-side notes carry ("or a sink that does
+/// not carry it"). Per-accessor docs below therefore describe the VALUE and
+/// leave the gate to this paragraph.
 pub trait QueryView {
     /// Resolved keyexpr literal (peer DECLARE table lookup already
     /// applied). Always non-empty — an un-resolvable keyexpr drops the
@@ -66,7 +82,7 @@ pub trait QueryView {
     fn attachment(&self) -> Option<&[u8]>;
     /// Source-info record extracted from the Query ext-chain (querier
     /// identity: zid / eid / sn). `None` when no source-info ext is
-    /// present or `query-source-info` is off. Default impl returns `None`
+    /// present. Default impl returns `None`
     /// so `QueryView` impls that predate this accessor stay valid.
     /// `alloc`-only (the `SourceInfo` type lives in the `alloc`-gated
     /// `sample` module); mirrors `SampleView`'s metadata accessors.
@@ -76,7 +92,7 @@ pub trait QueryView {
     }
     /// Value payload extracted from the Query body VALUE ext (id 0x03 — the
     /// querier's attached value, zenoh-pico `z_query_payload`). `None` when no
-    /// value ext is present or `query-value` is off. Default impl returns
+    /// value ext is present. Default impl returns
     /// `None` so `QueryView` impls that predate this accessor stay valid.
     /// Pairs with [`Self::encoding`] (the value's content type).
     fn payload(&self) -> Option<&[u8]> {
@@ -84,8 +100,8 @@ pub trait QueryView {
     }
     /// Value encoding extracted from the Query body VALUE ext (id 0x03),
     /// describing [`Self::payload`]'s content type (zenoh-pico
-    /// `z_query_encoding`). `None` when no value ext is present or
-    /// `query-value` is off. Default `None`. `alloc`-only (the `EncodingHint`
+    /// `z_query_encoding`). `None` when no value ext is present.
+    /// Default `None`. `alloc`-only (the `EncodingHint`
     /// type lives in the `alloc`-gated `sample` module); mirrors
     /// [`Self::source_info`].
     #[cfg(feature = "alloc")]

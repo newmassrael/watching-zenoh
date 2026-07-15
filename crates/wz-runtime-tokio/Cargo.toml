@@ -1219,7 +1219,12 @@ keyexpr-dollar-star = ["wz-session-core/keyexpr-dollar-star"]
 keyexpr-includes = ["wz-session-core/keyexpr-includes"]
 # R311cj — query domain 3 additional wire-ups (6 active -> 9 active):
 #   query-attachment            — Query inbound attachment ext extraction.
-#                                 cfg-off: callback observes None.
+#                                 cfg-off: extract_query_attachment returns
+#                                 None (R311y316: this line said "callback
+#                                 observes None" — the gate is on the
+#                                 dispatcher's projection, not on what a
+#                                 QueryView impl may return; its sibling
+#                                 below already named the mechanism).
 #   query-selector-parameters   — Query.parameters slice projection in
 #                                 dispatch. cfg-off: parameters_view = None.
 #   query-reply-err             — the QUERYABLE's application-level Err
