@@ -874,7 +874,12 @@ jobs:
   # transport-link-{unixpipe,vsock} off-Linux: those features pull `dep:libc` /
   # `dep:tokio-vsock` from the `[target.linux]` table, so enabling them on a
   # non-Linux target is an invalid `dep:` reference by construction (they are
-  # Linux-only backends, verified by the `ci` job's Linux lanes C1al / vsock).
+  # Linux-only backends). R311y305: the prior clause here claimed these are
+  # "verified by the ci job's Linux lanes C1al / vsock" — that is STALE. C1al
+  # (unixpipe) and C1ab (vsock) are defined in scripts/run-ci.sh but are NOT in
+  # this workflow's enumerated --layer set, so they run only in a local full
+  # sweep, not on the hosted ci job. The Linux-only-ness is enforced at the
+  # Cargo `[target.'cfg(...)']` layer, not by a hosted lane.
   portability:
     name: portability (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
