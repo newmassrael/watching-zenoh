@@ -1,30 +1,10 @@
 # Feature inventory — composable framework atomic + preset catalog
 
-> **RETIRED RENDER — DO NOT COUNT, CITE, OR DERIVE A SET FROM THIS FILE.**
+> **NOT THE SSOT — DO NOT DERIVE AN ATOM SET FROM THIS FILE.**
 >
 > R408 retired this document as a parsed/validated surface. The SSOT is the
-> atomic store; this file is an un-gated R301-era snapshot that nothing keeps
-> in sync, and it has drifted accordingly. Measured at R311y315 (re-derive
-> before quoting: parse each `` - `atom` `` bullet, cut at the NEXT bullet so a
-> status cannot be read off a neighbour, diff against
-> `mnemosyne-cli query --list-inventory --json`, and drop the six `preset-*`
-> rows — those are bundles, not atoms, and they live in §6 as headings rather
-> than bullets, so a bullet-parse reports them absent when they are present):
->
-> - **65 of its 141 status labels (46%) disagree with the store.**
-> - **71 of the store's 213 atoms are never listed here at all.**
-> - Its §5.9 Query section enumerates **10** atoms; the store has **11**
->   (`query-value`, added R311y248, is absent here). That omission is the
->   known origin of a wrong denominator that a later round carried as fact.
->
-> Those counts are themselves a citation and will rot — that is the point of
-> this banner, not an exception to it, and R311y315 proved it the hard way by
-> getting the second number wrong TWICE before an adversarial review landed it.
-> First `84`: the parse demanded the status sit on the atom's own LINE and six
-> bullets wrap. Then `77 of 219`: `--list-inventory` returns 219 *entries* =
-> 213 atoms + 6 presets, and the presets are listed here. Derive; do not quote.
->
-> To answer "which atoms exist / what is this atom's status", derive it:
+> atomic store; nothing gates this file against it. To answer "which atoms
+> exist / what is this atom's status", derive it:
 >
 > ```
 > mnemosyne-cli query --list-inventory        # the atom set + statuses
@@ -32,10 +12,28 @@
 > ./scripts/audit-catalog-status.sh --layer A3
 > ```
 >
-> Kept only as R301-era narrative: the naming convention (§2), the 3-test
-> definitions (§3), the conflict policy (§4), and the preset *contracts*
-> (§6). Those are design reasoning and do not rot the way a census does.
-> Everything shaped like a list of atoms below is a historical snapshot.
+> R311y316 removed the §5 per-atom census this banner used to warn about,
+> rather than keep warning about it: a banner over a trap is still a trap.
+> R311y315 had measured roughly half its status labels as disagreeing with
+> the store — re-derive, never quote that. What is left is the R301-era
+> design reasoning, which does not rot the way a census does:
+>
+> - **§1-§4** — purpose, naming convention, the 3-test definitions, conflict
+>   policy. This file is their ONLY copy: the store's counterpart sections
+>   exist but are title-only placeholders, so deleting them here would
+>   destroy them. (R311y316 measured 20 of this doc's 51 store sections as
+>   title-only — a decompose gap, not a deliberate scope call.)
+> - **§6** — the preset *contracts*. A contract is not a census: it states
+>   the RULE that generates a membership ("same as preset-ap-full except the
+>   MCU/embedded flavor"), and the store carries only the expanded closure,
+>   not the rule. Stale in one respect: it describes 6 presets, the store
+>   has 9.
+> - **§7-§9** — the emission-mechanism placeholders and the change log.
+>
+> Historical, kept for the audit trail: the machine-local reference paths
+> this file once carried were removed in R311y315, and the counts in this
+> banner's earlier form were themselves wrong twice before review landed
+> them — which is why the numbers are gone rather than restated.
 
 **Status.** R301 entry. First-pass catalog of ~140 atomic features
 across 19 domains plus 6 initial semver-named presets. Materializes
@@ -213,312 +211,43 @@ that pull in multiple wz consumers with different feature sets.
 
 ## §5 Atomic feature catalog
 
-Each subsection below enumerates atomic features in one domain.
-Status labels: `active` (implemented in wz at R300, citation
-points at wz source) / `reserved` (zenoh upstream has it,
-wz roadmap, citation points at upstream).
+**The per-atom enumeration that stood here was removed in R311y316.**
+It listed 19 domains as `` - `atom` — description (status, source) ``
+bullets. R311y315 measured it against the store and found roughly half
+its status labels disagreeing, plus dozens of store atoms never listed
+here at all — re-derive those numbers rather than quoting these words.
+Nothing kept it in sync: R408 retired this file as a parsed surface, so
+no gate ever compared the two.
 
-The inventory primitive (R273 5th-entity surface) stores the
-structured per-feature record (id / status / section_ref / source
-/ reason) in the atomic store; the markdown body below is the
-human-readable enumeration.
+This section's own preamble had already recorded why it was redundant:
+the inventory primitive (R273, the 5th-entity surface) stores the
+structured per-feature record — id / status / section_ref / source /
+reason — in the atomic store, and the markdown body here was merely "the
+human-readable enumeration" of it. A hand-maintained second copy of a
+primitive-backed record is a census, and a census rots.
 
-### §5.1 Transport
+Derive the catalog instead:
 
-Transport-layer atomic features cover the unicast/multicast
-session shape, link kinds, fragmentation, batching, and
-session-level extensions. 16 entries.
+```
+mnemosyne-cli query --list-inventory        # the atom set + statuses
+mnemosyne-cli query --inventory <atom-id>   # one atom
+./scripts/audit-catalog-status.sh --layer A3
+```
 
-- `transport-unicast` — point-to-point session (active, wz)
-- `transport-multicast` — N-peer session (reserved, zenoh-pico)
-- `transport-lowlatency` — no-fragmentation low-latency mode
-  (reserved, zenoh)
-- `transport-link-udp` — UDP link adapter (active, wz lwip + tokio)
-- `transport-link-tcp` — TCP link adapter (active, wz tokio)
-- `transport-link-tls` — TLS-wrapped link (reserved, zenoh)
-- `transport-link-quic` — QUIC link (reserved, zenoh)
-- `transport-link-ws` — WebSocket link (reserved, zenoh)
-- `transport-link-serial` — serial-port link (reserved, zenoh-pico)
-- `transport-link-vsock` — VM socket link (reserved, zenoh)
-- `transport-link-unixsock` — Unix domain socket (reserved, zenoh)
-- `transport-fragmentation` — fragment + reassemble (active, wz)
-- `transport-batching` — TX batch buffer (active, wz)
-- `transport-shm` — shared-memory zero-copy (reserved, zenoh)
-- `transport-compression` — Z_EXT_COMPRESSION (reserved, zenoh)
-- `transport-keepalive` — KeepAlive frame emit (active, wz)
+Per-domain design notes live in the store's own §5.x sections, which
+cover more domains than this file ever did (§5.20-§5.27 were never
+written here). Read one with:
 
-### §5.2 Locator
+```
+mnemosyne-cli query "§feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+```
 
-Locator strings encode endpoint addresses; one feature per
-transport-protocol-prefix the locator parser must accept. 9
-entries.
+§6 below is deliberately NOT removed. A preset contract is not a census:
+it states the RULE that generates a membership ("same as preset-ap-full
+except the MCU/embedded flavor"), and that rule is design reasoning the
+store's expanded per-atom closure does not carry. It is stale in one
+respect only — it describes 6 presets where the store now has 9.
 
-- `locator-udp` — `udp/host:port` parsing (active, wz)
-- `locator-tcp` — `tcp/host:port` parsing (active, wz)
-- `locator-tls` — `tls/host:port` (reserved, zenoh)
-- `locator-quic` — `quic/host:port` (reserved, zenoh)
-- `locator-ws` — `ws/host:port` (reserved, zenoh)
-- `locator-serial` — `serial/dev` (reserved, zenoh-pico)
-- `locator-vsock` — `vsock/cid:port` (reserved, zenoh)
-- `locator-unixsock` — `unixsock-stream/path` (reserved, zenoh)
-- `locator-iface` — `?iface=eth0` scope qualifier (reserved, zenoh)
-
-### §5.3 Scouting
-
-Scouting-layer atomic features cover the three discovery modes
-(active / passive / static) and their configuration knobs. 6
-entries.
-
-- `scouting-active` — active SCOUT/HELLO exchange (active, wz)
-- `scouting-passive` — passive listen for HELLO (reserved, OQ-W23)
-- `scouting-static` — config-file static peer list (reserved, zenoh)
-- `scouting-multicast` — UDP multicast SCOUT (reserved, zenoh-pico)
-- `scouting-gossip` — router-side peer gossip (reserved, zenoh)
-- `scouting-autoconnect` — auto-connect on HELLO (reserved, zenoh)
-
-### §5.4 Session
-
-Session-FSM-level atomic features. Includes the protocol
-extension carrier flags (extauth/extqos/extcompression/extshm). 9
-entries.
-
-- `session-unicast-open` — initiator role (active, wz)
-- `session-unicast-accept` — acceptor role (active, wz partial)
-- `session-multicast` — multicast session FSM (reserved,
-  zenoh-pico)
-- `session-resumable` — resumable session per OQ-Q14 (reserved,
-  zenoh)
-- `session-extauth` — Z_EXT_AUTH extension (reserved, zenoh)
-- `session-extqos` — Z_EXT_QOS priority (reserved, zenoh)
-- `session-extcompression` — Z_EXT_COMPRESSION (reserved, zenoh)
-- `session-extshm` — Z_EXT_SHM (reserved, zenoh)
-- `session-stateless-accept` — cookie-hmac stateless accept (OQ-W15
-  ratified, reserved)
-
-### §5.5 Link
-
-Link-layer atomic features above the OS adapter and below the
-session FSM — framing, flow control, TX cache. 5 entries.
-
-- `link-frame` — Frame envelope codec (active, wz)
-- `link-fragment` — Fragment envelope codec (active, wz)
-- `link-batching` — batch multiple messages per frame (active, wz)
-- `link-tx-cache` — TX retransmit cache (reserved, zenoh)
-- `link-flow-control` — backpressure signalling (reserved, zenoh)
-
-### §5.6 Keyexpr
-
-Key expression atomic features cover the literal / wildcard
-patterns, canonicalization, intersection, includes, and the
-declare-side alias mapping. 8 entries.
-
-- `keyexpr-literal` — literal-only patterns (active, wz)
-- `keyexpr-wildcard-single` — `*` segment wildcard (active, wz)
-- `keyexpr-wildcard-double` — `**` multi-segment wildcard (active,
-  wz with R299 documented divergence pins)
-- `keyexpr-canon` — canonicalization (active, wz at R221)
-- `keyexpr-intersect` — pattern intersect (active, wz at R297)
-- `keyexpr-includes` — pattern includes (active, wz at R299)
-- `keyexpr-mapping` — KexprMappingTable alias storage (active, wz)
-- `keyexpr-dollar-star` — `$*` non-greedy single-segment (active,
-  wz)
-
-### §5.7 Declare flow
-
-DECLARE-side atomic features cover keyexpr alias declarations,
-the four subject types (subscriber / queryable / token /
-publisher-side declare_final), and DECLARE/UNDECLARE pairings. 7
-entries.
-
-- `declare-keyexpr` — DECLARE-KEXPR alias (active, wz)
-- `declare-subscriber` — DECLARE-SUBSCRIBER (active, wz)
-- `declare-queryable` — DECLARE-QUERYABLE (active, wz)
-- `declare-token` — DECLARE-TOKEN (active, wz)
-- `declare-final` — DECLARE-FINAL push (active, wz partial)
-- `declare-interest` — Z_INTEREST extension (active, wz partial)
-- `declare-undeclare` — UNDECLARE-\* pair (active, wz)
-
-### §5.8 Pubsub
-
-Publisher / subscriber atomic features. Encoding, timestamp,
-source-info, attachment, congestion-control, priority, express,
-loop-allow are all atomic publisher options. 11 entries.
-
-- `pubsub-put` — Put sample emit (active, wz)
-- `pubsub-delete` — Delete sample emit (active, wz)
-- `pubsub-sample` — Sample receive surface (active, wz)
-- `pubsub-encoding` — Encoding header field (active, wz)
-- `pubsub-timestamp` — Timestamp field (active, wz)
-- `pubsub-source-info` — SourceInfo extension (reserved, zenoh)
-- `pubsub-attachment` — sample attachment bytes (reserved, zenoh)
-- `pubsub-congestion-control` — Block/Drop policy (reserved, zenoh)
-- `pubsub-priority` — 8-level priority (reserved, zenoh)
-- `pubsub-express` — express bit (reserved, zenoh)
-- `pubsub-allow-loop` — allow local loopback (reserved, zenoh)
-
-### §5.9 Query
-
-Query (zenoh "get") atomic features. Includes the queryable side
-of the protocol, the consolidation modes, the target selection
-modes, and the per-query attachment / source-info /
-selector-parameter knobs. 10 entries.
-
-- `query-get` — get() initiator (active, wz)
-- `query-queryable` — Queryable surface (active, wz)
-- `query-reply` — Reply emit (active, wz)
-- `query-reply-err` — ReplyErr variant (reserved, zenoh)
-- `query-target` — Best/All/AllComplete (active, wz)
-- `query-consolidation` — None/Monotonic/Latest/Auto (active, wz)
-- `query-selector-parameters` — `?k=v` query selector params
-  (reserved, zenoh)
-- `query-attachment` — query attachment bytes (reserved, zenoh)
-- `query-source-info` — query SourceInfo (reserved, zenoh)
-- `query-timeout` — per-query timeout (active, wz)
-
-### §5.10 Liveliness
-
-Liveliness atomic features cover token assertion + subscriber +
-history-on-subscribe. 5 entries.
-
-- `liveliness-token` — assert liveliness token (active, wz)
-- `liveliness-subscriber` — liveliness subscriber (active, wz)
-- `liveliness-get` — querier on liveliness (reserved, zenoh)
-- `liveliness-history` — Z_EXT_HISTORY on liveliness (reserved,
-  zenoh)
-- `liveliness-historical-samples` — historical samples on
-  liveliness subscribe (reserved, zenoh)
-
-### §5.11 Storage
-
-Storage backend atomic features — replication, history-extension,
-aligner protocol. 4 entries.
-
-- `storage-backend` — zenoh-backend-traits surface (reserved,
-  zenoh-backend-traits)
-- `storage-replication` — replication protocol (reserved, zenoh
-  storage-replication)
-- `storage-history` — Z_EXT_HISTORY emit (reserved, zenoh)
-- `storage-aligner` — aligner protocol (reserved, zenoh)
-
-### §5.12 Codec
-
-Wire-message codec atomic features — one per single-SCXML codec
-emit unit. 14 entries. Each maps to a `sources/codecs/<name>.scxml`
-(active when SCXML lands at the current vendor pin).
-
-R311a-recanon: the previous 4-entry split codec-init-syn / -ack /
-codec-open-syn / -ack collapsed to 2 codec-init-body /
-codec-open-body. The SCE upstream `init_body.scxml` and
-`open_body.scxml` are single emit units that handle both SYN and
-ACK via runtime `parent.S` / `parent.A` flag dispatch; gating the
-4-way at the cargo feature level would have failed the Footprint
-test (toggling codec-init-syn off while codec-init-ack stays on
-yields zero binary delta because both arms share one emitted
-module). The runtime is_ack flag picks the SYN vs ACK arm at
-encode time, not the build-time feature flag.
-
-- `codec-scout` — SCOUT (active, wz)
-- `codec-hello` — HELLO (active, wz)
-- `codec-init-body` — Init body (InitSyn + InitAck via parent.S/A
-  flags) (active, wz)
-- `codec-open-body` — Open body (OpenSyn + OpenAck via parent.A
-  negation) (active, wz)
-- `codec-close` — CLOSE (active, wz)
-- `codec-keep-alive` — KEEP_ALIVE (active, wz)
-- `codec-join` — JOIN (active, wz)
-- `codec-frame` — FRAME (active, wz)
-- `codec-fragment` — FRAGMENT (active, wz)
-- `codec-declare` — DECLARE outer (active, wz)
-- `codec-push` — PUSH (active, wz)
-- `codec-request` — REQUEST (active, wz)
-- `codec-response` — RESPONSE (active, wz)
-- `codec-response-final` — RESPONSE-FINAL (active, wz)
-
-### §5.13 Runtime
-
-Runtime adapter atomic features — async-executor + zero-copy
-mechanisms. 6 entries.
-
-- `runtime-tokio` — tokio executor (active, wz)
-- `runtime-tokio-uring` — tokio + io_uring fixed buffers (reserved,
-  RFC §9.5 row 3)
-- `runtime-coop` — lwIP MCU bare-metal (reserved, wz-runtime-coop
-  Phase W skeleton)
-- `runtime-async-std` — async-std executor (reserved, zenoh)
-- `runtime-no-std` — `#![no_std]` core lib (reserved, zenoh-pico)
-- `runtime-zero-copy` — pool-slot RxFrame zero-copy (reserved, RFC
-  §5.E)
-
-### §5.14 Platform
-
-Platform-OS atomic features — gates the `platform.os` build matrix
-in deploy.yaml. 7 entries.
-
-- `platform-linux` — Linux baseline (active, wz tokio)
-- `platform-qnx` — QNX-native (reserved, OQ-W20)
-- `platform-bare-metal` — MCU bare-metal C11 (reserved, RFC
-  §5.J.4)
-- `platform-windows` — Windows tokio (reserved, zenoh)
-- `platform-macos` — macOS tokio (reserved, zenoh)
-- `platform-freertos` — FreeRTOS (reserved, zenoh-pico)
-- `platform-zephyr` — Zephyr RTOS (reserved, zenoh-pico)
-
-### §5.15 Routing
-
-Routing atomic features — client / peer / router modes plus
-routing-table options. 6 entries.
-
-- `routing-client` — client mode (active, wz)
-- `routing-peer` — peer mode (reserved, zenoh)
-- `routing-router` — router mode (reserved, zenoh)
-- `routing-routes` — router routing tables (reserved, zenoh)
-- `routing-failover` — failover brokering (reserved, zenoh)
-- `routing-static-routes` — config-file static routes (reserved,
-  zenoh)
-
-### §5.16 Access control
-
-Access-control atomic features — ACL, downsampling, quota, and
-the three auth methods supported by Z_EXT_AUTH. 6 entries.
-
-- `access-acl` — ACL plugin (reserved, zenoh-acl)
-- `access-downsampling` — downsampling plugin (reserved, zenoh)
-- `access-quota` — per-key quota (reserved, zenoh)
-- `access-extauth-usrpwd` — username/password auth (reserved,
-  zenoh)
-- `access-extauth-pubkey` — RSA pubkey auth (reserved, zenoh)
-- `access-extauth-jwt` — JWT auth (reserved, zenoh)
-
-### §5.17 Attachment
-
-Sample/Query attachment atomic features. 2 entries.
-
-- `attachment-bytes` — opaque-bytes attachment (reserved, zenoh)
-- `attachment-encoding-aware` — encoding-tagged attachment
-  (reserved, zenoh)
-
-### §5.18 Time
-
-Timestamp source atomic features. 4 entries.
-
-- `time-ntp64` — 64-bit NTP timestamp (active, wz)
-- `time-hlc` — hybrid logical clock (reserved, zenoh-uhlc)
-- `time-system-clock` — wall-clock fallback (active, wz)
-- `time-timestamp-source` — pluggable timestamp source (reserved,
-  zenoh)
-
-### §5.19 Encoding
-
-Payload encoding atomic features — the `Encoding` field
-discriminator values. 7 entries.
-
-- `encoding-empty` — empty/raw (active, wz)
-- `encoding-utf8` — `text/plain` UTF-8 (active, wz)
-- `encoding-bytes` — `application/octet-stream` (active, wz)
-- `encoding-json` — `application/json` (reserved, zenoh)
-- `encoding-cbor` — `application/cbor` (reserved, zenoh)
-- `encoding-protobuf` — `application/protobuf` (reserved, zenoh)
-- `encoding-mime` — RFC 6838 full MIME (reserved, zenoh)
 
 ## §6 Presets
 
