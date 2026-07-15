@@ -878,7 +878,7 @@ impl<'a> QueryResponder<'a> {
     /// the pushed [`QueryReply`]. The stamp propagates through
     /// [`QueryReply::into_response`] into
     /// [`crate::session_glue::ResponseReplyBuilder::responder`] /
-    /// [`crate::session_glue::ResponseErrBuilder::responder`], which
+    /// [`crate::response_build::ResponseErrBuilder::responder`], which
     /// emits the envelope-level responder ext (zenoh-pico ext_id 0x03
     /// ZBUF) per `_z_response_encode` at
     /// `vendor/zenoh-pico/src/protocol/codec/network.c:281-291`.
@@ -955,8 +955,25 @@ impl<'a> QueryResponder<'a> {
 /// a build with the feature OFF could still emit an Err reply by calling
 /// `QueryResponder::send_err` directly or by staging the variant by
 /// hand. The gate now sits on the staged `QueryReply::Err` variant
-/// itself, so the contract holds by construction: no value to stage ⇒
-/// nothing for the `codec-response` drain to encode. The Put / Del /
+/// itself, so THIS path closes by construction: no value to stage ⇒
+/// nothing for the `codec-response` drain to encode.
+///
+/// SCOPE, and it is narrower than "no Err bytes reach the wire" — an
+/// adversarial review of R311y315 caught that overclaim before it froze.
+/// `query-reply-err` gates the QUERYABLE's application-level Err reply,
+/// i.e. this seam. It does NOT gate the Response(Err) codec:
+/// `response_build::{ResponseErrBuilder, build_response_err_literal,
+/// build_response_err_aliased, build_response_err_empty}` are
+/// `codec-response`-gated `pub` items, and
+/// `cargo test -p wz-session-core --no-default-features
+/// --features alloc,codec-response --lib response_build::tests::build_response_err`
+/// composes pico-parity Err bytes with `query-reply-err` OFF. That is
+/// CORRECT, not a hole to plug: the router's query-timeout path emits an
+/// Err through the same primitive (`LinkstateForwarder`, an ungated
+/// production caller of `build_response_err_empty` with a `b"Timeout"`
+/// payload), and it must keep doing so in a build that carries no
+/// queryable Err reply at all. Gating those primitives on this atom would
+/// break router timeouts. The Put / Del /
 /// responder-identity methods stay unconditional under `codec-request`:
 /// a constructed `QueryResponder` only accumulates into a
 /// `Vec<QueryReply>` that the `codec-response`-gated `into_response`
