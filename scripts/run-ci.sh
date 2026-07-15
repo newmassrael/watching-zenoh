@@ -2538,7 +2538,10 @@ layer_c1bi_cargo_test_pubsub_qos() {
 # omits the atom. Every hosted lane has these features ON (Layer C1's
 # `--workspace` unifies them), which cfg's all three OUT — so without THIS
 # lane they never build and the gate is unproven [[a skip is green]]. The
-# subset is `zget-reply-only` from the `_wz_consumer_plane_subsets` SSOT.
+# subset MIRRORS `zget-reply-only` in `_wz_consumer_plane_subsets` but is
+# HAND-COPIED, not derived from it -- so the two can silently diverge. Deriving
+# it is the better shape; it is not done. (R311y319: the first draft of this
+# header called it "from the SSOT", which it is not.)
 #
 # The `--list` assertion pins the SET, not a count: R311y315 shipped a gate
 # whose CARRY pinned `len()`, so a rename kept the number equal and a real
@@ -2552,7 +2555,7 @@ query_timeout_pub_field_cannot_bypass_the_query_timeout_gate"
     local got
     got=$(cd crates && cargo test -p wz-runtime-tokio --no-default-features \
         --features "$feats" --lib pub_field -- --list 2>/dev/null \
-        | sed -n 's/^session::tests::\([a-z0-9_]*\): test$/\1/p' | sort)
+        | sed -n 's/^session::tests::\([^:]*\): test$/\1/p' | sort)
     if [ "$got" != "$(printf '%s' "$expected" | sort)" ]; then
         echo "  C1bk FAIL: the pub-field NEG set drifted (cfg elided a guard, or one was renamed)"
         echo "    expected:"; printf '%s\n' "$expected" | sort | sed 's/^/      /'

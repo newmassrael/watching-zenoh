@@ -888,7 +888,7 @@ jobs:
     # above declares "THIS JOB HAS NO OTHER DISK HEADROOM" — every extra
     # feature-subset lane is a DISTINCT feature set and so a DISTINCT set of
     # `crates/target` artifacts. The lanes below add roughly a dozen such
-    # subsets between them. (R311y317: the job name used to enumerate its
+    # subsets between them. (R311y318: the job name used to enumerate its
     # lanes as "C1bi + C1bj"; it went stale the moment C1bk landed, so it now
     # names the genre. The step list below is the enumeration.)
     # Hanging them off `ci` would trade a real gate for a flaky timeout; a
@@ -930,7 +930,7 @@ jobs:
       - name: Layer C1bj — Push loopback metadata gates (R311y308)
         run: bash scripts/run-ci.sh --layer C1bj
 
-      # R311y317 — the QUERY twin of C1bj, hosted for the reason stated above
+      # Hosted R311y318 — the QUERY twin of C1bj, for the reason stated above
       # and one degree worse: y308's push leak was loopback-only, but
       # query-target / -consolidation / -timeout reached THE WIRE in builds
       # without the atom. The lane was proven by falsification (cut the gate ->
