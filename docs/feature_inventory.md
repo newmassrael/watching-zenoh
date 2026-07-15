@@ -12,31 +12,33 @@
 > ./scripts/audit-catalog-status.sh --layer A3
 > ```
 >
-> R311y316 removed the §5 per-atom census this banner used to warn about,
-> rather than keep warning about it: a banner over a trap is still a trap.
-> R311y315 had measured roughly half its status labels as disagreeing with
-> the store — re-derive, never quote that. What is left is the R301-era
-> design reasoning, which does not rot the way a census does:
+> R311y316 removed every census this file carried — the §5 per-atom
+> enumeration, the §6 preset definitions, and the §2.1 domain list —
+> rather than keep warning about them: a banner over a trap is still a
+> trap. What is left is design reasoning, which does not rot the way a
+> list does:
 >
-> - **§1-§4** — purpose, naming convention, the 3-test definitions, conflict
->   policy. This file is their ONLY copy: the store's counterpart sections
->   exist but are title-only placeholders, so deleting them here would
->   destroy them. (R311y316 measured 20 of this doc's 51 store sections as
->   title-only — a decompose gap, not a deliberate scope call.)
-> - **§6** — the preset *contracts*. A contract is not a census: it states
->   the RULE that generates a membership ("same as preset-ap-full except the
->   MCU/embedded flavor"), and the store carries only the expanded closure,
->   not the rule. Stale in one respect: it describes 6 presets, the store
->   has 9.
+> - **§1-§4** — purpose, the naming + preset-naming CONVENTIONS, the 3-test
+>   definitions, conflict policy. This file is their ONLY copy: the store's
+>   counterpart sections exist but are title-only placeholders, so deleting
+>   them here would destroy them. (Measured: 20 of this doc's 51 store
+>   sections are title-only — a decompose gap, not a deliberate scope call.)
+> - **§5, §6** — headings kept as pointers; each records what was removed
+>   and why, since a silent deletion reads as "this never existed".
 > - **§7-§9** — the emission-mechanism placeholders and the change log.
 >
-> Historical, kept for the audit trail: the machine-local reference paths
-> this file once carried were removed in R311y315, and the counts in this
-> banner's earlier form were themselves wrong twice before review landed
-> them — which is why the numbers are gone rather than restated.
+> This banner's own first draft (R311y316) is the cautionary case. It
+> exempted "§2 naming / §3 tests / §4 conflict policy / §6 preset
+> contracts" from census-rot, and was wrong twice in one paragraph: §2.1
+> held a 19-domain list against the store's 27, and §6's "rule" excluded 7
+> atoms that preset-ap-full does not contain. An exemption is a claim; it
+> gets measured like any other. Both were caught by review, not by the
+> author.
 
-**Status.** R301 entry. First-pass catalog of ~140 atomic features
-across 19 domains plus 6 initial semver-named presets. Materializes
+**Status.** R301 entry. First-pass catalog of atomic features across
+the domains, plus the initial semver-named presets — counts deliberately
+not restated here (R311y316; they were "~140 / 19 / 6" and every one had
+drifted). Materializes
 the composable-framework north star (R267 ratify, R299+ refined) by
 naming the contract every future SCXML / Rust crate must conform to
 when emitting a per-cargo-feature subset of zenoh's full feature
@@ -63,11 +65,12 @@ it, so it rots silently while still being cited. Both had in fact rotted
 — zenoh-pico is now vendored in-repo at `vendor/zenoh-pico/`. Resolve
 reference paths per machine; never commit them.
 
-**Outputs.** ~140 atomic feature names following the
-`<domain>-<capability>` convention, with each entry labelled
-*active* (implemented in wz at R300) or *reserved* (roadmap, not
-yet implemented but plausibility-confirmed against upstream). 6
-preset names following the `preset-<target>-<level>` convention.
+**Outputs.** Atomic feature names following the
+`<domain>-<capability>` convention, each labelled *active*
+(implemented in wz at R300) or *reserved* (roadmap, not yet
+implemented but plausibility-confirmed against upstream); preset
+names following the `preset-<target>-<level>` convention. Both sets
+now live in the store — derive, do not count from here.
 3-test definitions (Footprint / Plausibility / Coherence). Conflict
 policy: silently ALLOW (cargo monotone-additive semantics).
 
@@ -96,11 +99,11 @@ time. This document establishes that contract.
 Two layers of abstraction (R299+ refined):
 
 1. **Atomic features** — the smallest unit that can be turned on or
-   off. ~140 of them. Naming `<domain>-<capability>`. Each must
-   pass the Footprint + Plausibility + Coherence three-test.
+   off. Naming `<domain>-<capability>`. Each must pass the
+   Footprint + Plausibility + Coherence three-test.
 2. **Presets** — semver-versioned named contracts that bundle atomic
-   features. Naming `preset-<target>-<level>`. The initial six
-   below cover the common deploy shapes.
+   features. Naming `preset-<target>-<level>`, covering the common
+   deploy shapes.
 
 Atomic features are the units that build correctness reasons about;
 presets are the units that downstream projects depend on.
@@ -117,11 +120,21 @@ a closely related sibling, e.g. `transport-link-udp` vs
 `transport-link-tcp` where `link` is the modifier subdivision of
 the `transport` domain).
 
-Domains in this catalog: `transport`, `locator`, `scouting`,
-`session`, `link`, `keyexpr`, `declare`, `pubsub`, `query`,
-`liveliness`, `storage`, `codec`, `runtime`, `platform`, `routing`,
-`access`, `attachment`, `time`, `encoding`. Future additions
-require an explicit R-round ratification.
+The domain set is derived from the store, not listed here. R311y316
+removed the 19-domain list that stood in this paragraph: the store
+carries 27 domains, so it was missing 8 (`adminspace`, `api`, `config`,
+`ext`, `plugin`, `rest`, `router`, `switchboard`) covering 40 atoms. It
+was a census inside the section this file's banner had exempted from
+census-rot — the exemption was wrong, not the measurement. Derive it:
+
+```
+mnemosyne-cli query --list-inventory --json \
+  | python3 -c "import json,sys; print(sorted({r['id'].split('-')[0] \
+      for r in json.load(sys.stdin) if not r['id'].startswith('preset-')}))"
+```
+
+Adding a domain still requires an explicit R-round ratification; that
+rule is the design reasoning, and it is what survives here.
 
 Capability segments are nouns (the thing being offered) or
 qualified nouns (e.g. `wildcard-double` distinguishing `**` from
@@ -142,8 +155,8 @@ contract is what downstream depends on.
 
 ## §3 Three-test definitions
 
-Every atomic feature in §5 must pass all three tests before
-landing. The tests are independent — failing any one rejects the
+Every atomic feature must pass all three tests before landing
+(§5 enumerated them until R311y316; derive the set from the store). The tests are independent — failing any one rejects the
 candidate as an atomic feature (it must be split, merged, renamed,
 or accepted as a non-atomic preset-only concept).
 
@@ -173,9 +186,11 @@ the upstream surface — zenoh (Rust), zenoh-pico (C), or zenoh-cpp
 reference, not a vague "this exists somewhere".
 
 The plausibility test prevents the catalog from drifting into
-hypothetical-future-state names. Every reserved feature in §5 has
-a citation; if upstream removes the feature, the citation is
-invalidated and the entry moves to deprecated.
+hypothetical-future-state names. Every reserved feature carries a
+citation — it lives in the store's inventory `source` field, which is
+what §5's deleted `(status, source)` tags were a stale copy of. If
+upstream removes the feature, the citation is invalidated and the entry
+moves to deprecated.
 
 ### §3.3 Coherence
 
@@ -251,124 +266,43 @@ respect only — it describes 6 presets where the store now has 9.
 
 ## §6 Presets
 
-Each preset is a semver-versioned named contract bundling a fixed
-set of atomic features. Downstream projects depend on the
-*(name, version)* pair; the contents at a given version do not
-change. New atomic features land in a new preset version (e.g.
-`preset-mcu-minimal v0.2.0`) — see §2.2.
+**The six preset definitions that stood here were removed in R311y316**,
+one commit after the same round kept them — the justification for keeping
+them did not survive review, and it was wrong on both halves.
 
-### §6.1 preset-mcu-minimal v0.1.0
+It claimed a preset contract states the RULE generating a membership,
+which the store's expanded per-atom closure does not carry. But the store
+states the rule, in the section `intent`, for the presets that have one —
+including the very rule quoted in this file's defence:
 
-The smallest viable MCU deployment — zenoh-pico client-mode
-parity at minimum footprint. Targets bare-metal MCU with lwIP +
-UDP + minimal pubsub.
+- `§6.6` intent: "Functionally equivalent to preset-ap-full minus the 3
+  wz-superset backends"
+- `§6.4` intent: "preset-ap-client scope + router topology + gossip +
+  multicast"
+- `§6.2` intent: "preset-mcu-minimal scope + query + liveliness +
+  wildcards + active scouting"
 
-Includes: `platform-bare-metal`, `runtime-coop`, `runtime-no-std`,
-`transport-unicast`, `transport-link-udp`, `transport-keepalive`,
-`locator-udp`, `scouting-active`, `session-unicast-open`,
-`link-frame`, `link-fragment`, `link-batching`, `keyexpr-literal`,
-`keyexpr-canon`, `declare-keyexpr`, `declare-subscriber`,
-`declare-undeclare`, `pubsub-put`, `pubsub-sample`,
-`encoding-empty`, `encoding-utf8`, `encoding-bytes`,
-`codec-scout`, `codec-hello`, `codec-init-body`, `codec-open-body`,
-`codec-close`, `codec-keep-alive`, `codec-frame`, `codec-fragment`,
-`codec-declare`, `codec-push`, `routing-client`, `time-ntp64`.
-
-### §6.2 preset-mcu-extended v0.1.0
-
-MCU deployment + query + liveliness + wildcards. Targets MCU
-projects that need request/response and presence detection on top
-of preset-mcu-minimal.
-
-Includes: everything in preset-mcu-minimal plus
-`keyexpr-wildcard-single`, `keyexpr-wildcard-double`,
-`keyexpr-intersect`, `keyexpr-includes`, `keyexpr-mapping`,
-`declare-queryable`, `declare-token`, `pubsub-delete`,
-`pubsub-encoding`, `pubsub-timestamp`, `query-get`,
-`query-queryable`, `query-reply`, `query-target`,
-`query-consolidation`, `query-timeout`, `liveliness-token`,
-`liveliness-subscriber`, `codec-request`, `codec-response`,
-`codec-response-final`, `transport-fragmentation`,
-`time-system-clock`.
-
-### §6.3 preset-ap-client v0.1.0
-
-Linux AP deploying in client mode. Tokio executor, full pubsub +
-query + liveliness, TCP + UDP transports, but no router-side
-features.
-
-Includes: `platform-linux`, `runtime-tokio`, `routing-client`,
-`transport-unicast`, `transport-link-udp`, `transport-link-tcp`,
-`transport-fragmentation`, `transport-batching`,
-`transport-keepalive`, `locator-udp`, `locator-tcp`,
-`scouting-active`, `session-unicast-open`,
-`session-unicast-accept`, `link-frame`, `link-fragment`,
-`link-batching`, `keyexpr-literal`, `keyexpr-wildcard-single`,
-`keyexpr-wildcard-double`, `keyexpr-canon`, `keyexpr-intersect`,
-`keyexpr-includes`, `keyexpr-mapping`, `keyexpr-dollar-star`,
-`declare-keyexpr`, `declare-subscriber`, `declare-queryable`,
-`declare-token`, `declare-final`, `declare-interest`,
-`declare-undeclare`, `pubsub-put`, `pubsub-delete`,
-`pubsub-sample`, `pubsub-encoding`, `pubsub-timestamp`,
-`query-get`, `query-queryable`, `query-reply`, `query-target`,
-`query-consolidation`, `query-timeout`, `liveliness-token`,
-`liveliness-subscriber`, `codec-scout`, `codec-hello`,
-`codec-init-body`, `codec-open-body`,
-`codec-close`, `codec-keep-alive`, `codec-join`,
-`codec-frame`, `codec-fragment`, `codec-declare`, `codec-push`,
-`codec-request`, `codec-response`, `codec-response-final`,
-`encoding-empty`, `encoding-utf8`, `encoding-bytes`, `time-ntp64`,
-`time-system-clock`.
-
-### §6.4 preset-ap-router v0.1.0
-
-Linux AP deploying in router mode. preset-ap-client +
-router-side features + gossip + routing tables.
-
-Includes: everything in preset-ap-client plus `routing-router`,
-`routing-routes`, `routing-failover`, `routing-static-routes`,
-`scouting-passive`, `scouting-static`, `scouting-multicast`,
-`scouting-gossip`, `scouting-autoconnect`, `session-multicast`,
-`transport-multicast`, `transport-lowlatency`,
-`session-resumable`, `session-extqos`.
-
-### §6.5 preset-ap-full v0.1.0
-
-preset-ap-router + all transport link kinds + all auth methods +
-attachment + advanced encodings. The "kitchen sink" Linux deploy.
-
-Includes: everything in preset-ap-router plus
-`transport-link-tls`, `transport-link-quic`, `transport-link-ws`,
-`transport-link-vsock`, `transport-link-unixsock`,
-`transport-shm`, `transport-compression`, `locator-tls`,
-`locator-quic`, `locator-ws`, `locator-vsock`, `locator-unixsock`,
-`locator-iface`, `session-extauth`, `session-extcompression`,
-`session-extshm`, `session-stateless-accept`, `link-tx-cache`,
-`link-flow-control`, `pubsub-source-info`, `pubsub-attachment`,
-`pubsub-congestion-control`, `pubsub-priority`, `pubsub-express`,
-`pubsub-allow-loop`, `query-reply-err`,
-`query-selector-parameters`, `query-attachment`,
-`query-source-info`, `liveliness-get`, `liveliness-history`,
-`liveliness-historical-samples`, `access-acl`,
-`access-downsampling`, `access-quota`, `access-extauth-usrpwd`,
-`access-extauth-pubkey`, `access-extauth-jwt`,
-`attachment-bytes`, `attachment-encoding-aware`,
-`encoding-json`, `encoding-cbor`, `encoding-protobuf`,
-`encoding-mime`, `runtime-tokio-uring`, `runtime-zero-copy`,
-`time-hlc`, `time-timestamp-source`.
-
-### §6.6 preset-zenoh-cpp v0.1.0
-
-Cross-feature consistency anchor. The atomic feature set that
-matches zenoh-cpp's public API shape as exposed today. This
-preset defines what "full zenoh-cpp parity" means in atomic-
-feature terms; the project's first-milestone target.
-
-Includes: same as preset-ap-full except for the MCU/embedded-
-flavor subset — explicitly excludes `runtime-coop`,
+And the rule kept here had rotted to a no-op. §6.6 read "same as
+preset-ap-full except ... explicitly excludes `runtime-coop`,
 `runtime-no-std`, `platform-bare-metal`, `platform-freertos`,
-`platform-zephyr`, `transport-link-serial`, `locator-serial`. All
-other atomic features active.
+`platform-zephyr`, `transport-link-serial`, `locator-serial`". Executed
+against the store: NONE of those 7 atoms is in preset-ap-full, so every
+exclusion is vacuous; the rule yields 136 atoms where the store's
+zenoh-cpp closure is 121, and the real exclusion set is 15 entirely
+different atoms. A rule that computes the wrong answer is not design
+reasoning worth preserving — it is a census that stopped being checked.
+
+The store carries 9 presets; this file carried 6. Derive them:
+
+```
+mnemosyne-cli query --list-inventory | grep preset-
+mnemosyne-cli query "§feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-6-preset-zenoh-cpp"
+```
+
+§2.2 above keeps the preset NAMING contract (`preset-<target>-<level>`,
+and the (name × semver) pair as the unit downstream depends on). That is
+convention, not membership, and it does not rot the way a list does.
+
 
 ## §7 Cargo feature emission mechanism
 
