@@ -607,8 +607,12 @@ metadata_gated!(gated_qos, "pubsub-qos", QosLevel);
 /// Del-encoding slot empty (zenoh-pico `_z_msg_del_t` carries no
 /// encoding so the loopback parity mirrors that wire constraint).
 ///
-/// R311y308 — every metadata field now flows through its `loopback_*` gate
-/// above, so an un-composed field cannot reach the loopback Sample.
+/// R311y308 — every metadata field now flows through its `gated_*` gate
+/// above (`metadata_gated!`), so an un-composed field cannot reach the
+/// loopback Sample. R311y310 — the gates were named `loopback_*` here and
+/// in four §5.8 inventory reasons; no such symbol has ever existed, and
+/// the reasons had copied the name from this comment. A citation that
+/// names a symbol is only durable if the symbol was grepped.
 ///
 /// Keeps the metadata-threading rules in one place so a future R232
 /// follow-up that adjusts the propagation policy (e.g. validating QoS
