@@ -225,6 +225,65 @@ pub trait ReplySink {
     /// Signal the terminal `ResponseFinal` for `rid`. Fires once; the
     /// pending entry is removed by the registry afterwards.
     fn on_final(&mut self, rid: u64);
+    /// R311y323 — the pending for `rid` EXPIRED: its deadline passed before a
+    /// terminal `ResponseFinal` arrived. Fires instead of a bare
+    /// [`on_final`](Self::on_final), exactly once, and the registry removes the
+    /// entry afterwards.
+    ///
+    /// Why the seam needs a THIRD event rather than the sweep just calling
+    /// `on_final`: zenoh does not close a timed-out query silently — it
+    /// synthesizes an error reply so the caller can TELL a timeout from a peer's
+    /// normal completion (`api/session.rs`, the z_get timeout task and its
+    /// liveliness twin both call back `Err(ReplyError::new("Timeout",
+    /// Encoding::ZENOH_STRING))`). Before y323 wz fired a bare `on_final` and a
+    /// caller could not distinguish the two.
+    ///
+    /// The DEFAULT is the whole contract for a sink that holds no state:
+    /// synthesize the error, then the final. It is correct as-written for every
+    /// existing impl — the AP closure adapter, an MCU closed `enum`, the
+    /// liveliness get registry's sinks — which is why this is a defaulted method
+    /// and not a breaking addition.
+    ///
+    /// [`ConsolidatingSink`] overrides it because ORDER is observable: zenoh
+    /// flushes a `Latest` cache BEFORE the timeout error (data first, then the
+    /// reason the stream stopped). The default's `on_reply` -> `on_final`
+    /// sequence would emit the error FIRST and the cached data after it, and a
+    /// caller that treats an error as terminal would lose the data.
+    fn on_timeout(&mut self, rid: u64) {
+        self.on_reply(&timeout_reply(rid));
+        self.on_final(rid);
+    }
+}
+
+/// R311y323 — the synthetic `Err("Timeout")` reply a sweep delivers for an
+/// expired pending. The wz form of zenoh's `Reply { result:
+/// Err(ReplyError::new("Timeout", Encoding::ZENOH_STRING)) }`.
+///
+/// - `payload` = `Timeout`, the same ASCII bytes zenoh passes as the
+///   `ReplyError` payload.
+/// - `err_encoding` = `Some((2, None))`. zenoh's `Encoding::ZENOH_STRING` is
+///   `{ id: 1, schema: None }` (api/encoding.rs) and pico agrees (`id 1`); wz's
+///   wire form packs that as `id << 1 | schema_bit`, so no-schema `zenoh/string`
+///   is `packed_id == 2`. The low bit is the schema flag per
+///   [`crate::sample::EncodingHint::packed_id`].
+/// - `keyexpr` = `""`. There is no key: zenoh's `ReplyError` carries NO keyexpr
+///   field at all, and the registry could not supply one anyway — a `Pending`
+///   holds `rid` / `remaining_finals` / `deadline_ms` / `sink` and never saw the
+///   query's keyexpr. The empty literal is the honest encoding of "absent", not
+///   a placeholder to be filled in later.
+///
+/// Ungated and no-alloc-safe (a `BorrowedReply` over `'static` literals), so the
+/// MCU profile gets the same timeout signal as AP.
+pub fn timeout_reply(rid: u64) -> BorrowedReply<'static> {
+    BorrowedReply {
+        rid,
+        keyexpr: "",
+        kind: ReplyKind::Err,
+        payload: b"Timeout",
+        err_encoding: Some((2, None)),
+        attachment: None,
+        put_encoding: None,
+    }
 }
 
 /// Heap reply-closure type backing [`BoxedReplySink`]. Factored to a
@@ -400,6 +459,21 @@ impl<S: ReplySink> ConsolidatingSink<S> {
             crate::reply::InboundReply::from_view(reply),
         );
     }
+
+    /// R311y323 — deliver and clear the `Latest` cache. The ONE place that
+    /// decides a flush is due, shared by the normal-final path
+    /// ([`ReplySink::on_final`]) and the timeout path
+    /// ([`ReplySink::on_timeout`]) so they cannot drift apart on the `Latest`
+    /// condition. A no-op in every other mode — `Monotonic` and `None` forward
+    /// as they arrive and the cache (if any) is only a staleness record, never a
+    /// delivery backlog.
+    fn flush_latest(&mut self) {
+        if self.mode == crate::query_mode::ConsolidationMode::Latest {
+            for (_, reply) in self.cache.drain() {
+                self.inner.on_reply(&reply);
+            }
+        }
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -462,17 +536,31 @@ impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
         }
     }
 
+    /// R311y323 — zenoh's timeout ORDER, which the default `on_timeout` cannot
+    /// produce: flush the `Latest` cache FIRST, then the synthetic
+    /// `Err("Timeout")`, then the final.
+    ///
+    /// zenoh's timeout task does exactly this — remove the query, `if
+    /// reception_mode == Latest` replay the cached replies, then call back the
+    /// error (`api/session.rs`). Reaching it through the default would invert
+    /// the first two: `on_reply(err)` forwards immediately (the Err guard), and
+    /// only the following `on_final` drains — so the caller would see the
+    /// timeout error and THEN the data it had already earned.
+    ///
+    /// The `Latest` check is not duplicated here; `flush_latest` owns it, so the
+    /// normal-final path and this one cannot disagree about when a flush is due.
+    fn on_timeout(&mut self, rid: u64) {
+        self.flush_latest();
+        self.inner.on_reply(&timeout_reply(rid));
+        self.inner.on_final(rid);
+    }
+
     fn on_final(&mut self, rid: u64) {
-        if self.mode == crate::query_mode::ConsolidationMode::Latest {
-            // Drain BEFORE the inner final so the consumer sees every reply
-            // ahead of the terminal signal — the ordering zenoh produces
-            // (api/session.rs:3025-3029 flushes, then closes the query) and the
-            // one the Reply-before-Final contract already requires everywhere
-            // else in this crate.
-            for (_, reply) in self.cache.drain() {
-                self.inner.on_reply(&reply);
-            }
-        }
+        // Drain BEFORE the inner final so the consumer sees every reply ahead of
+        // the terminal signal — the ordering zenoh produces (it flushes, then
+        // closes the query) and the one the Reply-before-Final contract already
+        // requires everywhere else in this crate.
+        self.flush_latest();
         self.inner.on_final(rid);
     }
 }
@@ -855,6 +943,111 @@ mod consolidating_sink_tests {
             ],
             "the ts=5 arrival is stale and must be dropped; v1 and v2 pass"
         );
+    }
+
+    /// R311y323 — the timeout ORDER, and it is the whole reason `on_timeout`
+    /// exists as a seam method instead of the sweep calling `on_reply` then
+    /// `on_final`. zenoh flushes the `Latest` cache and THEN synthesizes the
+    /// error (data first, then the reason the stream stopped). The default
+    /// `on_timeout` would invert it — the Err guard forwards immediately, and
+    /// only the following `on_final` drains — so a caller that treats an error
+    /// as terminal would lose data it had already earned.
+    #[test]
+    fn timeout_flushes_latest_before_the_error_then_finals() {
+        let mut rec = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut rec);
+            sink.on_reply(&put("a/b", b"old", Some(ts(10))));
+            sink.on_reply(&put("a/b", b"new", Some(ts(20))));
+            assert!(
+                sink.inner.delivered.is_empty(),
+                "Latest holds until the end"
+            );
+            sink.on_timeout(1);
+        }
+        assert_eq!(
+            rec.delivered,
+            alloc::vec![
+                ("a/b".to_string(), b"new".to_vec()),
+                (String::new(), b"Timeout".to_vec()),
+            ],
+            "the cached data must arrive BEFORE the Timeout error, not after"
+        );
+        assert_eq!(rec.finals, alloc::vec![1], "the final still fires, last");
+    }
+
+    /// A timed-out query must be DISTINGUISHABLE from a peer's normal
+    /// completion. Before y323 both fired a bare `on_final` and a caller could
+    /// not tell them apart — that was `query-timeout`'s booked residual.
+    #[test]
+    fn timeout_is_distinguishable_from_a_normal_final() {
+        // normal completion: no synthetic reply, just the final
+        let mut normal = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::None, &mut normal);
+            sink.on_final(7);
+        }
+        assert!(
+            normal.delivered.is_empty(),
+            "a normal final synthesizes nothing"
+        );
+        assert_eq!(normal.finals, alloc::vec![7]);
+
+        // timeout: an Err("Timeout") precedes the final
+        let mut timed = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::None, &mut timed);
+            sink.on_timeout(7);
+        }
+        assert_eq!(
+            timed.delivered,
+            alloc::vec![(String::new(), b"Timeout".to_vec())],
+            "a timeout must announce itself"
+        );
+        assert_eq!(timed.finals, alloc::vec![7]);
+    }
+
+    /// R311y323 — the DEFAULT `on_timeout`, which is what the LIVELINESS get
+    /// registry's sinks and every MCU closed-`enum` sink take.
+    /// [`ConsolidatingSink`] OVERRIDES `on_timeout`, so every other test in this
+    /// module exercises the override and proves NOTHING about the default.
+    ///
+    /// This test exists because falsification caught its absence: neutering the
+    /// trait default to a bare `on_final` left all 12 other tests GREEN. The
+    /// liveliness leg would have shipped with no timeout signal and no test
+    /// would have said so — the same shape as the y321 Err bug, whose fixture
+    /// set (`fn put`) never built the arm that broke.
+    #[test]
+    fn default_on_timeout_synthesizes_the_error_then_finals() {
+        let mut rec = Recorder::default();
+        {
+            // A plain sink: no ConsolidatingSink wrapper, so this is the trait's
+            // own default body.
+            let mut plain = &mut rec;
+            plain.on_timeout(9);
+        }
+        assert_eq!(
+            rec.delivered,
+            alloc::vec![(String::new(), b"Timeout".to_vec())],
+            "the default must synthesize Err(Timeout) before the final"
+        );
+        assert_eq!(rec.finals, alloc::vec![9]);
+    }
+
+    /// The synthetic reply's SHAPE, pinned against zenoh's
+    /// `ReplyError::new("Timeout", Encoding::ZENOH_STRING)`. The encoding is the
+    /// half most likely to rot: zenoh's ZENOH_STRING is `{id: 1, schema: None}`
+    /// and wz packs `id << 1 | schema_bit`, so no-schema is `packed_id == 2` —
+    /// a bare `1` here would silently mean "id 0, schema follows".
+    #[test]
+    fn timeout_reply_matches_zenoh_replyerror_shape() {
+        let r = timeout_reply(42);
+        assert_eq!(r.rid(), 42);
+        assert_eq!(r.kind(), ReplyKind::Err);
+        assert_eq!(r.payload(), b"Timeout");
+        assert_eq!(r.err_encoding(), Some((2, None)), "zenoh/string, no schema");
+        assert_eq!(r.keyexpr(), "", "zenoh's ReplyError carries no keyexpr");
+        assert_eq!(r.timestamp(), None);
     }
 
     /// The tie rule, which is where "no timestamps at all" lands: zenoh's `>=`

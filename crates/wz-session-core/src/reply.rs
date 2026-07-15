@@ -1045,7 +1045,21 @@ impl<C: ReplySink> ReplyRegistry<C> {
         let swept = fired.len();
         for mut entry in fired {
             let rid = entry.rid;
-            entry.sink.on_final(rid);
+            // R311y323 — `on_timeout`, NOT a bare `on_final`: an expired query
+            // synthesizes `Err("Timeout")` before its final, so a caller can tell
+            // a timeout from a peer's normal completion. zenoh does the same
+            // (its timeout task calls back `Err(ReplyError::new("Timeout", ..))`
+            // rather than closing quietly); before y323 wz fired the bare final
+            // and the two were indistinguishable.
+            //
+            // NO cfg GATE HERE, and none is possible: this crate does not declare
+            // `query-timeout` (it is a wz-runtime-tokio TERMINAL feature — ask
+            // cargo, not memory), so the last hop that KNOWS is the runtime. It
+            // already gates: `deadline_ms` is armed only from
+            // `effective_timeout_ms()`, which reads 0 with the feature off, so no
+            // entry here can ever carry a deadline and this loop stays empty by
+            // construction. The gate is the arming, not the sweep.
+            entry.sink.on_timeout(rid);
         }
         swept
     }
@@ -2574,6 +2588,57 @@ mod tests {
         assert_eq!(swept, 1, "one expired entry must be swept");
         assert_eq!(fired.load(Ordering::SeqCst), 1, "on_final fires once");
         assert!(reg.is_empty(), "expired entry must be removed from table");
+    }
+
+    /// R311y323 — the SWEEP delivers the timeout error, proven at the registry
+    /// (not the sink seam): `sweep_timed_out` must route through `on_timeout`,
+    /// not a bare `on_final`. This is the wiring half — the reply_sink unit
+    /// tests prove the sink's contract and say nothing about which method the
+    /// registry calls.
+    ///
+    /// The gate is deliberately absent from this crate and cannot be here: it
+    /// does not declare `query-timeout` (a wz-runtime-tokio terminal feature).
+    /// The runtime gates by ARMING — `effective_timeout_ms()` reads 0 with the
+    /// feature off, so `deadline_ms` stays None and this sweep sees nothing.
+    #[test]
+    fn sweep_timed_out_synthesizes_the_timeout_error_before_the_final() {
+        let mut reg = ReplyRegistry::new();
+        // `type` alias per clippy::type_complexity — the same factoring
+        // `BoxedReplyFn` uses in reply_sink.rs.
+        type SeenReplies = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+        let seen: SeenReplies = Arc::new(Mutex::new(Vec::new()));
+        let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        let order_reply = order.clone();
+        let order_final = order.clone();
+        reg.register(
+            7,
+            1,
+            Some(1000),
+            move |reply| {
+                order_reply.lock().unwrap().push("reply");
+                seen_cb
+                    .lock()
+                    .unwrap()
+                    .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
+            },
+            move |_| order_final.lock().unwrap().push("final"),
+        );
+
+        let swept = reg.sweep_timed_out(1500);
+        assert_eq!(swept, 1);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(String::new(), b"Timeout".to_vec())],
+            "the sweep must synthesize Err(Timeout) -- a caller cannot otherwise \
+             tell a timeout from a peer's normal Final"
+        );
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["reply", "final"],
+            "Reply-before-Final holds on the timeout path too"
+        );
+        assert!(reg.is_empty());
     }
 
     #[test]

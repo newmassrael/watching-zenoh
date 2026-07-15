@@ -303,7 +303,19 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
                 "finalized staging overflow: sweep caller is not draining \
                  within its lock window (permanent replay-leak hazard)"
             );
-            entry.sink.on_final(id);
+            // R311y323 — `on_timeout`, NOT a bare `on_final`, mirroring
+            // `ReplyRegistry::sweep_timed_out`. zenoh synthesizes the SAME
+            // `Err(ReplyError::new("Timeout", ..))` for an expired LIVELINESS
+            // query as for an expired z_get — its `liveliness_queries` table has
+            // its own timeout task doing exactly that (`api/session.rs`). Two
+            // registries, one contract: an expired get says so.
+            //
+            // This leg takes `ReplySink::on_timeout`'s DEFAULT (synthesize, then
+            // final) and that is the faithful shape here, not a shortcut: a
+            // liveliness get has no consolidation, so there is no cache to flush
+            // first — which is why zenoh's liveliness timeout arm has no flush
+            // either, while its z_get arm does.
+            entry.sink.on_timeout(id);
         }
         swept
     }
@@ -675,6 +687,38 @@ mod tests {
         assert_eq!(*f.lock().unwrap(), vec![42], "swept get fires on_final");
         assert_eq!(reg.len(), 1, "never-expiring get 43 retained");
         assert_eq!(reg.sweep_timed_out(5000), 0, "idempotent; 43 never expires");
+    }
+
+    /// R311y323 — the SIBLING leg. zenoh synthesizes the same
+    /// `Err(ReplyError::new("Timeout", ..))` for an expired LIVELINESS query as
+    /// for an expired z_get: its `liveliness_queries` table has its own timeout
+    /// task doing exactly that. Two registries, one contract.
+    ///
+    /// Why this test and not just `sweep_times_out_pending_get` above: that one
+    /// asserts only `on_final`, so it stayed GREEN through the whole y323 change
+    /// and would stay green if this leg were reverted. A sibling that cannot
+    /// fail is not coverage — the same shape as the y321 Err bug.
+    ///
+    /// This leg takes `ReplySink::on_timeout`'s DEFAULT, and that is faithful:
+    /// a liveliness get has no consolidation, so there is no cache to flush
+    /// first — which is why zenoh's liveliness timeout arm has no flush either
+    /// while its z_get arm does.
+    #[test]
+    fn sweep_synthesizes_the_timeout_error_on_the_liveliness_leg() {
+        let mut reg = LivelinessGetRegistry::new();
+        let r: Captured = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(42, Some(1000), make_get(r.clone(), f.clone()))
+            .unwrap();
+
+        assert_eq!(reg.sweep_timed_out(1500), 1);
+        assert_eq!(
+            *r.lock().unwrap(),
+            vec![(42, String::new())],
+            "an expired liveliness get must announce itself with a synthetic \
+             reply carrying its id and no keyexpr, exactly as the z_get leg does"
+        );
+        assert_eq!(*f.lock().unwrap(), vec![42], "the final still fires, after");
     }
 
     #[test]
