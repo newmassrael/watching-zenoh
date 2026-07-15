@@ -9,14 +9,18 @@
 //! prefix is re-prepended. Closes the R311wt aligner strip_prefix gap at the
 //! LOGIC level.
 //!
-//! LOGIC ONLY this round (the R311y57 [`crate::storage_manager::StorageManager`]
-//! does not yet apply it): zenoh's `Storage::put` takes `key: Option<OwnedKeyExpr>`
-//! so it can store the exact-prefix-match value under a NONE key; wz's §5.11
-//! [`crate::storage_backend::StorageBackend::put`] takes `key: &str` (no Option),
-//! so wiring strip into the manager's live put/get path needs a §5.11 backend
-//! Option-key change — a documented follow-up. This module is the faithful
-//! strip/restore capability the future storage service applies; [`strip_prefix`]
-//! returning `Ok(None)` is exactly the case that backend change must carry.
+//! R311y304 correction (this header had gone stale, describing a follow-up that
+//! is DONE): strip/restore is now WIRED into the live put/get path.
+//! [`crate::storage_backend::StorageBackend::put`] takes `key: Option<&str>`
+//! (the exact-prefix-match mount-root is the `None` key, mirroring zenoh's
+//! `Storage::put` `Option<OwnedKeyExpr>`), and [`crate::storage_state::StorageState`]
+//! `with_strip_prefix` applies strip on the capture (`apply_sample` →
+//! `stored_key_for`) and restore on the query (`matching_versions` →
+//! `full_key_for`), driven from `StorageConfig.strip_prefix` via
+//! `StorageService::declare_with_backend`. [`strip_prefix`] returning `Ok(None)`
+//! is the mount-root case that the `Option` key carries end-to-end — through the
+//! backend, the digest, and the aligner `EventMetadata` (R311y64). This module
+//! remains the pure strip/restore logic those paths call.
 
 use crate::keyexpr_prefix::{strip_nonwild_prefix, NonWildError, NonWildKeyExpr};
 use alloc::string::String;
