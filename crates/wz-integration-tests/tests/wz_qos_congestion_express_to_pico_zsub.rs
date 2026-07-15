@@ -23,16 +23,35 @@
 //! byte that y240 already proved is wire-populated. So both sub-fields
 //! ARE foreign-observable; this test closes the remaining two.
 //!
-//! ## Scope — congestion + express sub-fields
+//! ## Scope — R311y312: the WHOLE qos byte, i.e. the whole `pubsub-qos` atom
 //!
 //! wz emits the whole packed byte in one ext (`build_push_outer_extensions`
-//! writes `q.raw`, gated on `any(pubsub-priority / pubsub-congestion-control
-//! / pubsub-express)` — no sub-field masking), so with `pubsub-priority`
-//! already active the congestion + express bits already ride the wire. This
-//! test needs NO send-path change; it only sets those bits and reads them
-//! back through pico's public getters. Note the honest limit: this witnesses
-//! the express BIT's foreign decode, NOT express's batching-flush SEMANTICS
-//! (a sender-side tx behaviour with no receiver-observable proxy).
+//! writes `q.raw` — no sub-field masking), so all three sub-fields ride the
+//! wire together. This test needs NO send-path change; it only sets the bits
+//! and reads them back through pico's public getters.
+//!
+//! R311y312 widened the scope from "congestion + express" to all three, and
+//! this file's proof claims below moved from the three per-field atoms onto
+//! `pubsub-qos`. Two reasons, both structural:
+//!
+//! 1. R311y307 MERGED the three former per-field features into the single
+//!    `pubsub-qos` atom, because one byte behind one gate is one compile unit.
+//!    The three survive only as elidable cargo ALIASES with zero cfg sites of
+//!    their own, so a proof claimed against them binds to no gated code. (This
+//!    doc used to say the ext was "gated on `any(pubsub-priority /
+//!    pubsub-congestion-control / pubsub-express)`" — that was the pre-y307
+//!    union the merge dissolved, left stale here.)
+//! 2. Partial claims never aggregate (`full = set(proven_full)`;
+//!    `partial = proven_partial - full`), so splitting the byte's proof across
+//!    two tests capped `pubsub-qos` at `partial` permanently. Asserting all
+//!    three sub-fields in ONE test is what makes the claim FULL — and it is
+//!    honest exactly because they share one byte: witnessing that byte
+//!    round-trip through pico IS witnessing the atom.
+//!
+//! Note the honest limit, unchanged: this witnesses the express BIT's foreign
+//! decode, NOT express's batching-flush SEMANTICS (a sender-side tx behaviour
+//! with no receiver-observable proxy) — that effect is the independent
+//! `transport-batching` axis.
 //!
 //! ## Why `Block`(1) + `express`(1) and not the default
 //!
@@ -93,8 +112,7 @@ const PUBLISH_KEYEXPR: &str = "demo/qos";
 const SUB_KEYEXPR: &str = "demo/**";
 const PAYLOAD: &str = "qos-metadata-hello-from-wz";
 
-// wz-proves: pubsub-congestion-control wz->pico partial
-// wz-proves: pubsub-express wz->pico partial
+// wz-proves: pubsub-qos wz->pico
 // wz-proves: pubsub-put wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub_attachment); Layer E runs via --ignored"]
@@ -201,10 +219,29 @@ async fn wz_put_congestion_express_decoded_by_pico_zsub_attachment() {
     let congestion_witness = "with congestion: 1";
     let express_witness = "with express: 1";
     let subscribed_witness = "Declaring Subscriber on";
-    // Priority stays `Data` (5) so the qos byte's discrimination is on the
-    // congestion + express bits alone; the priority sub-field is R311y240's
-    // witness, not this test's.
-    let qos = QosLevel::from_parts(Priority::Data, CongestionControl::Block, true);
+    // R311y312 — priority is now `RealTime` (1) and asserted here too, so this
+    // ONE test witnesses ALL THREE sub-fields of the single qos byte.
+    //
+    // It used to pin `Data` (5) deliberately, "so the qos byte's discrimination
+    // is on the congestion + express bits alone; the priority sub-field is
+    // R311y240's witness, not this test's". That division of labour mapped onto
+    // three per-field ATOMS. R311y307 merged them: the byte is ONE atom
+    // (`pubsub-qos`) because it is ONE gate. A per-field split of the proof no
+    // longer maps onto anything in the catalog, and it capped the merged atom at
+    // `partial` forever -- partial claims never aggregate (`full =
+    // set(proven_full)`, `partial = proven_partial - full`), so N partials never
+    // promote to a proof of the whole byte. Asserting all three here is what
+    // makes the claim FULL, and it is honest precisely because one byte carries
+    // all three: witnessing 0x01|0x08|0x10 round-trip through pico IS witnessing
+    // the atom.
+    //
+    // `RealTime`(1) is the discriminating choice, for the reason
+    // wz_priority_to_pico_zsub.rs states: `Data`(5) is pico's own default, so it
+    // would print 5 whether or not propagation works -- a tautology. wz's
+    // `Priority::wire_byte()` is 1:1 with pico's `z_priority_t`, so a propagated
+    // RealTime prints 1 and a dropped byte prints the default 5.
+    let priority_witness = "with priority: 1";
+    let qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
     let scenario = async {
         // Gate the delivery budget on pico's subscriber-declared witness
         // before publishing (no-flaky; pico open latency does not eat the
@@ -240,6 +277,7 @@ async fn wz_put_congestion_express_decoded_by_pico_zsub_attachment() {
             let captured = read_captured(&mut z_sub_stdout_reader);
             if captured.contains(received_witness)
                 && captured.contains(PAYLOAD)
+                && captured.contains(priority_witness)
                 && captured.contains(congestion_witness)
                 && captured.contains(express_witness)
             {
@@ -247,9 +285,11 @@ async fn wz_put_congestion_express_decoded_by_pico_zsub_attachment() {
             }
             if Instant::now() >= deadline {
                 return Err(format!(
-                    "pico z_sub_attachment did not decode wz's Block+express Put within 12s.\n\
-                     Expected '{received_witness}' + payload '{PAYLOAD}' + '{congestion_witness}' \
-                     + '{express_witness}' (a dropped qos byte would print the default \
+                    "pico z_sub_attachment did not decode wz's RealTime+Block+express Put \
+                     within 12s.\n\
+                     Expected '{received_witness}' + payload '{PAYLOAD}' + \
+                     '{priority_witness}' + '{congestion_witness}' + '{express_witness}' \
+                     (a dropped qos byte would print the defaults 'with priority: 5' + \
                      'with congestion: 0' + 'with express: 0').\n\
                      --- captured stdout ---\n{captured}"
                 ));

@@ -54,6 +54,22 @@ FOREIGN_NON_OBSERVABLE = {
     "link-frame": "alias view of codec-frame (the observable Frame envelope), would double-count",
     "link-fragment": "alias of transport-fragmentation",
     "link-batching": "alias of transport-batching",
+    # R311y312 — the three former per-field QoS features. R311y307 merged them
+    # into `pubsub-qos` (one byte, one gate, one compile unit) and left them as
+    # cargo aliases with ZERO cfg sites of their own. Same shape as link-frame
+    # above, same reason: the observable artifact is ONE qos byte, and counting
+    # the aliases beside the atom that gates it double-counts it. Their proofs
+    # moved onto `pubsub-qos` in this same commit -- required, not tidiness:
+    # A4-6 rejects a claim on an excluded atom and fires BEFORE A4-2/A4-5, so
+    # splitting the exclusion from the re-point turns the gate red.
+    "pubsub-congestion-control": "alias of pubsub-qos; the nodrop bit of the one qos byte",
+    "pubsub-express": "alias of pubsub-qos; the express bit of the one qos byte",
+    # NOT called a pure alias, deliberately: this key is
+    # ["session-extqos", "pubsub-qos", ..], not ["pubsub-qos"]. The extra edge is
+    # inert today (session-extqos is reserved/PARTIAL at 0 cfg sites and reaches
+    # no transport-qos), but it is live in the manifest, so the accurate reason
+    # names it rather than flattening it to "alias of pubsub-qos".
+    "pubsub-priority": "qos-byte priority bits via pubsub-qos; extra session-extqos edge is inert",
     "attachment-encoding-aware": "typed DATA-VIEW over attachment-bytes; not a separate wire toggle",
     # Purely local state.
     "transport-stats": "byte/msg counters; counting bytes changes no byte",
@@ -355,12 +371,23 @@ def main() -> int:
                     continue
                 # A4-5 containment applies ONLY to cfg-gated (active) atoms.
                 #
-                # A FOUNDATIONAL atom has ZERO cfg(feature=..) sites by A3 invariant #2 --
-                # its code is compiled unconditionally, whether or not its `= []` cargo key
-                # happens to be enabled in this build graph. So "the feature is not enabled"
-                # does NOT mean "the code is absent", and containment cannot refute it. Only
-                # an active atom's code can actually be elided by not enabling its feature,
-                # and that is exactly the case this arm is built to refute.
+                # A FOUNDATIONAL atom has ZERO cfg(feature=..) sites of its OWN by A3
+                # invariant #2, so not enabling its cargo key elides no code that names it,
+                # and containment has nothing to refute. Only an active atom's code can be
+                # elided by not enabling its feature, and that is the case this arm exists
+                # to refute.
+                #
+                # R311y312 — the reason stated here USED to be "its code is compiled
+                # unconditionally, whether or not its `= []` cargo key happens to be
+                # enabled". That is FALSE of every alias-shaped FOUNDATIONAL in the tree,
+                # which is 18 of the 57 (link-batching = ["transport-batching"],
+                # link-fragment, attachment-encoding-aware, the 9 locator-* forwards, and
+                # post-y307 the pubsub-qos aliases): their key is NOT `= []` and their
+                # vehicle's code IS elided when the vehicle feature is off. The exemption
+                # is still correct, but for the narrower reason above -- the atom names no
+                # cfg site, so containment over ITS name is vacuous either way. The
+                # alias-shaped ones escape a real check only because FOREIGN_NON_OBSERVABLE
+                # short-circuits them first, which is why an alias belongs in that set.
                 if status[atom] == "active" and atom not in closure:
                     fail_containment.append((rel, t.name, atom, pkg))
                     continue

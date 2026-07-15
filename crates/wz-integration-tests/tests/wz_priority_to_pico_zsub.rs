@@ -85,7 +85,13 @@ const PUBLISH_KEYEXPR: &str = "demo/prio";
 const SUB_KEYEXPR: &str = "demo/**";
 const PAYLOAD: &str = "prioritized-hello-from-wz";
 
-// wz-proves: pubsub-priority wz->pico
+// R311y312 — was `pubsub-priority`, which R311y307 demoted to an elidable cargo
+// alias of `pubsub-qos` with zero cfg sites of its own; a proof must bind to the
+// atom's own gated code, and the code this test drives is gated on `pubsub-qos`.
+// `partial` is the honest strength: this test witnesses the priority bits (0-2)
+// of the qos byte, not the nodrop (3) or express (4) bits. The FULL claim on the
+// whole byte is wz_qos_congestion_express_to_pico_zsub, which asserts all three.
+// wz-proves: pubsub-qos wz->pico partial
 // wz-proves: pubsub-put wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_sub_attachment); Layer E runs via --ignored"]
