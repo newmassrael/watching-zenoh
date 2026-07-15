@@ -568,6 +568,12 @@ impl From<QueryReply> for InboundReply {
                     body,
                 }
             }
+            // R311y315 — the staged `QueryReply::Err` variant is gated on
+            // `query-reply-err`, so this projection arm carries the same
+            // gate. The target `InboundReplyBody::Err` stays unconditional:
+            // it is the RECEIVE surface, and a foreign peer's Err must
+            // decode regardless of whether this build can emit one.
+            #[cfg(feature = "query-reply-err")]
             QueryReply::Err {
                 rid,
                 keyexpr_literal,
@@ -2262,7 +2268,9 @@ mod tests {
         // consumer InboundReply surface does not expose responder).
     }
 
-    #[cfg(feature = "query-queryable")]
+    // R311y315 — `query-reply-err` joined the gate: the fixture stages a
+    // `QueryReply::Err`, which that feature now gates.
+    #[cfg(all(feature = "query-queryable", feature = "query-reply-err"))]
     #[test]
     fn from_query_reply_err_projects_to_inbound_err() {
         use crate::query::QueryReply;

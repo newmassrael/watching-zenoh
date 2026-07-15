@@ -167,7 +167,13 @@ use crate::query_sink::BorrowedQuery;
 use crate::query_sink::BoxedQuerySink;
 use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
-use crate::response_build::{ResponseErrBuilder, ResponseReplyBuilder};
+// R311y315 — `ResponseErrBuilder` is deliberately NOT imported here.
+// Its only two code sites (the `into_response` Err arm and the Err
+// round-trip test) are both gated on `query-reply-err`, so an import
+// would have to carry that gate — and a cfg'd import encodes "which arm
+// names the type", which is the drift class that has bitten this file
+// before. Both sites fully qualify instead, which cannot drift.
+use crate::response_build::ResponseReplyBuilder;
 #[cfg(feature = "alloc")]
 use crate::sample::{EncodingHint, SourceInfo, TimestampHint};
 
@@ -356,7 +362,7 @@ pub enum ReplyBody {
 /// One outbound Reply or Err record produced by a queryable callback.
 /// The registry accumulates these into a caller-owned `Vec` so the
 /// runtime (R121j-5c) can wire each entry through the corresponding
-/// [`ResponseReplyBuilder`] / [`ResponseErrBuilder`] + the
+/// [`ResponseReplyBuilder`] / [`crate::response_build::ResponseErrBuilder`] + the
 /// `encode_frame_with_response` envelope helper.
 ///
 /// The optional `responder` tuple — set via
@@ -431,9 +437,21 @@ pub enum QueryReply {
     },
     /// Error reply — `MID = _Z_MID_Z_ERR(0x05)`. The `encoding` tuple
     /// (id, optional schema) maps onto
-    /// [`ResponseErrBuilder::encoding`] at frame-emit time. `payload`
+    /// [`crate::response_build::ResponseErrBuilder::encoding`] at frame-emit time. `payload`
     /// is the application-level error blob (often a UTF-8 message
     /// but no wire-level encoding is mandated).
+    ///
+    /// R311y315 — gated on `query-reply-err`, the atom whose contract is
+    /// "no Err-form reply is emitted in a build without it". `QueryReply`
+    /// is the SEND staging type, so gating the variant makes that
+    /// contract hold by construction rather than by convention: with the
+    /// feature off there is no value to stage, so neither the wire drain
+    /// ([`Self::into_response`]) nor the loopback projection
+    /// (`From<QueryReply> for InboundReply`) can reach an Err. The
+    /// RECEIVE side is a different type and stays unconditional — a
+    /// foreign peer may send us an Err regardless of our own build, and
+    /// [`crate::reply::InboundReplyBody::Err`] must always decode it.
+    #[cfg(feature = "query-reply-err")]
     Err {
         rid: u64,
         keyexpr_literal: String,
@@ -522,6 +540,7 @@ impl QueryReply {
                 }
                 builder.build()
             }
+            #[cfg(feature = "query-reply-err")]
             QueryReply::Err {
                 rid,
                 keyexpr_literal,
@@ -529,7 +548,12 @@ impl QueryReply {
                 payload,
                 responder,
             } => {
-                let mut builder = ResponseErrBuilder::new(rid, 0, Some(&keyexpr_literal), &payload);
+                let mut builder = crate::response_build::ResponseErrBuilder::new(
+                    rid,
+                    0,
+                    Some(&keyexpr_literal),
+                    &payload,
+                );
                 if let Some((id, schema)) = encoding {
                     builder = builder.encoding(id, schema.as_deref());
                 }
@@ -561,7 +585,8 @@ pub struct QueryResponder<'a> {
     /// emits no envelope-level responder ext; `Some` stamps the
     /// tuple onto every pushed [`QueryReply`] so
     /// [`QueryReply::into_response`] threads it into
-    /// [`ResponseReplyBuilder::responder`] / [`ResponseErrBuilder::responder`].
+    /// [`ResponseReplyBuilder::responder`] /
+    /// [`crate::response_build::ResponseErrBuilder::responder`].
     /// Set via [`Self::with_responder`]; clears via [`Self::clear_responder`].
     responder: Option<(Vec<u8>, u32)>,
 }
@@ -826,9 +851,17 @@ impl<'a> QueryResponder<'a> {
     }
 
     /// Emit an Err reply. `encoding_id` (with optional `schema`)
-    /// maps onto [`ResponseErrBuilder::encoding`] at frame-emit
+    /// maps onto [`crate::response_build::ResponseErrBuilder::encoding`]
+    /// at frame-emit
     /// time — pass `None` to skip the encoding ext and rely on the
     /// peer's default interpretation of `payload`.
+    ///
+    /// R311y315 — gated on `query-reply-err` alongside the
+    /// [`QueryReply::Err`] variant it stages. Before this it was an
+    /// ungated `pub fn` on a `pub` type in a `pub mod`, so it was a
+    /// public bypass of the very gate the trait-level
+    /// [`ReplyOut::reply_err`] forwarding was enforcing.
+    #[cfg(feature = "query-reply-err")]
     pub fn send_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
         let encoding = encoding_id.map(|id| (id, schema.map(str::to_string)));
         self.replies.push(QueryReply::Err {
@@ -914,10 +947,16 @@ impl<'a> QueryResponder<'a> {
 /// wrapper's `PhantomData` scaffolding used to, so the indirection (and
 /// its scaffolding) is gone.
 ///
-/// `reply_err` keeps the `query-reply-err` gate: it is that feature's
-/// sole production enforcement point — an Err-form reply must not be
-/// emitted in a build without it, and the `codec-response`-gated
-/// `into_response` encode stage carries no such gate. The Put / Del /
+/// `reply_err` keeps the `query-reply-err` gate. R311y315 — it is no
+/// longer that feature's SOLE enforcement point, and the claim that it
+/// was is what made the old wording wrong: `into_response` carries no
+/// gate of its own, so while `QueryReply::Err`, `send_err` and this
+/// forwarding were each independently reachable through `pub mod query`,
+/// a build with the feature OFF could still emit an Err reply by calling
+/// `QueryResponder::send_err` directly or by staging the variant by
+/// hand. The gate now sits on the staged `QueryReply::Err` variant
+/// itself, so the contract holds by construction: no value to stage ⇒
+/// nothing for the `codec-response` drain to encode. The Put / Del /
 /// responder-identity methods stay unconditional under `codec-request`:
 /// a constructed `QueryResponder` only accumulates into a
 /// `Vec<QueryReply>` that the `codec-response`-gated `into_response`
@@ -2781,11 +2820,12 @@ mod tests {
             responder: None,
         };
         let response = reply.into_response().unwrap();
-        let via_builder = ResponseErrBuilder::new(42, 0, Some("error/path"), b"oops")
-            .encoding(4, Some("schema_v1"))
-            .build()
-            .unwrap()
-            .wire();
+        let via_builder =
+            crate::response_build::ResponseErrBuilder::new(42, 0, Some("error/path"), b"oops")
+                .encoding(4, Some("schema_v1"))
+                .build()
+                .unwrap()
+                .wire();
         assert_eq!(
             response
                 .wire(),
