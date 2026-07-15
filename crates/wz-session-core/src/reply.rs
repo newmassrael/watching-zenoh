@@ -163,7 +163,7 @@ use crate::query::{QueryReply, ReplyBody};
 // `InboundReply` impl, and `BoxedReplySink` is the AP closure adapter, so
 // those two carry the `alloc` gate.
 #[cfg(feature = "alloc")]
-use crate::reply_sink::{BoxedReplySink, ReplyKind};
+use crate::reply_sink::{BoxedReplySink, ConsolidatingSink, ReplyKind};
 use crate::reply_sink::{ReplySink, ReplyView};
 
 /// Body arm of an inbound reply record. Mirrors the producer-side
@@ -1220,13 +1220,25 @@ impl<C: ReplySink> ReplyRegistry<C> {
 /// surface composes in any `alloc` subset (`BoxedReplySink` is itself
 /// `alloc`-gated).
 #[cfg(feature = "alloc")]
-impl ReplyRegistry<BoxedReplySink> {
+/// R311y321 — the AP registry's sink type is now
+/// `ConsolidatingSink<BoxedReplySink>` rather than a bare `BoxedReplySink`.
+///
+/// WHY THE WRAPPER IS UNIVERSAL rather than installed only on consolidating
+/// z_gets: `ReplyRegistry<C>` stores ONE `C` for every pending, so "some
+/// pendings consolidate" is not representable by mixing types — the wrapper goes
+/// on all of them and `ConsolidationMode::None` makes it a passthrough. That
+/// keeps the registry generic-over-one-sink (the R311gb-3c DIP seam) instead of
+/// growing a per-entry `dyn` or an `Option<Cache>` field on `Pending`, which is
+/// exactly the shape the apply-half plan ruled out: `Pending` stays
+/// byte-identical and the no-alloc profile, which composes its own closed-`enum`
+/// sink, never instantiates this impl at all.
+impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
     /// New empty AP registry backed by heap-boxed closures
-    /// ([`BoxedReplySink`]). The inferring shorthand for
+    /// ([`BoxedReplySink`]), each wrapped in a [`ConsolidatingSink`]. The
+    /// inferring shorthand for
     /// [`with_sink_backing`](ReplyRegistry::with_sink_backing):
-    /// `ReplyRegistry::new()` fixes `C = BoxedReplySink` so the
-    /// closure-taking [`register`](Self::register) wrapper is in reach
-    /// without a turbofish.
+    /// `ReplyRegistry::new()` fixes `C` so the closure-taking
+    /// [`register`](Self::register) wrapper is in reach without a turbofish.
     pub fn new() -> Self {
         Self::with_sink_backing()
     }
@@ -1254,6 +1266,41 @@ impl ReplyRegistry<BoxedReplySink> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> ReplyHandle {
+        // R311y321 — signature UNCHANGED; every existing caller (liveliness_get,
+        // the aligner's query plumbing, the tests) keeps registering a
+        // non-consolidating pending and gets byte-identical behaviour, because
+        // `passthrough` pins `ConsolidationMode::None`. A z_get that carries a
+        // mode calls `register_consolidating` instead.
+        self.register_consolidating(
+            rid,
+            expected_finals,
+            deadline_ms,
+            crate::query_mode::ConsolidationMode::None,
+            on_reply,
+            on_final,
+        )
+    }
+
+    /// R311y321 — register a pending z_get whose inbound replies are
+    /// consolidated with `mode` before reaching `on_reply`.
+    ///
+    /// The apply-half entry point: [`register`](Self::register) is this with
+    /// `ConsolidationMode::None`. Separated rather than added as a parameter to
+    /// `register` so the existing seam keeps its signature (the callers that do
+    /// not consolidate — liveliness, alignment plumbing — should not have to
+    /// name a mode they have no opinion about).
+    ///
+    /// `Latest` delivers NOTHING until `on_final`; see [`ConsolidatingSink`] for
+    /// the per-mode contract and the two named pico divergences.
+    pub fn register_consolidating(
+        &mut self,
+        rid: u64,
+        expected_finals: u32,
+        deadline_ms: Option<u64>,
+        mode: crate::query_mode::ConsolidationMode,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> ReplyHandle {
         // AP backing: `register_sink` is infallible here (the BoundedVec
         // pending table grows past the advisory `N`), so the convenience
         // wrapper keeps its `ReplyHandle` signature.
@@ -1261,7 +1308,7 @@ impl ReplyRegistry<BoxedReplySink> {
             rid,
             expected_finals,
             deadline_ms,
-            BoxedReplySink::new(on_reply, on_final),
+            ConsolidatingSink::new(mode, BoxedReplySink::new(on_reply, on_final)),
         )
         .expect("register on the alloc backing never exceeds declared capacity")
     }

@@ -296,7 +296,14 @@ pub struct ApplicationLayerObserver {
     /// pending entries regardless of `query-reply` feature state; the
     /// feature-OFF build never enters the registration path (Session::query's
     /// body is gated on `query-get` which implies `query-reply`).
-    pub replies: ReplyRegistry<crate::reply_sink::BoxedReplySink>,
+    ///
+    /// R311y321 — the sink is wrapped in a
+    /// [`ConsolidatingSink`](crate::reply_sink::ConsolidatingSink). The registry
+    /// stores ONE `C` for every pending, so the wrapper is universal and
+    /// `ConsolidationMode::None` (what `register` pins) is a passthrough; only a
+    /// z_get that names a mode via `register_consolidating` consolidates.
+    pub replies:
+        ReplyRegistry<crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>>,
     /// R311r — staging buffers are unconditional so the observer
     /// struct shape is stable across consumer-feature subsets. The
     /// drain side in [`Self::flush_pending`] stays cfg-gated on

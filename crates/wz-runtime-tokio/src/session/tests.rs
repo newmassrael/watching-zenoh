@@ -7422,3 +7422,139 @@ fn remote_only_query_does_not_drain_another_planes_staged_fire() {
     assert_eq!(session.drain_deferred_fires(), 1);
     assert_eq!(fired.load(Ordering::SeqCst), 1);
 }
+
+/// R311y321 — the APPLY half of `query-consolidation`, proven THROUGH
+/// `Session::query`'s own wiring rather than at the `ConsolidatingSink` unit
+/// seam. The unit tests in `wz-session-core::reply_sink` prove the decorator's
+/// per-mode contract; this proves the runtime actually INSTALLS it with the
+/// query's mode, which is a separate claim — before y321 the mode reached the
+/// wire as the Q_C ext and the local delivery ignored it entirely.
+///
+/// THE BREAK THIS CLOSES IS ON THE PICO C API'S DEFAULT PATH:
+/// `z_get_options_default` sets `Z_CONSOLIDATION_MODE_AUTO`
+/// (`vendor/zenoh-pico/src/api/api.c:1725` -> `:462` -> `:446`), `wz-capi-pico`
+/// resolves AUTO to LATEST exactly as pico's `primitives.c:567-573` does and
+/// calls `with_consolidation(Latest)` — so every default `z_get()` through wz
+/// used to deliver BOTH replies below where pico delivers one.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "query-consolidation",
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn query_with_latest_consolidation_delivers_one_reply_per_keyexpr() {
+    use wz_session_core::query_mode::ConsolidationMode;
+    use wz_session_core::sample::TimestampHint;
+
+    let (session, _driver) = build_session();
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+
+    // One queryable answering the SAME keyexpr twice with two versions — the
+    // History::All storage shape consolidation exists for.
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register("hist/key", |_q, responder| {
+            responder.reply_keyed_stamped(
+                "hist/key",
+                b"old",
+                None,
+                &TimestampHint {
+                    time: 10,
+                    zid: vec![0x01],
+                },
+            );
+            responder.reply_keyed_stamped(
+                "hist/key",
+                b"new",
+                None,
+                &TimestampHint {
+                    time: 20,
+                    zid: vec![0x01],
+                },
+            );
+        });
+
+    session
+        .query(
+            "hist/key",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_consolidation(ConsolidationMode::Latest),
+            move |reply| seen_cb.lock().unwrap().push(reply.payload().to_vec()),
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+
+    let got = seen.lock().unwrap();
+    assert_eq!(
+        *got,
+        vec![b"new".to_vec()],
+        "Latest must collapse the two versions to the newest by timestamp"
+    );
+}
+
+/// The companion NEG at the same seam: the SAME two replies, with the default
+/// (no consolidation) options, must BOTH arrive. Without this, a decorator that
+/// consolidated unconditionally would pass the test above and silently break
+/// every non-consolidating z_get in the tree — the wrapper is installed on every
+/// pending, so "does None still passthrough" is a real question, not a given.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn query_without_consolidation_still_delivers_every_reply() {
+    use wz_session_core::sample::TimestampHint;
+
+    let (session, _driver) = build_session();
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register("hist/key", |_q, responder| {
+            responder.reply_keyed_stamped(
+                "hist/key",
+                b"old",
+                None,
+                &TimestampHint {
+                    time: 10,
+                    zid: vec![0x01],
+                },
+            );
+            responder.reply_keyed_stamped(
+                "hist/key",
+                b"new",
+                None,
+                &TimestampHint {
+                    time: 20,
+                    zid: vec![0x01],
+                },
+            );
+        });
+
+    session
+        .query(
+            "hist/key",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| seen_cb.lock().unwrap().push(reply.payload().to_vec()),
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+
+    let got = seen.lock().unwrap();
+    assert_eq!(
+        *got,
+        vec![b"old".to_vec(), b"new".to_vec()],
+        "the default get must not consolidate: both versions, in arrival order"
+    );
+}

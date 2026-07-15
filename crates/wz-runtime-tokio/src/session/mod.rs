@@ -1921,7 +1921,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // synchronously before `query` returns (pico parity:
             // `_z_session_deliver_query_locally` fires on the caller
             // thread, outside the session mutex).
-            let sink = self.deferred_reply_sink(on_reply, on_final);
+            //
+            // R311y321 — the sink is wrapped with this query's consolidation
+            // mode, which is the APPLY half of `query-consolidation`: before
+            // y321 the mode reached the wire as the Q_C ext and did nothing
+            // locally. `effective_consolidation` is the gate (R311y317's "last
+            // hop that knows"), so a build without the feature reads `None` here
+            // and the wrapper is a passthrough — same delivery as pre-y321.
+            let sink = wz_session_core::reply_sink::ConsolidatingSink::new(
+                opts.effective_consolidation()
+                    .unwrap_or(wz_session_core::query_mode::ConsolidationMode::None),
+                self.deferred_reply_sink(on_reply, on_final),
+            );
 
             // R311dc — observer access migrates from `.lock().expect()` to
             // R::with_mutex_mut closure form (R311ct API). The closure body
@@ -2181,7 +2192,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
 
             // R311lg — deferred staging sink; same lock-free callback
             // contract + tail drain as `Session::query`.
-            let sink = self.deferred_reply_sink(on_reply, on_final);
+            //
+            // R311y321 — consolidation wrap, identical to `Session::query`'s:
+            // the aliased get is the same requester plane and must consolidate
+            // the same way, or `Querier::get` and `Session::query` would honour
+            // the mode differently for the same options.
+            let sink = wz_session_core::reply_sink::ConsolidatingSink::new(
+                opts.effective_consolidation()
+                    .unwrap_or(wz_session_core::query_mode::ConsolidationMode::None),
+                self.deferred_reply_sink(on_reply, on_final),
+            );
 
             // R311dc — closure-form observer access via R::with_mutex_mut
             // (R311ct API). Same closure body shape as Session::query.

@@ -255,6 +255,176 @@ impl ReplySink for BoxedReplySink {
     }
 }
 
+/// R311y321 — is `new` at least as recent as `cached`, by the ordering zenoh
+/// consolidates with?
+///
+/// zenoh compares `Option<uhlc::Timestamp>` with `>=` (api/session.rs, the
+/// Monotonic + Auto/Latest arms). `uhlc::Timestamp` derives `Ord` over its
+/// fields IN ORDER — `time: NTP64` then `id: ID` (uhlc timestamp.rs) — so the
+/// rule is lexicographic `(time, zid)`, and `Option`'s own ordering puts `None`
+/// BELOW every `Some`. Both halves matter: a stamped reply always beats an
+/// unstamped one, and two replies stamped at the same instant by different
+/// sources still have a deterministic winner rather than an arrival-order race.
+///
+/// NAMED DIVERGENCE — pico compares `msg->_commons._timestamp.time <=
+/// pen_rep->_tstamp.time` (`vendor/zenoh-pico/src/session/query.c:145`): the
+/// TIME WORD ONLY, and it drops on a tie, so pico keeps the FIRST arrival among
+/// equal stamps while zenoh keeps the LAST. wz follows zenoh: its order is
+/// total, so the delivered reply does not depend on which peer answered first.
+/// The tie is also where "no timestamps at all" lands (both read as `None`),
+/// which is why the choice is not academic — an unstamped keyexpr consolidates
+/// to the LAST reply here and to the FIRST under pico.
+#[cfg(feature = "alloc")]
+fn reply_ts_at_least(
+    new: Option<&crate::sample::TimestampHint>,
+    cached: Option<&crate::sample::TimestampHint>,
+) -> bool {
+    match (new, cached) {
+        // Option ordering: None < Some(_). An unstamped reply never displaces a
+        // stamped one; two unstamped replies tie, and a tie keeps the newer.
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some(_), None) => true,
+        (Some(n), Some(c)) => (n.time, n.zid.as_slice()) >= (c.time, c.zid.as_slice()),
+    }
+}
+
+/// R311y321 — reception-side reply consolidation as a DECORATOR over any
+/// [`ReplySink`], the apply-half of the `query-consolidation` atom.
+///
+/// Before y321 wz emitted the `Q_C` wire ext and applied NOTHING on receive, so
+/// `with_consolidation(Latest)` was a no-op. That was a live break on the
+/// zenoh-pico C API's DEFAULT path, not a corner case: `z_get_options_default`
+/// sets `Z_CONSOLIDATION_MODE_AUTO` (`vendor/zenoh-pico/src/api/api.c:1725` ->
+/// `:462` -> `:446`), and `wz-capi-pico`'s `get_options` resolves AUTO to LATEST
+/// exactly as pico does and calls `with_consolidation(Latest)`. Every default
+/// `z_get()` through wz therefore delivered every reply where pico delivers one
+/// per keyexpr.
+///
+/// A DECORATOR rather than a `Pending` cache field: the registry's pending entry
+/// stays byte-identical, so the no-alloc profile pays zero for a feature it
+/// cannot compose (`ConsolidatingSink` is `alloc`-gated; an MCU build supplies
+/// its own closed-`enum` sink and never sees this type). It rides the existing
+/// DIP seam — the registry is generic over `C: ReplySink`, so wrapping is a type
+/// substitution, not a new code path in the registry.
+///
+/// Mode semantics, each anchored by direct read of BOTH upstreams:
+///
+/// - **None** — forward every reply immediately; no cache. zenoh and pico agree
+///   (`api/session.rs` `ConsolidationMode::None`; `query.c:179` fires whenever
+///   the mode is not LATEST).
+/// - **Monotonic** — forward a reply only when it is at least as recent as the
+///   last one forwarded for its keyexpr; drop stale/out-of-order arrivals.
+///   **This is zenoh's semantic and it DIVERGES from pico**, which computes the
+///   same staleness check but then fires the callback regardless (`query.c:179`
+///   gates on `!= LATEST`, so `drop` suppresses only pico's cache, never its
+///   callback — pico's Monotonic is observably identical to None). wz honours
+///   the mode: a Monotonic that cannot suppress anything is a mode in name only.
+///   `wz-capi-pico` keeps the pico-faithful behaviour on the C ABI so a relinked
+///   pico app does not change behaviour; that mapping names the gap at its own
+///   seam.
+/// - **Latest** — forward NOTHING during the query; keep the most recent reply
+///   per keyexpr and flush the whole cache on the terminal final. zenoh and pico
+///   agree on the shape (`api/session.rs:3025-3029` flushes at `nb_final == 0`;
+///   `query.c:239-246` flushes at finalize); they differ only in the tie-break,
+///   see [`reply_ts_at_least`].
+///
+/// The cache holds owned [`crate::reply::InboundReply`] values for BOTH caching
+/// modes, matching zenoh (`query.replies` is allocated for every mode but None,
+/// `api/session.rs:2295`, and its Monotonic arm inserts the full reply). pico
+/// stores only the keyexpr + stamp under Monotonic — an MCU memory economy, not
+/// a semantic difference, and moot here because this type is AP-only.
+#[cfg(feature = "alloc")]
+pub struct ConsolidatingSink<S: ReplySink> {
+    inner: S,
+    mode: crate::query_mode::ConsolidationMode,
+    /// Most-recent reply per keyexpr. Empty for `None` (never populated), so a
+    /// non-consolidating pending pays one empty `HashMap` — no allocation until
+    /// the first insert.
+    cache: hashbrown::HashMap<alloc::string::String, crate::reply::InboundReply>,
+}
+
+#[cfg(feature = "alloc")]
+impl<S: ReplySink> ConsolidatingSink<S> {
+    /// Wrap `inner` with `mode`. `ConsolidationMode::None` is a pure
+    /// passthrough — the wrapper is installed on EVERY pending so the registry's
+    /// `C` stays one type, and a non-consolidating z_get must therefore behave
+    /// exactly as it did before this type existed.
+    pub fn new(mode: crate::query_mode::ConsolidationMode, inner: S) -> Self {
+        Self {
+            inner,
+            mode,
+            cache: hashbrown::HashMap::new(),
+        }
+    }
+
+    /// Wrap `inner` in passthrough mode — the constructor every non-z_get
+    /// registration path uses (liveliness, the aligner's own plumbing), so their
+    /// call sites keep their signatures and their behaviour.
+    pub fn passthrough(inner: S) -> Self {
+        Self::new(crate::query_mode::ConsolidationMode::None, inner)
+    }
+
+    /// Would `reply` displace what is cached for its keyexpr? `true` when
+    /// nothing is cached yet, or when the arrival is at least as recent.
+    fn displaces_cached(&self, reply: &dyn ReplyView) -> bool {
+        match self.cache.get(reply.keyexpr()) {
+            None => true,
+            Some(cached) => reply_ts_at_least(reply.timestamp(), cached.timestamp()),
+        }
+    }
+
+    fn cache_reply(&mut self, reply: &dyn ReplyView) {
+        self.cache.insert(
+            alloc::string::String::from(reply.keyexpr()),
+            crate::reply::InboundReply::from_view(reply),
+        );
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
+    fn on_reply(&mut self, reply: &dyn ReplyView) {
+        use crate::query_mode::ConsolidationMode;
+        match self.mode {
+            ConsolidationMode::None => self.inner.on_reply(reply),
+            ConsolidationMode::Monotonic => {
+                // zenoh's arm: cache AND forward when this is not stale; drop
+                // outright when it is. An Err reply carries no keyexpr-versioned
+                // body, but it still keys by keyexpr and stamps as `None`, so it
+                // ties with an unstamped Put and is forwarded — matching zenoh,
+                // which runs every reply through the same match.
+                if self.displaces_cached(reply) {
+                    self.cache_reply(reply);
+                    self.inner.on_reply(reply);
+                }
+            }
+            ConsolidationMode::Latest => {
+                // Cache only. The flush happens in `on_final` — this is why a
+                // Latest z_get that never receives its final delivers nothing,
+                // exactly as zenoh (whose timeout path flushes explicitly).
+                if self.displaces_cached(reply) {
+                    self.cache_reply(reply);
+                }
+            }
+        }
+    }
+
+    fn on_final(&mut self, rid: u64) {
+        if self.mode == crate::query_mode::ConsolidationMode::Latest {
+            // Drain BEFORE the inner final so the consumer sees every reply
+            // ahead of the terminal signal — the ordering zenoh produces
+            // (api/session.rs:3025-3029 flushes, then closes the query) and the
+            // one the Reply-before-Final contract already requires everywhere
+            // else in this crate.
+            for (_, reply) in self.cache.drain() {
+                self.inner.on_reply(&reply);
+            }
+        }
+        self.inner.on_final(rid);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +549,221 @@ mod tests {
         assert_eq!(got[0], "a/b");
         assert_eq!(got[1], "c/d");
         assert_eq!(*finals.lock().unwrap(), std::vec![1]);
+    }
+}
+
+/// R311y321 — the `ConsolidatingSink` contract, mode by mode.
+///
+/// These build `InboundReply` values rather than `BorrowedReply` ones because
+/// consolidation orders by TIMESTAMP and `BorrowedReply` has no timestamp field
+/// (it rides the trait default `None`, as it already does for `source_info`), so
+/// it cannot express the input this seam keys on. `InboundReply` is the owned
+/// retention form the wire path produces, which is what a real pending sees.
+#[cfg(test)]
+#[cfg(feature = "alloc")]
+mod consolidating_sink_tests {
+    use super::*;
+    use crate::query_mode::ConsolidationMode;
+    use crate::reply::{InboundReply, InboundReplyBody};
+    use crate::sample::TimestampHint;
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+
+    /// Records what actually reached the consumer, in order.
+    #[derive(Default)]
+    struct Recorder {
+        delivered: Vec<(String, Vec<u8>)>,
+        finals: Vec<u64>,
+    }
+
+    impl ReplySink for &mut Recorder {
+        fn on_reply(&mut self, reply: &dyn ReplyView) {
+            self.delivered
+                .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
+        }
+        fn on_final(&mut self, rid: u64) {
+            self.finals.push(rid);
+        }
+    }
+
+    fn ts(time: u64) -> TimestampHint {
+        TimestampHint {
+            time,
+            zid: alloc::vec![0x01],
+        }
+    }
+
+    fn put(keyexpr: &str, payload: &[u8], timestamp: Option<TimestampHint>) -> InboundReply {
+        InboundReply {
+            rid: 1,
+            keyexpr_literal: keyexpr.to_string(),
+            body: InboundReplyBody::Put {
+                payload: payload.to_vec(),
+                attachment: None,
+                encoding: None,
+                source_info: None,
+                timestamp,
+            },
+        }
+    }
+
+    /// `None` is the pre-y321 behaviour and the wrapper is installed on EVERY
+    /// pending, so this is the regression guard for every non-consolidating
+    /// z_get in the tree: forward each reply immediately, in arrival order.
+    #[test]
+    fn none_forwards_every_reply_immediately() {
+        let mut rec = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::None, &mut rec);
+            sink.on_reply(&put("a/b", b"v1", Some(ts(10))));
+            sink.on_reply(&put("a/b", b"v2", Some(ts(20))));
+            sink.on_final(1);
+        }
+        assert_eq!(
+            rec.delivered,
+            alloc::vec![
+                ("a/b".to_string(), b"v1".to_vec()),
+                ("a/b".to_string(), b"v2".to_vec())
+            ],
+            "None must not consolidate: both replies, in arrival order"
+        );
+        assert_eq!(rec.finals, alloc::vec![1]);
+    }
+
+    /// THE pico-AP break this whole increment exists to close. pico's
+    /// `z_get_options_default` is AUTO, `wz-capi-pico` resolves that to LATEST,
+    /// and before y321 wz delivered BOTH replies where pico delivers one.
+    #[test]
+    fn latest_delivers_one_per_keyexpr_and_only_at_final() {
+        let mut rec = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut rec);
+            sink.on_reply(&put("a/b", b"old", Some(ts(10))));
+            sink.on_reply(&put("a/b", b"new", Some(ts(20))));
+            assert!(
+                sink.inner.delivered.is_empty(),
+                "Latest delivers NOTHING before the final — it cannot know which is last"
+            );
+            sink.on_final(1);
+        }
+        assert_eq!(
+            rec.delivered,
+            alloc::vec![("a/b".to_string(), b"new".to_vec())],
+            "one reply per keyexpr, the newest by timestamp"
+        );
+        assert_eq!(rec.finals, alloc::vec![1], "the final still fires, after");
+    }
+
+    /// Distinct keyexprs are distinct versions — consolidation is per-keyexpr,
+    /// not per-query. A wildcard GET over N keys must still see N replies.
+    #[test]
+    fn latest_keeps_one_per_distinct_keyexpr() {
+        let mut rec = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut rec);
+            sink.on_reply(&put("a/1", b"x", Some(ts(10))));
+            sink.on_reply(&put("a/2", b"y", Some(ts(10))));
+            sink.on_final(1);
+        }
+        let mut got: Vec<String> = rec.delivered.iter().map(|(k, _)| k.clone()).collect();
+        got.sort();
+        assert_eq!(got, alloc::vec!["a/1".to_string(), "a/2".to_string()]);
+    }
+
+    /// An out-of-order arrival must not displace a newer cached version.
+    #[test]
+    fn latest_ignores_a_stale_out_of_order_arrival() {
+        let mut rec = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut rec);
+            sink.on_reply(&put("a/b", b"new", Some(ts(20))));
+            sink.on_reply(&put("a/b", b"old", Some(ts(10))));
+            sink.on_final(1);
+        }
+        assert_eq!(
+            rec.delivered,
+            alloc::vec![("a/b".to_string(), b"new".to_vec())],
+            "the ts=10 arrival is stale and must not overwrite ts=20"
+        );
+    }
+
+    /// Monotonic = zenoh's semantic (R311y321 owner decision): forward as they
+    /// arrive, but SUPPRESS a stale one. NAMED DIVERGENCE from pico, whose
+    /// Monotonic fires every reply (`query.c:179`) and is thus identical to
+    /// None; `wz-capi-pico` keeps pico's behaviour on the C ABI.
+    #[test]
+    fn monotonic_forwards_immediately_and_suppresses_only_the_stale() {
+        let mut rec = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Monotonic, &mut rec);
+            sink.on_reply(&put("a/b", b"v1", Some(ts(10))));
+            assert_eq!(
+                sink.inner.delivered.len(),
+                1,
+                "Monotonic forwards immediately — it does not wait for the final"
+            );
+            sink.on_reply(&put("a/b", b"stale", Some(ts(5))));
+            sink.on_reply(&put("a/b", b"v2", Some(ts(20))));
+            sink.on_final(1);
+        }
+        assert_eq!(
+            rec.delivered,
+            alloc::vec![
+                ("a/b".to_string(), b"v1".to_vec()),
+                ("a/b".to_string(), b"v2".to_vec())
+            ],
+            "the ts=5 arrival is stale and must be dropped; v1 and v2 pass"
+        );
+    }
+
+    /// The tie rule, which is where "no timestamps at all" lands: zenoh's `>=`
+    /// keeps the LAST arrival, pico's `<=`-drop keeps the FIRST. wz follows
+    /// zenoh — this test pins that divergence so it cannot drift silently.
+    #[test]
+    fn latest_unstamped_replies_tie_and_the_last_arrival_wins() {
+        let mut rec = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut rec);
+            sink.on_reply(&put("a/b", b"first", None));
+            sink.on_reply(&put("a/b", b"second", None));
+            sink.on_final(1);
+        }
+        assert_eq!(
+            rec.delivered,
+            alloc::vec![("a/b".to_string(), b"second".to_vec())],
+            "zenoh's >= keeps the last arrival on a tie; pico would keep `first`"
+        );
+    }
+
+    /// A stamped reply always beats an unstamped one, in both directions —
+    /// `Option`'s `None < Some` ordering, which zenoh gets for free by comparing
+    /// `Option<Timestamp>` and wz reproduces in `reply_ts_at_least`.
+    #[test]
+    fn stamped_beats_unstamped_regardless_of_arrival_order() {
+        for (first, second, want) in [
+            (
+                (b"un".as_slice(), None),
+                (b"st".as_slice(), Some(ts(1))),
+                "st",
+            ),
+            (
+                (b"st".as_slice(), Some(ts(1))),
+                (b"un".as_slice(), None),
+                "st",
+            ),
+        ] {
+            let mut rec = Recorder::default();
+            {
+                let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut rec);
+                sink.on_reply(&put("a/b", first.0, first.1));
+                sink.on_reply(&put("a/b", second.0, second.1));
+                sink.on_final(1);
+            }
+            assert_eq!(
+                rec.delivered,
+                alloc::vec![("a/b".to_string(), want.as_bytes().to_vec())],
+                "the stamped reply must win"
+            );
+        }
     }
 }
