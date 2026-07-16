@@ -2635,15 +2635,21 @@ mod tests {
     /// retraction came from is the point. y325 already killed this exact
     /// generalisation inside [`ReplyRegistry::sweep_timed_out`], the very
     /// method under test here, and its retraction landed only on the code it
-    /// was reading; this copy, in the test's own doc, outlived it. `register`
-    /// is pub and ungated, so any consumer arms a deadline without the
-    /// accessor — and one ships: wz-ap-demo reads `--query-timeout-ms`
-    /// straight into `register` (`wz-ap-demo/src/runner.rs`, which carries
-    /// zero `feature = "query-timeout"` sites). The narrower claim is the true
-    /// one: `Session::query` and the aliased-get path arm through
-    /// `effective_timeout_ms()`, so THOSE two are gated. The sweep itself
-    /// promises nothing — which is why this test arms its own `Some(1000)`
-    /// instead of resting on the sweep being empty.
+    /// was reading; this copy, in the test's own doc, outlived it.
+    /// [`ReplyRegistry::register`] AND [`ReplyRegistry::register_sink`] are
+    /// both pub and ungated (y325 named the pair; dropping one understates the
+    /// hole), so a consumer arms a deadline without the accessor. One ships:
+    /// wz-ap-demo reads `--query-timeout-ms` straight into `register`, and
+    /// carries zero `feature = "query-timeout"` sites — so on a build with the
+    /// atom OFF it arms anyway and this sweep sees it. The narrower claim is
+    /// the true one: `Session::query` and `query_aliased` resolve their
+    /// deadline through `effective_timeout_ms()` before calling
+    /// `register_sink`, so THOSE two are gated. The sweep itself promises
+    /// nothing.
+    ///
+    /// (y325's copy cites `session/mod.rs:1930` / `:2209` for those two arming
+    /// sites; both line numbers have since rotted to unrelated code. Cite the
+    /// symbols — a line number is a position, and positions move.)
     #[test]
     fn sweep_timed_out_synthesizes_the_timeout_error_before_the_final() {
         let mut reg = ReplyRegistry::new();
