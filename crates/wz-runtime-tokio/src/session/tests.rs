@@ -4901,6 +4901,84 @@ fn subscribe_alias_error_display_message_hints_remediation() {
     assert!(msg.contains("send_declare_keyexpr"));
 }
 
+// ── R311y331 query-get OFF-arm NEG trio ──
+//
+// `Session::query{,_aliased,_aliased_auto}` are the atom's whole initiator
+// surface and all three carry a `not(query-get)` arm returning
+// `QueryAliasError::FeatureDisabled`. Until now those three arms were the ONLY
+// `not(feature = "query-get")` sites in the tree and ZERO tests carried that
+// gate — the atom's OFF behaviour was compile-checked and never run, which is
+// what held `query-get` at PARTIAL in R311y330.
+//
+// The standard is this repo's, not an imported one: `session_glue.rs:1445-1452`
+// (R311hw / R311hx) rules that a footprint/compile proof "does NOT prove the
+// consumer-side signature-stable emit path BEHAVES correctly when off", and each
+// guard must pin BOTH the typed `Err` AND `frame_count()`. Seven sibling atoms
+// (transport-batching / declare-keyexpr / declare-queryable / declare-subscriber
+// / declare-token / declare-interest / codec-push) already run their OFF guards
+// on the `queryable-only` subset — the very lane where query-get is off. These
+// three close that asymmetry; they need no new lane, they ride that row.
+//
+// Frame count is asserted as a DELTA, not `== 0`: `build_session()`'s set-up is
+// free to emit, and pinning an absolute would make the guard a hostage to it.
+
+#[cfg(not(feature = "query-get"))]
+#[test]
+fn query_rejects_typed_and_emits_nothing_when_query_get_off() {
+    let (session, driver) = build_session();
+    let before = driver.frame_count();
+
+    let r = session.query("home/temp", QueryOptions::get(), |_| {}, |_| {});
+
+    assert!(
+        matches!(r, Err(QueryAliasError::FeatureDisabled)),
+        "query-get off must reject typed, not silently no-op",
+    );
+    assert_eq!(
+        driver.frame_count(),
+        before,
+        "a rejected get must put NO Request(Query) on the wire",
+    );
+}
+
+#[cfg(not(feature = "query-get"))]
+#[test]
+fn query_aliased_rejects_typed_and_emits_nothing_when_query_get_off() {
+    let (session, driver) = build_session();
+    let before = driver.frame_count();
+
+    let r = session.query_aliased(7, None, "home/temp", QueryOptions::get(), |_| {}, |_| {});
+
+    assert!(
+        matches!(r, Err(QueryAliasError::FeatureDisabled)),
+        "query-get off must reject the aliased get typed",
+    );
+    assert_eq!(
+        driver.frame_count(),
+        before,
+        "a rejected aliased get must put NO Request(Query) on the wire",
+    );
+}
+
+#[cfg(not(feature = "query-get"))]
+#[test]
+fn query_aliased_auto_rejects_typed_and_emits_nothing_when_query_get_off() {
+    let (session, driver) = build_session();
+    let before = driver.frame_count();
+
+    let r = session.query_aliased_auto(7, None, QueryOptions::get(), |_| {}, |_| {});
+
+    assert!(
+        matches!(r, Err(QueryAliasError::FeatureDisabled)),
+        "query-get off must reject the auto-aliased get typed",
+    );
+    assert_eq!(
+        driver.frame_count(),
+        before,
+        "a rejected auto-aliased get must put NO Request(Query) on the wire",
+    );
+}
+
 // ── R246 Queryable + QueryableOptions + declare_queryable{,_aliased} ──
 
 /// R311y330 NEG — the `query-queryable` drop proof the atom never had.
