@@ -2681,16 +2681,27 @@ layer_c1bj_cargo_test_loopback_metadata_gates() {
 # building this guard (R311y329) — eliding one NEG tripped `-D warnings`
 # dead_code on its now-unused fixture, and the first draft blamed the SIBLING
 # module for a compile error it never mentioned.
+#
+# The capture is `.*`, not `[^:]*`: a NEG added inside a SUBMODULE would be
+# invisible to `[^:]*` and the compare would still MATCH, so a new guard could
+# land unpinned. Neither module has submodules today (measured) — `.*` keeps it
+# that way by construction rather than by luck. A submodule name simply reads as
+# `nested::name` and must appear verbatim in the expected set.
 _c1e_neg_set() {
     local module="$1" out rc
     out=$(cd crates && cargo test -p wz-session-core --features query-queryable \
         --lib "$module" -- --list 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then
-        echo "  C1e FAIL: listing \`$module\` did not BUILD (exit $rc) — this is not a drift verdict:" >&2
+        # The crate failed to compile. The error can originate in ANY module —
+        # `--lib <module>` filters which tests RUN, not what gets built — so do
+        # not read `$module` as the culprit; the dump below names the real site.
+        echo "  C1e FAIL: the subset build broke while listing \`$module\` (exit $rc)." >&2
+        echo "            This is NOT a drift verdict, and the fault is not necessarily" >&2
+        echo "            in \`$module\` — the compiler output names the real site:" >&2
         printf '%s\n' "$out" | tail -20 | sed 's/^/      /' >&2
         return 1
     fi
-    printf '%s' "$out" | sed -n "s/^${module}::\([^:]*\): test\$/\1/p" | sort
+    printf '%s' "$out" | sed -n "s/^${module}::\(.*\): test\$/\1/p" | sort
 }
 
 layer_c1e_cargo_test_query() {
