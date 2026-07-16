@@ -212,15 +212,21 @@ untracked note.
   `zenoh-link-*`) land in the local cargo **registry cache** as a side effect
   of building; `cargo fetch` if absent. This is what §5.12-codec / §5.1-transport
   anchor to, and it is why those domains are gradable.
-- **Zenoh STORAGE upstream — not obtainable that way, and it BLOCKS work.**
-  `zenoh-plugin-storage-manager` and `zenoh-backend-traits` are nobody's cargo
-  dependency, so no build ever provisions them. The §5.11-storage /
-  §5.24-storage-backend atoms and `adminspace.rs` anchor to them — 14 modules
-  cite the plugin by path — so **their A3 impl axis cannot be graded** without a
-  deliberate checkout of the `zenoh` repo's `plugins/` tree at the pinned
-  version. Until then those atoms stay A3-UNAUDITED, which is the honest state,
-  not a gap to paper over. The read-directly rule is NOT waived by the reference
-  being inconvenient.
+- **Zenoh STORAGE upstream — needs a DELIBERATE checkout; no build provisions
+  it.** `zenoh-plugin-storage-manager` and `zenoh-backend-traits` are nobody's
+  cargo dependency, so the registry-cache route above never yields them. The
+  §5.11-storage / §5.24-storage-backend atoms and `adminspace.rs` anchor to
+  them, so grading their A3 impl axis needs a checkout of the `zenoh` repo's
+  `plugins/` tree at the pinned version. **Whether that checkout exists on THIS
+  machine is machine-local state: resolve it per the rule above — never read
+  "blocked" off a note, including a prior session's.** R311y339 is the proof:
+  this bullet said "it BLOCKS work" and an agent-memory hook said "ABSENT ->
+  UNGRADABLE" for ~37 rounds after the clone had already landed; both were
+  quoted instead of checked, and the domain stayed shut for months over a
+  directory that was there. Absent the checkout, A3-UNAUDITED is the honest
+  state, not a gap to paper over — but "absent" is a fact to establish, not to
+  inherit. The read-directly rule is NOT waived by the reference being
+  inconvenient.
 - **zenoh-pico** — vendored in-repo at `vendor/zenoh-pico/`, so unlike the
   others this one is always available to every clone.
 
