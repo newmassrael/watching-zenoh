@@ -4903,6 +4903,74 @@ fn subscribe_alias_error_display_message_hints_remediation() {
 
 // ── R246 Queryable + QueryableOptions + declare_queryable{,_aliased} ──
 
+/// R311y330 NEG — the `query-queryable` drop proof the atom never had.
+///
+/// Until now the atom's OFF arms (`mod.rs` `not(query-queryable)`: the two
+/// `FeatureDisabled` rejects + the loopback-fan elision) were only ever
+/// COMPILED — by C1h / C4b / C1g and by the hosted E2 `wz-e2e-zget` binary —
+/// and the OFF *behaviour* rested on that e2e alone. `tests.rs` said so itself,
+/// on `query_session_local_with_no_queryable_finalises_inline_with_zero_replies`
+/// below: "a query-queryable-OFF UNIT run is blocked until the test-support
+/// dev-dep stops force-enabling default features (the C1j isolation carry)".
+///
+/// That carry is STALE, measured not argued: the textbook fix already landed —
+/// this file's fixtures come from the crate-LOCAL `crate::test_fixtures`
+/// (`:15`), and the only sibling import (`fixture_session_init_params`, `:18`)
+/// returns a shared `wz-session-core` type that is safe across the dev-dep
+/// cycle. `cargo test -p wz-runtime-tokio --no-default-features --features
+/// <C1j's zget-reply-only row>` compiles and runs 126 unit tests with
+/// `query-queryable` OFF. Nothing was blocking the proof but the note claiming
+/// it was blocked.
+///
+/// Pins BOTH halves of the contract, because the reject alone is the weaker
+/// claim: the surface stays signature-stable and rejects typed, AND it emits
+/// NO wire frame — an OFF build must not announce a queryable it cannot serve.
+/// R311g1 NEG shape, same as `remote_subscriber_listener_rejects_typed_when_
+/// feature_off`.
+#[cfg(not(feature = "query-queryable"))]
+#[test]
+fn declare_queryable_rejects_typed_and_emits_nothing_when_feature_off() {
+    let (session, driver) = build_session();
+    let before = driver.frame_count();
+
+    let r = session.declare_queryable("home/temp", QueryableOptions::default(), |_, _| {});
+
+    assert!(
+        matches!(r, Err(QueryableError::FeatureDisabled)),
+        "query-queryable off must reject typed, not silently no-op",
+    );
+    assert_eq!(
+        driver.frame_count(),
+        before,
+        "a rejected declare must announce NOTHING on the wire",
+    );
+}
+
+/// R311y330 NEG — the aliased twin of
+/// `declare_queryable_rejects_typed_and_emits_nothing_when_feature_off`.
+/// Its own OFF arm is a separate `not(query-queryable)` site with a separate
+/// error type, so it needs its own guard: a sibling covered by its neighbour's
+/// proof is exactly the asymmetry this round's predecessor (R311y329) was spent
+/// paying off.
+#[cfg(not(feature = "query-queryable"))]
+#[test]
+fn declare_queryable_aliased_rejects_typed_and_emits_nothing_when_feature_off() {
+    let (session, driver) = build_session();
+    let before = driver.frame_count();
+
+    let r = session.declare_queryable_aliased(7, None, QueryableOptions::default(), |_, _| {});
+
+    assert!(
+        matches!(r, Err(QueryableAliasError::FeatureDisabled)),
+        "query-queryable off must reject the aliased declare typed",
+    );
+    assert_eq!(
+        driver.frame_count(),
+        before,
+        "a rejected aliased declare must announce NOTHING on the wire",
+    );
+}
+
 #[test]
 fn queryable_options_default_is_any_locality() {
     let opts = QueryableOptions::default();
@@ -4949,6 +5017,16 @@ fn declare_queryable_returns_handle_with_keyexpr_and_options() {
     assert_eq!(q.options().allowed_origin, Locality::SessionLocal);
 }
 
+/// R311y330 — was UNGATED and discarded the declare's `Result`, so on a
+/// `query-queryable`-OFF build (C1j's `zget-reply-only` row) the reject at
+/// `mod.rs`'s `not(query-queryable)` arm emitted nothing, `frame_count()` was
+/// 0, and this passed VACUOUSLY while no queryable existed at all. Its own
+/// sibling twelve lines up already carried the fix
+/// (`declare_queryable_returns_handle_with_keyexpr_and_options`: gate +
+/// `.expect("... is ON in this test build")`) — the same
+/// rule-applied-to-X-not-Y asymmetry R311y329 was spent paying off. Gated and
+/// `.expect`ed now, so the claim binds to a queryable that was really declared.
+#[cfg(feature = "query-queryable")]
 #[test]
 fn declare_queryable_session_local_does_not_emit_wire_frame() {
     // R311ow — pico parity (`_z_register_queryable`, primitives.c:348): a
@@ -4957,11 +5035,13 @@ fn declare_queryable_session_local_does_not_emit_wire_frame() {
     // surviving half of the old `declare_queryable_does_not_emit_wire_frame` —
     // the wire-no-op is now the session-local case, not the default.)
     let (session, driver) = build_session();
-    let _q = session.declare_queryable(
-        "home/temp",
-        QueryableOptions::new().with_allowed_origin(Locality::SessionLocal),
-        |_q, _r| {},
-    );
+    let _q = session
+        .declare_queryable(
+            "home/temp",
+            QueryableOptions::new().with_allowed_origin(Locality::SessionLocal),
+            |_q, _r| {},
+        )
+        .expect("query-queryable feature is ON in this test build");
     assert_eq!(
         driver.frame_count(),
         0,
@@ -5240,19 +5320,28 @@ fn queryable_undeclare_returns_true_and_skips_drop() {
     assert!(q.undeclare(), "first undeclare returns true");
 }
 
-#[cfg(feature = "query-get")]
+/// R311y330 — the gate gained `query-queryable` and the declare gained its
+/// `.expect`. It was `query-get`-only and discarded the `Result`, so on a
+/// `query-queryable`-OFF build no queryable was ever registered, `fired` was
+/// trivially 0, and the locality predicate this test exists to pin went
+/// UNEXERCISED while reporting green. The body already `.expect`ed the sibling
+/// feature (`query-get`, on the `query` call below) — the asymmetry was inside
+/// one function.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
 #[test]
 fn declare_queryable_with_locality_remote_skips_loopback_query() {
     let (session, _driver) = build_session();
     let fired = Arc::new(AtomicUsize::new(0));
     let fired_cb = fired.clone();
-    let _q = session.declare_queryable(
-        "home/temp",
-        QueryableOptions::new().with_allowed_origin(Locality::Remote),
-        move |_q, _r| {
-            fired_cb.fetch_add(1, Ordering::SeqCst);
-        },
-    );
+    let _q = session
+        .declare_queryable(
+            "home/temp",
+            QueryableOptions::new().with_allowed_origin(Locality::Remote),
+            move |_q, _r| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("query-queryable feature is ON in this test build");
 
     session
         .query(
