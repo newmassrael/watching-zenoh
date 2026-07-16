@@ -7675,6 +7675,45 @@ fn queryable_handler_runs_deferred_replies_then_final_on_wire() {
     );
 }
 
+/// R311y337 — the sibling of the R311li guard below, on the arm R311li did not
+/// name. That one proves a MATCHED-but-silent handler still terminates its
+/// stream; this one proves the case the registry used to drop outright: a
+/// resolvable wire query that matches NO queryable at all. zenoh terminates it
+/// through `Drop for QueryInner` (its `QueryInner` is built unconditionally,
+/// session.rs:2440-2450 + queryable.rs:75-83); pico through its explicit
+/// `if (qle_nb == 0) { ...; _z_session_send_reply_final(..); }`
+/// (queryable.c:246-252). Before y337 wz stayed silent here and the requester
+/// waited out its own timeout — and R311y334's completeness filter had just made
+/// the arm easy to reach.
+#[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
+#[test]
+fn unmatched_wire_query_still_sends_final() {
+    let (session, driver) = build_session();
+    let _q = session
+        .declare_queryable(
+            "home/**",
+            QueryableOptions::default(),
+            |_query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                // never fires: the query below matches no registered pattern
+            },
+        )
+        .expect("query-queryable on in this lane");
+
+    // Snapshot past the routed declare's `Declare(DeclQueryable)`.
+    let base = driver.frame_count();
+
+    // `garden/temp` RESOLVES (literal, mapping id 0) but matches nothing.
+    let outcome = query_frame_outcome(make_request_query(13, "garden/temp"));
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(
+        driver.frame_count() - base,
+        1,
+        "a resolvable wire query that matched NOBODY still gets its bare \
+         ResponseFinal — otherwise the requester waits out its own timeout"
+    );
+}
+
 /// R311li — a matched-but-silent handler still terminates the reply
 /// stream: the Final trigger keys on the MATCH count, not the staged
 /// reply delta (the prior delta detection starved the querier until

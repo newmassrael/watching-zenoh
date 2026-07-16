@@ -1268,6 +1268,60 @@ impl<C: QuerySink> QueryableRegistry<C> {
     }
 }
 
+/// R311y337 — what [`QueryableRegistry::dispatch_request`] did with one inbound
+/// Request. Two facts, deliberately separate, because the caller's Final
+/// obligation keys on the FIRST and not the second.
+///
+/// zenoh decides the same way, structurally: its wire entry
+/// (`Primitives::send_request`, `zenoh/src/api/session.rs:2769-2792`) reaches
+/// `handle_query` ONLY for a `RequestBody::Query` whose wire_expr resolves —
+/// a non-Query body never enters the match arm, and an unresolvable keyexpr
+/// takes the `Err(err) => error!("Received Query for unknown key_expr")` leg
+/// and returns. Once inside `handle_query`, the `QueryInner` is built WITHOUT
+/// EVER CONSULTING THE QUERYABLE SET (`:2440-2450`) and `impl Drop for
+/// QueryInner` (`api/queryable.rs:75-83`) sends the ResponseFinal — only the
+/// callback loop is gated on `!queryables.is_empty()`, so a zero-match query
+/// simply never moves the inner into a `Query` and drops it at scope end. So
+/// "entered handle_query" is the debt, and the match count is not. (Precisely:
+/// one guard does sit between entry and the inner — `let Ok(primitives) =
+/// state.primitives() else { return }` at `:2421-2423`, a closed/closing
+/// session. wz has no counterpart arm: an inbound Request implies a live
+/// transport, and a closed session emits nothing at all rather than owing a
+/// Final. It is orthogonal to the match count, which is the axis at issue.) zenoh-pico states it outright on the same
+/// boundary: `if (qle_nb == 0) { ...; _z_session_send_reply_final(zn, qid,
+/// is_local); return _Z_RES_OK; }` (`vendor/zenoh-pico/src/session/queryable.c:246-252`).
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchOutcome {
+    /// Whether the Request carried a RESOLVABLE Query body and was therefore
+    /// routed through the queryable table — wz's boundary equivalent of zenoh
+    /// entering `handle_query`.
+    ///
+    /// `true` means the requester is owed EXACTLY ONE ResponseFinal, whatever
+    /// [`matched`](Self::matched) is: a query that reached the table and found
+    /// nobody still gets its stream terminated, or the requester waits out its
+    /// own timeout for an answer that was never coming.
+    ///
+    /// `false` is the two arms that are not application-visible at all — a
+    /// non-Query body, or a keyexpr the peer table cannot resolve. Neither owes
+    /// anything, matching zenoh's two pre-`handle_query` exits above.
+    pub dispatched: bool,
+    /// How many queryables the query matched and fired, in registration order.
+    /// `0` is a legal outcome of a real dispatch and does NOT discharge the
+    /// Final — read [`dispatched`](Self::dispatched) for that.
+    pub matched: usize,
+}
+
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+impl DispatchOutcome {
+    /// The Request never reached the queryable table (non-Query body, or an
+    /// unresolvable keyexpr): nothing fired and nothing is owed.
+    pub const NOT_DISPATCHED: Self = Self {
+        dispatched: false,
+        matched: 0,
+    };
+}
+
 // R311gb (Track 2) — owned wire-dispatch surface: these entry points
 // consume an owned `wz_codecs::query::Query` / `Request` / a
 // `Vec<QueryReply>` accumulator, so they gate on `all(codec-request,
@@ -1313,20 +1367,23 @@ impl<C: QuerySink> QueryableRegistry<C> {
         request: &RequestOwned,
         peer_keyexpr_table: &HashMap<u64, String>,
         replies: &mut Vec<QueryReply>,
-    ) -> usize {
+    ) -> DispatchOutcome {
         // Only the Query body arm triggers application-visible
-        // dispatch — see scope note above.
+        // dispatch — see scope note above. zenoh's wire entry never enters its
+        // Query arm for these bodies either (session.rs:2771).
         let query = match &request.body {
             RequestOwnedVariant::CodecZenohQuery(q) => q,
-            _ => return 0,
+            _ => return DispatchOutcome::NOT_DISPATCHED,
         };
 
         // R311gn-follow — resolve via the shared resolve_wireexpr SSOT
         // (id==0 -> suffix verbatim; id!=0 -> table[id] + optional suffix;
         // None -> drop, covering the empty form + an undeclared id).
+        // zenoh's twin exit: `Err(err) => error!("Received Query for unknown
+        // key_expr")` returns before `handle_query`, so no Final is owed.
         let resolved: String = match resolve_wireexpr(&request.keyexpr.body, peer_keyexpr_table) {
             Some(r) => r,
-            None => return 0,
+            None => return DispatchOutcome::NOT_DISPATCHED,
         };
 
         // zenoh session.rs:2430 — the completeness filter reads the query's
@@ -1345,14 +1402,22 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // in [`Self::fire_matching_queryables`] once. The "deferred
         // self-publish loopback" carry note prior to R238 lands here:
         // the helper switch is the textbook resolution.
-        self.fire_matching_queryables(
+        //
+        // R311y337 — past this point the query HAS been routed (wz's equivalent
+        // of zenoh entering `handle_query`), so the requester is owed a Final
+        // even if `matched` comes back 0.
+        let matched = self.fire_matching_queryables(
             request.rid,
             &resolved,
             query,
             replies,
             target,
             /* is_remote = */ true,
-        )
+        );
+        DispatchOutcome {
+            dispatched: true,
+            matched,
+        }
     }
 
     /// R238 — in-process query loopback mirror of
@@ -1507,12 +1572,18 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// `FramePayload.messages` field surfaced by
     /// [`crate::session_glue::drive_session_until_terminal`]) through
     /// the queryable table. Each `NetworkMessage::Request` triggers
-    /// at most one `dispatch_request` and, when at least one queryable
-    /// matched the inbound keyexpr, also enqueues a
-    /// `pending_final_rids` entry so the caller emits exactly one
-    /// matching [`ResponseFinal`] after all per-rid replies have been
-    /// sent (zenoh-pico semantics: "many Reply + exactly one Final"
-    /// per Query).
+    /// at most one `dispatch_request` and, when that Request carried a
+    /// RESOLVABLE Query body, also enqueues a `pending_final_rids`
+    /// entry so the caller emits exactly one matching [`ResponseFinal`]
+    /// after all per-rid replies have been sent (zenoh-pico semantics:
+    /// "many Reply + exactly one Final" per Query).
+    ///
+    /// R311y337 — the trigger is [`DispatchOutcome::dispatched`], NOT the
+    /// match count: a query that reached the table and matched ZERO
+    /// queryables still owes its requester the terminator, exactly as
+    /// zenoh (Drop of the unconditionally-built `QueryInner`) and pico
+    /// (`if (qle_nb == 0) { ... send_reply_final }`) do. Keying on the
+    /// match count starved such a requester until its own timeout.
     ///
     /// `pending_replies` accumulates outbound replies in arrival
     /// order. `pending_final_rids` accumulates the rids for which
@@ -1522,10 +1593,12 @@ impl<C: QuerySink> QueryableRegistry<C> {
     ///
     /// A `Request(Query)` whose keyexpr is un-resolvable (mapping_id
     /// references an entry the peer never declared) does NOT enqueue
-    /// a Final — the dispatch dropped silently, so the wire-level
-    /// contract is "no Reply, no Final" rather than "no Reply, one
-    /// Final" (the latter would falsely promise the requester a
-    /// terminal that never comes from an unmatched queryable).
+    /// a Final — the query never reached the table, so the wire-level
+    /// contract is "no Reply, no Final". zenoh's twin: an unresolvable
+    /// wire_expr takes the `Err(err) => error!(..)` leg and never enters
+    /// `handle_query`, so no `QueryInner` is built and none is dropped
+    /// (session.rs:2769-2792). This is NOT the zero-match case, which
+    /// DOES owe a Final — see the note above.
     ///
     /// Non-Query body arms (MsgPut|MsgDel|Default) are no-ops at
     /// this layer per the scope note on
@@ -1546,26 +1619,37 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // registry does not handle simply fall through the `if let`.
         for message in messages {
             if let NetworkMessage::Request(req) = message {
-                // Only Query bodies are queryable-visible; only
-                // resolvable keyexprs schedule a Final. We detect both
-                // by snapshotting the replies length before / after
-                // dispatch_request — a delta of zero means either
-                // non-Query body, un-resolvable keyexpr, or no queryable
-                // matched. In all three cases we owe no Final (the
-                // requester sees no Reply chain at all from this peer
-                // for this rid).
-                // R311li — the Final trigger is the MATCH count, not
-                // the staged-reply delta: a deferred Session-tier sink
-                // stages zero replies at dispatch time (the handler
-                // runs at the post-lock drain), and a matched-but-
-                // silent inline handler still owes the requester its
-                // stream terminator (zenoh-pico emits the reply Final
-                // on query-object drop regardless of reply count; the
-                // prior delta detection starved that querier until
-                // timeout). Non-Query bodies and un-resolvable
-                // keyexprs still owe nothing (matched == 0).
-                let matched = self.dispatch_request(req, peer_keyexpr_table, pending_replies);
-                if matched > 0 {
+                // R311y337 — the Final is owed iff the Request carried a
+                // RESOLVABLE Query body, i.e. iff it actually reached the
+                // queryable table. NOT iff a queryable matched.
+                //
+                // R311li got the direction right and stopped one arm short. It
+                // moved the trigger off the staged-reply delta and onto the
+                // match count, because a deferred sink stages zero replies at
+                // dispatch time and a matched-but-silent handler still owes a
+                // terminator. Its closing sentence — "Non-Query bodies and
+                // un-resolvable keyexprs still owe nothing (matched == 0)" —
+                // named two of the three ways `matched == 0` arises. The third,
+                // a resolvable query that simply matched NOBODY, silently
+                // inherited "owe nothing", and that was WRONG: both upstreams
+                // terminate the stream there (zenoh builds `QueryInner` without
+                // consulting the queryable set and its Drop sends the Final,
+                // session.rs:2440-2450 + queryable.rs:75-83; pico says it
+                // outright, `if (qle_nb == 0) { ...; _z_session_send_reply_final
+                // (...); }`, queryable.c:246-252), and wz's OWN loopback leg
+                // already emitted `deliver_local_final` unconditionally. The two
+                // legs disagreed and the wire leg was the wrong one, so a query
+                // matching nobody starved its requester until timeout — the very
+                // harm R311li set out to kill, left alive on the arm it did not
+                // name. R311y334 then widened the arm: an `AllComplete` query
+                // now filters incomplete queryables out, manufacturing
+                // `matched == 0` on a live, ordinary path.
+                //
+                // The two arms that DO legitimately owe nothing are exactly the
+                // two `DispatchOutcome::NOT_DISPATCHED` returns, which mirror
+                // zenoh's two pre-`handle_query` exits (session.rs:2769-2792).
+                let outcome = self.dispatch_request(req, peer_keyexpr_table, pending_replies);
+                if outcome.dispatched {
                     pending_final_rids.push(req.rid);
                 }
             }
@@ -2865,7 +2949,10 @@ mod tests {
             .unwrap();
         let mut replies = Vec::new();
         let matched = reg.dispatch_request(&request, &HashMap::new(), &mut replies);
-        assert_eq!(matched, 1, "the demo/data queryable matched the query");
+        assert_eq!(
+            matched.matched, 1,
+            "the demo/data queryable matched the query"
+        );
         assert!(
             *observed.lock().unwrap(),
             "the queryable handler ran and observed the value"
@@ -2922,13 +3009,19 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_messages_emits_final_for_each_matched_request() {
+    fn dispatch_messages_emits_final_for_each_dispatched_request() {
+        // R311y337 — was `..._for_each_matched_request`, and it pinned the same
+        // defect as its sibling below from a second angle: rid 12 RESOLVES
+        // ("garden/temp", literal, id 0) and simply matches no pattern, yet the
+        // old assertion dropped its Final and called that correct. One Final per
+        // DISPATCHED rid is the contract — zenoh terminates the zero-match query
+        // via Drop<QueryInner>, pico via its `qle_nb == 0` branch.
         let mut reg = QueryableRegistry::new();
         reg.register("home/temp", |_q, responder| {
             responder.reply(b"21.0");
         });
 
-        // Two Query requests on the matched keyexpr + one unmatched.
+        // Two Query requests on the matched keyexpr + one that matches nobody.
         let messages = vec![
             NetworkMessage::Request(Box::new(request_query(10, 0, Some("home/temp")))),
             NetworkMessage::Request(Box::new(request_query(11, 0, Some("home/temp")))),
@@ -2941,13 +3034,30 @@ mod tests {
         assert_eq!(replies.len(), 2, "two matched Queries produce two Replies");
         assert_eq!(
             finals,
-            vec![10u64, 11u64],
-            "one Final per matched rid, unmatched rid 12 dropped"
+            vec![10u64, 11u64, 12u64],
+            "one Final per DISPATCHED rid, in arrival order -- rid 12 resolved \
+             but matched nobody, and a query that reached the table still owes \
+             its requester the terminator"
         );
     }
 
     #[test]
-    fn dispatch_messages_skips_final_when_no_queryable_matched() {
+    fn dispatch_messages_emits_final_when_query_matches_zero_queryables() {
+        // R311y337 — INVERTED. This assertion used to read `finals.is_empty()`
+        // under the name `..._skips_final_when_no_queryable_matched`, and it
+        // PINNED the defect: a resolvable query that matched nobody got no
+        // stream terminator, so its requester waited out its own timeout for an
+        // answer that was never coming. Both upstreams terminate it — zenoh
+        // builds `QueryInner` unconditionally and its Drop sends the Final
+        // (session.rs:2440-2450 + queryable.rs:75-83); pico sends it on the
+        // explicit `qle_nb == 0` branch (queryable.c:246-252) — and wz's own
+        // loopback leg already emitted it unconditionally.
+        //
+        // The keyexpr RESOLVES here ("garden/humid" is a literal, id 0); it just
+        // matches no registered pattern. That is the whole point: resolvable-
+        // but-unmatched is a REAL dispatch, and a real dispatch owes exactly one
+        // Final. Contrast `..._skips_final_when_keyexpr_unresolvable` below,
+        // which owes nothing and stays as it was.
         let mut reg = QueryableRegistry::new();
         reg.register("home/temp", |_q, responder| {
             responder.reply(b"21.0");
@@ -2961,10 +3071,48 @@ mod tests {
         let mut replies = Vec::new();
         let mut finals = Vec::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
-        assert!(replies.is_empty());
+        assert!(replies.is_empty(), "nothing matched, so nothing replied");
+        assert_eq!(
+            finals,
+            vec![7],
+            "a resolvable query that matched NOBODY still owes exactly one \
+             Final -- zenoh's Drop<QueryInner> and pico's qle_nb==0 branch both \
+             send it, and wz's own loopback leg already did"
+        );
+    }
+
+    #[test]
+    fn dispatch_messages_emits_final_when_allcomplete_filters_every_queryable_out() {
+        // R311y337 — the arm R311y334 WIDENED, and the reason this defect stopped
+        // being a rare corner. The completeness filter (`complete || target !=
+        // AllComplete`) manufactures `matched == 0` on an ordinary path: ask for
+        // AllComplete while only an INCOMPLETE queryable is registered, and the
+        // query reaches the table, is filtered down to nobody, and must still be
+        // terminated. Pre-y337 this went silent and starved the requester — a
+        // hole y334 opened while closing another.
+        use crate::request_build::build_request_query_with_target;
+        let mut reg = QueryableRegistry::new();
+        // The plain `register` wrapper declares complete = false.
+        reg.register("metrics/cpu", |_q, responder| {
+            responder.reply(b"incomplete");
+        });
+
+        let messages = vec![NetworkMessage::Request(Box::new(
+            build_request_query_with_target(9, 0, Some("metrics/cpu"), QueryTarget::AllComplete)
+                .expect("build AllComplete request"),
+        ))];
+        let mut replies = Vec::new();
+        let mut finals = Vec::new();
+        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(
-            finals.is_empty(),
-            "no matched queryable -> no Final to terminate"
+            replies.is_empty(),
+            "AllComplete filtered the incomplete queryable out, so it never fired"
+        );
+        assert_eq!(
+            finals,
+            vec![9],
+            "the query DID reach the table, so it owes a Final even though the \
+             completeness filter left nothing to fire"
         );
     }
 
@@ -3300,8 +3448,12 @@ mod tests {
             &mut replies,
         );
         assert_eq!(
-            matched, 1,
+            matched.matched, 1,
             "an AllComplete wire query matches only the complete queryable"
+        );
+        assert!(
+            matched.dispatched,
+            "a resolvable Query body reached the table, so a Final is owed"
         );
         assert_eq!(complete_hits.load(Ordering::SeqCst), 1);
         assert_eq!(incomplete_hits.load(Ordering::SeqCst), 0);
@@ -3315,7 +3467,7 @@ mod tests {
             &mut replies_plain,
         );
         assert_eq!(
-            matched_plain, 2,
+            matched_plain.matched, 2,
             "an absent target reaches both — the ext_target read is load-bearing"
         );
         assert_eq!(incomplete_hits.load(Ordering::SeqCst), 1);
