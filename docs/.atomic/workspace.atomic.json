@@ -66352,6 +66352,96 @@
         "panic at tests.rs, not the exit code)."
       ]
     },
+    "Round 311y335": {
+      "decision_summary": "R311y335 -- two METHOD misses from R311y334, both caught by the gates rather than\nby me, both recorded here because the round's own prose claimed otherwise.\n\nMISS 1 -- THE CALLER SWEEP WAS crates/-SCOPED. R311y334 changed three public\nsignatures (QueryableRegistry::register_sink, local_query, dispatch_borrowed) and\nswept for callers with `grep -rn ... crates/`. That sweep is structurally blind to\ndeploy/*, which are SEPARATE CARGO WORKSPACES: no `cargo build` run from crates/\never compiles them, so every subset build the round cited (no-alloc, alloc-only,\nfull-query) passed while deploy/mcu-noheap-probe was broken. The pre-push Layer Q\ngate caught it: error[E0061] \"this method takes 4 arguments but 3 were supplied\",\ntwice per target, on the probe's qs.register_sink / qs.dispatch_borrowed. The probe\nis the MCU no-heap exerciser of exactly the un-gated control plane y334 touched --\nthe one consumer most likely to break, and the one the sweep could not see.\nFIXED: /*complete=*/ false + /*target=*/ None at the two sites; semantics unchanged\n(an incomplete queryable under a BestMatching/None target still fires, so the\nprobe's `query_fired == 1` assertion is untouched). R311y334's verification bullet\n\"subset builds compile\" was TRUE of the crates/ workspace and MISLEADING as a\nwhole-tree claim; this entry is the correction. THE RULE: a signature change is\nswept REPO-WIDE (`grep -rn --include=*.rs .`), never crates/-scoped. deploy/* being\nseparate workspaces was already a recorded fact in this project; the round had it\nand did not apply it.\n\nMISS 2 -- `git push 2>&1 | tail` REPORTS THE PIPE'S EXIT CODE. The push was run\nthrough a pipe, the harness reported exit 0, and the round announced the push had\nlanded. It had not: run-ci had FAILED Layer Q and pre-push rejected the ref. `tail`\nexited 0; git push did not. This is the same exit-code-behind-a-pipe trap R311y325\n/ y326 recorded, and the y333 rule (\"cite the `test result:` / panic line, never the\nexit code\") is its sibling. THE RULE: never read success from a piped command's\nstatus -- check ${PIPESTATUS[0]}, or read the command's own output for its verdict\n(here: \"pre-push: CI-equivalent gate failed\", plainly in the tail I did print).\n\nNOT A FLAKE. Layer Q carries a known qemu load flake, and the footprint gate is the\ndocumented first check for it -- footprint was clean (text/data/bss all (+0) OK on\nevery target), which is exactly what proved this was a genuine build break and not\nthe flake. The diagnosis path worked; the sweep that should have prevented it did\nnot.",
+      "changes_bullets": [
+        "deploy/mcu-noheap-probe/src/main.rs: qs.register_sink gains /*complete=*/ false;",
+        "qs.dispatch_borrowed gains /*target=*/ None. Mechanical caller updates for the",
+        "R311y334 signatures; behaviour unchanged (incomplete queryable + BestMatching",
+        "target still fires, so `query_fired == 1` holds).",
+        "No other repo-wide caller outside crates/ exists: a repo-wide grep for",
+        "register_sink / dispatch_borrowed / local_query over all *.rs outside crates/",
+        "matches only this probe (the subscriber + reply registries have their own",
+        "unchanged signatures).",
+        "Folded into the R311y334 commit rather than pushed as a broken intermediate."
+      ],
+      "verification_bullets": [
+        "deploy/mcu-noheap-probe builds for all three Layer Q targets: thumbv6m-none-eabi,",
+        "thumbv7m-none-eabi, thumbv7em-none-eabihf.",
+        "`./scripts/run-ci.sh --layer Q` -> \"Layer Q pass\", \"run-ci: all required layers",
+        "pass\", exit 0 (checked via PIPESTATUS, not the pipe's status -- the MISS 2 rule",
+        "applied immediately).",
+        "Footprint unchanged on every target: text/data/bss all (+0) OK -- adding the",
+        "`complete: bool` to Queryable<C> cost nothing measurable on the MCU profile.",
+        "qemu runs PASS across microbit / mps2-an385 / mps2-an386 / mps2-an500.",
+        "validate_workspace after this append: orphan new=+0, baseline unmoved."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "carry_forward_bullets": [
+        "SWEEP REPO-WIDE ON ANY SIGNATURE CHANGE. `grep -rn --include=*.rs .` -- never",
+        "crates/-scoped. deploy/* are SEPARATE cargo workspaces (mcu-noheap-probe,",
+        "and any sibling): no crates/ build compiles them, so a green touched-crate gate",
+        "says NOTHING about them. Layer Q is what catches the MCU probe; run it whenever a",
+        "wz-session-core un-gated (control-plane) signature moves.",
+        "NEVER READ SUCCESS FROM A PIPED COMMAND. `cmd 2>&1 | tail` reports tail's status.",
+        "Use ${PIPESTATUS[0]} or read the command's own verdict line. Sibling of the y333",
+        "rule (cite `test result:` / the panic, never rc=101).",
+        "Layer Q's known qemu load flake: check the FOOTPRINT gate first -- clean footprint",
+        "(+0) alongside a Q failure means a genuine break, not the flake. That is how this",
+        "one was diagnosed in one pass.",
+        "R311y334's open carries stand unchanged: host the loopback OFF-guard in",
+        "feature-gates (pin by SET) -> then query-target COMPLETE; close query-queryable's",
+        "residual (3) take_pending_final_rids fn-cfg asymmetry (observer.rs); the 5 query",
+        "atoms' dead-pointer `source` fields need a schema round (no set-inventory-source",
+        "primitive exists)."
+      ],
+      "publishable_decision_summary": "R311y335 -- two METHOD misses from R311y334, both caught by the gates rather than\nby me, both recorded here because the round's own prose claimed otherwise.\n\nMISS 1 -- THE CALLER SWEEP WAS crates/-SCOPED. R311y334 changed three public\nsignatures (QueryableRegistry::register_sink, local_query, dispatch_borrowed) and\nswept for callers with `grep -rn ... crates/`. That sweep is structurally blind to\ndeploy/*, which are SEPARATE CARGO WORKSPACES: no `cargo build` run from crates/\never compiles them, so every subset build the round cited (no-alloc, alloc-only,\nfull-query) passed while deploy/mcu-noheap-probe was broken. The pre-push Layer Q\ngate caught it: error[E0061] \"this method takes 4 arguments but 3 were supplied\",\ntwice per target, on the probe's qs.register_sink / qs.dispatch_borrowed. The probe\nis the MCU no-heap exerciser of exactly the un-gated control plane y334 touched --\nthe one consumer most likely to break, and the one the sweep could not see.\nFIXED: /*complete=*/ false + /*target=*/ None at the two sites; semantics unchanged\n(an incomplete queryable under a BestMatching/None target still fires, so the\nprobe's `query_fired == 1` assertion is untouched). R311y334's verification bullet\n\"subset builds compile\" was TRUE of the crates/ workspace and MISLEADING as a\nwhole-tree claim; this entry is the correction. THE RULE: a signature change is\nswept REPO-WIDE (`grep -rn --include=*.rs .`), never crates/-scoped. deploy/* being\nseparate workspaces was already a recorded fact in this project; the round had it\nand did not apply it.\n\nMISS 2 -- `git push 2>&1 | tail` REPORTS THE PIPE'S EXIT CODE. The push was run\nthrough a pipe, the harness reported exit 0, and the round announced the push had\nlanded. It had not: run-ci had FAILED Layer Q and pre-push rejected the ref. `tail`\nexited 0; git push did not. This is the same exit-code-behind-a-pipe trap R311y325\n/ y326 recorded, and the y333 rule (\"cite the `test result:` / panic line, never the\nexit code\") is its sibling. THE RULE: never read success from a piped command's\nstatus -- check ${PIPESTATUS[0]}, or read the command's own output for its verdict\n(here: \"pre-push: CI-equivalent gate failed\", plainly in the tail I did print).\n\nNOT A FLAKE. Layer Q carries a known qemu load flake, and the footprint gate is the\ndocumented first check for it -- footprint was clean (text/data/bss all (+0) OK on\nevery target), which is exactly what proved this was a genuine build break and not\nthe flake. The diagnosis path worked; the sweep that should have prevented it did\nnot.",
+      "publishable_changes_bullets": [
+        "deploy/mcu-noheap-probe/src/main.rs: qs.register_sink gains /*complete=*/ false;",
+        "qs.dispatch_borrowed gains /*target=*/ None. Mechanical caller updates for the",
+        "R311y334 signatures; behaviour unchanged (incomplete queryable + BestMatching",
+        "target still fires, so `query_fired == 1` holds).",
+        "No other repo-wide caller outside crates/ exists: a repo-wide grep for",
+        "register_sink / dispatch_borrowed / local_query over all *.rs outside crates/",
+        "matches only this probe (the subscriber + reply registries have their own",
+        "unchanged signatures).",
+        "Folded into the R311y334 commit rather than pushed as a broken intermediate."
+      ],
+      "publishable_verification_bullets": [
+        "deploy/mcu-noheap-probe builds for all three Layer Q targets: thumbv6m-none-eabi,",
+        "thumbv7m-none-eabi, thumbv7em-none-eabihf.",
+        "`./scripts/run-ci.sh --layer Q` -> \"Layer Q pass\", \"run-ci: all required layers",
+        "pass\", exit 0 (checked via PIPESTATUS, not the pipe's status -- the MISS 2 rule",
+        "applied immediately).",
+        "Footprint unchanged on every target: text/data/bss all (+0) OK -- adding the",
+        "`complete: bool` to Queryable<C> cost nothing measurable on the MCU profile.",
+        "qemu runs PASS across microbit / mps2-an385 / mps2-an386 / mps2-an500.",
+        "validate_workspace after this append: orphan new=+0, baseline unmoved."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "publishable_carry_forward_bullets": [
+        "SWEEP REPO-WIDE ON ANY SIGNATURE CHANGE. `grep -rn --include=*.rs .` -- never",
+        "crates/-scoped. deploy/* are SEPARATE cargo workspaces (mcu-noheap-probe,",
+        "and any sibling): no crates/ build compiles them, so a green touched-crate gate",
+        "says NOTHING about them. Layer Q is what catches the MCU probe; run it whenever a",
+        "wz-session-core un-gated (control-plane) signature moves.",
+        "NEVER READ SUCCESS FROM A PIPED COMMAND. `cmd 2>&1 | tail` reports tail's status.",
+        "Use ${PIPESTATUS[0]} or read the command's own verdict line. Sibling of the y333",
+        "rule (cite `test result:` / the panic, never rc=101).",
+        "Layer Q's known qemu load flake: check the FOOTPRINT gate first -- clean footprint",
+        "(+0) alongside a Q failure means a genuine break, not the flake. That is how this",
+        "one was diagnosed in one pass.",
+        "R311y334's open carries stand unchanged: host the loopback OFF-guard in",
+        "feature-gates (pin by SET) -> then query-target COMPLETE; close query-queryable's",
+        "residual (3) take_pending_final_rids fn-cfg asymmetry (observer.rs); the 5 query",
+        "atoms' dead-pointer `source` fields need a schema round (no set-inventory-source",
+        "primitive exists)."
+      ]
+    },
     "Round 311y34": {
       "decision_summary": "R311y34 -- adminspace-core (§5.23) keystone built: the FIRST P4/LAYER-3 (zenoh-full) atom. Session::declare_adminspace registers the @/<zid>/<whatami>/** built-in queryable (via the existing query-queryable declare path) and answers a root-key-intersecting GET with the local_data JSON (zid/version/locators/sessions/plugins) as application/json -- the wz mirror of zenoh AdminSpace::start + local_data (adminspace.rs:155,561). Faithful to zenoh's Runtime-owns-adminspace model (embedder supplies version + listening locators the Session does not hold); a root-key intersect gate scopes local_data to root GETs so the layered §5.23 handler atoms (read/write/config-sub/per-entity/metrics/linkstate) compose later. Relocated the zid<->ZenohId Display hex SSOT (zid_to_zenoh_hex/zenoh_hex_to_zid/zid_to_le_array) into a new foundational zid_hex module (storage re-exports; every call site + cross-impl test unchanged). Added the missing reply_keyed_encoded ReplyOut seam (keyed+encoding, no timestamp/attachment). reserved->active; CI Layer C1am; A3 active=98. A 4-agent INDEPENDENT adversarial review + direct-read arbitration found NO HIGH defect and 2 MED, both remediated: MED-1 the wz facade adminspace-core was a dead = [] no-op after the active flip -> forwarded to wz-runtime-tokio?/adminspace-core (the feedback-facade-forward-separate-edit R311y13 trap), verified the cfg lights up via -v rustc; MED-2 the local_data JSON used json!-source key order but zenoh builds serde_json WITHOUT preserve_order (BTreeMap -> ALPHABETICAL keys) so the emitter + 3 tests + doc now match zenoh's actual bytes. full run-ci RUNCI_EXIT=0; validate orphan new=+0.",
       "changes_bullets": [
