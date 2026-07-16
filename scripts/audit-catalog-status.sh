@@ -321,6 +321,40 @@ for atom in sorted(atoms):
         # skipped either, which is exactly what this gate did until R311y299.
         unaudited.append(atom)
 
+# R311y343 — invariant #6: COMPLETE must rest on a TEST, not on a code read.
+#
+# This file's own docstring says the implementation tag is earned by CODE READ.
+# That is the defect one level up: R311y339-y341 spent three rounds proving it,
+# and R311y342 found a live wire defect (an alias id wider than both upstreams'
+# u16) that every read had only ever LABELLED -- a failing test settled it in
+# seconds. So COMPLETE now requires a test that names the atom's OWN gated code,
+# and the join is DERIVED (scripts/lib/atom_test_graph.py), never authored: the
+# cfg is evaluated as a boolean, so an `any(..)` OR-contributor does not count as
+# owning the shared plumbing it merely names, and the symbol is then looked up in
+# every test context (a sibling crate's integration test carries the feature in
+# its MANIFEST, with no cfg to match -- which is why a cfg-to-cfg join cannot work
+# and was measured wrong: it rejected 9 of 46 COMPLETE atoms, all false).
+#
+# Calibrated before wiring: 47 of 47 COMPLETE atoms pass. It is a NECESSARY
+# condition, not a sufficient one -- it does not prove the test asserts the right
+# thing, only that the atom's code is reachable by one. An atom no test can even
+# name cannot have been proven built by one; that class is exactly what R311y342
+# had to find by hand (declare-final's sole gated fn has zero callers).
+# `scripts/lib` relative, not via `__file__`: this python runs from a heredoc, so
+# `__file__` does not exist. The cwd is REPO_ROOT by this file's own `cd` contract,
+# which the corpus grep above already relies on (it passes a bare "crates").
+sys.path.insert(0, "scripts/lib")
+import atom_test_graph  # noqa: E402
+
+_atg = atom_test_graph.graph()
+fail_untested_complete = []
+for _a in sorted(atoms):
+    if impl_tag(_a) != "COMPLETE":
+        continue
+    _owned, _ref = _atg.get(_a, (set(), set()))
+    if not _ref:
+        fail_untested_complete.append((_a, len(_owned)))
+
 ok = True
 active_n = sum(1 for a in atoms if atoms[a] == "active")
 print("=== catalog status truthfulness audit ===")
@@ -444,6 +478,18 @@ if fail_tag_status:
     for a, tag, status in fail_tag_status:
         print("    - %s  tag=%s is legal on {%s}, but status=%s"
               % (a, tag, ", ".join(sorted(IMPL_TAGS[tag])), status))
+
+if fail_untested_complete:
+    ok = False
+    print("FAIL: COMPLETE with no test naming the atom's OWN gated code: %d"
+          % len(fail_untested_complete))
+    for a, n_owned in fail_untested_complete:
+        print("    - %s  owns %d cfg-necessary symbol(s); no test context names any"
+              % (a, n_owned))
+    print("      COMPLETE means built with no residual. A read cannot establish")
+    print("      that (R311y339-y341 spent three rounds proving it); a test can.")
+    print("      Either write a test that exercises this atom's own gated code,")
+    print("      or the tag is PARTIAL and the residual is 'unproven by any lane'.")
 
 if ok:
     print("catalog status truthfulness OK")
