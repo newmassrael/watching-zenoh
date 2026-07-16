@@ -233,6 +233,22 @@ to = "66"
 reason = "R121j-5c-e2e-action — Round 193 impact_refs §66 typo. Intended atomic section: runtime-crate--sce_link_runtime_tokio. RFC sec numbering tops out at §16; §66 is not a workspace section. R254 absorb."
 since = "Round 193"
 
+# R311y327 impact_refs typo — same class as the Round 193 row above.
+# The `-advanced` suffix belongs to the FEATURE family name
+# (ext-pubsub-advanced-recovery / -history), not to the section, whose
+# real id is .../5-25-ext-pubsub (verified via query --list-sections).
+# Round 311y327 is frozen, so its impact_refs stay as authored and the
+# dangling ref is absorbed here. Round 311y328 records the correction
+# and re-cites the intended section. NOT a scope shift: nothing left
+# workspace.docs and 5-25-ext-pubsub is alive.
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 311y327"
+to = "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub-advanced"
+reason = "R311y328 scope correction — Round 311y327 impact_refs typo. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub (it exists; the `-advanced` suffix is the feature family's, not the section's). Round 311y328 re-cites the intended section."
+since = "Round 311y328"
+
 # ── R408 markdown-doc model retirement (2026-06-04) ──
 # R400 retired the ParsedDoc validator; store-prose §N citations that
 # previously resolved against parsed markdown headings now surface as

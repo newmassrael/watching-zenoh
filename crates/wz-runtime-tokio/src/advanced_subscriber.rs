@@ -914,8 +914,11 @@ fn issue_recovery_query<R, T>(
     }
     .into_bytes();
     // R311y89 (review C3) — bound the GET with a timeout so the deadline sweep can
-    // fire `finish_recovery` if no `@adv` cache answers (else `pending_queries`
-    // wedges this source's reorder buffer forever).
+    // fire `finish_recovery` if no `@adv` cache answers. R311y326 — the explicit
+    // `recovery_query_timeout_ms` (>= 1 ms) is what arms the deadline; a raw 0 would
+    // now resolve to the 10s platform default rather than never-expire, so the
+    // pre-y326 "else pending_queries wedges the reorder buffer forever" no longer
+    // holds on this build. The explicit timeout still pins the recovery bound.
     let opts = QueryOptions::get()
         .with_allowed_destination(dest)
         .with_parameters(params)
@@ -2519,9 +2522,12 @@ mod tests {
     /// so `history_pending` stays set and a live sample buffers undelivered. The C3
     /// timeout registers the GET with a live deadline, so the reply registry's
     /// deadline sweep fires the synthetic terminal `Final` -> `finish_history` clears
-    /// the gate and flushes the buffer. WITHOUT the timeout (`timeout_ms == 0` ->
-    /// `deadline_ms == None`) the sweep skips the entry forever and `delivered`
-    /// stays empty — the diagnose-first failing arm.
+    /// the gate and flushes the buffer. R311y326 — the failing arm this test guards
+    /// against is now the EXPLICIT-clamp path: recovery threads
+    /// `recovery_query_timeout_ms` (>= 1 ms), which is what arms the deadline. A raw
+    /// `timeout_ms == 0` no longer produces `deadline_ms == None` on this build
+    /// (`ext-pubsub-advanced-history` composes `query-timeout`, so `0` resolves to
+    /// the platform default); pre-y326 it did, and the sweep skipped it forever.
     #[cfg(feature = "ext-pubsub-advanced-history")]
     #[test]
     fn history_get_with_no_answerer_is_rescued_by_the_timeout_sweep() {

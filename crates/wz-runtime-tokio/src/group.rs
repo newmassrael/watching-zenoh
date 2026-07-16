@@ -80,11 +80,12 @@ const EVENT_POSTFIX: &str = "evt";
 /// `Duration::from_secs(1)`, group.rs:402).
 const WATCHDOG_PERIOD_MS: u64 = 1_000;
 /// The unknown-member `get` timeout. The recovered member is only relevant
-/// for the duration of its lease, and an unanswered `get` (the member left
-/// between its beacon and our query) must not pin a pending reply-registry
-/// entry forever (the advanced-recovery C3 lesson: a timeout-less GET wedges
-/// the registry's deadline sweep). A fixed, generous bound; the next beacon
-/// re-issues if it really was a transient miss.
+/// for the duration of its lease, so an unanswered `get` (the member left
+/// between its beacon and our query) is bounded tighter than the platform
+/// default. R311y326 — a `0` would no longer wedge (it resolves to the 10s
+/// `DEFAULT_QUERY_TIMEOUT_MS`); this explicit 5s is chosen because a stale
+/// member is lease-scoped and the next beacon re-issues if it was a transient
+/// miss, so a shorter bound than the default is wanted here.
 const MEMBER_QUERY_TIMEOUT_MS: u32 = 5_000;
 
 /// The group event key `zenoh/ext/net/group/<gid>/evt` — the pub/sub channel
