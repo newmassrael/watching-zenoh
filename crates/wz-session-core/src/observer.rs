@@ -686,7 +686,16 @@ impl ApplicationLayerObserver {
     /// — the Reply-before-Final invariant owner on the deferred path
     /// (the combined [`Self::flush_pending`] owns it on the inline /
     /// MCU path).
-    #[cfg(feature = "query-queryable")]
+    ///
+    /// R311y336 — signature-stable, no `query-queryable` gate. The gate this
+    /// carried was gratuitous: `pending_final_rids` is an UNCONDITIONAL field
+    /// (R311r made the staging buffers ungated precisely so the observer's
+    /// shape is stable across consumer-feature subsets), so the body compiles
+    /// in every subset and only the POPULATE side is gated. Without
+    /// `query-queryable` nothing ever stages a rid, so this honestly returns an
+    /// empty `Vec` — the same OFF projection its sibling drains
+    /// ([`Self::drain_query_replies`] / [`Self::drain_query_finals`]) already
+    /// document, and the shape a `pub` accessor owes its callers.
     pub fn take_pending_final_rids(&mut self) -> Vec<u64> {
         core::mem::take(&mut self.pending_final_rids)
     }

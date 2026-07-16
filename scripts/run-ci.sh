@@ -1892,7 +1892,6 @@ layer_c1an_cargo_test_adminspace_nodefault() {
         && cargo test -p wz-session-core --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet \
         && cargo clippy -p wz-session-core --no-default-features --features adminspace-router-linkstate --all-targets --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet \
-        && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib loopback_target_pub_field_cannot_bypass_the_query_target_gate --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --lib declare_adminspace --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --all-targets --quiet -- -D warnings \
@@ -2559,11 +2558,23 @@ layer_c1bi_cargo_test_pubsub_qos() {
 #
 # The `--list` assertion pins the SET, not a count: R311y315 shipped a gate
 # whose CARRY pinned `len()`, so a rename kept the number equal and a real
-# omission passed green. Three names, compared exactly.
+# omission passed green. Four names, compared exactly.
+#
+# R311y336 — the subset carries `query-queryable` for the FOURTH guard, the
+# LOOPBACK twin. R311y334 wired zenoh's `(queryable.complete || target !=
+# AllComplete)` filter into the LOCAL dispatch, which handed the pub-field
+# bypass a second leg: with `query-target` OFF, a raw `opts.target` write made
+# the loopback select on completeness while the wire leg — gated by
+# `effective_target()` — did not, so the two legs disagreed in a build without
+# the atom. Proving that needs a LOCAL QUERYABLE to select among, which is why
+# this subset now composes `query-queryable`; the three wire guards are
+# unaffected by it (they route `Locality::Remote` and compare frames, so no
+# loopback fan occurs).
 layer_c1bk_cargo_test_query_pub_field_gates() {
     local base="transport-unicast,transport-link-tcp,session-unicast-open,session-unicast-accept,codec-frame,codec-keep-alive,codec-init-body,codec-open-body,codec-close,keyexpr-canon"
-    local feats="$base,codec-response,codec-response-final,query-get,query-reply"
-    local expected="query_consolidation_pub_field_cannot_bypass_the_gate
+    local feats="$base,codec-response,codec-response-final,query-get,query-reply,query-queryable"
+    local expected="loopback_target_pub_field_cannot_bypass_the_query_target_gate
+query_consolidation_pub_field_cannot_bypass_the_gate
 query_target_pub_field_cannot_bypass_the_query_target_gate
 query_timeout_pub_field_cannot_bypass_the_query_timeout_gate"
     local got

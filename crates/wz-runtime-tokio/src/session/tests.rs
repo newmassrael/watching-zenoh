@@ -2989,9 +2989,16 @@ fn query_target_pub_field_cannot_bypass_the_query_target_gate() {
 /// one either. Both SessionLocal queryables — complete and incomplete — must
 /// fire, exactly as with no target. This is the guard that would have caught the
 /// review-found bug (loopback fed `opts.target`, skipping the incomplete
-/// queryable in a query-target-OFF build). Runs in the `adminspace-core`,
-/// `query-get` feature-gates row (query-queryable ON via adminspace-core,
-/// query-target OFF).
+/// queryable in a query-target-OFF build).
+///
+/// R311y336 — HOSTED in Layer C1bk, the feature-gates job's query pub-field row
+/// (`ci.yml` -> `run-ci.sh --layer C1bk`), beside the wire twin it mirrors. That
+/// subset composes `query-queryable` DIRECTLY and omits `query-target`, and its
+/// `--list` SET pin names this guard, so a rename or a cfg elision fails the
+/// lane red rather than passing as zero tests. (The pre-y336 text here claimed
+/// an `adminspace-core, query-get` "feature-gates row"; that was wrong twice
+/// over — the lane it named was Layer C1an, which is local-only and appears in
+/// no workflow, and y336 removed that stopgap when C1bk took the guard.)
 #[cfg(all(
     feature = "query-get",
     feature = "query-queryable",
