@@ -1801,6 +1801,38 @@ mod tests {
         );
     }
 
+    /// R311y342 — the RETRACTION half of the same bound. Found by sweeping
+    /// the sibling after gating the declare twin: `send_undeclare_kexpr`
+    /// emits WITHOUT consulting the mapping table (its idempotence
+    /// contract), so gating the declare side does not bound it. It has no
+    /// error channel, so the drop is silent — the same contract that
+    /// already drops the emit on a transport-down link.
+    #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
+    #[test]
+    fn send_undeclare_kexpr_does_not_emit_an_id_wider_than_the_wire() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.send_undeclare_kexpr(u64::from(u16::MAX) + 1);
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "an UndeclKexpr id neither upstream can hold must not reach the wire"
+        );
+    }
+
+    /// R311y342 — the retraction half's boundary: `u16::MAX` is legal and
+    /// must still emit. Pins the off-by-one in the twin above.
+    #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
+    #[test]
+    fn send_undeclare_kexpr_emits_the_widest_id_the_wire_can_hold() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.send_undeclare_kexpr(u64::from(u16::MAX));
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "the widest legal id must still be retractable"
+        );
+    }
+
     /// R311y342 — the boundary itself is LEGAL: `u16::MAX` is the widest
     /// id both upstreams can hold, so the gate must admit it. Pins the
     /// off-by-one the twin above would otherwise hide.

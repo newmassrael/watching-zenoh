@@ -4285,6 +4285,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_undeclare_kexpr(&self, mapping_id: u64) {
         #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
         {
+            // R311y342 — the DECLARE twin's u16 wire bound, applied to the
+            // retraction half. zenoh's `UndeclareKeyExpr { id: ExprId }` and
+            // pico's `_z_undecl_kexpr_t { uint16_t _id }` are as narrow as
+            // their declare counterparts, and this surface emits WITHOUT
+            // consulting the mapping table (its doc's "removing an absent id
+            // is a no-op" idempotence), so the gated twin does not bound it.
+            // Dropped silently rather than reported because this signature has
+            // no error channel by contract — the same reason a transport-down
+            // reject drops the emit here.
+            if mapping_id > u64::from(u16::MAX) {
+                return;
+            }
             let declare = build_undeclare_kexpr(mapping_id);
             // F2 — this surface has no error channel; a transport-down
             // reject drops the emit exactly as the dead link would.
