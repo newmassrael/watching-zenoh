@@ -726,8 +726,12 @@ struct Pending<C: ReplySink> {
     /// R261 — absolute monotonic-ms deadline (clock baseline-agnostic
     /// snapshot taken at register time as `clock.now_monotonic_ms() +
     /// timeout_ms`). `None` means the pending entry never expires
-    /// (matches the pre-R261 contract; `QueryOptions::timeout_ms == 0`
-    /// callers pass `None`). A `Some(d)` entry is swept by
+    /// (matches the pre-R261 contract). R311y326 — the `None` producers are the
+    /// `query-timeout`-OFF build (where `effective_timeout_ms` reads 0), the
+    /// demo's register-level `--query-timeout-ms 0`, and relay-forwarded meta
+    /// with no timeout ext; a DEFAULT `Session::query` on a `query-timeout` build
+    /// no longer produces `None` — it resolves the 0 to the platform default and
+    /// passes `Some`. A `Some(d)` entry is swept by
     /// [`ReplyRegistry::sweep_timed_out`] when the caller-supplied
     /// `now_ms >= d`. The deadline uses absolute ms so the sweep call
     /// only needs to compare without re-reading the clock per entry.
@@ -1025,10 +1029,11 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// ignores replies still sees the final, so the stream-terminated reading
     /// stays valid.
     ///
-    /// Entries with `deadline_ms == None` (the `QueryOptions::timeout_ms
-    /// == 0` "never expire" path) are skipped — they remain pending
-    /// across an arbitrary number of sweep passes until a wire or
-    /// loopback Final actually arrives. Idempotent: a second
+    /// Entries with `deadline_ms == None` (the never-expire path — see the
+    /// `deadline_ms` field doc for its R311y326 producer set, which no longer
+    /// includes a default `Session::query` on a `query-timeout` build) are
+    /// skipped — they remain pending across an arbitrary number of sweep passes
+    /// until a wire or loopback Final actually arrives. Idempotent: a second
     /// `sweep_timed_out` call with the same `now_ms` returns 0
     /// (everything that could have expired already did).
     ///
@@ -1107,9 +1112,10 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// `timeout_ms = 100` up to 33x late. `deadline_ms` is private to
     /// [`Pending`], so no accessor could be composed from outside.
     ///
-    /// Entries with `deadline_ms == None` (the `timeout_ms == 0`
-    /// "never expire" path) are skipped, exactly as the sweep skips
-    /// them: they impose no wake. `O(n)` over a table bounded by
+    /// Entries with `deadline_ms == None` (the never-expire path; see the
+    /// `deadline_ms` field doc for its R311y326 producer set) are skipped,
+    /// exactly as the sweep skips them: they impose no wake. `O(n)` over a table
+    /// bounded by
     /// [`caps::MAX_PENDING_QUERIES`], and read once per wake-arm.
     pub fn next_deadline_ms(&self) -> Option<u64> {
         self.pending
@@ -2550,7 +2556,8 @@ mod tests {
             "the earliest deadline arms the wake regardless of insertion order"
         );
 
-        // `deadline_ms == None` is the timeout_ms == 0 never-expires path: it
+        // `deadline_ms == None` is the never-expire path (R311y326: reached on a
+        // query-timeout-off build / register-level 0, not a default query): it
         // imposes no wake, exactly as `sweep_timed_out` never sweeps it.
         reg.register(3, 1, None, |_| {}, |_| {});
         assert_eq!(
@@ -2689,9 +2696,11 @@ mod tests {
     #[test]
     fn sweep_timed_out_skips_none_deadline_entries() {
         // deadline_ms = None ("never expire") entries must survive any
-        // sweep_timed_out call, regardless of now_ms. This pins the
-        // contract for the QueryOptions::timeout_ms == 0 path that the
-        // R261 Session::query production callers exercise.
+        // sweep_timed_out call, regardless of now_ms. This pins the registry
+        // contract for the None-deadline path. R311y326 — that path is reached by
+        // a query-timeout-OFF build, the demo's register-level 0, and relay
+        // meta with no timeout ext; a default Session::query on a query-timeout
+        // build does NOT exercise it (it resolves 0 to the platform default).
         let mut reg = ReplyRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();

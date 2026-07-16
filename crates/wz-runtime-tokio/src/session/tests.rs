@@ -2534,24 +2534,44 @@ fn query_options_query_metadata_extracts_wire_fields() {
     );
 }
 
-#[cfg(feature = "query-get")]
+// R311y326 — the `is_empty()` verdict for default options is now
+// build-dependent: with `query-timeout` ON, default options resolve the
+// timeout to `DEFAULT_QUERY_TIMEOUT_MS` (matching pico/zenoh, neither of which
+// has an empty-timeout default), so the metadata is NOT empty. With the atom
+// OFF the accessor still yields 0 and the metadata stays empty. Two lanes, two
+// tests, so the assertion matches the build it runs on rather than passing only
+// by coincidence on the one subset that omits query-timeout.
+#[cfg(all(feature = "query-get", not(feature = "query-timeout")))]
 #[test]
 fn query_options_default_query_metadata_is_empty() {
     let meta = QueryOptions::default().query_metadata();
     assert!(
         meta.is_empty(),
-        "default options produce empty wire metadata"
+        "with query-timeout OFF, default options produce empty wire metadata"
     );
 }
 
-#[cfg(feature = "query-get")]
+#[cfg(all(feature = "query-get", feature = "query-timeout"))]
+#[test]
+fn query_options_default_query_metadata_carries_default_timeout() {
+    let meta = QueryOptions::default().query_metadata();
+    assert_eq!(
+        meta.timeout_ms, DEFAULT_QUERY_TIMEOUT_MS,
+        "default options resolve the 0 sentinel to the platform default timeout"
+    );
+    assert!(
+        !meta.is_empty(),
+        "a default query now carries the timeout ext, so the metadata is non-empty"
+    );
+}
+
+#[cfg(all(feature = "query-get", not(feature = "query-timeout")))]
 #[test]
 fn query_wire_branch_with_empty_meta_emits_no_meta_fast_path_frame() {
-    // Session::query with default options (Locality::Any, no
-    // metadata) MUST take the no-meta fast path → wire frame is
-    // byte-identical to a standalone send_request_query call.
-    // Pins the R240 short-circuit invariant at the Session
-    // level.
+    // With query-timeout OFF, Session::query with default options
+    // (Locality::Any, no metadata) MUST take the no-meta fast path → wire
+    // frame is byte-identical to a standalone send_request_query call.
+    // Pins the R240 short-circuit invariant at the Session level.
     let (session, driver) = build_session();
     session
         .query(
@@ -2583,6 +2603,84 @@ fn query_wire_branch_with_empty_meta_emits_no_meta_fast_path_frame() {
     );
 }
 
+// R311y326 — with query-timeout ON, a default query no longer takes the
+// no-meta fast path: it resolves the 0 sentinel to DEFAULT_QUERY_TIMEOUT_MS and
+// carries the timeout ext, matching pico's z_get (which rewrites 0->default
+// before encoding) and zenoh (which always emits ext_timeout). Two independent
+// build_session() instances seed identically from fixture_session_init_params,
+// so a default query and an explicit with_timeout_ms(DEFAULT) query produce
+// byte-identical frames; both differ from the bare no-ext baseline.
+#[cfg(all(feature = "query-get", feature = "query-timeout"))]
+#[test]
+fn query_wire_branch_default_carries_the_default_timeout_ext() {
+    let (session, driver) = build_session();
+    session
+        .query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            |_| {},
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+    let default_frame = driver.frame_bytes(0);
+
+    let (session2, driver2) = build_session();
+    session2
+        .query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::Remote)
+                .with_timeout_ms(DEFAULT_QUERY_TIMEOUT_MS),
+            |_| {},
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+    let explicit_frame = driver2.frame_bytes(0);
+
+    assert_eq!(
+        default_frame, explicit_frame,
+        "a default query must resolve to exactly the platform default timeout on the wire"
+    );
+
+    // And it must NOT be the bare no-ext frame — the ext is genuinely present.
+    let (actions3, driver3) = recording_actions();
+    let rid = actions3.alloc_next_request_id();
+    actions3
+        .send_request_query(rid, 0, Some("home/temp"))
+        .unwrap();
+    let bare = driver3.frame_bytes(0);
+    assert_ne!(
+        default_frame, bare,
+        "a default query on a query-timeout build must carry the timeout ext, not the bare frame"
+    );
+}
+
+// R311y326 — expected Request bytes for a Session::query wire assertion, with
+// the default-timeout resolution mirrored. A query now resolves `timeout_ms == 0`
+// to `DEFAULT_QUERY_TIMEOUT_MS` (matching pico/zenoh), so the single-knob
+// convenience builders (which carry no timeout) no longer appear verbatim in the
+// recorded frame — the trailing timeout ext lengthens the request and flips the
+// preceding ext's continuation bit. Build the expected via
+// `build_request_query_with_meta` carrying the knob under test AND the effective
+// timeout, so it matches on query-timeout ON (ext present) and OFF (ext absent,
+// short-circuiting to the same bytes as the bare builder per the R240 invariant).
+#[cfg(all(test, feature = "query-get"))]
+fn expected_query_request_bytes(
+    mapping_id: u64,
+    keyexpr: Option<&str>,
+    #[allow(unused_mut)] mut meta: wz_session_core::metadata::QueryMetadata,
+) -> Vec<u8> {
+    #[cfg(feature = "query-timeout")]
+    if meta.timeout_ms == 0 {
+        meta.timeout_ms = DEFAULT_QUERY_TIMEOUT_MS;
+    }
+    wz_session_core::request_build::build_request_query_with_meta(0, mapping_id, keyexpr, &meta)
+        .unwrap()
+        .try_as_borrowed()
+        .expect("test: <=N exts by construction")
+        .encode_to_vec()
+}
+
 #[cfg(all(
     feature = "codec-request",
     feature = "query-get",
@@ -2606,16 +2704,17 @@ fn query_wire_branch_with_target_threads_target_through_with_meta() {
         )
         .expect("query-get feature is ON in this test build");
 
-    // Re-encode an equivalent standalone Request with target=All
-    // and assert the wire bytes appear verbatim in the recorded
-    // frame.
-    use crate::session_glue::build_request_query_with_target;
-    let standalone =
-        build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::AllComplete).unwrap();
-    let standalone_bytes = standalone
-        .try_as_borrowed()
-        .expect("test: <=N exts by construction")
-        .encode_to_vec();
+    // Re-encode an equivalent standalone Request with target=All (plus the
+    // default timeout the query path now resolves) and assert the wire bytes
+    // appear verbatim in the recorded frame.
+    let standalone_bytes = expected_query_request_bytes(
+        0,
+        Some("home/temp"),
+        wz_session_core::metadata::QueryMetadata {
+            target: Some(QueryTarget::AllComplete),
+            ..Default::default()
+        },
+    );
     let frame = driver.frame_bytes(0);
     assert!(
         frame
@@ -2640,13 +2739,14 @@ fn query_wire_branch_with_attachment_threads_attachment_through_with_meta() {
         )
         .expect("query-get feature is ON in this test build");
 
-    use crate::session_glue::build_request_query_with_attachment;
-    let standalone =
-        build_request_query_with_attachment(0, 0, Some("home/temp"), b"q-att").unwrap();
-    let standalone_bytes = standalone
-        .try_as_borrowed()
-        .expect("test: <=N exts by construction")
-        .encode_to_vec();
+    let standalone_bytes = expected_query_request_bytes(
+        0,
+        Some("home/temp"),
+        wz_session_core::metadata::QueryMetadata {
+            attachment: Some(b"q-att".to_vec()),
+            ..Default::default()
+        },
+    );
     let frame = driver.frame_bytes(0);
     assert!(
         frame
@@ -2675,14 +2775,14 @@ fn query_wire_branch_with_consolidation_threads_consolidation_through_with_meta(
         )
         .expect("query-get feature is ON in this test build");
 
-    use crate::session_glue::build_request_query_with_consolidation;
-    let standalone =
-        build_request_query_with_consolidation(0, 0, Some("home/temp"), ConsolidationMode::Latest)
-            .unwrap();
-    let standalone_bytes = standalone
-        .try_as_borrowed()
-        .expect("test: <=N exts by construction")
-        .encode_to_vec();
+    let standalone_bytes = expected_query_request_bytes(
+        0,
+        Some("home/temp"),
+        wz_session_core::metadata::QueryMetadata {
+            consolidation: Some(ConsolidationMode::Latest),
+            ..Default::default()
+        },
+    );
     let frame = driver.frame_bytes(0);
     assert!(
         frame
@@ -2703,7 +2803,18 @@ fn query_wire_branch_with_consolidation_threads_consolidation_through_with_meta(
 /// byte-identical to the bare no-metadata baseline (no Q_T flag /
 /// target ext on the wire). A regression that silently un-gated the
 /// setter — making the field always-on — would break this parity.
-#[cfg(all(feature = "query-get", not(feature = "query-target")))]
+// R311y326 — `not(query-timeout)` is load-bearing, not incidental: this guard
+// compares against the BARE no-metadata baseline, and a default query only
+// produces bare bytes when query-timeout is also off. With query-timeout ON the
+// default resolves a 10s timeout ext, so the frame is bare+timeout, not bare.
+// Without this clause the guard fails on the valid query-get+query-timeout,
+// query-target-off combo (e.g. a future ext-pubsub-advanced-recovery test lane)
+// for a reason unrelated to what it guards.
+#[cfg(all(
+    feature = "query-get",
+    not(feature = "query-target"),
+    not(feature = "query-timeout")
+))]
 #[test]
 fn query_with_target_is_silent_noop_when_query_target_feature_disabled() {
     let (session, driver) = build_session();
@@ -2750,7 +2861,13 @@ fn query_with_target_is_silent_noop_when_query_target_feature_disabled() {
 /// the wire is the consequence: this is the emit-path shape R311y315 closed
 /// for `QueryResponder::send_err`, not the read-surface shape R311y316 ruled
 /// benign for `BorrowedQuery`.
-#[cfg(all(feature = "query-get", not(feature = "query-target")))]
+// R311y326 — `not(query-timeout)`: bare-baseline comparison, valid only when a
+// default query emits no timeout ext (see the sibling silent-noop guard above).
+#[cfg(all(
+    feature = "query-get",
+    not(feature = "query-target"),
+    not(feature = "query-timeout")
+))]
 #[test]
 fn query_target_pub_field_cannot_bypass_the_query_target_gate() {
     let (session, driver) = build_session();
@@ -2782,7 +2899,13 @@ fn query_target_pub_field_cannot_bypass_the_query_target_gate() {
 /// signature-stable no-op: the Q_C flag and its consolidation byte
 /// must be absent, so the outbound frame must equal the bare
 /// no-metadata baseline.
-#[cfg(all(feature = "query-get", not(feature = "query-consolidation")))]
+// R311y326 — `not(query-timeout)`: bare-baseline comparison, valid only when a
+// default query emits no timeout ext (see the query-target silent-noop guard).
+#[cfg(all(
+    feature = "query-get",
+    not(feature = "query-consolidation"),
+    not(feature = "query-timeout")
+))]
 #[test]
 fn query_with_consolidation_is_silent_noop_when_query_consolidation_feature_disabled() {
     let (session, driver) = build_session();
@@ -2909,7 +3032,13 @@ fn query_timeout_pub_field_cannot_bypass_the_query_timeout_gate() {
 
 /// R311y317 — field-path twin for `query-consolidation` (see
 /// `query_target_pub_field_cannot_bypass_the_query_target_gate`).
-#[cfg(all(feature = "query-get", not(feature = "query-consolidation")))]
+// R311y326 — `not(query-timeout)`: bare-baseline comparison, valid only when a
+// default query emits no timeout ext (see the query-target silent-noop guard).
+#[cfg(all(
+    feature = "query-get",
+    not(feature = "query-consolidation"),
+    not(feature = "query-timeout")
+))]
 #[test]
 fn query_consolidation_pub_field_cannot_bypass_the_gate() {
     let (session, driver) = build_session();
@@ -3019,14 +3148,12 @@ fn query_aliased_locality_remote_fires_wire_with_mapping_id() {
         .expect("query-get feature is ON in this test build");
     assert_eq!(driver.frame_count(), 1, "wire frame emitted");
 
-    // Verify the recorded frame is byte-equivalent to a standalone
-    // build_request_query with mapping_id=7.
-    use crate::session_glue::build_request_query;
-    let standalone = build_request_query(0, 7, None).unwrap();
-    let standalone_bytes = standalone
-        .try_as_borrowed()
-        .expect("test: <=N exts by construction")
-        .encode_to_vec();
+    // Verify the recorded frame carries the (mapping_id=7, suffix=None) aliased
+    // pair. A default query now resolves the platform timeout, so the expected
+    // bytes carry it too (on a query-timeout build); on an OFF build the empty
+    // meta short-circuits to the bare build_request_query bytes.
+    let standalone_bytes =
+        expected_query_request_bytes(7, None, wz_session_core::metadata::QueryMetadata::default());
     let frame = driver.frame_bytes(0);
     assert!(
         frame
@@ -3257,12 +3384,14 @@ fn query_aliased_with_meta_threads_attachment_through_wire() {
         )
         .expect("query-get feature is ON in this test build");
 
-    use crate::session_glue::build_request_query_with_attachment;
-    let standalone = build_request_query_with_attachment(0, 7, None, b"q-att").unwrap();
-    let standalone_bytes = standalone
-        .try_as_borrowed()
-        .expect("test: <=N exts by construction")
-        .encode_to_vec();
+    let standalone_bytes = expected_query_request_bytes(
+        7,
+        None,
+        wz_session_core::metadata::QueryMetadata {
+            attachment: Some(b"q-att".to_vec()),
+            ..Default::default()
+        },
+    );
     let frame = driver.frame_bytes(0);
     assert!(
         frame
@@ -3406,13 +3535,14 @@ fn querier_get_threads_target_option_into_wire() {
         .get(|_| {}, |_| {})
         .expect("query-get feature is ON in this test build");
 
-    use crate::session_glue::build_request_query_with_target;
-    let standalone =
-        build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::All).unwrap();
-    let standalone_bytes = standalone
-        .try_as_borrowed()
-        .expect("test: <=N exts by construction")
-        .encode_to_vec();
+    let standalone_bytes = expected_query_request_bytes(
+        0,
+        Some("home/temp"),
+        wz_session_core::metadata::QueryMetadata {
+            target: Some(QueryTarget::All),
+            ..Default::default()
+        },
+    );
     let frame = driver.frame_bytes(0);
     assert!(
         frame

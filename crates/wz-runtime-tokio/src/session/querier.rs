@@ -10,6 +10,41 @@
 
 use super::*;
 
+/// R311y326 — the platform default per-query timeout, in milliseconds.
+///
+/// Mirrors zenoh-pico's `Z_GET_TIMEOUT_DEFAULT`
+/// (`vendor/zenoh-pico/include/zenoh-pico/config.h.in:208`) and zenoh's
+/// `queries_default_timeout` (`zenoh-config-1.5.0/src/defaults.rs:151`). Both
+/// upstreams apply it at EVERY query-issuing surface and NEITHER offers a
+/// never-expire client query: pico rewrites `timeout_ms == 0` to this value
+/// before it builds the message (`z_get` `api/api.c:1762-1763`, `z_querier`
+/// `:1830-1831`, `z_liveliness_get` `api/liveliness.c:132-133`), and zenoh
+/// eagerly fills `GetBuilder::timeout: Duration` from config and then emits
+/// `ext_timeout: Some(..)` unconditionally (`api/session.rs:2314`).
+///
+/// Deliberately NOT inside either `effective_timeout_ms` accessor: the z_get
+/// accessor is `query-get`-gated and the liveliness leg composes WITHOUT
+/// `query-get` (the `liveliness-get-only` subset, `scripts/run-ci.sh:3534`), so
+/// a constant scoped to one atom's gate would be absent on the other's lane.
+/// One constant, one resolution site per atom — the same split zenoh has, where
+/// `queries_default_timeout()` is a shared defaulting convenience consulted by
+/// three otherwise-independent surfaces (R311y325 §LEG B).
+///
+/// NOT unified with `LinkstateForwarder::DEFAULT_QUERY_TIMEOUT`
+/// (`linkstate_forward.rs:661`), the RELAY's identical 10s. zenoh keeps ONE
+/// config key for both legs (`tables.rs` router-side, `conf` client-side), so
+/// two constants for one concept IS a divergence — a NAMED residual, because
+/// unifying them means deciding whether wz grows a client config plane, which
+/// this round deliberately does not.
+///
+/// Gated to the union of its two consumers — the z_get accessor
+/// ([`QueryOptions::effective_timeout_ms`], `query-timeout`) and the liveliness
+/// accessor ([`LivelinessGetOptions::effective_timeout_ms`], `liveliness-get`).
+/// A `query-get`-only build (both atoms off) has no reader, so an ungated const
+/// would be `-D dead-code`.
+#[cfg(any(feature = "query-timeout", feature = "liveliness-get"))]
+pub(crate) const DEFAULT_QUERY_TIMEOUT_MS: u32 = 10_000;
+
 /// R239 — options bundle for [`Session::query`]. Mirrors zenoh-pico's
 /// `z_get_options_t` (`vendor/zenoh-pico/include/zenoh-pico/api/types.h`
 /// 487-497, defaulted by `z_get_options_default`
@@ -355,7 +390,11 @@ impl QueryOptions {
 
     /// R311y317 — the three runtime-only atoms' slots as every consumer must
     /// read them: the field when the atom is on, its wire-elision sentinel when
-    /// off.
+    /// off. R311y326 — `timeout_ms`'s accessor
+    /// ([`QueryOptions::effective_timeout_ms`]) additionally resolves its `0` to
+    /// `DEFAULT_QUERY_TIMEOUT_MS` when the atom is on (a default query inherits
+    /// the platform timeout, not never-expire); `target` / `consolidation` keep
+    /// the plain field-or-None shape described here.
     ///
     /// WHY an accessor rather than the setter's body gate. `target` /
     /// `consolidation` / `timeout_ms` are `pub` fields, and `#[non_exhaustive]`
@@ -409,16 +448,44 @@ impl QueryOptions {
         }
     }
 
-    /// See [`Self::effective_target`]. `0` is the wire-elision sentinel
-    /// (zenoh-pico's `_z_n_msg_request_needed_exts` predicate
-    /// `msg->_ext_timeout_ms != 0`) AND the "never-expire" sentinel the
+    /// See [`Self::effective_target`]. Resolves the `0` sentinel this type's
+    /// field + setter docs have always specified — `0` = "use the default" —
+    /// to [`DEFAULT_QUERY_TIMEOUT_MS`], so a caller who sets no timeout gets
+    /// zenoh's and pico's 10s rather than a query that never expires.
+    ///
+    /// R311y326 — this doc used to close with: "`0` is the wire-elision
+    /// sentinel (zenoh-pico's `_z_n_msg_request_needed_exts` predicate
+    /// `msg->_ext_timeout_ms != 0`) AND the 'never-expire' sentinel the
     /// `deadline_ms` computation keys on — one accessor covers both consumers,
-    /// which is the point.
+    /// which is the point." RETRACTED: that rationale is inverted. The two
+    /// meanings never coexist on pico's client path either — its elision
+    /// predicate is UNREACHABLE from `z_get` / `z_querier` / `z_liveliness_get`,
+    /// because all three rewrite `0` to the default BEFORE building the message
+    /// (`api/api.c:1762-1763`, `:1830-1831`, `api/liveliness.c:132-133`). The
+    /// sentinel survives only for internally-generated requests, which in wz is
+    /// the relay-forwarded meta (`request_build.rs:230`), never `QueryOptions`.
+    /// Carrying both meanings on one value was not "the point"; it was the
+    /// defect (R311y325 §LEG A), and it made the `Err("Timeout")` synthesis
+    /// R311y323 built unreachable on wz's own default path.
+    ///
+    /// The `0` that remains is the OFF arm's, and it means what it always did
+    /// on that build: no ext, no deadline. Never-expire is therefore
+    /// unrepresentable when `query-timeout` is ON — matching both upstreams,
+    /// neither of which can express it — and remains the ONLY behaviour when it
+    /// is OFF. That OFF-build residual is real and this round does not close it.
+    ///
+    /// Shape precedent, not invention: [`SessionInitParams::effective_batch_size`]
+    /// (`wz-session-core/src/session_init_params.rs:98-103`) already resolves a
+    /// `0` sentinel to its real default in an `effective_*` accessor, and
+    /// `session_actions.rs:1481` / `:1565` read it load-bearing.
     #[cfg(feature = "query-get")]
     pub(super) fn effective_timeout_ms(&self) -> u32 {
         #[cfg(feature = "query-timeout")]
         {
-            self.timeout_ms
+            match self.timeout_ms {
+                0 => DEFAULT_QUERY_TIMEOUT_MS,
+                n => n,
+            }
         }
         #[cfg(not(feature = "query-timeout"))]
         {
@@ -495,14 +562,25 @@ impl QueryOptions {
 }
 
 /// liveliness-get — options for [`Session::liveliness_get`]. Mirrors
-/// zenoh-pico's `z_liveliness_get_options_t` (currently the timeout
-/// only). `timeout_ms == 0` is the "no timeout" sentinel (the pending
-/// get never expires; it is removed only by the peer's `DeclFinal`).
+/// zenoh-pico's `z_liveliness_get_options_t` (currently the timeout only).
+///
+/// R311y326 — `timeout_ms == 0` is the "use the default" sentinel, resolved by
+/// [`Self::effective_timeout_ms`] to [`DEFAULT_QUERY_TIMEOUT_MS`]. This doc
+/// previously called `0` a "no timeout" sentinel under which "the pending get
+/// never expires". RETRACTED: that was the liveliness twin of the R311y325
+/// §LEG A client-default defect. pico does NOT offer a never-expire liveliness
+/// get — `z_liveliness_get` rewrites `0` to `Z_GET_TIMEOUT_DEFAULT` before
+/// issuing (`vendor/zenoh-pico/src/api/liveliness.c:132-133`), and zenoh reads
+/// the same `queries_default_timeout()` (`api/liveliness.rs:201-203`). A default
+/// liveliness get now expires at the platform default, matching both — and
+/// `wz-ap-demo/src/tasks.rs` (which issues `LivelinessGetOptions::default()`)
+/// gains that bound instead of hanging until the peer's `DeclFinal`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LivelinessGetOptions {
-    /// Snapshot timeout in milliseconds. `0` = no timeout. A non-zero
-    /// value arms the driver-loop sweep to terminate the get if the peer
-    /// never terminates the snapshot, so the pending slot cannot leak.
+    /// Snapshot timeout in milliseconds. `0` = use the platform default
+    /// ([`DEFAULT_QUERY_TIMEOUT_MS`], via [`Self::effective_timeout_ms`]); any
+    /// value arms the driver-loop sweep to terminate the get if the peer never
+    /// terminates the snapshot, so the pending slot cannot leak.
     /// R311y323 — the sweep fires `on_timeout`, not a bare `on_final`: an
     /// expired snapshot delivers a synthetic `Err("Timeout")` and then its
     /// final, matching zenoh's liveliness timeout arm.
@@ -510,16 +588,38 @@ pub struct LivelinessGetOptions {
 }
 
 impl LivelinessGetOptions {
-    /// Default options — `timeout_ms = 0` (no timeout). Mirrors
-    /// zenoh-pico's `z_liveliness_get_options_default`.
+    /// Default options — `timeout_ms = 0` (the "use the default" sentinel;
+    /// [`Self::effective_timeout_ms`] resolves it to
+    /// [`DEFAULT_QUERY_TIMEOUT_MS`]). Mirrors zenoh-pico's
+    /// `z_liveliness_get_options_default`, whose `0` `z_liveliness_get` likewise
+    /// rewrites to the default before issuing.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builder — set the snapshot `timeout_ms`.
+    /// Builder — set the snapshot `timeout_ms`. `0` selects the platform
+    /// default rather than never-expire (see [`Self::effective_timeout_ms`]).
     pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
         self.timeout_ms = timeout_ms;
         self
+    }
+
+    /// Resolve the `0` = "use the default" sentinel to
+    /// [`DEFAULT_QUERY_TIMEOUT_MS`], so [`Session::liveliness_get`] arms a
+    /// deadline for a default snapshot get exactly as its z_get sibling does
+    /// (`QueryOptions::effective_timeout_ms`). Separate accessor because this is
+    /// `liveliness-get`'s leg, not `query-timeout`'s (R311y325 §LEG B): the two
+    /// atoms are independent, and `liveliness-get` composes without `query-get`
+    /// (the `liveliness-get-only` subset, `scripts/run-ci.sh:3534`), so the
+    /// z_get accessor — item-gated on `query-get` — does not exist on this leg's
+    /// lane. The shared thing is the constant, matching zenoh, whose
+    /// `queries_default_timeout()` both surfaces read.
+    #[cfg(feature = "liveliness-get")]
+    pub(crate) fn effective_timeout_ms(&self) -> u32 {
+        match self.timeout_ms {
+            0 => DEFAULT_QUERY_TIMEOUT_MS,
+            n => n,
+        }
     }
 }
 
@@ -1132,12 +1232,23 @@ mod value_threading_tests {
     }
 
     /// The `(None, None) -> None` collapse: a default QueryOptions (no
-    /// payload, no encoding) yields `value = None` so the no-meta fast path
-    /// is preserved.
+    /// payload, no encoding) yields `value = None`.
+    ///
+    /// R311y326 — the trailing `is_empty()` assertion is now build-dependent:
+    /// with `query-timeout` ON, default options resolve the timeout to
+    /// `DEFAULT_QUERY_TIMEOUT_MS`, so the metadata is non-empty even though the
+    /// value slot is `None`. The value-collapse this test names is unaffected;
+    /// only the incidental emptiness check splits by build.
     #[test]
     fn default_options_yield_no_value() {
         let meta = QueryOptions::get().query_metadata();
         assert_eq!(meta.value, None);
+        #[cfg(not(feature = "query-timeout"))]
         assert!(meta.is_empty());
+        #[cfg(feature = "query-timeout")]
+        assert_eq!(
+            meta.timeout_ms, DEFAULT_QUERY_TIMEOUT_MS,
+            "the only non-empty slot on default options is the resolved timeout"
+        );
     }
 }

@@ -322,9 +322,10 @@ ext-pubsub-advanced-recovery = [
     "query-get",
     "query-selector-parameters",
     # R311y89 (review C3) — the recovery / history GETs carry a query timeout so the
-    # reply registry's deadline sweep can release a no-answerer query (a `0`/unset
-    # timeout would register the pending entry with a None deadline the sweep skips
-    # forever, wedging the subscriber). `with_timeout_ms` no-ops without this feature.
+    # reply registry's deadline sweep can release a no-answerer query. R311y326 —
+    # a `0`/unset timeout no longer wedges (it now resolves to the platform default,
+    # not never-expire); the explicit timeout still pins the recovery GET's own
+    # bound. `with_timeout_ms` no-ops without this feature.
     "query-timeout",
     "wz-session-core/reply-source-info",
 ]

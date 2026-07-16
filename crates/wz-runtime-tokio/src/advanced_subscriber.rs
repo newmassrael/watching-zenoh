@@ -348,7 +348,10 @@ impl AdvancedSubscriberOptions {
 
     /// Pin the recovery + history GET timeout (zenoh `.query_timeout()`). Converted
     /// to the `QueryOptions::with_timeout_ms` value by [`recovery_query_timeout_ms`],
-    /// clamped to `>= 1` ms (a `0` re-opens the C3 no-answerer wedge).
+    /// clamped to `>= 1` ms. R311y326 — the clamp no longer prevents a wedge (a `0`
+    /// now resolves to the platform default, not never-expire); it pins that a
+    /// recovery GET carries ITS configured timeout rather than silently inheriting
+    /// the 10s default. See [`recovery_query_timeout_ms`].
     pub fn with_query_timeout(mut self, query_timeout: Duration) -> Self {
         self.query_timeout = query_timeout;
         self
@@ -811,12 +814,19 @@ fn flush_sequenced(
 
 /// R311y89 (review C3) — convert a [`RecoveryConfig::query_timeout`] `Duration`
 /// into the `QueryOptions::with_timeout_ms` `u32` ms value, clamped to
-/// `[1, u32::MAX]`. The lower clamp is the correctness bite: a `0` (a zero or
-/// sub-ms `Duration` truncates to `0`) is the `timeout_ms == 0` "never-expire"
-/// sentinel, so the GET's pending reply entry registers with `deadline_ms == None`
-/// and [`crate::reply::ReplyRegistry::sweep_timed_out`] skips it on every pass —
-/// a no-answerer recovery / history GET would then wedge the subscriber forever.
-/// The upper clamp keeps the cast lossless (the `with_timeout_ms` field is `u32`).
+/// `[1, u32::MAX]`. The upper clamp keeps the cast lossless (the
+/// `with_timeout_ms` field is `u32`).
+///
+/// R311y326 — the lower clamp's original correctness bite is superseded but the
+/// clamp is kept. It said a `0` (a zero / sub-ms `Duration` truncates to `0`)
+/// was the `timeout_ms == 0` "never-expire" sentinel that would wedge a
+/// no-answerer recovery GET forever. `ext-pubsub-advanced-recovery` composes
+/// `query-timeout` (Cargo.toml), so `QueryOptions::effective_timeout_ms` now
+/// resolves a `0` to `DEFAULT_QUERY_TIMEOUT_MS` — a `0` would inherit the 10s
+/// platform default, not never-expire, so it can no longer wedge. The clamp
+/// stays because a recovery GET should carry ITS configured timeout, not fall
+/// back to the platform default; `>= 1` pins that intent (a zero-Duration config
+/// still yields a live 1 ms deadline rather than silently becoming 10s).
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 fn recovery_query_timeout_ms(query_timeout: Duration) -> u32 {
     query_timeout.as_millis().clamp(1, u32::MAX as u128) as u32
@@ -2480,17 +2490,19 @@ mod tests {
         );
     }
 
-    /// R311y89 (review C3) — the pure timeout-ms conversion. The lower clamp is the
-    /// correctness bite: a `0`/sub-ms `Duration` must NOT pass through as the
-    /// `timeout_ms == 0` "never-expire" sentinel (which registers the GET with a
-    /// `None` deadline the sweep skips forever — the no-answerer wedge).
+    /// R311y89 (review C3) — the pure timeout-ms conversion. The lower clamp keeps
+    /// a recovery GET on its own configured timeout. R311y326 — pre-y326 the clamp's
+    /// bite was that a `0`/sub-ms `Duration` would pass through as the never-expire
+    /// sentinel and wedge a no-answerer GET; now `effective_timeout_ms` resolves a
+    /// `0` to the platform default, so the clamp pins intent (a live 1 ms deadline)
+    /// rather than the platform fallback, not never-expire-avoidance.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     #[test]
     fn recovery_query_timeout_ms_clamps_to_a_live_deadline() {
         // The zenoh default (10s) maps to 10000 ms.
         assert_eq!(recovery_query_timeout_ms(Duration::from_secs(10)), 10_000);
-        // A zero / sub-ms timeout clamps UP to 1 ms — never the 0 "never-expire"
-        // sentinel.
+        // A zero / sub-ms timeout clamps UP to 1 ms — a live deadline, not the
+        // platform default it would otherwise resolve to.
         assert_eq!(recovery_query_timeout_ms(Duration::ZERO), 1);
         assert_eq!(recovery_query_timeout_ms(Duration::from_micros(500)), 1);
         // A timeout past u32::MAX ms caps at u32::MAX (the with_timeout_ms field is u32).

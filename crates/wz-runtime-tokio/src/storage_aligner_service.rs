@@ -122,16 +122,19 @@ use crate::timestamp_source::wall_clock_ntp64;
 /// zenoh's session default get timeout is 10s (zenoh-config `defaults.rs:151`
 /// `queries_default_timeout`).
 ///
-/// R311y325 — this used to add "wz matches it". It does not, and the sentence
-/// certified a parity the platform lacks: the 10s here is matched because THIS
-/// CONSUMER passes it. wz's client default is the opposite — `QueryOptions`
-/// derives `Default` (`session/querier.rs:58`) so `timeout_ms` is 0, the
-/// never-expire sentinel, and a default `Session::query` never expires. wz's
-/// own RELAY does mirror zenoh (`LinkstateForwarder::DEFAULT_QUERY_TIMEOUT`
-/// = 10_000ms, `linkstate_forward.rs:661`); the client leg is the one that
-/// diverges. Every consumer that wants zenoh's default hand-patches it, this
-/// one included — see `query-timeout`'s inventory reason, which names the
-/// divergence as of R311y325.
+/// R311y325 — this used to add "wz matches it". It did not then, and the
+/// sentence certified a parity the platform lacked: the 10s here was matched
+/// because THIS CONSUMER passes it, while a default `Session::query` never
+/// expired (`QueryOptions` derived `Default` -> `timeout_ms` 0 -> the
+/// never-expire sentinel). The RELAY already mirrored zenoh
+/// (`LinkstateForwarder::DEFAULT_QUERY_TIMEOUT` = 10_000ms,
+/// `linkstate_forward.rs:661`); only the client leg diverged.
+///
+/// R311y326 — the divergence is now CLOSED: `QueryOptions::effective_timeout_ms`
+/// resolves the `0` default to `DEFAULT_QUERY_TIMEOUT_MS`, so a default
+/// `Session::query` inherits the platform 10s exactly as pico/zenoh do. This
+/// consumer still passes its timeout explicitly (that is correct and unchanged);
+/// what changed is that it no longer needs to in order to avoid never-expire.
 ///
 /// The sweep ([`ReplyRegistry::sweep_timed_out`](crate::reply::ReplyRegistry))
 /// is a SEPARATE task — R268 relocated it out of `drive_session_until_terminal`

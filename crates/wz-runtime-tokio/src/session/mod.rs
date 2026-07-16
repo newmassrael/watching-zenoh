@@ -1911,10 +1911,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let allows_remote = opts.allowed_destination.allows_remote();
             let allows_local = opts.allowed_destination.allows_local();
             // R262 — compute the absolute monotonic-ms deadline from
-            // `self.clock.now_monotonic_ms()` + `opts.timeout_ms`.
-            // timeout_ms == 0 is the "no timeout" sentinel; the pending
-            // entry is registered with deadline_ms = None and survives
-            // every sweep until a wire/loopback Final arrives. The Session-
+            // `self.clock.now_monotonic_ms()` + the effective timeout.
+            // R311y326 — the effective timeout is `0` ONLY on a `query-timeout`-off
+            // build; there `deadline_ms` is `None` and the pending entry survives
+            // every sweep until a wire/loopback Final arrives. With the atom ON,
+            // `effective_timeout_ms` resolves the `0` default to
+            // `DEFAULT_QUERY_TIMEOUT_MS`, so a default query always arms a deadline
+            // (§LEG A) — matching pico/zenoh, which never leave a client get
+            // unbounded. The Session-
             // owned clock (R311cw fold-in) shares monotonic epoch with
             // `drive_session_until_terminal`'s `clock` parameter as long
             // as the application threads the same `Arc<T>` instance into
@@ -3850,13 +3854,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// get API, but there is no `Request(Query)` on the wire and no
     /// dependency on the query plane.
     ///
-    /// `options.timeout_ms == 0` registers the pending get with no
-    /// deadline (it stays pending until the peer's `DeclFinal` arrives);
-    /// a non-zero value arms a timeout the host sweeps via
-    /// `LivelinessGetRegistry::sweep_timed_out` (the wz-ap-demo sweep
-    /// ticker drives it alongside the reply registry; F3), terminating the
-    /// get if the peer never terminates the snapshot so the pending slot
-    /// cannot leak. R311y323 — the sweep delivers a synthetic
+    /// R311y326 — `options.timeout_ms == 0` selects the platform default
+    /// ([`LivelinessGetOptions::effective_timeout_ms`] resolves it to
+    /// `DEFAULT_QUERY_TIMEOUT_MS`), so EVERY snapshot get arms a deadline the
+    /// host sweeps via `LivelinessGetRegistry::sweep_timed_out` (the wz-ap-demo
+    /// sweep ticker drives it alongside the reply registry; F3), terminating the
+    /// get if the peer never terminates the snapshot so the pending slot cannot
+    /// leak. This doc previously said `0` registered "no deadline ... stays
+    /// pending until the peer's `DeclFinal`" — that was the liveliness twin of
+    /// the R311y325 §LEG A never-expire defect; pico's `z_liveliness_get`
+    /// likewise rewrites `0` to the default before issuing
+    /// (`api/liveliness.c:132-133`). R311y323 — the sweep delivers a synthetic
     /// `Err("Timeout")` reply BEFORE that final, so a caller can tell an
     /// expired snapshot from one the peer really closed. Because a get is one-shot (unlike a
     /// re-fireable subscription) this surface enforces the
@@ -3896,10 +3904,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // R262 — absolute monotonic-ms deadline (same epoch contract
             // as `Session::query`: the application threads one `Arc<T>`
             // clock through both `Session::new` and
-            // `drive_session_until_terminal`). timeout_ms == 0 → None
-            // (never expires).
-            let deadline_ms = (options.timeout_ms > 0)
-                .then(|| self.clock.now_monotonic_ms() + options.timeout_ms as u64);
+            // `drive_session_until_terminal`).
+            //
+            // R311y326 — read through `effective_timeout_ms`, not the raw
+            // `options.timeout_ms`. The raw read treated `0` as never-expire;
+            // the accessor resolves it to `DEFAULT_QUERY_TIMEOUT_MS`, mirroring
+            // pico's `z_liveliness_get` (0 -> default before issuing) and
+            // zenoh's `queries_default_timeout()`. A default snapshot get now
+            // always arms a deadline, so it cannot hang on a silent peer — the
+            // liveliness twin of the R311y325 §LEG A client-default fix. This is
+            // `liveliness-get`'s own leg (§LEG B), so it uses that atom's
+            // accessor, not `QueryOptions`'.
+            let deadline_ms =
+                Some(self.clock.now_monotonic_ms() + options.effective_timeout_ms() as u64);
             // Register the pending get first, emit the Interest second —
             // the order matters against a peer reply whose Interest
             // reached it before we recorded the pending entry (same race

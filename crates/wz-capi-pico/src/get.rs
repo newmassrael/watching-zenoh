@@ -184,12 +184,15 @@ pub struct z_query_consolidation_t {
 /// Load-bearing, and NOT interchangeable with "no timeout": pico's `z_get`
 /// rewrites `timeout_ms == 0` to this value before issuing
 /// (`src/api/api.c:1762-1764`), so in pico 0 means "default", never "infinite".
-/// wz's `QueryOptions::timeout_ms == 0` means the OPPOSITE — the pending entry
-/// registers with `deadline_ms = None` and survives every sweep until a real
-/// Final arrives (`wz-session-core/src/reply.rs:625-626`). Passing C's 0
-/// straight through would therefore leak the pending entry on a silent peer,
-/// hold the closure's `Arc` forever, and never run the C `on_final`. See
-/// [`get_timeout_ms`].
+///
+/// R311y326 — wz now agrees on this build. `QueryOptions::effective_timeout_ms`
+/// resolves `timeout_ms == 0` to `DEFAULT_QUERY_TIMEOUT_MS`, and this crate
+/// composes `query-timeout` (Cargo.toml), so C's `0` would resolve to the same
+/// 10s whether or not [`get_timeout_ms`] rewrote it. This doc previously said
+/// wz's `0` meant the OPPOSITE (never-expire, leaking the pending entry) — that
+/// held only before y326 and only on a `query-timeout`-off build. The rewrite in
+/// [`get_timeout_ms`] is now belt-and-suspenders on this build; see there for
+/// the half that is still load-bearing (the `u64 -> u32` saturation).
 pub const Z_GET_TIMEOUT_DEFAULT: u64 = 10_000;
 
 // --- opaque loaned reply ---------------------------------------------------
@@ -678,11 +681,14 @@ pub extern "C" fn z_query_consolidation_default() -> z_query_consolidation_t {
 /// The effective timeout for a get, applying pico's `0 → default` rewrite
 /// (`src/api/api.c:1762-1764`).
 ///
-/// This must NOT be routed to wz's `timeout_ms = 0`, whose meaning is the
-/// opposite ("never expires"). Getting this wrong is silent and total: the
-/// pending entry would survive every sweep, so on a peer that never answers the
-/// `Arc` would never release and the C `drop(context)` — the get's completion
-/// signal — would never fire.
+/// R311y326 — the 0->default rewrite here is now redundant with
+/// `QueryOptions::effective_timeout_ms`, which resolves `0` to
+/// `DEFAULT_QUERY_TIMEOUT_MS` on a `query-timeout` build (this crate composes
+/// it). It is kept deliberately: this doc used to warn that wz's `timeout_ms = 0`
+/// meant the OPPOSITE ("never expires"), which was true pre-y326 and remains true
+/// on a hypothetical `query-timeout`-off build, so rewriting here keeps the C API
+/// correct regardless of wz's feature set. The genuinely load-bearing half below
+/// is the `u64 -> u32` saturation, which the wz accessor does not do.
 ///
 /// wz's `QueryOptions::timeout_ms` is a `u32`; pico's is a `u64`. A value past
 /// `u32::MAX` (~49 days) saturates rather than wrapping — wrapping could turn a
@@ -1118,9 +1124,14 @@ mod tests {
     use super::*;
 
     /// pico rewrites `timeout_ms == 0` to `Z_GET_TIMEOUT_DEFAULT` before
-    /// issuing (`api.c:1762-1764`). Routing C's 0 into wz's `timeout_ms = 0`
-    /// would mean the OPPOSITE ("never expires"), leaking the pending entry so
-    /// the `Arc` never releases and the C completion never fires.
+    /// issuing (`api.c:1762-1764`); [`get_timeout_ms`] mirrors that so C's 0
+    /// becomes the 10s default. R311y326 — the rewrite is now belt-and-suspenders
+    /// on a `query-timeout` build (this crate composes it): wz's
+    /// `QueryOptions::effective_timeout_ms` ALSO resolves a 0 to the default, so
+    /// C's 0 would reach 10s either way. The rewrite is kept for the `u64 -> u32`
+    /// saturation and to stay correct on a hypothetical `query-timeout`-off
+    /// build, where wz's 0 still means never-expire. The test name predates
+    /// y326; what it pins is `get_timeout_ms(0) == 10_000`, which is unchanged.
     #[test]
     fn timeout_zero_means_picos_default_not_wzs_never_expires() {
         assert_eq!(
