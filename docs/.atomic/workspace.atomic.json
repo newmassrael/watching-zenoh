@@ -65552,6 +65552,118 @@
         "Everything else carries forward from Round 311y326 / y327 unchanged."
       ]
     },
+    "Round 311y329": {
+      "decision_summary": "R311y329 -- two atoms tagged COMPLETE (query-attachment, query-selector-parameters;\nCOMPLETE 42 -> 44, UNAUDITED 67 -> 65, re-derived not quoted), and the round's real\nwork was a guard nobody asked for plus two of my own hypotheses dying.\n\nWHAT I GOT WRONG FIRST, twice, and caught myself: (1) I read request_build.rs's\nungated `parameters` setter beside its three gated siblings, measured it surviving\nin a feature-OFF rlib while query_attachment/-source_info/-value vanished, and had\na \"wire-observable hole\" written. REFUTED by reading further: query_metadata()\ncarries TWO legitimate gate patterns -- effective_* accessors for target/\nconsolidation/timeout (which have a second consumer, deadline_ms, that bypasses\nquery_metadata) and wire-threading gates at build_request_query_with_meta for\nattachment/parameters/source_info/value. The comment at querier.rs:541-551 documents\nthe latter explicitly. No hole. (2) I then had \"the layer3 marker is laundering\",\nsince layer3_request_parameters_byte_equivalent drives only ungated codec. REFUTED\nby my own memory file: R311y261 diagnosed exactly this for six query-knob atoms and\nDOWNGRADED them to `partial`. The marker already reads `partial`. The finding was\nledgered before I re-found it.\n\nWHAT SURVIVED, and it is y314's sibling: C1e arm 2 runs BOTH receive-side NEG\nmodules, and y314 pinned only reply's -- with a `grep -c = 2` count. Its sibling\nquery::request_decode_isolation_tests, the OFF proof for THREE atoms\n(query-attachment / -selector-parameters / -source-info, the last already COMPLETE\nciting this module AND this lane by name), rode nothing. Measured, not argued:\n`--features query-queryable,query-attachment` lists 0 tests, rc=0, green even under\nRUSTFLAGS=\"-D warnings\" -- every fixture is co-located and vanishes with the module.\nSilently green, the exact construction y314 named. Both modules are now pinned as\nSETS (y315's lesson: a rename passed a len() gate). Falsified both ways.\n\nTHE REVIEW BROKE MY ARTIFACT AGAIN, 3 for 3 rounds. Reviewer 1+2 independently found\nthe same defect and it was in MY PROSE, protecting a correct guard: the comment\nclaimed one widening mechanism for all three atoms, false for query-source-info,\nwhich is NOT in the module cfg (query.rs:3374-3379 has two not()s) -- its test\nself-gates at :3516/:3542, so widening it elides one test, not the module. Measured\nboth paths, corrected (5fab0bc). Reviewer 2 also named two limits I closed (f3c69a7):\n`[^:]*` made a NEG added in a submodule INVISIBLE to the compare, and a build break\nread as the listed module's fault when `--lib <m>` filters what RUNS, not what BUILDS.\n\nREVIEWER 3 FOUND THE ROUND'S REAL DEFECT, and it is why the tag moved on the review\nrather than on my read: query-attachment's drop proof was VACUITY-EXPOSED. Its\nfixture (query.rs:3407) hand-writes set_ext_id(0x05) with the constant's name only in\na comment -- the isolation module's own not(query-attachment) gate cfg's the SSOT out\nof the build that must not decode -- while extract_query_attachment's OFF arm returns\nNone WITHOUT walking the chain, so a malformed ext satisfies it identically. The tree\nalready ratified the rule (query-value carries this twin since y316; query-source-\ninfo's reason names it) and attachment alone lacked it. PAID (d59305a) and FALSIFIED:\n0x05 -> 0x06 makes the twin FAIL rc=101 while the drop proof still PASSES rc=0. The\nvacuity is demonstrated, not theorised.\n\nTHE ASYMMETRY IS NOT A DEFECT -- reviewer 3's read beat mine: `pub mod attachment` is\n#[cfg(all(alloc, attachment-bytes))] (lib.rs:737) and query-attachment implies\nattachment-bytes, so its gate is COMPILE-EXISTENCE NECESSITY. Q_P is a native\nQuery-body bit with no module to gate. y318 governs: build_request_query_with_target/\n_with_timeout_ms are pub+ungated+codec-request-re-exported too, and both are COMPLETE.\nMeasured: those low-level helpers have ZERO production callers; session_glue's\n\"session.rs z_get\" comment is a fossil.\n\nANYKE IS NOT A HOLE -- my third dead hypothesis. _implicit_anyke is not a wire field\n(pico message.c:488-490 sets it false on receive: \"signaled by the presence of the\n_anyke key\"). It is encode-time sugar off accept_replies, wz expresses every byte via\nwith_parameters(b\"k=v;_anyke\"), and wz DOES implement anyke at wz-capi-pico/src/\nquery.rs:139/169/934 -- a file naming NEITHER atom, i.e. owned elsewhere per y315.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: layer_c1e_cargo_test_query pins BOTH NEG sets, + _c1e_neg_set",
+        "_c1e_neg_set checks cargo's exit code; a build break is not a drift verdict",
+        "query.rs: hand_composed_attachment_ext_fixture_matches_the_ssot_encoder (twin)",
+        "set-inventory-status query-attachment -> COMPLETE (twin paid in the same round)",
+        "set-inventory-status query-selector-parameters -> COMPLETE",
+        "4 commits: 046252b guard, 5fab0bc prose fix, f3c69a7 two limits, d59305a twin"
+      ],
+      "verification_bullets": [
+        "C1e green (EXIT=0); clippy -D warnings + cargo fmt --check clean on wz-session-core",
+        "twin falsified: ATTACHMENT_EXT_ID_QUERY 0x05->0x06 => twin rc=101, drop proof rc=0",
+        "guard falsified 3 ways: rename->DRIFT, cfg-elide->DRIFT, compile error->BUILD msg",
+        "measured: --features query-queryable,query-attachment => 0 tests rc=0 under -D warnings",
+        "measured: --features query-queryable,query-source-info => module survives, 2 tests",
+        "A3 re-derived after tagging: COMPLETE 42->44, UNAUDITED 67->65 (both tags parsed)",
+        "validate_workspace: orphan new=+0, ledger 13, T3 warn 4 -- baseline unmoved",
+        "both --impact section ids verified present via query --list-sections THIS round"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "§5.9-query now has TWO UNAUDITED left: query-get, query-queryable. Both are bigger",
+        "than this round's pair -- they are the plane, not a knob on it.",
+        "THE TWIN IS A REPLICA, named not hidden: mod tests (attachment ON) and",
+        "request_decode_isolation_tests (OFF) have mutually exclusive gates, so no shared",
+        "fixture is possible. It kills the SILENT drift (constant moves) but cannot follow an",
+        "edit to the fixture itself. A shared fixture module would need gating as the union of",
+        "both modules' gates or an #[allow(dead_code)] -- not taken, not free.",
+        "SWEEP THE SIBLING BEFORE TAGGING, every time: this round's real defect (attachment's",
+        "missing twin) and y314's miss (query's unpinned NEG) are the SAME shape -- a rule",
+        "applied to X and not to its identical Y. It has now paid out 6+ times.",
+        "NOT DONE, found this round: wz-runtime-tokio/Cargo.toml:1222-1230 glosses describe",
+        "both atoms RX-only (\"inbound attachment ext extraction\" / \"slice projection\"). Both",
+        "are INCOMPLETE, not false -- attachment gates 7 TX sites too. Left alone deliberately",
+        "(y315's precedent was a FALSE gloss); but a future reader can re-derive \"attachment",
+        "is RX-only\" from them. Fix with the next query round, not by mass rewrite.",
+        "STILL OWED, unchanged from y326/y327/y328's carries (read them for file:line):",
+        "(2) R2 consolidation test. (3) Q2 loopback target/complete :2968/:2984.",
+        "(4) BorrowedReply lossy from_view. (5) zid tie-break vs uhlc.",
+        "(6) NOT HOSTED: C1j/C4c/C4d/C4e; the zget-reply-only+query-timeout combo rides no lane.",
+        "(7) liveliness-get: default + Err legs built; its OTHER legs UNAUDITED.",
+        "(8) storage_aligner neighbours -- y324/y325/y326 each found a stale claim. Not exhausted.",
+        "STILL UNPAID from y320: (a) 20 TITLE-ONLY feature_inventory sections. (b) 3",
+        "wz-session-core tests FAIL under query-queryable without keyexpr-wildcard-*",
+        "(PRE-EXISTING). (c) 3 domain_census CARRY rows. (d) y314's three. (e) C1bk hand-copied",
+        "subset. (f) query-target/query-timeout `source` dead pointers.",
+        "PRE-EXISTING, nobody's lane: 2 wz-runtime-tokio tests RED under --all-features (admin",
+        "wildcard count scales with the handler set -- do NOT bump 3->4).",
+        "METHOD DEBT, bit me AGAIN this round despite y326 writing it down: `cd crates` then a",
+        "repo-root-relative path silently fails -- it ate a restore mid-falsification, and",
+        "cargo fmt from the repo root exits 141 (workspace root is crates/). Absolute paths."
+      ],
+      "publishable_decision_summary": "R311y329 -- two atoms tagged COMPLETE (query-attachment, query-selector-parameters;\nCOMPLETE 42 -> 44, UNAUDITED 67 -> 65, re-derived not quoted), and the round's real\nwork was a guard nobody asked for plus two of my own hypotheses dying.\n\nWHAT I GOT WRONG FIRST, twice, and caught myself: (1) I read request_build.rs's\nungated `parameters` setter beside its three gated siblings, measured it surviving\nin a feature-OFF rlib while query_attachment/-source_info/-value vanished, and had\na \"wire-observable hole\" written. REFUTED by reading further: query_metadata()\ncarries TWO legitimate gate patterns -- effective_* accessors for target/\nconsolidation/timeout (which have a second consumer, deadline_ms, that bypasses\nquery_metadata) and wire-threading gates at build_request_query_with_meta for\nattachment/parameters/source_info/value. The comment at querier.rs:541-551 documents\nthe latter explicitly. No hole. (2) I then had \"the layer3 marker is laundering\",\nsince layer3_request_parameters_byte_equivalent drives only ungated codec. REFUTED\nby my own memory file: R311y261 diagnosed exactly this for six query-knob atoms and\nDOWNGRADED them to `partial`. The marker already reads `partial`. The finding was\nledgered before I re-found it.\n\nWHAT SURVIVED, and it is y314's sibling: C1e arm 2 runs BOTH receive-side NEG\nmodules, and y314 pinned only reply's -- with a `grep -c = 2` count. Its sibling\nquery::request_decode_isolation_tests, the OFF proof for THREE atoms\n(query-attachment / -selector-parameters / -source-info, the last already COMPLETE\nciting this module AND this lane by name), rode nothing. Measured, not argued:\n`--features query-queryable,query-attachment` lists 0 tests, rc=0, green even under\nRUSTFLAGS=\"-D warnings\" -- every fixture is co-located and vanishes with the module.\nSilently green, the exact construction y314 named. Both modules are now pinned as\nSETS (y315's lesson: a rename passed a len() gate). Falsified both ways.\n\nTHE REVIEW BROKE MY ARTIFACT AGAIN, 3 for 3 rounds. Reviewer 1+2 independently found\nthe same defect and it was in MY PROSE, protecting a correct guard: the comment\nclaimed one widening mechanism for all three atoms, false for query-source-info,\nwhich is NOT in the module cfg (query.rs:3374-3379 has two not()s) -- its test\nself-gates at :3516/:3542, so widening it elides one test, not the module. Measured\nboth paths, corrected (5fab0bc). Reviewer 2 also named two limits I closed (f3c69a7):\n`[^:]*` made a NEG added in a submodule INVISIBLE to the compare, and a build break\nread as the listed module's fault when `--lib <m>` filters what RUNS, not what BUILDS.\n\nREVIEWER 3 FOUND THE ROUND'S REAL DEFECT, and it is why the tag moved on the review\nrather than on my read: query-attachment's drop proof was VACUITY-EXPOSED. Its\nfixture (query.rs:3407) hand-writes set_ext_id(0x05) with the constant's name only in\na comment -- the isolation module's own not(query-attachment) gate cfg's the SSOT out\nof the build that must not decode -- while extract_query_attachment's OFF arm returns\nNone WITHOUT walking the chain, so a malformed ext satisfies it identically. The tree\nalready ratified the rule (query-value carries this twin since y316; query-source-\ninfo's reason names it) and attachment alone lacked it. PAID (d59305a) and FALSIFIED:\n0x05 -> 0x06 makes the twin FAIL rc=101 while the drop proof still PASSES rc=0. The\nvacuity is demonstrated, not theorised.\n\nTHE ASYMMETRY IS NOT A DEFECT -- reviewer 3's read beat mine: `pub mod attachment` is\n#[cfg(all(alloc, attachment-bytes))] (lib.rs:737) and query-attachment implies\nattachment-bytes, so its gate is COMPILE-EXISTENCE NECESSITY. Q_P is a native\nQuery-body bit with no module to gate. y318 governs: build_request_query_with_target/\n_with_timeout_ms are pub+ungated+codec-request-re-exported too, and both are COMPLETE.\nMeasured: those low-level helpers have ZERO production callers; session_glue's\n\"session.rs z_get\" comment is a fossil.\n\nANYKE IS NOT A HOLE -- my third dead hypothesis. _implicit_anyke is not a wire field\n(pico message.c:488-490 sets it false on receive: \"signaled by the presence of the\n_anyke key\"). It is encode-time sugar off accept_replies, wz expresses every byte via\nwith_parameters(b\"k=v;_anyke\"), and wz DOES implement anyke at wz-capi-pico/src/\nquery.rs:139/169/934 -- a file naming NEITHER atom, i.e. owned elsewhere per y315.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: layer_c1e_cargo_test_query pins BOTH NEG sets, + _c1e_neg_set",
+        "_c1e_neg_set checks cargo's exit code; a build break is not a drift verdict",
+        "query.rs: hand_composed_attachment_ext_fixture_matches_the_ssot_encoder (twin)",
+        "set-inventory-status query-attachment -> COMPLETE (twin paid in the same round)",
+        "set-inventory-status query-selector-parameters -> COMPLETE",
+        "4 commits: 046252b guard, 5fab0bc prose fix, f3c69a7 two limits, d59305a twin"
+      ],
+      "publishable_verification_bullets": [
+        "C1e green (EXIT=0); clippy -D warnings + cargo fmt --check clean on wz-session-core",
+        "twin falsified: ATTACHMENT_EXT_ID_QUERY 0x05->0x06 => twin rc=101, drop proof rc=0",
+        "guard falsified 3 ways: rename->DRIFT, cfg-elide->DRIFT, compile error->BUILD msg",
+        "measured: --features query-queryable,query-attachment => 0 tests rc=0 under -D warnings",
+        "measured: --features query-queryable,query-source-info => module survives, 2 tests",
+        "A3 re-derived after tagging: COMPLETE 42->44, UNAUDITED 67->65 (both tags parsed)",
+        "validate_workspace: orphan new=+0, ledger 13, T3 warn 4 -- baseline unmoved",
+        "both --impact section ids verified present via query --list-sections THIS round"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "§5.9-query now has TWO UNAUDITED left: query-get, query-queryable. Both are bigger",
+        "than this round's pair -- they are the plane, not a knob on it.",
+        "THE TWIN IS A REPLICA, named not hidden: mod tests (attachment ON) and",
+        "request_decode_isolation_tests (OFF) have mutually exclusive gates, so no shared",
+        "fixture is possible. It kills the SILENT drift (constant moves) but cannot follow an",
+        "edit to the fixture itself. A shared fixture module would need gating as the union of",
+        "both modules' gates or an #[allow(dead_code)] -- not taken, not free.",
+        "SWEEP THE SIBLING BEFORE TAGGING, every time: this round's real defect (attachment's",
+        "missing twin) and y314's miss (query's unpinned NEG) are the SAME shape -- a rule",
+        "applied to X and not to its identical Y. It has now paid out 6+ times.",
+        "NOT DONE, found this round: wz-runtime-tokio/Cargo.toml:1222-1230 glosses describe",
+        "both atoms RX-only (\"inbound attachment ext extraction\" / \"slice projection\"). Both",
+        "are INCOMPLETE, not false -- attachment gates 7 TX sites too. Left alone deliberately",
+        "(y315's precedent was a FALSE gloss); but a future reader can re-derive \"attachment",
+        "is RX-only\" from them. Fix with the next query round, not by mass rewrite.",
+        "STILL OWED, unchanged from y326/y327/y328's carries (read them for file:line):",
+        "(2) R2 consolidation test. (3) Q2 loopback target/complete :2968/:2984.",
+        "(4) BorrowedReply lossy from_view. (5) zid tie-break vs uhlc.",
+        "(6) NOT HOSTED: C1j/C4c/C4d/C4e; the zget-reply-only+query-timeout combo rides no lane.",
+        "(7) liveliness-get: default + Err legs built; its OTHER legs UNAUDITED.",
+        "(8) storage_aligner neighbours -- y324/y325/y326 each found a stale claim. Not exhausted.",
+        "STILL UNPAID from y320: (a) 20 TITLE-ONLY feature_inventory sections. (b) 3",
+        "wz-session-core tests FAIL under query-queryable without keyexpr-wildcard-*",
+        "(PRE-EXISTING). (c) 3 domain_census CARRY rows. (d) y314's three. (e) C1bk hand-copied",
+        "subset. (f) query-target/query-timeout `source` dead pointers.",
+        "PRE-EXISTING, nobody's lane: 2 wz-runtime-tokio tests RED under --all-features (admin",
+        "wildcard count scales with the handler set -- do NOT bump 3->4).",
+        "METHOD DEBT, bit me AGAIN this round despite y326 writing it down: `cd crates` then a",
+        "repo-root-relative path silently fails -- it ate a restore mid-falsification, and",
+        "cargo fmt from the repo root exits 141 (workspace root is crates/). Absolute paths."
+      ]
+    },
     "Round 311y33": {
       "decision_summary": "R311y33 -- session-review remediation of the Zephyr Z2/Z3 work (R311y31/y32). The textbook/SSOT/north-star/cost-irrelevant trigger correctly launched a 4-agent INDEPENDENT adversarial review (soundness/UB, SSOT/structure, CI/hermeticity, honesty), arbitrated by direct-read (PROVEN 5x: y13/y20/y25/y30/y33). NO HIGH/MED code or soundness defect found (y30 HEAP_ALIGN lesson held -- 4 re-verified vs Zephyr small-heap source; cfg gate genuine; CoopRuntime SSOT reuse genuine; facade exactly parallel; inventory/§5.14 typed-primitive-correct; R311wt keyexpr closure independently confirmed). 1 CI HIGH REFUTED by direct-read (west modules ARE SHA-pinned: west.yml@daad7c59 = 78 SHA revisions, 0 branch). Remediated 7 CI-robustness + audit-honesty items (no code over-claim): recorded the unledgered CI fail+fix (run 28235751813 FAILED on west init --mr SHA -> 6fd3c72 -> run 28237165756 green); Layer Qz SKIP made FATAL on the dedicated runner (WZ_QZ_REQUIRE, anti-masking); cache restore/save split + Verify (no poison); deploy/mcu-freertos-demo [workspace] (fmt-gated, R311y27 omission); platform-freertos+platform-zephyr compile_error guard (unrepresentable); Qz grep CRLF-tolerant; docstring honesty. All verified locally (Layer Qz PASS default + WZ_QZ_REQUIRE; SKIP-fatal negative-tested; guard fires; Layer 0 fmt-gates mcu-freertos-demo). A self-introduced bare-$ CRLF false-FAIL was caught by running --layer Qz before commit. validate orphan new=+0; no inventory/A3 change (platform-zephyr stays active=97).",
       "changes_bullets": [
@@ -74926,7 +75038,7 @@
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "zenoh query attachment field",
-      "reason": "F=attachment in query; P=zenoh; C=opt-in metadata, requires attachment-bytes"
+      "reason": "COMPLETE: F=attachment in query; P=zenoh; C=opt-in metadata, requires attachment-bytes. R311y329 tagged on a code read of BOTH legs plus a 3-reviewer adversarial pass; earned, not transcribed. The C= clause is load-bearing and explains this atom's shape: `pub mod attachment` is #[cfg(all(alloc, attachment-bytes))] (lib.rs:737) and query-attachment = [\"attachment-bytes\"] (Cargo.toml:578), so encode_attachment_ext/decode_attachment_ext cannot EXIST without the atom. Its gating is compile-existence necessity, not policy -- which is why it gates strictly more sites than its selector-parameters sibling, and why that asymmetry is not a defect in either. TX, unrepresentable-by-construction when off: struct field (request_build.rs:302), setter query_attachment (:480), build() ext-chain emit (:613), one-shot build_request_query_with_attachment (:891), with_meta threading (:212), the session_glue re-export split under the combined gate (session_glue.rs:464), and QueryOptions::with_attachment (querier.rs:297). RX: extract_query_attachment's not(query-attachment) short-circuit returns None WITHOUT walking the chain (query.rs:201-205), signature stable. LOOPBACK: build_loopback_query (session/mod.rs:175-199) threads attachment through the same gated with_meta SSOT. POS: query.rs:1975 (ext payload reaches the callback verbatim) + layer3_request.rs:420, whose codec-parity byte-compare against pico DOES bind -- it drives the atom-gated .query_attachment() setter, so the atom-off build cannot compile it (contrast the selector-parameters marker at :383, which R311y261 already downgraded to `partial` for exactly the non-binding this one avoids). NEG: inbound_query_attachment_is_dropped_when_query_attachment_off (query.rs:3458), RUNNING HOSTED in Layer C1e arm 2 (ci.yml:319), pinned there as a SET by R311y329's guard. PAID THIS ROUND, do not re-open as a gap: that drop proof was vacuity-EXPOSED. Its fixture request_query_with_attachment (query.rs:3407) hand-writes set_ext_id(0x05) with the constant's name only in a COMMENT -- the isolation module's own not(query-attachment) gate cfg's the SSOT out of the very build that must not decode -- and the OFF arm accepts a malformed ext exactly as readily as a real one. R311y329 added the anti-vacuity twin its sibling query-value has carried since y316: hand_composed_attachment_ext_fixture_matches_the_ssot_encoder (query.rs, mod tests, pins the hardcoded literals against encode_attachment_ext(ATTACHMENT_EXT_ID_QUERY, ..)). FALSIFIED, not assumed: moving the constant 0x05 -> 0x06 makes the twin FAIL (rc=101) while the drop proof still PASSES (rc=0) -- the silent vacuity, demonstrated. RESIDUAL, named not hidden: the twin is a replica, because mod tests (query-attachment ON) and request_decode_isolation_tests (OFF) have mutually exclusive gates, so no shared fixture is possible; it kills the SILENT drift (the constant moving) but cannot follow an edit to the fixture itself. NOT a pub-field bypass, examined: QueryOptions.attachment is a pub field and query_metadata() (querier.rs:531) copies it UNGATED -- unlike target/consolidation/timeout's effective_* accessors, and there is no C1bk pub_field NEG for it. The bypass is nonetheless unreachable: the gate sits at the TX SSOT build_request_query_with_meta (:212), the sole funnel for BOTH the wire and the loopback leg. Same shape as query-value, already COMPLETE on it."
     },
     "query-consolidation": {
       "status": "active",
@@ -74962,7 +75074,7 @@
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "zenoh Selector ?k=v parameters",
-      "reason": "F=selector param parse; P=zenoh; C=opt-in query refinement"
+      "reason": "COMPLETE: F=selector param parse; P=zenoh; C=opt-in query refinement. R311y329 tagged on a code read of BOTH legs plus a 3-reviewer adversarial pass; earned, not transcribed. TX: the atom gates the wire threading in build_request_query_with_meta (request_build.rs:224) and QueryOptions::with_parameters (querier.rs:311). RX: the parameters_view cfg-pair in fire_matching_queryables (query.rs:1386-1389). LOOPBACK: build_loopback_query (session/mod.rs:175-199) threads parameters through the SAME gated with_meta SSOT -- it trims only target/consolidation/timeout, which is precisely why query-target is PARTIAL (y321) and this atom is not. POS: query.rs:2054 (wire slice reaches QueryView) + request_build.rs:1320 (with_meta threads Q_P byte-identically to the direct helper -- binds to the gated threading, not to ungated codec). NEG: inbound_query_parameters_are_dropped_when_query_selector_parameters_off (query.rs:3486), which RUNS HOSTED in Layer C1e arm 2 (ci.yml:319; `--features query-queryable` alone, the script's only bare invocation) and is now pinned there as a SET by R311y329's guard, not a count. Vacuity-immune by construction: the fixture sets Query.parameters and the RX reads Query.parameters -- one ungated codec field, no decode predicate to drift -- unlike its attachment sibling, which needed a twin this round. NOT a defect, examined and rejected: RequestQueryBuilder::parameters (request_build.rs:429) + build_request_query_with_parameters (:803) are pub and gated on codec-request ALONE. Q_P is a native Query-body header bit + inline slice, always compiled under codec-request; there is no separate encode module whose EXISTENCE the atom could gate -- contrast query-attachment, whose `pub mod attachment` is #[cfg(all(alloc, attachment-bytes))] (lib.rs:737) with query-attachment = [\"attachment-bytes\"], making ITS gate a compile-existence necessity rather than a policy choice. y318 governs and is identical in shape: build_request_query_with_target/_with_timeout_ms are pub+ungated+codec-request-re-exported at session_glue.rs:457, and both atoms are COMPLETE. Measured: those low-level helpers have ZERO production callers; session_glue's \"session.rs z_get\" comment is a fossil (that path goes through with_meta). y317 closed the supported user path (pub field -> Session::query -> wire); it never claimed the codec primitive. NOT this atom's gap, verified against pico: _implicit_anyke (primitives.c:576-578) derives from accept_replies == Z_REPLY_KEYEXPR_ANY and appends `_anyke` to the params slice at encode time. It is NOT a wire field -- pico's decoder sets it false unconditionally (message.c:488-490: \"signaled by the presence of the _anyke key in the parameters list\"). wz expresses every byte of it via with_parameters(b\"k=v;_anyke\"), and wz DOES implement anyke, in wz-capi-pico/src/query.rs:139/169/934 (parameters_has_anyke / reply_keyexpr_is_covered / z_query_accepts_replies) -- a file that names NEITHER query atom (0 hits), i.e. the route is owned elsewhere per y315's \"gate the atom that OWNS the route\". request_build.rs:796-801's \"NOT modelled here\" is accurate and scoped to that helper. A first pass this round called the absent accept_replies option a catalog hole; REFUTED by the review + direct read."
     },
     "query-source-info": {
       "status": "active",
