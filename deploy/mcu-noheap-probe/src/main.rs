@@ -312,10 +312,10 @@ fn main() -> ! {
             },
             &mut out,
             /* is_remote = */ true,
-            // R311y334 — the query target (zenoh's `(queryable.complete ||
+            // R311y334 — the query `target` (zenoh's `(queryable.complete ||
             // target != AllComplete)` filter). `None` = the never-transmitted
             // BestMatching default, so this incomplete queryable still fires.
-            /*target=*/ None,
+            None,
         );
         require(
             "query",
