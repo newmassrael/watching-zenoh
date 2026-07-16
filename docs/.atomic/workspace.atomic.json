@@ -66102,6 +66102,84 @@
         "anything is missing. And prove the ERROR path, not just the happy path."
       ]
     },
+    "Round 311y333": {
+      "decision_summary": "R311y333 -- two corrections to R311y331/y332's METHOD prose, both review-found,\nboth measured. Frozen entries stand; this supersedes their evidence citations.\n\nCORRECTION 1 -- the E0308 attribution is FALSE. R311y331's decision says\n\"neutering the arm to a non-existent variant produced E0308\". Measured with a\nthrowaway probe crate, both directions:\n  - an EXISTING tuple variant used without its payload (`UnknownMapping` sans\n    `(0)`) -> error[E0308]\n  - a variant that does NOT exist (`Nonexistent`) -> error[E0599]\nSo what I actually hit was an ARITY error on a real variant, not a non-existence\nerror. The METHOD lesson the paragraph draws (\"a falsification that dies at\nCOMPILE time is not a falsification\") survives intact -- only its diagnosis of\nWHY the compile failed was wrong.\n\nCORRECTION 2 -- and this one voids the evidence, not just the label. R311y331 and\nR311y332 both cite `rc=101` as the signature that a falsification BIT. Measured:\n  - `cargo test` on a crate with `compile_error!`  -> rc=101\n  - `cargo test` with a genuinely failing #[test]   -> rc=101\n`rc=101` therefore CANNOT distinguish the two. I cited it as proof of exactly the\ndistinction it cannot make, in the same paragraph where I declared that\ndistinction the round's lesson. The claims are still TRUE -- the verification\nbullets name the failing test and the runs grepped `FAILED|panicked at`, which IS\ndiscriminating -- but the cited signal was the wrong one, and a future round\ncopying the citation rather than the grep would prove nothing.\nTHE DISCRIMINATING EVIDENCE, for anyone repeating this: the `test result: FAILED`\nline, or the `panicked at <file>:<line>` message naming the assert. Never the exit\ncode alone. `--list`-mode rc IS sound (nothing runs, so non-zero means the build\nfailed) -- that is why the C1j / C1e set-pin guards check it there and only there.\n\nWHAT THE REVIEW ALSO FOUND, and it is worth recording because it cuts the other\nway: R311y331's falsification was UNDERSTATED. It falsified arm 1 only. The\nreview falsified all three independently and each killed ONLY its own guard --\nso the trio is a genuine 1:1 proof set, stronger than the round claimed.\n\nAND THE PROCESS FIX FROM R311y330 PAID OFF IMMEDIATELY. y330's review was\nungradable because I edited the tree under it. y331's review was told \"grade\ncommit a4809a0\" by sha -- and when I moved HEAD anyway (y332 landed mid-review),\nthe reviewer noticed, said so, and graded a4809a0 via `git show` regardless. The\nsha did the work the freeze failed to do. I still moved the tree under a reviewer\nfor the second round running; naming the sha is what made that survivable, not a\nlicence to keep doing it.\n\nEVERYTHING ELSE IN THE REVIEW HELD: the three OFF arms were the only\nnot(query-get) sites with zero tests; typed Err + frame delta both pinned, no\nasync race (the guards are plain #[test] and the OFF arm never touches the\ndriver); `matches!` pins a unit variant exactly; the doctrine quote at\nsession_glue.rs:1445-1452 is verbatim; \"seven sibling atoms\" is exactly seven,\nand correctly EXCLUDES codec-request (it is IN the subset, so its guard does not\nrun); PARTIAL=24 re-derived and correct. No third blocker exists -- the review\nhunted one (liveliness-get's deadline vs a query-get-gated sweep) and the code\nrefuted it: liveliness gets ride their own `liveliness_gets` registry and are\nswept independently.",
+      "changes_bullets": [
+        "no code change: this entry corrects two evidence citations in frozen prose",
+        "R311y331 decision: \"non-existent variant produced E0308\" -> it was an ARITY error",
+        "R311y331 + R311y332: `rc=101` is NOT the falsification signature they cite it as",
+        "the guards themselves are unaffected; only the ledger's account of them was wrong"
+      ],
+      "verification_bullets": [
+        "probe crate, measured both ways: existing tuple variant sans payload -> E0308",
+        "probe crate: variant that does not exist -> E0599 (NOT E0308, as y331 claimed)",
+        "probe crate: cargo test on compile_error! -> rc=101",
+        "probe crate: cargo test on a panicking #[test] -> rc=101 (SAME code, no discrimination)",
+        "therefore the discriminating evidence is the `test result: FAILED` / `panicked at` line",
+        "--list-mode rc IS sound (nothing runs) -- C1j/C1e's set pins check it only there",
+        "review re-derived and confirmed: 3 not(query-get) sites, 7 sibling atoms, PARTIAL=24",
+        "validate_workspace after append: orphan new=+0, baseline unmoved"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "carry_forward_bullets": [
+        "CITE THE `test result:` LINE OR THE PANIC, NEVER `rc=101`. cargo test returns 101",
+        "for a compile error AND for a test failure -- measured. Every future \"falsified:",
+        "neuter X -> red\" claim must name the failing test or paste the panic, or it proves",
+        "nothing. This is the same family as the pipe-exit-code trap y326 recorded: an exit",
+        "code that cannot fail the way you think is not evidence.",
+        "`--list`-mode rc is the exception and is why the C1j/C1e pins use it there: nothing",
+        "runs, so non-zero means the BUILD broke. Keep that distinction.",
+        "NAME THE SHA when launching a reviewer. y330's review was ungradable because I",
+        "edited under it; y331's survived the same mistake ONLY because the prompt said",
+        "\"grade commit <sha>\" and the reviewer used `git show`. Do both: freeze AND name.",
+        "NEXT, unchanged (y332's carry has the file:line): (1) `queryable.complete` is",
+        "wire-only -- ONE predicate closes query-queryable's blocker AND query-target's",
+        "loopback residual AND carry (3); zenoh's rule read directly at",
+        "/home/coin/zenoh-ref/zenoh/src/api/session.rs:2427-2431. ~84 call sites, mostly",
+        "tests. (2) accept_replies / ReplyKeyExpr is HOMELESS -- decide the OWNER first.",
+        "STILL LOCAL-ONLY by decision: C4c / C4d / C4e. STILL OWED: y332's carry list."
+      ],
+      "publishable_decision_summary": "R311y333 -- two corrections to R311y331/y332's METHOD prose, both review-found,\nboth measured. Frozen entries stand; this supersedes their evidence citations.\n\nCORRECTION 1 -- the E0308 attribution is FALSE. R311y331's decision says\n\"neutering the arm to a non-existent variant produced E0308\". Measured with a\nthrowaway probe crate, both directions:\n  - an EXISTING tuple variant used without its payload (`UnknownMapping` sans\n    `(0)`) -> error[E0308]\n  - a variant that does NOT exist (`Nonexistent`) -> error[E0599]\nSo what I actually hit was an ARITY error on a real variant, not a non-existence\nerror. The METHOD lesson the paragraph draws (\"a falsification that dies at\nCOMPILE time is not a falsification\") survives intact -- only its diagnosis of\nWHY the compile failed was wrong.\n\nCORRECTION 2 -- and this one voids the evidence, not just the label. R311y331 and\nR311y332 both cite `rc=101` as the signature that a falsification BIT. Measured:\n  - `cargo test` on a crate with `compile_error!`  -> rc=101\n  - `cargo test` with a genuinely failing #[test]   -> rc=101\n`rc=101` therefore CANNOT distinguish the two. I cited it as proof of exactly the\ndistinction it cannot make, in the same paragraph where I declared that\ndistinction the round's lesson. The claims are still TRUE -- the verification\nbullets name the failing test and the runs grepped `FAILED|panicked at`, which IS\ndiscriminating -- but the cited signal was the wrong one, and a future round\ncopying the citation rather than the grep would prove nothing.\nTHE DISCRIMINATING EVIDENCE, for anyone repeating this: the `test result: FAILED`\nline, or the `panicked at <file>:<line>` message naming the assert. Never the exit\ncode alone. `--list`-mode rc IS sound (nothing runs, so non-zero means the build\nfailed) -- that is why the C1j / C1e set-pin guards check it there and only there.\n\nWHAT THE REVIEW ALSO FOUND, and it is worth recording because it cuts the other\nway: R311y331's falsification was UNDERSTATED. It falsified arm 1 only. The\nreview falsified all three independently and each killed ONLY its own guard --\nso the trio is a genuine 1:1 proof set, stronger than the round claimed.\n\nAND THE PROCESS FIX FROM R311y330 PAID OFF IMMEDIATELY. y330's review was\nungradable because I edited the tree under it. y331's review was told \"grade\ncommit a4809a0\" by sha -- and when I moved HEAD anyway (y332 landed mid-review),\nthe reviewer noticed, said so, and graded a4809a0 via `git show` regardless. The\nsha did the work the freeze failed to do. I still moved the tree under a reviewer\nfor the second round running; naming the sha is what made that survivable, not a\nlicence to keep doing it.\n\nEVERYTHING ELSE IN THE REVIEW HELD: the three OFF arms were the only\nnot(query-get) sites with zero tests; typed Err + frame delta both pinned, no\nasync race (the guards are plain #[test] and the OFF arm never touches the\ndriver); `matches!` pins a unit variant exactly; the doctrine quote at\nsession_glue.rs:1445-1452 is verbatim; \"seven sibling atoms\" is exactly seven,\nand correctly EXCLUDES codec-request (it is IN the subset, so its guard does not\nrun); PARTIAL=24 re-derived and correct. No third blocker exists -- the review\nhunted one (liveliness-get's deadline vs a query-get-gated sweep) and the code\nrefuted it: liveliness gets ride their own `liveliness_gets` registry and are\nswept independently.",
+      "publishable_changes_bullets": [
+        "no code change: this entry corrects two evidence citations in frozen prose",
+        "R311y331 decision: \"non-existent variant produced E0308\" -> it was an ARITY error",
+        "R311y331 + R311y332: `rc=101` is NOT the falsification signature they cite it as",
+        "the guards themselves are unaffected; only the ledger's account of them was wrong"
+      ],
+      "publishable_verification_bullets": [
+        "probe crate, measured both ways: existing tuple variant sans payload -> E0308",
+        "probe crate: variant that does not exist -> E0599 (NOT E0308, as y331 claimed)",
+        "probe crate: cargo test on compile_error! -> rc=101",
+        "probe crate: cargo test on a panicking #[test] -> rc=101 (SAME code, no discrimination)",
+        "therefore the discriminating evidence is the `test result: FAILED` / `panicked at` line",
+        "--list-mode rc IS sound (nothing runs) -- C1j/C1e's set pins check it only there",
+        "review re-derived and confirmed: 3 not(query-get) sites, 7 sibling atoms, PARTIAL=24",
+        "validate_workspace after append: orphan new=+0, baseline unmoved"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "publishable_carry_forward_bullets": [
+        "CITE THE `test result:` LINE OR THE PANIC, NEVER `rc=101`. cargo test returns 101",
+        "for a compile error AND for a test failure -- measured. Every future \"falsified:",
+        "neuter X -> red\" claim must name the failing test or paste the panic, or it proves",
+        "nothing. This is the same family as the pipe-exit-code trap y326 recorded: an exit",
+        "code that cannot fail the way you think is not evidence.",
+        "`--list`-mode rc is the exception and is why the C1j/C1e pins use it there: nothing",
+        "runs, so non-zero means the BUILD broke. Keep that distinction.",
+        "NAME THE SHA when launching a reviewer. y330's review was ungradable because I",
+        "edited under it; y331's survived the same mistake ONLY because the prompt said",
+        "\"grade commit <sha>\" and the reviewer used `git show`. Do both: freeze AND name.",
+        "NEXT, unchanged (y332's carry has the file:line): (1) `queryable.complete` is",
+        "wire-only -- ONE predicate closes query-queryable's blocker AND query-target's",
+        "loopback residual AND carry (3); zenoh's rule read directly at",
+        "/home/coin/zenoh-ref/zenoh/src/api/session.rs:2427-2431. ~84 call sites, mostly",
+        "tests. (2) accept_replies / ReplyKeyExpr is HOMELESS -- decide the OWNER first.",
+        "STILL LOCAL-ONLY by decision: C4c / C4d / C4e. STILL OWED: y332's carry list."
+      ]
+    },
     "Round 311y34": {
       "decision_summary": "R311y34 -- adminspace-core (§5.23) keystone built: the FIRST P4/LAYER-3 (zenoh-full) atom. Session::declare_adminspace registers the @/<zid>/<whatami>/** built-in queryable (via the existing query-queryable declare path) and answers a root-key-intersecting GET with the local_data JSON (zid/version/locators/sessions/plugins) as application/json -- the wz mirror of zenoh AdminSpace::start + local_data (adminspace.rs:155,561). Faithful to zenoh's Runtime-owns-adminspace model (embedder supplies version + listening locators the Session does not hold); a root-key intersect gate scopes local_data to root GETs so the layered §5.23 handler atoms (read/write/config-sub/per-entity/metrics/linkstate) compose later. Relocated the zid<->ZenohId Display hex SSOT (zid_to_zenoh_hex/zenoh_hex_to_zid/zid_to_le_array) into a new foundational zid_hex module (storage re-exports; every call site + cross-impl test unchanged). Added the missing reply_keyed_encoded ReplyOut seam (keyed+encoding, no timestamp/attachment). reserved->active; CI Layer C1am; A3 active=98. A 4-agent INDEPENDENT adversarial review + direct-read arbitration found NO HIGH defect and 2 MED, both remediated: MED-1 the wz facade adminspace-core was a dead = [] no-op after the active flip -> forwarded to wz-runtime-tokio?/adminspace-core (the feedback-facade-forward-separate-edit R311y13 trap), verified the cfg lights up via -v rustc; MED-2 the local_data JSON used json!-source key order but zenoh builds serde_json WITHOUT preserve_order (BTreeMap -> ALPHABETICAL keys) so the emitter + 3 tests + doc now match zenoh's actual bytes. full run-ci RUNCI_EXIT=0; validate orphan new=+0.",
       "changes_bullets": [
