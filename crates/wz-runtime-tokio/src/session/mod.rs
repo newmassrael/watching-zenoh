@@ -1873,11 +1873,33 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// `_z_send_n_msg` outside, `_z_session_deliver_query_locally`
     /// reads the local queryable table under the session mutex.
     ///
-    /// R307 — gated on `feature = "query-get"`. The implication chain
-    /// (`query-get` → `query-reply` + `query-queryable`) guarantees
-    /// both the `ReplyRegistry` pending-entry registration and the
-    /// loopback `QueryableRegistry::local_query` fan are available;
-    /// the body holds no further per-feature cfg when query-get is ON.
+    /// R307 — gated on `feature = "query-get"`.
+    ///
+    /// R311y330 — this doc used to open: "The implication chain
+    /// (`query-get` → `query-reply` + `query-queryable`) guarantees both the
+    /// `ReplyRegistry` pending-entry registration and the loopback
+    /// `QueryableRegistry::local_query` fan are available; the body holds no
+    /// further per-feature cfg when query-get is ON." RETRACTED — both halves
+    /// are false, and they were false in opposite directions:
+    ///
+    /// - The chain is `query-get = ["query-reply", "codec-request"]`
+    ///   (wz-runtime-tokio/Cargo.toml:204). `query-queryable` is NOT implied,
+    ///   deliberately: R311fq decoupled the responder plane, and that manifest's
+    ///   own comment (`:201-203`) states the supported shape — "no queryable
+    ///   capability ⇒ no local queryable to answer". A pure getter is a real
+    ///   composition, not an accident. Only `query-reply` is guaranteed, and it
+    ///   is what backs the `ReplyRegistry` half of the retracted sentence.
+    /// - The body therefore DOES hold a further per-feature cfg: the loopback
+    ///   fan gates on `query-queryable` at `:2053`, exactly the site the old
+    ///   text claimed was guaranteed unnecessary. Its inline comment (`:2044`)
+    ///   has described the real rule since R311fq — the rot was confined to
+    ///   this rustdoc, 170 lines above the code it mis-described.
+    ///
+    /// Do not re-derive the old chain from this symbol's `source` pointer in the
+    /// feature inventory either: it cites `wz-runtime-tokio/src/query.rs
+    /// Session::get`, a 35-line re-export shell that contains neither
+    /// `Session::get` nor any `query-get` gate (R311y330; the pointer is prose,
+    /// nothing gates it).
     ///
     /// R311t — signature is type-ungated and Result-form. When
     /// `query-get` is OFF the body returns
