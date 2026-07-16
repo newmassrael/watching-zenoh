@@ -2628,8 +2628,22 @@ mod tests {
     ///
     /// The gate is deliberately absent from this crate and cannot be here: it
     /// does not declare `query-timeout` (a wz-runtime-tokio terminal feature).
-    /// The runtime gates by ARMING — `effective_timeout_ms()` reads 0 with the
-    /// feature off, so `deadline_ms` stays None and this sweep sees nothing.
+    ///
+    /// R311y339 — this used to add that "the runtime gates by ARMING —
+    /// `effective_timeout_ms()` reads 0 with the feature off, so `deadline_ms`
+    /// stays None and this sweep sees nothing". RETRACTED — and WHERE the
+    /// retraction came from is the point. y325 already killed this exact
+    /// generalisation inside [`ReplyRegistry::sweep_timed_out`], the very
+    /// method under test here, and its retraction landed only on the code it
+    /// was reading; this copy, in the test's own doc, outlived it. `register`
+    /// is pub and ungated, so any consumer arms a deadline without the
+    /// accessor — and one ships: wz-ap-demo reads `--query-timeout-ms`
+    /// straight into `register` (`wz-ap-demo/src/runner.rs`, which carries
+    /// zero `feature = "query-timeout"` sites). The narrower claim is the true
+    /// one: `Session::query` and the aliased-get path arm through
+    /// `effective_timeout_ms()`, so THOSE two are gated. The sweep itself
+    /// promises nothing — which is why this test arms its own `Some(1000)`
+    /// instead of resting on the sweep being empty.
     #[test]
     fn sweep_timed_out_synthesizes_the_timeout_error_before_the_final() {
         let mut reg = ReplyRegistry::new();

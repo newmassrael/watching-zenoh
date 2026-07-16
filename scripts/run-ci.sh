@@ -3605,7 +3605,10 @@ _wz_consumer_plane_subsets() {
     # to the bare no-metadata wire when their feature is off — the
     # query-side analog of the pubsub C1d metadata-OFF lane. The timeout_ms
     # guard (R311hv) additionally pins that the local ReplyRegistry
-    # deadline stays unarmed, since both effects share the one setter gate.
+    # deadline stays unarmed — R311y339: it now OBSERVES that deadline
+    # (`next_reply_deadline_ms()`). It used to rest on "both effects share
+    # the one setter gate", which is the coupling its own pub-field twin
+    # refutes: only query-timeout of the three has a non-wire observable.
     printf '%s\t%s\n' "zget-reply-only"       "codec-response,codec-response-final,query-get,query-reply"
     printf '%s\t%s\n' "liveliness-sub-only"   "codec-declare,declare-interest,liveliness-subscriber"
     printf '%s\t%s\n' "liveliness-token-only" "liveliness-token"

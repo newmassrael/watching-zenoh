@@ -3117,10 +3117,18 @@ fn query_with_consolidation_is_silent_noop_when_query_consolidation_feature_disa
 /// the outbound frame to the bare no-metadata baseline therefore
 /// guards both effects at once — a regression that silently un-gated
 /// the setter would push the field above zero, emitting the timeout
-/// ext (this assertion fails) and arming a spurious deadline. No
-/// separate sweep harness is needed: the sentinel the wire branch
-/// reads is the same one the deadline reads, so one wire-parity
-/// assertion is the complete guard.
+/// ext (this assertion fails) and arming a spurious deadline.
+///
+/// R311y339 — this used to close with "no separate sweep harness is
+/// needed: the sentinel the wire branch reads is the same one the
+/// deadline reads, so one wire-parity assertion is the complete
+/// guard", while the frame assert below claimed "no local deadline is
+/// armed" and never observed one. The coupling holds today, but it is
+/// a property of `Session::query`, not a guard — and the pub-field
+/// twin below says so outright: "a wire-only fix leaves this armed and
+/// the assertion above still passes". Two twins on one atom disagreed
+/// about what a single assert covers, so this one now OBSERVES the
+/// second observable rather than arguing from the shared sentinel.
 #[cfg(all(feature = "query-get", not(feature = "query-timeout")))]
 #[test]
 fn query_with_timeout_ms_is_silent_noop_when_query_timeout_feature_disabled() {
@@ -3150,7 +3158,17 @@ fn query_with_timeout_ms_is_silent_noop_when_query_timeout_feature_disabled() {
         session_frame, baseline,
         "with query-timeout OFF, with_timeout_ms() must be a no-op: the \
              wire frame must equal the bare no-metadata baseline (no timeout \
-             ext on the wire) and no local deadline is armed"
+             ext on the wire)"
+    );
+
+    // The SECOND observable, symmetric with the pub-field twin below: the
+    // frame assert above cannot see the local deadline, so observe it rather
+    // than reason that the wire branch and the deadline share a sentinel.
+    assert_eq!(
+        session.next_reply_deadline_ms(),
+        None,
+        "with query-timeout OFF, the gated setter must not arm the local \
+             ReplyRegistry deadline either"
     );
 }
 
