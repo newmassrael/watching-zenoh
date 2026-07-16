@@ -243,8 +243,23 @@ impl LocalTokenRegistry {
     ///
     /// Staging is best-effort under the buffer bound
     /// ([`caps::MAX_PENDING_DECLARES`]): if `pending` fills mid-chain the
-    /// remaining items are dropped — the bound is sized so a single
-    /// Interest's chain always fits.
+    /// remaining items are dropped — INCLUDING the terminating `Final`,
+    /// whose `let _ = pending.push(..)` below swallows the same
+    /// `CapacityFull` the token loop just broke on. A caller that loses a
+    /// chain's `Final` leaves that peer's CURRENT Interest unterminated.
+    ///
+    /// R311y341 — that is unreachable as shipped, and the reason is a cfg
+    /// accident worth stating rather than trusting. `push` can only fail on
+    /// the no-alloc backing (on `alloc` it is a `Vec` and `N` is advisory),
+    /// and the only thing that threads ONE buffer across several Interests
+    /// — [`Self::dispatch_messages`] — is itself `alloc`-gated. So the
+    /// profile that can overflow does not batch, and the profile that
+    /// batches cannot overflow. **The contract this method actually needs
+    /// from a no-alloc caller: ONE Interest per buffer, drained between.**
+    /// One chain is `MAX_LOCAL_TOKENS + 1` = 9 against 32. A future no-heap
+    /// consumer that fans a frame's Interests through one buffer breaks the
+    /// invariant silently — reserve the `Final` slot before adding tokens if
+    /// that day comes.
     pub fn respond_to_interest_borrowed(
         &self,
         pattern: Option<&str>,

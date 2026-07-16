@@ -119,9 +119,32 @@ pub const MAX_PENDING_LIVELINESS_GETS: usize = 8;
 /// records the application-layer observer stages for one drain cycle
 /// (the declarer-side liveliness interest-response buffer). One inbound
 /// CURRENT Interest stages up to [`MAX_LOCAL_TOKENS`] `DeclToken` items
-/// plus one `DeclFinal`; the buffer accumulates across the Interests in a
-/// single poll batch, so the bound is sized generously. R311hn (Track 2)
-/// — replaces the prior unbounded `Vec<DeclareOwned>` staging.
+/// plus one `DeclFinal` — 9 items per chain. R311hn (Track 2) — replaces
+/// the prior unbounded `Vec<DeclareOwned>` staging.
+///
+/// R311y341 — this said "the buffer accumulates across the Interests in a
+/// single poll batch, so the bound is sized generously", and that sentence
+/// straddles two profiles that never meet. Read per backing
+/// ([`crate::bounded::BoundedVec`]):
+///
+/// - **AP (`alloc`)** — the backing is a `Vec` and `N` is ADVISORY; `push`
+///   cannot fail. Batching is real here (`dispatch_messages` threads one
+///   buffer across every Interest in a frame, and it is `alloc`-gated), so
+///   chains do accumulate — but nothing can be dropped, and this constant
+///   does not bound anything. It is a footprint declaration, not a limit.
+/// - **MCU (no-alloc)** — `N` is the HARD limit `push` enforces, but the
+///   `alloc`-gated batching does not exist: the consumer drives
+///   `respond_to_interest_borrowed` per Interest, so one 9-item chain meets
+///   32 with room to spare.
+///
+/// The batching and the hard bound therefore sit on OPPOSITE sides of the
+/// `alloc` cfg, which is why the swallowed `let _ = push(Final)` in
+/// `respond_to_interest_borrowed` is unreachable as shipped. That is a
+/// property of the cfg split, NOT a guarantee this constant provides: a
+/// future no-alloc consumer that threads ONE buffer across several
+/// Interests would overflow it and lose a chain's terminating `Final`.
+/// Size this against that consumer if one is ever written; do not read
+/// "generously" off the number.
 pub const MAX_PENDING_DECLARES: usize = 32;
 
 /// Maximum byte length of one static-scouting peer locator string
