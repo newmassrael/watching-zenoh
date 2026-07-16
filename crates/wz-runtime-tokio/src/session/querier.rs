@@ -77,11 +77,23 @@ pub(crate) const DEFAULT_QUERY_TIMEOUT_MS: u32 = 10_000;
 /// callers. Construct via [`QueryOptions::get`] (or `default`) plus
 /// optional `with_*` setters — never struct-literal externally.
 ///
-/// R307 — `#[cfg(feature = "query-get")]`. The struct + impl + every
-/// setter elide when `query-get` is off; `with_target` /
-/// `with_consolidation` / `with_timeout_ms` carry their own narrower
-/// gates so an `--features query-get` (no extras) build still
-/// compiles QueryOptions without those setters.
+/// R311y330 — this doc used to open: "R307 — `#[cfg(feature = "query-get")]`.
+/// The struct + impl + every setter elide when `query-get` is off; `with_target`
+/// / `with_consolidation` / `with_timeout_ms` carry their own narrower gates so
+/// an `--features query-get` (no extras) build still compiles QueryOptions
+/// without those setters." RETRACTED, and it had been self-contradicting for
+/// rounds: `QueryOptions` (`:95`) and `Querier` (`:844`) carry NO cfg, and the
+/// R311o paragraph immediately below says so — "type-ungated ... Struct +
+/// builders always defined regardless of the `query-get` family". R311o
+/// superseded R307's design and the R307 sentence was never marked retracted,
+/// so the file asserted both. Only the narrower-gate half survived contact with
+/// the code, and R311o restates it correctly.
+///
+/// Found by review, not by me, and it is the same class this round retracted in
+/// `session/mod.rs` (`Session::query`'s implication chain) one commit earlier —
+/// I swept the claim family for the exact phrases I had just read and never
+/// looked at the sibling file. That is `retraction-lands-where-you-look`
+/// verbatim: a retraction closes where you GREP, not where the claim lives.
 ///
 /// R311o — type-ungated per `feedback_signature_stability` MEMORY
 /// anchor. Struct + builders always defined regardless of the
