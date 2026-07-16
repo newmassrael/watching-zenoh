@@ -1772,6 +1772,53 @@ mod tests {
 
     // ── R300 — outbound DECLARE-side gate ─────────────────────
 
+    /// R311y342 — the UPPER-bound twin of
+    /// `send_declare_keyexpr_rejects_reserved_mapping_id_zero`. The id
+    /// space has two ends and only the lower one was guarded: zenoh types
+    /// `DeclareKeyExpr.id` as `ExprId = u16` and zenoh-pico's
+    /// `_z_decl_kexpr_t` holds `uint16_t _id`, while wz's codec carries a
+    /// VLE u64. So an id above `u16::MAX` encoded here and arrived at a
+    /// peer that structurally cannot hold it — wz emitting a shape no
+    /// upstream can represent. Same contract as the zero twin: reject
+    /// pre-emit and pre-side-effect.
+    #[cfg(feature = "declare-keyexpr")]
+    #[test]
+    fn send_declare_keyexpr_rejects_a_mapping_id_wider_than_the_wire() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        let too_wide = u64::from(u16::MAX) + 1;
+        let err = actions
+            .send_declare_keyexpr(too_wide, "home/temp")
+            .expect_err("an alias id neither upstream can hold must not reach the wire");
+        assert_eq!(err, SendDeclareError::MappingIdTooWideForWire(too_wide));
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "gate must reject pre-emit — no wire frame leaves on Err"
+        );
+        assert!(
+            actions.resolve_outbound_mapping(too_wide).is_none(),
+            "gate must reject pre-side-effect — mapping table untouched on Err"
+        );
+    }
+
+    /// R311y342 — the boundary itself is LEGAL: `u16::MAX` is the widest
+    /// id both upstreams can hold, so the gate must admit it. Pins the
+    /// off-by-one the twin above would otherwise hide.
+    #[cfg(feature = "declare-keyexpr")]
+    #[test]
+    fn send_declare_keyexpr_admits_the_widest_id_the_wire_can_hold() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let widest = u64::from(u16::MAX);
+        actions
+            .send_declare_keyexpr(widest, "home/temp")
+            .expect("u16::MAX is representable in both upstreams");
+        assert_eq!(
+            actions.resolve_outbound_mapping(widest),
+            Some("home/temp".to_owned()),
+            "the widest legal id must register like any other"
+        );
+    }
+
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_rejects_reserved_mapping_id_zero() {

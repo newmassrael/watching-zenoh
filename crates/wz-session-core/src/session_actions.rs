@@ -3659,6 +3659,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if mapping_id == 0 {
                 return Err(SendDeclareError::ReservedMappingIdZero);
             }
+            // R311y342 — the id space's OTHER end. The lower bound has been
+            // gated since R300; the upper bound never was, so wz could emit an
+            // alias id that neither upstream can hold: zenoh types
+            // `DeclareKeyExpr.id` as `ExprId = u16` and zenoh-pico's
+            // `_z_decl_kexpr_t` holds `uint16_t _id`, while our codec carries a
+            // VLE u64 (deliberate — the shared wireexpr shape). Measured, not
+            // argued: before this gate, `send_declare_keyexpr(65_536, ..)`
+            // returned Ok and put the frame on the wire.
+            if mapping_id > u64::from(u16::MAX) {
+                return Err(SendDeclareError::MappingIdTooWideForWire(mapping_id));
+            }
             check_outbound_keyexpr_pico_safe(suffix)?;
             let declare = build_declare_kexpr(mapping_id, suffix)?;
             // §5.21 routing-namespace — bake the namespace into the wire alias

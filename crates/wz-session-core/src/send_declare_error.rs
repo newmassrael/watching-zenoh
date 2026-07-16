@@ -79,6 +79,23 @@ pub enum SendDeclareError {
     /// from `FeatureDisabled` (a declare-* feature may well be ON) and
     /// `TransportUnavailable` (a unicast link mid-reconnect).
     RequiresUnicast,
+    /// R311y342 — `send_declare_keyexpr(mapping_id > u16::MAX, ..)`. The
+    /// alias id is a `u16` in BOTH upstreams: zenoh types
+    /// `DeclareKeyExpr.id` as `ExprId`, and `pub type ExprId = u16`
+    /// (`zenoh-protocol` `core/wire_expr.rs`); zenoh-pico's
+    /// `_z_decl_kexpr_t` / `_z_undecl_kexpr_t` hold `uint16_t _id`
+    /// (`protocol/definitions/declarations.h`). wz's codec carries the id
+    /// as VLE u64 — the shared wireexpr shape, deliberate per
+    /// `sources/codecs/decl_kexpr.scxml` — so a wider id ENCODES cleanly
+    /// here and is structurally unreadable THERE. A no-emit reject, and
+    /// the upper-bound SIBLING of [`Self::ReservedMappingIdZero`]: same
+    /// gate site, same pre-emit / pre-side-effect contract. It exists
+    /// because the lower bound had a gate and a test while the upper
+    /// bound had neither.
+    ///
+    /// Variant ordering: appended at end, per the note on
+    /// [`Self::FeatureDisabled`].
+    MappingIdTooWideForWire(u64),
 }
 
 impl fmt::Display for SendDeclareError {
@@ -98,6 +115,12 @@ impl fmt::Display for SendDeclareError {
             Self::MissingKeyexpr => f.write_str(
                 "send_declare: mapping_id 0 requires a literal keyexpr \
                  suffix (received None)",
+            ),
+            Self::MappingIdTooWideForWire(id) => write!(
+                f,
+                "send_declare_keyexpr: mapping_id {id} exceeds u16::MAX \
+                 (both zenoh and zenoh-pico type the alias id as u16, so \
+                 a wider id cannot be represented at the peer)"
             ),
             Self::Codec(e) => write!(
                 f,
