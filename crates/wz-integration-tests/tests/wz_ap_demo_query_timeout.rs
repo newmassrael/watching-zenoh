@@ -13,16 +13,48 @@
 // fixture so the full register-deadline -> sweep_task -> on_final
 // fire chain is exercised at the actual process boundary.
 //
-// Peer pattern (chosen R264 kickoff):
-//   - Acceptor `wz-ap-demo --listen <port> --key demo/timeout`
-//     declares only a subscriber, no queryable. Inbound Request(Query)
-//     has no matching responder, so no Response/ResponseFinal goes back
-//     on the wire. (wz-ap-demo does not auto-emit a
-//     "no matching queryable" ResponseFinal; the AP demo's queryable
-//     side dispatches via callback only.) The Query effectively sinks
-//     at the peer. (The Q_B / Q_E value-ext codec slot itself landed
-//     R311y248 via RequestQueryBuilder::query_value — unrelated to this
-//     no-responder-ResponseFinal behavior.)
+// Peer pattern — REBUILT at R311y338, and the reason is the point.
+//
+//   The R264 fixture used `wz-ap-demo --listen <port> --key demo/timeout`
+//   (subscriber, no queryable) and justified it like this: "Inbound
+//   Request(Query) has no matching responder, so no Response/ResponseFinal
+//   goes back on the wire ... The Query effectively sinks at the peer."
+//
+//   That was never a property of the acceptor's configuration. It was
+//   R311y337's DEFECT: wz's wire leg keyed its ResponseFinal on the MATCH
+//   COUNT, so a resolvable query that matched nobody got no terminator and
+//   starved its requester until timeout. Both upstreams terminate that query
+//   (zenoh's unconditionally-built QueryInner and its Drop, session.rs:2440-2450
+//   + queryable.rs:75-83; pico's `if (qle_nb == 0) { ...; _z_session_send_reply
+//   _final(...); }`, queryable.c:246-252). When y337 fixed it, this fixture
+//   inverted: FINAL arrived in ~50 ms instead of at the 500 ms deadline, and
+//   the lower-bound assert failed.
+//
+//   THE LESSON, which is why this file now reads as it does: A FIXTURE'S
+//   PRECONDITION MUST BE OWNED BY THE FIXTURE. R264's precondition ("no reply
+//   ever arrives") was an emergent property of the code under test, so the day
+//   that code was correctly fixed, this test started lying. Any replacement
+//   that borrows its silence from someone else's behaviour — an OS signal's
+//   timing, the resolve path's current handling of an unknown mapping id, a
+//   feature combination — rots the same way.
+//
+//   So the peer is now `wz-e2e-silent-peer --listen <port>`: a test double
+//   whose ONLY job is to never answer. Its silence lives in code IT owns — the
+//   harness's `run_silent_acceptor_e2e` drive loop hands inbound events to
+//   nobody — so nothing in the build graph can talk it into answering. (Its
+//   manifest also omits the whole response plane, but that is defence in depth,
+//   NOT the guarantee: cargo unifies features across packages built in one
+//   invocation, so a combined `cargo build -p wz-ap-demo -p wz-e2e-silent-peer`
+//   hands the double a response plane. Measured — it is how this re-fixture
+//   first failed, in the same 50 ms shape as the defect it replaced.) The peer
+//   stays transport-alive (the FSM is driven, so keepalive and lease behave as a
+//   live peer's), which is exactly the shape a query timeout defends against: a
+//   peer that is UP and never answers.
+//
+//   (The Q_B / Q_E value-ext codec slot landed R311y248 via
+//   RequestQueryBuilder::query_value — unrelated to any of this.)
+//
+// The initiator is unchanged from R264 — it is the side under test:
 //   - Initiator `wz-ap-demo --connect <port> --query demo/timeout
 //     --query-timeout-ms 500 --on-query-final-log` sends one
 //     outbound Query once the session reaches Established. The
@@ -49,39 +81,41 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, PortReservation,
+    read_captured, wait_for_substring, wz_ap_demo_binary, wz_e2e_silent_peer_binary,
+    PortReservation,
 };
 
 #[test]
-#[ignore = "binary-dep e2e (2x wz-ap-demo); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo + wz-e2e-silent-peer); Layer E runs via --ignored"]
 fn wz_ap_demo_query_timeout_fires_final_callback() {
     let demo = wz_ap_demo_binary();
+    let silent_peer = wz_e2e_silent_peer_binary();
     let port_res = PortReservation::pick();
     let port = port_res.port();
     let listen_addr = format!("127.0.0.1:{port}");
     let connect_addr = format!("127.0.0.1:{port}");
     let key = "demo/timeout";
 
-    // Step 1: spawn the silent acceptor (subscriber only, no
-    // queryable). It will accept the initiator's TCP, complete the
-    // session handshake, receive the inbound Query, and silently
-    // sink it because no queryable callback is registered.
+    // Step 1: spawn the silent peer. It accepts the initiator's TCP,
+    // completes the session handshake, stays transport-alive, and never
+    // answers the inbound Query — because it has no response plane to
+    // answer WITH (see its Cargo.toml; the header explains why that
+    // distinction is load-bearing). It takes no --key: it answers nothing,
+    // so it needs to be told nothing.
     let acceptor_stderr_capture = tempfile::tempfile().expect("tempfile for acceptor stderr");
     let acceptor_stderr_writer = acceptor_stderr_capture
         .try_clone()
         .expect("dup acceptor stderr handle");
     let mut acceptor_stderr_reader = acceptor_stderr_capture;
 
-    let mut acceptor = Command::new(&demo)
+    let mut acceptor = Command::new(&silent_peer)
         .arg("--listen")
         .arg(&listen_addr)
-        .arg("--key")
-        .arg(key)
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::from(acceptor_stderr_writer))
         .spawn()
-        .expect("spawn acceptor wz-ap-demo");
+        .expect("spawn wz-e2e-silent-peer");
 
     let acceptor_bound = wait_for_substring(
         &mut acceptor_stderr_reader,
@@ -92,8 +126,8 @@ fn wz_ap_demo_query_timeout_fires_final_callback() {
         let _ = acceptor.kill();
         let _ = acceptor.wait();
         panic!(
-            "acceptor wz-ap-demo did not log 'listening on' within 5s\n\
-             --- acceptor stderr ---\n{captured}"
+            "wz-e2e-silent-peer did not log 'listening on' within 5s\n\
+             --- wz-e2e-silent-peer stderr ---\n{captured}"
         );
     }
     // R216 — release the port-alloc mutex now that the acceptor's
@@ -146,7 +180,7 @@ fn wz_ap_demo_query_timeout_fires_final_callback() {
     let initiator_captured = read_captured(&mut initiator_stderr_reader);
     let acceptor_captured = read_captured(&mut acceptor_stderr_reader);
     eprintln!("--- captured initiator wz-ap-demo stderr ---\n{initiator_captured}");
-    eprintln!("--- captured acceptor wz-ap-demo stderr ---\n{acceptor_captured}");
+    eprintln!("--- captured wz-e2e-silent-peer stderr ---\n{acceptor_captured}");
 
     if let Err(c) = final_result {
         panic!(

@@ -4013,6 +4013,12 @@ layer_e_ap_demo_round_trip() {
     # The workflow still builds the demo explicitly before this lane; that step is now a
     # belt to this brace rather than the only thing standing between CI and a silent SKIP.
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    # R311y338 — the query-timeout e2e's peer is `wz-e2e-silent-peer`, the test
+    # double whose only job is to never answer (its predecessor borrowed its
+    # silence from R311y337's defect and inverted when that was fixed). Built
+    # here under the same rule as the demo above: never SKIP on a wz binary we
+    # can build, or the lane goes green without proving anything.
+    (cd crates && cargo build -p wz-e2e-silent-peer --quiet) || return 1
     # R121e + R121f + R121f1 + R121g: bundle the integration tests
     # into a single cargo invocation so the compilation/link step
     # runs once and the lane timing stays predictable. `--test`

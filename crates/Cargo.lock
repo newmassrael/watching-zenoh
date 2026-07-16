@@ -2495,6 +2495,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-e2e-silent-peer"
+version = "0.1.0"
+dependencies = [
+ "wz",
+ "wz-e2e-harness",
+]
+
+[[package]]
 name = "wz-e2e-zget"
 version = "0.1.0"
 dependencies = [

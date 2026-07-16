@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-e2e-silent-peer — a peer whose ONLY job is to never answer.
+#
+# R311y338. This is a TEST DOUBLE, not a plane demo. It completes the
+# session handshake, stays transport-alive (keepalive / lease), and then
+# never answers an application Request. That silence is its entire
+# contract, and it exists so a test can say "no reply ever arrives"
+# without borrowing that fact from some other component's behaviour.
+#
+# WHY IT EXISTS. R264 built the `--query-timeout-ms` e2e on a
+# wz-ap-demo acceptor that declared no queryable, documenting the
+# mechanism as "no matching responder, so no Response/ResponseFinal goes
+# back on the wire". That was not a property of the acceptor's
+# configuration — it was R311y337's DEFECT: wz's wire leg keyed its
+# ResponseFinal on the match count, so a resolvable query that matched
+# nobody got no terminator and starved its requester until timeout. Both
+# upstreams terminate that query (zenoh's Drop<QueryInner>; pico's
+# `qle_nb == 0` branch). When y337 fixed it, the fixture inverted: the
+# Final arrived in ~50 ms instead of at the 500 ms deadline.
+#
+# The lesson that shapes this crate: A FIXTURE'S PRECONDITION MUST BE
+# OWNED BY THE FIXTURE. If it is instead an emergent property of the
+# code under test, the day that code is correctly fixed is the day the
+# test starts lying. So this peer's silence is not emergent, not a
+# configuration accident, and not a bug — it is declared here.
+#
+# HOW THE SILENCE IS ENFORCED — and read this before trusting the
+# feature list below, because the obvious answer is WRONG.
+#
+# The silence is enforced by CODE, in `run_silent_acceptor_e2e`
+# (wz-e2e-harness): that drive loop hands inbound events to nobody, so
+# no Reply and no ResponseFinal can be produced whatever is compiled in.
+# That is the guarantee.
+#
+# It is NOT enforced by the feature list below, and the first cut of this
+# crate got that wrong. The reasoning that failed: "omit `codec-response`
+# / `codec-response-final` / `query-queryable` and answering becomes
+# unrepresentable". It is unrepresentable only for a SOLO build. Cargo
+# unifies features across packages built in ONE invocation, so
+#
+#     cargo build -p wz-ap-demo -p wz-e2e-silent-peer
+#
+# hands this binary the demo's response plane and it starts answering.
+# Measured, not argued: that is exactly how this fixture first failed —
+# the query-timeout e2e went green in 50 ms as a happy-path test, which
+# is the precise rot this crate exists to make impossible. A manifest
+# describes a package; unification is a property of the BUILD GRAPH.
+#
+# So the feature list is DEFENCE IN DEPTH, not the contract:
+#
+#   * `codec-response` / `codec-response-final` / `query-queryable` are
+#     ABSENT so that a solo build cannot even name a Reply or a
+#     ResponseFinal. (`query-queryable` would drag `codec-response` back
+#     in: `query-queryable = ["codec-request","codec-response"]`.)
+#   * `codec-request` IS present, deliberately: the peer decodes the
+#     inbound Query cleanly and then has nowhere to route it, which keeps
+#     the modelled silence in the APPLICATION layer rather than resting
+#     on whatever a frame decoder does with a message it cannot parse.
+#
+# Layer E therefore builds this binary in its OWN cargo invocation. If you
+# ever fold it into a combined `-p a -p b` build, the belt is gone and only
+# the braces (the silent loop) remain — which still holds, but do not
+# quietly rely on that.
+#
+# DO NOT "FIX" THIS BINARY. If a future round adds a response plane
+# here, the query-timeout e2e stops testing the timeout and silently
+# starts testing the happy path — the exact failure this crate was
+# created to make impossible. If you need a peer that answers, use
+# wz-e2e-queryable.
+
+[package]
+name = "wz-e2e-silent-peer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "E2E test double: completes the session handshake and never answers a Request — the response plane is absent by construction, so a requester's timeout is the only terminator."
+
+[[bin]]
+name = "wz-e2e-silent-peer"
+path = "src/main.rs"
+
+[dependencies]
+# The handshake core (the wz-e2e-* intersection, same as every sibling)
+# PLUS codec-request and nothing else. The response plane's absence is
+# this crate's contract — see the header. Adding codec-response /
+# codec-response-final / query-queryable here would silently convert the
+# query-timeout e2e into a happy-path test.
+wz = { path = "../wz", default-features = false, features = [
+    "runtime-tokio",
+    "transport-unicast",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    # Decode the inbound Query cleanly, then drop it on the floor: the
+    # silence must live in the application layer, not in a decode error.
+    "codec-request",
+] }
+# The shared acceptor scaffolding (bind / accept / open / drive /
+# teardown + env_logger + tokio runtime). Its own dep pins only the
+# handshake-core intersection — no plane features — so depending on it
+# cannot hand this binary a way to answer.
+wz-e2e-harness = { path = "../wz-e2e-harness" }
+
+[lints]
+workspace = true

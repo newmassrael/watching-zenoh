@@ -219,6 +219,33 @@ pub mod common {
         );
     }
 
+    /// Locate the `wz-e2e-silent-peer` binary — the R311y338 test double
+    /// that completes the session handshake and then never answers a
+    /// Request. Same debug/release lookup shape as its siblings; Layer E
+    /// builds it before the query-timeout e2e drives it, so a missing
+    /// binary is a CI-prep error surfaced as a panic, not a graceful SKIP.
+    ///
+    /// Its silence is enforced by its manifest (no `codec-response` /
+    /// `codec-response-final` / `query-queryable`, so a Reply and a
+    /// ResponseFinal are types it does not have), which is the whole reason
+    /// it exists — see its `Cargo.toml`.
+    pub fn wz_e2e_silent_peer_binary() -> PathBuf {
+        let crates_dir = project_root().join("crates");
+        let candidates = [
+            crates_dir.join("target/debug/wz-e2e-silent-peer"),
+            crates_dir.join("target/release/wz-e2e-silent-peer"),
+        ];
+        for c in &candidates {
+            if c.is_file() {
+                return c.clone();
+            }
+        }
+        panic!(
+            "wz-e2e-silent-peer binary not found in {candidates:?}; \
+             run `cargo build -p wz-e2e-silent-peer` first"
+        );
+    }
+
     /// Locate the `wz-e2e-zget` binary — the minimal z_get-initiator
     /// ("zget-reply-only") facade-subset e2e consumer (initiator-side
     /// mirror of [`wz_e2e_queryable_binary`]: wz ISSUES the query, the

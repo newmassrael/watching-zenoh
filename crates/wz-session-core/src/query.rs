@@ -3138,6 +3138,46 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_messages_skips_final_when_request_body_is_not_a_query() {
+        // R311y338 — the second `DispatchOutcome::NOT_DISPATCHED` arm, given its
+        // own Final-level proof. Its sibling above (un-resolvable keyexpr) had
+        // one; this one only ever had a callback-level check
+        // (`dispatch_ignores_non_query_request_body_arms`, which asserts the
+        // handler does not fire but never looks at `finals`). After R311y337 made
+        // the Final key on `dispatched` rather than the match count, "a non-Query
+        // body owes nothing" became a load-bearing claim, so it gets pinned here
+        // rather than being inferred from the arm next door.
+        //
+        // Parity: zenoh's wire entry only enters its `RequestBody::Query(m)` arm,
+        // so a MsgPut-bodied Request never reaches `handle_query`, never builds a
+        // `QueryInner`, and therefore never drops one — no Final
+        // (session.rs:2769-2792). Together with the two emits-a-Final tests and
+        // the unresolvable guard, this pins the whole `DispatchOutcome` truth
+        // table: dispatched => exactly one Final, whatever `matched` is;
+        // not dispatched => none, ever.
+        let mut reg = QueryableRegistry::new();
+        reg.register("home/temp", |_q, responder| {
+            responder.reply(b"21.0");
+        });
+
+        // A resolvable keyexpr that WOULD match — the only thing withholding the
+        // Final here is the body arm, so this cannot pass for the wrong reason.
+        let messages = vec![NetworkMessage::Request(Box::new(request_put(
+            5,
+            "home/temp",
+        )))];
+        let mut replies = Vec::new();
+        let mut finals = Vec::new();
+        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        assert!(replies.is_empty(), "a MsgPut body fires no queryable");
+        assert!(
+            finals.is_empty(),
+            "a non-Query body never reached the table, so it owes no Final -- \
+             zenoh never enters handle_query for it either"
+        );
+    }
+
+    #[test]
     fn dispatch_messages_ignores_push_response_declare_variants() {
         let mut reg = QueryableRegistry::new();
         let invocations = Arc::new(AtomicUsize::new(0));

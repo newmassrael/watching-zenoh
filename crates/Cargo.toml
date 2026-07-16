@@ -81,6 +81,7 @@ members = [
     "wz-e2e-liveliness",
     "wz-e2e-liveliness-token",
     "wz-e2e-declare-observer",
+    "wz-e2e-silent-peer",
     "wz-runtime-coop",
     "lwip-sys",
     "freertos-sys",

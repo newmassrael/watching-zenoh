@@ -213,6 +213,89 @@ pub async fn run_acceptor_e2e<H>(
     Ok(())
 }
 
+/// R311y338 — run an acceptor that completes the session handshake, stays
+/// transport-alive, and **never answers an application Request**. The silence
+/// is this function's CONTRACT, not an omission: the drive loop below hands
+/// inbound events to NOBODY.
+///
+/// WHY THIS EXISTS AS ITS OWN LOOP rather than `run_acceptor_e2e` with an empty
+/// setup. An empty setup registers no queryable, but the loop still dispatches
+/// into the session, so whether anything answers would depend on the
+/// COMPILED-IN response plane — and that is a property of the BUILD GRAPH, not
+/// of a manifest. Cargo unifies features across packages built in one
+/// invocation, so `cargo build -p wz-ap-demo -p wz-e2e-silent-peer` hands the
+/// double `codec-response` + `query-queryable` and it starts answering. That is
+/// measured, not hypothetical: it is exactly how the R311y338 fixture first
+/// failed, and it would have converted the query-timeout e2e into a happy-path
+/// test without a single line changing.
+///
+/// So the silence lives HERE, in code the double owns, where no feature
+/// unification can reach it. The caller's manifest omitting the response plane
+/// is defence in depth on top of this — not the other way round.
+///
+/// The session FSM is still driven (keepalive, lease), so the peer is UP and
+/// merely mute — which is precisely the thing a query timeout defends against.
+/// There is no observer and no `Session`: an acceptor that answers nothing needs
+/// neither.
+pub async fn run_silent_acceptor_e2e(
+    binary_name: &'static str,
+    listen: String,
+) -> std::io::Result<()> {
+    let listener = bind_tcp_host(&listen, None).await?;
+    log::info!("{binary_name}: listening on {}", listener.local_addr()?);
+    let (stream, peer) = accept_tcp(listener).await?;
+    log::info!("{binary_name}: accepted peer {peer}");
+
+    let clock = TokioTime::new();
+    let OpenedSession {
+        mut engine,
+        actions,
+        inbound,
+        writer_handle,
+        clock: _,
+    } = accept_and_open_session(
+        DialedLink::Tcp(stream),
+        session_init_params(),
+        clock,
+        None,
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await
+    .map_err(|e| std::io::Error::other(format!("session open failed: {e:?}")))?;
+    log::info!("{binary_name}: session Established; entering steady state");
+
+    let mut driver = inbound;
+    let actions_for_loop = actions.clone();
+    let session_timeouts = SessionTimeouts::spec_defaults();
+    let outcome = tokio::select! {
+        o = drive_session_until_terminal(
+            &mut driver,
+            &actions_for_loop,
+            &mut engine,
+            Some(DRIVE_MAX_ITERS),
+            &clock,
+            &session_timeouts,
+            |_event: IterationEvent<'_>| {
+                // DELIBERATE SILENCE. This is the whole point of this function:
+                // the inbound event is dropped here and reaches no application
+                // plane, so no Reply and no ResponseFinal can ever be produced,
+                // whatever features the build graph happens to enable. Do not
+                // "fix" this by dispatching — see the fn doc.
+            },
+        ) => Some(o),
+        _ = shutdown_signal() => None,
+    };
+    match &outcome {
+        Some(o) => log::info!("{binary_name}: session ended: {o:?}"),
+        None => log::info!("{binary_name}: shutdown signal received; draining writer"),
+    }
+
+    drop(actions_for_loop);
+    drop(actions);
+    let _ = tokio::time::timeout(Duration::from_millis(50), writer_handle).await;
+    Ok(())
+}
+
 /// Acceptor-side session parameters shared by every `wz-e2e-*` binary: the
 /// `Peer`-role projection of the zenoh-1.5.0 interop wire-negotiation profile
 /// (its SSOT is `zenoh_interop_session_init_params` in the test-support crate),
