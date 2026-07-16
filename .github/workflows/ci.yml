@@ -941,6 +941,33 @@ jobs:
       - name: Layer C1bk — Query pub-field gates (R311y317)
         run: bash scripts/run-ci.sh --layer C1bk
 
+      # Hosted R311y332, and it is this job's own doctrine finally applied to
+      # the lane that needed it most. C1j is the BEHAVIOURAL half of the
+      # runtime-crate subset guard (`cargo test -p wz-runtime-tokio` over the
+      # `_wz_consumer_plane_subsets` SSOT rows); it is the ONLY lane anywhere
+      # that RUNS wz-runtime-tokio's tests with a consumer plane compiled OUT.
+      #
+      # Why now: R311y330 and R311y331 each wrote feature-OFF NEG proofs that
+      # land ONLY here — declare_queryable{,_aliased} and
+      # query{,_aliased,_aliased_auto} rejecting typed and emitting nothing —
+      # and both rounds shipped them into a lane no hosted job ran. Two rounds
+      # of "proven by falsification locally" is exactly the silence this job
+      # exists to break; leaving them unhosted would make the proofs decorative.
+      #
+      # Cost, measured not guessed: C1j's worst recorded local wall time is
+      # 193s (typical 54-87s) across 214 run-ci logs. This job's three existing
+      # lanes total ~24s warm, so the 30-minute budget absorbs it with room. It
+      # shares the `_wz_consumer_plane_subsets` feature sets with C4c/C4d, so
+      # its distinct-artifact cost is the rows themselves, once.
+      #
+      # NOT hosted here, deliberately, and still carried: C4c (the BUILD half),
+      # C4d (the clippy half) and C4e (transport axis). They are real gaps —
+      # they guard `deny(warnings)` dead-code regressions per subset — but they
+      # are a separate cost decision, not a side-effect of unblocking two
+      # rounds' NEG proofs.
+      - name: Layer C1j — runtime-tokio subset BEHAVIOUR (R311y330/y331 NEGs)
+        run: bash scripts/run-ci.sh --layer C1j
+
   portability:
     name: portability (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
