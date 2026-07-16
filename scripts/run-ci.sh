@@ -3778,14 +3778,68 @@ layer_c4c_runtime_tokio_subset_matrix() {
 # consumer-plane subset, so a SessionLocal publish there must short-circuit
 # to Ok(0) and never fire the registered loopback subscriber. The POS twins
 # are cfg-gated ON the feature and run only in the all-on default build.
+# The feature-OFF NEG set each SSOT row is REQUIRED to execute. Rows absent from
+# this table assert nothing beyond "the suite is green" — the table names only
+# what a round deliberately parked here.
+#
+# R311y332 — why this exists at all. C1j runs `cargo test --quiet` and reads only
+# the exit code, so a row that silently STOPS running a guard still reports green:
+# the suite is 100+ tests and losing five of them changes no visible number. That
+# is y314's "skip reporting green" one level up, and it would have eaten exactly
+# the proofs R311y330/y331 wrote and R311y332 hosted. Pinned as SETS, not counts —
+# R311y315 shipped a len()-pinned gate that a rename passed green, so C1bk and
+# C1e's guards both compare sets and this follows them.
+_c1j_required_negs() {
+    case "$1" in
+        # R311y330 — the query-queryable OFF arms: declare rejects typed AND
+        # announces nothing. This row is the only place they compile.
+        zget-reply-only)
+            printf '%s\n' \
+                declare_queryable_aliased_rejects_typed_and_emits_nothing_when_feature_off \
+                declare_queryable_rejects_typed_and_emits_nothing_when_feature_off
+            ;;
+        # R311y331 — the query-get OFF arms, the atom's whole initiator surface.
+        queryable-only)
+            printf '%s\n' \
+                query_aliased_auto_rejects_typed_and_emits_nothing_when_query_get_off \
+                query_aliased_rejects_typed_and_emits_nothing_when_query_get_off \
+                query_rejects_typed_and_emits_nothing_when_query_get_off
+            ;;
+        *) : ;;
+    esac
+}
+
 layer_c1j_runtime_tokio_subset_behavior() {
-    local name feats
+    local name feats expected got rc out
     while IFS=$'\t' read -r name feats; do
+        expected=$(_c1j_required_negs "$name" | sort)
+        if [ -n "$expected" ]; then
+            # `--list` in its own invocation: a build break must read as a build
+            # break, not as a vanished guard, so the exit code is checked before
+            # the set is compared (the trap R311y329 hit writing C1e's twin).
+            out=$(cd crates && cargo test -p wz-runtime-tokio --no-default-features \
+                --features "$feats" --lib -- --list 2>&1); rc=$?
+            if [ "$rc" -ne 0 ]; then
+                echo "  C1j FAIL: subset $name did not BUILD (exit $rc) — not a drift verdict:"
+                printf '%s\n' "$out" | tail -20 | sed 's/^/      /'
+                return 1
+            fi
+            got=$(printf '%s' "$out" \
+                | sed -n 's/^session::tests::\(.*rejects_typed_and_emits_nothing_when_[a-z_]*\): test$/\1/p' \
+                | sort)
+            if [ "$got" != "$expected" ]; then
+                echo "  C1j FAIL: subset $name's required feature-OFF NEG set drifted"
+                echo "            (a guard was cfg-elided, renamed, or its gate widened)"
+                echo "    expected:"; printf '%s\n' "$expected" | sed 's/^/      /'
+                echo "    got:";      printf '%s\n' "$got" | sed 's/^/      /'
+                return 1
+            fi
+        fi
         if ! (cd crates && cargo test -p wz-runtime-tokio --no-default-features --features "$feats" --quiet); then
             echo "  C1j FAIL: wz-runtime-tokio subset $name behaviour tests failed"
             return 1
         fi
-        echo "  C1j wz-runtime-tokio subset $name tests OK"
+        echo "  C1j wz-runtime-tokio subset $name tests OK${expected:+ (NEG set pinned)}"
     done < <(_wz_runtime_tokio_coherent_subsets)
 }
 
