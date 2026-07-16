@@ -3289,6 +3289,58 @@ mod tests {
         );
     }
 
+    /// R311y329 — the anti-vacuity twin `query-attachment`'s drop proof lacked,
+    /// found by review while grading that atom (its sibling `query-value` has
+    /// carried one since R311y316; `query-source-info`'s reason names the rule).
+    ///
+    /// THE EXPOSURE: `request_decode_isolation_tests::request_query_with_attachment`
+    /// hand-writes `set_ext_id(0x05)` with `// ATTACHMENT_EXT_ID_QUERY` as a
+    /// COMMENT, because that module's own `not(query-attachment)` gate cfg's
+    /// `crate::attachment` out — `pub mod attachment` is
+    /// `#[cfg(all(alloc, attachment-bytes))]` (lib.rs:737) and
+    /// `query-attachment = ["attachment-bytes"]`, so the SSOT is unreachable
+    /// from the very build that must not decode. Nothing binds that literal to
+    /// the constant it names. Move the constant and the fixture stops composing
+    /// a decodable attachment ext, while its drop proof keeps PASSING:
+    /// `extract_query_attachment`'s OFF arm returns `None` WITHOUT inspecting
+    /// the chain (`:201-205`), so a malformed ext satisfies it exactly as well
+    /// as a real one — and would keep satisfying it if the gate were deleted.
+    /// That is verbatim the vacuity `query-value`'s twin exists to kill.
+    ///
+    /// SCOPE, stated because this file's precedent is a comment that overstated
+    /// its own twin: this pins the two literals the fixture hardcodes (ext id +
+    /// the ENC_ZBUF/ExtZbuf envelope) against the SSOT encoder. It does NOT
+    /// re-verify the fixture's Request/Query framing, and it cannot follow an
+    /// edit to the fixture itself — the two modules' gates are mutually
+    /// exclusive on `query-attachment`, so no shared fixture is possible and a
+    /// replica is the only available shape. The drift it does kill is the one
+    /// that is silent; a fixture edit is visible in review.
+    #[cfg(feature = "query-attachment")]
+    #[test]
+    fn hand_composed_attachment_ext_fixture_matches_the_ssot_encoder() {
+        let payload = b"fixture-attachment";
+        // The isolation fixture's literals, verbatim (query.rs:3408-3414).
+        let mut ext = ExtEntry::default();
+        ext.set_ext_id(0x05); // ATTACHMENT_EXT_ID_QUERY
+        ext.set_enc(2); // ENC_ZBUF
+        ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+            value_len: payload.len() as u64,
+            value: payload,
+        });
+        let replica = ext.try_into_owned().expect("fixture literals own");
+        let ssot = crate::attachment::encode_attachment_ext(
+            crate::attachment::ATTACHMENT_EXT_ID_QUERY,
+            payload,
+        )
+        .expect("SSOT encodes the attachment ext");
+        assert_eq!(
+            replica, ssot,
+            "the isolation module hand-writes ext id 0x05 + the ENC_ZBUF envelope \
+             because it cannot reach `crate::attachment`; if the SSOT moves, its \
+             attachment drop proof goes SILENTLY vacuous rather than red",
+        );
+    }
+
     /// R311y316 — the feature-off drop proof `query-value` lacked. Its three
     /// projection-gated siblings each had one, all three in
     /// `mod request_decode_isolation_tests` BELOW (not in this module):
