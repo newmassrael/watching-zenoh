@@ -103,6 +103,7 @@ use alloc::vec::Vec;
 use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
 use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
+use crate::query_mode::QueryTarget;
 use crate::registry_error::RegisterError;
 // `CodecError` is referenced only by `into_response`, which lives in the
 // `all(codec-response, alloc)` impl block (ResponseOwned is alloc-backed),
@@ -297,6 +298,17 @@ struct Queryable<C: QuerySink> {
     /// `dispatch_request` consults `allows_remote()` since every
     /// Request reaching it has been parsed off the wire.
     allowed_origin: crate::locality::Locality,
+    /// Whether this queryable declared itself COMPLETE (it can fully answer
+    /// its keyexpr on its own) — zenoh's `Queryable.complete` /
+    /// [`crate::queryable_info::QueryableInfo::complete`]. The responder-side
+    /// operand of zenoh's local `handle_query` filter
+    /// `(queryable.complete || target != AllComplete)`
+    /// (`zenoh/src/api/session.rs:2430`): an `AllComplete`-targeted query
+    /// reaches ONLY complete queryables; every other target reaches all
+    /// matching queryables regardless of this flag. Set at register time from
+    /// the same declaration that stamps the wire `QueryableInfo` ext — the
+    /// local dispatch table and the wire declaration agree by construction.
+    complete: bool,
     /// R311gb-3b — the query-dispatch sink (DIP seam). `C = BoxedQuerySink`
     /// on AP (heap closure), a consumer-supplied closed `enum` on MCU.
     sink: C,
@@ -307,18 +319,35 @@ impl<C: QuerySink> Queryable<C> {
     /// path ([`QueryableRegistry::fire_matching_queryables`]) and the
     /// no-heap borrowed fire ([`QueryableRegistry::dispatch_borrowed`]):
     /// does this queryable's pattern match `keyexpr` under the
-    /// `is_remote` locality predicate? Splits the bounded pattern into a
-    /// stack chunk view (no heap); a pattern whose canonical form
-    /// exceeds [`MAX_KEYEXPR_CHUNKS`] chunks (cannot happen for a
-    /// pattern admitted at register time) is treated as a non-match
-    /// rather than a truncated match.
-    fn matches(&self, keyexpr: &str, is_remote: bool) -> bool {
+    /// `is_remote` locality predicate AND the query `target`? Splits the
+    /// bounded pattern into a stack chunk view (no heap); a pattern whose
+    /// canonical form exceeds [`MAX_KEYEXPR_CHUNKS`] chunks (cannot happen for
+    /// a pattern admitted at register time) is treated as a non-match rather
+    /// than a truncated match.
+    ///
+    /// The three conjuncts mirror zenoh's local `handle_query` filter
+    /// (`zenoh/src/api/session.rs:2427-2431`): locality
+    /// (`origin == Any || local == (origin == SessionLocal)`), completeness /
+    /// target (`self.complete || target != AllComplete`), and keyexpr
+    /// intersection. `target` is `None` for the never-transmitted BestMatching
+    /// default (and for `All`); only a `Some(AllComplete)` query is filtered
+    /// down to the complete queryables — matching zenoh, where BestMatching /
+    /// All reach every locally-matching queryable regardless of completeness.
+    fn matches(&self, keyexpr: &str, is_remote: bool, target: Option<QueryTarget>) -> bool {
         let allowed = if is_remote {
             self.allowed_origin.allows_remote()
         } else {
             self.allowed_origin.allows_local()
         };
         if !allowed {
+            return false;
+        }
+        // zenoh session.rs:2430 — `queryable.complete || target != AllComplete`.
+        // An `AllComplete` query reaches ONLY queryables that declared complete;
+        // every other target (All, or the absent BestMatching default) reaches
+        // all matching queryables, so `complete` is consulted iff the query
+        // demands authoritative (complete) responders.
+        if !self.complete && target == Some(QueryTarget::AllComplete) {
             return false;
         }
         // A query reaches a queryable iff their keyexprs INTERSECT (zenoh query
@@ -1112,6 +1141,16 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// produce distinct queryables — `dispatch_request` fires every
     /// matching sink in registration order.
     ///
+    /// `complete` is zenoh's `Queryable.complete` (the local operand of the
+    /// `handle_query` completeness filter): a `complete = true` queryable is
+    /// reached by an `AllComplete`-targeted query, an incomplete one is not.
+    /// The full-fidelity entry point — the `alloc` convenience wrappers
+    /// [`register`](QueryableRegistry::register) /
+    /// [`register_with_locality`](QueryableRegistry::register_with_locality)
+    /// default it to `false` (incomplete), matching zenoh's builder default;
+    /// a caller that knows the declared completeness (the runtime's
+    /// `declare_queryable`) passes it here directly.
+    ///
     /// R221 — the pattern is canonicalized via
     /// [`canonize_keyexpr`](crate::keyexpr_canon::canonize_keyexpr)
     /// into the bounded pattern buffer, so the stored form agrees
@@ -1129,6 +1168,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         &mut self,
         keyexpr_pattern: &str,
         allowed_origin: crate::locality::Locality,
+        complete: bool,
         sink: C,
     ) -> Result<QueryableId, RegisterError> {
         // R221/R311gb — canonicalize into the bounded pattern buffer. A
@@ -1162,6 +1202,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                 id,
                 pattern,
                 allowed_origin,
+                complete,
                 sink,
             })
             .map_err(|_| RegisterError::TableFull)?;
@@ -1192,7 +1233,9 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// R311gb (Track 2) — no-heap fire entry: match `view`'s keyexpr
     /// against every queryable and hand each matching sink the borrowed
     /// [`QueryView`] + the caller-supplied [`ReplyOut`], applying the
-    /// locality filter. Borrow-driven (no owned `Query` materialization,
+    /// locality + target-completeness filter (`target = None` for the
+    /// BestMatching / All default; `Some(AllComplete)` restricts to complete
+    /// queryables). Borrow-driven (no owned `Query` materialization,
     /// no per-match `QueryResponder` accumulator), so it is the MCU
     /// no-heap dispatch path; the AP wire path
     /// ([`fire_matching_queryables`](Self::fire_matching_queryables))
@@ -1211,11 +1254,12 @@ impl<C: QuerySink> QueryableRegistry<C> {
         view: &dyn QueryView,
         reply_out: &mut dyn ReplyOut,
         is_remote: bool,
+        target: Option<QueryTarget>,
     ) -> usize {
         let mut fired: usize = 0;
         let keyexpr = view.keyexpr();
         for queryable in self.queryables.iter_mut() {
-            if queryable.matches(keyexpr, is_remote) {
+            if queryable.matches(keyexpr, is_remote, target) {
                 queryable.sink.handle(view, reply_out);
                 fired = fired.saturating_add(1);
             }
@@ -1285,6 +1329,14 @@ impl<C: QuerySink> QueryableRegistry<C> {
             None => return 0,
         };
 
+        // zenoh session.rs:2430 — the completeness filter reads the query's
+        // `ext_target`. Absent / BestMatching / All -> None or All (every
+        // matching queryable fires); `AllComplete` -> only complete queryables.
+        // Read off the SAME wire Request the dispatch already holds, so no
+        // signature change: the target rides the Request envelope, not the
+        // Query body.
+        let target = crate::request_routing_context::read_request_target(request);
+
         // R223 — every Request reaching dispatch_request has been
         // parsed off the wire, so the inner fan-out treats this as a
         // remote-origin dispatch. R238 — the same fan-out logic is
@@ -1298,6 +1350,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
             &resolved,
             query,
             replies,
+            target,
             /* is_remote = */ true,
         )
     }
@@ -1335,6 +1388,13 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// `_z_trigger_queryables_impl` is the `dispatch_request`
     /// equivalent here.
     ///
+    /// `target` is the requester's `QueryTarget` (the loopback caller lifts it
+    /// from the GET options — it is NOT carried in the `QueryOwned` body, which
+    /// holds only queryable-visible slots). `None` = the BestMatching / All
+    /// default (every matching SessionLocal queryable fires);
+    /// `Some(AllComplete)` restricts to complete queryables, mirroring the wire
+    /// path's `dispatch_request` completeness filter on one host.
+    ///
     /// R311dx — gate carried by the enclosing
     /// `#[cfg(all(codec-request, alloc))] impl` (the `&QueryOwned` param).
     pub fn local_query(
@@ -1342,9 +1402,12 @@ impl<C: QuerySink> QueryableRegistry<C> {
         rid: u64,
         keyexpr: &str,
         query: &QueryOwned,
+        target: Option<QueryTarget>,
         replies: &mut Vec<QueryReply>,
     ) -> usize {
-        self.fire_matching_queryables(rid, keyexpr, query, replies, /* is_remote = */ false)
+        self.fire_matching_queryables(
+            rid, keyexpr, query, replies, target, /* is_remote = */ false,
+        )
     }
 
     /// R238 — shared fan-out body for [`Self::dispatch_request`]
@@ -1370,6 +1433,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         keyexpr: &str,
         query: &QueryOwned,
         replies: &mut Vec<QueryReply>,
+        target: Option<QueryTarget>,
         is_remote: bool,
     ) -> usize {
         // R311gb-3b-cleanup — extract the projection inputs ONCE per
@@ -1400,9 +1464,10 @@ impl<C: QuerySink> QueryableRegistry<C> {
         let mut matched = 0;
         for queryable in self.queryables.iter_mut() {
             // R311gb (Track 2) — shared match SSOT with the no-heap
-            // `dispatch_borrowed` path: locality predicate + bounded
-            // pattern split happen in `Queryable::matches`.
-            if queryable.matches(keyexpr, is_remote) {
+            // `dispatch_borrowed` path: locality predicate + target
+            // completeness filter + bounded pattern split happen in
+            // `Queryable::matches`.
+            if queryable.matches(keyexpr, is_remote, target) {
                 matched += 1;
                 let mut responder = QueryResponder {
                     rid,
@@ -1595,8 +1660,13 @@ impl QueryableRegistry<BoxedQuerySink> {
         // AP backing: `register_sink` is infallible here (the BoundedVec
         // table + BoundedString pattern grow past the advisory `N`), so
         // the convenience wrapper keeps its `QueryableId` signature.
-        self.register_sink(&pattern, allowed_origin, BoxedQuerySink::new(handler))
-            .expect("register on the alloc backing never exceeds declared capacity")
+        self.register_sink(
+            &pattern,
+            allowed_origin,
+            /*complete=*/ false,
+            BoxedQuerySink::new(handler),
+        )
+        .expect("register on the alloc backing never exceeds declared capacity")
     }
 }
 
@@ -3001,7 +3071,13 @@ mod tests {
 
         let mut replies = Vec::new();
         let query = Query::default().try_into_owned().unwrap();
-        reg.local_query(/*rid=*/ 7, "home/temp", &query, &mut replies);
+        reg.local_query(
+            /*rid=*/ 7,
+            "home/temp",
+            &query,
+            /*target=*/ None,
+            &mut replies,
+        );
 
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert_eq!(replies.len(), 1);
@@ -3041,7 +3117,7 @@ mod tests {
 
         let mut replies = Vec::new();
         let query = Query::default().try_into_owned().unwrap();
-        reg.local_query(1, "home/temp", &query, &mut replies);
+        reg.local_query(1, "home/temp", &query, /*target=*/ None, &mut replies);
 
         assert_eq!(
             invocations.load(Ordering::SeqCst),
@@ -3069,7 +3145,7 @@ mod tests {
 
         let mut replies = Vec::new();
         let query = Query::default().try_into_owned().unwrap();
-        reg.local_query(1, "home/temp", &query, &mut replies);
+        reg.local_query(1, "home/temp", &query, /*target=*/ None, &mut replies);
 
         assert_eq!(
             invocations.load(Ordering::SeqCst),
@@ -3094,10 +3170,156 @@ mod tests {
 
         let mut replies = Vec::new();
         let query = Query::default().try_into_owned().unwrap();
-        reg.local_query(1, "home/humid", &query, &mut replies);
+        reg.local_query(1, "home/humid", &query, /*target=*/ None, &mut replies);
 
         assert_eq!(invocations.load(Ordering::SeqCst), 0);
         assert!(replies.is_empty());
+    }
+
+    // ── queryable.complete / QueryTarget completeness filter ──
+    // zenoh session.rs:2430 `(queryable.complete || target != AllComplete)`.
+
+    #[test]
+    fn local_query_allcomplete_target_fires_only_complete_queryable() {
+        // Two queryables on the SAME keyexpr — one COMPLETE, one not. An
+        // `AllComplete`-targeted loopback query reaches ONLY the complete one;
+        // `All` / BestMatching(None) reach BOTH. The `All`/`None` arms are the
+        // anti-vacuity twin: they prove the `AllComplete` skip was CONDITIONAL
+        // on the target, not an unconditional drop of the incomplete queryable.
+        use crate::locality::Locality;
+        let mut reg = QueryableRegistry::new();
+        let complete_hits = Arc::new(AtomicUsize::new(0));
+        let incomplete_hits = Arc::new(AtomicUsize::new(0));
+
+        let c = complete_hits.clone();
+        reg.register_sink(
+            "home/temp",
+            Locality::Any,
+            /*complete=*/ true,
+            BoxedQuerySink::new(move |_q, responder| {
+                c.fetch_add(1, Ordering::SeqCst);
+                responder.reply(b"complete");
+            }),
+        )
+        .unwrap();
+        let ic = incomplete_hits.clone();
+        reg.register("home/temp", move |_q, responder| {
+            ic.fetch_add(1, Ordering::SeqCst);
+            responder.reply(b"incomplete");
+        });
+
+        let query = Query::default().try_into_owned().unwrap();
+
+        // AllComplete: only the complete queryable fires.
+        let mut replies = Vec::new();
+        reg.local_query(
+            1,
+            "home/temp",
+            &query,
+            Some(QueryTarget::AllComplete),
+            &mut replies,
+        );
+        assert_eq!(
+            complete_hits.load(Ordering::SeqCst),
+            1,
+            "AllComplete fires the complete queryable"
+        );
+        assert_eq!(
+            incomplete_hits.load(Ordering::SeqCst),
+            0,
+            "AllComplete SKIPS the incomplete queryable"
+        );
+        assert_eq!(replies.len(), 1, "one reply, from the complete queryable");
+
+        // All: both fire (proves the AllComplete skip was target-conditional).
+        let mut replies_all = Vec::new();
+        reg.local_query(
+            2,
+            "home/temp",
+            &query,
+            Some(QueryTarget::All),
+            &mut replies_all,
+        );
+        assert_eq!(complete_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            incomplete_hits.load(Ordering::SeqCst),
+            1,
+            "All reaches BOTH — the incomplete queryable is not unconditionally dropped"
+        );
+        assert_eq!(replies_all.len(), 2);
+
+        // BestMatching (absent target = None): both fire on the local path,
+        // matching zenoh (only AllComplete filters by completeness locally).
+        let mut replies_bm = Vec::new();
+        reg.local_query(3, "home/temp", &query, None, &mut replies_bm);
+        assert_eq!(complete_hits.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            incomplete_hits.load(Ordering::SeqCst),
+            2,
+            "None/BestMatching reaches both locally"
+        );
+        assert_eq!(replies_bm.len(), 2);
+    }
+
+    #[test]
+    fn dispatch_request_reads_allcomplete_target_from_the_wire() {
+        // The wire path: `dispatch_request` lifts the target off the Request's
+        // `ext_target` via `read_request_target`. A Request built with
+        // `AllComplete` reaches only the complete queryable; a plain Request
+        // (no target ext = BestMatching) reaches both — the anti-vacuity twin
+        // proving the extension is actually read, not ignored.
+        use crate::locality::Locality;
+        use crate::request_build::build_request_query_with_target;
+        let mut reg = QueryableRegistry::new();
+        let complete_hits = Arc::new(AtomicUsize::new(0));
+        let incomplete_hits = Arc::new(AtomicUsize::new(0));
+
+        let c = complete_hits.clone();
+        reg.register_sink(
+            "metrics/cpu",
+            Locality::Any,
+            /*complete=*/ true,
+            BoxedQuerySink::new(move |_q, responder| {
+                c.fetch_add(1, Ordering::SeqCst);
+                responder.reply(b"complete");
+            }),
+        )
+        .unwrap();
+        let ic = incomplete_hits.clone();
+        reg.register("metrics/cpu", move |_q, responder| {
+            ic.fetch_add(1, Ordering::SeqCst);
+            responder.reply(b"incomplete");
+        });
+
+        // AllComplete ext on the wire -> only the complete queryable matches.
+        let mut replies = Vec::new();
+        let matched = reg.dispatch_request(
+            &build_request_query_with_target(1, 0, Some("metrics/cpu"), QueryTarget::AllComplete)
+                .unwrap(),
+            &HashMap::new(),
+            &mut replies,
+        );
+        assert_eq!(
+            matched, 1,
+            "an AllComplete wire query matches only the complete queryable"
+        );
+        assert_eq!(complete_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(incomplete_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(replies.len(), 1);
+
+        // Plain Request (no target ext = BestMatching) -> both match.
+        let mut replies_plain = Vec::new();
+        let matched_plain = reg.dispatch_request(
+            &request_query(2, 0, Some("metrics/cpu")),
+            &HashMap::new(),
+            &mut replies_plain,
+        );
+        assert_eq!(
+            matched_plain, 2,
+            "an absent target reaches both — the ext_target read is load-bearing"
+        );
+        assert_eq!(incomplete_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(replies_plain.len(), 2);
     }
 
     #[test]
@@ -3166,6 +3388,7 @@ mod tests {
             },
             &mut responder,
             /* is_remote = */ true,
+            /*target=*/ None,
         );
         assert_eq!(
             fired, 2,

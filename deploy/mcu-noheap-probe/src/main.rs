@@ -286,8 +286,13 @@ fn main() -> ! {
         let mut qs: QueryableRegistry<QueryCounter> = QueryableRegistry::with_sink_backing();
         require(
             "query register",
-            qs.register_sink("svc/**", Locality::Any, QueryCounter(&QUERY_HITS))
-                .is_ok(),
+            qs.register_sink(
+                "svc/**",
+                Locality::Any,
+                /*complete=*/ false,
+                QueryCounter(&QUERY_HITS),
+            )
+            .is_ok(),
         );
         let mut out = NoopReplyOut;
         let query_fired = qs.dispatch_borrowed(
@@ -307,6 +312,10 @@ fn main() -> ! {
             },
             &mut out,
             /* is_remote = */ true,
+            // R311y334 — the query target (zenoh's `(queryable.complete ||
+            // target != AllComplete)` filter). `None` = the never-transmitted
+            // BestMatching default, so this incomplete queryable still fires.
+            /*target=*/ None,
         );
         require(
             "query",

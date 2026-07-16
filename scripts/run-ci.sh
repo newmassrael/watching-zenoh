@@ -1892,6 +1892,7 @@ layer_c1an_cargo_test_adminspace_nodefault() {
         && cargo test -p wz-session-core --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet \
         && cargo clippy -p wz-session-core --no-default-features --features adminspace-router-linkstate --all-targets --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib loopback_target_pub_field_cannot_bypass_the_query_target_gate --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --lib declare_adminspace --quiet \
         && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --all-targets --quiet -- -D warnings \

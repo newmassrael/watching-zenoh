@@ -127,12 +127,18 @@ pub struct QueryOptions {
     /// complete", which is a property of the queryable, not of the
     /// topology.
     ///
-    /// wz still drops target on the loopback leg
-    /// (`build_loopback_query` trims it), so an `AllComplete` local
-    /// query fires every matching queryable, complete or not. That is a
-    /// KNOWN divergence carried by the `query-target` atom (PARTIAL),
-    /// not a design decision — do not re-derive it from this field's
-    /// old comment.
+    /// R311y334 — that divergence is now CLOSED. The loopback applies the
+    /// completeness filter: `Session::query` / `query_aliased` pass the target
+    /// into `QueryableRegistry::local_query`, which runs zenoh's
+    /// `(queryable.complete || target != AllComplete)` on the SessionLocal
+    /// queryables. It rides the call argument, NOT `build_loopback_query`'s body
+    /// (target is a Request-level slot, not a Query-body slot). Critically, the
+    /// loopback reads the GATED [`Self::effective_target`], NOT this raw `pub`
+    /// field: with `query-target` OFF the field is a bypassable pub write
+    /// (R311y317), so reading it directly on the local path would re-arm the
+    /// selection axis in a build that cannot emit a target — the exact
+    /// last-hop-that-knows leak `effective_target` exists to close. Never read
+    /// `self.target` on a dispatch path; go through `effective_target()`.
     pub target: Option<QueryTarget>,
     /// Reply consolidation hint. `None` (default) elides → zenoh-pico
     /// decodes `Z_CONSOLIDATION_MODE_AUTO`. `Some(mode)` sets the Q_C

@@ -2133,6 +2133,93 @@ fn query_session_local_with_session_local_queryable_fires() {
 #[cfg(all(
     feature = "query-get",
     feature = "query-queryable",
+    feature = "query-target"
+))]
+#[test]
+fn query_allcomplete_target_loopback_fires_only_complete_queryable() {
+    // The R311y321 loopback residual, closed at the runtime boundary:
+    // `Session::query` forwards the GET's `target` into `local_query`, so an
+    // `AllComplete` self-get reaches only the COMPLETE SessionLocal queryable —
+    // the responder-side operand (`register_sink(.., complete=true, ..)`, the
+    // same call `declare_queryable` makes with `options.complete`) meeting the
+    // requester-side operand (`with_target(AllComplete)`) on one host. The
+    // `All` arm is the anti-vacuity twin: it proves the skip was conditional on
+    // the target, not an unconditional drop of the incomplete queryable.
+    let (session, _driver) = build_session();
+    let complete_hits = Arc::new(AtomicUsize::new(0));
+    let incomplete_hits = Arc::new(AtomicUsize::new(0));
+
+    let c = complete_hits.clone();
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register_sink(
+            "home/temp",
+            Locality::SessionLocal,
+            /*complete=*/ true,
+            wz_session_core::query_sink::BoxedQuerySink::new(move |_q, responder| {
+                c.fetch_add(1, Ordering::SeqCst);
+                responder.reply(b"complete");
+            }),
+        )
+        .expect("register on the alloc backing never exceeds declared capacity");
+    let ic = incomplete_hits.clone();
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
+            ic.fetch_add(1, Ordering::SeqCst);
+            responder.reply(b"incomplete");
+        });
+
+    // AllComplete self-get: only the complete queryable fires.
+    session
+        .query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_target(QueryTarget::AllComplete),
+            |_| {},
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+    assert_eq!(
+        complete_hits.load(Ordering::SeqCst),
+        1,
+        "AllComplete self-get fires the complete queryable"
+    );
+    assert_eq!(
+        incomplete_hits.load(Ordering::SeqCst),
+        0,
+        "AllComplete self-get skips the incomplete queryable through Session::query"
+    );
+
+    // Anti-vacuity twin: All self-get fires BOTH.
+    session
+        .query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_target(QueryTarget::All),
+            |_| {},
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+    assert_eq!(complete_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        incomplete_hits.load(Ordering::SeqCst),
+        1,
+        "All self-get reaches both — the incomplete queryable is not unconditionally dropped"
+    );
+}
+
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
     feature = "adminspace-core"
 ))]
 #[test]
@@ -2890,6 +2977,79 @@ fn query_target_pub_field_cannot_bypass_the_query_target_gate() {
         session_frame, baseline,
         "with query-target OFF, assigning the pub `target` field must not \
              reach the wire: no build without the atom may emit Q_T"
+    );
+}
+
+/// R311y334 — the LOOPBACK twin of the wire guard above. When R311y334 wired
+/// `queryable.complete` into the loopback dispatch, the local leg had to read
+/// the GATED `effective_target()`, NOT the raw `opts.target` pub field. With
+/// `query-target` OFF a pub-field write of `Some(AllComplete)` (the same
+/// R311y317 bypass the wire guard blocks) must NOT re-arm the completeness
+/// filter on the local leg: a build that cannot EMIT a target must not SELECT on
+/// one either. Both SessionLocal queryables — complete and incomplete — must
+/// fire, exactly as with no target. This is the guard that would have caught the
+/// review-found bug (loopback fed `opts.target`, skipping the incomplete
+/// queryable in a query-target-OFF build). Runs in the `adminspace-core`,
+/// `query-get` feature-gates row (query-queryable ON via adminspace-core,
+/// query-target OFF).
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    not(feature = "query-target")
+))]
+#[test]
+fn loopback_target_pub_field_cannot_bypass_the_query_target_gate() {
+    let (session, _driver) = build_session();
+    let complete_hits = Arc::new(AtomicUsize::new(0));
+    let incomplete_hits = Arc::new(AtomicUsize::new(0));
+
+    let c = complete_hits.clone();
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register_sink(
+            "home/temp",
+            Locality::SessionLocal,
+            /*complete=*/ true,
+            wz_session_core::query_sink::BoxedQuerySink::new(move |_q, responder| {
+                c.fetch_add(1, Ordering::SeqCst);
+                responder.reply(b"complete");
+            }),
+        )
+        .expect("register on the alloc backing never exceeds declared capacity");
+    let ic = incomplete_hits.clone();
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
+            ic.fetch_add(1, Ordering::SeqCst);
+            responder.reply(b"incomplete");
+        });
+
+    let mut opts = QueryOptions::get().with_allowed_destination(Locality::SessionLocal);
+    // Pub-field bypass — with_target() is a no-op when query-target is OFF, so
+    // the raw field is the only injection path, exactly the R311y317 attack.
+    opts.target = Some(QueryTarget::AllComplete);
+    session
+        .query("home/temp", opts, |_| {}, |_| {})
+        .expect("query-get feature is ON in this test build");
+
+    // query-target OFF => effective_target() == None => the loopback applies NO
+    // completeness filter => BOTH queryables fire, despite the pub-field target.
+    assert_eq!(
+        complete_hits.load(Ordering::SeqCst),
+        1,
+        "complete queryable fires on the loopback"
+    );
+    assert_eq!(
+        incomplete_hits.load(Ordering::SeqCst),
+        1,
+        "incomplete queryable STILL fires: a query-target-OFF build must not \
+             select on a pub-field target injected past the gate"
     );
 }
 

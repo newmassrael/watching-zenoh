@@ -139,12 +139,15 @@ use crate::sync::Mutex;
 ///   the wire.
 /// - `timeout_ms` — correctly absent: the deadline is armed on the pending
 ///   entry from the option directly, never through this body.
-/// - `target` — WRONGLY absent. The old text called it "a Request-level ext a
-///   single-host fan-out has no relay to honour"; zenoh's `handle_query` applies
+/// - `target` — correctly absent FROM THE BODY, but its selection axis is now
+///   honoured on the call. zenoh's `handle_query` applies
 ///   `(queryable.complete || target != AllComplete)` on its LOCAL path too, so
-///   the selection axis is real on one host. Dropping it here means an
-///   `AllComplete` loopback query fires incomplete queryables. Carried as the
-///   `query-target` atom's PARTIAL residual; not a design decision.
+///   the axis is real on one host; the old code dropped it entirely and an
+///   `AllComplete` loopback query fired incomplete queryables. Resolved: the
+///   GET's `target` rides the `local_query(.., target, ..)` argument (a
+///   Request-level slot, not a Query-body slot), so the loopback applies the
+///   same completeness filter as the wire `dispatch_request`. The
+///   `query-target` PARTIAL residual is closed.
 ///
 /// The `rid = 0` / literal-id 0 envelope `build_request_query_with_meta` wraps
 /// the body in is discarded: the loopback rid + resolved keyexpr ride the
@@ -2080,9 +2083,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // (`_sn` / `_max`) into the loopback Query so a SessionLocal
                         // queryable filters identically to the wire path.
                         let query = build_loopback_query(&opts);
-                        observer
-                            .queryables
-                            .local_query(rid, keyexpr, &query, &mut replies);
+                        // R311y321 residual closed: the GET's `target` is a
+                        // Request-level slot the loopback body does not carry, so
+                        // it rides the call. Use the GATED `effective_target()` —
+                        // the SAME accessor the wire path (`query_metadata`) uses
+                        // — NEVER the raw `opts.target` pub field: with
+                        // `query-target` OFF that field is a bypassable pub write
+                        // (R311y317), and reading it here would re-arm the
+                        // completeness filter on the loopback leg in a build that
+                        // cannot emit a target — the last-hop-that-knows trap the
+                        // accessor exists to close. Gated, an `AllComplete` GET
+                        // fires only complete SessionLocal queryables, as the wire
+                        // path does; `query-target` OFF leaves the leg inert.
+                        observer.queryables.local_query(
+                            rid,
+                            keyexpr,
+                            &query,
+                            opts.effective_target(),
+                            &mut replies,
+                        );
                         for reply in replies.drain(..) {
                             let inbound: InboundReply = reply.into();
                             observer.replies.deliver_local_reply(&inbound);
@@ -2322,10 +2341,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // (`_sn` / `_max`) into the loopback Query so a SessionLocal
                         // queryable filters identically to the wire path.
                         let query = build_loopback_query(&opts);
+                        // R311y321 residual closed: the GET's `target` rides the
+                        // call via the GATED `effective_target()` (the wire path's
+                        // accessor), NEVER the raw `opts.target` pub field — so
+                        // `query-target` OFF keeps this loopback leg inert
+                        // (R311y317 pub-field bypass class), and ON fires only
+                        // complete SessionLocal queryables here too.
                         observer.queryables.local_query(
                             rid,
                             loopback_keyexpr,
                             &query,
+                            opts.effective_target(),
                             &mut replies,
                         );
                         for reply in replies.drain(..) {
@@ -2690,11 +2716,24 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let (cell, sink) = self.deferred_query_sink(actions, callback);
             // R311df — observer access via R::with_mutex_mut closure form.
             let id = R::with_mutex_mut(&self.observer, |observer| {
-                observer.queryables.register_with_locality(
-                    keyexpr_string.clone(),
-                    options.allowed_origin,
-                    sink,
-                )
+                // Full-fidelity registration through the `register_sink` SSOT:
+                // the runtime is the one caller that knows the declared
+                // completeness, so it threads `options.complete` into the LOCAL
+                // dispatch table here — the responder-side operand of zenoh's
+                // `handle_query` filter. The table's `complete` and the wire
+                // `QueryableInfo` ext (stamped below from the same
+                // `options.complete`) now agree by construction. The closure
+                // convenience wrappers default `complete = false`, so a
+                // complete queryable must take this path.
+                observer
+                    .queryables
+                    .register_sink(
+                        &keyexpr_string,
+                        options.allowed_origin,
+                        options.complete,
+                        crate::query_sink::BoxedQuerySink::new(sink),
+                    )
+                    .expect("register on the alloc backing never exceeds declared capacity")
             });
             // R311ow — announce the queryable to the router iff the locality
             // allows remote (pico `_z_register_queryable`, primitives.c:348),
