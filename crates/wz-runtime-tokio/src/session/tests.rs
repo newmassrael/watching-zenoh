@@ -4790,6 +4790,39 @@ fn declare_subscriber_remote_emits_one_reliable_decl_subscriber() {
     std::mem::forget(sub);
 }
 
+/// R311y342 NEG — the OFF twin of the routed-announce test above, and the
+/// guard `announce_subscriber`'s own doc was owed. That doc claims: "On a
+/// build without the `declare-subscriber` codec, `Ok(None)` — the local
+/// subscriber stays valid for loopback / directly-connected delivery; only
+/// the router announce is elided." Both halves of that sentence were
+/// unguarded — the arm returns the SAME `Ok(None)` a legitimate
+/// session-local subscriber gets, so a regression that turned the announce
+/// into a silent no-op ON a `declare-subscriber` build would look identical
+/// from the caller's side. R311hw/R311hx: a compile proof does not prove the
+/// signature-stable surface BEHAVES when the feature is off.
+///
+/// Asserted after Drop as well: the retraction half is elided too, so the
+/// whole handle lifecycle is wire-silent rather than just its construction.
+#[cfg(not(feature = "declare-subscriber"))]
+#[test]
+fn declare_subscriber_stays_local_and_emits_nothing_when_feature_off() {
+    let (session, driver) = build_session();
+    let sub = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("the local subscriber stays constructible with the atom off");
+    assert_eq!(
+        driver.frame_count(),
+        0,
+        "declare-subscriber off must elide the router announce — no Declare reaches the wire"
+    );
+    drop(sub);
+    assert_eq!(
+        driver.frame_count(),
+        0,
+        "the elided announce must not leave a retraction behind either"
+    );
+}
+
 #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
 #[test]
 fn routed_subscriber_drop_emits_undecl_subscriber() {
@@ -5271,6 +5304,34 @@ fn declare_queryable_returns_handle_with_keyexpr_and_options() {
 /// `.expect("... is ON in this test build")`) — the same
 /// rule-applied-to-X-not-Y asymmetry R311y329 was spent paying off. Gated and
 /// `.expect`ed now, so the claim binds to a queryable that was really declared.
+/// R311y342 NEG — the `declare-queryable`-OFF twin, and the guard
+/// `announce_queryable`'s silent `Ok(None)` arm was owed. Note the cfg: it
+/// needs `query-queryable` ON (the fn lives behind it) and
+/// `declare-queryable` OFF — the C1j `queryable-only` row. Without this, the
+/// announce could regress to a no-op ON a declare-queryable build and look
+/// identical to a legitimate session-local queryable from the caller's side.
+/// The sibling twelve lines down records a VACUOUS pass of exactly this
+/// class, which is why the `.expect` and the post-Drop assert are both here.
+#[cfg(all(feature = "query-queryable", not(feature = "declare-queryable")))]
+#[test]
+fn declare_queryable_stays_local_and_emits_nothing_when_declare_queryable_off() {
+    let (session, driver) = build_session();
+    let q = session
+        .declare_queryable("home/temp", QueryableOptions::default(), |_, _| {})
+        .expect("the local queryable stays constructible with the announce atom off");
+    assert_eq!(
+        driver.frame_count(),
+        0,
+        "declare-queryable off must elide the announce — no Declare reaches the wire"
+    );
+    drop(q);
+    assert_eq!(
+        driver.frame_count(),
+        0,
+        "the elided announce must not leave a retraction behind either"
+    );
+}
+
 #[cfg(feature = "query-queryable")]
 #[test]
 fn declare_queryable_session_local_does_not_emit_wire_frame() {
@@ -6987,6 +7048,25 @@ fn remote_subscriber_listener_rejects_typed_when_feature_off() {
             Err(DeclListenerError::FeatureDisabled)
         ),
         "declare-subscriber off must reject typed"
+    );
+}
+
+/// R311y342 NEG — the queryable twin of the guard above. `decl_listener.rs`
+/// holds two listeners whose OFF arms are character-for-character identical
+/// (`let _ = callback; Err(DeclListenerError::FeatureDisabled)`), and only
+/// the subscriber one was pinned. An unguarded typed-reject arm is exactly
+/// the shape R311hw/R311hx names: a compile/footprint proof does NOT prove
+/// the signature-stable surface BEHAVES when the feature is off.
+#[cfg(not(feature = "declare-queryable"))]
+#[test]
+fn remote_queryable_listener_rejects_typed_when_feature_off() {
+    let (session, _driver) = build_session();
+    assert!(
+        matches!(
+            session.declare_remote_queryable_listener(|_| {}),
+            Err(DeclListenerError::FeatureDisabled)
+        ),
+        "declare-queryable off must reject typed"
     );
 }
 
