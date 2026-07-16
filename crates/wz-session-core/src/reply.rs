@@ -1064,11 +1064,24 @@ impl<C: ReplySink> ReplyRegistry<C> {
             //
             // NO cfg GATE HERE, and none is possible: this crate does not declare
             // `query-timeout` (it is a wz-runtime-tokio TERMINAL feature — ask
-            // cargo, not memory), so the last hop that KNOWS is the runtime. It
-            // already gates: `deadline_ms` is armed only from
-            // `effective_timeout_ms()`, which reads 0 with the feature off, so no
-            // entry here can ever carry a deadline and this loop stays empty by
-            // construction. The gate is the arming, not the sweep.
+            // cargo, not memory), so the last hop that KNOWS is the runtime. The
+            // gate is the arming, not the sweep.
+            //
+            // R311y325 — this used to add that `deadline_ms` "is armed only from
+            // `effective_timeout_ms()` ... so no entry here can ever carry a
+            // deadline and this loop stays empty by construction". RETRACTED: the
+            // "only" is false. `register` / `register_sink` are pub and ungated
+            // (this crate cannot gate them), so ANY consumer can arm a deadline
+            // without passing the accessor — and one does: wz-ap-demo computes
+            // `deadline_ms` straight off its `--query-timeout-ms` flag and calls
+            // `replies.register(..)` directly (`wz-ap-demo/src/runner.rs:278-281`;
+            // that crate has ZERO `query-timeout` cfg sites). What IS true is the
+            // narrower claim: the deadline `Session::query` / the aliased get path
+            // arm is gated, because THOSE two sites read `effective_timeout_ms()`
+            // (`session/mod.rs:1930`, `:2209`). The registry itself makes no such
+            // guarantee. The generalisation was the R311y323 shape this round
+            // names: true of the path the author was looking at, false of its
+            // siblings.
             entry.sink.on_timeout(rid);
         }
         swept

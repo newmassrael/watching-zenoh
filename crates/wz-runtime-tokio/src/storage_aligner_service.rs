@@ -120,7 +120,18 @@ use crate::timestamp_source::wall_clock_ntp64;
 /// `with_timeout_ms`, so a session that runs the reply-timeout **sweep** fires
 /// the proper Err+Final (hence `on_final`) when the targeted replica is silent.
 /// zenoh's session default get timeout is 10s (zenoh-config `defaults.rs:151`
-/// `queries_default_timeout`); wz matches it.
+/// `queries_default_timeout`).
+///
+/// R311y325 — this used to add "wz matches it". It does not, and the sentence
+/// certified a parity the platform lacks: the 10s here is matched because THIS
+/// CONSUMER passes it. wz's client default is the opposite — `QueryOptions`
+/// derives `Default` (`session/querier.rs:58`) so `timeout_ms` is 0, the
+/// never-expire sentinel, and a default `Session::query` never expires. wz's
+/// own RELAY does mirror zenoh (`LinkstateForwarder::DEFAULT_QUERY_TIMEOUT`
+/// = 10_000ms, `linkstate_forward.rs:661`); the client leg is the one that
+/// diverges. Every consumer that wants zenoh's default hand-patches it, this
+/// one included — see `query-timeout`'s inventory reason, which names the
+/// divergence as of R311y325.
 ///
 /// The sweep ([`ReplyRegistry::sweep_timed_out`](crate::reply::ReplyRegistry))
 /// is a SEPARATE task — R268 relocated it out of `drive_session_until_terminal`
