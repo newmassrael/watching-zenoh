@@ -2650,11 +2650,59 @@ layer_c1bj_cargo_test_loopback_metadata_gates() {
 # not(query-reply)`-gated, so its 2 NEGs exist ONLY in this subset. If a future
 # round widens any of those three gates the module vanishes and this goes red,
 # instead of the suite silently shrinking to nothing.
+#
+# R311y329 — y314 guarded the REPLY module and left its sibling unguarded, in the
+# same arm. `query::request_decode_isolation_tests` is the OFF proof for THREE
+# atoms (query-attachment / query-selector-parameters / query-source-info, the
+# last already tagged COMPLETE on it); widening any of those three gates cfg's the
+# module out and arm 2 silently shrinks back to the exact "skip reporting green"
+# y314 named. Both modules are now pinned as SETS, not counts: R311y315 shipped a
+# len()-pinned gate that a rename passed green, so C1bk moved to a set comparison
+# and this lane follows it. Falsifiable both ways — rename a guard or cfg-elide
+# one and the compare goes red.
+# Print `$1`'s surviving test-name set (sorted) from the arm-2 subset build.
+# Returns non-zero WITHOUT printing a set when the listing build itself fails:
+# `--list` emits nothing on a compile error, so a swallowed build failure would
+# otherwise read as an empty set and be reported as drift. Verified live while
+# building this guard (R311y329) — eliding one NEG tripped `-D warnings`
+# dead_code on its now-unused fixture, and the first draft blamed the SIBLING
+# module for a compile error it never mentioned.
+_c1e_neg_set() {
+    local module="$1" out rc
+    out=$(cd crates && cargo test -p wz-session-core --features query-queryable \
+        --lib "$module" -- --list 2>&1); rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "  C1e FAIL: listing \`$module\` did not BUILD (exit $rc) — this is not a drift verdict:" >&2
+        printf '%s\n' "$out" | tail -20 | sed 's/^/      /' >&2
+        return 1
+    fi
+    printf '%s' "$out" | sed -n "s/^${module}::\([^:]*\): test\$/\1/p" | sort
+}
+
 layer_c1e_cargo_test_query() {
+    local reply_expected="inbound_reply_del_body_is_dropped_when_reply_consumer_off
+inbound_reply_put_body_is_dropped_when_reply_consumer_off"
+    local query_expected="inbound_query_attachment_is_dropped_when_query_attachment_off
+inbound_query_parameters_are_dropped_when_query_selector_parameters_off
+inbound_query_source_info_is_dropped_when_query_source_info_off"
+    local got
+    got=$(_c1e_neg_set reply::decode_isolation_tests) || return 1
+    if [ "$got" != "$(printf '%s' "$reply_expected" | sort)" ]; then
+        echo "  C1e FAIL: the reply decode-isolation NEG set drifted (cfg elided a guard, or one was renamed)"
+        echo "    expected:"; printf '%s\n' "$reply_expected" | sort | sed 's/^/      /'
+        echo "    got:";      printf '%s\n' "$got" | sed 's/^/      /'
+        return 1
+    fi
+    got=$(_c1e_neg_set query::request_decode_isolation_tests) || return 1
+    if [ "$got" != "$(printf '%s' "$query_expected" | sort)" ]; then
+        echo "  C1e FAIL: the query request decode-isolation NEG set drifted (cfg elided a guard, or one was renamed)"
+        echo "    expected:"; printf '%s\n' "$query_expected" | sort | sed 's/^/      /'
+        echo "    got:";      printf '%s\n' "$got" | sed 's/^/      /'
+        return 1
+    fi
     (cd crates \
         && cargo test -p wz-session-core --features query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-source-info,codec-response-final --quiet \
-        && cargo test -p wz-session-core --features query-queryable --quiet \
-        && test "$(cargo test -p wz-session-core --features query-queryable --lib reply::decode_isolation_tests -- --list 2>/dev/null | grep -c ': test')" = "2")
+        && cargo test -p wz-session-core --features query-queryable --quiet)
 }
 
 # ─── Layer C1f — cargo test -p wz-session-core (reply dispatch plane) ──
