@@ -2654,12 +2654,26 @@ layer_c1bj_cargo_test_loopback_metadata_gates() {
 # R311y329 — y314 guarded the REPLY module and left its sibling unguarded, in the
 # same arm. `query::request_decode_isolation_tests` is the OFF proof for THREE
 # atoms (query-attachment / query-selector-parameters / query-source-info, the
-# last already tagged COMPLETE on it); widening any of those three gates cfg's the
-# module out and arm 2 silently shrinks back to the exact "skip reporting green"
-# y314 named. Both modules are now pinned as SETS, not counts: R311y315 shipped a
-# len()-pinned gate that a rename passed green, so C1bk moved to a set comparison
-# and this lane follows it. Falsifiable both ways — rename a guard or cfg-elide
-# one and the compare goes red.
+# last already tagged COMPLETE citing this module AND this lane by name).
+#
+# Two DIFFERENT widening paths, both silent before this guard — measured, not
+# argued (an earlier draft of this comment claimed one mechanism for all three
+# and was wrong about source-info; a reviewer caught it):
+#   - query-attachment / query-selector-parameters are the module's own cfg
+#     (query.rs:3374-3379, two `not()`s): widening either cfg's the WHOLE module
+#     out. Measured: `--features query-queryable,query-attachment` lists 0 tests,
+#     rc=0 — green even under RUSTFLAGS="-D warnings", because every fixture is
+#     co-located and vanishes with it.
+#   - query-source-info is NOT in that cfg. Its test + fixture carry their own
+#     `not(query-source-info)` (query.rs:3516 / :3542), so widening it elides
+#     only THAT test. Measured: `--features query-queryable,query-source-info`
+#     lists 2, rc=0.
+# Either way arm 2 silently shrinks — the exact "skip reporting green" y314
+# named — and a SET pin catches both; y314's `grep -c = 2` on reply catches
+# neither. Sets, not counts: R311y315 shipped a len()-pinned gate that a rename
+# passed green, so C1bk moved to a set comparison and this lane follows it.
+# Falsifiable both ways — rename an expected name or cfg-elide a guard and the
+# compare goes red.
 # Print `$1`'s surviving test-name set (sorted) from the arm-2 subset build.
 # Returns non-zero WITHOUT printing a set when the listing build itself fails:
 # `--list` emits nothing on a compile error, so a swallowed build failure would
