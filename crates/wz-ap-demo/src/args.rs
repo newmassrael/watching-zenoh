@@ -223,6 +223,24 @@ pub(crate) struct PublisherSpec {
     /// `transport-batching`: surfacing every Push proves it walked the chain to
     /// the end.
     pub(crate) batch: bool,
+    /// `--matching-log` — declare a `Publisher` on `keyexpr` plus a
+    /// `Publisher::declare_matching_listener`, and log every matching-status
+    /// TRANSITION it reports.
+    ///
+    /// The ordering a FOREIGN peer needs to witness `session-matching`: the
+    /// transitions are caused entirely by the remote's own
+    /// `Declare(DeclSubscriber)` / `Declare(UndeclSubscriber)`, so a pico
+    /// `z_sub` arriving and leaving drives both edges without wz touching the
+    /// wire. Registration itself never fires (pico transition-only), which is
+    /// why the listener is installed PRE-DRIVE, before any inbound Declare can
+    /// be dispatched.
+    ///
+    /// Binds to the atom's OWN gated code: `Publisher::declare_matching_listener`
+    /// is `#[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]`
+    /// and rejects typed with the feature off. Its sibling
+    /// `Publisher::get_matching_status` is gated on `declare-subscriber` ALONE, so
+    /// polling would NOT bind the claim to `session-matching`.
+    pub(crate) matching_log: bool,
 }
 
 /// R121k-5 / R311oy — bundle of declare-emit keyexprs the demo emits once the

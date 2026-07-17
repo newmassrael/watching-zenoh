@@ -225,6 +225,11 @@ pub(crate) async fn publisher_task<T>(
         declare_id,
         publish_after_ms,
         batch,
+        // `--matching-log` is consumed by install_session_handles, PRE-DRIVE and
+        // at run_demo scope: the listener has to outlive this task's burst to
+        // witness the remote's Undeclare. Named-and-ignored rather than dropped
+        // from the bundle, so a future field cannot silently land in this task.
+        matching_log: _,
     } = spec;
     // R235 — borrow the outbound actions handle for `trace_snapshot`
     // (Established gate polling) + `send_declare_keyexpr` (the

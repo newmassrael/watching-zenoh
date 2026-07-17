@@ -72,7 +72,8 @@ use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use wz::runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
-    Queryable, QueryableOptions, SubscribeOptions, Subscriber, TokioSession,
+    MatchingListener, PublishOptions, Publisher, Queryable, QueryableOptions, SubscribeOptions,
+    Subscriber, TokioSession,
 };
 use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
@@ -103,6 +104,14 @@ struct SessionHandles {
     _subscriber: Option<Subscriber>,
     _liveliness_subscriber: Option<LivelinessSubscriber>,
     _queryable: Option<Queryable>,
+    /// R311y347 — `--matching-log`'s publisher + its matching listener. Held here
+    /// for a reason the other handles do not have: the listener must OUTLIVE the
+    /// publisher_task's burst. The remote's `UndeclSubscriber` — the `false`
+    /// edge — arrives AFTER the burst it responded to, so a listener scoped to
+    /// the burst would see only half the transition pair. The publisher is kept
+    /// alongside it because dropping it would take the listener's keyexpr with it.
+    _publisher: Option<Publisher>,
+    _matching_listener: Option<MatchingListener>,
 }
 
 /// Background-task handles produced by [`spawn_background_tasks`].
@@ -363,6 +372,7 @@ fn install_session_handles(
     liveliness_subscriber_keyexpr: Option<&str>,
     liveliness_subscriber_history: bool,
     queryable_spec: Option<(String, String)>,
+    matching_publisher_keyexpr: Option<&str>,
 ) -> SessionHandles {
     let subscriber = key.and_then(|filter| {
         let key_for_callback = filter.clone();
@@ -493,10 +503,50 @@ fn install_session_handles(
         }
     });
 
+    // R311y347 — `--matching-log`. Installed PRE-DRIVE, which is load-bearing
+    // rather than tidy: `declare_matching_listener` is TRANSITION-only (pico
+    // parity — registration never fires), so a listener installed after the
+    // remote's `DeclSubscriber` has already been dispatched would miss the very
+    // edge it exists to observe and report nothing, silently.
+    let (publisher, matching_listener) = match matching_publisher_keyexpr {
+        Some(keyexpr) => {
+            let publisher = session.declare_publisher(keyexpr, PublishOptions::default());
+            let keyexpr_for_log = keyexpr.to_string();
+            match publisher.declare_matching_listener(move |status| {
+                log::info!(
+                    "wz-ap-demo: MATCHING STATUS keyexpr='{keyexpr_for_log}' matching={}",
+                    status.matching,
+                );
+            }) {
+                Ok(listener) => {
+                    log::info!(
+                        "wz-ap-demo: DECLARED MATCHING LISTENER keyexpr='{keyexpr}' \
+                         (transition-only; a remote Decl/UndeclSubscriber drives each edge)"
+                    );
+                    (Some(publisher), Some(listener))
+                }
+                // The `session-matching`-OFF arm. Loud on purpose: this is the
+                // anti-vacuity twin, and a test that greps for MATCHING STATUS
+                // must be able to tell "the feature is off" from "the transition
+                // never happened".
+                Err(e) => {
+                    log::warn!(
+                        "wz-ap-demo: MATCHING LISTENER declare rejected for \
+                         keyexpr='{keyexpr}': {e:?}"
+                    );
+                    (Some(publisher), None)
+                }
+            }
+        }
+        None => (None, None),
+    };
+
     SessionHandles {
         _subscriber: subscriber,
         _liveliness_subscriber: liveliness_subscriber,
         _queryable: queryable,
+        _publisher: publisher,
+        _matching_listener: matching_listener,
     }
 }
 
@@ -790,12 +840,19 @@ pub(crate) async fn run_demo(
     // register-time deadline_ms vs sweep-time now_ms comparison.
     let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(session_clock));
 
+    // Read the matching knob BEFORE `publisher_spec` moves into spawn_tasks.
+    let matching_publisher_keyexpr: Option<&str> = publisher_spec
+        .as_ref()
+        .filter(|spec| spec.matching_log)
+        .map(|spec| spec.keyexpr.as_str());
+
     let _handles = install_session_handles(
         &session,
         key,
         declare_spec.liveliness_subscriber_keyexpr.as_deref(),
         declare_spec.liveliness_subscriber_history,
         queryable_spec,
+        matching_publisher_keyexpr,
     );
 
     // R311ot / R311oy — declare the outbound liveliness TOKEN SYNCHRONOUSLY in

@@ -676,6 +676,12 @@ fn main() -> ExitCode {
     // R311y345 — `--batch` wraps the burst in a TX batching window. A bare flag
     // (no value), like `--reconnect` and `--delete`.
     let batch = rest.iter().any(|a| a == "--batch");
+    // R311y347 — `--matching-log` installs a matching listener on the publish
+    // keyexpr. A bare flag, same family as `--batch` / `--on-remote-*-log`.
+    // Deliberately NOT cfg-gated: the `session-matching`-OFF build must reach the
+    // same path and surface the typed reject, because that arm is the
+    // anti-vacuity twin the proof rests on.
+    let matching_log = rest.iter().any(|a| a == "--matching-log");
     let publisher_spec: Option<PublisherSpec> = match (publish_opt, value_opt, delete_opt) {
         (Some(k), Some(v), None) => Some(PublisherSpec {
             keyexpr: k,
@@ -683,6 +689,7 @@ fn main() -> ExitCode {
             declare_id: declare_id_parsed,
             publish_after_ms,
             batch,
+            matching_log,
         }),
         (None, None, Some(k)) => Some(PublisherSpec {
             keyexpr: k,
@@ -690,9 +697,20 @@ fn main() -> ExitCode {
             declare_id: declare_id_parsed,
             publish_after_ms,
             batch,
+            matching_log,
         }),
         _ => None,
     };
+    // A knob that silently does nothing is how a proof goes vacuous (R311y345's
+    // rule for --publish-after-ms). `--matching-log` needs a publisher to hang
+    // the listener on, so name the mistake rather than ignoring the flag.
+    if matching_log && publisher_spec.is_none() {
+        eprintln!(
+            "wz-ap-demo: --matching-log needs a publisher; pass --publish <keyexpr> \
+             --value <text> (or --delete <keyexpr>)"
+        );
+        return ExitCode::from(2);
+    }
     let queryable_spec: Option<(String, String)> = match (queryable_opt, reply_opt) {
         (Some(p), Some(r)) => Some((p, r)),
         _ => None,
@@ -723,10 +741,17 @@ fn main() -> ExitCode {
         declare_id: id,
         publish_after_ms: after,
         batch: batch_on,
+        matching_log: matching_on,
     }) = &publisher_spec
     {
         if *batch_on {
             log::info!("batch   = on (burst rides ONE frame; zp_start_batching parity)");
+        }
+        if *matching_on {
+            log::info!(
+                "matching = on (logs every matching-status transition a remote \
+                 Decl/UndeclSubscriber drives)"
+            );
         }
         if let Some(ms) = after {
             log::info!("publish-after = {ms}ms (burst held; session idle for this window)");
