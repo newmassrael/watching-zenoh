@@ -4553,28 +4553,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = token_id;
     }
 
-    /// R121i-c — encode + dispatch a `Declare(DeclFinal)` marker on
-    /// the outbound link, terminating a declaration sequence.
-    /// Reserved for the future Interest/Reply path (R121j+); the
-    /// unsolicited DECLARE outbound path that the AP MVP uses today
-    /// does not emit DeclFinal, but the action is provided so the
-    /// state machine has the dispatch shape ready when Interest
-    /// replies need to close a multi-DECLARE reply batch.
-    ///
-    /// R311g1 — signature-stability: body cfg, signature stable.
-    /// Silent no-op when `declare-final` off (() return — no error
-    /// channel; the peer observes a missing DeclFinal which is
-    /// already the legal terminal-suppressed shape per the AP MVP
-    /// contract, so no observable wire-protocol regression).
-    pub fn send_declare_final(&self) {
-        #[cfg(feature = "declare-final")]
-        {
-            let declare = build_declare_final();
-            // F2 — this surface has no error channel; a transport-down
-            // reject drops the emit exactly as the dead link would.
-            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
-        }
-    }
+    // R121i-c added `send_declare_final` here: encode + dispatch a bare
+    // `Declare(DeclFinal)`, "reserved for the future Interest/Reply path
+    // (R121j+) ... so the state machine has the dispatch shape ready when
+    // Interest replies need to close a multi-DECLARE reply batch".
+    //
+    // R311y346 DELETES it. That future arrived and took the other road:
+    // `build_declare_final_reply` (declare_build.rs) is the interest-response
+    // terminator, live in the router (router_forward.rs, linkstate_forward.rs),
+    // and it stamps the id the wire requires. The stub had ZERO callers and
+    // could not have acquired a correct one -- it dispatched `build_declare_final`
+    // NEAT, i.e. `interest_id: None`, and pico HARD-ERRORS on a DeclFinal with no
+    // interest_id (`_Z_ERR_MESSAGE_ZENOH_DECLARATION_UNKNOWN`, declare_build.rs's
+    // own :944-951 note). pico never emits that shape either: every emit runs
+    // through `_z_optional_id_make_some(interest_id)`
+    // (vendor/zenoh-pico/src/session/interest.c:185), so even the UNSOLICITED
+    // peer-push sends `Some(0)`, not None. So this was not dead code awaiting a
+    // caller; it was unreachable code that was wrong by construction.
+    //
+    // `build_declare_final` does NOT orphan on this deletion --
+    // `build_declare_final_reply` reuses it and the codec tests name it.
+    //
+    // What the stub GESTURED at is real and wz does not have it: pico pushes its
+    // whole declaration set to a freshly accepted peer and closes it with
+    // DeclFinal(Some(0)) (interest.c:194-201, driven from
+    // transport/unicast/accept.c:149). That is now declare-final's NAMED RESIDUAL
+    // in the inventory rather than a stub standing in for it.
 
     /// R279 — encode + dispatch an `Interest` network-message
     /// requesting future + (optionally) current `DeclToken` records
