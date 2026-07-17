@@ -35,7 +35,7 @@ use wz::runtime_tokio::session::{
 use wz::runtime_tokio::session_glue::SessionLinkActions;
 use wz::runtime_tokio::Reliability;
 
-use crate::args::PushOperation;
+use crate::args::{PublisherSpec, PushOperation};
 
 /// R121e — publisher task body. Waits for the session FSM to
 /// reach the Established state (signalled by
@@ -209,15 +209,23 @@ where
 /// has to reach the same code path and lose the session.
 pub(crate) async fn publisher_task<T>(
     session: TokioSession,
-    keyexpr: String,
-    operation: PushOperation,
-    declare_id: Option<u64>,
+    spec: PublisherSpec,
     clock: T,
     long_lived: bool,
-    publish_after_ms: Option<u64>,
 ) where
     T: TimeSource + Send + 'static,
 {
+    // Destructured once, here: the task body below predates the spec struct and
+    // reads these as locals. Taking the bundle rather than eight positional
+    // arguments is also what keeps two `Option<u64>` from sitting side by side
+    // at the call site.
+    let PublisherSpec {
+        keyexpr,
+        operation,
+        declare_id,
+        publish_after_ms,
+        batch,
+    } = spec;
     // R235 — borrow the outbound actions handle for `trace_snapshot`
     // (Established gate polling) + `send_declare_keyexpr` (the
     // pre-burst R121g declare preamble). Push emission itself routes
@@ -371,6 +379,34 @@ pub(crate) async fn publisher_task<T>(
         clock.sleep(PUBLISHER_BURST_INTERVAL_MS).await;
     }
 
+    // ── R311y345 — `--batch`: open a TX batching window around the burst
+    //           (`zp_start_batching` parity). Every send is then ABSORBED into
+    //           one open T_MID_FRAME until the flush below, so the burst's
+    //           `PUBLISHER_BURST_COUNT` Pushes ride ONE frame as a message
+    //           chain rather than one frame each. The cadence between them is
+    //           irrelevant while the window is open — nothing drains the buffer
+    //           but a flush, a conduit change, or an MTU overflow.
+    //
+    //           That absorption is what makes the foreign proof possible AND
+    //           what makes it honest: with the window open the burst CANNOT go
+    //           out as separate frames, so a peer that surfaces every Push has
+    //           necessarily walked a multi-message frame to its end. The two log
+    //           lines are the test's evidence that the window really covered the
+    //           burst -- without them a green would not distinguish this from
+    //           the ordinary one-frame-per-Push path.
+    if batch {
+        match actions.batch_start() {
+            Ok(()) => log::info!(
+                "wz-ap-demo: publisher_task opened a TX batch window (--batch); \
+                 the next {PUBLISHER_BURST_COUNT} Pushes ride ONE frame"
+            ),
+            Err(e) => {
+                log::warn!("wz-ap-demo: --batch rejected: {e}");
+                return;
+            }
+        }
+    }
+
     // ── Step 3: emit the burst. Each iteration composes a
     //           `PublishOptions` carrying `SampleKind::Put` or
     //           `SampleKind::Del` and `Reliability::Reliable` (the
@@ -399,6 +435,19 @@ pub(crate) async fn publisher_task<T>(
         // drain window).
         if i + 1 < PUBLISHER_BURST_COUNT {
             clock.sleep(PUBLISHER_BURST_INTERVAL_MS).await;
+        }
+    }
+    // R311y345 — close the window and drain (`zp_batch_stop` parity). Until this
+    // returns, NOTHING of the burst has reached the wire: it is all sitting in
+    // the one open frame. Stop rather than flush, because the burst is over and
+    // an open window would then absorb the teardown's own emits.
+    if batch {
+        match actions.batch_stop() {
+            Ok(()) => log::info!(
+                "wz-ap-demo: publisher_task closed the TX batch window; \
+                 {PUBLISHER_BURST_COUNT} Pushes flushed as ONE frame"
+            ),
+            Err(e) => log::warn!("wz-ap-demo: batch_stop rejected: {e}"),
         }
     }
     log::info!("wz-ap-demo: publisher_task finished emission burst");

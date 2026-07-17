@@ -217,6 +217,12 @@ pub(crate) struct PublisherSpec {
     /// `transport-keepalive`: past the adopted lease, a peer expires a silent
     /// line, so a Push that still lands proves the KeepAlive held it open.
     pub(crate) publish_after_ms: Option<u64>,
+    /// `--batch` — wrap the burst in a TX batching window (`zp_start_batching` /
+    /// `zp_batch_stop` parity), so every Push rides ONE frame as a message chain
+    /// instead of one frame each. The shape a foreign peer needs to witness
+    /// `transport-batching`: surfacing every Push proves it walked the chain to
+    /// the end.
+    pub(crate) batch: bool,
 }
 
 /// R121k-5 / R311oy — bundle of declare-emit keyexprs the demo emits once the

@@ -528,12 +528,9 @@ fn spawn_background_tasks(
         let session_for_publisher = session.clone();
         TokioRuntime.spawn(publisher_task(
             session_for_publisher,
-            spec.keyexpr,
-            spec.operation,
-            spec.declare_id,
+            spec,
             session_clock,
             long_lived,
-            spec.publish_after_ms,
         ))
     });
 

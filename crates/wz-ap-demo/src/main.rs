@@ -673,18 +673,23 @@ fn main() -> ExitCode {
         },
         None => None,
     };
+    // R311y345 — `--batch` wraps the burst in a TX batching window. A bare flag
+    // (no value), like `--reconnect` and `--delete`.
+    let batch = rest.iter().any(|a| a == "--batch");
     let publisher_spec: Option<PublisherSpec> = match (publish_opt, value_opt, delete_opt) {
         (Some(k), Some(v), None) => Some(PublisherSpec {
             keyexpr: k,
             operation: PushOperation::Put { value: v },
             declare_id: declare_id_parsed,
             publish_after_ms,
+            batch,
         }),
         (None, None, Some(k)) => Some(PublisherSpec {
             keyexpr: k,
             operation: PushOperation::Delete,
             declare_id: declare_id_parsed,
             publish_after_ms,
+            batch,
         }),
         _ => None,
     };
@@ -717,8 +722,12 @@ fn main() -> ExitCode {
         operation: op,
         declare_id: id,
         publish_after_ms: after,
+        batch: batch_on,
     }) = &publisher_spec
     {
+        if *batch_on {
+            log::info!("batch   = on (burst rides ONE frame; zp_start_batching parity)");
+        }
         if let Some(ms) = after {
             log::info!("publish-after = {ms}ms (burst held; session idle for this window)");
         }
