@@ -326,7 +326,7 @@ pub(crate) struct ReplyConsumerSpec {
 pub(crate) struct QueryRoleSpec {
     pub(crate) queryable: Option<(String, String)>,
     pub(crate) query: Option<String>,
-    /// liveliness-get — optional `--liveliness-get <keyexpr>` payload.
+    /// liveliness-get — optional `--liveliness-get <keyexpr>` bundle.
     /// When `Some`, the demo spawns an Established-gated
     /// [`crate::tasks::liveliness_get_task`] that issues one
     /// [`wz::runtime_tokio::session::Session::liveliness_get`] snapshot
@@ -335,5 +335,51 @@ pub(crate) struct QueryRoleSpec {
     /// reply-consuming "get" surfaces) though the wire is the
     /// declaration plane (a CURRENT liveliness Interest), not the
     /// Request/Query plane.
-    pub(crate) liveliness_get: Option<String>,
+    pub(crate) liveliness_get: Option<LivelinessGetSpec>,
+}
+
+/// R311y353 — the `--liveliness-get` bundle. Was a bare `String` (the keyexpr)
+/// threaded through `run_demo` and `spawn_background_tasks`; `--liveliness-get-
+/// after-ms` makes it a two-field payload, so it is named per the sibling idiom
+/// here ([`PublisherSpec`], [`DeclareEmitSpec`], [`QueryRoleSpec`],
+/// [`RemoteLogSpec`], [`ReplyConsumerSpec`]) rather than grown into a tuple.
+/// The atom's own surface has a further knob in reach for a later round
+/// (`LivelinessGetOptions::timeout_ms`, which this task currently leaves at
+/// `default()`), and a named struct is where that lands without touching a call
+/// site.
+pub(crate) struct LivelinessGetSpec {
+    /// `--liveliness-get <keyexpr>` — the filter the CURRENT liveliness
+    /// Interest carries.
+    pub(crate) keyexpr: String,
+    /// `--liveliness-get-after-ms <ms>` — hold the get this long AFTER
+    /// Established.
+    ///
+    /// WHAT IT IS FOR, stated narrowly because R311y353 measured the wider claim
+    /// and it was FALSE. The carried blocker for `liveliness-get` said the atom
+    /// needed "an ordering the demo can't make" — wz asking before a foreign
+    /// token holder had declared. That is NOT why the atom had no witness, and
+    /// this knob is not what fixed it: a fixture can simply start the token
+    /// holder first and gate on its declaration banner, and
+    /// `wz_liveliness_get_zenohd_pico_interop.rs` passes with this hold set to
+    /// nothing at all. The real blocker was zenoh-pico declining to answer any
+    /// Interest on a unicast transport (`interest.c:533-535`), which no ordering
+    /// could have touched.
+    ///
+    /// What survives is narrower and is a TIMING MARGIN, not a precondition: the
+    /// get is ONE-SHOT and has no retry, so unlike the burst-driven tests here
+    /// (whose 5x200ms burst is what "covers the window for the subscription to
+    /// reach zenohd") it gets exactly one chance. The holder's banner proves it
+    /// SENT its token, not that the router REGISTERED it. This hold covers that
+    /// propagation window. It is a margin against a race not yet observed, kept
+    /// because a one-shot proof has nothing else to absorb one — not evidence of
+    /// a race that was.
+    ///
+    /// Deliberately NOT cfg-gated on `liveliness-get`, for the same reason
+    /// `--publish-after-ms` is not gated on `transport-keepalive` and
+    /// `--matching-log` is not gated on `session-matching`: it is a pure
+    /// ordering delay, inert when the feature is off, and it must stay reachable
+    /// in the OFF build. `Session::liveliness_get` is signature-stable and
+    /// returns `LivelinessGetError::FeatureDisabled` when elided, so the OFF arm
+    /// walks the identical path and logs no reply.
+    pub(crate) after_ms: Option<u64>,
 }

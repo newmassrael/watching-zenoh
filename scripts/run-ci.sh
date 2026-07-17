@@ -5414,6 +5414,20 @@ layer_z_zenohd_interop() {
     # routing-peer for --peer). Same --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_peer_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y353 — liveliness-get's cross-impl witness rides THIS lane and could not
+    # ride Layer E, for a reason measured rather than assumed: zenoh-pico NEVER
+    # answers an Interest on a unicast transport (interest.c:533-535, "Nothing to
+    # do on unicast"), so a wz<->pico snapshot get returns empty no matter the
+    # timing. zenohd IS an interest responder, so the topology is pico(token) ->
+    # zenohd(responder) <- wz(get), and all three are load-bearing. Needs the pico
+    # z_liveliness CLI on top of zenohd; the presence gates at the top of this
+    # lane cover z_sub/z_pub/z_querier, so this one is checked here.
+    if [[ ! -x target/zenoh-pico-cli/z_liveliness ]]; then
+        _z_unavailable "zenoh-pico z_liveliness not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
+        return 0
+    fi
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_liveliness_get_zenohd_pico_interop -- --ignored --quiet --test-threads=1) || return 1
     # R3b-2 — wz<->zenohd usrpwd AUTH interop. Needs ONLY zenohd (no
     # storage-manager plugin, no pico CLI): wz authenticates to a
     # mandatory-usrpwd zenohd (correct creds -> Established) and is rejected

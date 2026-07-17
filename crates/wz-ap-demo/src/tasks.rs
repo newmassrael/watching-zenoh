@@ -35,7 +35,7 @@ use wz::runtime_tokio::session::{
 use wz::runtime_tokio::session_glue::SessionLinkActions;
 use wz::runtime_tokio::Reliability;
 
-use crate::args::{PublisherSpec, PushOperation};
+use crate::args::{LivelinessGetSpec, PublisherSpec, PushOperation};
 
 /// R121e — publisher task body. Waits for the session FSM to
 /// reach the Established state (signalled by
@@ -141,10 +141,14 @@ where
 /// surface enforces [`crate::Session::is_established`] (a one-shot get
 /// emitted mid-handshake is discarded by the peer), so the task must
 /// not call before the gate fires.
-pub(crate) async fn liveliness_get_task<T>(session: TokioSession, keyexpr: String, clock: T)
+/// R311y353 — `spec.after_ms` holds the get that long AFTER Established, which is
+/// the ordering a foreign token holder needs. See [`LivelinessGetSpec::after_ms`]
+/// for why no other knob produces it and why it is not cfg-gated.
+pub(crate) async fn liveliness_get_task<T>(session: TokioSession, spec: LivelinessGetSpec, clock: T)
 where
     T: TimeSource + Send + 'static,
 {
+    let LivelinessGetSpec { keyexpr, after_ms } = spec;
     // R311nf — `session` is `TokioSession` (= `Session<_,_,Unicast>`);
     // `actions()` is infallible on the unicast typestate.
     let actions = session.actions();
@@ -162,6 +166,18 @@ where
             return;
         }
         clock.sleep(QUERY_HANDSHAKE_POLL_INTERVAL_MS).await;
+    }
+    // R311y353 — the ordering hold. It is logged as a BRACKET (this line, then
+    // the emit line below) rather than slept silently: a fixture that waits on
+    // a reply must be able to prove the wait actually happened, or a green run
+    // could equally mean the get fired at t=0 and got lucky.
+    if let Some(ms) = after_ms {
+        log::info!(
+            "wz-ap-demo: liveliness_get_task holding the get {ms}ms after Established \
+             (--liveliness-get-after-ms), leaving the peer time to declare"
+        );
+        clock.sleep(ms).await;
+        log::info!("wz-ap-demo: liveliness_get_task hold elapsed after {ms}ms");
     }
     log::info!(
         "wz-ap-demo: liveliness_get_task observed Established; emitting CURRENT \

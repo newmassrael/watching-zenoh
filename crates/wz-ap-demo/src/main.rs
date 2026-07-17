@@ -97,8 +97,8 @@ mod teardown;
 mod usage;
 
 use crate::args::{
-    parse_pair, DeclareEmitSpec, PublisherSpec, PushOperation, QueryRoleSpec, RemoteLogSpec,
-    ReplyConsumerSpec, Role,
+    parse_pair, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec, PushOperation, QueryRoleSpec,
+    RemoteLogSpec, ReplyConsumerSpec, Role,
 };
 use crate::runner::run_demo;
 use crate::usage::{print_usage, ABOUT};
@@ -488,6 +488,23 @@ fn main() -> ExitCode {
     // reply + the terminating final. Reply-consuming "get" surface on the
     // declaration plane (sibling of --query on the Request plane).
     let liveliness_get_opt = parse_pair(rest, "--liveliness-get");
+    // R311y353 — `--liveliness-get-after-ms <ms>` holds the get that long after
+    // Established, so a foreign token holder has time to declare. A malformed
+    // value is a HARD error rather than a silent None, for the same reason
+    // `--publish-after-ms` rejects: an ordering knob that quietly does nothing
+    // leaves the get firing at t=0, which is the exact race it exists to remove
+    // -- and the proof would go green on an empty snapshot only when the timing
+    // happened to work, i.e. flakily.
+    let liveliness_get_after_ms: Option<u64> = match parse_pair(rest, "--liveliness-get-after-ms") {
+        Some(s) => match s.trim().parse::<u64>() {
+            Ok(ms) => Some(ms),
+            Err(_) => {
+                eprintln!("wz-ap-demo: --liveliness-get-after-ms expects milliseconds, got '{s}'");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
     // R121k-5 / R311oy — declare emit + remote-declare callback CLI surface.
     // The low-level `--declare-subscriber` / `--declare-queryable` raw-emit
     // hooks were retired: `--key` / `--queryable` now declare a ROUTED
@@ -867,7 +884,10 @@ fn main() -> ExitCode {
     let query_role_spec = QueryRoleSpec {
         queryable: queryable_spec,
         query: query_spec,
-        liveliness_get: liveliness_get_opt,
+        liveliness_get: liveliness_get_opt.map(|keyexpr| LivelinessGetSpec {
+            keyexpr,
+            after_ms: liveliness_get_after_ms,
+        }),
     };
     // Optional `--zid <hex>`: override the single-session node's demo zid. The
     // mesh routing graph keys nodes by zid, so two session nodes behind routers

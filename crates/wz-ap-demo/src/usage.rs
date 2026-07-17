@@ -78,6 +78,10 @@ pub(crate) fn print_usage() {
     eprintln!("    --liveliness-get <keyexpr>");
     eprintln!("                             one-shot liveliness snapshot get on <keyexpr>;");
     eprintln!("                             emits one CURRENT Interest(KE|TO|R|C) on Established");
+    eprintln!("    --liveliness-get-after-ms <ms>");
+    eprintln!("                             hold that get <ms> after Established, so a foreign");
+    eprintln!("                             token holder has time to declare first (a snapshot");
+    eprintln!("                             only returns tokens that already exist)");
     eprintln!("                             and logs 'LIVELINESS GET REPLY' per alive token then");
     eprintln!("                             one 'LIVELINESS GET FINAL'");
     eprintln!("    --on-remote-subscriber-log");

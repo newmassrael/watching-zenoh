@@ -85,8 +85,8 @@ use wz::runtime_tokio::session_open::{
 use wz::runtime_tokio::sync::Mutex;
 
 use crate::args::{
-    demo_session_init_params, DeclareEmitSpec, PublisherSpec, QueryRoleSpec, RemoteLogSpec,
-    ReplyConsumerSpec, Role,
+    demo_session_init_params, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec, QueryRoleSpec,
+    RemoteLogSpec, ReplyConsumerSpec, Role,
 };
 use crate::shutdown::shutdown_signal;
 use crate::tasks::{liveliness_get_task, publisher_task, query_task, QUERY_RID};
@@ -570,7 +570,7 @@ fn spawn_background_tasks(
     actions: &Arc<SessionLinkActions>,
     publisher_spec: Option<PublisherSpec>,
     query_spec: Option<String>,
-    liveliness_get_spec: Option<String>,
+    liveliness_get_spec: Option<LivelinessGetSpec>,
     session_clock: TokioTime,
     long_lived: bool,
 ) -> SpawnedTasks {
@@ -589,9 +589,9 @@ fn spawn_background_tasks(
         TokioRuntime.spawn(query_task(actions_for_query, keyexpr, session_clock))
     });
 
-    let liveliness_get_handle = liveliness_get_spec.map(|keyexpr| {
+    let liveliness_get_handle = liveliness_get_spec.map(|spec| {
         let session_for_get = session.clone();
-        TokioRuntime.spawn(liveliness_get_task(session_for_get, keyexpr, session_clock))
+        TokioRuntime.spawn(liveliness_get_task(session_for_get, spec, session_clock))
     });
 
     // R311ot — no declare_task: all outbound declares (subscriber / queryable /
