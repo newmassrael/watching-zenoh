@@ -33,9 +33,9 @@
 //! green run would not distinguish "the pre-existing token was replayed" from
 //! "some token arrived somehow". The twin is what makes the claim the atom's:
 //!
-//! - [`wz_liveliness_history_replays_a_pico_token_declared_before_the_subscriber`]
+//! - [`wz_liveliness_history_replays_a_zenohd_routed_pico_token`]
 //!   — history ON: the sample arrives, carrying pico's exact token.
-//! - [`wz_liveliness_without_history_does_not_replay_the_existing_pico_token`]
+//! - [`wz_liveliness_without_history_ignores_the_zenohd_routed_token`]
 //!   — history OFF, IDENTICAL fixture otherwise: the session Establishes and the
 //!   sample never comes.
 //!
@@ -196,10 +196,17 @@ fn run_arm(history: bool) -> String {
     demo_captured
 }
 
+// The `zenohd` substring in BOTH function names in this file is load-bearing, not
+// cosmetic (R311y356 hotfix): Layer E's catch-all sweep runs every `#[ignore]` test
+// EXCEPT those matching `--skip zenohd`, and it filters by FUNCTION NAME, not file
+// name. The `ci` job's Layer E does not build zenohd, so a zenohd-dependent test
+// whose fn name lacks `zenohd` is swept in and panics at `zenohd_binary()`
+// (lib.rs:367). This shipped green on y354 because local run-ci HAS zenohd built, so
+// Layer E ran these and passed; hosted CI caught it. Keep `zenohd` in the fn name.
 // wz-proves: liveliness-history wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenohd + zenoh-pico z_liveliness CLI); Layer Z runs via --ignored"]
-fn wz_liveliness_history_replays_a_pico_token_declared_before_the_subscriber() {
+fn wz_liveliness_history_replays_a_zenohd_routed_pico_token() {
     let captured = run_arm(true);
     let expected = format!("LIVELINESS SAMPLE PUT filter='{SUB_FILTER}' keyexpr='{PICO_TOKEN}'");
     assert!(
@@ -224,7 +231,7 @@ fn wz_liveliness_history_replays_a_pico_token_declared_before_the_subscriber() {
 // replay is caused by `history` and not by the token existing, and claims no atom.
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenohd + zenoh-pico z_liveliness CLI); Layer Z runs via --ignored"]
-fn wz_liveliness_without_history_does_not_replay_the_existing_pico_token() {
+fn wz_liveliness_without_history_ignores_the_zenohd_routed_token() {
     let captured = run_arm(false);
     assert!(
         !captured.contains("LIVELINESS SAMPLE"),

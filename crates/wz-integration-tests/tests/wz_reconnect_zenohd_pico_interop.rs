@@ -243,11 +243,16 @@ fn wz_reconnect_resumes_subscription_against_a_respawned_zenohd() {
 /// (Spelled only in the `//` line, never here: A4 parses the marker token wherever
 /// it appears. R311y352 and R311y354 both hit this in prose; noted so R311y355 is
 /// the round that stops.)
+// The `zenohd` substring in this fn name is load-bearing (R311y356 hotfix): Layer E's
+// catch-all filters `#[ignore]` tests by FUNCTION NAME via `--skip zenohd`, and the
+// `ci` job's Layer E has no zenohd, so a zenohd-dependent test whose fn name lacks
+// `zenohd` is swept in and panics at `zenohd_binary()`. The POSITIVE arm above already
+// carries `zenohd`; this twin did not until y356. Keep it.
 // wz-proves: none -- anti-vacuity twin: without --reconnect the same fixture never
 // delivers demo/post, so the sibling's receipt is the reconnect, not survival.
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenohd restart + zenoh-pico z_put CLI); Layer Z runs via --ignored"]
-fn wz_without_reconnect_does_not_resume_after_the_router_respawns() {
+fn wz_without_reconnect_does_not_resume_after_the_zenohd_respawns() {
     let captured = run_arm(false);
     assert!(
         captured.contains("PRE_LANDED"),
