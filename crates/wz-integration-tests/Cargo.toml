@@ -151,6 +151,24 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # tests additionally run there (purely additive; the concrete-key paths the
     # existing storage tests exercise stay equivalent).
     "storage-mgr-garbage-collection",
+    # R311y352 (pico cross-impl leg) — the static-scout open interop e2e
+    # (tests/wz_static_scout_open_to_pico_zsub.rs) calls `open_session_static`
+    # IN-PROCESS against a foreign zenoh-pico `z_sub -m peer -l` listener, and
+    # that entrypoint is gated on `scouting-static` (session_open.rs:2246). The
+    # SIBLING `open_session_at` is UNGATED — "active scouting feeds it too" — so
+    # a test dialing one locator would bind to the wrong atom; only the
+    # dead-first LIST fallthrough is scouting-static's own observable.
+    # MEASURED, not inherited from the sibling pins above: `scouting-static` is
+    # NOT in wz-runtime-tokio's default set, and `cargo test -p wz-runtime-tokio
+    # --test static_scout_open -- --list` collects only the 3 ungated
+    # `open_session_at_*` tests — so this pin is what puts `open_session_static`
+    # in reach at all, and the isolated build is unchanged by it.
+    # The `--workspace` additive-unification note the pins above carry is NOT
+    # repeated here, because it could not be checked: `cargo test --workspace`
+    # does not build in this workspace at all (sce-rust-runtime raises its
+    # `no_std` + `http-send` mutually-exclusive compile_error). Copying an
+    # unverifiable claim forward is how R311wq's wrong resolver=2 note survived.
+    "scouting-static",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
@@ -160,6 +178,17 @@ wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
 # output in a clean directory per test run (no pollution of $OUT_DIR
 # or vendor/sce/target).
 tempfile = "3"
+# R311y352 — the static-scout interop e2e needs a loopback address that is
+# DETERMINISTICALLY connection-refused, to stand as the dead first entry of the
+# static list. `std::net::TcpListener::bind` always calls `listen()`, so a bound
+# std listener would ACCEPT and then hang the open loop; the bind-then-drop
+# pattern instead leaks the port back to the OS, which under a full CI run can
+# recycle it to an unrelated live listener (a TOCTOU race that made the wz-only
+# sibling flaky before R311if replaced it with this). socket2 binds WITHOUT
+# listening, so a connect gets RST -> ECONNREFUSED for as long as the guard
+# lives. Same version as wz-runtime-tokio's own dev-dep, where the identical
+# `refused_locator` helper lives (static_scout_open.rs).
+socket2 = "0.6"
 # R297b — property-based fuzz layer on top of R297's handcrafted
 # Layer 3 keyexpr-intersect fixture. The generator constructs
 # canonical zenoh keyexprs over a bounded alphabet [a,b,c] with
