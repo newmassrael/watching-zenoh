@@ -114,34 +114,52 @@ def _split_top(s):
     return out
 
 
-def _eval(expr, off):
-    """Evaluate a cfg predicate with feature `off` false and every other true."""
-    e = expr.strip()
+def _op_of(e):
+    """(op, args) for an `all(..)`/`any(..)`/`not(..)` node, else (None, [])."""
     for op in ("all", "any", "not"):
         if e.startswith(op) and e[len(op) :].lstrip().startswith("("):
-            args = [a for a in _split_top(_cfg_body(e)) if a.strip()]
-            vals = [_eval(a, off) for a in args]
-            if op == "all":
-                return all(vals)
-            if op == "any":
-                return any(vals)
-            return not vals[0] if vals else True
+            return op, [a for a in _split_top(_cfg_body(e)) if a.strip()]
+    return None, []
+
+
+def _sat(expr, off, want=True):
+    """Can `expr` be `want` with feature `off` forced false and the rest free?
+
+    Necessity is a SATISFIABILITY question, not an evaluation. Evaluating with
+    "off false, everything else true" is wrong the moment a `not(..)` appears:
+    `all(not(transport-multilink), any(.., declare-final, ..))` is FALSE under
+    that assignment for EVERY feature, so every feature reads as necessary --
+    measured, and it credited declare-final with owning `session_send_available`,
+    which it merely OR-contributes to. Asking instead "is there any build where
+    this compiles WITHOUT X" gets the multilink-off arm right.
+
+    Features are treated as independent free variables; a cfg naming the same
+    feature both plainly and under `not(..)` would need a real solver, and none
+    in this tree does.
+    """
+    e = expr.strip()
+    op, args = _op_of(e)
+    if op == "not":
+        return _sat(args[0], off, not want) if args else want
+    if op == "all":
+        return all(_sat(a, off, True) for a in args) if want \
+            else any(_sat(a, off, False) for a in args)
+    if op == "any":
+        return any(_sat(a, off, True) for a in args) if want \
+            else all(_sat(a, off, False) for a in args)
     m = _FEAT.search(e)
     if m:
-        return m.group(1) != off
-    return True  # target_os, test, etc. -- not a feature axis; treat as satisfied
+        # `off` is pinned false; any other feature is free to take either value.
+        return (m.group(1) != off) if want else True
+    return want  # target_os, test, .. -- not a feature axis; satisfiable either way
 
 
 def _necessary_features(blob):
-    """The features X for which this cfg is FALSE when X is off. Derived."""
+    """The features X without which this cfg can never be true. Derived."""
     body = _cfg_body(blob)
     if not body:
         return set()
-    out = set()
-    for f in set(_FEAT.findall(body)):
-        if not _eval(body, f):
-            out.add(f)
-    return out
+    return {f for f in set(_FEAT.findall(body)) if not _sat(body, f, True)}
 
 
 def _rs_files(root="crates"):
