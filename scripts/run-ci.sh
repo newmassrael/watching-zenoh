@@ -5436,6 +5436,17 @@ layer_z_zenohd_interop() {
     # must run for either to mean anything -- do not filter one out.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_liveliness_history_zenohd_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y355 — session-reconnect, against a foreign router RESTARTED underneath a
+    # live wz session: wz subscribes to zenohd#1, zenohd#1 is killed, a fresh
+    # zenohd#2 respawns on the same port, and a pico put on a NEW keyexpr reaches wz
+    # only if the supervisor re-dialled and REPLAYED the subscription to that fresh
+    # router. This is the cross-impl half the wz-only session_reconnect_e2e cannot
+    # reach (it re-handshakes against a wz acceptor). A PAIR: the --reconnect arm
+    # resumes, the twin (no --reconnect) exits on link loss and never delivers the
+    # post-respawn put -- both must run or neither means anything. ~28s, verified
+    # stable across repeated local runs (zenohd restart on the same port).
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_reconnect_zenohd_pico_interop -- --ignored --quiet --test-threads=1) || return 1
     # R3b-2 — wz<->zenohd usrpwd AUTH interop. Needs ONLY zenohd (no
     # storage-manager plugin, no pico CLI): wz authenticates to a
     # mandatory-usrpwd zenohd (correct creds -> Established) and is rejected
