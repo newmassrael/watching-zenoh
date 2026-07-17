@@ -5625,6 +5625,14 @@ layer_e6b_adminspace_introspection() {
     fi
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_adminspace_to_pico_zget -- --ignored --quiet) || return 1
+    # R311y350 — locator-tcp's cross-impl witness rides THIS lane, not Layer E: it
+    # needs the same routing-peer + adminspace binary built above (Layer E builds the
+    # demo with default features, which reject `--peer`). The atom is the canonical
+    # `tcp/...` string wz RENDERS into `@/<zid>/peer` from a BARE addr -- a foreign
+    # peer reads it, which is what killed R311y348's proposal to exclude the 8
+    # locator-* atoms from the A4 denominator as non-observable.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_locator_render_to_pico_zget -- --ignored --quiet) || return 1
 }
 
 # ─── Layer E6c — transport-multilink: demo-binary N-link aggregation E2E ───────

@@ -56,10 +56,20 @@ use wz_integration_tests::common::{
     Z_SUB_INIT_TIMEOUT,
 };
 
+// The `wz_peer_` prefix on BOTH the file and the fn is load-bearing, not cosmetic:
+// Layer E's sweep filters by test NAME (`--skip wz_peer`), and it builds wz-ap-demo
+// with DEFAULT features -- which reject `--peer`. Named anything else, this test is
+// swept into Layer E, run against a demo that cannot serve it, and fails there.
+// R311y350 learned that from the pre-push gate.
+//
+// This block sits ABOVE `#[test]` and not between it and `#[ignore]`, which is where
+// R311y350 first put it: Layer C0 requires the two attributes be ADJACENT, and an
+// insertion that reads harmlessly is exactly how an attribute gets stranded.
+//
 // wz-proves: locator-tcp wz->pico
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,adminspace-introspection-handlers + zenoh-pico z_get CLI); Layer E6b runs via --ignored"]
-fn pico_zget_decodes_the_canonical_tcp_locator_wz_rendered_from_a_bare_addr() {
+fn wz_peer_locator_render_decoded_by_pico_z_get() {
     let demo = wz_ap_demo_binary();
     let z_get = zenoh_pico_cli_binary("z_get");
     let port_res = PortReservation::pick();
