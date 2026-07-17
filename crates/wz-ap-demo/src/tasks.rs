@@ -194,6 +194,19 @@ where
 /// R255 — deadline math also migrated to u64 ms (option (b) from
 /// R254 carry); `std::time::Instant` is no longer referenced in this
 /// function.
+/// R311y345 — `--publish-after-ms`: hold the burst for `<ms>` AFTER Established,
+/// leaving the session deliberately IDLE. It exists so a foreign peer can
+/// witness `transport-keepalive`: a zenoh peer expires a silent line after the
+/// adopted lease, so a Push that still lands beyond it proves wz's KeepAlive
+/// held the session open — and the peer's own lease timer, not any wz assertion,
+/// is the thing that would have failed. No other demo knob can produce that
+/// ordering: the default burst fires immediately (5 x 200ms) and `--reconnect`'s
+/// long-lived mode publishes on a cadence, so neither is ever idle.
+///
+/// Deliberately NOT cfg-gated on `transport-keepalive`. It is a pure ordering
+/// delay -- inert when the feature is off, and it MUST stay inert, because the
+/// keepalive-OFF build is exactly the anti-vacuity arm the proof rests on: it
+/// has to reach the same code path and lose the session.
 pub(crate) async fn publisher_task<T>(
     session: TokioSession,
     keyexpr: String,
@@ -201,6 +214,7 @@ pub(crate) async fn publisher_task<T>(
     declare_id: Option<u64>,
     clock: T,
     long_lived: bool,
+    publish_after_ms: Option<u64>,
 ) where
     T: TimeSource + Send + 'static,
 {
@@ -249,6 +263,19 @@ pub(crate) async fn publisher_task<T>(
             return;
         }
         clock.sleep(PUBLISHER_HANDSHAKE_POLL_INTERVAL_MS).await;
+    }
+    // R311y345 — the deliberate idle window. It sits AFTER the Established gate
+    // and BEFORE the burst, so the line is silent for exactly `<ms>` while both
+    // peers' lease timers run. The log line is the test's observation point for
+    // "the idle actually happened" -- without it a burst that fired early would
+    // still look like a pass.
+    if let Some(ms) = publish_after_ms {
+        log::info!(
+            "wz-ap-demo: publisher_task holding the burst {ms}ms after Established \
+             (--publish-after-ms); the session is idle for this window"
+        );
+        clock.sleep(ms).await;
+        log::info!("wz-ap-demo: publisher_task idle window elapsed; emitting now");
     }
     match &operation {
         PushOperation::Put { value } => log::info!(

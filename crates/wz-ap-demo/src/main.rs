@@ -97,8 +97,8 @@ mod teardown;
 mod usage;
 
 use crate::args::{
-    parse_pair, DeclareEmitSpec, PushOperation, QueryRoleSpec, RemoteLogSpec, ReplyConsumerSpec,
-    Role,
+    parse_pair, DeclareEmitSpec, PublisherSpec, PushOperation, QueryRoleSpec, RemoteLogSpec,
+    ReplyConsumerSpec, Role,
 };
 use crate::runner::run_demo;
 use crate::usage::{print_usage, ABOUT};
@@ -658,14 +658,36 @@ fn main() -> ExitCode {
     // R219 — publisher_spec carries both Put and Delete modes through
     // a single channel into publisher_task. Put requires --value
     // (validated above); Delete carries no payload.
-    let publisher_spec: Option<(String, PushOperation, Option<u64>)> =
-        match (publish_opt, value_opt, delete_opt) {
-            (Some(k), Some(v), None) => {
-                Some((k, PushOperation::Put { value: v }, declare_id_parsed))
+    // R311y345 — `--publish-after-ms <ms>` holds the burst that long after
+    // Established, leaving the line idle. A malformed value is a hard error
+    // rather than a silent None: an ordering knob that quietly does nothing
+    // would turn the keepalive proof vacuous (the burst would fire at t=0 and
+    // the lease window it exists to cross would never open).
+    let publish_after_ms: Option<u64> = match parse_pair(rest, "--publish-after-ms") {
+        Some(s) => match s.trim().parse::<u64>() {
+            Ok(ms) => Some(ms),
+            Err(_) => {
+                eprintln!("wz-ap-demo: --publish-after-ms expects milliseconds, got '{s}'");
+                return ExitCode::from(2);
             }
-            (None, None, Some(k)) => Some((k, PushOperation::Delete, declare_id_parsed)),
-            _ => None,
-        };
+        },
+        None => None,
+    };
+    let publisher_spec: Option<PublisherSpec> = match (publish_opt, value_opt, delete_opt) {
+        (Some(k), Some(v), None) => Some(PublisherSpec {
+            keyexpr: k,
+            operation: PushOperation::Put { value: v },
+            declare_id: declare_id_parsed,
+            publish_after_ms,
+        }),
+        (None, None, Some(k)) => Some(PublisherSpec {
+            keyexpr: k,
+            operation: PushOperation::Delete,
+            declare_id: declare_id_parsed,
+            publish_after_ms,
+        }),
+        _ => None,
+    };
     let queryable_spec: Option<(String, String)> = match (queryable_opt, reply_opt) {
         (Some(p), Some(r)) => Some((p, r)),
         _ => None,
@@ -690,7 +712,16 @@ fn main() -> ExitCode {
     if let Some(k) = &key_opt {
         log::info!("key     = {k}");
     }
-    if let Some((k, op, id)) = &publisher_spec {
+    if let Some(PublisherSpec {
+        keyexpr: k,
+        operation: op,
+        declare_id: id,
+        publish_after_ms: after,
+    }) = &publisher_spec
+    {
+        if let Some(ms) = after {
+            log::info!("publish-after = {ms}ms (burst held; session idle for this window)");
+        }
         match op {
             PushOperation::Put { value } => {
                 log::info!("publish = {k}");

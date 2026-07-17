@@ -198,6 +198,27 @@ pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
     }
 }
 
+/// R311y345 — the publisher's `--publish` bundle. Was a bare
+/// `(String, PushOperation, Option<u64>)` tuple threaded through `run_demo` and
+/// `spawn_tasks`; `--publish-after-ms` would have made it a second consecutive
+/// `Option<u64>`, distinguishable only by position at every call site. Named
+/// per the sibling idiom here ([`DeclareEmitSpec`], [`QueryRoleSpec`],
+/// [`RemoteLogSpec`], [`ReplyConsumerSpec`]) instead.
+pub(crate) struct PublisherSpec {
+    /// `--publish <keyexpr>` — the literal the burst emits on.
+    pub(crate) keyexpr: String,
+    /// `--value <text>` (Put) or `--delete` (Del).
+    pub(crate) operation: PushOperation,
+    /// `--declare-id <id>` — when set, a DeclKexpr preamble maps `id -> keyexpr`
+    /// and the burst emits aliased Pushes carrying only the id.
+    pub(crate) declare_id: Option<u64>,
+    /// `--publish-after-ms <ms>` — hold the burst this long AFTER Established,
+    /// leaving the line idle. The ordering a foreign peer needs to witness
+    /// `transport-keepalive`: past the adopted lease, a peer expires a silent
+    /// line, so a Push that still lands proves the KeepAlive held it open.
+    pub(crate) publish_after_ms: Option<u64>,
+}
+
 /// R121k-5 / R311oy — bundle of declare-emit keyexprs the demo emits once the
 /// session reaches Established. Holds `--declare-token` (the high-level
 /// [`wz::runtime_tokio::session::Session::declare_token`] RAII liveliness

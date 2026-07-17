@@ -84,7 +84,7 @@ use wz::runtime_tokio::session_open::{
 use wz::runtime_tokio::sync::Mutex;
 
 use crate::args::{
-    demo_session_init_params, DeclareEmitSpec, PushOperation, QueryRoleSpec, RemoteLogSpec,
+    demo_session_init_params, DeclareEmitSpec, PublisherSpec, QueryRoleSpec, RemoteLogSpec,
     ReplyConsumerSpec, Role,
 };
 use crate::shutdown::shutdown_signal;
@@ -518,21 +518,22 @@ fn install_session_handles(
 fn spawn_background_tasks(
     session: &TokioSession,
     actions: &Arc<SessionLinkActions>,
-    publisher_spec: Option<(String, PushOperation, Option<u64>)>,
+    publisher_spec: Option<PublisherSpec>,
     query_spec: Option<String>,
     liveliness_get_spec: Option<String>,
     session_clock: TokioTime,
     long_lived: bool,
 ) -> SpawnedTasks {
-    let publisher_handle = publisher_spec.map(|(keyexpr, operation, declare_id)| {
+    let publisher_handle = publisher_spec.map(|spec| {
         let session_for_publisher = session.clone();
         TokioRuntime.spawn(publisher_task(
             session_for_publisher,
-            keyexpr,
-            operation,
-            declare_id,
+            spec.keyexpr,
+            spec.operation,
+            spec.declare_id,
             session_clock,
             long_lived,
+            spec.publish_after_ms,
         ))
     });
 
@@ -641,7 +642,7 @@ async fn race_against_shutdown<O>(
 pub(crate) async fn run_demo(
     role: Role,
     key: Option<String>,
-    publisher_spec: Option<(String, PushOperation, Option<u64>)>,
+    publisher_spec: Option<PublisherSpec>,
     query_role_spec: QueryRoleSpec,
     declare_spec: DeclareEmitSpec,
     remote_log_spec: RemoteLogSpec,
