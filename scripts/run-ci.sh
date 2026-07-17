@@ -5428,6 +5428,14 @@ layer_z_zenohd_interop() {
     fi
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_liveliness_get_zenohd_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y354 — liveliness-history, same topology and same reason as the get above:
+    # a history replay IS an Interest answer, and pico never answers one on unicast.
+    # This file is a PAIR (history on / history off against an identical fixture) and
+    # the twin is load-bearing: `LIVELINESS SAMPLE PUT` is what any token logs, so the
+    # positive arm alone would not show the replay was caused by `history`. Both arms
+    # must run for either to mean anything -- do not filter one out.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_liveliness_history_zenohd_pico_interop -- --ignored --quiet --test-threads=1) || return 1
     # R3b-2 — wz<->zenohd usrpwd AUTH interop. Needs ONLY zenohd (no
     # storage-manager plugin, no pico CLI): wz authenticates to a
     # mandatory-usrpwd zenohd (correct creds -> Established) and is rejected
