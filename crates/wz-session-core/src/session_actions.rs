@@ -158,9 +158,9 @@ use crate::declare::local_token::{build_final_reply, build_token_reply};
 // codec, since a codec can be on while every method that calls the module is
 // gated off (e.g. `liveliness-token` pulls `codec-declare` but uses none of
 // the `declare_build` action builders).
-// R311y350 — `declare-final` LEFT this list when R311y349 deleted
-// `send_declare_final`, which was the only thing in this file that reached
-// `declare_build` under that feature alone. The list names the features under
+// R311y350 — `declare-final` LEFT this list when R311y346 deleted
+// `send_declare_final` (138f842), which was the only thing in this file that
+// reached `declare_build` under that feature alone. The list names the features under
 // which the glob IS used; a feature that no longer does belongs out of it, or the
 // import is dead in exactly the subset the comment above predicts (C4c's
 // `liveliness-sub-only` = codec-declare + declare-interest + liveliness-subscriber
