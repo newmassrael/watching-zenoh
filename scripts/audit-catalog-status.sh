@@ -385,8 +385,14 @@ print("  atoms=%d active=%d declared-cargo-features=%d" % (len(atoms), active_n,
 # tally counts every TAGGED atom regardless of status (an active PARTIAL is
 # remaining work exactly as much as a reserved one).
 #
-# Why UNAUDITED is counted rather than failed: tagging the 132 active atoms is
-# a per-atom CODE READ, not a prose transcription. The reason prose is known to
+# Why UNAUDITED is counted rather than failed: tagging an active atom is a
+# per-atom CODE READ, not a prose transcription. (R311y346 -- this sentence used
+# to name a hardcoded "132 active atoms" written at R311y299. The live count is
+# printed by the roll-up below and had already drifted to 130 by the time anyone
+# re-derived it. An ungated census rots exactly like the ungated line number
+# :527 warns about, and it rotted HERE, in the file that carries the warning.
+# The count is deleted rather than corrected: the roll-up prints it with %d, so
+# a second copy is a second thing to rot.) The reason prose is known to
 # rot in BOTH directions -- storage-aligner's says "driver A8 + facade forward
 # A9 pending" against a live 1178-line driver and a shipped facade forward
 # (understates); keyexpr-includes' said "no internal consumer yet" while its
@@ -409,21 +415,27 @@ print("  atoms=%d active=%d declared-cargo-features=%d" % (len(atoms), active_n,
 # UNAUDITED hits 0, promote the active arm to fail_untagged (one-line change)
 # and the bound becomes exact.
 #
-# R311y302 -- one part of UNAUDITED is BLOCKED, not merely pending, and the
-# blocker is a missing reference rather than missing effort. The §5.11-storage
-# and §5.24-storage-backend atoms (14 modules across wz-session-core and
-# wz-runtime-tokio) anchor their design to zenoh's
-# `zenoh-plugin-storage-manager` and `zenoh-backend-traits`. Neither is a cargo
-# dependency of anything, so no build provisions them, and they are typically
-# absent from a dev machine's cargo caches. Those atoms therefore cannot be
-# graded against the upstream they mirror without a deliberate checkout of the
-# zenoh `plugins/` tree, and CLAUDE.md forbids asserting zenoh state from
-# memory. They stay UNAUDITED until the reference is provisioned -- which is the
-# honest state, and exactly what this counter exists to show. §5.12-codec, by
-# contrast, anchors to zenoh's CORE crates (registry-provisioned by any build)
-# and to the in-repo vendored zenoh-pico, so it was gradable and is done. (Exact
-# reference-source paths are machine-local and live in CLAUDE.md's External
-# references section, not hardcoded here.)
+# R311y302 wrote a storage BLOCKER here: the §5.11-storage / §5.24-storage-backend
+# atoms anchor to zenoh's `zenoh-plugin-storage-manager` + `zenoh-backend-traits`,
+# neither is a cargo dependency of anything, so no build provisions them, and
+# CLAUDE.md forbids asserting zenoh state from memory -- therefore "they stay
+# UNAUDITED until the reference is provisioned".
+#
+# R311y346 -- THAT BLOCKER IS DEAD, and this was its LAST surviving copy. The
+# checkout landed (a deliberate clone of the zenoh `plugins/` tree at the pinned
+# 1.5.0; the path is machine-local, so it lives in agent memory / a local note,
+# never here -- R311y302's own rule, and the one this file kept). R311y340 killed
+# the claim; it survived here because a multi-line `# ` comment defeats the
+# line-grep that closed the other copies. Two lessons, both already this repo's:
+# a retraction lands where you LOOK, so close a claim by grepping its FAMILY
+# before the edit -- and a blocker note is a CLAIM, so run the blocked command
+# before believing it. This one was quoted for ~38 rounds after the directory was
+# already there.
+#
+# So §5.11 / §5.24 are GRADABLE now and their UNAUDITED rows are ordinary pending
+# work, not a blocked class. §5.12-codec, by contrast, anchors to zenoh's CORE
+# crates (registry-provisioned by any build) and to the in-repo vendored
+# zenoh-pico, so it was gradable all along and is done.
 tally = {}
 for a in atoms:
     t = impl_tag(a)

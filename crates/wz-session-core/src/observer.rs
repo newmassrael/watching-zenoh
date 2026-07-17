@@ -316,7 +316,7 @@ pub struct ApplicationLayerObserver {
     /// (`Declare(DeclToken)` + `Declare(DeclFinal)`). Populated by
     /// `local_tokens` during the fan phase (the `alloc` inbound-parse
     /// path), drained through the borrowed
-    /// `ResponseSink::send_declare_token` / `send_declare_final` seam
+    /// `ResponseSink::send_declare_token_reply` / `send_declare_final_reply` seam
     /// during [`Self::flush_pending`]. Gated on `liveliness-token`
     /// (unlike the unconditional reply buffers) because only the declarer
     /// registry — itself feature-gated — ever stages into it. R311hn
