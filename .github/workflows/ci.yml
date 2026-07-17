@@ -430,10 +430,111 @@ jobs:
         # wz<->wz, no external runner like E3/E4.
         run: bash scripts/run-ci.sh --layer E5
 
+  # ─────────────────────────────────────────────────────────────────
+  # R311y351 — the CODEC-FOOTPRINT job. Layer F ran as the `ci` job's last
+  # step from R311pt until run 29571213015 killed that job at 30m03s INSIDE
+  # Layer F. Every gate through E5 passed; no wz gate failed. Same shape as
+  # the y296 disk overflow, on the other ceiling.
+  #
+  # THE MEASUREMENT THAT MOVED IT, not the timeout itself: Layer F is 12.9min
+  # of a 28.5min job — 45% — and it is STABLE at that (12.87 / 12.88 / 13.00
+  # across the three prior green runs). The `ci` job was therefore carrying
+  # 28.5min against a 30min cap: ~5% headroom.
+  #
+  # AND THE OVERRUN IS NOT CODE GROWTH — the first diagnosis, and it was
+  # wrong. Against the last green run the +2.18min is spread evenly over
+  # EVERY step, including steps whose input is pinned and did not change
+  # (`Build sce-codegen` +17% on a pinned vendor/sce; cache restore 16s->44s).
+  # That is runner variance, and at 5% headroom variance alone decides the
+  # run. The job did not break on y350; it had been a coin flip for some
+  # rounds and y350 is when the coin landed. Nothing reported the margin —
+  # exactly what ci.yml:84-86 predicted in y297 and left standing.
+  #
+  # WHY SPLIT RATHER THAN RAISE `timeout-minutes`. A bigger number buys one
+  # atom's worth of time and re-arms the same failure: the cost grows
+  # monotonically in atom count (each new atom is another exclusion lane
+  # here, and another subset lane there). Splitting changes the SLOPE — F's
+  # growth is now charged to its own budget, not to the gate every other
+  # layer shares. The precedent is this file's own `interop` job, split off
+  # for the identical stated reason: it "must not eat the primary job's
+  # 30-minute budget".
+  #
+  # WHAT THIS JOB NEEDS, and it is much less than `ci`: measure-codec-
+  # footprint.sh is git + cargo + python3, and wz-ap-demo's only dependency
+  # is the wz facade. So no protoc, no mnemosyne-cli, no sce-codegen build,
+  # no python3-yaml, no zenoh-pico CLI. The prep is kept otherwise identical
+  # to `ci`'s rather than trimmed further: an over-provisioned job costs
+  # ~2min in parallel, an under-provisioned one costs the fix-and-repush
+  # series that ci-yaml-local-verify names as the anti-pattern.
+  #
+  # A SECOND CEILING MOVES WITH IT, unasked: each lane builds a full
+  # wz-ap-demo into its own `target/measure-codec-footprint/<lane>` — a path
+  # rust-cache's `crates -> target` does not cover, so none of it is cached
+  # and all of it is disk. That load now leaves the job that overflowed on
+  # y296.
+  footprint:
+    name: codec-footprint catalog truthfulness (Layer F)
+    runs-on: ubuntu-22.04
+    # F alone is ~13min; the cap is the `ci` job's, deliberately — this job
+    # exists so the two budgets are independent, not so this one is generous.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (with submodules)
+        # `submodules: recursive` is LOAD-BEARING, not copied boilerplate:
+        # wz-ap-demo resolves through sce-build / sce-forge-runtime /
+        # sce-rust-runtime, which are path deps in vendor/sce. Without the
+        # submodule the build does not resolve. (Verified by `cargo tree -p
+        # wz-ap-demo --features wz/preset-ap-client`, not by reading manifests.)
+        #
+        # No `fetch-depth: 0` though: that is the `ci` job's, for its
+        # git-log-based commit<->ledger drift check. Layer F reads no history —
+        # only `git rev-parse --show-toplevel`, which a shallow clone answers.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        # Mirrors `ci`'s list EXACTLY, perl included. Not trimmed to what the
+        # dep tree appears to need: `wz-ap-demo`'s manifest lists only the `wz`
+        # facade, but its resolved tree pulls bindgen (libclang), libxml, and
+        # the vendor/sce crates — a direct-dependency read says "needs nothing"
+        # and is wrong. The prep is cheap and parallel; guessing it down is how
+        # the fix-and-repush series starts.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            libclang-dev \
+            clang \
+            perl
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        # The pin is the SSOT for channel + components + targets — see the
+        # `ci` job's step of the same name. It matters MORE here than there:
+        # a floating compiler moves codegen size, and this job is the one
+        # that gates on bytes (y267's ~20-push red streak).
+        run: rustup show
+
+      - name: Cache Cargo registry (NOT this job's build tree — see below)
+        # The REGISTRY half is what this buys: Layer F's lanes resolve the same
+        # dependency graph every run. The build half it does not, and the name
+        # says so deliberately — `workspaces: crates -> target` covers
+        # `crates/target`, while every Layer F lane builds into
+        # `target/measure-codec-footprint/<lane>`. So this job's ~13min is a
+        # COLD number and stays one; the split, not a cache, is what bought the
+        # headroom. Caching that tree is a separate question with its own risk
+        # (this is the gate that measures bytes) and is not bundled in here.
+        # Distinct `key` for the same reason `interop` carries one: a shared key
+        # across jobs with different build sets thrashes.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates -> target
+          key: footprint
+
       - name: Layer F — codec-footprint catalog truthfulness gate
-        # R311pt — F is host-only (python3 + cargo; no cross-toolchain),
-        # so it runs on the primary runner. Default-on in run-ci.sh now,
-        # but CI invokes it by name to keep this job's lane list explicit.
+        # R311pt — F is host-only (python3 + cargo; no cross-toolchain).
+        # Default-on in run-ci.sh; CI invokes it by name to keep the lane
+        # list explicit.
         run: bash scripts/run-ci.sh --layer F
 
   # ─────────────────────────────────────────────────────────────────
