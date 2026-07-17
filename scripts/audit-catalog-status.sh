@@ -346,6 +346,18 @@ for atom in sorted(atoms):
 sys.path.insert(0, "scripts/lib")
 import atom_test_graph  # noqa: E402
 
+# R311y344 — the derivation guards ITSELF, here, before this gate trusts a single
+# one of its answers. R311y343 shipped this module calibrated ("47 of 47 COMPLETE
+# pass") and the calibration was true, but a gate that only ever passes cannot
+# tell a correct derivation from a broken one: FIVE distinct misattribution
+# classes were live and invisible in it (a cfg on an enum variant, on a struct
+# variant, on an inherent `impl`, on a trait `impl`, and `const fn` parsed as a
+# `const` named `fn`), and they were found by MEASURING the output, not by
+# re-reading the code. The fixtures pair every defect with the twin arm that must
+# survive its fix, and they run on every A3 lane -- a guard that only runs when
+# someone remembers to run it is the skip-is-green defect one level up.
+fail_selftest = atom_test_graph._selftest()
+
 _atg = atom_test_graph.graph()
 fail_untested_complete = []
 for _a in sorted(atoms):
@@ -478,6 +490,15 @@ if fail_tag_status:
     for a, tag, status in fail_tag_status:
         print("    - %s  tag=%s is legal on {%s}, but status=%s"
               % (a, tag, ", ".join(sorted(IMPL_TAGS[tag])), status))
+
+if fail_selftest:
+    ok = False
+    print("FAIL: atom_test_graph self-check: %d" % len(fail_selftest))
+    for _f in fail_selftest:
+        print("    - %s" % _f)
+    print("      The atom <-> test derivation is broken, so every answer below it")
+    print("      is unsafe -- including the COMPLETE tags it admits. Fix the")
+    print("      derivation (scripts/lib/atom_test_graph.py); do not retag.")
 
 if fail_untested_complete:
     ok = False
