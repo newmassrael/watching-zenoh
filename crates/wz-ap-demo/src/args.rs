@@ -58,6 +58,13 @@ pub(crate) enum Role {
         /// runtime's typed `Unsupported`. Read only by the one-shot
         /// `establish_link` (runner.rs).
         quic_ca: Option<String>,
+        /// R311y369 — the `--namespace <prefix>` keyexpr namespace an Initiator
+        /// installs on its opened session (`set_namespace`), so outbound keyexprs
+        /// are prefixed `<prefix>/<key>` on the wire. Feature-uniform (always
+        /// parsed); `None` without `--namespace` OR when built without the
+        /// `namespace` feature, in which case the flag is inert. Applied once, on
+        /// the one-shot open (runner.rs; reconnect is out of demo scope).
+        namespace: Option<String>,
     },
 }
 

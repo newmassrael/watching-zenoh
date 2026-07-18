@@ -172,6 +172,15 @@ tls = ["wz/locator-tls"]
 # `DialConfig::with_quic` — the cert-plumbing the quic cross-impl legs 14/15 dial
 # against zenohd's `quic/` listener with (zenoh-pico dials TCP; zenohd routes).
 quic = ["wz/locator-quic"]
+# R311y369 — opt-in namespace prefixing (`--namespace <prefix>`), forwarding the
+# wz facade's `routing-namespace`. The mirror of `ws`/`tls`/`quic`: NOT in
+# `default` (preset-ap-client omits it), so the footprint baseline and every
+# other lane build are unchanged; only run-ci Layer Z builds wz-ap-demo with it.
+# It enables the `--namespace <prefix>` CLI that installs `set_namespace` on the
+# opened client session, so outbound keyexprs are prefixed `<prefix>/<key>` on
+# the wire — the plumbing the routing-namespace cross-impl leg 18 exercises
+# against a zenohd router + a zenoh-pico `<prefix>/**` subscriber.
+namespace = ["wz/routing-namespace"]
 # R311qa — opt-in multi-peer ROUTER mode (`--router <addr>`): the catalog
 # `routing-router` atom's foundation (bind once, hold N concurrent peer faces,
 # no forwarding yet). Forwards the wz facade's `routing-router` marker feature,

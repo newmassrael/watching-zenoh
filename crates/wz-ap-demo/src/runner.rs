@@ -880,6 +880,25 @@ pub(crate) async fn run_demo(
                 }
             }
             .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))?;
+            // R311y369 — an Initiator with `--namespace <prefix>` installs the
+            // keyexpr namespace on the freshly-opened session, so every outbound
+            // publish keyexpr is prefixed `<prefix>/<key>` on the wire. Applied
+            // ONLY on the one-shot open (reconnect is out of demo scope, like the
+            // cert dial config); the field is feature-uniform, only its USE is
+            // gated on the `namespace` feature.
+            #[cfg(feature = "namespace")]
+            if let Role::Initiator {
+                namespace: Some(ns),
+                ..
+            } = &role
+            {
+                use wz::runtime_tokio::keyexpr_prefix::OwnedNonWildKeyExpr;
+                let prefix = OwnedNonWildKeyExpr::new(ns).map_err(|e| {
+                    io::Error::other(format!("wz-ap-demo: invalid --namespace {ns:?}: {e:?}"))
+                })?;
+                opened.actions.set_namespace(prefix);
+                log::info!("wz-ap-demo: namespace '{ns}' installed (outbound keyexprs prefixed)");
+            }
             log::info!("wz-ap-demo: session Established; entering steady state");
             DriveSource::OneShot(Box::new(opened))
         }

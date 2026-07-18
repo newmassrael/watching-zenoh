@@ -2057,3 +2057,115 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_udp() {
          --- captured wz-ap-demo stderr ---\n{demo_captured}"
     );
 }
+
+/// leg 18 (R311y369) — wz publishes with a keyexpr NAMESPACE (`--namespace myns`)
+/// and the Put routes through zenohd to a zenoh-pico `z_sub` on `myns/**`: the
+/// namespace-prefixing cross-impl. The wz app publishes the BARE keyexpr `data`,
+/// but wz's routing-namespace egress prefixes it to `myns/data` ON THE WIRE
+/// (`set_namespace` -> `namespace::apply_egress`, transport.rs), so a pico
+/// subscriber on `myns/**` receives `myns/data`. The received keyexpr `myns/data`
+/// (NOT the bare `data` the app published) is the load-bearing witness that the
+/// prefix was applied on the wire; a publish WITHOUT `--namespace` would land on
+/// bare `data`, unmatched by `myns/**`, and never reach this subscriber (the RED).
+/// Mirrors [`wz_publish_routes_through_zenohd_to_pico_zsub`] (leg 2) with a
+/// namespace installed on the wz client.
+// wz-proves: routing-namespace wz->zenohd
+// wz-proves: routing-namespace wz->pico
+// wz-proves: codec-push wz->zenohd
+// wz-proves: pubsub-put wz->zenohd
+// wz-proves: pubsub-put wz->pico
+#[test]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_namespaced_publish_routes_through_zenohd_to_pico_zsub() {
+    let demo = wz_ap_demo_binary();
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+    let port_res = PortReservation::pick();
+    let port = port_res.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    // The app publishes the BARE keyexpr; --namespace prefixes it on the wire.
+    let publish_key = "data";
+    let namespace = "myns";
+    let sub_key = "myns/**";
+    let wire_key = "myns/data";
+    let publish_value = "hello-from-wz-namespaced";
+
+    let mut zenohd = spawn_zenohd(port, || {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    drop(port_res);
+
+    // ── pico z_sub on the NAMESPACED keyexpr: it only receives if wz's egress
+    //    prefixed the bare `data` to `myns/data` on the wire.
+    let (mut z_sub_child, mut z_sub_stdout_reader) =
+        spawn_subscribed_zsub(&z_sub, sub_key, &endpoint, "zenohd", || {
+            tempfile::tempfile().expect("tempfile for z_sub stdout")
+        });
+
+    // ── wz-ap-demo: a client of zenohd that publishes the BARE key `data` under
+    //    `--namespace myns`, so the wire keyexpr is `myns/data`.
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect zenohd --namespace --publish)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--namespace")
+            .arg(namespace)
+            .arg("--publish")
+            .arg(publish_key)
+            .arg("--value")
+            .arg(publish_value)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect zenohd --namespace"),
+    );
+
+    let received_substr = ">> [Subscriber] Received";
+    let received = wait_for_substring(
+        &mut z_sub_stdout_reader,
+        received_substr,
+        Duration::from_secs(10),
+    );
+
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = z_sub_child.child_mut().kill();
+    let _ = z_sub_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    let z_sub_captured = read_captured(&mut z_sub_stdout_reader);
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+    eprintln!("--- captured z_sub stdout ---\n{z_sub_captured}");
+
+    let received_text = match received {
+        Ok(c) => c,
+        Err(c) => panic!(
+            "z_sub on '{sub_key}' did not log '{received_substr}' within 10s — wz's \
+             namespaced Put did not route to the '{sub_key}' subscriber. Without the \
+             namespace prefix the wire keyexpr would be bare '{publish_key}' \
+             (unmatched by '{sub_key}').\n--- captured z_sub stdout at deadline ---\n{c}\n\
+             --- captured wz-ap-demo stderr ---\n{demo_captured}"
+        ),
+    };
+    // Load-bearing witness: the received keyexpr is the PREFIXED wire key
+    // `myns/data`, not the bare `data` the app published -- so routing-namespace
+    // applied the prefix on the wire (a non-namespaced publish lands on `data`,
+    // unmatched by `myns/**`, and never reaches this subscriber).
+    assert!(
+        received_text.contains(wire_key),
+        "z_sub received but the namespaced wire keyexpr '{wire_key}' is missing \
+         (the routing-namespace prefix was not applied).\n{received_text}"
+    );
+    assert!(
+        received_text.contains(publish_value),
+        "z_sub received but the publish value '{publish_value}' is missing.\n{received_text}"
+    );
+}

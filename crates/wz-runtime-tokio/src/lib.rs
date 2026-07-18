@@ -148,6 +148,13 @@ pub use wz_session_core::keyexpr_canon;
 // `reply ⊆ query` contract the way zenoh-pico does
 // (`_z_declared_keyexpr_intersects`, `~/zenoh-pico/src/net/primitives.c:438`).
 pub use wz_session_core::keyexpr_match;
+/// R311y369 — re-exported for the `--namespace` demo affordance
+/// (`OwnedNonWildKeyExpr`). The `keyexpr_prefix` module is `keyexpr-prefix`-gated
+/// in wz-session-core, which `routing-namespace` pulls in, so the re-export
+/// carries the same gate (an ungated re-export fails to resolve in a build
+/// without `routing-namespace`).
+#[cfg(feature = "routing-namespace")]
+pub use wz_session_core::keyexpr_prefix;
 
 /// R223 — zenoh-style locality filter for subscribers and queryables.
 /// Mirrors zenoh-pico's `z_locality_t` enum and the

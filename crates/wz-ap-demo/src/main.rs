@@ -448,6 +448,8 @@ fn main() -> ExitCode {
             // R311y366 — root-CA PEM path for a `quic/...` --connect (QUIC sibling
             // of --tls-ca; verified against server name `localhost`).
             quic_ca: parse_pair(rest, "--quic-ca"),
+            // R311y369 — keyexpr namespace prefix for outbound publishes.
+            namespace: parse_pair(rest, "--namespace"),
         },
         (Some(_), Some(_)) => {
             eprintln!("wz-ap-demo: --listen and --connect are mutually exclusive");
@@ -769,6 +771,7 @@ fn main() -> ExitCode {
             reconnect,
             tls_ca,
             quic_ca,
+            namespace,
         } => {
             log::info!("connect = {connect}");
             if *reconnect {
@@ -779,6 +782,9 @@ fn main() -> ExitCode {
             }
             if let Some(ca) = quic_ca {
                 log::info!("quic-ca = {ca} (quic/ dial verifies server name localhost)");
+            }
+            if let Some(ns) = namespace {
+                log::info!("namespace = {ns} (outbound keyexprs prefixed {ns}/<key>)");
             }
         }
     }

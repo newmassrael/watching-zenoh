@@ -5380,7 +5380,11 @@ layer_z_zenohd_interop() {
     # the `--quic-ca <path>` cert affordance so the QUIC cross-impl legs 14/15 dial
     # `--connect quic/127.0.0.1:port --quic-ca <cert>` against zenohd's `quic/`
     # listener; every TCP/WS/unixsock/tls leg dials through the unchanged binary.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,router-hat-router,routing-token-tables --quiet) || return 1
+    # `namespace` (R311y369) is additive too: it compiles the `--namespace <prefix>`
+    # CLI (routing-namespace) so leg 18 publishes a bare key under a namespace and
+    # a pico `<prefix>/**` z_sub receives the wire-prefixed keyexpr; every other leg
+    # (no --namespace) dials through the unchanged binary.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,router-hat-router,routing-token-tables,namespace --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients
