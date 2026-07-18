@@ -182,6 +182,16 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # coverage (the strip lib tests also run there), the same note the pins above
     # carry.
     "storage-mgr-strip-prefix",
+    # R311y361 (pico cross-impl leg) — the storage filesystem-backend serve
+    # interop e2e (tests/wz_storage_filesystem_serves_pico_zget.rs) declares an
+    # in-process wz StorageService over a FilesystemVolume rooted at a tempdir
+    # (volume_id `fs`), seeds a value (write-through to disk), and a foreign
+    # zenoh-pico z_get reads it back. FilesystemVolume/FilesystemStorage live in
+    # the `filesystem_storage` module, which is `#[cfg(feature =
+    # "storage-backend-filesystem")]` (lib.rs) and OPT-IN (never in default), so
+    # this pin is what compiles it in reach. Same additive-unification note as
+    # the storage-mgr-* pins above; the fs backend adds no third-party dep.
+    "storage-backend-filesystem",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
