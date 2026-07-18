@@ -88,8 +88,9 @@ use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
     read_captured, spawn_publishing_zpub, spawn_subscribed_zsub, spawn_zenohd,
-    spawn_zenohd_tcp_quic, spawn_zenohd_tcp_tls, spawn_zenohd_tcp_unixsock, spawn_zenohd_tcp_ws,
-    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
+    spawn_zenohd_tcp_quic, spawn_zenohd_tcp_tls, spawn_zenohd_tcp_udp, spawn_zenohd_tcp_unixsock,
+    spawn_zenohd_tcp_ws, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
+    PortReservation,
 };
 use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
@@ -1858,6 +1859,201 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_quic() {
         demo_captured.contains("over quic transport"),
         "leg 15 routed wz->zenohd->pico but did not witness a QUIC-transport dial \
          in wz-ap-demo stderr (expected 'over quic transport').\n\
+         --- captured wz-ap-demo stderr ---\n{demo_captured}"
+    );
+}
+
+/// leg 16 (R311y367) — wz reaches Established against zenohd over a `udp/`
+/// (unreliable DATAGRAM) link: the UDP-transport counterpart of leg 8 (ws) / leg
+/// 1 (tcp, handshake wire-parity). Deterministic (no peer-timing race, pico-free)
+/// — pins that wz's UDP transport (`udp_pipeline`, each zenoh batch = one
+/// datagram, DATAGRAM flow like ws, NOT the tcp/tls StreamEnvelope) completes the
+/// zenoh 4-way handshake against the reference router's `udp/` listener. wz dials
+/// with `--connect udp/127.0.0.1:{udp_port}` (UDP is in the demo DEFAULT
+/// preset-ap-client = transport-link-{tcp,udp}, so NO extra demo feature, unlike
+/// ws/tls/quic); zenohd also listens on `tcp/` for its readiness gate. This gives
+/// transport-link-udp its FIRST cross-impl (wz->zenohd) + hosted-CI witness (it
+/// was previously proven only wz<->wz, local-only). Mirrors
+/// [`wz_client_reaches_established_against_zenohd_over_ws`] one transport over.
+// wz-proves: transport-link-udp wz->zenohd
+// wz-proves: session-unicast-open wz->zenohd
+// wz-proves: codec-init-body wz->zenohd
+// wz-proves: codec-init-body zenohd->wz
+// wz-proves: codec-open-body wz->zenohd
+// wz-proves: codec-open-body zenohd->wz
+// wz-proves: transport-unicast wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (zenohd router, udp); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_client_reaches_established_against_zenohd_over_udp() {
+    let demo = wz_ap_demo_binary();
+    let (tcp_res, udp_port) = PortReservation::pick_pair();
+    let tcp_port = tcp_res.port();
+    let mut zenohd = spawn_zenohd_tcp_udp(tcp_port, udp_port, || {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    drop(tcp_res);
+
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect udp/zenohd --publish)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("udp/127.0.0.1:{udp_port}"))
+            .arg("--publish")
+            .arg("demo/zenohd")
+            .arg("--value")
+            .arg("udp-handshake-probe")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect udp/zenohd"),
+    );
+
+    let established = wait_for_substring(
+        &mut demo_stderr_reader,
+        "session Established",
+        Duration::from_secs(10),
+    );
+
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    if let Err(c) = &established {
+        panic!(
+            "wz-ap-demo did not log 'session Established' within 10s over udp — the \
+             wz<->zenohd UDP handshake regressed.\n--- captured wz-ap-demo stderr ---\n{c}"
+        );
+    }
+    // WITNESS the udp transport. The reserved `udp_port` carries a udp-only
+    // listener and `tcp_port` is a separate port, so a TCP dial could not reach
+    // Established here (structurally — no TCP fallback); but that is an INFERENCE.
+    // wz-ap-demo logs the dialed transport name, so this asserts the leg really
+    // opened a UDP link. A regression that quietly dialed TCP would drop
+    // "over udp transport".
+    assert!(
+        demo_captured.contains("over udp transport"),
+        "leg 16 reached Established but did not witness a UDP-transport dial in \
+         wz-ap-demo stderr (expected 'over udp transport').\n\
+         --- captured wz-ap-demo stderr ---\n{demo_captured}"
+    );
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+}
+
+/// leg 17 (R311y367) — wz's Put over a `udp/` link routes through zenohd to a
+/// zenoh-pico `z_sub` on TCP: the UDP-transport counterpart of leg 9 (ws) / leg 2
+/// (tcp, data-plane cross-impl). wz dials zenohd with
+/// `--connect udp/127.0.0.1:{udp_port}` (its UDP datagram transport), pico
+/// subscribes over `tcp/`, and zenohd routes wz's Put ACROSS the two link types.
+/// This pins wz's UDP data plane against the REFERENCE zenoh `udp/` link — wz
+/// publishes over datagrams, the reference router decodes them off its `udp/`
+/// listener and forwards to the pico TCP subscriber. The same Put-burst +
+/// retried-zsub shape as [`wz_publish_routes_through_zenohd_to_pico_zsub`], one
+/// transport over.
+// wz-proves: transport-link-udp wz->zenohd
+// wz-proves: codec-frame wz->zenohd
+// wz-proves: codec-push wz->zenohd
+// wz-proves: pubsub-put wz->zenohd
+// wz-proves: pubsub-put wz->pico
+// wz-proves: routing-client wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (zenohd router udp + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_publish_routes_through_zenohd_to_pico_zsub_over_udp() {
+    let demo = wz_ap_demo_binary();
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+    let (tcp_res, udp_port) = PortReservation::pick_pair();
+    let tcp_port = tcp_res.port();
+    let endpoint = format!("tcp/127.0.0.1:{tcp_port}");
+    let publish_key = "demo/zenohd";
+    let sub_key = "demo/**";
+    let publish_value = "hello-from-wz-over-udp";
+
+    let mut zenohd = spawn_zenohd_tcp_udp(tcp_port, udp_port, || {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    drop(tcp_res);
+
+    // ── pico z_sub: a TCP client of zenohd, subscribed and ready (retried past
+    //    any transient one-shot open). Its declared subscription is the route
+    //    zenohd uses to forward wz's UDP Put.
+    let (mut z_sub_child, mut z_sub_stdout_reader) =
+        spawn_subscribed_zsub(&z_sub, sub_key, &endpoint, "zenohd", || {
+            tempfile::tempfile().expect("tempfile for z_sub stdout")
+        });
+
+    // ── wz-ap-demo: a UDP DATAGRAM client of zenohd that emits a Put burst. The
+    //    burst (publisher_task) covers the window for z_sub's subscription to
+    //    reach zenohd; a Put landing after that propagation is routed to z_sub.
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect udp/zenohd --publish)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("udp/127.0.0.1:{udp_port}"))
+            .arg("--publish")
+            .arg(publish_key)
+            .arg("--value")
+            .arg(publish_value)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect udp/zenohd --publish"),
+    );
+
+    let received_substr = ">> [Subscriber] Received";
+    let received = wait_for_substring(
+        &mut z_sub_stdout_reader,
+        received_substr,
+        Duration::from_secs(10),
+    );
+
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = z_sub_child.child_mut().kill();
+    let _ = z_sub_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    let z_sub_captured = read_captured(&mut z_sub_stdout_reader);
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+    eprintln!("--- captured z_sub stdout ---\n{z_sub_captured}");
+
+    let received_text = match received {
+        Ok(c) => c,
+        Err(c) => panic!(
+            "z_sub did not log '{received_substr}' within 10s — wz's UDP Put did not route \
+             through zenohd to z_sub.\n--- captured z_sub stdout at deadline ---\n{c}\n\
+             --- captured wz-ap-demo stderr ---\n{demo_captured}"
+        ),
+    };
+    assert!(
+        received_text.contains(publish_key),
+        "z_sub received but the publish keyexpr '{publish_key}' is missing.\n{received_text}"
+    );
+    assert!(
+        received_text.contains(publish_value),
+        "z_sub received but the publish value '{publish_value}' is missing.\n{received_text}"
+    );
+    // WITNESS the udp transport. z_sub receiving proves the data plane routed, but
+    // not that wz's leg of it was UDP (vs a silent TCP dial); wz-ap-demo logs the
+    // dialed transport name, so assert it dialed `udp`.
+    assert!(
+        demo_captured.contains("over udp transport"),
+        "leg 17 routed wz->zenohd->pico but did not witness a UDP-transport dial \
+         in wz-ap-demo stderr (expected 'over udp transport').\n\
          --- captured wz-ap-demo stderr ---\n{demo_captured}"
     );
 }

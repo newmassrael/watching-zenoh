@@ -1112,6 +1112,40 @@ pub mod common {
         )
     }
 
+    /// R311y367 — the UDP counterpart of [`spawn_zenohd_tcp_ws`]: zenohd listens
+    /// on BOTH `tcp/` (pico's TCP link + the readiness gate) and `udp/` (the wz
+    /// datagram client). zenoh-pico dials TCP (its native udp link is
+    /// scouting/multicast-oriented here), wz dials the `udp/` listener, and zenohd
+    /// routes between its two listeners. UDP is a cert-free DATAGRAM transport
+    /// already in the demo default (preset-ap-client = transport-link-{tcp,udp}),
+    /// so unlike ws/tls/quic NO demo feature is needed.
+    ///
+    /// UNLIKE the ws/unixsock spawns, the readiness probe here dials `tcp/`, NOT
+    /// the `udp/` listener under test (the TLS-style discipline). A `udp/` probe
+    /// would open a SECOND wz->zenohd udp session that overlaps the test's udp
+    /// client (the probe's session lingers on zenohd past the probe process until
+    /// lease expiry), and two concurrent wz udp sessions on this loopback fail the
+    /// second one to `Terminal` — so the probe must not hold a udp session. The
+    /// `udp/` listener binds at startup like every `-l` listener, so a `tcp/`
+    /// readiness gate confirms it is up, and the test body itself is the direct
+    /// `udp/` handshake witness (leg 16). The probe drives a real wz `tcp/` client
+    /// to `Established`, closing the TCP-accept-vs-routing-ready gap.
+    pub fn spawn_zenohd_tcp_udp(
+        tcp_port: u16,
+        udp_port: u16,
+        mk_probe_stderr: impl FnMut() -> File,
+    ) -> ChildGuard {
+        spawn_zenohd_listeners(
+            &[
+                format!("tcp/127.0.0.1:{tcp_port}"),
+                format!("udp/127.0.0.1:{udp_port}"),
+            ],
+            tcp_port,
+            &format!("127.0.0.1:{tcp_port}"),
+            mk_probe_stderr,
+        )
+    }
+
     /// Spawn a zenohd router listening on BOTH `tcp/` (for pico TCP clients and
     /// the TCP-accept readiness gate) and `unixsock-stream/` (for a wz Unix-
     /// domain-socket client), and block until it is HANDSHAKE-ready. R311y364 —
