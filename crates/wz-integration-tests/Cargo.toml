@@ -192,6 +192,14 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # this pin is what compiles it in reach. Same additive-unification note as
     # the storage-mgr-* pins above; the fs backend adds no third-party dep.
     "storage-backend-filesystem",
+    # R311y362 (pico cross-impl leg) — the multi-storage-host serve interop e2e
+    # (tests/wz_storage_multi_host_serves_pico_zget.rs) hosts TWO named storages
+    # (a/** and b/**) on one session via RuntimeStorageManager::add_storage, and a
+    # foreign zenoh-pico z_get -k '**' gets a value back from BOTH. RuntimeStorage-
+    # Manager lives in the `storage_manager_service` module, gated
+    # `storage-mgr-multi-storage-host` (lib.rs:1128), opt-in. Same additive-
+    # unification note as the storage-* pins above.
+    "storage-mgr-multi-storage-host",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
