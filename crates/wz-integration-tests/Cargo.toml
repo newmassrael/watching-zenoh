@@ -169,6 +169,19 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # `no_std` + `http-send` mutually-exclusive compile_error). Copying an
     # unverifiable claim forward is how R311wq's wrong resolver=2 note survived.
     "scouting-static",
+    # R311y358 (pico cross-impl leg) — the storage strip-prefix capture interop
+    # e2e (tests/wz_storage_strip_prefix_pico_interop.rs) drives a foreign
+    # zenoh-pico `z_put home/kitchen/temp` into an IN-PROCESS wz StorageService
+    # configured with strip_prefix = Some("home/kitchen"), and asserts the sample
+    # stores under the STRIPPED key `temp` (not verbatim). The strip is applied in
+    # `declare_with_backend` -> `StorageState::with_strip_prefix` ONLY under this
+    # cfg gate (storage_service.rs:178); it is NOT in wz-runtime-tokio's default
+    # set, so this pin is what compiles the strip path in reach at all. Existing
+    # storage tests use strip_prefix = None (a passthrough), so enabling it does
+    # not change their behavior; under `cargo test --workspace` it is additive
+    # coverage (the strip lib tests also run there), the same note the pins above
+    # carry.
+    "storage-mgr-strip-prefix",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
