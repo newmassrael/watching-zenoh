@@ -821,6 +821,15 @@ pub struct RouterForwarder {
     /// and, when self is the route master, BRIDGED to the other mesh (C4,
     /// [`bridge_push_cross_mesh`](RouterForwarder::bridge_push_cross_mesh)).
     data_seen: Cell<usize>,
+    /// C4 double-delivery guard witness: the number of local-client deliveries a
+    /// NON-master router DEFERRED (block-3 master gate) — the peer/client-source
+    /// copy suppressed in favour of the master's bridged router-source copy. A
+    /// POSITIVE observable that self was non-master for a keyexpr its client
+    /// subscribes AND correctly deferred; the guard is otherwise E2E-invisible (a
+    /// correct guard delivers the client zero peer-source copies, same as a
+    /// black-hole — only the counter distinguishes "suppressed a duplicate" from
+    /// "never had one").
+    deferred_client_delivery: Cell<usize>,
     /// I3c loop-safety witnesses (mcast-ingress DR plane). `mcast_ingress_federated`
     /// / `_suppressed` count the two arms of the per-keyexpr DR gate at
     /// [`route_push`](Self::route_push): federated when this router is the group DR
@@ -974,6 +983,7 @@ impl RouterForwarder {
             timed_out: Cell::new(0),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
+            deferred_client_delivery: Cell::new(0),
             #[cfg(feature = "router-multicast-faces")]
             mcast_ingress_federated: Cell::new(0),
             #[cfg(feature = "router-multicast-faces")]
@@ -1044,6 +1054,16 @@ impl RouterForwarder {
     /// asserts on.
     pub fn data_seen(&self) -> usize {
         self.data_seen.get()
+    }
+
+    /// C4 double-delivery guard witness — the number of local-client deliveries a
+    /// NON-master router deferred (block-3 master gate). `> 0` proves self was
+    /// non-master for a keyexpr its client subscribes and SUPPRESSED the duplicate
+    /// peer/client-source copy (the master's bridged router-source copy is what
+    /// delivers, exactly once). The non-master-corner E2E asserts this positive
+    /// observable — a broken guard leaves it at 0 (and double-delivers the client).
+    pub fn deferred_client_delivery_seen(&self) -> usize {
+        self.deferred_client_delivery.get()
     }
 
     /// I3c — count of mcast-ingress Pushes this router FEDERATED into the mesh as
@@ -2971,6 +2991,15 @@ impl RouterForwarder {
         // it would then ALSO receive as the bridged router-source copy = a double
         // delivery). Single-router => master => unconditional, as before C4.
         if inbound_tier != FaceTier::Routers && !master {
+            // C4 double-delivery guard fired: a non-master router defers this
+            // peer/client-source client delivery (the master's bridged
+            // router-source copy delivers instead). Count it — but only when a
+            // client sub exists, so the witness reflects a delivery actually
+            // suppressed, not a vacuous defer on a router hosting no clients.
+            if !self.client_subs.borrow().is_empty() {
+                self.deferred_client_delivery
+                    .set(self.deferred_client_delivery.get() + 1);
+            }
             return;
         }
         if self.client_subs.borrow().is_empty() {

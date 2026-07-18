@@ -2356,6 +2356,11 @@ pub(crate) async fn run_router_hat(
     // `transport-qos`-gated) so the run-mode signature stays feature-stable — the
     // caller passes `false` when `transport-qos` is off.
     multicast_qos: bool,
+    // Optional `--zid <hex>` override: pin this router's routing zid instead of
+    // deriving it from the ephemeral listen port. The mesh MASTER election (HRW over
+    // shared_nodes) keys on zid, so a deterministic zid makes a federation e2e's
+    // master choice reproducible — a port-derived zid varies per run (flaky).
+    zid_override: Option<Vec<u8>>,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
     #[cfg(not(feature = "router-multicast-faces"))]
@@ -2437,12 +2442,17 @@ pub(crate) async fn run_router_hat(
     // A DISTINCT routing zid per node (the run_peer discipline), derived from the
     // listen port so the demo's zids never collide — the mesh graph keys on it.
     let port = local.port();
-    params.zid = vec![
-        (ROUTER_HAT_ZID_PREFIX >> 8) as u8,
-        (ROUTER_HAT_ZID_PREFIX & 0xff) as u8,
-        (port >> 8) as u8,
-        (port & 0xff) as u8,
-    ];
+    // An explicit `--zid` override WINS (deterministic mesh master election);
+    // otherwise derive a distinct zid from the listen port so the demo's zids never
+    // collide.
+    params.zid = zid_override.unwrap_or_else(|| {
+        vec![
+            (ROUTER_HAT_ZID_PREFIX >> 8) as u8,
+            (ROUTER_HAT_ZID_PREFIX & 0xff) as u8,
+            (port >> 8) as u8,
+            (port & 0xff) as u8,
+        ]
+    });
 
     // The dual-mesh router forwarder. Self is a WhatAmI::Router in BOTH meshes
     // (the ctor seeds both nets with Router); its zid is this node's own trusted
@@ -2671,6 +2681,7 @@ pub(crate) async fn run_router_hat(
     let mut last_announced_routers = 1usize;
     let mut last_data_seen = 0usize;
     let mut last_queries_seen = 0usize;
+    let mut last_deferred_client = 0usize;
     let mut announced_queryable = false;
     let mut announced_client_sub = false;
     let mut announced_mesh_sub = false;
@@ -2728,6 +2739,20 @@ pub(crate) async fn run_router_hat(
                 if seen > last_data_seen {
                     last_data_seen = seen;
                     log::info!("wz-ap-demo router-hat: forwarded mesh data ({seen} push(es))");
+                }
+                // C4 double-delivery guard transit witness: this router was
+                // NON-master for a keyexpr its client subscribes and DEFERRED the
+                // duplicate peer/client-source copy (the master's bridged
+                // router-source copy delivers exactly once). A rise proves the
+                // non-master block-3 gate fired — the non-master corner's positive
+                // observable (a broken guard never defers, and double-delivers).
+                let deferred = forwarder.deferred_client_delivery_seen();
+                if deferred > last_deferred_client {
+                    last_deferred_client = deferred;
+                    log::info!(
+                        "wz-ap-demo router-hat: deferred a non-master client delivery \
+                         ({deferred} suppressed)"
+                    );
                 }
                 // Query transit witness: a Request(Query) crossed this router. With no
                 // autoconnect the querier reaches the queryable only THROUGH the router

@@ -361,11 +361,26 @@ fn main() -> ExitCode {
                 }
                 false
             };
+            // `--zid <hex>` (optional): PIN this router's zid so the mesh master
+            // election (HRW over shared_nodes) is deterministic — a federation e2e
+            // needs a reproducible non-master. Without it the zid derives from the
+            // ephemeral listen port and varies per run (the flaky root cause).
+            let zid_override: Option<Vec<u8>> = match parse_pair(rest, "--zid") {
+                Some(h) => match parse_zid_hex(&h) {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) => {
+                        eprintln!("wz-ap-demo: --zid {e}");
+                        return ExitCode::from(2);
+                    }
+                },
+                None => None,
+            };
             return run_router_hat_mode(
                 router_hat_listen,
                 dial_targets,
                 connect_after,
                 multicast_qos,
+                zid_override,
             );
         }
         #[cfg(not(feature = "router-hat-router"))]
@@ -1062,6 +1077,7 @@ fn run_router_hat_mode(
     dial_targets: Vec<String>,
     connect_after: Option<(u64, Vec<String>)>,
     multicast_qos: bool,
+    zid_override: Option<Vec<u8>>,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -1076,6 +1092,7 @@ fn run_router_hat_mode(
         &dial_targets,
         connect_after,
         multicast_qos,
+        zid_override,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

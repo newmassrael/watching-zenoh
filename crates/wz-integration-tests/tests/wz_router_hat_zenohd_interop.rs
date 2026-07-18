@@ -1474,3 +1474,140 @@ fn wz_router_hat_token_lifecycle_reaches_a_pico_liveliness_subscriber() {
          --- z_liveliness stdout ---\n{z_token_captured}"
     );
 }
+
+/// Leg 10 — the ROUTER-NATIVE cross-tier BRIDGE, cross-impl (the C4
+/// [`bridge_push_cross_mesh`] acid test a foreign router uniquely enables).
+///
+/// Every prior data leg publishes from a pico CLIENT of a router (leg 2/3 take
+/// the C3b `publish_client_push_into_meshes` re-inject) or from a wz peer into a
+/// SAME-impl wz peer (`wz_router_hat_mesh` test #4). This leg puts a wz `--peer`
+/// PUBLISHER behind the wz router and a pico `z_sub` behind ZENOHD: the
+/// peer-source Put arrives on wz's `linkstatepeers_net`, so the ONLY path to the
+/// subscriber is wz BRIDGING it cross-mesh into `routers_net` toward the sub
+/// zenohd advertised as a ROUTER-NATIVE declaration (zenoh
+/// `register_router_subscription`). That is the `router_subs -> peer-mesh`
+/// direction the file header flags as UNIT-only — undrivable by the OBSERVE-only
+/// wz demo router (it originates no router-native declare), but a single foreign
+/// zenohd supplies one. wz is the sole master (`shared_nodes = {self}`) so the
+/// master gate admits the bridge.
+///
+/// Discriminator (why this is not leg 2/3 nor test #4): the wz `--peer` publisher
+/// knows only the wz router; the pico subscriber is zenohd's client — neither can
+/// reach the other except through wz's cross-mesh bridge. Break
+/// `bridge_push_cross_mesh` (or the router-native sub ingest) and the subscriber
+/// receives nothing, while leg 2/3's within-tier / client re-inject route still
+/// passes — so this witnesses the C4 bridge specifically. Barrier-gated on wz's
+/// `learned a mesh sub` (wz provably holds zenohd's router-native sub) before the
+/// peer publisher spawns, so a Put burst cannot outrun the mesh subscription.
+// wz-proves: router-hat-router wz->zenohd partial
+#[test]
+#[ignore = "binary-dep e2e (zenohd + zenoh-pico z_sub + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
+fn wz_router_hat_bridges_a_peer_publish_to_a_zenohd_router_native_sub() {
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+    let port_res = PortReservation::pick();
+    let zport = port_res.port();
+    let _zenohd = spawn_zenohd(zport, tempfile);
+    let zaddr = format!("127.0.0.1:{zport}");
+
+    // A pico z_sub behind ZENOHD subscribes demo/**; zenohd advertises it into
+    // routers_net as a ROUTER-NATIVE subscription once the wz router links.
+    let z_sub_endpoint = format!("tcp/127.0.0.1:{zport}");
+    let (mut z_sub_guard, mut z_sub_reader) =
+        spawn_subscribed_zsub(&z_sub, "demo/**", &z_sub_endpoint, "zenohd", tempfile);
+
+    // wz --router-hat dials zenohd; converge the router backbone before attaching
+    // the peer publisher.
+    let (mut wz_guard, mut wz_reader, wz_port) = spawn_router_hat_dialing(&zaddr);
+    if wait_for_substring(
+        &mut wz_reader,
+        ROUTERS_NET_CONVERGED,
+        Duration::from_secs(15),
+    )
+    .is_err()
+    {
+        let c = read_captured(&mut wz_reader);
+        let _ = z_sub_guard.child_mut().kill();
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        panic!("wz <-> zenohd router backbone never converged within 15s\n--- wz-router-hat stderr ---\n{c}");
+    }
+
+    // Barrier: wz has INGESTED zenohd's router-native sub off routers_net, so it can
+    // advertise it into the peer mesh (attract the peer publisher) AND bridge a
+    // peer-source Push toward it. Gate the publisher's spawn on this witness.
+    if wait_for_substring(
+        &mut wz_reader,
+        "router-hat: learned a mesh sub",
+        Duration::from_secs(15),
+    )
+    .is_err()
+    {
+        let c = read_captured(&mut wz_reader);
+        let _ = z_sub_guard.child_mut().kill();
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        panic!("wz-router-hat never ingested zenohd's router-native sub within 15s — the router mesh did not carry the subscription\n--- wz-router-hat stderr ---\n{c}");
+    }
+
+    // The wz --peer PUBLISHER behind the wz router: whatami=Peer, so its Put arrives
+    // on wz's linkstatepeers_net and takes the C4 cross-mesh bridge (NOT the C3b
+    // client re-inject). It republishes each app tick, so delivery is self-healing.
+    let r1_addr = format!("127.0.0.1:{wz_port}");
+    let (mut peer_guard, mut peer_reader, _peer_port) = spawn_on_ephemeral_port(
+        &wz_ap_demo_binary(),
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            &r1_addr,
+            "--publish",
+            "demo/key",
+        ],
+        "peer: listening on 127.0.0.1:",
+        "peer-pub",
+        tempfile(),
+    );
+
+    // Acid test: the pico subscriber behind zenohd receives the wz peer's Put, having
+    // crossed wz's cross-mesh bridge into routers_net and out through zenohd.
+    let received = wait_for_substring(
+        &mut z_sub_reader,
+        "Received ('demo/key'",
+        Duration::from_secs(20),
+    );
+    // Transit pin: wz forwarded the Push across the mesh (the peer -> router bridge).
+    let transit = received.is_ok().then(|| {
+        wait_for_substring(
+            &mut wz_reader,
+            "router-hat: forwarded mesh data",
+            Duration::from_secs(5),
+        )
+    });
+
+    let _ = peer_guard.child_mut().kill();
+    let _ = peer_guard.child_mut().wait();
+    let _ = z_sub_guard.child_mut().kill();
+    let _ = z_sub_guard.child_mut().wait();
+    graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+    let wz_captured = read_captured(&mut wz_reader);
+    let peer_captured = read_captured(&mut peer_reader);
+    let z_sub_captured = read_captured(&mut z_sub_reader);
+    eprintln!("--- wz-router-hat stderr ---\n{wz_captured}");
+    eprintln!("--- peer-pub stderr ---\n{peer_captured}");
+    eprintln!("--- z_sub stdout ---\n{z_sub_captured}");
+
+    received.unwrap_or_else(|c| {
+        panic!(
+            "pico z_sub behind zenohd never received the wz peer's Put within 20s — \
+             the peer-source Put was not bridged cross-mesh (linkstatepeers_net -> \
+             routers_net) toward zenohd's router-native sub\n--- z_sub stdout ---\n{c}"
+        )
+    });
+    transit
+        .expect("received implies transit was probed")
+        .unwrap_or_else(|c| {
+            panic!(
+                "wz-router-hat never logged 'forwarded mesh data' — the Put reached \
+                 the subscriber without transiting wz's router bridge\n--- \
+                 wz-router-hat stderr ---\n{c}"
+            )
+        });
+}
