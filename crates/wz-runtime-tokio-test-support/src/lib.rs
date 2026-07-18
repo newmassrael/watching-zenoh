@@ -575,6 +575,21 @@ pub fn loopback_tls_configs() -> (
     (Arc::new(server_config), Arc::new(client_config))
 }
 
+/// R311y365 — a fresh self-signed `localhost` cert + private key as PEM strings
+/// `(cert_pem, key_pem)` — the file-material twin of [`loopback_tls_configs`]
+/// for a caller that must hand cert/key to an EXTERNAL process by PATH (a
+/// zenohd `--config` TLS listener cannot take a rustls `ServerConfig`, only PEM
+/// files). Same rcgen `localhost` self-signed leaf; for a self-signed cert the
+/// leaf IS its own root, so the SAME `cert_pem` doubles as the client's
+/// `root_ca_pem` (`wz_runtime_tokio::session_open::TlsDialConfig::from_ca_pem`).
+/// The caller writes the two PEMs to files and cleans them up.
+#[cfg(feature = "tls-fixtures")]
+pub fn localhost_cert_key_pem() -> (String, String) {
+    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate self-signed localhost cert");
+    (issued.cert.pem(), issued.key_pair.serialize_pem())
+}
+
 /// R311og — the loopback mutual-TLS (mTLS) PEM material, returned as PEM
 /// strings so a test feeds them through the PRODUCTION
 /// `wz_runtime_tokio::tls_config::{server_config_from_pem, client_config_from_pem}`

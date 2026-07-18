@@ -204,7 +204,9 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
 # `_test_support` Cargo feature used through R70.
-wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
+    "tls-fixtures",
+] }
 # tempfile is used by R63 link_emitter_b6 to stage sce-codegen emit
 # output in a clean directory per test run (no pollution of $OUT_DIR
 # or vendor/sce/target).

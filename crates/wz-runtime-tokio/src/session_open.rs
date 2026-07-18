@@ -256,6 +256,38 @@ pub struct TlsDialConfig {
     pub server_name: ServerName<'static>,
 }
 
+#[cfg(feature = "transport-link-tls")]
+impl TlsDialConfig {
+    /// Build server-auth-only TLS client material from a root-CA PEM, verifying
+    /// that the peer's presented server cert chains to that root AND its SAN
+    /// matches `server_name` ([`ServerNameVerification::Verify`](crate::tls_config::ServerNameVerification)).
+    /// The consumer convenience a `tls/...` --connect needs (the demo's
+    /// `--tls-ca`): the connect ADDRESS (a numeric `tls/1.2.3.4:port`, all wz's
+    /// locator parser accepts) and the VERIFIED NAME are decoupled — dial by IP,
+    /// verify by name — because rustls takes the name as an explicit
+    /// [`ServerName`], not from the socket address. So one self-signed
+    /// `localhost` cert can be dialed at `tls/127.0.0.1:port` and still verify,
+    /// with no IP SAN required on the cert. For a self-signed leaf the cert IS
+    /// its own root, so the same PEM serves as `root_ca_pem`.
+    pub fn from_ca_pem(root_ca_pem: &[u8], server_name: &str) -> io::Result<Self> {
+        let client_config = crate::tls_config::client_config_from_pem(
+            root_ca_pem,
+            None,
+            crate::tls_config::ServerNameVerification::Verify,
+        )?;
+        let server_name = ServerName::try_from(server_name.to_owned()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid TLS server name {server_name:?}: {e}"),
+            )
+        })?;
+        Ok(Self {
+            client_config,
+            server_name,
+        })
+    }
+}
+
 /// The QUIC material a `quic/...` dial needs beyond the locator's addr (R311xk):
 /// the rustls [`ClientConfig`] (TLS-1.3 + ALPN `hq-29`, from
 /// [`crate::quic_config`]) and the SNI / cert server name. Mirrors

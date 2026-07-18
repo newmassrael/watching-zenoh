@@ -1151,6 +1151,61 @@ pub mod common {
         )
     }
 
+    /// Spawn a zenohd router listening on BOTH `tcp/` (for pico TCP clients and
+    /// the readiness gate) and `tls/` (for a wz TLS client), presenting the
+    /// server cert at `cert_path` / key at `key_path`, and block until it is
+    /// HANDSHAKE-ready. R311y365 — the TLS counterpart of
+    /// [`spawn_zenohd_tcp_ws`] / [`spawn_zenohd_tcp_unixsock`]: zenoh-pico dials
+    /// TCP (its TLS link is emscripten-limited here) while wz dials the TLS
+    /// listener, and zenohd routes between the two.
+    ///
+    /// Unlike the `-l`-only spawns, a `tls/` listener needs its cert + key, which
+    /// zenoh takes from config (`transport/link/tls/listen_certificate` /
+    /// `listen_private_key`), NOT from the locator — so this writes a JSON5
+    /// config beside the cert (`<cert_path>.zenohd.json5`) and passes `--config`.
+    /// The readiness gate probes the TCP listener (a wz demo without `--tls-ca`
+    /// cannot drive the TLS probe), which proves the router core is up; every
+    /// `-l` listener binds at startup, so the TLS listener is ready once TCP is.
+    /// The caller owns cert/key/config cleanup (the config path is derived above).
+    pub fn spawn_zenohd_tcp_tls(
+        tcp_port: u16,
+        tls_port: u16,
+        cert_path: &str,
+        key_path: &str,
+        mk_probe_stderr: impl FnMut() -> File,
+    ) -> ChildGuard {
+        let cfg_path = format!("{cert_path}.zenohd.json5");
+        let cfg = format!(
+            "{{ transport: {{ link: {{ tls: {{ \
+             listen_private_key: {key_path:?}, listen_certificate: {cert_path:?} }} }} }} }}"
+        );
+        std::fs::write(&cfg_path, cfg).expect("write zenohd tls config");
+
+        let mut command = Command::new(zenohd_binary());
+        command
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("-l")
+            .arg(format!("tls/127.0.0.1:{tls_port}"))
+            .arg("--config")
+            .arg(&cfg_path)
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let guard = ChildGuard::wrap(
+            "zenohd (reference router, tls)",
+            command.spawn().expect("spawn zenohd (tls)"),
+        );
+        assert!(
+            wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
+            "zenohd (tls) did not start accepting on 127.0.0.1:{tcp_port} within 10s"
+        );
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{tcp_port}"), mk_probe_stderr);
+        guard
+    }
+
     /// R311pi — confirm zenohd can complete a zenoh handshake by driving a
     /// throwaway wz client to `Established` against the `connect` locator, then
     /// dropping the client. The wz open is deterministic (in-process, no fork),

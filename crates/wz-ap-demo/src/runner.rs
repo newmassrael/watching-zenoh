@@ -172,6 +172,37 @@ struct SpawnedTasks {
 /// the library, so wiring them is a one-arm change when a verified caller lands
 /// (R63 concrete-impls-land-alongside-real-callers) — the demo dials, not
 /// accepts, those transports today.
+/// R311y365 — build the [`DialConfig`] for a one-shot `--connect`. Cert-free
+/// transports (tcp/ws/udp/unixsock) take [`DialConfig::default`]; a `tls/...`
+/// dial needs the `--tls-ca <path>` root-CA PEM threaded into `DialConfig.tls`
+/// (verifying the server cert chains to that root AND its SAN matches
+/// `localhost`), so this loads the PEM and builds a `TlsDialConfig`. The connect
+/// ADDRESS (`tls/127.0.0.1:port`) and the VERIFIED NAME (`localhost`) are
+/// decoupled — dial by IP, verify by name — so one self-signed `localhost` cert
+/// needs no IP SAN (see `TlsDialConfig::from_ca_pem`).
+#[cfg(feature = "tls")]
+fn build_dial_config(tls_ca: &Option<String>) -> io::Result<DialConfig> {
+    use wz::runtime_tokio::session_open::TlsDialConfig;
+    use wz::runtime_tokio::tls_config::read_pem_file;
+    match tls_ca {
+        Some(path) => {
+            let ca_pem = read_pem_file(path)?;
+            let tls = TlsDialConfig::from_ca_pem(&ca_pem, "localhost")?;
+            Ok(DialConfig::default().with_tls(tls))
+        }
+        None => Ok(DialConfig::default()),
+    }
+}
+
+/// The `tls`-less build: a `tls/...` dial surfaces the runtime's typed
+/// `Unsupported` at [`dial_endpoint`], so `--tls-ca` is inert (the field is
+/// feature-uniform on [`Role`], only its USE is gated). Byte-identical to the
+/// pre-R311y365 `DialConfig::default()` path.
+#[cfg(not(feature = "tls"))]
+fn build_dial_config(_tls_ca: &Option<String>) -> io::Result<DialConfig> {
+    Ok(DialConfig::default())
+}
+
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {
     match role {
         Role::Acceptor { listen } => {
@@ -185,12 +216,17 @@ async fn establish_link(role: &Role) -> io::Result<DialedLink> {
             // ever wires in.
             accept_endpoint(listen).await
         }
-        Role::Initiator { connect, .. } => {
+        Role::Initiator {
+            connect, tls_ca, ..
+        } => {
             // R311pw — `reconnect` is ignored here: `establish_link` runs the
             // one-shot dial only. The reconnect-Initiator lifecycle dials inside
             // the supervisor (which re-dials on loss), so `run_demo` routes it
             // away from `establish_link` entirely (it never reaches this arm).
-            let dialed = dial_endpoint(connect, &DialConfig::default()).await?;
+            // R311y365 — a `tls/...` --connect threads its `--tls-ca` root-CA
+            // into `DialConfig.tls`; every cert-free transport takes the default.
+            let dial_cfg = build_dial_config(tls_ca)?;
+            let dialed = dial_endpoint(connect, &dial_cfg).await?;
             // R311po — log WHICH transport was dialed (the DialedLink variant
             // name). This is the WS legs' witness that a `ws/...` --connect
             // really opened a WebSocket link, not a silent TCP fallback.
@@ -749,6 +785,7 @@ pub(crate) async fn run_demo(
         Role::Initiator {
             connect,
             reconnect: true,
+            ..
         } => {
             // R311py — one library seam owns the `--connect` string →
             // ReconnectingSession orchestration (parse + narrow-to-reconnectable

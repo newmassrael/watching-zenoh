@@ -152,6 +152,16 @@ ws = ["wz/locator-ws"]
 # against zenohd's `unixsock-stream/` listener (zenoh-pico has no unixsock link,
 # so pico dials TCP and zenohd routes between the two).
 unixsock = ["wz/locator-unixsock"]
+# R311y365 — opt-in `tls/` (TLS-over-TCP) DIAL transport, forwarding the wz
+# facade's `locator-tls` (which pulls `transport-link-tls`). The mirror of `ws`
+# / `unixsock`: NOT in `default` (preset-ap-client is TCP-only), so the
+# footprint baseline and every other lane build are unchanged; only run-ci
+# Layer Z builds wz-ap-demo with it. A `tls/` --connect needs cert material the
+# locator alone cannot carry, so it also enables the `--tls-ca <path>` CLI that
+# builds a `TlsDialConfig` (root-CA + server-name `localhost`) via
+# `DialConfig::with_tls` — the cert-plumbing the tls cross-impl legs 12/13 dial
+# against zenohd's `tls/` listener with (zenoh-pico dials TCP; zenohd routes).
+tls = ["wz/locator-tls"]
 # R311qa — opt-in multi-peer ROUTER mode (`--router <addr>`): the catalog
 # `routing-router` atom's foundation (bind once, hold N concurrent peer faces,
 # no forwarding yet). Forwards the wz facade's `routing-router` marker feature,

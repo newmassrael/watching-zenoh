@@ -36,8 +36,21 @@ use wz::runtime_tokio::session_glue::{SessionInitParams, SigningKey, WhatAmI};
 /// runs the long-lived supervised lifecycle (re-dial + declaration replay on
 /// link loss); `false` keeps the default round-trip-then-exit harness.
 pub(crate) enum Role {
-    Acceptor { listen: String },
-    Initiator { connect: String, reconnect: bool },
+    Acceptor {
+        listen: String,
+    },
+    /// R311y365 — `tls_ca` is the `--tls-ca <path>` root-CA PEM a `tls/...`
+    /// --connect verifies zenoh's/the peer's server cert against (server name
+    /// `localhost`). ALWAYS present (feature-uniform match sites); `None` when
+    /// no `--tls-ca` was given OR the demo was built without the `tls` feature,
+    /// so a `tls/...` dial then surfaces the runtime's typed `Unsupported`. Only
+    /// the one-shot `establish_link` reads it (the reconnect path is out of demo
+    /// scope, runner.rs).
+    Initiator {
+        connect: String,
+        reconnect: bool,
+        tls_ca: Option<String>,
+    },
 }
 
 /// R219 — publisher-task operation kind. `Put` carries the

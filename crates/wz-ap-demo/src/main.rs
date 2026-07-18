@@ -441,6 +441,10 @@ fn main() -> ExitCode {
         (None, Some(addr)) => Role::Initiator {
             connect: addr,
             reconnect,
+            // R311y365 — the root-CA PEM path for a `tls/...` --connect (verified
+            // against server name `localhost`). Read here, applied only on the
+            // one-shot dial path (establish_link); `None` for a non-tls connect.
+            tls_ca: parse_pair(rest, "--tls-ca"),
         },
         (Some(_), Some(_)) => {
             eprintln!("wz-ap-demo: --listen and --connect are mutually exclusive");
@@ -757,10 +761,17 @@ fn main() -> ExitCode {
     eprintln!("{ABOUT}");
     match &role {
         Role::Acceptor { listen } => log::info!("listen  = {listen}"),
-        Role::Initiator { connect, reconnect } => {
+        Role::Initiator {
+            connect,
+            reconnect,
+            tls_ca,
+        } => {
             log::info!("connect = {connect}");
             if *reconnect {
                 log::info!("reconnect = on (long-lived supervised lifecycle)");
+            }
+            if let Some(ca) = tls_ca {
+                log::info!("tls-ca  = {ca} (tls/ dial verifies server name localhost)");
             }
         }
     }
