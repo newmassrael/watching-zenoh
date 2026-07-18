@@ -162,6 +162,16 @@ unixsock = ["wz/locator-unixsock"]
 # `DialConfig::with_tls` — the cert-plumbing the tls cross-impl legs 12/13 dial
 # against zenohd's `tls/` listener with (zenoh-pico dials TCP; zenohd routes).
 tls = ["wz/locator-tls"]
+# R311y366 — opt-in `quic/` (QUIC, TLS-1.3 + ALPN hq-29) DIAL transport,
+# forwarding the wz facade's `locator-quic` (which pulls `transport-link-quic`).
+# The mirror of `tls`: NOT in `default` (preset-ap-client is TCP-only), so the
+# footprint baseline and every other lane build are unchanged; only run-ci Layer
+# Z builds wz-ap-demo with it. A `quic/` --connect needs cert material the
+# locator alone cannot carry, so it also enables the `--quic-ca <path>` CLI that
+# builds a `QuicDialConfig` (root-CA + server-name `localhost`) via
+# `DialConfig::with_quic` — the cert-plumbing the quic cross-impl legs 14/15 dial
+# against zenohd's `quic/` listener with (zenoh-pico dials TCP; zenohd routes).
+quic = ["wz/locator-quic"]
 # R311qa — opt-in multi-peer ROUTER mode (`--router <addr>`): the catalog
 # `routing-router` atom's foundation (bind once, hold N concurrent peer faces,
 # no forwarding yet). Forwards the wz facade's `routing-router` marker feature,

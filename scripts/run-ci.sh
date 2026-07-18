@@ -5376,7 +5376,11 @@ layer_z_zenohd_interop() {
     # the `--tls-ca <path>` cert affordance so the TLS cross-impl legs 12/13 dial
     # `--connect tls/127.0.0.1:port --tls-ca <cert>` against zenohd's `tls/`
     # listener; every TCP/WS/unixsock leg dials through the unchanged binary.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,router-hat-router,routing-token-tables --quiet) || return 1
+    # `quic` (R311y366) is additive too: it compiles the `quic/` DIAL transport +
+    # the `--quic-ca <path>` cert affordance so the QUIC cross-impl legs 14/15 dial
+    # `--connect quic/127.0.0.1:port --quic-ca <cert>` against zenohd's `quic/`
+    # listener; every TCP/WS/unixsock/tls leg dials through the unchanged binary.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,router-hat-router,routing-token-tables --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients

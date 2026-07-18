@@ -300,6 +300,28 @@ pub struct QuicDialConfig {
     pub server_name: String,
 }
 
+#[cfg(feature = "transport-link-quic")]
+impl QuicDialConfig {
+    /// Build server-auth-only QUIC client material from a root-CA PEM — the QUIC
+    /// sibling of [`TlsDialConfig::from_ca_pem`]. The rustls config is TLS-1.3 +
+    /// ALPN `hq-29` ([`quic_client_config_from_pem`](crate::quic_config::quic_client_config_from_pem)),
+    /// verifying the peer's server cert chains to `root_ca_pem` AND its SAN
+    /// matches `server_name`. Like the TLS sibling, the connect ADDRESS (a numeric
+    /// `quic/1.2.3.4:port`, all wz's locator parser accepts) and the VERIFIED NAME
+    /// are decoupled — dial by IP, verify by name — because quinn takes the SNI as
+    /// an explicit `&str`, not from the socket address. So one self-signed
+    /// `localhost` cert can be dialed at `quic/127.0.0.1:port` and still verify,
+    /// with no IP SAN required; the self-signed leaf IS its own root, so the same
+    /// PEM serves as `root_ca_pem`.
+    pub fn from_ca_pem(root_ca_pem: &[u8], server_name: &str) -> io::Result<Self> {
+        let client_config = crate::quic_config::quic_client_config_from_pem(root_ca_pem, None)?;
+        Ok(Self {
+            client_config,
+            server_name: server_name.to_owned(),
+        })
+    }
+}
+
 /// A dialed raw transport — the mode-agnostic dial seam's output, a union
 /// spanning every link transport (R311ez TCP/UDP; R311nv serial).
 /// [`wire_dialed_link`] consumes it into the uniform

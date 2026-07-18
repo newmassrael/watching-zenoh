@@ -88,8 +88,8 @@ use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
     read_captured, spawn_publishing_zpub, spawn_subscribed_zsub, spawn_zenohd,
-    spawn_zenohd_tcp_tls, spawn_zenohd_tcp_unixsock, spawn_zenohd_tcp_ws, wait_for_substring,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
+    spawn_zenohd_tcp_quic, spawn_zenohd_tcp_tls, spawn_zenohd_tcp_unixsock, spawn_zenohd_tcp_ws,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
 use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
@@ -1407,10 +1407,11 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_unixsock() {
     );
 }
 
-/// Remove a TLS leg's on-disk material: the cert, the key, and the zenohd config
-/// `spawn_zenohd_tcp_tls` wrote beside the cert (`<cert>.zenohd.json5`). Called
-/// after the children are reaped so /tmp does not accrue leftover PEM/config.
-fn cleanup_tls_files(cert_path: &str, key_path: &str) {
+/// Remove a cert-transport (tls/quic) leg's on-disk material: the cert, the key,
+/// and the zenohd config `spawn_zenohd_tcp_tls` / `spawn_zenohd_tcp_quic` wrote
+/// beside the cert (`<cert>.zenohd.json5`). Called after the children are reaped
+/// so /tmp does not accrue leftover PEM/config.
+fn cleanup_cert_files(cert_path: &str, key_path: &str) {
     let _ = std::fs::remove_file(cert_path);
     let _ = std::fs::remove_file(key_path);
     let _ = std::fs::remove_file(format!("{cert_path}.zenohd.json5"));
@@ -1486,7 +1487,7 @@ fn wz_client_reaches_established_against_zenohd_over_tls() {
     let _ = demo_child.child_mut().wait();
     let _ = zenohd.child_mut().kill();
     let _ = zenohd.child_mut().wait();
-    cleanup_tls_files(&cert_path, &key_path);
+    cleanup_cert_files(&cert_path, &key_path);
 
     let demo_captured = read_captured(&mut demo_stderr_reader);
     if let Err(c) = &established {
@@ -1594,7 +1595,7 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_tls() {
     let _ = z_sub_child.child_mut().wait();
     let _ = zenohd.child_mut().kill();
     let _ = zenohd.child_mut().wait();
-    cleanup_tls_files(&cert_path, &key_path);
+    cleanup_cert_files(&cert_path, &key_path);
 
     let demo_captured = read_captured(&mut demo_stderr_reader);
     let z_sub_captured = read_captured(&mut z_sub_stdout_reader);
@@ -1624,6 +1625,239 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_tls() {
         demo_captured.contains("over tls transport"),
         "leg 13 routed wz->zenohd->pico but did not witness a TLS-transport dial \
          in wz-ap-demo stderr (expected 'over tls transport').\n\
+         --- captured wz-ap-demo stderr ---\n{demo_captured}"
+    );
+}
+
+/// The `(cert_pem_path, key_pem_path)` for a QUIC leg's zenohd server material,
+/// keyed on the reserved (unique) `tcp_port` so concurrent-file legs never
+/// collide — the QUIC sibling of [`zenohd_tls_cert_paths`] with a `quic`-distinct
+/// filename prefix (a `quic/` leg and a `tls/` leg picking the same `tcp_port`
+/// would otherwise share a path). QUIC reads its cert from the SAME
+/// `transport/link/tls` config block as TLS (spawn_zenohd_tcp_quic), so the cert
+/// material itself is identical; only the on-disk path differs.
+fn zenohd_quic_cert_paths(tcp_port: u16) -> (String, String) {
+    let dir = std::env::temp_dir();
+    let cert = dir
+        .join(format!("wz-zenohd-quic-{tcp_port}.cert.pem"))
+        .to_string_lossy()
+        .into_owned();
+    let key = dir
+        .join(format!("wz-zenohd-quic-{tcp_port}.key.pem"))
+        .to_string_lossy()
+        .into_owned();
+    (cert, key)
+}
+
+/// leg 14 (R311y366) — wz reaches Established against zenohd over a `quic/` (QUIC,
+/// TLS-1.3 + ALPN `hq-29`) link: the QUIC-transport counterpart of leg 12 (tls) /
+/// leg 8 (ws) / leg 1 (tcp, handshake wire-parity). Deterministic (no peer-timing
+/// race, pico-free) — pins that wz's QUIC transport (`quic_pipeline`, a quinn
+/// `Endpoint::connect` + single bidirectional stream carrying the same
+/// StreamEnvelope length-prefix as tcp) completes the QUIC + TLS-1.3 handshake AND
+/// the zenoh 4-way handshake against the reference router's `quic/` listener. wz
+/// dials with `--connect quic/127.0.0.1:{quic_port} --quic-ca {cert}` (the
+/// `wz-ap-demo` binary built with the `quic` feature, R311y366): the connect
+/// ADDRESS is numeric but the cert is verified against server name `localhost`
+/// (`QuicDialConfig::from_ca_pem`), so one rcgen self-signed `localhost` cert
+/// serves both zenohd (listen_certificate, via the tls config block) and wz
+/// (root_ca), with NO IP SAN. zenohd also listens on `tcp/` for its readiness gate
+/// (pico has no usable `quic/` link here). Mirrors
+/// [`wz_client_reaches_established_against_zenohd_over_tls`] one transport over.
+// wz-proves: transport-link-quic wz->zenohd
+// wz-proves: session-unicast-open wz->zenohd
+// wz-proves: codec-init-body wz->zenohd
+// wz-proves: codec-init-body zenohd->wz
+// wz-proves: codec-open-body wz->zenohd
+// wz-proves: codec-open-body zenohd->wz
+// wz-proves: transport-unicast wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (zenohd router, quic); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_client_reaches_established_against_zenohd_over_quic() {
+    let demo = wz_ap_demo_binary();
+    let (tcp_res, quic_port) = PortReservation::pick_pair();
+    let tcp_port = tcp_res.port();
+    let (cert_path, key_path) = zenohd_quic_cert_paths(tcp_port);
+    let (cert_pem, key_pem) = localhost_cert_key_pem();
+    std::fs::write(&cert_path, &cert_pem).expect("write quic cert pem");
+    std::fs::write(&key_path, &key_pem).expect("write quic key pem");
+
+    let mut zenohd = spawn_zenohd_tcp_quic(tcp_port, quic_port, &cert_path, &key_path, || {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    drop(tcp_res);
+
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect quic/zenohd --publish)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("quic/127.0.0.1:{quic_port}"))
+            .arg("--quic-ca")
+            .arg(&cert_path)
+            .arg("--publish")
+            .arg("demo/zenohd")
+            .arg("--value")
+            .arg("quic-handshake-probe")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect quic/zenohd"),
+    );
+
+    let established = wait_for_substring(
+        &mut demo_stderr_reader,
+        "session Established",
+        Duration::from_secs(10),
+    );
+
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+    cleanup_cert_files(&cert_path, &key_path);
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    if let Err(c) = &established {
+        panic!(
+            "wz-ap-demo did not log 'session Established' within 10s over quic — the \
+             wz<->zenohd QUIC handshake regressed.\n--- captured wz-ap-demo stderr ---\n{c}"
+        );
+    }
+    // WITNESS the quic transport. The reserved `quic_port` is a quic-only listener
+    // and `tcp_port` is a separate port, so a TCP dial could not reach Established
+    // here (structurally — no TCP fallback); but that is an INFERENCE. wz-ap-demo
+    // logs the dialed transport name, so this asserts the leg really opened a QUIC
+    // link. A regression that quietly dialed TCP would drop "over quic transport".
+    assert!(
+        demo_captured.contains("over quic transport"),
+        "leg 14 reached Established but did not witness a QUIC-transport dial in \
+         wz-ap-demo stderr (expected 'over quic transport').\n\
+         --- captured wz-ap-demo stderr ---\n{demo_captured}"
+    );
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+}
+
+/// leg 15 (R311y366) — wz's Put over a `quic/` link routes through zenohd to a
+/// zenoh-pico `z_sub` on TCP: the QUIC-transport counterpart of leg 13 (tls) / leg
+/// 9 (ws) / leg 2 (tcp, data-plane cross-impl). wz dials zenohd with
+/// `--connect quic/127.0.0.1:{quic_port} --quic-ca {cert}` (its QUIC transport),
+/// pico subscribes over `tcp/`, and zenohd routes wz's Put ACROSS the two link
+/// types. This pins wz's QUIC data plane against the REFERENCE zenoh `quic/` link —
+/// wz publishes over the QUIC stream, the reference router decodes it off its
+/// `quic/` listener and forwards to the pico TCP subscriber. The same Put-burst +
+/// retried-zsub shape as [`wz_publish_routes_through_zenohd_to_pico_zsub_over_tls`],
+/// one transport over.
+// wz-proves: transport-link-quic wz->zenohd
+// wz-proves: codec-frame wz->zenohd
+// wz-proves: codec-push wz->zenohd
+// wz-proves: pubsub-put wz->zenohd
+// wz-proves: pubsub-put wz->pico
+// wz-proves: routing-client wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (zenohd router quic + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_publish_routes_through_zenohd_to_pico_zsub_over_quic() {
+    let demo = wz_ap_demo_binary();
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+    let (tcp_res, quic_port) = PortReservation::pick_pair();
+    let tcp_port = tcp_res.port();
+    let endpoint = format!("tcp/127.0.0.1:{tcp_port}");
+    let (cert_path, key_path) = zenohd_quic_cert_paths(tcp_port);
+    let publish_key = "demo/zenohd";
+    let sub_key = "demo/**";
+    let publish_value = "hello-from-wz-over-quic";
+
+    let (cert_pem, key_pem) = localhost_cert_key_pem();
+    std::fs::write(&cert_path, &cert_pem).expect("write quic cert pem");
+    std::fs::write(&key_path, &key_pem).expect("write quic key pem");
+
+    let mut zenohd = spawn_zenohd_tcp_quic(tcp_port, quic_port, &cert_path, &key_path, || {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    drop(tcp_res);
+
+    // ── pico z_sub: a TCP client of zenohd, subscribed and ready (retried past
+    //    any transient one-shot open). Its declared subscription is the route
+    //    zenohd uses to forward wz's QUIC Put.
+    let (mut z_sub_child, mut z_sub_stdout_reader) =
+        spawn_subscribed_zsub(&z_sub, sub_key, &endpoint, "zenohd", || {
+            tempfile::tempfile().expect("tempfile for z_sub stdout")
+        });
+
+    // ── wz-ap-demo: a QUIC client of zenohd that emits a Put burst. The burst
+    //    (publisher_task) covers the window for z_sub's subscription to reach
+    //    zenohd; a Put landing after that propagation is routed to z_sub.
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect quic/zenohd --publish)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("quic/127.0.0.1:{quic_port}"))
+            .arg("--quic-ca")
+            .arg(&cert_path)
+            .arg("--publish")
+            .arg(publish_key)
+            .arg("--value")
+            .arg(publish_value)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect quic/zenohd --publish"),
+    );
+
+    let received_substr = ">> [Subscriber] Received";
+    let received = wait_for_substring(
+        &mut z_sub_stdout_reader,
+        received_substr,
+        Duration::from_secs(10),
+    );
+
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = z_sub_child.child_mut().kill();
+    let _ = z_sub_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+    cleanup_cert_files(&cert_path, &key_path);
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    let z_sub_captured = read_captured(&mut z_sub_stdout_reader);
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+    eprintln!("--- captured z_sub stdout ---\n{z_sub_captured}");
+
+    let received_text = match received {
+        Ok(c) => c,
+        Err(c) => panic!(
+            "z_sub did not log '{received_substr}' within 10s — wz's QUIC Put did not route \
+             through zenohd to z_sub.\n--- captured z_sub stdout at deadline ---\n{c}\n\
+             --- captured wz-ap-demo stderr ---\n{demo_captured}"
+        ),
+    };
+    assert!(
+        received_text.contains(publish_key),
+        "z_sub received but the publish keyexpr '{publish_key}' is missing.\n{received_text}"
+    );
+    assert!(
+        received_text.contains(publish_value),
+        "z_sub received but the publish value '{publish_value}' is missing.\n{received_text}"
+    );
+    // WITNESS the quic transport. z_sub receiving proves the data plane routed, but
+    // not that wz's leg of it was QUIC (vs a silent TCP dial); wz-ap-demo logs the
+    // dialed transport name, so assert it dialed `quic`.
+    assert!(
+        demo_captured.contains("over quic transport"),
+        "leg 15 routed wz->zenohd->pico but did not witness a QUIC-transport dial \
+         in wz-ap-demo stderr (expected 'over quic transport').\n\
          --- captured wz-ap-demo stderr ---\n{demo_captured}"
     );
 }

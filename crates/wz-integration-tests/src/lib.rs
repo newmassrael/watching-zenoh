@@ -1206,6 +1206,56 @@ pub mod common {
         guard
     }
 
+    /// R311y366 — the QUIC counterpart of [`spawn_zenohd_tcp_tls`]: zenohd listens
+    /// on `tcp/` (readiness gate + the pico subscriber's link) AND `quic/` (the wz
+    /// client's link). A `quic/` listener needs the SAME cert + key as `tls/` —
+    /// zenoh's QUIC link reads its server cert from the `transport/link/tls` config
+    /// block (there is NO separate `quic` cert block; verified at R311y366 by a
+    /// standalone zenohd `-l quic/...` bind from a tls-block config), so this
+    /// writes the identical JSON5 config beside the cert (`<cert>.zenohd.json5`)
+    /// that `spawn_zenohd_tcp_tls` does and passes `--config`. The readiness gate
+    /// probes the TCP listener (a wz demo without `--quic-ca` cannot drive a QUIC
+    /// probe); every `-l` listener binds at startup, so the QUIC (UDP) listener is
+    /// ready once TCP is. The caller owns cert/key/config cleanup.
+    pub fn spawn_zenohd_tcp_quic(
+        tcp_port: u16,
+        quic_port: u16,
+        cert_path: &str,
+        key_path: &str,
+        mk_probe_stderr: impl FnMut() -> File,
+    ) -> ChildGuard {
+        let cfg_path = format!("{cert_path}.zenohd.json5");
+        let cfg = format!(
+            "{{ transport: {{ link: {{ tls: {{ \
+             listen_private_key: {key_path:?}, listen_certificate: {cert_path:?} }} }} }} }}"
+        );
+        std::fs::write(&cfg_path, cfg).expect("write zenohd quic config");
+
+        let mut command = Command::new(zenohd_binary());
+        command
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("-l")
+            .arg(format!("quic/127.0.0.1:{quic_port}"))
+            .arg("--config")
+            .arg(&cfg_path)
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let guard = ChildGuard::wrap(
+            "zenohd (reference router, quic)",
+            command.spawn().expect("spawn zenohd (quic)"),
+        );
+        assert!(
+            wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
+            "zenohd (quic) did not start accepting on 127.0.0.1:{tcp_port} within 10s"
+        );
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{tcp_port}"), mk_probe_stderr);
+        guard
+    }
+
     /// R311pi — confirm zenohd can complete a zenoh handshake by driving a
     /// throwaway wz client to `Established` against the `connect` locator, then
     /// dropping the client. The wz open is deterministic (in-process, no fork),

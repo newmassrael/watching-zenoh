@@ -50,6 +50,14 @@ pub(crate) enum Role {
         connect: String,
         reconnect: bool,
         tls_ca: Option<String>,
+        /// R311y366 — the `--quic-ca <path>` root-CA PEM a `quic/...` --connect
+        /// verifies the peer's server cert against (server name `localhost`), the
+        /// QUIC sibling of `tls_ca`. Feature-uniform (always present on the match
+        /// sites); `None` when no `--quic-ca` was given OR the demo was built
+        /// without the `quic` feature, so a `quic/...` dial then surfaces the
+        /// runtime's typed `Unsupported`. Read only by the one-shot
+        /// `establish_link` (runner.rs).
+        quic_ca: Option<String>,
     },
 }
 

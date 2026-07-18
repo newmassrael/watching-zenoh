@@ -172,35 +172,70 @@ struct SpawnedTasks {
 /// the library, so wiring them is a one-arm change when a verified caller lands
 /// (R63 concrete-impls-land-alongside-real-callers) — the demo dials, not
 /// accepts, those transports today.
-/// R311y365 — build the [`DialConfig`] for a one-shot `--connect`. Cert-free
-/// transports (tcp/ws/udp/unixsock) take [`DialConfig::default`]; a `tls/...`
-/// dial needs the `--tls-ca <path>` root-CA PEM threaded into `DialConfig.tls`
-/// (verifying the server cert chains to that root AND its SAN matches
-/// `localhost`), so this loads the PEM and builds a `TlsDialConfig`. The connect
-/// ADDRESS (`tls/127.0.0.1:port`) and the VERIFIED NAME (`localhost`) are
-/// decoupled — dial by IP, verify by name — so one self-signed `localhost` cert
-/// needs no IP SAN (see `TlsDialConfig::from_ca_pem`).
+/// R311y365/y366 — build the [`DialConfig`] for a one-shot `--connect`. Cert-free
+/// transports (tcp/ws/udp/unixsock) take [`DialConfig::default`]; a cert transport
+/// threads its `--<scheme>-ca <path>` root-CA PEM into the matching `DialConfig`
+/// slot (verifying the server cert chains to that root AND its SAN matches
+/// `localhost`). The connect ADDRESS (`<scheme>/127.0.0.1:port`) and the VERIFIED
+/// NAME (`localhost`) are decoupled — dial by IP, verify by name — so one
+/// self-signed `localhost` cert needs no IP SAN (see `TlsDialConfig::from_ca_pem`
+/// / `QuicDialConfig::from_ca_pem`). Each cert transport is applied by its own
+/// feature-gated helper, so a new cert transport is one added `apply_*` call — no
+/// combinatorial cfg on this function.
+fn build_dial_config(tls_ca: &Option<String>, quic_ca: &Option<String>) -> io::Result<DialConfig> {
+    let cfg = DialConfig::default();
+    let cfg = apply_tls_ca(cfg, tls_ca)?;
+    let cfg = apply_quic_ca(cfg, quic_ca)?;
+    Ok(cfg)
+}
+
+/// Thread the `--tls-ca` root-CA into `DialConfig.tls` — a `tls/...` dial verifies
+/// the peer's server cert against it (server name `localhost`). No-op when no
+/// `--tls-ca` was given.
 #[cfg(feature = "tls")]
-fn build_dial_config(tls_ca: &Option<String>) -> io::Result<DialConfig> {
+fn apply_tls_ca(cfg: DialConfig, tls_ca: &Option<String>) -> io::Result<DialConfig> {
     use wz::runtime_tokio::session_open::TlsDialConfig;
     use wz::runtime_tokio::tls_config::read_pem_file;
     match tls_ca {
         Some(path) => {
             let ca_pem = read_pem_file(path)?;
             let tls = TlsDialConfig::from_ca_pem(&ca_pem, "localhost")?;
-            Ok(DialConfig::default().with_tls(tls))
+            Ok(cfg.with_tls(tls))
         }
-        None => Ok(DialConfig::default()),
+        None => Ok(cfg),
     }
 }
 
 /// The `tls`-less build: a `tls/...` dial surfaces the runtime's typed
 /// `Unsupported` at [`dial_endpoint`], so `--tls-ca` is inert (the field is
-/// feature-uniform on [`Role`], only its USE is gated). Byte-identical to the
-/// pre-R311y365 `DialConfig::default()` path.
+/// feature-uniform on [`Role`], only its USE is gated).
 #[cfg(not(feature = "tls"))]
-fn build_dial_config(_tls_ca: &Option<String>) -> io::Result<DialConfig> {
-    Ok(DialConfig::default())
+fn apply_tls_ca(cfg: DialConfig, _tls_ca: &Option<String>) -> io::Result<DialConfig> {
+    Ok(cfg)
+}
+
+/// Thread the `--quic-ca` root-CA into `DialConfig.quic` — a `quic/...` dial
+/// verifies the peer's server cert against it (server name `localhost`), the QUIC
+/// sibling of [`apply_tls_ca`]. No-op when no `--quic-ca` was given.
+#[cfg(feature = "quic")]
+fn apply_quic_ca(cfg: DialConfig, quic_ca: &Option<String>) -> io::Result<DialConfig> {
+    use wz::runtime_tokio::session_open::QuicDialConfig;
+    use wz::runtime_tokio::tls_config::read_pem_file;
+    match quic_ca {
+        Some(path) => {
+            let ca_pem = read_pem_file(path)?;
+            let quic = QuicDialConfig::from_ca_pem(&ca_pem, "localhost")?;
+            Ok(cfg.with_quic(quic))
+        }
+        None => Ok(cfg),
+    }
+}
+
+/// The `quic`-less build: a `quic/...` dial surfaces the runtime's typed
+/// `Unsupported` at [`dial_endpoint`], so `--quic-ca` is inert.
+#[cfg(not(feature = "quic"))]
+fn apply_quic_ca(cfg: DialConfig, _quic_ca: &Option<String>) -> io::Result<DialConfig> {
+    Ok(cfg)
 }
 
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {
@@ -217,15 +252,19 @@ async fn establish_link(role: &Role) -> io::Result<DialedLink> {
             accept_endpoint(listen).await
         }
         Role::Initiator {
-            connect, tls_ca, ..
+            connect,
+            tls_ca,
+            quic_ca,
+            ..
         } => {
             // R311pw — `reconnect` is ignored here: `establish_link` runs the
             // one-shot dial only. The reconnect-Initiator lifecycle dials inside
             // the supervisor (which re-dials on loss), so `run_demo` routes it
             // away from `establish_link` entirely (it never reaches this arm).
-            // R311y365 — a `tls/...` --connect threads its `--tls-ca` root-CA
-            // into `DialConfig.tls`; every cert-free transport takes the default.
-            let dial_cfg = build_dial_config(tls_ca)?;
+            // R311y365/y366 — a `tls/...` / `quic/...` --connect threads its
+            // `--tls-ca` / `--quic-ca` root-CA into the matching `DialConfig` slot;
+            // every cert-free transport takes the default.
+            let dial_cfg = build_dial_config(tls_ca, quic_ca)?;
             let dialed = dial_endpoint(connect, &dial_cfg).await?;
             // R311po — log WHICH transport was dialed (the DialedLink variant
             // name). This is the WS legs' witness that a `ws/...` --connect

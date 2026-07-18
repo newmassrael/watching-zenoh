@@ -445,6 +445,9 @@ fn main() -> ExitCode {
             // against server name `localhost`). Read here, applied only on the
             // one-shot dial path (establish_link); `None` for a non-tls connect.
             tls_ca: parse_pair(rest, "--tls-ca"),
+            // R311y366 — root-CA PEM path for a `quic/...` --connect (QUIC sibling
+            // of --tls-ca; verified against server name `localhost`).
+            quic_ca: parse_pair(rest, "--quic-ca"),
         },
         (Some(_), Some(_)) => {
             eprintln!("wz-ap-demo: --listen and --connect are mutually exclusive");
@@ -765,6 +768,7 @@ fn main() -> ExitCode {
             connect,
             reconnect,
             tls_ca,
+            quic_ca,
         } => {
             log::info!("connect = {connect}");
             if *reconnect {
@@ -772,6 +776,9 @@ fn main() -> ExitCode {
             }
             if let Some(ca) = tls_ca {
                 log::info!("tls-ca  = {ca} (tls/ dial verifies server name localhost)");
+            }
+            if let Some(ca) = quic_ca {
+                log::info!("quic-ca = {ca} (quic/ dial verifies server name localhost)");
             }
         }
     }
