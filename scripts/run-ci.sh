@@ -5368,7 +5368,11 @@ layer_z_zenohd_interop() {
     # binary so the token cross-impl leg exercises it; the non-token legs 1-8 dial
     # through the unchanged binary. router-hat-router is redundant under the
     # passthrough but kept explicit to match this line's documenting comment.
-    (cd crates && cargo build -p wz-ap-demo --features ws,router-hat-router,routing-token-tables --quiet) || return 1
+    # `unixsock` (R311y364) is additive too: it compiles the `unixsock-stream/`
+    # DIAL transport so the unixsock cross-impl legs 10/11 dial
+    # `--connect unixsock-stream/<path>` against zenohd's unixsock listener; every
+    # TCP/WS leg dials through the unchanged binary (pico has no unixsock link).
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,router-hat-router,routing-token-tables --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients

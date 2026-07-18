@@ -1112,6 +1112,45 @@ pub mod common {
         )
     }
 
+    /// Spawn a zenohd router listening on BOTH `tcp/` (for pico TCP clients and
+    /// the TCP-accept readiness gate) and `unixsock-stream/` (for a wz Unix-
+    /// domain-socket client), and block until it is HANDSHAKE-ready. R311y364 —
+    /// the unixsock counterpart of [`spawn_zenohd_tcp_ws`]: zenoh-pico has NO
+    /// `unixsock-stream` link, so pico dials TCP while wz dials the Unix socket,
+    /// and zenohd routes between its two listeners. The TCP-accept gate targets
+    /// `tcp_port` (pico dials it), and the handshake-ready probe drives a real wz
+    /// client to `Established` over `unixsock-stream/{sock_path}` — a genuine
+    /// `UnixStream` connect + zenoh 4-way handshake that exercises the unixsock
+    /// listener DIRECTLY (the same probe-the-actual-listener discipline
+    /// [`spawn_zenohd_tcp_ws`] uses for WS; a full wz handshake, not a bare
+    /// connect-then-close, so zenoh's accept task is left healthy).
+    ///
+    /// `sock_path` is an ABSOLUTE filesystem path (so the emitted locator is
+    /// `unixsock-stream/<abs>` = `unixsock-stream//tmp/...`). A stale socket file
+    /// from a SIGKILLed prior zenohd is removed first so the bind does not hit
+    /// `EADDRINUSE`.
+    pub fn spawn_zenohd_tcp_unixsock(
+        tcp_port: u16,
+        sock_path: &str,
+        mk_probe_stderr: impl FnMut() -> File,
+    ) -> ChildGuard {
+        // Remove BOTH a stale socket and its `<path>.lock` flock twin (zenoh's
+        // unixsock-stream listener creates a lock file beside the socket via
+        // nix flock). A SIGKILLed prior zenohd leaves both; clearing them keeps
+        // the bind from EADDRINUSE and keeps /tmp from accruing 0-byte locks.
+        let _ = std::fs::remove_file(sock_path);
+        let _ = std::fs::remove_file(format!("{sock_path}.lock"));
+        spawn_zenohd_listeners(
+            &[
+                format!("tcp/127.0.0.1:{tcp_port}"),
+                format!("unixsock-stream/{sock_path}"),
+            ],
+            tcp_port,
+            &format!("unixsock-stream/{sock_path}"),
+            mk_probe_stderr,
+        )
+    }
+
     /// R311pi — confirm zenohd can complete a zenoh handshake by driving a
     /// throwaway wz client to `Established` against the `connect` locator, then
     /// dropping the client. The wz open is deterministic (in-process, no fork),

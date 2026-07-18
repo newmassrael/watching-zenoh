@@ -143,6 +143,15 @@ switchboard = ["dep:wz-ap-demo-app", "wz/switchboard"]
 # `connect-ws`: the WS transport is not Initiator-only (the library also
 # has `accept_ws`), so a connect-baked name would misdescribe it.
 ws = ["wz/locator-ws"]
+# R311y364 — opt-in `unixsock-stream/` (Unix domain socket) DIAL transport,
+# forwarding the wz facade's `locator-unixsock` (which pulls
+# `transport-link-unixsock`). The mirror of `ws`: NOT in `default`
+# (preset-ap-client is TCP-only), so the footprint baseline and every other
+# lane's build are unchanged; only run-ci Layer Z builds wz-ap-demo with it so
+# the unixsock cross-impl legs can dial `--connect unixsock-stream/<path>`
+# against zenohd's `unixsock-stream/` listener (zenoh-pico has no unixsock link,
+# so pico dials TCP and zenohd routes between the two).
+unixsock = ["wz/locator-unixsock"]
 # R311qa — opt-in multi-peer ROUTER mode (`--router <addr>`): the catalog
 # `routing-router` atom's foundation (bind once, hold N concurrent peer faces,
 # no forwarding yet). Forwards the wz facade's `routing-router` marker feature,
