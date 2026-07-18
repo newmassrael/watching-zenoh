@@ -5597,6 +5597,20 @@ layer_e6_peer_mesh() {
     else
         _pico_cli_unavailable "Layer E6 (pico adminspace config-write z_put)" || return 1
     fi
+    # R311y368 — pico ACCESS-CONTROL cross-impl (§5.16): a pico z_put to a wz
+    # peer's DENIED keyexpr (secret/**, via --acl-deny) is dropped by the ACL
+    # interceptor while a z_put to an allowed keyexpr is admitted (the positive
+    # control in the SAME leg — proves the ACL, not a dead session). pico is the
+    # ENCODER; the wz peer adjudicates by subject + keyexpr. Guarded on the
+    # FOREIGN z_put binary (like the adminspace leg above); rides the same E6
+    # binary (routing-peer pulls access-acl). The atom binds to the AclInterceptor
+    # decision (RED: always-admit -> secret leaks as a 2nd admitted push).
+    if [[ -x target/zenoh-pico-cli/z_put ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_acl_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    else
+        _pico_cli_unavailable "E6 leg wz_peer_acl_pico_interop" || return 1
+    fi
     # R311y165 — the STRONG peer-mode future-push CROSS-IMPL e2e (the leg-5 peer analog,
     # now that D4 gave the peer a client data plane): a pico z_pub CLIENT of peer-A
     # (pub-before-sub) + a pico z_sub CLIENT of peer-B; A pushes the future
