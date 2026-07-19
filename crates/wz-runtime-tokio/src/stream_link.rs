@@ -26,6 +26,8 @@
 //! carries its own boundary-as-frame drivers.
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -47,15 +49,27 @@ use wz_session_core::link::BoxedLinkDriver;
 pub struct StreamReadDriver<R> {
     reader: R,
     read_state: ReadState,
+    /// transport-lowlatency — shared with the sibling [`writer_task`] and flipped
+    /// true by the lowlatency open helper at Established (only when the session
+    /// negotiated lowlatency). While true, the streamed length prefix read is the
+    /// 4-byte LE u32 zenoh lowlatency form (`unicast/lowlatency/link.rs`), not the
+    /// 2-byte u16 batch form; false (the default) keeps the universal u16 prefix,
+    /// so a non-lowlatency link and the handshake frames of a lowlatency link read
+    /// byte-identically to before.
+    lowlatency: Arc<AtomicBool>,
 }
 
 impl<R: AsyncRead + Unpin> StreamReadDriver<R> {
-    // `pub(crate)` so each transport's `wire_*` constructs it over its own
-    // split read half; the type is transport-neutral.
-    pub(crate) fn new(reader: R) -> Self {
+    // `pub(crate)` so each transport's `wire_*` constructs it over its own split
+    // read half; the type is transport-neutral. `lowlatency` is the flag the
+    // lowlatency open helper flips at Established (the TCP dial/accept path
+    // threads a shared one; every non-lowlatency stream link passes a fresh
+    // always-false flag, keeping the universal u16 prefix).
+    pub(crate) fn new(reader: R, lowlatency: Arc<AtomicBool>) -> Self {
         Self {
             reader,
             read_state: ReadState::Idle,
+            lowlatency,
         }
     }
 }
@@ -84,7 +98,12 @@ impl<R: AsyncRead + Unpin> LinkDriver for StreamReadDriver<R> {
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
-        poll_framed(&mut self.read_state, &mut self.reader).await
+        poll_framed(
+            &mut self.read_state,
+            &mut self.reader,
+            self.lowlatency.load(Ordering::Acquire),
+        )
+        .await
     }
 }
 
@@ -101,27 +120,54 @@ impl<R: AsyncRead + Unpin> LinkDriver for StreamReadDriver<R> {
 /// carrying no per-transport state), so TCP and TLS share the one type.
 pub struct StreamWriteDriver {
     tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// transport-lowlatency — flipped true by the lowlatency open helper at
+    /// Established (a fresh always-false flag for every non-lowlatency link).
+    /// While true, [`Self::send_blocking`] frames with the 4-byte LE u32 zenoh
+    /// lowlatency prefix (`unicast/lowlatency/link.rs`); false keeps the universal
+    /// 2-byte u16 [`StreamEnvelope`] batch prefix. The framing is decided HERE, at
+    /// enqueue time (synchronous with the FSM's emit), NOT in the async
+    /// [`writer_task`] — so a handshake frame enqueued while the flag is still
+    /// false is framed u16 even if the writer drains it after the flip, closing
+    /// the enqueue-vs-dequeue race a dequeue-time flag read would open.
+    lowlatency: Arc<AtomicBool>,
 }
 
 impl StreamWriteDriver {
-    pub(crate) fn new(tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
-        Self { tx }
+    pub(crate) fn new(tx: mpsc::UnboundedSender<Vec<u8>>, lowlatency: Arc<AtomicBool>) -> Self {
+        Self { tx, lowlatency }
     }
 }
 
 impl BoxedLinkDriver for StreamWriteDriver {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
         if bytes.len() > u16::MAX as usize {
-            // Oversize: drop with a warn rather than overflow the u16 length
-            // prefix. zenoh-pico's Z_BATCH_UNICAST_SIZE ceiling is 65535, so a
-            // larger frame is a wz-side encoder bug — loud.
+            // Oversize: drop with a warn rather than overflow the length prefix.
+            // zenoh-pico's Z_BATCH_UNICAST_SIZE ceiling is 65535 and the
+            // negotiated lowlatency max (49152) is under it, so a larger frame is
+            // a wz-side encoder bug — loud, in either framing mode.
             log::warn!(
                 "wz-runtime-tokio: outbound frame {} bytes > 65535; dropping",
                 bytes.len()
             );
             return;
         }
-        if let Err(e) = self.tx.send(bytes.to_vec()) {
+        let wire = if self.lowlatency.load(Ordering::Acquire) {
+            // transport-lowlatency — 4-byte LE u32 length prefix + payload (zenoh's
+            // lowlatency streamed framing), NOT the u16 batch prefix.
+            let mut wire = Vec::with_capacity(4 + bytes.len());
+            wire.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            wire.extend_from_slice(bytes);
+            wire
+        } else {
+            // Codec-routed wire shape (single source of truth for the streamed-link
+            // envelope); `bytes.len() <= u16::MAX` is guaranteed above.
+            StreamEnvelope {
+                payload_len: bytes.len() as u16,
+                payload: bytes,
+            }
+            .encode_to_vec()
+        };
+        if let Err(e) = self.tx.send(wire) {
             log::warn!("wz-runtime-tokio: outbound channel closed; dropping frame ({e})");
         }
     }
@@ -139,38 +185,20 @@ impl BoxedLinkDriver for StreamWriteDriver {
 }
 
 /// Async writer task. Owns a stream write half `W` (any `AsyncWrite` — TCP's
-/// `OwnedWriteHalf` or a rustls `WriteHalf<TlsStream<TcpStream>>`) and drains
-/// the outbound channel one frame at a time, encoding each payload into the
-/// Zenoh streamed-link [`StreamEnvelope`] (u16 LE length prefix + payload) via
-/// the codec, then writing + flushing. Generic over the write half so the
-/// StreamEnvelope framing is the single source of truth for every byte-stream
-/// link. Exits when every write-driver clone has dropped (receiver returns
-/// `None`) or a write fails (logged + bail), shutting the write half so the
-/// peer observes EOF rather than RST.
+/// `OwnedWriteHalf` or a rustls `WriteHalf<TlsStream<TcpStream>>`) and drains the
+/// outbound channel one PRE-FRAMED wire at a time, writing + flushing each. The
+/// length-prefix framing is applied by [`StreamWriteDriver::send_blocking`] at
+/// enqueue time (synchronous with the FSM's emit), so a handshake frame enqueued
+/// before a lowlatency flag flip stays u16-framed regardless of when it drains —
+/// the writer never re-decides framing. Generic over the write half so it is the
+/// single home for every byte-stream link. Exits when every write-driver clone
+/// has dropped (receiver returns `None`) or a write fails (logged + bail),
+/// shutting the write half so the peer observes EOF rather than RST.
 pub async fn writer_task<W>(mut writer: W, mut rx: mpsc::UnboundedReceiver<Vec<u8>>)
 where
     W: AsyncWrite + Unpin,
 {
-    while let Some(payload) = rx.recv().await {
-        // Defensive: send_blocking already rejects oversize frames, but a
-        // future caller could bypass that check.
-        let payload_len = match u16::try_from(payload.len()) {
-            Ok(n) => n,
-            Err(_) => {
-                log::warn!(
-                    "wz-runtime-tokio: writer_task received oversize frame ({} bytes); dropping",
-                    payload.len()
-                );
-                continue;
-            }
-        };
-        // Codec-routed wire shape (single source of truth for the streamed-link
-        // envelope), mirroring the per-transport driver's send.
-        let wire = StreamEnvelope {
-            payload_len,
-            payload: payload.as_slice(),
-        }
-        .encode_to_vec();
+    while let Some(wire) = rx.recv().await {
         if let Err(e) = writer.write_all(&wire).await {
             log::warn!("wz-runtime-tokio: writer_task write failed: {e}; closing");
             return;
@@ -194,10 +222,14 @@ mod tests {
     #[tokio::test]
     async fn write_driver_drops_oversize_frame() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let driver = StreamWriteDriver::new(tx);
+        let driver = StreamWriteDriver::new(tx, Arc::new(AtomicBool::new(false)));
         driver.send_blocking(&vec![0u8; 65_536], Reliability::Reliable);
         driver.send_blocking(b"ok", Reliability::Reliable);
-        // Only the in-range frame reached the channel.
-        assert_eq!(rx.recv().await.as_deref(), Some(b"ok".as_slice()));
+        // Only the in-range frame reached the channel, u16-framed at enqueue
+        // (2-byte LE len=2 + "ok"); the oversize frame was dropped.
+        assert_eq!(
+            rx.recv().await.as_deref(),
+            Some([0x02, 0x00, b'o', b'k'].as_slice())
+        );
     }
 }

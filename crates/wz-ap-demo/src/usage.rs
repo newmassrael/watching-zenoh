@@ -39,6 +39,7 @@ pub(crate) fn print_usage() {
     eprintln!("OPTIONS:");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
     eprintln!("    --connect <addr>         initiator mode (HOST:PORT or tcp/|ws/HOST:PORT)");
+    eprintln!("    --lowlatency             offer the lowlatency transport on --connect");
     eprintln!("    --router <addr>          multi-peer router mode: bind once, HOLD N concurrent");
     eprintln!(
         "                             peer faces (routing-router foundation, no forwarding)."

@@ -65,6 +65,17 @@ pub(crate) enum Role {
         /// `namespace` feature, in which case the flag is inert. Applied once, on
         /// the one-shot open (runner.rs; reconnect is out of demo scope).
         namespace: Option<String>,
+        /// R311y372 — `--lowlatency` offers the Z_EXT_LOWLATENCY transport ext on
+        /// the InitSyn (`initiate_and_open_session_with_lowlatency` ->
+        /// `set_lowlatency_offer(true)`), so a peer that also offers it negotiates
+        /// the lean transport that drops the Frame(sn) wrapper on the data path.
+        /// Feature-uniform (always parsed + banner-logged); `false` without
+        /// `--lowlatency` OR when the demo was built without the
+        /// `transport-lowlatency` feature, in which case the flag is inert (the
+        /// one-shot open takes the bare initiate path, runner.rs). Initiator-only
+        /// and one-shot-only, like `namespace`: the reconnect path is out of demo
+        /// scope, and an acceptor's lowlatency offer is not exercised by the demo.
+        lowlatency: bool,
     },
 }
 

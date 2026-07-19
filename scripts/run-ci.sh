@@ -5384,7 +5384,12 @@ layer_z_zenohd_interop() {
     # CLI (routing-namespace) so leg 18 publishes a bare key under a namespace and
     # a pico `<prefix>/**` z_sub receives the wire-prefixed keyexpr; every other leg
     # (no --namespace) dials through the unchanged binary.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,router-hat-router,routing-token-tables,namespace --quiet) || return 1
+    # `transport-lowlatency` (R311y372) is additive too: it compiles the
+    # `--lowlatency` CLI so the lowlatency cross-impl leg dials `--connect ...
+    # --lowlatency` and NEGOTIATES zenoh's lean (Frame-less) transport against a
+    # zenohd whose `transport/unicast/lowlatency` is on; every other leg (no
+    # --lowlatency) dials through the unchanged binary on the universal transport.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,router-hat-router,routing-token-tables,namespace,transport-lowlatency --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients
@@ -5397,6 +5402,14 @@ layer_z_zenohd_interop() {
     # e2e tests, so serial execution costs only wall-clock, not coverage.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_to_zenohd_router -- --ignored --quiet --test-threads=1) || return 1
+    # R311y372 — wz LOWLATENCY transport cross-impl: wz dials zenohd with
+    # `--lowlatency`, negotiates the Z_EXT_LOWLATENCY unit ext (asserted true via
+    # the demo log), and its lean (4-byte-prefixed, Frame-less) Put routes through
+    # a lowlatency-configured zenohd to a pico z_sub. zenoh-pico has NO lowlatency
+    # transport, so zenohd is the only foreign witness. Same --test-threads=1
+    # per-zenohd isolation as the client legs above.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_lowlatency_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y140 — wz-ROUTER-HAT <-> zenohd ROUTER-TIER federation interop, the
     # FIRST cross-impl test on wz's `routers_net` link-state wire (every other
     # zenohd leg pairs wz as a CLIENT, never on the router tier). Leg 1 converges

@@ -1081,6 +1081,44 @@ pub mod common {
         )
     }
 
+    /// R311y372 — spawn a zenohd router with the LOWLATENCY unicast transport
+    /// enabled. zenoh refuses `transport/unicast/lowlatency` unless qos is also
+    /// disabled ("'lowlatency' is incompatible with 'qos'",
+    /// DEFAULT_CONFIG.json5:541), so this passes BOTH `--cfg` overrides. A wz
+    /// client that OFFERS Z_EXT_LOWLATENCY negotiates the lean (Frame-less)
+    /// transport with this router; a non-offering client — including the
+    /// handshake-readiness probe below and a pico `z_sub` (zenoh-pico has NO
+    /// lowlatency transport) — transparently falls back to the UNIVERSAL
+    /// transport on its own link, so the same router routes both sides of the
+    /// lowlatency interop leg. Single `tcp/` listener; the readiness probe dials
+    /// it universal (fallback), which Establishes against a lowlatency-enabled
+    /// router just as a plain one does.
+    pub fn spawn_zenohd_lowlatency(port: u16, mk_probe_stderr: impl FnMut() -> File) -> ChildGuard {
+        let mut command = Command::new(zenohd_binary());
+        command
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .arg("--cfg")
+            .arg("transport/unicast/lowlatency:true")
+            .arg("--cfg")
+            .arg("transport/unicast/qos/enabled:false")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let guard = ChildGuard::wrap(
+            "zenohd (reference router, lowlatency)",
+            command.spawn().expect("spawn zenohd (lowlatency)"),
+        );
+        assert!(
+            wait_for_tcp_accept(port, Duration::from_secs(10)),
+            "zenohd (lowlatency) did not start accepting on 127.0.0.1:{port} within 10s"
+        );
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), mk_probe_stderr);
+        guard
+    }
+
     /// Spawn a zenohd router listening on BOTH `tcp/` (for pico TCP clients) and
     /// `ws/` (for a wz WebSocket client) on the reserved ports, and block until
     /// it is HANDSHAKE-ready. R311pk — the dual-transport variant of

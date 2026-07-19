@@ -25,6 +25,7 @@
 //! dispatcher consumes.
 
 use std::io;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use sce_rust_runtime::Engine;
@@ -50,8 +51,8 @@ use wz_session_core::qos::Priority;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
 use crate::link_pipeline::{
-    accept_tcp, accept_tcp_on, bind_tcp, bind_tcp_host, dial_tcp, dial_tcp_host, wire_tcp_stream,
-    TcpReadDriver,
+    accept_tcp, accept_tcp_on, bind_tcp, bind_tcp_host, dial_tcp, dial_tcp_host,
+    wire_tcp_stream_with_lowlatency, TcpReadDriver,
 };
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
 use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
@@ -1108,9 +1109,28 @@ pub fn wire_dialed_link(
     Arc<dyn BoxedLinkDriver + Send + Sync>,
     TokioJoinHandle<()>,
 ) {
+    // Universal framing (u16 prefix). The lowlatency open helpers call
+    // `wire_dialed_link_with_lowlatency` with a flag they flip at Established.
+    wire_dialed_link_with_lowlatency(dialed, Arc::new(AtomicBool::new(false)))
+}
+
+/// transport-lowlatency — [`wire_dialed_link`] sharing a lowlatency-wire flag
+/// with the TCP link's read + write framing (the only link the lowlatency
+/// negotiation is wired for today). The flag stays false through the handshake
+/// and for every non-TCP link, so those wires are byte-identical to before; the
+/// lowlatency open helper flips it at Established, switching the TCP frame prefix
+/// to the 4-byte u32 zenoh lowlatency form.
+pub fn wire_dialed_link_with_lowlatency(
+    dialed: DialedLink,
+    lowlatency: Arc<AtomicBool>,
+) -> (
+    InboundLink,
+    Arc<dyn BoxedLinkDriver + Send + Sync>,
+    TokioJoinHandle<()>,
+) {
     match dialed {
         DialedLink::Tcp(stream) => {
-            let (inbound, outbound, handle) = wire_tcp_stream(stream);
+            let (inbound, outbound, handle) = wire_tcp_stream_with_lowlatency(stream, lowlatency);
             (InboundLink::Tcp(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-udp")]
@@ -1784,10 +1804,12 @@ pub async fn initiate_and_open_session_with_lowlatency(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let lowlatency_wire = Arc::new(AtomicBool::new(false));
+    let (inbound, outbound, writer_handle) =
+        wire_dialed_link_with_lowlatency(connected, lowlatency_wire.clone());
     let actions = new_session_actions(outbound, params, clock);
     actions.set_lowlatency_offer(true);
-    initiator_open(
+    let opened = initiator_open(
         inbound,
         actions,
         writer_handle,
@@ -1795,7 +1817,14 @@ pub async fn initiate_and_open_session_with_lowlatency(
         max_iters,
         tick_interval_ms,
     )
-    .await
+    .await?;
+    // At Established: if the peer mirrored the ext (`is_lowlatency()`), switch the
+    // link wire to the 4-byte u32 lowlatency prefix for all post-Established
+    // (data / keepalive) frames. The handshake above already went out u16.
+    if opened.actions.is_lowlatency() {
+        lowlatency_wire.store(true, std::sync::atomic::Ordering::Release);
+    }
+    Ok(opened)
 }
 
 /// transport-qos (R311y216) — [`initiate_and_open_session`] with the QoS
@@ -2117,12 +2146,14 @@ pub async fn accept_and_open_session_with_lowlatency(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let lowlatency_wire = Arc::new(AtomicBool::new(false));
+    let (inbound, outbound, writer_handle) =
+        wire_dialed_link_with_lowlatency(accepted, lowlatency_wire.clone());
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.set_lowlatency_offer(true);
 
     engine.process_event(E::InboundStart);
-    drive_open_loop(
+    let opened = drive_open_loop(
         inbound,
         actions,
         engine,
@@ -2131,7 +2162,13 @@ pub async fn accept_and_open_session_with_lowlatency(
         max_iters,
         tick_interval_ms,
     )
-    .await
+    .await?;
+    // At Established: switch to the 4-byte u32 lowlatency wire iff the peer's
+    // InitSyn offered the ext (`is_lowlatency()`); the handshake went out u16.
+    if opened.actions.is_lowlatency() {
+        lowlatency_wire.store(true, std::sync::atomic::Ordering::Release);
+    }
+    Ok(opened)
 }
 
 /// transport-qos (R311y216) — [`accept_and_open_session`] that OFFERS the QoS

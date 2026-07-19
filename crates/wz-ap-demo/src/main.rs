@@ -450,6 +450,9 @@ fn main() -> ExitCode {
             quic_ca: parse_pair(rest, "--quic-ca"),
             // R311y369 — keyexpr namespace prefix for outbound publishes.
             namespace: parse_pair(rest, "--namespace"),
+            // R311y372 — `--lowlatency` presence flag: offer the lowlatency
+            // transport on the InitSyn (mirror of `--reconnect` presence parsing).
+            lowlatency: rest.iter().any(|a| a == "--lowlatency"),
         },
         (Some(_), Some(_)) => {
             eprintln!("wz-ap-demo: --listen and --connect are mutually exclusive");
@@ -772,6 +775,7 @@ fn main() -> ExitCode {
             tls_ca,
             quic_ca,
             namespace,
+            lowlatency,
         } => {
             log::info!("connect = {connect}");
             if *reconnect {
@@ -785,6 +789,9 @@ fn main() -> ExitCode {
             }
             if let Some(ns) = namespace {
                 log::info!("namespace = {ns} (outbound keyexprs prefixed {ns}/<key>)");
+            }
+            if *lowlatency {
+                log::info!("lowlatency = on (offers Z_EXT_LOWLATENCY on the InitSyn)");
             }
         }
     }

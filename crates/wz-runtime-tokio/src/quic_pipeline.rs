@@ -281,9 +281,14 @@ pub fn wire_quic_stream(
     } = link;
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(writer_task(send, rx));
-    let outbound = Arc::new(StreamWriteDriver::new(tx));
+    // transport-lowlatency is a TCP-path negotiation; QUIC keeps the universal
+    // u16 prefix (an always-false flag on the write driver).
+    let outbound = Arc::new(StreamWriteDriver::new(
+        tx,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    ));
     let inbound = QuicReadDriver {
-        inner: StreamReadDriver::new(recv),
+        inner: StreamReadDriver::new(recv, Arc::new(std::sync::atomic::AtomicBool::new(false))),
         _endpoint: endpoint,
         _connection: connection,
     };

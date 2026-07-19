@@ -236,6 +236,16 @@ routing-peer = [
 # other lane build unchanged; only `--features transport-multilink` compiles the
 # aggregation wiring. The atom is active <=> its cfg sites in run_peer + main.rs.
 transport-multilink = ["routing-peer", "wz/transport-multilink"]
+# R311y372 (transport-lowlatency) — opt-in lowlatency transport MODE, forwarding
+# the wz facade's `transport-lowlatency` (the runtime-negotiated lean transport
+# that offers the Z_EXT_LOWLATENCY unit ext on InitSyn and drops the Frame(sn)
+# wrapper once negotiated). The mirror of `transport-multilink`: NOT in `default`
+# (preset-ap-client does not carry lowlatency), so every other lane build is
+# unchanged; only run-ci Layer Z builds wz-ap-demo with it so the lowlatency
+# cross-impl leg can dial `--connect ... --lowlatency` against a zenohd whose
+# `transport/unicast/lowlatency` is enabled. The atom is active <=> its cfg site
+# in runner.rs (the `--lowlatency` open branch).
+transport-lowlatency = ["wz/transport-lowlatency"]
 # R311y218 (transport-qos) — opt-in QoS transport on the `--peer` mesh mode: `--qos`
 # offers it, routed through `WzConfig.qos` into `FaceSources.qos` and staged by the
 # `_with_multilink` entrypoints. Pulls `routing-peer` (the run-mode that hosts the

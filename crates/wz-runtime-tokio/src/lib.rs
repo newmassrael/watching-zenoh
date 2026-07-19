@@ -1326,23 +1326,32 @@ pub struct TcpDriver {
 #[cfg(feature = "transport-link-tcp")]
 #[derive(Default)]
 pub(crate) enum ReadState {
-    /// No partial read in flight. Next `poll_event` enters
-    /// `Length` and begins reading the 2-byte prefix.
+    /// No partial read in flight. Next `poll_event` enters `Length` and begins
+    /// reading the length prefix, whose WIDTH (2-byte u16 universal / 4-byte u32
+    /// lowlatency) is fixed from the link's lowlatency flag at that transition.
     #[default]
     Idle,
-    /// Length prefix partially read. `prefix[..offset]` holds the
-    /// bytes consumed so far; `offset < 2`. Once `offset == 2`,
-    /// the prefix is decoded and the state transitions to
-    /// `Payload` with a sized buffer.
-    Length { prefix: [u8; 2], offset: usize },
-    /// Payload partially read into `frame[..offset]`; `frame`
-    /// includes the 2-byte length prefix at `frame[..2]` so the
-    /// codec decode at frame-complete operates on the wire-shape
-    /// bytes verbatim. `offset < frame.len()` while reading;
-    /// `offset == frame.len()` means the frame is complete and
-    /// the state machine emits a `LinkEvent::Rx` + transitions
-    /// back to `Idle` on the next iteration.
-    Payload { frame: Vec<u8>, offset: usize },
+    /// Length prefix partially read. `prefix[..offset]` holds the bytes consumed
+    /// so far; `offset < width` (`width` is 2 or 4). Once `offset == width`, the
+    /// prefix is decoded and the state transitions to `Payload` with a sized
+    /// buffer.
+    Length {
+        prefix: [u8; 4],
+        offset: usize,
+        width: usize,
+    },
+    /// Payload partially read into `frame[..offset]`; `frame` includes the
+    /// `prefix_width`-byte length prefix at `frame[..prefix_width]` so the u16
+    /// codec decode at frame-complete operates on the wire-shape bytes verbatim
+    /// (the 4-byte u32 lowlatency path takes the payload tail directly).
+    /// `offset < frame.len()` while reading; `offset == frame.len()` means the
+    /// frame is complete and the state machine emits a `LinkEvent::Rx` +
+    /// transitions back to `Idle` on the next iteration.
+    Payload {
+        frame: Vec<u8>,
+        offset: usize,
+        prefix_width: usize,
+    },
 }
 
 /// R311et — shared cancel-safe framing read used by both [`TcpDriver`]
@@ -1361,19 +1370,35 @@ pub(crate) enum ReadState {
 /// (R311ev); the wire shape stays codec-routed (the [`StreamEnvelope`]
 /// decode is the single source of truth, not a hand-rolled prefix strip).
 #[cfg(feature = "transport-link-tcp")]
-pub(crate) async fn poll_framed<S>(read_state: &mut ReadState, src: &mut S) -> LinkEvent
+pub(crate) async fn poll_framed<S>(
+    read_state: &mut ReadState,
+    src: &mut S,
+    lowlatency: bool,
+) -> LinkEvent
 where
     S: tokio::io::AsyncRead + Unpin,
 {
     loop {
         match read_state {
             ReadState::Idle => {
+                // transport-lowlatency — a negotiated + Established lowlatency link
+                // frames with a 4-byte LE u32 prefix (zenoh
+                // `unicast/lowlatency/link.rs`); every other frame (universal + the
+                // handshake) keeps the 2-byte u16 prefix. The width is fixed here,
+                // at frame start, so a flag flip between frames never splits a
+                // prefix mid-read.
+                let width = if lowlatency { 4 } else { 2 };
                 *read_state = ReadState::Length {
-                    prefix: [0u8; 2],
+                    prefix: [0u8; 4],
                     offset: 0,
+                    width,
                 };
             }
-            ReadState::Length { prefix, offset } => match src.read(&mut prefix[*offset..]).await {
+            ReadState::Length {
+                prefix,
+                offset,
+                width,
+            } => match src.read(&mut prefix[*offset..*width]).await {
                 Ok(0) => {
                     *read_state = ReadState::Idle;
                     return LinkEvent::Lost {
@@ -1382,11 +1407,36 @@ where
                 }
                 Ok(n) => {
                     *offset += n;
-                    if *offset == 2 {
-                        let payload_len = u16::from_le_bytes(*prefix) as usize;
-                        let mut frame = vec![0u8; 2 + payload_len];
-                        frame[..2].copy_from_slice(prefix);
-                        *read_state = ReadState::Payload { frame, offset: 2 };
+                    if *offset == *width {
+                        let w = *width;
+                        let payload_len = if w == 4 {
+                            u32::from_le_bytes([prefix[0], prefix[1], prefix[2], prefix[3]])
+                                as usize
+                        } else {
+                            u16::from_le_bytes([prefix[0], prefix[1]]) as usize
+                        };
+                        // transport-lowlatency — the 4-byte prefix is an untrusted
+                        // u32; bound it before allocating, exactly as zenoh's
+                        // read_with_link rejects an over-max batch ("Batch len is
+                        // invalid. Received {n} but negotiated max len is {len}").
+                        // The u16 path is inherently capped by its type; the u32
+                        // path must not allocate an attacker-chosen ~4 GiB. A legit
+                        // lowlatency frame rides the negotiated batch (<= u16::MAX,
+                        // matching send_blocking's outbound u16::MAX cap), so this
+                        // never rejects a well-formed peer.
+                        if payload_len > u16::MAX as usize {
+                            *read_state = ReadState::Idle;
+                            return LinkEvent::Lost {
+                                cause: LostCause::PeerClosed,
+                            };
+                        }
+                        let mut frame = vec![0u8; w + payload_len];
+                        frame[..w].copy_from_slice(&prefix[..w]);
+                        *read_state = ReadState::Payload {
+                            frame,
+                            offset: w,
+                            prefix_width: w,
+                        };
                     }
                 }
                 Err(_) => {
@@ -1396,12 +1446,22 @@ where
                     };
                 }
             },
-            ReadState::Payload { frame, offset } => {
+            ReadState::Payload {
+                frame,
+                offset,
+                prefix_width,
+            } => {
                 if *offset == frame.len() {
                     // Frame complete. Take the buffer out before decoding
                     // so the state reset is visible if the codec rejects.
+                    let w = *prefix_width;
                     let bytes = std::mem::take(frame);
                     *read_state = ReadState::Idle;
+                    if w == 4 {
+                        // transport-lowlatency — the 4-byte u32 prefix is NOT the
+                        // u16 StreamEnvelope shape; the payload is the frame tail.
+                        return LinkEvent::Rx(RxFrame::new(bytes[4..].to_vec()));
+                    }
                     let mut cursor = SceCursor::new(&bytes);
                     return match StreamEnvelope::decode(&mut cursor) {
                         Ok(env) => LinkEvent::Rx(RxFrame::new(env.payload.to_vec())),
@@ -1526,7 +1586,10 @@ impl LinkDriver for TcpDriver {
         // it is `TcpDriver`-specific (the split read half always owns its
         // `OwnedReadHalf`).
         match self.stream.as_mut() {
-            Some(stream) => poll_framed(&mut self.read_state, stream).await,
+            // TcpDriver is the unified acceptor/adapter driver; the lowlatency
+            // open helpers wire via `wire_dialed_link` -> `StreamReadDriver`, not
+            // this path, so it always reads the universal 2-byte prefix.
+            Some(stream) => poll_framed(&mut self.read_state, stream, false).await,
             None => LinkEvent::Lost {
                 cause: LostCause::PeerClosed,
             },
@@ -1718,5 +1781,25 @@ impl LinkDriver for UdpDriver {
                 cause: LostCause::OsError,
             },
         }
+    }
+}
+
+#[cfg(all(test, feature = "transport-link-tcp"))]
+mod poll_framed_lowlatency_tests {
+    use super::*;
+
+    /// transport-lowlatency — a 4-byte u32 length prefix over `u16::MAX` is
+    /// rejected (`Lost`) BEFORE allocation, mirroring zenoh's over-max batch
+    /// rejection ("Batch len is invalid"). Guards the lowlatency rx path against
+    /// a hostile peer forcing wz to allocate an attacker-chosen buffer (the u16
+    /// path is inherently capped by its type; the u32 path is not).
+    #[tokio::test]
+    async fn lowlatency_rx_rejects_oversize_u32_prefix() {
+        // u32 LE 0x0001_0000 = 65536 = u16::MAX + 1.
+        let bytes = [0x00u8, 0x00, 0x01, 0x00];
+        let mut src: &[u8] = &bytes;
+        let mut st = ReadState::Idle;
+        let ev = poll_framed(&mut st, &mut src, true).await;
+        assert!(matches!(ev, LinkEvent::Lost { .. }));
     }
 }

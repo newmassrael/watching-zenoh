@@ -30,6 +30,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use tokio::net::tcp::OwnedReadHalf;
@@ -274,11 +275,26 @@ fn configure_tcp_stream(stream: &TcpStream) {
 pub fn wire_tcp_stream(
     stream: TcpStream,
 ) -> (TcpReadDriver, Arc<StreamWriteDriver>, TokioJoinHandle<()>) {
+    // Universal framing: a fresh always-false lowlatency flag (the u16 batch
+    // prefix). The lowlatency open helpers instead use the _with_lowlatency
+    // variant to share a flag they flip at Established.
+    wire_tcp_stream_with_lowlatency(stream, Arc::new(AtomicBool::new(false)))
+}
+
+/// transport-lowlatency — [`wire_tcp_stream`] sharing the link's lowlatency-wire
+/// flag with BOTH the read ([`StreamReadDriver`]) and write ([`writer_task`])
+/// framing, so both switch to the 4-byte LE u32 prefix once the open helper flips
+/// it at Established. The flag stays false through the handshake and for every
+/// universal link, so those wires are byte-identical to before.
+pub fn wire_tcp_stream_with_lowlatency(
+    stream: TcpStream,
+    lowlatency: Arc<AtomicBool>,
+) -> (TcpReadDriver, Arc<StreamWriteDriver>, TokioJoinHandle<()>) {
     let (reader, writer) = stream.into_split();
-    let inbound = StreamReadDriver::new(reader);
+    let inbound = StreamReadDriver::new(reader, lowlatency.clone());
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(writer_task(writer, rx));
-    let outbound = Arc::new(StreamWriteDriver::new(tx));
+    let outbound = Arc::new(StreamWriteDriver::new(tx, lowlatency));
     (inbound, outbound, writer_handle)
 }
 

@@ -78,6 +78,8 @@ use wz::runtime_tokio::session::{
 use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
 };
+#[cfg(feature = "transport-lowlatency")]
+use wz::runtime_tokio::session_open::initiate_and_open_session_with_lowlatency;
 use wz::runtime_tokio::session_open::{
     accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session, DialConfig,
     DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
@@ -869,14 +871,49 @@ pub(crate) async fn run_demo(
                     .await
                 }
                 Role::Initiator { .. } => {
-                    initiate_and_open_session(
+                    // R311y372 — an Initiator with `--lowlatency` OFFERS the
+                    // Z_EXT_LOWLATENCY unit ext on the InitSyn (via
+                    // `initiate_and_open_session_with_lowlatency` ->
+                    // `set_lowlatency_offer(true)`), so a peer that also offers it
+                    // negotiates the lean transport that drops the Frame(sn)
+                    // wrapper. Gated on the atom; a non-lowlatency build always
+                    // takes the bare initiate path.
+                    #[cfg(feature = "transport-lowlatency")]
+                    let opened_res = if matches!(
+                        &role,
+                        Role::Initiator {
+                            lowlatency: true,
+                            ..
+                        }
+                    ) {
+                        initiate_and_open_session_with_lowlatency(
+                            dialed,
+                            params,
+                            session_clock,
+                            None,
+                            DEFAULT_OPEN_TICK_MS,
+                        )
+                        .await
+                    } else {
+                        initiate_and_open_session(
+                            dialed,
+                            params,
+                            session_clock,
+                            None,
+                            DEFAULT_OPEN_TICK_MS,
+                        )
+                        .await
+                    };
+                    #[cfg(not(feature = "transport-lowlatency"))]
+                    let opened_res = initiate_and_open_session(
                         dialed,
                         params,
                         session_clock,
                         None,
                         DEFAULT_OPEN_TICK_MS,
                     )
-                    .await
+                    .await;
+                    opened_res
                 }
             }
             .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))?;
@@ -898,6 +935,24 @@ pub(crate) async fn run_demo(
                 })?;
                 opened.actions.set_namespace(prefix);
                 log::info!("wz-ap-demo: namespace '{ns}' installed (outbound keyexprs prefixed)");
+            }
+            // R311y372 — WITNESS the negotiated lowlatency capability: `&=`-merged
+            // against the peer's InitAck ext, so `true` here means the peer (a
+            // zenohd with `transport/unicast/lowlatency` on, or a wz peer) offered
+            // Z_EXT_LOWLATENCY back and the established session runs the lean
+            // (Frame-less) data path. The Layer Z cross-impl leg greps this line.
+            #[cfg(feature = "transport-lowlatency")]
+            if matches!(
+                &role,
+                Role::Initiator {
+                    lowlatency: true,
+                    ..
+                }
+            ) {
+                log::info!(
+                    "wz-ap-demo: lowlatency negotiated = {}",
+                    opened.actions.is_lowlatency()
+                );
             }
             log::info!("wz-ap-demo: session Established; entering steady state");
             DriveSource::OneShot(Box::new(opened))
