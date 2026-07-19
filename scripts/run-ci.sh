@@ -5410,6 +5410,16 @@ layer_z_zenohd_interop() {
     # per-zenohd isolation as the client legs above.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_lowlatency_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):
+    # a real zenohd DIALS the wz `--listen ws/...` acceptor over ws (the RFC6455
+    # server upgrade wired in bind_locator/accept_locator), and a pico z_put routes
+    # through zenohd ACROSS the ws link into the wz acceptor's subscriber. The
+    # existing wz_to_zenohd_router legs prove only the wz ws DIALER (wz->zenohd);
+    # this is the reverse (acceptor) direction. zenoh-pico has no ws client, so
+    # zenohd is the only foreign ws dialer. Same --test-threads=1 per-zenohd
+    # isolation; the demo is already built with `ws` above.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_ws_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y140 — wz-ROUTER-HAT <-> zenohd ROUTER-TIER federation interop, the
     # FIRST cross-impl test on wz's `routers_net` link-state wire (every other
     # zenohd leg pairs wz as a CLIENT, never on the router tier). Leg 1 converges

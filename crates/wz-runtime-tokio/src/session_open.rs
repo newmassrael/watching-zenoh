@@ -119,7 +119,7 @@ use crate::quic_datagram_pipeline::{
 // `WebSocketStream<TcpStream>` produced by `ws_pipeline::dial_ws`/`accept_ws`.
 // UNLIKE tls, `dial_locator` DOES build it (a `ws/...` locator needs no cert).
 #[cfg(feature = "transport-link-ws")]
-use crate::ws_pipeline::{dial_ws, wire_ws_stream, WsReadDriver};
+use crate::ws_pipeline::{accept_ws, dial_ws, wire_ws_stream, WsReadDriver};
 #[cfg(feature = "transport-link-ws")]
 use tokio_tungstenite::WebSocketStream;
 
@@ -456,6 +456,82 @@ impl DialedLink {
             DialedLink::Quic(_) => "quic",
             #[cfg(feature = "transport-link-quic-datagram")]
             DialedLink::QuicDatagram(_) => "quic-datagram",
+        }
+    }
+}
+
+/// A bound listening socket, keyed by transport scheme — the ACCEPT-side mirror
+/// of [`DialedLink`]. [`bind_locator`] produces one per `--listen` scheme; the
+/// consuming [`accept_bound`] dispatches on the variant to accept ONE peer and
+/// run that scheme's post-accept handshake, yielding the SAME [`DialedLink`] the
+/// dial side produces — so the downstream `wire_*` split is shared, dialed or
+/// accepted. Adding a transport is one arm HERE + one in [`bind_locator`] + one
+/// in [`accept_bound`], the symmetric counterpart of adding a `dial_locator` arm
+/// plus a [`DialedLink`] variant (R311y375 — the accept side made symmetric to
+/// the dial side, retiring the per-scheme `bind_locator`-returns-`TcpListener`
+/// special-casing).
+pub enum BoundListener {
+    /// A bound TCP listener; [`accept_bound`] accepts a raw [`DialedLink::Tcp`].
+    Tcp(TcpListener),
+    /// A bound TCP listener whose accepted stream gets the RFC6455 SERVER upgrade
+    /// ([`accept_ws`]) — ws LISTENS on plain TCP, so the listener type is the same
+    /// as [`Self::Tcp`]; only the post-accept handshake differs. The acceptor
+    /// mirror of `dial_locator`'s `Proto::Ws => dial_ws` (client upgrade).
+    #[cfg(feature = "transport-link-ws")]
+    Ws(TcpListener),
+}
+
+impl BoundListener {
+    /// The transport name of the bound listener (`"tcp"` / `"ws"`) — the
+    /// variant→name SSOT, the accept-side mirror of [`DialedLink::transport_name`],
+    /// so a caller logs WHICH transport it is listening on without re-matching
+    /// the feature-gated arms.
+    pub fn transport_name(&self) -> &'static str {
+        match self {
+            BoundListener::Tcp(_) => "tcp",
+            #[cfg(feature = "transport-link-ws")]
+            BoundListener::Ws(_) => "ws",
+        }
+    }
+
+    /// Log the "listening on {addr} ({transport})" line — observable before any
+    /// peer connects (the race-free bind/accept split [`bind_tcp`] established).
+    /// Per-variant so each transport formats its OWN address type to a `String`
+    /// (the IP `SocketAddr` for tcp/ws; a unix path / vsock CID for the future
+    /// unix family), rather than a uniform IP-typed accessor the non-IP
+    /// transports could not satisfy — the accept-side counterpart of why the dial
+    /// mirror [`DialedLink`] exposes only [`DialedLink::transport_name`], no
+    /// uniform `local_addr`. Formatting to `String` in the arm keeps `SocketAddr`
+    /// off this (ungated) method's signature, so it compiles without the
+    /// `transport-link-udp`-gated `SocketAddr` import.
+    fn log_listening(&self) -> io::Result<()> {
+        let (addr, name) = match self {
+            BoundListener::Tcp(l) => (l.local_addr()?.to_string(), "tcp"),
+            #[cfg(feature = "transport-link-ws")]
+            BoundListener::Ws(l) => (l.local_addr()?.to_string(), "ws"),
+        };
+        log::info!("wz accept: listening on {addr} ({name})");
+        Ok(())
+    }
+
+    /// Extract the raw [`TcpListener`] for the TCP-only multi-peer paths — the
+    /// concurrent [`accept_loop`](crate::accept_loop) and its [`bind_endpoint`]
+    /// callers, which do not yet hold non-tcp faces. A non-tcp variant returns a
+    /// typed `Unsupported`, the same shape a router/peer `--listen` surfaced
+    /// before (their accept side was always tcp-only). Generalizing `accept_loop`
+    /// to accept every [`BoundListener`] variant retires this accessor.
+    pub fn into_tcp(self) -> io::Result<TcpListener> {
+        match self {
+            BoundListener::Tcp(l) => Ok(l),
+            #[cfg(feature = "transport-link-ws")]
+            other => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "the multi-peer accept loop is wired only for tcp; a {} listener needs \
+                     the generalized accept_loop",
+                    other.transport_name()
+                ),
+            )),
         }
     }
 }
@@ -820,6 +896,10 @@ pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<Dialed
 /// ([`accept_serial`](crate::serial_pipeline::accept_serial)) — both unwired
 /// until their responder caller lands.
 pub async fn accept_locator(locator: AnyLocator) -> io::Result<DialedLink> {
+    // R311y375 — bind + accept dispatch uniformly on the scheme: `bind_locator`
+    // produces the scheme's `BoundListener` and `accept_bound` accepts one peer +
+    // runs that scheme's post-accept handshake (the ws RFC6455 upgrade, etc.). No
+    // per-scheme special-case here — the symmetric mirror of dial_locator.
     accept_bound(bind_locator(locator).await?).await
 }
 
@@ -827,12 +907,11 @@ pub async fn accept_locator(locator: AnyLocator) -> io::Result<DialedLink> {
 /// bind-only half of [`accept_locator`], split out so the multi-peer
 /// [`accept_loop`](crate::accept_loop) can hold the listener and loop accepts
 /// over it (R311qa), while the one-shot [`accept_locator`] binds-then-accepts a
-/// single peer. The `Tcp` path mirrors dial's 3-layer seam: numeric [`bind_tcp`]
-/// / DNS [`bind_tcp_host`]. Non-tcp schemes return a feature-blind typed
-/// `Unsupported` — the same not-yet-wired extension point [`accept_locator`]
-/// documents (ws/tls accept is `bind` + `accept` + handshake, udp is a
-/// `recv_from` peer-learn, serial is a tty open).
-pub async fn bind_locator(locator: AnyLocator) -> io::Result<TcpListener> {
+/// single peer. Returns a [`BoundListener`] keyed by scheme (the accept-side
+/// mirror of `dial_locator`'s [`DialedLink`]): `tcp` / `ws` bind a `TcpListener`
+/// (ws upgrades per-accept), and the remaining schemes return a feature-blind
+/// typed `Unsupported` extension point until their [`BoundListener`] arm lands.
+pub async fn bind_locator(locator: AnyLocator) -> io::Result<BoundListener> {
     fn unsupported(detail: &str) -> io::Error {
         io::Error::new(
             io::ErrorKind::Unsupported,
@@ -841,7 +920,18 @@ pub async fn bind_locator(locator: AnyLocator) -> io::Result<TcpListener> {
     }
     match locator {
         AnyLocator::Ip(ip) => match ip.proto {
-            Proto::Tcp => bind_tcp(ip.addr, ip.iface.as_deref()).await,
+            Proto::Tcp => Ok(BoundListener::Tcp(
+                bind_tcp(ip.addr, ip.iface.as_deref()).await?,
+            )),
+            // R311y374 — a `ws/...` acceptor LISTENS on plain TCP; the RFC6455
+            // server upgrade happens per-accept in `accept_bound` (`accept_ws`
+            // over the accepted stream), so the bind is the SAME `bind_tcp` the
+            // `tcp` arm uses — only the `BoundListener` variant differs. With the
+            // backend off, `Ws` falls to the catch-all `Unsupported` below.
+            #[cfg(feature = "transport-link-ws")]
+            Proto::Ws => Ok(BoundListener::Ws(
+                bind_tcp(ip.addr, ip.iface.as_deref()).await?,
+            )),
             other => Err(unsupported(&format!(
                 "{other:?} acceptor is a not-yet-wired extension point"
             ))),
@@ -852,7 +942,16 @@ pub async fn bind_locator(locator: AnyLocator) -> io::Result<TcpListener> {
             port,
             iface,
         } => match proto {
-            Proto::Tcp => bind_tcp_host(&format!("{host}:{port}"), iface.as_deref()).await,
+            Proto::Tcp => Ok(BoundListener::Tcp(
+                bind_tcp_host(&format!("{host}:{port}"), iface.as_deref()).await?,
+            )),
+            // A `ws/...` NAME acceptor: bind the resolved TCP host (the RFC6455
+            // upgrade is per-accept, as in the numeric arm). Non-ws non-tcp names
+            // stay unwired (acceptor + non-tcp name resolution both).
+            #[cfg(feature = "transport-link-ws")]
+            Proto::Ws => Ok(BoundListener::Ws(
+                bind_tcp_host(&format!("{host}:{port}"), iface.as_deref()).await?,
+            )),
             // A non-tcp NAME is unwired for two reasons (acceptor + non-tcp
             // name resolution), kept distinct from the numeric arm's message.
             other => Err(unsupported(&format!(
@@ -902,11 +1001,25 @@ pub async fn bind_locator(locator: AnyLocator) -> io::Result<TcpListener> {
 /// so the shared SSOT is the quiet [`bind_tcp`] / [`accept_tcp`] primitives,
 /// not the logging. Logging here (not in the primitives) keeps them quiet like
 /// their `dial_*` siblings.
-async fn accept_bound(listener: TcpListener) -> io::Result<DialedLink> {
-    log::info!("wz accept: listening on {}", listener.local_addr()?);
-    let (stream, peer) = accept_tcp(listener).await?;
-    log::info!("wz accept: accepted peer {peer}");
-    Ok(DialedLink::Tcp(stream))
+async fn accept_bound(listener: BoundListener) -> io::Result<DialedLink> {
+    listener.log_listening()?;
+    match listener {
+        BoundListener::Tcp(l) => {
+            let (stream, peer) = accept_tcp(l).await?;
+            log::info!("wz accept: accepted peer {peer}");
+            Ok(DialedLink::Tcp(stream))
+        }
+        // R311y375 — ws LISTENS on plain TCP; accept the raw stream, then run the
+        // RFC6455 SERVER upgrade (`accept_ws`) — the acceptor twin of
+        // dial_locator's `Proto::Ws => dial_ws`. Feeds the SAME `wire_ws_stream`
+        // split the dial side does.
+        #[cfg(feature = "transport-link-ws")]
+        BoundListener::Ws(l) => {
+            let (stream, peer) = accept_tcp(l).await?;
+            log::info!("wz accept: accepted peer {peer}; ws server upgrade");
+            Ok(DialedLink::Ws(Box::new(accept_ws(stream).await?)))
+        }
+    }
 }
 
 /// Accept ONE peer from a *borrowed* [`TcpListener`], wrapping it as a
@@ -949,16 +1062,33 @@ pub async fn accept_bound_on(listener: &TcpListener) -> io::Result<DialedLink> {
 /// not duplicated here — the endpoint-layer analogue of
 /// `accept_locator = accept_bound ∘ bind_locator`.
 pub async fn accept_endpoint(listen: &str) -> io::Result<DialedLink> {
-    accept_bound(bind_endpoint(listen).await?).await
+    // R311y374 — route through `accept_locator` (not `accept_bound` directly) so a
+    // `ws/...` listen string gets the RFC6455 server upgrade its scheme requires:
+    // `accept_locator` binds + accepts + applies the per-scheme handshake, while
+    // the tcp path stays byte-identical (it delegates to `accept_bound`). The
+    // `plan_endpoint` classify + error-map is kept here (mirrors `bind_endpoint`'s
+    // wrapping) so a malformed `--listen` still surfaces the endpoint-layer error,
+    // not the raw locator one.
+    let locator = plan_endpoint(listen).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("wz listen: malformed / unsupported --listen {listen:?}: {e:?}"),
+        )
+    })?;
+    accept_locator(locator).await
 }
 
 /// Bind a `--listen`-style endpoint string to a listening [`TcpListener`] — the
 /// bind-only seam symmetric to [`accept_endpoint`], consumed by the multi-peer
 /// [`accept_loop`](crate::accept_loop) (a router/peer binds once, then holds the
 /// listener and loops accepts). [`plan_endpoint`] classifies the string exactly
-/// as [`accept_endpoint`] does; [`bind_locator`] performs the bind. Splitting
-/// bind from the accept loop keeps `local_addr` observable before any peer
-/// connects — the race-free bind/accept split [`bind_tcp`] established.
+/// as [`accept_endpoint`] does; [`bind_locator`] performs the bind.
+///
+/// R311y375 — `bind_locator` now yields a scheme-keyed [`BoundListener`]; the
+/// multi-peer accept loop is still tcp-only, so this seam projects it to the raw
+/// [`TcpListener`] via [`BoundListener::into_tcp`] (a non-tcp router/peer
+/// `--listen` surfaces the same typed `Unsupported` it did before). Generalizing
+/// `accept_loop` to hold every [`BoundListener`] variant retires the projection.
 pub async fn bind_endpoint(listen: &str) -> io::Result<TcpListener> {
     let locator = plan_endpoint(listen).map_err(|e| {
         io::Error::new(
@@ -966,7 +1096,7 @@ pub async fn bind_endpoint(listen: &str) -> io::Result<TcpListener> {
             format!("wz listen: malformed / unsupported --listen {listen:?}: {e:?}"),
         )
     })?;
-    bind_locator(locator).await
+    bind_locator(locator).await?.into_tcp()
 }
 
 /// Inbound read driver of a dialed link — the transport union on the read
@@ -2513,21 +2643,28 @@ mod tests {
         assert!(matches!(schemed, DialedLink::Tcp(_)));
     }
 
-    // ── accept-side contract (R311pu): symmetric to the dial side above. Only
-    //    `tcp` is wired; a udp/ws/tls `--listen` is a typed `Unsupported`
+    // ── accept-side contract: a udp/tls `--listen` is a typed `Unsupported`
     //    returned BEFORE any bind (no socket) — the same clean extension-point
-    //    shape `dial_locator`'s non-tcp arms carry. The TCP accept path
-    //    (bind + accept) is proven end-to-end by Layer E's ap_demo_round_trip
-    //    (establish_link's Acceptor role now delegates to accept_endpoint); a
-    //    port-race-free unit cannot mirror it because the acceptor owns the
-    //    bind, hiding the OS-chosen port a dialing test would need.
+    //    shape `dial_locator`'s not-yet-wired non-tcp arms carry. `ws` is EXCLUDED
+    //    when `transport-link-ws` is on: R311y374 wired the ws acceptor, so a
+    //    `ws/…` listen now BINDS + accepts (blocking) — proven by the
+    //    `wz_ws_acceptor_zenohd_interop` e2e instead — and asserting "unsupported
+    //    before any bind" would hang here. With the backend off, ws is still an
+    //    unwired extension point and stays in the list. The TCP accept path is
+    //    proven end-to-end by Layer E's ap_demo_round_trip (establish_link's
+    //    Acceptor role delegates to accept_endpoint); a port-race-free unit cannot
+    //    mirror it because the acceptor owns the bind, hiding the OS-chosen port a
+    //    dialing test would need. As each remaining scheme's acceptor lands, drop
+    //    it from this list the same feature-aware way.
     #[tokio::test]
     async fn non_tcp_listen_accept_is_unsupported_without_io() {
-        for s in [
-            "udp/127.0.0.1:7447",
-            "ws/127.0.0.1:7447",
-            "tls/127.0.0.1:7447",
-        ] {
+        // `mut` is used only on the ws-off arm (the push); silence unused_mut when
+        // ws is on and the list is already complete.
+        #[allow(unused_mut)]
+        let mut unwired = vec!["udp/127.0.0.1:7447", "tls/127.0.0.1:7447"];
+        #[cfg(not(feature = "transport-link-ws"))]
+        unwired.push("ws/127.0.0.1:7447");
+        for s in unwired {
             match accept_endpoint(s).await {
                 Err(e) => assert_eq!(
                     e.kind(),

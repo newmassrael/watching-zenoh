@@ -1081,6 +1081,42 @@ pub mod common {
         )
     }
 
+    /// R311y374 — spawn a zenohd that DIALS a wz `ws/...` acceptor
+    /// (`-e ws/<wz_ws_endpoint>`) while also listening on `tcp/<tcp_port>` for a
+    /// pico client. This is the FOREIGN WebSocket DIALER that verifies wz's new ws
+    /// ACCEPTOR (the `bind_locator` ws arm + `accept_locator`'s RFC6455 server
+    /// upgrade): zenoh-pico has NO ws client (`z_sub -e ws/...` returns "Unable to
+    /// open session!"), so zenohd is the only foreign ws dialer available. Once
+    /// the ws link Establishes, a pico `z_put` on the tcp listener routes through
+    /// zenohd and ACROSS the ws link to the wz acceptor's subscriber — the
+    /// cross-impl witness that wz accepts a foreign ws session AND carries data
+    /// over it. Readiness = zenohd accepting on its tcp listener (the ws dial to
+    /// wz is witnessed on the wz side: "ws server upgrade" + "session
+    /// Established"). No handshake-probe param: unlike the `-l`-only helpers, this
+    /// zenohd DIALS out, and the wz-side log is the Established witness.
+    pub fn spawn_zenohd_ws_dialer(wz_ws_endpoint: &str, tcp_port: u16) -> ChildGuard {
+        let mut command = Command::new(zenohd_binary());
+        command
+            .arg("-e")
+            .arg(wz_ws_endpoint)
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let guard = ChildGuard::wrap(
+            "zenohd (ws dialer)",
+            command.spawn().expect("spawn zenohd ws dialer"),
+        );
+        assert!(
+            wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
+            "zenohd (ws dialer) did not start accepting tcp on 127.0.0.1:{tcp_port} within 10s"
+        );
+        guard
+    }
+
     /// R311y372 — spawn a zenohd router with the LOWLATENCY unicast transport
     /// enabled. zenoh refuses `transport/unicast/lowlatency` unless qos is also
     /// disabled ("'lowlatency' is incompatible with 'qos'",
