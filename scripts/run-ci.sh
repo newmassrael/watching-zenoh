@@ -5554,6 +5554,22 @@ layer_e5_router_forward() {
     (cd crates && cargo build -p wz-ap-demo --features routing-routes --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_forward -- --ignored --quiet) || return 1
+    # R311y373 — the CROSS-IMPL half of routing-routes forwarding: real pico
+    # z_pub / z_put -> wz --router (RoutingForwarder) -> real pico z_sub, the
+    # §5.15 forwarding atom's foreign<->foreign witness (incl the pico publisher's
+    # write-filter Interest release, which the wz RouteTable now answers). Needs
+    # the FOREIGN pico CLI, so SKIP green when it is absent (WZ_PICO_REQUIRE
+    # escalates to FAIL, per the E/E2/E6/E8 rule); the self-contained wz<->wz
+    # wz_router_forward leg above stays a hard gate. Rides the SAME routing-routes
+    # demo binary (built above), so no extra build. --test-threads=1 keeps the
+    # per-router pico spawns from contending.
+    if [[ ! -x target/zenoh-pico-cli/z_pub || ! -x target/zenoh-pico-cli/z_put \
+          || ! -x target/zenoh-pico-cli/z_sub ]]; then
+        _pico_cli_unavailable "Layer E5 (routing-routes pico interop)" || return 1
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_routes_pico_interop -- --ignored --test-threads=1 --quiet) || return 1
 }
 
 # ─── Layer E6 — peer-MESH e2e (R311qg) ─────────────────────────────

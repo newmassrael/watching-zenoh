@@ -104,10 +104,15 @@ mod imp {
     use hashbrown::HashMap;
 
     use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
+    use wz_codecs::interest::InterestOwned;
     use wz_codecs::push::PushOwned;
     use wz_runtime_core::TimeSource;
 
     use crate::declare::declared_intersects;
+    use crate::declare_build::{
+        build_declare_final_reply, build_declare_subscriber_reply,
+        build_declare_subscriber_reply_with_id,
+    };
     use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
     use crate::link::SessionRuntime;
     use crate::network_message::NetworkMessage;
@@ -142,6 +147,38 @@ mod imp {
         /// the same per-session table [`crate::pubsub::SubscriberRegistry`]
         /// keeps (`peer_keyexpr_table`).
         peer_aliases: HashMap<u64, String>,
+        /// FUTURE (C+F) subscriber interests this face declared — a pico
+        /// publisher's write-filter interest (`net/filtering.c`
+        /// `_z_write_filter_create`, flags `SUBSCRIBERS|CURRENT|FUTURE|AGGREGATE`).
+        /// A subscription that arrives LATER on ANOTHER face is pushed to this
+        /// face unsolicited (see [`RouteTable::push_future_subscriber`]) so the
+        /// publisher's write filter deactivates and it begins putting. Empty for
+        /// a face that declared no subscriber interest (a plain wz/zenoh
+        /// publisher that puts without a write filter, e.g. `z_put`).
+        future_subs: Vec<FutureSubInterest>,
+    }
+
+    /// One FUTURE subscriber interest a face registered — the state
+    /// [`RouteTable::push_future_subscriber`] consults when a new subscription
+    /// arrives so a pico publisher's write filter releases on the pub-before-sub
+    /// ordering (the CURRENT dump in [`RouteTable::record_interest`] covers the
+    /// sub-before-pub ordering).
+    struct FutureSubInterest {
+        /// The soliciting interest id — echoed onto every unsolicited FUTURE
+        /// `DeclareSubscriber` push so the peer routes it to this interest
+        /// (`session/interest.c` `__z_get_interest_by_key_and_flags`).
+        interest_id: u64,
+        /// The resolved (literal) interest keyexpr — matched against each new
+        /// subscription's keyexpr to decide whether to push.
+        keyexpr: String,
+        /// Whether the interest is AGGREGATE (pico client publishers always are):
+        /// an aggregate reply MUST carry the interest's OWN keyexpr, associated by
+        /// `_z_keyexpr_equals` on the peer, not the concrete subscription keyexpr.
+        aggregate: bool,
+        /// reply-keyexpr -> the non-zero subscriber id allocated for its FUTURE
+        /// push, reused on a redundant re-push of the same keyexpr (the peer
+        /// dedups a `(decl_id, peer)` target, `net/filtering.c`).
+        pushed: HashMap<String, u64>,
     }
 
     impl<R: SessionRuntime, T: TimeSource> FaceRoute<R, T> {
@@ -150,6 +187,7 @@ mod imp {
                 actions,
                 subs: HashMap::new(),
                 peer_aliases: HashMap::new(),
+                future_subs: Vec::new(),
             }
         }
 
@@ -241,6 +279,14 @@ mod imp {
         /// witness ([`route_computations`](RouteTable::route_computations)) — a
         /// `Cell` for the same `&self`-on-miss reason as `route_cache`.
         route_computations: Cell<u64>,
+        /// Monotonic allocator for the non-zero subscriber id an unsolicited
+        /// FUTURE `DeclareSubscriber` push carries (id 0 is reserved for the
+        /// CURRENT dump — zenoh `make_sub_id` = 0 for non-future). Starts at 1;
+        /// [`push_future_subscriber`](RouteTable::push_future_subscriber) hands
+        /// out and remembers one id per `(future interest, reply keyexpr)` so a
+        /// redundant re-push reuses it. `Cell` because the push path runs off the
+        /// `&mut` observe borrow but the id state is logically interior.
+        next_future_sub_id: Cell<u64>,
     }
 
     impl<R: SessionRuntime, T: TimeSource> Default for RouteTable<R, T> {
@@ -260,6 +306,7 @@ mod imp {
                     routes: HashMap::new(),
                 }),
                 route_computations: Cell::new(0),
+                next_future_sub_id: Cell::new(1),
             }
         }
 
@@ -351,6 +398,11 @@ mod imp {
                     NetworkMessage::Push(push) => {
                         forwarded += self.forward_push(src_id, push, *reliable, *priority)
                     }
+                    // R311y373 — a subscriber Interest (a pico publisher's
+                    // write-filter interest, `net/filtering.c`): reply with the
+                    // matching subscriptions so the publisher's filter releases.
+                    // NOT counted as a forward (control plane, not data).
+                    NetworkMessage::Interest(interest) => self.record_interest(src_id, interest),
                     _ => {}
                 }
             }
@@ -375,6 +427,11 @@ mod imp {
             // declare time), and an inbound Put's keyexpr is resolved fresh per
             // Put in `forward_push` before the cache is consulted. So only a
             // subscription delta invalidates the route cache.
+            // A newly-added subscription's resolved keyexpr — carried out of the
+            // `face` borrow so the post-match FUTURE push (which re-borrows the
+            // OTHER faces) can consult it. `Some` only on a DeclareSubscriber that
+            // recorded a route (so `subscriptions_changed` is implied by it).
+            let mut new_sub_keyexpr = None;
             let subscriptions_changed = match &declare.body {
                 // R311qd — record the peer's expr-id -> literal-keyexpr mapping
                 // so a later aliased subscription / Put resolves through it.
@@ -401,7 +458,8 @@ mod imp {
                     // route never formed.
                     match resolve_wireexpr(&sub.keyexpr.body, &face.peer_aliases) {
                         Some(keyexpr) => {
-                            face.subs.insert(sub.id, keyexpr);
+                            face.subs.insert(sub.id, keyexpr.clone());
+                            new_sub_keyexpr = Some(keyexpr);
                             true
                         }
                         None => {
@@ -423,6 +481,173 @@ mod imp {
             // after, so a stale cache is recomputed on the next Put.
             if subscriptions_changed {
                 self.invalidate_routes();
+            }
+            // FUTURE interest fulfilment (pub-before-sub ordering): a face that
+            // published a subscriber Interest before this subscription existed is
+            // now told about it, releasing its write filter.
+            if let Some(keyexpr) = new_sub_keyexpr {
+                self.push_future_subscriber(src_id, &keyexpr);
+            }
+        }
+
+        /// Reply to an inbound subscriber `Interest` from face `src_id` — a pico
+        /// publisher's write-filter interest (`net/filtering.c`
+        /// `_z_write_filter_create`, flags `SUBSCRIBERS|CURRENT|FUTURE|AGGREGATE`).
+        /// Until the publisher receives a matching `DeclareSubscriber` its write
+        /// filter stays ACTIVE and it drops every put locally, so a router that
+        /// never answers the interest cannot carry a pico publisher's data (a
+        /// `z_put` with no publisher has no filter and is unaffected). CURRENT
+        /// dumps the subscriptions already held on OTHER faces; the interest_id is
+        /// echoed on each reply and on the terminating Final so the peer routes
+        /// them to this interest. FUTURE registers the interest so a later
+        /// matching subscription is pushed (see
+        /// [`push_future_subscriber`](Self::push_future_subscriber)). Queryable /
+        /// token interests are the query / liveliness planes and are not routed
+        /// here.
+        fn record_interest(&mut self, src_id: u64, interest: &InterestOwned) {
+            let Some(body) = interest.body.as_ref() else {
+                return;
+            };
+            if !body.su() {
+                return;
+            }
+            let interest_id = interest.interest_id;
+            let aggregate = body.ag();
+            // Resolve the interest keyexpr in the SOURCE face's alias context
+            // (literal id=0, or aliased id!=0 via a prior DeclareKeyexpr). A
+            // keyexpr-less interest has nothing to match against.
+            let Some(src) = self.faces.get(&src_id) else {
+                return;
+            };
+            let Some(interest_ke) = body
+                .keyexpr
+                .as_ref()
+                .and_then(|w| resolve_wireexpr(&w.body, &src.peer_aliases))
+            else {
+                return;
+            };
+            let src_actions = src.actions.clone();
+
+            if interest.c() {
+                // The CURRENT dump: the subscriptions already held on OTHER faces
+                // that match. AGGREGATE (pico client publishers always are) sends
+                // ONE reply carrying the interest's OWN keyexpr iff any face
+                // matches — the peer associates an aggregate interest's replies by
+                // `_z_keyexpr_equals` (`session/interest.c`), so a concrete
+                // subscription keyexpr would silently fail to match. Non-aggregate
+                // sends one reply per matching subscription with the subscription's
+                // own keyexpr.
+                let mut replies: Vec<String> = Vec::new();
+                if aggregate {
+                    if self
+                        .faces
+                        .iter()
+                        .any(|(id, f)| *id != src_id && f.matches(&interest_ke))
+                    {
+                        replies.push(interest_ke.clone());
+                    }
+                } else {
+                    let target_chunks: Vec<&str> = interest_ke.split('/').collect();
+                    for (id, f) in self.faces.iter() {
+                        if *id == src_id {
+                            continue;
+                        }
+                        for sub_ke in f.subs.values() {
+                            if crate::keyexpr_match::keyexpr_intersects_target(
+                                sub_ke,
+                                &target_chunks,
+                            ) {
+                                replies.push(sub_ke.clone());
+                            }
+                        }
+                    }
+                }
+                for ke in &replies {
+                    if let Ok(decl) = build_declare_subscriber_reply(interest_id, ke) {
+                        let _ = src_actions.send_network_message(
+                            NetworkMessage::Declare(Box::new(decl)),
+                            true,
+                            true,
+                        );
+                    }
+                }
+                // Close the CURRENT dump with a Final stamped with interest_id —
+                // sent even with zero replies (no matching subscriber -> the
+                // publisher's filter correctly stays ACTIVE and it does not put).
+                let _ = src_actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
+                    true,
+                    true,
+                );
+            }
+
+            if interest.f() {
+                if let Some(src) = self.faces.get_mut(&src_id) {
+                    // Dedup an identical re-declared interest so future entries do
+                    // not stack.
+                    if !src
+                        .future_subs
+                        .iter()
+                        .any(|fi| fi.interest_id == interest_id && fi.keyexpr == interest_ke)
+                    {
+                        src.future_subs.push(FutureSubInterest {
+                            interest_id,
+                            keyexpr: interest_ke,
+                            aggregate,
+                            pushed: HashMap::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        /// Push an unsolicited `DeclareSubscriber` for a newly-declared
+        /// subscription `new_sub_keyexpr` (on face `new_sub_face`) to every OTHER
+        /// face whose registered FUTURE subscriber interest matches it — the
+        /// pub-before-sub half of the write-filter release. The reply keyexpr is
+        /// the interest's OWN keyexpr for an AGGREGATE interest (peer associates by
+        /// `_z_keyexpr_equals`) else the concrete subscription keyexpr; each
+        /// carries a non-zero subscriber id (id 0 is the CURRENT dump), reused per
+        /// `(interest, reply keyexpr)` so a redundant re-push dedups on the peer.
+        fn push_future_subscriber(&mut self, new_sub_face: u64, new_sub_keyexpr: &str) {
+            let target_chunks: Vec<&str> = new_sub_keyexpr.split('/').collect();
+            let mut sends: Vec<(Arc<SessionLinkActions<R, T>>, DeclareOwned)> = Vec::new();
+            for (fid, face) in self.faces.iter_mut() {
+                if *fid == new_sub_face {
+                    continue;
+                }
+                for fi in face.future_subs.iter_mut() {
+                    if !crate::keyexpr_match::keyexpr_intersects_target(&fi.keyexpr, &target_chunks)
+                    {
+                        continue;
+                    }
+                    let reply_ke = if fi.aggregate {
+                        fi.keyexpr.clone()
+                    } else {
+                        String::from(new_sub_keyexpr)
+                    };
+                    let sub_id = match fi.pushed.get(&reply_ke) {
+                        Some(id) => *id,
+                        None => {
+                            let id = self.next_future_sub_id.get();
+                            self.next_future_sub_id.set(id.saturating_add(1));
+                            fi.pushed.insert(reply_ke.clone(), id);
+                            id
+                        }
+                    };
+                    if let Ok(decl) =
+                        build_declare_subscriber_reply_with_id(fi.interest_id, sub_id, &reply_ke)
+                    {
+                        sends.push((face.actions.clone(), decl));
+                    }
+                }
+            }
+            for (actions, decl) in sends {
+                let _ = actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(decl)),
+                    true,
+                    true,
+                );
             }
         }
 

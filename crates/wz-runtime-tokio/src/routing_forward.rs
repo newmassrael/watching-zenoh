@@ -107,8 +107,9 @@ impl FaceForwarder for RoutingForwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::recording_actions;
+    use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
     use crate::Reliability;
+    use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
     use wz_codecs::push::PushOwned;
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::network_message::NetworkMessage;
@@ -117,8 +118,8 @@ mod tests {
     };
     use wz_session_core_test_support::{
         decl_kexpr, decl_subscriber, declare_envelope_decl_kexpr, declare_envelope_decl_subscriber,
-        declare_envelope_undecl_kexpr, declare_envelope_undecl_subscriber, undecl_kexpr,
-        undecl_subscriber,
+        declare_envelope_undecl_kexpr, declare_envelope_undecl_subscriber, interest_subscriber,
+        undecl_kexpr, undecl_subscriber,
     };
 
     // Wrap a Push as the inbound FramePayload iteration event the forwarder
@@ -185,6 +186,192 @@ mod tests {
     fn declare_kexpr(forwarder: &RoutingForwarder, face: u64, id: u64, keyexpr: &str) {
         let outcome = declare_frame(declare_envelope_decl_kexpr(decl_kexpr(id, keyexpr)));
         forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// Feed `forwarder` a subscriber `Interest` on `keyexpr` from face `face` —
+    /// the pico-publisher write-filter shape (R311y373). `current` / `future` are
+    /// the envelope C / F bits, `aggregate` the body AG bit (a pico client
+    /// publisher sends C+F+AG).
+    fn send_interest(
+        forwarder: &RoutingForwarder,
+        face: u64,
+        interest_id: u64,
+        keyexpr: &str,
+        current: bool,
+        future: bool,
+        aggregate: bool,
+    ) {
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Interest(interest_subscriber(
+                interest_id,
+                keyexpr,
+                current,
+                future,
+                aggregate,
+            ))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// Every `Declare` a face's recording sink captured, flattened across frames
+    /// in emit order — robust to whether the express sends batched or not, so a
+    /// test asserts the DECODED reply sequence (subscriber decl + Final) rather
+    /// than a frame count. Decodes through the production RX path
+    /// (`parse_inbound` + `parse_frame_payload`), so a malformed reply would fail
+    /// to decode here (not silently pass).
+    fn captured_declares(sink: &RecordingLinkDriver) -> Vec<DeclareOwned> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let mut out = Vec::new();
+        for i in 0..sink.frame_count() {
+            let bytes = sink.frame_bytes(i);
+            let InboundFrame::Frame { payload, .. } =
+                parse_inbound(&bytes).expect("parse emitted frame")
+            else {
+                panic!("emitted bytes are not a T_MID_FRAME");
+            };
+            for m in parse_frame_payload(&payload).expect("parse frame payload") {
+                if let NetworkMessage::Declare(d) = m {
+                    out.push(*d);
+                }
+            }
+        }
+        out
+    }
+
+    fn is_decl_subscriber(d: &DeclareOwned) -> bool {
+        matches!(d.body, DeclareOwnedVariant::CodecZenohDeclSubscriber(_))
+    }
+
+    fn is_decl_final(d: &DeclareOwned) -> bool {
+        matches!(d.body, DeclareOwnedVariant::CodecZenohDeclFinal(_))
+    }
+
+    /// The subscriber id of a `Declare(DeclSubscriber)` — 0 for a CURRENT dump,
+    /// non-zero for a FUTURE push (`build_declare_subscriber_reply{,_with_id}`).
+    fn decl_subscriber_id(d: &DeclareOwned) -> u64 {
+        match &d.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(s) => s.id,
+            other => panic!("expected a DeclSubscriber, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn answers_a_current_subscriber_interest_with_the_matching_declare_and_final() {
+        // R311y373 — the sub-before-pub half: a pico publisher's CURRENT interest
+        // (net/filtering.c write filter) is answered with the DeclareSubscriber a
+        // matching subscription on ANOTHER face implies, so the publisher's filter
+        // releases. Without this reply the filter stays ACTIVE and every put is
+        // dropped locally (the cross-impl RED: forwarded 0 / computed 0).
+        let fwd = RoutingForwarder::new();
+        let (subscriber, sub_sink) = recording_actions();
+        let (publisher, pub_sink) = recording_actions();
+        fwd.register(FaceId(0), &subscriber);
+        fwd.register(FaceId(1), &publisher);
+
+        declare_sub(&fwd, 0, 1, "demo/route");
+        // The publisher's write-filter interest (C+F+AG, the pico client shape).
+        send_interest(&fwd, 1, 42, "demo/route", true, true, true);
+
+        let replies = captured_declares(&pub_sink);
+        assert_eq!(
+            replies.len(),
+            2,
+            "the interest is answered with a DeclareSubscriber then a Final"
+        );
+        assert!(
+            is_decl_subscriber(&replies[0]) && replies[0].interest_id == Some(42),
+            "first reply is a DeclareSubscriber stamped with the soliciting interest_id"
+        );
+        assert_eq!(
+            decl_subscriber_id(&replies[0]),
+            0,
+            "a CURRENT dump carries subscriber id 0 (zenoh make_sub_id = 0 for non-future)"
+        );
+        assert!(
+            is_decl_final(&replies[1]) && replies[1].interest_id == Some(42),
+            "the dump is terminated by a Final stamped with the interest_id"
+        );
+        assert_eq!(
+            captured_declares(&sub_sink).len(),
+            0,
+            "the subscriber's own face receives no interest reply"
+        );
+    }
+
+    #[test]
+    fn a_current_interest_with_no_matching_subscription_sends_only_a_final() {
+        // The discriminator for the reply: with NO matching subscription the
+        // router advertises NO subscriber, so a pico publisher's write filter
+        // correctly stays ACTIVE (it must not put into a void). Only the Final is
+        // sent (closing the CURRENT interest); no DeclareSubscriber.
+        let fwd = RoutingForwarder::new();
+        let (publisher, pub_sink) = recording_actions();
+        let (_bystander, _bystander_sink) = recording_actions();
+        fwd.register(FaceId(1), &publisher);
+        // face 0 is a bystander with no subscription.
+        fwd.register(FaceId(0), &_bystander);
+
+        send_interest(&fwd, 1, 7, "demo/route", true, true, true);
+
+        let replies = captured_declares(&pub_sink);
+        assert_eq!(
+            replies.len(),
+            1,
+            "only a Final is sent when nothing matches"
+        );
+        assert!(
+            is_decl_final(&replies[0]) && replies[0].interest_id == Some(7),
+            "the sole reply is the Final that closes the CURRENT interest"
+        );
+        assert!(
+            !replies.iter().any(is_decl_subscriber),
+            "NO subscriber is advertised — the filter must stay ACTIVE"
+        );
+    }
+
+    #[test]
+    fn a_future_interest_pushes_a_later_declared_subscription() {
+        // R311y373 — the pub-before-sub half: a publisher whose C+F interest found
+        // no current subscriber (Final only) is later PUSHED the subscription that
+        // arrives on another face, releasing its write filter on the pub-first
+        // ordering. The FUTURE push carries a NON-ZERO subscriber id (id 0 is the
+        // CURRENT dump) so a value-aware re-push updates the same target in place.
+        let fwd = RoutingForwarder::new();
+        let (subscriber, _sub_sink) = recording_actions();
+        let (publisher, pub_sink) = recording_actions();
+        fwd.register(FaceId(0), &subscriber);
+        fwd.register(FaceId(1), &publisher);
+
+        // Publisher interest arrives FIRST — no subscription yet, so only a Final.
+        send_interest(&fwd, 1, 9, "demo/route", true, true, true);
+        assert_eq!(
+            captured_declares(&pub_sink).len(),
+            1,
+            "CURRENT dump finds nothing yet -> only the Final"
+        );
+
+        // The subscription arrives LATER on the other face -> unsolicited push.
+        declare_sub(&fwd, 0, 5, "demo/route");
+        let replies = captured_declares(&pub_sink);
+        assert_eq!(
+            replies.len(),
+            2,
+            "the later subscription is pushed to the waiting publisher face"
+        );
+        assert!(
+            is_decl_subscriber(&replies[1]) && replies[1].interest_id == Some(9),
+            "the FUTURE push is a DeclareSubscriber stamped with the interest_id"
+        );
+        assert_ne!(
+            decl_subscriber_id(&replies[1]),
+            0,
+            "a FUTURE push carries a non-zero subscriber id (id 0 is the CURRENT dump)"
+        );
     }
 
     #[test]

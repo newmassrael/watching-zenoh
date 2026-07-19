@@ -43,6 +43,8 @@ use wz_codecs::decl_queryable::{DeclQueryable, DeclQueryableOwned};
 use wz_codecs::decl_subscriber::{DeclSubscriber, DeclSubscriberOwned};
 use wz_codecs::decl_token::{DeclToken, DeclTokenOwned};
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
+use wz_codecs::interest::{Interest, InterestOwned};
+use wz_codecs::interest_body::InterestBody;
 use wz_codecs::undecl_kexpr::UndeclKexpr;
 use wz_codecs::undecl_queryable::{UndeclQueryable, UndeclQueryableOwned};
 use wz_codecs::undecl_subscriber::{UndeclSubscriber, UndeclSubscriberOwned};
@@ -84,6 +86,42 @@ pub fn decl_subscriber(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclSu
     }
     .try_into_owned()
     .unwrap()
+}
+
+/// A subscriber `Interest` mirroring a zenoh-pico publisher's write-filter
+/// interest (`net/filtering.c` `_z_write_filter_create`): the body carries the
+/// `su` (subscribers) and `ke` (keyexpr-present) bits over a literal `keyexpr`,
+/// the envelope carries the `c` (CURRENT) and `f` (FUTURE) bits, and the body
+/// `ag` (AGGREGATE) bit is set per the caller. wz never SENDS one (a wz publisher
+/// puts without a write filter), so this fixture exists only to drive the
+/// router's inbound-interest reply path (`RouteTable::record_interest`) in tests.
+/// The `c` and `f` bits also gate body presence in the wire codec (Interest
+/// header 0x20 / 0x40), so setting them keeps the owned form self-consistent with
+/// a real decoded interest.
+pub fn interest_subscriber(
+    interest_id: u64,
+    keyexpr: &str,
+    current: bool,
+    future: bool,
+    aggregate: bool,
+) -> InterestOwned {
+    let mut body = InterestBody::new();
+    body.set_su(true);
+    body.set_ke(true);
+    body.set_ag(aggregate);
+    body.keyexpr = Some(Wireexpr {
+        body: WireexprVariant::WireexprLocal(WireexprLocal {
+            id: 0,
+            suffix_len: Some(keyexpr.len() as u64),
+            suffix: Some(keyexpr),
+        }),
+    });
+    let mut interest = Interest::new();
+    interest.interest_id = interest_id;
+    interest.set_c(current);
+    interest.set_f(future);
+    interest.body = Some(body);
+    interest.try_into_owned().unwrap()
 }
 
 pub fn decl_subscriber_nonlocal(
