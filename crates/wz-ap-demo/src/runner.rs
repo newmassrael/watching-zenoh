@@ -1437,7 +1437,7 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
     use wz::runtime_tokio::session_open::bind_endpoint;
 
     let listener = bind_endpoint(listen).await?;
-    let local = listener.local_addr()?;
+    let local = listener.local_addr_display()?;
     #[cfg(feature = "routing-routes")]
     log::info!(
         "wz-ap-demo router: listening on {local}; holding N concurrent peer \
@@ -3262,8 +3262,13 @@ pub(crate) async fn run_storage_host(listen: &str, storage_dir: Option<String>) 
     let zid_hex = zid_to_zenoh_hex(&node_zid);
     let whatami_str = params.whatami.to_str();
 
-    let listener = bind_endpoint(listen).await?;
-    let local = listener.local_addr()?;
+    // R311y376 — bind_endpoint now yields a scheme-keyed BoundListener; the
+    // storage-host sequential seam (accept_bound_on) is tcp-only, so project to a
+    // TcpListener via into_tcp (a non-tcp storage-host --listen surfaces the same
+    // Unsupported it did before). The display string is read before the projection.
+    let bound = bind_endpoint(listen).await?;
+    let local = bound.local_addr_display()?;
+    let listener = bound.into_tcp()?;
 
     // The admin keys this host serves (SSOT-derived from the same zid/whatami).
     let queryable_key = admin_queryable_key(&zid_hex, whatami_str); // @/<zid>/peer/**

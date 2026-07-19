@@ -42,7 +42,8 @@ use wz_runtime_tokio::config::LinkReliabilityPref;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session_with_multilink, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session_with_multilink, BoundListener, DialedLink, OpenedSession,
+    DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio_test_support::fixture_params_with_zid;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
@@ -218,7 +219,7 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
     let (a_shut_tx, a_shut_rx) = watch::channel(false);
     let a_loop = peer_loop(
         FaceSources {
-            listener: a_listener,
+            listener: BoundListener::Tcp(a_listener),
             dial_targets: vec![b_addr, b_addr],
             dial_intents: None,
             mcast_ingress: None,

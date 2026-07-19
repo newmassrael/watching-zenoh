@@ -47,7 +47,8 @@ use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
 use wz_runtime_tokio::session_open::{
-    initiate_and_open_session_with_multilink, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    initiate_and_open_session_with_multilink, BoundListener, DialedLink, OpenedSession,
+    DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio_test_support::fixture_params_with_zid;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
@@ -240,7 +241,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
     // dials (accept-only). It aggregates inbound links through its own handlers.
     let b_loop = peer_loop(
         FaceSources {
-            listener: b_listener,
+            listener: BoundListener::Tcp(b_listener),
             dial_targets: vec![],
             dial_intents: None,
             mcast_ingress: None,
@@ -451,7 +452,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
     let (b_shut_tx, b_shut_rx) = watch::channel(false);
     let b_loop = peer_loop(
         FaceSources {
-            listener: b_listener,
+            listener: BoundListener::Tcp(b_listener),
             dial_targets: vec![],
             dial_intents: None,
             mcast_ingress: None,
@@ -479,7 +480,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
     let (a_shut_tx, a_shut_rx) = watch::channel(false);
     let a_loop = peer_loop(
         FaceSources {
-            listener: a_listener,
+            listener: BoundListener::Tcp(a_listener),
             dial_targets: vec![b_addr, b_addr],
             dial_intents: None,
             mcast_ingress: None,
@@ -576,7 +577,7 @@ async fn deploy_active_qos_priority_segregates_across_links() {
     // B only RECEIVES here, so what B observes is decided entirely by A's select_link.
     let b_loop = peer_loop(
         FaceSources {
-            listener: b_listener,
+            listener: BoundListener::Tcp(b_listener),
             dial_targets: vec![],
             dial_intents: None,
             mcast_ingress: None,

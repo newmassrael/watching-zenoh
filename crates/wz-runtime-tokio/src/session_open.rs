@@ -51,7 +51,7 @@ use wz_session_core::qos::Priority;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
 use crate::link_pipeline::{
-    accept_tcp, accept_tcp_on, bind_tcp, bind_tcp_host, dial_tcp, dial_tcp_host,
+    accept_tcp_on, bind_tcp, bind_tcp_host, dial_tcp, dial_tcp_host,
     wire_tcp_stream_with_lowlatency, TcpReadDriver,
 };
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
@@ -571,24 +571,95 @@ impl BoundListener {
 
     /// Log the "listening on {addr} ({transport})" line — observable before any
     /// peer connects (the race-free bind/accept split [`bind_tcp`] established).
-    /// Per-variant so each transport formats its OWN address type to a `String`
-    /// (the IP `SocketAddr` for tcp/ws; a unix path / vsock CID for the future
-    /// unix family), rather than a uniform IP-typed accessor the non-IP
-    /// transports could not satisfy — the accept-side counterpart of why the dial
-    /// mirror [`DialedLink`] exposes only [`DialedLink::transport_name`], no
-    /// uniform `local_addr`. Formatting to `String` in the arm keeps `SocketAddr`
-    /// off this (ungated) method's signature, so it compiles without the
-    /// `transport-link-udp`-gated `SocketAddr` import.
+    /// Composes [`Self::local_addr_display`] (the per-variant address) with
+    /// [`Self::transport_name`], so the address-formatting SSOT lives in one place.
     fn log_listening(&self) -> io::Result<()> {
-        let (addr, name) = match self {
-            BoundListener::Tcp(l) => (l.local_addr()?.to_string(), "tcp"),
-            #[cfg(feature = "transport-link-ws")]
-            BoundListener::Ws(l) => (l.local_addr()?.to_string(), "ws"),
-            #[cfg(feature = "transport-link-tls")]
-            BoundListener::Tls(l, _) => (l.local_addr()?.to_string(), "tls"),
-        };
-        log::info!("wz accept: listening on {addr} ({name})");
+        log::info!(
+            "wz accept: listening on {} ({})",
+            self.local_addr_display()?,
+            self.transport_name()
+        );
         Ok(())
+    }
+
+    /// The bound local address rendered as a `String` — the per-variant address
+    /// the runner's `--router` / `--peer` / `--router-hat` bind paths log (the
+    /// cross-impl e2e greps `peer: listening on 127.0.0.1:`) and the address half
+    /// of [`Self::log_listening`]. Returns a `String`, NOT a `SocketAddr`: each
+    /// transport formats its OWN address type (the IP `SocketAddr` for the stream
+    /// family tcp/ws/tls; a unix path / vsock CID for a future non-IP variant),
+    /// rather than a uniform IP-typed accessor the non-IP transports could not
+    /// satisfy — the accept-side counterpart of why the dial mirror [`DialedLink`]
+    /// exposes only [`DialedLink::transport_name`], no uniform `local_addr`
+    /// (R311y374). Total over the stream family; a future non-IP variant formats
+    /// its own address here.
+    pub fn local_addr_display(&self) -> io::Result<String> {
+        Ok(match self {
+            BoundListener::Tcp(l) => l.local_addr()?.to_string(),
+            #[cfg(feature = "transport-link-ws")]
+            BoundListener::Ws(l) => l.local_addr()?.to_string(),
+            #[cfg(feature = "transport-link-tls")]
+            BoundListener::Tls(l, _) => l.local_addr()?.to_string(),
+        })
+    }
+
+    /// The bound local address as a `SocketAddr` — for the stream-family callers
+    /// that need the STRUCTURED address, not just its display: the demo's `--peer`
+    /// and `--router-hat` bind paths derive the node zid from `.port()` and gate
+    /// self-locator advertisement on `.ip().is_unspecified()`, neither of which a
+    /// `String` ([`Self::local_addr_display`]) can serve. Fully-qualified
+    /// `std::net::SocketAddr` in the signature because the bare import is
+    /// `transport-link-udp`-gated here (this ungated accessor must compile no-udp).
+    /// Total over the stream family (tcp/ws/tls, all `TcpListener`-backed); a
+    /// future non-IP variant (unix path / vsock CID) has no `SocketAddr`, so such a
+    /// caller must use [`Self::local_addr_display`] (the per-variant, non-IP-safe
+    /// display) — this accessor is the one that will need a typed error there
+    /// (R311y374, the reason `log_listening` formats a per-variant String).
+    pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+        match self {
+            BoundListener::Tcp(l) => l.local_addr(),
+            #[cfg(feature = "transport-link-ws")]
+            BoundListener::Ws(l) => l.local_addr(),
+            #[cfg(feature = "transport-link-tls")]
+            BoundListener::Tls(l, _) => l.local_addr(),
+        }
+    }
+
+    /// Accept ONE raw transport connection from a *borrowed* listener WITHOUT the
+    /// per-scheme SERVER handshake — the non-blocking accept the multi-peer
+    /// [`accept_loop`](crate::accept_loop) runs in its `select!` arm. The ws/tls
+    /// SERVER handshake is (potentially) slow and peer-controlled, so it is
+    /// DEFERRED into the spawned per-face open future ([`AcceptedLink::handshake`])
+    /// rather than run here: a stalled handshake never blocks the loop from
+    /// accepting the next peer (the "one peer's handshake never blocks another"
+    /// invariant the loop doc states). The stream family (tcp/ws/tls) all accept
+    /// from the same [`TcpListener`] — only the deferred handshake differs — so the
+    /// returned [`AcceptedLink`] carries WHICH handshake to run. The borrowed,
+    /// multi-accept counterpart of the consuming one-shot [`accept_bound`] (which
+    /// handshakes inline for the one-shot session-open contract).
+    ///
+    /// The peer address is fully-qualified `std::net::SocketAddr` in the signature
+    /// (not the bare `SocketAddr`) because that import is `transport-link-udp`-gated
+    /// here (R311y374): this ungated accessor must compile in a no-udp build. The
+    /// stream family accepts from a `TcpListener`, so the peer is always an IP
+    /// `SocketAddr`; a future non-IP variant will revisit the peer type.
+    pub async fn accept_raw(&self) -> io::Result<(AcceptedLink, std::net::SocketAddr)> {
+        Ok(match self {
+            BoundListener::Tcp(l) => {
+                let (stream, peer) = accept_tcp_on(l).await?;
+                (AcceptedLink::Tcp(stream), peer)
+            }
+            #[cfg(feature = "transport-link-ws")]
+            BoundListener::Ws(l) => {
+                let (stream, peer) = accept_tcp_on(l).await?;
+                (AcceptedLink::Ws(stream), peer)
+            }
+            #[cfg(feature = "transport-link-tls")]
+            BoundListener::Tls(l, server_config) => {
+                let (stream, peer) = accept_tcp_on(l).await?;
+                (AcceptedLink::Tls(stream, server_config.clone()), peer)
+            }
+        })
     }
 
     /// Extract the raw [`TcpListener`] for the TCP-only multi-peer paths — the
@@ -609,6 +680,69 @@ impl BoundListener {
                     other.transport_name()
                 ),
             )),
+        }
+    }
+}
+
+/// A raw transport connection accepted from a [`BoundListener`], carrying the
+/// deferred per-scheme SERVER handshake — the in-flight state between
+/// [`BoundListener::accept_raw`] (the fast, non-blocking accept the multi-peer
+/// [`accept_loop`](crate::accept_loop) runs in its `select!` arm) and
+/// [`Self::handshake`] (the ws/tls SERVER handshake, deferred to the spawned
+/// per-face open future so a slow/stalled handshake never blocks the accept
+/// loop). [`Self::handshake`] completes it into the SAME [`DialedLink`] the
+/// consuming one-shot [`accept_bound`] yields inline — the split exists ONLY so
+/// the loop can move the (potentially slow, peer-controlled) handshake off its
+/// accept path. The accept-side counterpart of [`DialedLink`] mid-flight; the
+/// stream family only (tcp/ws/tls all accept from a [`TcpListener`]).
+pub enum AcceptedLink {
+    /// A raw accepted TCP stream — no post-accept handshake; [`Self::handshake`]
+    /// wraps it directly as [`DialedLink::Tcp`].
+    Tcp(TcpStream),
+    /// A raw accepted TCP stream awaiting the RFC6455 SERVER upgrade
+    /// ([`accept_ws`]); [`Self::handshake`] runs it into [`DialedLink::Ws`].
+    #[cfg(feature = "transport-link-ws")]
+    Ws(TcpStream),
+    /// A raw accepted TCP stream awaiting the rustls SERVER handshake
+    /// ([`accept_tls`]) with the cert carried since bind; [`Self::handshake`] runs
+    /// it into [`DialedLink::Tls`].
+    #[cfg(feature = "transport-link-tls")]
+    Tls(TcpStream, Arc<ServerConfig>),
+}
+
+impl AcceptedLink {
+    /// Run the deferred per-scheme SERVER handshake, yielding the SAME
+    /// [`DialedLink`] the dial side produces (so the downstream `wire_*` split is
+    /// shared, dialed or accepted) — the acceptor twin of [`dial_locator`]'s
+    /// per-scheme client handshake, and the mechanism SSOT the consuming one-shot
+    /// [`accept_bound`] also drives. Runs in the spawned per-face open future (not
+    /// the accept loop's `select!` arm), so a slow ws/tls handshake never stalls
+    /// accepting the next peer.
+    pub async fn handshake(self) -> io::Result<DialedLink> {
+        Ok(match self {
+            AcceptedLink::Tcp(stream) => DialedLink::Tcp(stream),
+            #[cfg(feature = "transport-link-ws")]
+            AcceptedLink::Ws(stream) => DialedLink::Ws(Box::new(accept_ws(stream).await?)),
+            #[cfg(feature = "transport-link-tls")]
+            AcceptedLink::Tls(stream, server_config) => {
+                DialedLink::Tls(Box::new(accept_tls(stream, server_config).await?))
+            }
+        })
+    }
+
+    /// The one-shot [`accept_bound`]'s "accepted peer {peer}{note}" log suffix —
+    /// `""` for tcp, `"; ws server upgrade"` / `"; tls server handshake"` for the
+    /// handshaking schemes (the completion-witness wording R311y375 obs#1 pinned,
+    /// logged AFTER [`Self::handshake`] succeeds). A variant->note SSOT so the
+    /// one-shot log stays byte-exact after delegating its accept+handshake
+    /// mechanics to [`Self::handshake`].
+    fn server_handshake_note(&self) -> &'static str {
+        match self {
+            AcceptedLink::Tcp(_) => "",
+            #[cfg(feature = "transport-link-ws")]
+            AcceptedLink::Ws(_) => "; ws server upgrade",
+            #[cfg(feature = "transport-link-tls")]
+            AcceptedLink::Tls(..) => "; tls server handshake",
         }
     }
 }
@@ -1103,48 +1237,26 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
     }
 }
 
-/// Log the bound address, accept one peer, log it, wrap as `DialedLink::Tcp` —
-/// the accept-side counterpart to the Initiator's "connected to .. over .."
-/// line. The "wz accept:" prefix tags the demo's logs; the e2e harness owns a
-/// binary-name-tagged copy of this 3-line shape (it cannot share the prefix),
-/// so the shared SSOT is the quiet [`bind_tcp`] / [`accept_tcp`] primitives,
-/// not the logging. Logging here (not in the primitives) keeps them quiet like
-/// their `dial_*` siblings.
+/// Log the bound address, accept one peer, run its scheme's SERVER handshake,
+/// log it — the accept-side counterpart to the Initiator's "connected to .. over
+/// .." line, and the ONE-SHOT (consuming) twin of the multi-accept
+/// [`BoundListener::accept_raw`] + [`AcceptedLink::handshake`]. Delegates its
+/// accept + per-scheme handshake mechanics to those two (the mechanism SSOT), so
+/// adding a transport touches only [`AcceptedLink`], not here. The "wz accept:"
+/// prefix tags the demo's logs; the e2e harness owns a binary-name-tagged copy of
+/// this shape. The "; ws server upgrade" / "; tls server handshake" completion
+/// note is logged AFTER the handshake succeeds (R311y375 obs#1) — a failed ws/tls
+/// handshake returns the error here and never logs a spurious "accepted peer".
 async fn accept_bound(listener: BoundListener) -> io::Result<DialedLink> {
     listener.log_listening()?;
-    match listener {
-        BoundListener::Tcp(l) => {
-            let (stream, peer) = accept_tcp(l).await?;
-            log::info!("wz accept: accepted peer {peer}");
-            Ok(DialedLink::Tcp(stream))
-        }
-        // R311y375 — ws LISTENS on plain TCP; accept the raw stream, then run the
-        // RFC6455 SERVER upgrade (`accept_ws`) — the acceptor twin of
-        // dial_locator's `Proto::Ws => dial_ws`. Feeds the SAME `wire_ws_stream`
-        // split the dial side does. The "ws server upgrade" line logs AFTER the
-        // upgrade SUCCEEDS (R311y375 review obs#1), so it is a true completion
-        // witness — a failed upgrade returns the error and never logs it.
-        #[cfg(feature = "transport-link-ws")]
-        BoundListener::Ws(l) => {
-            let (stream, peer) = accept_tcp(l).await?;
-            let upgraded = accept_ws(stream).await?;
-            log::info!("wz accept: accepted peer {peer}; ws server upgrade");
-            Ok(DialedLink::Ws(Box::new(upgraded)))
-        }
-        // R311y375 — tls LISTENS on plain TCP; accept the raw stream, then run the
-        // rustls SERVER handshake (`accept_tls`) with the cert carried since bind —
-        // the acceptor twin of dial_locator's `Proto::Tls => dial_tls`. Feeds the
-        // SAME `wire_tls_stream` split the dial side does. The "tls server
-        // handshake" line logs AFTER the handshake SUCCEEDS (review obs#1), a true
-        // completion witness — a rejected cert returns the error and never logs it.
-        #[cfg(feature = "transport-link-tls")]
-        BoundListener::Tls(l, server_config) => {
-            let (stream, peer) = accept_tcp(l).await?;
-            let handshaked = accept_tls(stream, server_config).await?;
-            log::info!("wz accept: accepted peer {peer}; tls server handshake");
-            Ok(DialedLink::Tls(Box::new(handshaked)))
-        }
-    }
+    let (accepted, peer) = listener.accept_raw().await?;
+    // The completion-witness note (R311y375 obs#1): read from the scheme BEFORE
+    // the handshake consumes `accepted`, but LOGGED only after the handshake
+    // SUCCEEDS below.
+    let note = accepted.server_handshake_note();
+    let link = accepted.handshake().await?;
+    log::info!("wz accept: accepted peer {peer}{note}");
+    Ok(link)
 }
 
 /// Accept ONE peer from a *borrowed* [`TcpListener`], wrapping it as a
@@ -1204,30 +1316,30 @@ pub async fn accept_endpoint(listen: &str, cfg: &AcceptConfig) -> io::Result<Dia
     accept_locator(locator, cfg).await
 }
 
-/// Bind a `--listen`-style endpoint string to a listening [`TcpListener`] — the
-/// bind-only seam symmetric to [`accept_endpoint`], consumed by the multi-peer
+/// Bind a `--listen`-style endpoint string to a scheme-keyed [`BoundListener`] —
+/// the bind-only seam symmetric to [`accept_endpoint`], consumed by the multi-peer
 /// [`accept_loop`](crate::accept_loop) (a router/peer binds once, then holds the
 /// listener and loops accepts). [`plan_endpoint`] classifies the string exactly
 /// as [`accept_endpoint`] does; [`bind_locator`] performs the bind.
 ///
-/// R311y375 — `bind_locator` now yields a scheme-keyed [`BoundListener`]; the
-/// multi-peer accept loop is still tcp-only, so this seam projects it to the raw
-/// [`TcpListener`] via [`BoundListener::into_tcp`] (a non-tcp router/peer
-/// `--listen` surfaces the same typed `Unsupported` it did before). Generalizing
-/// `accept_loop` to hold every [`BoundListener`] variant retires the projection.
-pub async fn bind_endpoint(listen: &str) -> io::Result<TcpListener> {
+/// R311y376 (Stage 3) — the multi-peer accept loop now accepts every
+/// [`BoundListener`] variant, so this seam yields the [`BoundListener`] directly
+/// (was: projected to a raw [`TcpListener`] via [`BoundListener::into_tcp`], the
+/// tcp-only-loop restriction). A cert-free listen (`tcp` / `ws`) binds; a `tls`
+/// listen surfaces `Unsupported` here because the default [`AcceptConfig`] carries
+/// no server cert (threading a router cert config is a follow-up). The one-shot
+/// tcp-only sequential seam (the storage-host `accept_bound_on(&TcpListener)`
+/// caller) projects via [`BoundListener::into_tcp`] at its own call site.
+pub async fn bind_endpoint(listen: &str) -> io::Result<BoundListener> {
     let locator = plan_endpoint(listen).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("wz listen: malformed / unsupported --listen {listen:?}: {e:?}"),
         )
     })?;
-    // The multi-peer/router bind is tcp-only, so no acceptor cert config is
-    // needed — pass the default (all `None`); a non-tcp router `--listen` still
-    // surfaces `Unsupported` via `into_tcp`.
-    bind_locator(locator, &AcceptConfig::default())
-        .await?
-        .into_tcp()
+    // The router/peer bind carries no acceptor cert (a `tls/...` router listen
+    // surfaces `Unsupported` until a cert config is threaded); pass the default.
+    bind_locator(locator, &AcceptConfig::default()).await
 }
 
 /// Inbound read driver of a dialed link — the transport union on the read
@@ -1539,6 +1651,16 @@ pub enum OpenError {
     /// protocol is not compiled in (a `udp/...` locator with the
     /// `transport-link-udp` feature off surfaces a typed `Unsupported` here).
     Dial(io::Error),
+    /// R311y376 — the accept-side transport (ws/tls) SERVER handshake failed
+    /// before the session handshake (a rejected rustls client, a malformed
+    /// RFC6455 upgrade). The accept-side twin of [`Self::Dial`]: where a dialed
+    /// face surfaces a failed client handshake as `Dial`, an accepted non-tcp face
+    /// in the multi-peer [`accept_loop`](crate::accept_loop) surfaces its failed
+    /// SERVER handshake here (a `FaceFailed`, isolated — one peer's bad handshake
+    /// never sinks the loop). Only the loop's deferred-handshake path
+    /// ([`AcceptedLink::handshake`]) produces it; the one-shot [`accept_bound`]
+    /// returns the raw `io::Error` instead.
+    AcceptHandshake(io::Error),
     /// The link was lost mid-handshake (peer closed before OpenAck).
     LinkLost(LostCause),
     /// The FSM reached a terminal state before Established — e.g. a peer

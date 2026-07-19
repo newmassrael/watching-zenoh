@@ -5389,7 +5389,11 @@ layer_z_zenohd_interop() {
     # --lowlatency` and NEGOTIATES zenoh's lean (Frame-less) transport against a
     # zenohd whose `transport/unicast/lowlatency` is on; every other leg (no
     # --lowlatency) dials through the unchanged binary on the universal transport.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,router-hat-router,routing-token-tables,namespace,transport-lowlatency --quiet) || return 1
+    # R311y376 — `routing-router` added so the Layer Z binary carries the `--router`
+    # accept-and-hold mode (the multi-peer accept loop) for the ws-router-acceptor
+    # leg below; a superset over the acceptor legs, inert for them (it adds a mode,
+    # not a wire change), per the routing-routes-is-a-superset rationale.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients
@@ -5430,6 +5434,17 @@ layer_z_zenohd_interop() {
     # zenohd is the only foreign tls dialer. The demo is already built with `tls`.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_tls_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y376 — wz ROUTER ws ACCEPTOR cross-impl (accept-symmetry Stage 3): the
+    # MULTI-PEER accept loop (`--router` / peer_loop, not just one-shot `--listen`)
+    # now accepts a foreign non-tcp face. A real zenohd DIALS the wz `--router
+    # --listen ws/...` over ws; the loop accepts the ws connection, completes the
+    # RFC6455 upgrade + zenoh handshake, and HOLDS it (face 0 UP). The R311y374 ws
+    # acceptor leg proves only the ONE-SHOT `--listen` acceptor; this proves the
+    # loop (was TCP-only via bind_endpoint->into_tcp). zenoh-pico has no ws client,
+    # so zenohd is the only foreign ws dialer. Same --test-threads=1 isolation; the
+    # demo is built with `ws,routing-router` above.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_router_ws_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y140 — wz-ROUTER-HAT <-> zenohd ROUTER-TIER federation interop, the
     # FIRST cross-impl test on wz's `routers_net` link-state wire (every other
     # zenohd leg pairs wz as a CLIENT, never on the router tier). Leg 1 converges

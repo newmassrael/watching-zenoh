@@ -79,10 +79,9 @@ use wz_codecs::push::PushOwned;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use wz_runtime_core::TimeSource;
 
-use crate::link_pipeline::accept_tcp_on;
 use crate::runtime_impl::TokioTime;
 use crate::session_glue::{
     drive_session_until_terminal_with_extra_deadline, DriverOutcome, ExtraDeadline, IterationEvent,
@@ -100,7 +99,8 @@ use crate::session_glue::{
 #[cfg(any(test, feature = "transport-multilink"))]
 use crate::session_glue::drive_session_until_terminal;
 use crate::session_open::{
-    accept_and_open_session, initiate_and_open_session, DialedLink, OpenError, OpenedSession,
+    accept_and_open_session, initiate_and_open_session, AcceptedLink, BoundListener, DialedLink,
+    OpenError, OpenedSession,
 };
 use wz_session_core::locator::{parse_locator, Proto};
 
@@ -478,20 +478,28 @@ type OpenFuture = Pin<Box<dyn Future<Output = OpenResult>>>;
 #[cfg(feature = "transport-multilink")]
 type DriveFuture<'f> = Pin<Box<dyn Future<Output = (Face, DriverOutcome)> + 'f>>;
 
-/// Bring one accepted link up to Established. Tagged with `(id, peer)` so the
-/// loop can route the result without threading state through
-/// [`FuturesUnordered`]. Production semantics: `max_iters = None` (the
-/// accept-side open-deadline — `accepting.inactivity_timeout`, 1s — bounds a
-/// silent peer; see [`accept_and_open_session`]).
+/// Run the accepted link's deferred transport handshake, then bring it up to
+/// Established. Tagged with `(id, peer)` so the loop can route the result without
+/// threading state through [`FuturesUnordered`]. The transport (ws/tls) SERVER
+/// handshake ([`AcceptedLink::handshake`]) runs HERE, in the spawned per-face
+/// future — NOT in the loop's `select!` arm — so a slow/stalled handshake never
+/// blocks accepting the next peer (a failed handshake surfaces as
+/// [`OpenError::AcceptHandshake`], an isolated `FaceFailed`). Production
+/// semantics: `max_iters = None` (the accept-side open-deadline —
+/// `accepting.inactivity_timeout`, 1s — bounds a silent peer; see
+/// [`accept_and_open_session`]).
 async fn open_face(
     id: FaceId,
     peer: SocketAddr,
-    accepted: DialedLink,
+    accepted: AcceptedLink,
     params: SessionInitParams,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
-    let result = accept_and_open_session(accepted, params, clock, None, tick_interval_ms).await;
+    let result = match accepted.handshake().await {
+        Ok(link) => accept_and_open_session(link, params, clock, None, tick_interval_ms).await,
+        Err(e) => Err(OpenError::AcceptHandshake(e)),
+    };
     (id, peer, result)
 }
 
@@ -502,10 +510,13 @@ async fn open_face(
 /// single-session initiator drives), tagged `(id, peer)` so its completion
 /// routes through the same `opening` arm. A failed TCP connect surfaces as
 /// [`OpenError::Dial`] (a `FaceFailed`, not a panic), so one unreachable peer
-/// never sinks the mesh. TCP only — symmetric to the TCP-only accept side
-/// ([`accept_tcp_on`]); locator / DNS / TLS dial (reusing
-/// [`connect_and_open_session`](crate::session_open::connect_and_open_session))
-/// is a later `routing-peer` atom.
+/// never sinks the mesh. TCP only (the mesh DIAL side): after R311y376 (Stage 3)
+/// the ACCEPT side accepts the whole stream family (tcp/ws/tls) via
+/// [`BoundListener::accept_raw`], but the outbound mesh dial here still targets a
+/// raw [`SocketAddr`] ([`FaceSources::dial_targets`]) — generalizing it (locator /
+/// DNS / TLS dial, reusing
+/// [`connect_and_open_session`](crate::session_open::connect_and_open_session)) is
+/// a later `routing-peer` atom, the dial-side twin of this stage.
 async fn dial_face(
     id: FaceId,
     peer: SocketAddr,
@@ -605,7 +616,7 @@ fn multilink_priority_range(id: FaceId) -> (Priority, Priority) {
 async fn open_face_multilink(
     id: FaceId,
     peer: SocketAddr,
-    accepted: DialedLink,
+    accepted: AcceptedLink,
     pref: LinkReliabilityPref,
     qos: bool,
     band: (Priority, Priority),
@@ -613,17 +624,25 @@ async fn open_face_multilink(
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
-    let result = accept_and_open_session_with_multilink(
-        accepted,
-        params,
-        pref,
-        qos,
-        band,
-        clock,
-        None,
-        tick_interval_ms,
-    )
-    .await;
+    // The deferred transport handshake runs here in the spawned future (never the
+    // loop's `select!` arm), same as the single-link [`open_face`] — a failed
+    // ws/tls handshake is an isolated `FaceFailed`, not a loop stall.
+    let result = match accepted.handshake().await {
+        Ok(link) => {
+            accept_and_open_session_with_multilink(
+                link,
+                params,
+                pref,
+                qos,
+                band,
+                clock,
+                None,
+                tick_interval_ms,
+            )
+            .await
+        }
+        Err(e) => Err(OpenError::AcceptHandshake(e)),
+    };
     (id, peer, result)
 }
 
@@ -942,7 +961,7 @@ enum Step {
     // `large_enum_variant`). One box per open event is negligible.
     Opened(Box<OpenResult>),
     Driven((Face, DriverOutcome)),
-    Accepted(io::Result<(DialedLink, SocketAddr)>),
+    Accepted(io::Result<(AcceptedLink, SocketAddr)>),
     /// The forwarder's periodic timer fired (its [`FaceForwarder::tick_period`]
     /// cadence) — call [`FaceForwarder::tick`]. Only ever produced when a timer
     /// is armed (a forwarder that returned `Some` from `tick_period`).
@@ -1187,8 +1206,14 @@ pub struct McastIngressItem {
 }
 
 pub struct FaceSources {
-    /// The bound TCP listener for inbound peers (accept source).
-    pub listener: TcpListener,
+    /// The bound listener for inbound peers (accept source), scheme-keyed
+    /// ([`BoundListener`]) so a router/peer accepts the whole stream family
+    /// (tcp/ws/tls) — [`face_drive_loop`]'s `select!` arm accepts one raw
+    /// connection per iteration via [`BoundListener::accept_raw`], and the ws/tls
+    /// SERVER handshake is deferred to the spawned open future so a slow handshake
+    /// never blocks the loop. R311y376 (Stage 3) generalized this from a bare
+    /// [`tokio::net::TcpListener`].
+    pub listener: BoundListener,
     /// The peer addresses to dial at startup (static outbound source); empty for
     /// a pure acceptor.
     pub dial_targets: Vec<SocketAddr>,
@@ -1443,9 +1468,11 @@ where
             _ = &mut shutdown => Step::Shutdown,
             Some(opened) = opening.next() => Step::Opened(Box::new(opened)),
             Some(driven) = driving.next() => Step::Driven(driven),
-            accepted = accept_tcp_on(&listener) => {
-                Step::Accepted(accepted.map(|(stream, peer)| (DialedLink::Tcp(stream), peer)))
-            }
+            // The fast, non-blocking accept: one raw connection per iteration
+            // (ws/tls SERVER handshake deferred to the spawned open future, so a
+            // slow handshake never stalls this arm). R311y376 (Stage 3) — was
+            // `accept_tcp_on(&listener)`; now scheme-keyed via `accept_raw`.
+            accepted = listener.accept_raw() => Step::Accepted(accepted),
             _ = forwarder_tick(&mut tick_timer) => Step::Tick,
             intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
             item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(item),
@@ -2083,15 +2110,17 @@ where
 /// Bind-once, accept-and-hold-N: the multi-peer accept loop (the
 /// `routing-router` foundation).
 ///
-/// Loops accepting inbound TCP links on the already-bound `listener`; each
+/// Loops accepting inbound links on the already-bound [`BoundListener`] (the
+/// whole stream family — tcp/ws/tls — since R311y376 Stage 3, was tcp-only); each
 /// accepted link is opened to Established (concurrently, so one peer's handshake
-/// never blocks accepting the next) and then driven as a held *face* until the
-/// peer closes. A thin entry over [`face_drive_loop`] with NO outbound dials —
-/// every face comes from accepting. `on_event` observes each [`AcceptEvent`];
-/// the loop runs until `shutdown` resolves, then returns its
+/// never blocks accepting the next — the ws/tls transport handshake is part of
+/// that per-face open, off the accept path) and then driven as a held *face*
+/// until the peer closes. A thin entry over [`face_drive_loop`] with NO outbound
+/// dials — every face comes from accepting. `on_event` observes each
+/// [`AcceptEvent`]; the loop runs until `shutdown` resolves, then returns its
 /// [`AcceptLoopSummary`].
 pub async fn accept_loop<S, F>(
-    listener: TcpListener,
+    listener: BoundListener,
     params: SessionInitParams,
     clock: TokioTime,
     tick_interval_ms: u64,
@@ -2280,12 +2309,12 @@ mod tests {
 
     // ── shared fixtures ────────────────────────────────────────────────
 
-    async fn bind_loopback() -> (TcpListener, SocketAddr) {
+    async fn bind_loopback() -> (BoundListener, SocketAddr) {
         let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("local addr");
-        (listener, addr)
+        (BoundListener::Tcp(listener), addr)
     }
 
     /// One acceptor node identity (a distinct zid from the initiators).
