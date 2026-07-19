@@ -284,6 +284,19 @@ fn main() {
         // `[0x1E, 0x1A]`.
         .allowlist_type("_z_n_msg_declare_t")
         .allowlist_function("_z_declare_encode")
+        // R311y370 — DECLARE inbound DECODE path, for the storage-mgr-
+        // complete-flag wz->pico witness. wz drives a StorageService
+        // declare and captures the emitted DeclareQueryable off the wire;
+        // pico's real C `_z_declaration_decode` then parses those bytes
+        // and its `_z_decl_queryable_t._ext_queryable_info._complete`
+        // is the foreign agreement that the config-driven complete bit
+        // reached the wire. `_z_declaration_t` pulls in the nested
+        // `_z_decl_queryable_t` / `_z_wireexpr_t` / `_z_string_t` union
+        // members transitively; `_z_wbuf_write_bytes` fills a wbuf with
+        // wz's bytes for `_z_wbuf_to_zbuf` to hand the decoder.
+        .allowlist_type("_z_declaration_t")
+        .allowlist_function("_z_declaration_decode")
+        .allowlist_function("_z_wbuf_write_bytes")
         // R108b — REQUEST envelope Layer 3 byte-compare. Closes the
         // wire-interop debt on the last application-layer envelope
         // that has zenoh-pico parity. R108a fixed the latent

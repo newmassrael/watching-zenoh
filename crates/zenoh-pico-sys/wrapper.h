@@ -39,6 +39,12 @@
 #include "zenoh-pico/protocol/codec/network.h"
 #include "zenoh-pico/protocol/codec/ext.h"
 #include "zenoh-pico/protocol/ext.h"
+/* R311y370 — DECLARE declaration-body codec (codec/network.h carries the
+ * DECLARE envelope encode; the per-declaration `_z_declaration_decode` +
+ * `_z_decl_queryable_decode` live here). Needed for the storage-mgr-complete-
+ * flag wz->pico witness, which decodes a wz-emitted DeclareQueryable with pico's
+ * real C decoder and reads `_ext_queryable_info._complete`. */
+#include "zenoh-pico/protocol/codec/declarations.h"
 
 /* R311nx — serial-link framing codec + its COBS / CRC32 primitives, for
  * the wz<->pico serial wire-framing byte-parity test

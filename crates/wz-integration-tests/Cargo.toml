@@ -200,6 +200,25 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # `storage-mgr-multi-storage-host` (lib.rs:1128), opt-in. Same additive-
     # unification note as the storage-* pins above.
     "storage-mgr-multi-storage-host",
+    # R311y370 (pico cross-impl leg) — the storage complete-flag wz->pico
+    # witness (tests/wz_storage_complete_flag_pico_codec.rs) drives an
+    # IN-PROCESS wz StorageService with StorageConfig.complete = true / false
+    # and decodes the emitted DeclareQueryable with pico's real C
+    # `_z_declaration_decode`, asserting the config-driven complete bit
+    # reached the wire. The `storage_queryable_complete` gate honors
+    # `config.complete` ONLY under this cfg (storage_service.rs:108-116; with
+    # it OFF the queryable is always complete = the pre-y59 behavior), so this
+    # pin is what makes the config->wire distinction observable at all — and
+    # it is what puts `storage-mgr-complete-flag` in this in-process test
+    # binary's feature closure (audit A4-5 containment). Enabling the gate DOES
+    # change the wire bit for default-config storages — from always-complete
+    # (gate off) to config-driven (StorageConfig defaults complete = false) —
+    # but the existing storage serve / replication interop tests still pass
+    # (RE-RUN this round): a lone incomplete queryable still receives queries
+    # (BestMatching falls back to all-matching, and the aligner queries with
+    # target All), so their serve / converge assertions are unaffected. Same
+    # additive-unification note as the storage-* pins above.
+    "storage-mgr-complete-flag",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
