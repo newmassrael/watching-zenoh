@@ -81,8 +81,8 @@ use wz::runtime_tokio::session_glue::{
 #[cfg(feature = "transport-lowlatency")]
 use wz::runtime_tokio::session_open::initiate_and_open_session_with_lowlatency;
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session, DialConfig,
-    DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session,
+    AcceptConfig, DialConfig, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 
@@ -216,6 +216,44 @@ fn apply_tls_ca(cfg: DialConfig, _tls_ca: &Option<String>) -> io::Result<DialCon
     Ok(cfg)
 }
 
+/// R311y375 — build the [`AcceptConfig`] for a one-shot `--listen`, the accept
+/// mirror of [`build_dial_config`]. Cert-free acceptors (tcp/ws) take
+/// [`AcceptConfig::default`]; a `tls/...` acceptor threads its `--tls-cert` +
+/// `--tls-key` PEM (the cert it PRESENTS) into `AcceptConfig.tls`. Both must be
+/// supplied together for TLS; supplying neither is the cert-free default.
+#[cfg(feature = "tls")]
+fn build_accept_config(
+    tls_cert: &Option<String>,
+    tls_key: &Option<String>,
+) -> io::Result<AcceptConfig> {
+    use wz::runtime_tokio::session_open::TlsAcceptConfig;
+    use wz::runtime_tokio::tls_config::read_pem_file;
+    match (tls_cert, tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert_pem = read_pem_file(cert_path)?;
+            let key_pem = read_pem_file(key_path)?;
+            let tls = TlsAcceptConfig::from_cert_key_pem(&cert_pem, &key_pem)?;
+            Ok(AcceptConfig::default().with_tls(tls))
+        }
+        (None, None) => Ok(AcceptConfig::default()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a tls/... --listen needs BOTH --tls-cert and --tls-key",
+        )),
+    }
+}
+
+/// The `tls`-less build: a `tls/...` --listen surfaces the runtime's typed
+/// `Unsupported` at [`accept_endpoint`], so `--tls-cert` / `--tls-key` are inert
+/// (feature-uniform on [`Role::Acceptor`], only their USE is gated).
+#[cfg(not(feature = "tls"))]
+fn build_accept_config(
+    _tls_cert: &Option<String>,
+    _tls_key: &Option<String>,
+) -> io::Result<AcceptConfig> {
+    Ok(AcceptConfig::default())
+}
+
 /// Thread the `--quic-ca` root-CA into `DialConfig.quic` — a `quic/...` dial
 /// verifies the peer's server cert against it (server name `localhost`), the QUIC
 /// sibling of [`apply_tls_ca`]. No-op when no `--quic-ca` was given.
@@ -242,16 +280,20 @@ fn apply_quic_ca(cfg: DialConfig, _quic_ca: &Option<String>) -> io::Result<DialC
 
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {
     match role {
-        Role::Acceptor { listen } => {
+        Role::Acceptor {
+            listen,
+            tls_cert,
+            tls_key,
+        } => {
             // R311pu/pv — delegate to the library accept seam (symmetric to the
             // Initiator's dial_endpoint), dissolving the inline TcpListener::bind.
             // accept_bound logs the "listening on" / "accepted peer" lines the
-            // round-trip test waits on. No "over {transport}" line here: unlike
-            // the Initiator (which can dial ws/tls/udp, so it logs which
-            // transport opened), accept_locator only ever yields Tcp today, so
-            // that line would be a tautology — it returns if a non-tcp acceptor
-            // ever wires in.
-            accept_endpoint(listen).await
+            // round-trip test waits on. R311y375 — a `tls/...` --listen threads its
+            // `--tls-cert` / `--tls-key` into the `AcceptConfig` server-cert slot
+            // (the accept mirror of the Initiator's `--tls-ca` -> DialConfig);
+            // every cert-free acceptor (tcp/ws) takes the default.
+            let accept_cfg = build_accept_config(tls_cert, tls_key)?;
+            accept_endpoint(listen, &accept_cfg).await
         }
         Role::Initiator {
             connect,

@@ -437,7 +437,15 @@ fn main() -> ExitCode {
             print_usage();
             return ExitCode::from(2);
         }
-        (Some(addr), None) => Role::Acceptor { listen: addr },
+        (Some(addr), None) => Role::Acceptor {
+            listen: addr,
+            // R311y375 — the cert-chain + private-key PEM paths a `tls/...` --listen
+            // PRESENTS (the accept mirror of the Initiator's --tls-ca). Read here,
+            // applied only on the one-shot accept path (establish_link /
+            // build_accept_config); `None` for a non-tls listen.
+            tls_cert: parse_pair(rest, "--tls-cert"),
+            tls_key: parse_pair(rest, "--tls-key"),
+        },
         (None, Some(addr)) => Role::Initiator {
             connect: addr,
             reconnect,
@@ -768,7 +776,17 @@ fn main() -> ExitCode {
 
     eprintln!("{ABOUT}");
     match &role {
-        Role::Acceptor { listen } => log::info!("listen  = {listen}"),
+        Role::Acceptor {
+            listen,
+            tls_cert,
+            tls_key,
+        } => {
+            log::info!("listen  = {listen}");
+            if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
+                log::info!("tls-cert = {cert}");
+                log::info!("tls-key  = {key}");
+            }
+        }
         Role::Initiator {
             connect,
             reconnect,

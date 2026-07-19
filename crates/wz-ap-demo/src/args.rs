@@ -38,6 +38,16 @@ use wz::runtime_tokio::session_glue::{SessionInitParams, SigningKey, WhatAmI};
 pub(crate) enum Role {
     Acceptor {
         listen: String,
+        /// R311y375 — `--tls-cert <path>` / `--tls-key <path>`: the cert chain +
+        /// private key PEM a `tls/...` --listen PRESENTS to a dialing peer (the
+        /// accept mirror of the Initiator's `--tls-ca`, which the dialer verifies
+        /// against). Feature-uniform (always parsed); `None` without the flags OR
+        /// when built without the `tls` feature, in which case a `tls/...` listen
+        /// surfaces the runtime's typed `Unsupported`. BOTH are required together
+        /// for TLS. Read by `establish_link`'s Acceptor arm (`build_accept_config`,
+        /// runner.rs); the reconnect/router paths are out of demo scope.
+        tls_cert: Option<String>,
+        tls_key: Option<String>,
     },
     /// R311y365 — `tls_ca` is the `--tls-ca <path>` root-CA PEM a `tls/...`
     /// --connect verifies zenoh's/the peer's server cert against (server name

@@ -75,8 +75,8 @@ use wz_runtime_tokio::session_glue::{
     WhatAmI,
 };
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session, DialConfig,
-    OpenedSession, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session,
+    AcceptConfig, DialConfig, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex as WzMutex;
 
@@ -808,7 +808,7 @@ fn native_silent_listener(endpoint: String, bound_tx: mpsc::Sender<()>) {
         // `accept_endpoint` binds then accepts; signalling before it means the
         // dialer may still beat the bind, so the C side retries its open below.
         let _ = bound_tx.send(());
-        let accepted = match accept_endpoint(&endpoint).await {
+        let accepted = match accept_endpoint(&endpoint, &AcceptConfig::default()).await {
             Ok(link) => link,
             Err(_) => return,
         };

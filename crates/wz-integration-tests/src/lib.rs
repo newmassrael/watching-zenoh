@@ -641,11 +641,18 @@ pub mod common {
                 .spawn()
                 .unwrap_or_else(|e| panic!("spawn {label}: {e}")),
         );
-        let captured = wait_for_substring(&mut reader, listen_marker, Duration::from_secs(5))
+        // R311y375 — 10s (was 5s), matching the more generous 8s windows the pico
+        // spawn helpers below use. A wz node's cold-start bind + log can exceed 5s
+        // under full-run-ci load (parallel compiles + many live processes), which
+        // flaked Layer E6 (a wz --peer node not logging "peer: listening on" in
+        // time). wait_for_substring returns the instant the marker appears, so the
+        // wider window costs a green run NOTHING — it only raises the false-timeout
+        // ceiling for a slow-scheduled start.
+        let captured = wait_for_substring(&mut reader, listen_marker, Duration::from_secs(10))
             .unwrap_or_else(|c| {
                 let _ = guard.child_mut().kill();
                 let _ = guard.child_mut().wait();
-                panic!("{label} did not bind within 5s\n--- {label} stderr ---\n{c}");
+                panic!("{label} did not bind within 10s\n--- {label} stderr ---\n{c}");
             });
         let port = listen_port(&captured);
         (guard, reader, port)
@@ -1113,6 +1120,58 @@ pub mod common {
         assert!(
             wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
             "zenohd (ws dialer) did not start accepting tcp on 127.0.0.1:{tcp_port} within 10s"
+        );
+        guard
+    }
+
+    /// R311y375 — spawn a zenohd that DIALS a wz `tls/...` acceptor
+    /// (`-e tls/<wz>`) while listening on `tcp/<tcp_port>` for a pico client. The
+    /// TLS DIALER twin of [`spawn_zenohd_ws_dialer`], verifying wz's new tls
+    /// ACCEPTOR (`bind_locator`'s `Proto::Tls` arm + `accept_bound`'s rustls server
+    /// handshake). zenohd trusts wz's self-signed cert via
+    /// `transport/link/tls/root_ca_certificate` (`ca_cert_path` — a self-signed
+    /// leaf IS its own root; the CA-chain trust is LOAD-BEARING, a wrong CA fails
+    /// the handshake) and DISABLES SAN hostname matching with
+    /// `verify_name_on_connect: false` (DEFAULT_CONFIG.json5:693), so the connect
+    /// can be by IP (`tls/127.0.0.1:<wz>`) against a `localhost` cert verifying the
+    /// chain-of-trust only. (Distinct from wz's OWN dialer, which decouples
+    /// dial-IP from a still-VERIFIED `localhost` SAN — disabling the name check is
+    /// weaker, but leaves the CA trust wz's acceptor proves untouched.)
+    /// zenoh-pico's CLI here is not built with tls, so zenohd is the foreign
+    /// tls dialer. Readiness = zenohd accepting on its tcp listener; the tls dial
+    /// to wz is witnessed on the wz side ("tls server handshake" + "Established").
+    /// The caller owns the cert/key/config file cleanup.
+    pub fn spawn_zenohd_tls_dialer(
+        wz_tls_endpoint: &str,
+        tcp_port: u16,
+        ca_cert_path: &str,
+    ) -> ChildGuard {
+        let cfg_path = format!("{ca_cert_path}.dialer.zenohd.json5");
+        let cfg = format!(
+            "{{ transport: {{ link: {{ tls: {{ \
+             root_ca_certificate: {ca_cert_path:?}, verify_name_on_connect: false }} }} }} }}"
+        );
+        std::fs::write(&cfg_path, cfg).expect("write zenohd tls dialer config");
+        let mut command = Command::new(zenohd_binary());
+        command
+            .arg("-e")
+            .arg(wz_tls_endpoint)
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("--config")
+            .arg(&cfg_path)
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let guard = ChildGuard::wrap(
+            "zenohd (tls dialer)",
+            command.spawn().expect("spawn zenohd tls dialer"),
+        );
+        assert!(
+            wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
+            "zenohd (tls dialer) did not start accepting tcp on 127.0.0.1:{tcp_port} within 10s"
         );
         guard
     }

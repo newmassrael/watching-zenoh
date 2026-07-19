@@ -5420,6 +5420,16 @@ layer_z_zenohd_interop() {
     # isolation; the demo is already built with `ws` above.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_ws_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y375 — wz TLS ACCEPTOR cross-impl (transport-link-tls zenohd->wz): the tls
+    # twin of the ws-acceptor leg above. A real zenohd DIALS the wz `--listen
+    # tls/...` acceptor over tls (the rustls server handshake wired as the
+    # BoundListener::Tls arm), trusting wz's self-signed cert; a pico z_put routes
+    # through zenohd ACROSS the tls link into the wz acceptor's subscriber. The
+    # existing wz_to_zenohd_router legs prove only the wz tls DIALER (wz->zenohd);
+    # this is the reverse (acceptor) direction. zenoh-pico's CLI has no tls, so
+    # zenohd is the only foreign tls dialer. The demo is already built with `tls`.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_tls_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y140 — wz-ROUTER-HAT <-> zenohd ROUTER-TIER federation interop, the
     # FIRST cross-impl test on wz's `routers_net` link-state wire (every other
     # zenohd leg pairs wz as a CLIENT, never on the router tier). Leg 1 converges

@@ -84,7 +84,7 @@ use tokio_serial::SerialStream;
 // rustls `TlsStream<TcpStream>` produced by `tls_pipeline::dial_tls`/
 // `accept_tls`; `dial_locator` never builds it (no cert config in a locator).
 #[cfg(feature = "transport-link-tls")]
-use crate::tls_pipeline::{dial_tls, wire_tls_stream, TlsReadDriver};
+use crate::tls_pipeline::{accept_tls, dial_tls, wire_tls_stream, TlsReadDriver};
 #[cfg(feature = "transport-link-tls")]
 use tokio_rustls::rustls::pki_types::ServerName;
 // R311xk — the rustls `ClientConfig` is shared by `TlsDialConfig` and
@@ -92,6 +92,10 @@ use tokio_rustls::rustls::pki_types::ServerName;
 // duplicate when both are on).
 #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
 use tokio_rustls::rustls::ClientConfig;
+// The acceptor's server cert config, carried by `AcceptConfig::tls` and stored in
+// `BoundListener::Tls` — the accept-side mirror of the dialer's `ClientConfig`.
+#[cfg(feature = "transport-link-tls")]
+use tokio_rustls::rustls::ServerConfig;
 #[cfg(feature = "transport-link-tls")]
 use tokio_rustls::TlsStream;
 
@@ -323,6 +327,67 @@ impl QuicDialConfig {
     }
 }
 
+/// The ACCEPT-side config, mirror of [`DialConfig`]: the per-scheme server
+/// material [`bind_locator`] / [`accept_endpoint`] consume to bind a listener
+/// whose accept path needs more than the addr. Today only `tls` (the acceptor's
+/// server cert); its dial twin is [`DialConfig::tls`]. `Default` (all `None`) is
+/// the tcp/ws path (no cert), which is why the tcp-only multi-peer `bind_endpoint`
+/// passes `AcceptConfig::default()`. R311y375.
+#[derive(Default)]
+#[non_exhaustive]
+pub struct AcceptConfig {
+    /// TLS server material for a `tls/...` acceptor. `None` (the default) => a
+    /// `tls/...` listen binds to a typed `Unsupported` (no cert to present), so a
+    /// TLS acceptor is opt-in by supplying this — the accept mirror of
+    /// [`DialConfig::tls`] being opt-in for a dial.
+    #[cfg(feature = "transport-link-tls")]
+    pub tls: Option<TlsAcceptConfig>,
+}
+
+impl AcceptConfig {
+    /// Supply the TLS server material for a `tls/...` acceptor. Chain onto
+    /// [`AcceptConfig::default`]; a config without this binds a `tls/...` listen
+    /// to a typed `Unsupported`. Hard-gated on `transport-link-tls` (its
+    /// [`TlsAcceptConfig`] parameter type is gated), the accept mirror of
+    /// [`DialConfig::with_tls`].
+    #[cfg(feature = "transport-link-tls")]
+    pub fn with_tls(mut self, tls: TlsAcceptConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+}
+
+/// The TLS material a `tls/...` ACCEPTOR needs beyond the locator's addr: the
+/// rustls [`ServerConfig`] (the cert chain + key it PRESENTS, optional client
+/// auth). The accept-side mirror of [`TlsDialConfig`] — where the dialer carries
+/// a `ClientConfig` + the name it verifies, the acceptor carries the
+/// `ServerConfig` it presents. Mirrors the listen side of pico's TLS config keys
+/// (`LISTEN_CERTIFICATE` / `LISTEN_PRIVATE_KEY`, `tls.c`).
+#[cfg(feature = "transport-link-tls")]
+pub struct TlsAcceptConfig {
+    pub server_config: Arc<ServerConfig>,
+}
+
+#[cfg(feature = "transport-link-tls")]
+impl TlsAcceptConfig {
+    /// Build one-way-TLS server material from the acceptor's cert-chain + private
+    /// key PEM (the demo's `--tls-cert` / `--tls-key`) — the acceptor convenience
+    /// symmetric to [`TlsDialConfig::from_ca_pem`]. One-way TLS (no client auth,
+    /// `client_ca_pem = None`): the acceptor presents its cert; the dialer
+    /// verifies it against a CA (its `--tls-ca`), but the acceptor does not
+    /// authenticate the dialer. mTLS is the `server_config_from_pem` client-CA arm
+    /// when a verified caller needs it.
+    pub fn from_cert_key_pem(cert_chain_pem: &[u8], private_key_pem: &[u8]) -> io::Result<Self> {
+        Ok(Self {
+            server_config: crate::tls_config::server_config_from_pem(
+                cert_chain_pem,
+                private_key_pem,
+                None,
+            )?,
+        })
+    }
+}
+
 /// A dialed raw transport — the mode-agnostic dial seam's output, a union
 /// spanning every link transport (R311ez TCP/UDP; R311nv serial).
 /// [`wire_dialed_link`] consumes it into the uniform
@@ -479,6 +544,14 @@ pub enum BoundListener {
     /// mirror of `dial_locator`'s `Proto::Ws => dial_ws` (client upgrade).
     #[cfg(feature = "transport-link-ws")]
     Ws(TcpListener),
+    /// A bound TCP listener whose accepted stream gets the rustls SERVER
+    /// handshake ([`accept_tls`]) using the carried [`ServerConfig`] — tls, like
+    /// ws, LISTENS on plain TCP; only the post-accept handshake differs. The
+    /// acceptor mirror of `dial_locator`'s `Proto::Tls => dial_tls` (client
+    /// handshake). The `Arc<ServerConfig>` (the cert it presents) is taken from
+    /// [`AcceptConfig::tls`] at bind time and carried until the accept runs it.
+    #[cfg(feature = "transport-link-tls")]
+    Tls(TcpListener, Arc<ServerConfig>),
 }
 
 impl BoundListener {
@@ -491,6 +564,8 @@ impl BoundListener {
             BoundListener::Tcp(_) => "tcp",
             #[cfg(feature = "transport-link-ws")]
             BoundListener::Ws(_) => "ws",
+            #[cfg(feature = "transport-link-tls")]
+            BoundListener::Tls(..) => "tls",
         }
     }
 
@@ -509,6 +584,8 @@ impl BoundListener {
             BoundListener::Tcp(l) => (l.local_addr()?.to_string(), "tcp"),
             #[cfg(feature = "transport-link-ws")]
             BoundListener::Ws(l) => (l.local_addr()?.to_string(), "ws"),
+            #[cfg(feature = "transport-link-tls")]
+            BoundListener::Tls(l, _) => (l.local_addr()?.to_string(), "tls"),
         };
         log::info!("wz accept: listening on {addr} ({name})");
         Ok(())
@@ -523,7 +600,7 @@ impl BoundListener {
     pub fn into_tcp(self) -> io::Result<TcpListener> {
         match self {
             BoundListener::Tcp(l) => Ok(l),
-            #[cfg(feature = "transport-link-ws")]
+            #[cfg(any(feature = "transport-link-ws", feature = "transport-link-tls"))]
             other => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
@@ -895,12 +972,13 @@ pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<Dialed
 /// peer-learn (not a `TcpListener::accept`); `Serial`'s is a tty open
 /// ([`accept_serial`](crate::serial_pipeline::accept_serial)) — both unwired
 /// until their responder caller lands.
-pub async fn accept_locator(locator: AnyLocator) -> io::Result<DialedLink> {
+pub async fn accept_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result<DialedLink> {
     // R311y375 — bind + accept dispatch uniformly on the scheme: `bind_locator`
-    // produces the scheme's `BoundListener` and `accept_bound` accepts one peer +
-    // runs that scheme's post-accept handshake (the ws RFC6455 upgrade, etc.). No
+    // produces the scheme's `BoundListener` (consuming `cfg`'s server cert where a
+    // scheme needs it) and `accept_bound` accepts one peer + runs that scheme's
+    // post-accept handshake (the ws RFC6455 upgrade, the tls handshake, etc.). No
     // per-scheme special-case here — the symmetric mirror of dial_locator.
-    accept_bound(bind_locator(locator).await?).await
+    accept_bound(bind_locator(locator, cfg).await?).await
 }
 
 /// Bind a listening [`TcpListener`] for an [`AnyLocator`]'s scheme — the
@@ -911,13 +989,17 @@ pub async fn accept_locator(locator: AnyLocator) -> io::Result<DialedLink> {
 /// mirror of `dial_locator`'s [`DialedLink`]): `tcp` / `ws` bind a `TcpListener`
 /// (ws upgrades per-accept), and the remaining schemes return a feature-blind
 /// typed `Unsupported` extension point until their [`BoundListener`] arm lands.
-pub async fn bind_locator(locator: AnyLocator) -> io::Result<BoundListener> {
+pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result<BoundListener> {
     fn unsupported(detail: &str) -> io::Error {
         io::Error::new(
             io::ErrorKind::Unsupported,
             format!("listen/accept is wired only for tcp; {detail}"),
         )
     }
+    // `cfg` is consumed only by the tls arm (its server cert); inert on a build
+    // without the tls backend (mirrors dial_locator's DialConfig usage).
+    #[cfg(not(feature = "transport-link-tls"))]
+    let _ = cfg;
     match locator {
         AnyLocator::Ip(ip) => match ip.proto {
             Proto::Tcp => Ok(BoundListener::Tcp(
@@ -932,6 +1014,21 @@ pub async fn bind_locator(locator: AnyLocator) -> io::Result<BoundListener> {
             Proto::Ws => Ok(BoundListener::Ws(
                 bind_tcp(ip.addr, ip.iface.as_deref()).await?,
             )),
+            // R311y375 — a `tls/...` acceptor also LISTENS on plain TCP; the rustls
+            // SERVER handshake runs per-accept in `accept_bound`, using the
+            // `ServerConfig` supplied here from `AcceptConfig.tls`. Absent the cert
+            // config => typed `Unsupported`, so a TLS acceptor is opt-in — the
+            // accept mirror of dial_locator's `Proto::Tls => match &cfg.tls`.
+            #[cfg(feature = "transport-link-tls")]
+            Proto::Tls => match &cfg.tls {
+                Some(t) => Ok(BoundListener::Tls(
+                    bind_tcp(ip.addr, ip.iface.as_deref()).await?,
+                    t.server_config.clone(),
+                )),
+                None => Err(unsupported(
+                    "tls acceptor requires AcceptConfig.tls (a server cert + key)",
+                )),
+            },
             other => Err(unsupported(&format!(
                 "{other:?} acceptor is a not-yet-wired extension point"
             ))),
@@ -952,6 +1049,18 @@ pub async fn bind_locator(locator: AnyLocator) -> io::Result<BoundListener> {
             Proto::Ws => Ok(BoundListener::Ws(
                 bind_tcp_host(&format!("{host}:{port}"), iface.as_deref()).await?,
             )),
+            // A `tls/...` NAME acceptor: bind the resolved TCP host + carry the
+            // server cert (the handshake is per-accept, as in the numeric arm).
+            #[cfg(feature = "transport-link-tls")]
+            Proto::Tls => match &cfg.tls {
+                Some(t) => Ok(BoundListener::Tls(
+                    bind_tcp_host(&format!("{host}:{port}"), iface.as_deref()).await?,
+                    t.server_config.clone(),
+                )),
+                None => Err(unsupported(
+                    "tls acceptor requires AcceptConfig.tls (a server cert + key)",
+                )),
+            },
             // A non-tcp NAME is unwired for two reasons (acceptor + non-tcp
             // name resolution), kept distinct from the numeric arm's message.
             other => Err(unsupported(&format!(
@@ -1012,12 +1121,28 @@ async fn accept_bound(listener: BoundListener) -> io::Result<DialedLink> {
         // R311y375 — ws LISTENS on plain TCP; accept the raw stream, then run the
         // RFC6455 SERVER upgrade (`accept_ws`) — the acceptor twin of
         // dial_locator's `Proto::Ws => dial_ws`. Feeds the SAME `wire_ws_stream`
-        // split the dial side does.
+        // split the dial side does. The "ws server upgrade" line logs AFTER the
+        // upgrade SUCCEEDS (R311y375 review obs#1), so it is a true completion
+        // witness — a failed upgrade returns the error and never logs it.
         #[cfg(feature = "transport-link-ws")]
         BoundListener::Ws(l) => {
             let (stream, peer) = accept_tcp(l).await?;
+            let upgraded = accept_ws(stream).await?;
             log::info!("wz accept: accepted peer {peer}; ws server upgrade");
-            Ok(DialedLink::Ws(Box::new(accept_ws(stream).await?)))
+            Ok(DialedLink::Ws(Box::new(upgraded)))
+        }
+        // R311y375 — tls LISTENS on plain TCP; accept the raw stream, then run the
+        // rustls SERVER handshake (`accept_tls`) with the cert carried since bind —
+        // the acceptor twin of dial_locator's `Proto::Tls => dial_tls`. Feeds the
+        // SAME `wire_tls_stream` split the dial side does. The "tls server
+        // handshake" line logs AFTER the handshake SUCCEEDS (review obs#1), a true
+        // completion witness — a rejected cert returns the error and never logs it.
+        #[cfg(feature = "transport-link-tls")]
+        BoundListener::Tls(l, server_config) => {
+            let (stream, peer) = accept_tcp(l).await?;
+            let handshaked = accept_tls(stream, server_config).await?;
+            log::info!("wz accept: accepted peer {peer}; tls server handshake");
+            Ok(DialedLink::Tls(Box::new(handshaked)))
         }
     }
 }
@@ -1061,21 +1186,22 @@ pub async fn accept_bound_on(listener: &TcpListener) -> io::Result<DialedLink> {
 /// so the `plan_endpoint` classify + error-map lives once in `bind_endpoint`,
 /// not duplicated here — the endpoint-layer analogue of
 /// `accept_locator = accept_bound ∘ bind_locator`.
-pub async fn accept_endpoint(listen: &str) -> io::Result<DialedLink> {
-    // R311y374 — route through `accept_locator` (not `accept_bound` directly) so a
-    // `ws/...` listen string gets the RFC6455 server upgrade its scheme requires:
-    // `accept_locator` binds + accepts + applies the per-scheme handshake, while
-    // the tcp path stays byte-identical (it delegates to `accept_bound`). The
-    // `plan_endpoint` classify + error-map is kept here (mirrors `bind_endpoint`'s
-    // wrapping) so a malformed `--listen` still surfaces the endpoint-layer error,
-    // not the raw locator one.
+pub async fn accept_endpoint(listen: &str, cfg: &AcceptConfig) -> io::Result<DialedLink> {
+    // R311y374/375 — route through `accept_locator` (not `accept_bound` directly)
+    // so a `ws/...` or `tls/...` listen string gets the per-scheme handshake its
+    // scheme requires: `accept_locator` binds (consuming `cfg`'s server cert where
+    // needed) + accepts + applies the handshake, while the tcp path stays
+    // byte-identical (it delegates to `accept_bound`). The `plan_endpoint`
+    // classify + error-map is kept here (mirrors `bind_endpoint`'s wrapping) so a
+    // malformed `--listen` still surfaces the endpoint-layer error. `cfg` is the
+    // accept mirror of `dial_endpoint`'s `DialConfig`.
     let locator = plan_endpoint(listen).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("wz listen: malformed / unsupported --listen {listen:?}: {e:?}"),
         )
     })?;
-    accept_locator(locator).await
+    accept_locator(locator, cfg).await
 }
 
 /// Bind a `--listen`-style endpoint string to a listening [`TcpListener`] — the
@@ -1096,7 +1222,12 @@ pub async fn bind_endpoint(listen: &str) -> io::Result<TcpListener> {
             format!("wz listen: malformed / unsupported --listen {listen:?}: {e:?}"),
         )
     })?;
-    bind_locator(locator).await?.into_tcp()
+    // The multi-peer/router bind is tcp-only, so no acceptor cert config is
+    // needed — pass the default (all `None`); a non-tcp router `--listen` still
+    // surfaces `Unsupported` via `into_tcp`.
+    bind_locator(locator, &AcceptConfig::default())
+        .await?
+        .into_tcp()
 }
 
 /// Inbound read driver of a dialed link — the transport union on the read
@@ -2665,7 +2796,7 @@ mod tests {
         #[cfg(not(feature = "transport-link-ws"))]
         unwired.push("ws/127.0.0.1:7447");
         for s in unwired {
-            match accept_endpoint(s).await {
+            match accept_endpoint(s, &AcceptConfig::default()).await {
                 Err(e) => assert_eq!(
                     e.kind(),
                     io::ErrorKind::Unsupported,
