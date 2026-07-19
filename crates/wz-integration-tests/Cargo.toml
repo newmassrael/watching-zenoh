@@ -73,7 +73,18 @@ wz-session-core = { path = "../wz-session-core", features = [
     # reply_keyed_sourced) for a pico z_get to decode, so it needs the
     # send-side stamp compiled in. Not an inventory atom (A3-neutral);
     # only forwarded elsewhere by ext-pubsub-advanced-recovery.
-    "reply-source-info", "keyexpr-includes"] }
+    "reply-source-info", "keyexpr-includes",
+    # R311y371 — the QoS-mode JOIN codec-parity test
+    # (layer3_join_qos.rs::layer3_join_qos_sn_ext_byte_equals_pico) builds a wz
+    # multicast qos JOIN via the production `multicast_join::encode_join` with a
+    # per-priority `MulticastTxConduits` and byte-compares it against pico's
+    # `_z_join_encode` with `_is_qos = true`. `transport-qos` gates the
+    # per-priority SN conduits + the `write_join_qos_ext` QoS-SN wire + the
+    # `{0,0}` decoy base in encode_join; `session-multicast` + `codec-join` gate
+    # the `multicast_join` module itself. This pin puts `transport-qos` in the
+    # in-process test binary's feature closure (audit A4-5 containment) and is
+    # what compiles the qos ext path in reach at all (it is opt-in, in no preset).
+    "transport-qos", "session-multicast", "codec-join"] }
 zenoh-pico-sys = { path = "../zenoh-pico-sys" }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 # R116b — `hal_timer_routing.rs` declares an in-test TimerProbePolicy
