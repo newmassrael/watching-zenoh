@@ -133,10 +133,20 @@ git config core.hooksPath .githooks
 - **commit-msg** — enforces `COMMIT_FORMAT.md` (subject and body
   ≤72 bytes per line, no multi-line bullet wraps, no
   Co-Authored-By / "Generated with Claude Code" / emoji).
-- **pre-push** — re-runs `mnemosyne-cli validate-workspace` at
-  push time so the integrity gate also covers post-commit state
-  changes (manual atomic.json edits, amends, rebases) before
-  remote share.
+- **pre-push** — runs the FULL `scripts/run-ci.sh` (the
+  CI-equivalent gate: all host lanes C1 build / C2 clippy / E
+  integration plus the F/G/Q/Z footprint / cross-compile / interop
+  gates; only Layer M stays opt-in), NOT just `validate-workspace`
+  — that (Layer A) is only ONE lane within it. So a `git push` runs
+  the whole suite once, at push time, catching what land-then-CI
+  used to (it re-sources `run-ci.sh` from HEAD, the to-be-pushed
+  content, and holds a non-blocking flock so a concurrent run-ci
+  fails loud instead of racing `crates/target`). Layer A still
+  covers post-commit state changes (manual atomic.json edits,
+  amends, rebases). Cost: ~50s host-only floor, several minutes
+  with the ARM / qemu / zenohd / pico gates present; background it
+  when driving a push, it exceeds a short shell timeout. Bypass
+  only for genuine hotfixes via `git push --no-verify`.
 
 `pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
 (install via
