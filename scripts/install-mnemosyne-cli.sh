@@ -24,15 +24,16 @@
 
 set -euo pipefail
 
-# github.com/newmassrael/mnemosyne @ R730 (DEBT-K choice gate) — the rev whose
-# CLI reads the current atomic-store schema_version (34). The store bumped
-# 23 -> 34 when the R730 CLI appended the wz R311y376 ledger entry; the prior
-# pin (R584, bb01cc6b) reads only schema <= 23, so it would hard-fail Layer A
-# `schema version mismatch: store=34 expected <= 23` (the same failure class the
-# even-older R415 pin hit at schema 9). Kept in step with the locally-installed
-# `--path` binary (mnemosyne-cli 0.1.0 6871b925) so local pre-push and CI
-# validate against the same mnemosyne version.
-MNEMOSYNE_REV="6871b9256d3b35687cdb6df7145a19cd5c717ed8"
+# github.com/newmassrael/mnemosyne @ R732 (DEBT-M entity-kind inheritance
+# tree) — the rev whose CLI reads the current atomic-store schema_version
+# (34) and defines CURRENT_SCHEMA_VERSION 37, so a later mutation migrates
+# the store up to 37 and this same pin still reads it (reader max >= store).
+# The prior pin (R730, 6871b925) defines only schema <= 35; adopting the
+# R731/R732 upstream (fact_counts multiset custody + entity-kind inheritance
+# tree) moved the local --path binary to R732, so the pin moves in step to
+# keep local pre-push and CI on one mnemosyne version. Kept in step with the
+# locally-installed `--path` binary (mnemosyne-cli 0.1.0 5807bd5).
+MNEMOSYNE_REV="5807bd5cd53d4b9dea85a6560a2dfe22b02252bc"
 
 cargo install --git https://github.com/newmassrael/mnemosyne \
   --rev "$MNEMOSYNE_REV" --bin mnemosyne-cli --force mnemosyne-cli
