@@ -99,8 +99,8 @@ use crate::session_glue::{
 #[cfg(any(test, feature = "transport-multilink"))]
 use crate::session_glue::drive_session_until_terminal;
 use crate::session_open::{
-    accept_and_open_session, initiate_and_open_session, AcceptedLink, BoundListener, DialedLink,
-    OpenError, OpenedSession,
+    accept_and_open_session, initiate_and_open_session, AcceptedLink, AcceptedPeer, BoundListener,
+    DialedLink, OpenError, OpenedSession,
 };
 use wz_session_core::locator::{parse_locator, Proto};
 
@@ -961,7 +961,7 @@ enum Step {
     // `large_enum_variant`). One box per open event is negligible.
     Opened(Box<OpenResult>),
     Driven((Face, DriverOutcome)),
-    Accepted(io::Result<(AcceptedLink, SocketAddr)>),
+    Accepted(io::Result<(AcceptedLink, AcceptedPeer)>),
     /// The forwarder's periodic timer fired (its [`FaceForwarder::tick_period`]
     /// cadence) — call [`FaceForwarder::tick`]. Only ever produced when a timer
     /// is armed (a forwarder that returned `Some` from `tick_period`).
@@ -2043,6 +2043,27 @@ where
             }
 
             Step::Accepted(Ok((accepted, peer))) => {
+                // R311y378 — the mesh accept loop keys faces on the IP
+                // `SocketAddr` (`Face.peer`, zid-dedup, gossip locators), so a
+                // non-IP accepted peer (unixsock) has no routable locator and
+                // cannot join the mesh; the one-shot `accept_bound` path serves
+                // non-IP accept. A router that binds a non-IP `--listen` is a
+                // mis-config: report + drop the connection rather than hold an
+                // unroutable face.
+                let peer = match peer {
+                    AcceptedPeer::Ip(addr) => addr,
+                    AcceptedPeer::NonIp(name) => {
+                        on_event(&AcceptEvent::AcceptError(io::Error::new(
+                            io::ErrorKind::Unsupported,
+                            format!(
+                                "the mesh accept loop holds IP faces only; a {name} peer has no \
+                                 routable locator — dropping (non-IP accept is one-shot only)"
+                            ),
+                        )));
+                        drop(accepted);
+                        continue;
+                    }
+                };
                 let id = FaceId(next_id);
                 next_id += 1;
                 summary.accepted += 1;
