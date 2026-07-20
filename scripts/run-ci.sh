@@ -306,6 +306,12 @@
 #   scripts/run-ci.sh                  # full default sweep (= CI mirror)
 #   scripts/run-ci.sh --skip-codegen   # skip Layer B (codec emit; ~30s/codec)
 #   scripts/run-ci.sh --layer A        # run only the named layer
+#   scripts/run-ci.sh --resume         # skip layers that already passed on the
+#                                      # IDENTICAL tree (kill/flake re-run); a
+#                                      # fingerprint over HEAD + tracked diff +
+#                                      # untracked content invalidates on ANY
+#                                      # source edit -> full re-run. Opt-in; the
+#                                      # default sweep + pre-push hook run all.
 #   WZ_RUN_LAYER_M=1 scripts/run-ci.sh # add the opt-in environment-flaky M lane
 #
 # Time cost (warm cache):
@@ -322,9 +328,11 @@ set -uo pipefail
 # ─── argument parsing ──────────────────────────────────────────────
 SKIP_CODEGEN=0
 ONLY_LAYER=""
+RESUME=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-codegen) SKIP_CODEGEN=1; shift ;;
+        --resume) RESUME=1; shift ;;
         --layer)
             ONLY_LAYER="$2"
             shift 2
@@ -383,6 +391,41 @@ fi
 FAILED_LAYERS=()
 _runci_ts() { date +'%Y-%m-%dT%H:%M:%S%z'; }
 
+# ─── resume checkpoint (--resume) ──────────────────────────────────
+# A fingerprint-gated per-layer pass ledger so a killed/failed sweep can be
+# re-run with --resume and SKIP the layers that already passed on the IDENTICAL
+# tree. SAFETY (the R311gf lesson — a subset run must never hide a break a source
+# edit introduced): the fingerprint hashes HEAD + the full tracked diff + every
+# untracked file's content, so ANY source change invalidates the checkpoint and
+# forces a full re-run. Opt-in only — the default sweep and the pre-push hook
+# pass no --resume, so they run every layer unconditionally; they still WRITE the
+# checkpoint (a killed full sweep is then resumable). Disabled under --layer (that
+# mode owns lane selection). The ledger lives in .git (untracked), like the
+# pre-push run-ci.lock.
+CKPT_FILE="$(git rev-parse --git-dir)/run-ci-checkpoint"
+[[ -n "$ONLY_LAYER" ]] && RESUME=""   # --layer is a targeted single-lane run
+_runci_fingerprint() {
+    {
+        git rev-parse HEAD 2>/dev/null || echo "no-head"
+        git diff HEAD 2>/dev/null
+        git ls-files --others --exclude-standard -z 2>/dev/null \
+            | sort -z | xargs -0 -r sha256sum 2>/dev/null
+    } | sha256sum | cut -d' ' -f1
+}
+_ckpt_passed() { [[ -f "$CKPT_FILE" ]] && grep -qxF "$1" "$CKPT_FILE"; }
+_ckpt_mark()   { [[ -z "$ONLY_LAYER" ]] && printf '%s\n' "$1" >> "$CKPT_FILE"; }
+if [[ -z "$ONLY_LAYER" ]]; then
+    _ckpt_fp="$(_runci_fingerprint)"
+    if [[ -n "$RESUME" && -f "$CKPT_FILE" \
+          && "$(head -n1 "$CKPT_FILE" 2>/dev/null)" == "$_ckpt_fp" ]]; then
+        echo "[$(_runci_ts)] INFO  resume: checkpoint matches tree; skipping already-passed layers"
+    else
+        [[ -n "$RESUME" ]] && \
+            echo "[$(_runci_ts)] INFO  resume: no matching checkpoint (tree changed or none); running ALL layers"
+        printf '%s\n' "$_ckpt_fp" > "$CKPT_FILE"   # fresh ledger: fingerprint header only
+    fi
+fi
+
 # ─── footprint build normalisation (SSOT) ──────────────────────────
 #
 # The rustc flags that make a footprint-gated binary's .text/.rodata
@@ -407,10 +450,15 @@ run_layer() {
     if [[ -n "$ONLY_LAYER" && "$ONLY_LAYER" != "$name" ]]; then
         return 0
     fi
+    if [[ -n "$RESUME" ]] && _ckpt_passed "$name"; then
+        echo "[$(_runci_ts)] INFO  Layer $name SKIP (resume: already passed on this tree)"
+        return 0
+    fi
     echo "[$(_runci_ts)] INFO  ──── Layer $name ────"
     local start=$SECONDS
     if "$@"; then
         echo "[$(_runci_ts)] INFO  Layer $name pass ($((SECONDS - start))s)"
+        _ckpt_mark "$name"
         return 0
     else
         local rc=$?
