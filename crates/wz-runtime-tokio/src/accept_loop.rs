@@ -1307,7 +1307,7 @@ where
     F: FnMut(&AcceptEvent),
 {
     let FaceSources {
-        listener,
+        mut listener,
         dial_targets,
         mut dial_intents,
         mut mcast_ingress,

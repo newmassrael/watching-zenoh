@@ -237,7 +237,7 @@ async fn wz_accepts_a_session_over_unixsock_via_the_bind_endpoint_seam() {
     // ── The Stage 4 gap: the scheme-keyed listen seam. Before the arm lands
     //    this is `Unsupported` (bind_locator wired only for tcp/ws/tls); after,
     //    it yields a `BoundListener::Unixsock`.
-    let bound = bind_endpoint(&format!("unixsock-stream/{path}"))
+    let mut bound = bind_endpoint(&format!("unixsock-stream/{path}"))
         .await
         .expect("bind_endpoint accepts a unixsock-stream/ listen (Stage 4 accept seam)");
     assert_eq!(

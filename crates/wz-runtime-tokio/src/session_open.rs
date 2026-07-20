@@ -147,9 +147,11 @@ use tokio::net::{UnixListener, UnixStream};
 // `dial_locator` builds it from a `vsock/<CID>:<PORT>` locator (no cert config,
 // like ws/udp/unixsock).
 #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
-use crate::vsock_pipeline::{dial_vsock, wire_vsock_stream, VsockReadDriver};
+use crate::vsock_pipeline::{
+    accept_vsock_on, bind_vsock, dial_vsock, wire_vsock_stream, VsockReadDriver,
+};
 #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
-use tokio_vsock::VsockStream;
+use tokio_vsock::{VsockListener, VsockStream};
 
 // R311y10 — the unixpipe arm: a same-host named-FIFO-pair link, Linux-only
 // (the tokio `read_write` open-rendezvous knob is target_os=linux). A connected
@@ -563,15 +565,26 @@ pub enum BoundListener {
     /// no IP peer) and [`Self::local_addr`] returns a typed error for it.
     #[cfg(feature = "transport-link-unixsock")]
     Unixsock(UnixListener),
+    /// A bound AF_VSOCK [`VsockListener`]; [`accept_bound`] accepts a raw
+    /// [`DialedLink::Vsock`] with NO post-accept handshake (direct wrap, like
+    /// `tcp` / `unixsock`). Non-IP like `unixsock` (the accepted peer is
+    /// anonymous -> [`AcceptedPeer::NonIp`]); Linux-only (AF_VSOCK), gated with
+    /// the backend (R311y379). `tokio_vsock::VsockListener::accept` is
+    /// `&mut self`, which is why [`Self::accept_raw`] takes `&mut self` (the
+    /// stream family's `&`-accept never forced it).
+    #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+    Vsock(VsockListener),
 }
 
 /// The peer of a link accepted by [`BoundListener::accept_raw`] — an IP
 /// [`SocketAddr`](std::net::SocketAddr) for the stream family (tcp/ws/tls, all
 /// `TcpListener`-backed), or a non-IP marker for a unix/vsock family listener
-/// whose accepted peer is anonymous (a unix `accept` yields an unnamed peer;
-/// zenoh assigns it a fresh UUID, `unixsock_pipeline::accept_unixsock_on`). This
-/// is the "revisit the peer type" [`BoundListener::accept_raw`]'s doc
-/// anticipated for the first non-IP variant (R311y378).
+/// whose accepted peer wz does NOT thread: a unix `accept` yields a genuinely
+/// unnamed peer (zenoh assigns a fresh UUID, `unixsock_pipeline`), while a vsock
+/// `accept` yields a real `(cid, port)` that wz discards (`vsock_pipeline`) —
+/// session identity is the handshake zid, not the transport peer, so neither is
+/// routed. This is the "revisit the peer type" [`BoundListener::accept_raw`]'s
+/// doc anticipated for the first non-IP variant (R311y378).
 ///
 /// [`Display`](std::fmt::Display) renders the "accepted peer {..}" log line the
 /// one-shot [`accept_bound`] writes. The multi-peer
@@ -583,8 +596,9 @@ pub enum BoundListener {
 pub enum AcceptedPeer {
     /// The IP address of an accepted stream-family peer (tcp/ws/tls).
     Ip(std::net::SocketAddr),
-    /// A non-IP transport peer (unixsock; later vsock/unixpipe) — anonymous, so
-    /// the payload is the transport name for the log line, not an address.
+    /// A non-IP transport peer (unixsock / vsock) — wz does not thread the
+    /// accepted peer address (unix: genuinely unnamed; vsock: a real cid:port it
+    /// drops), so the payload is the transport name for the log line.
     NonIp(&'static str),
 }
 
@@ -611,6 +625,8 @@ impl BoundListener {
             BoundListener::Tls(..) => "tls",
             #[cfg(feature = "transport-link-unixsock")]
             BoundListener::Unixsock(_) => "unixsock",
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            BoundListener::Vsock(_) => "vsock",
         }
     }
 
@@ -654,6 +670,14 @@ impl BoundListener {
                 .as_pathname()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "<unnamed unix socket>".to_string()),
+            // A vsock listener addresses by (cid, port), not an IP -- render the
+            // bound AF_VSOCK address (the ephemeral port the kernel assigned to a
+            // VMADDR_PORT_ANY bind is readable here, race-free).
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            BoundListener::Vsock(l) => {
+                let a = l.local_addr()?;
+                format!("{}:{}", a.cid(), a.port())
+            }
         })
     }
 
@@ -685,6 +709,12 @@ impl BoundListener {
                 io::ErrorKind::Unsupported,
                 "a unixsock listener has no IP SocketAddr; use local_addr_display",
             )),
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            BoundListener::Vsock(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a vsock listener has no IP SocketAddr (it addresses by cid:port); \
+                 use local_addr_display",
+            )),
         }
     }
 
@@ -708,7 +738,7 @@ impl BoundListener {
     /// "future non-IP variant will revisit the peer type" this doc anticipated.
     /// [`Display`](std::fmt::Display) on [`AcceptedPeer`] renders the log line
     /// uniformly across both.
-    pub async fn accept_raw(&self) -> io::Result<(AcceptedLink, AcceptedPeer)> {
+    pub async fn accept_raw(&mut self) -> io::Result<(AcceptedLink, AcceptedPeer)> {
         Ok(match self {
             BoundListener::Tcp(l) => {
                 let (stream, peer) = accept_tcp_on(l).await?;
@@ -739,6 +769,15 @@ impl BoundListener {
                     AcceptedPeer::NonIp("unixsock"),
                 )
             }
+            // R311y379 — the second non-IP accept: `accept_vsock_on` needs
+            // `&mut VsockListener` (tokio_vsock's accept is `&mut self`), which
+            // the `&mut self` receiver here supplies directly (no Mutex). Direct
+            // wrap, anonymous peer -> NonIp, mirroring unixsock.
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            BoundListener::Vsock(l) => {
+                let stream = accept_vsock_on(l).await?;
+                (AcceptedLink::Vsock(stream), AcceptedPeer::NonIp("vsock"))
+            }
         })
     }
 
@@ -754,7 +793,8 @@ impl BoundListener {
             #[cfg(any(
                 feature = "transport-link-ws",
                 feature = "transport-link-tls",
-                feature = "transport-link-unixsock"
+                feature = "transport-link-unixsock",
+                all(feature = "transport-link-vsock", target_os = "linux")
             ))]
             other => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -797,6 +837,11 @@ pub enum AcceptedLink {
     /// [`DialedLink::Unixsock`] (R311y378).
     #[cfg(feature = "transport-link-unixsock")]
     Unixsock(UnixStream),
+    /// A raw accepted AF_VSOCK stream — NO post-accept handshake (like
+    /// [`Self::Tcp`] / [`Self::Unixsock`]); [`Self::handshake`] wraps it
+    /// directly as [`DialedLink::Vsock`] (R311y379).
+    #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+    Vsock(VsockStream),
 }
 
 impl AcceptedLink {
@@ -821,6 +866,10 @@ impl AcceptedLink {
             // (R311y378).
             #[cfg(feature = "transport-link-unixsock")]
             AcceptedLink::Unixsock(stream) => DialedLink::Unixsock(stream),
+            // Direct wrap, the acceptor mirror of dial_locator's
+            // `DialedLink::Vsock` (R311y379).
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            AcceptedLink::Vsock(stream) => DialedLink::Vsock(stream),
         })
     }
 
@@ -840,6 +889,8 @@ impl AcceptedLink {
             // Direct wrap, no server handshake (like tcp) — no completion note.
             #[cfg(feature = "transport-link-unixsock")]
             AcceptedLink::Unixsock(_) => "",
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            AcceptedLink::Vsock(_) => "",
         }
     }
 }
@@ -1316,25 +1367,30 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             io::ErrorKind::Unsupported,
             "unixsock accept requires the transport-link-unixsock feature",
         )),
-        // R311xj — a vsock acceptor is a `VsockListener` bind + accept
-        // (`vsock_pipeline::bind_vsock` / `accept_vsock_on`), NOT the
-        // `TcpListener` this seam returns, so it cannot fit here — the listen
-        // side is owned by the acceptor / e2e harness (the same not-yet-wired
-        // acceptor extension point ws/tls/udp/unixsock document). The DIAL side
-        // IS wired (`dial_locator` above); only the listen seam is unwired here.
-        AnyLocator::Vsock(_) => Err(unsupported(
-            "vsock accept is a VsockListener bind (bind_vsock + accept_vsock_on), not a \
-             TcpListener; the listen side is owned by the acceptor, unwired here",
+        // R311y379 (accept-symmetry Stage 4, second arm) — a vsock acceptor
+        // binds a `VsockListener` (`bind_vsock`) into `BoundListener::Vsock`, the
+        // accept-side mirror of `dial_locator`'s `AnyLocator::Vsock =>
+        // DialedLink::Vsock`. Like the dial arm, gated `all(transport-link-vsock,
+        // target_os = "linux")` (AF_VSOCK is Linux-only), with the
+        // cfg-off/non-Linux twin returning a typed `Unsupported` so the
+        // always-present `AnyLocator::Vsock` variant stays exhaustive on every
+        // target.
+        #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+        AnyLocator::Vsock(ep) => Ok(BoundListener::Vsock(bind_vsock(ep.cid, ep.port)?)),
+        #[cfg(not(all(feature = "transport-link-vsock", target_os = "linux")))]
+        AnyLocator::Vsock(_ep) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "vsock accept requires the transport-link-vsock feature on Linux",
         )),
-        // R311y10 — a unixpipe acceptor is a `mkfifo` pair bind + open
-        // (`unixpipe_pipeline::bind_unixpipe` / `accept_unixpipe_on`), NOT the
-        // `TcpListener` this seam returns, so it cannot fit here — the listen
-        // side is owned by the acceptor / e2e harness (the same not-yet-wired
-        // acceptor extension point ws/tls/udp/unixsock/vsock document). The DIAL
-        // side IS wired (`dial_locator` above); only the listen seam is unwired.
+        // R311y10 / R311y379 — a unixpipe acceptor would bind a `mkfifo` pair
+        // (`unixpipe_pipeline::bind_unixpipe` / `accept_unixpipe_on`) into a
+        // future `BoundListener::Unixpipe` arm, exactly as unixsock (y378) and
+        // vsock (y379) wired their non-`TcpListener` listeners into this seam.
+        // Not wired yet (a follow-up round); `udp` is the other remaining
+        // acceptor extension point. The DIAL side IS wired (`dial_locator`).
         AnyLocator::Unixpipe(_) => Err(unsupported(
-            "unixpipe accept is a mkfifo pair bind (bind_unixpipe + accept_unixpipe_on), not a \
-             TcpListener; the listen side is owned by the acceptor, unwired here",
+            "unixpipe accept is a mkfifo pair bind (bind_unixpipe + accept_unixpipe_on); \
+             the BoundListener::Unixpipe arm is a follow-up, unwired here",
         )),
     }
 }
@@ -1349,7 +1405,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
 /// this shape. The "; ws server upgrade" / "; tls server handshake" completion
 /// note is logged AFTER the handshake succeeds (R311y375 obs#1) — a failed ws/tls
 /// handshake returns the error here and never logs a spurious "accepted peer".
-async fn accept_bound(listener: BoundListener) -> io::Result<DialedLink> {
+async fn accept_bound(mut listener: BoundListener) -> io::Result<DialedLink> {
     listener.log_listening()?;
     let (accepted, peer) = listener.accept_raw().await?;
     // The completion-witness note (R311y375 obs#1): read from the scheme BEFORE
