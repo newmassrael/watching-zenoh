@@ -9,13 +9,15 @@
 //!
 //! ## What makes UDP the structurally-hardest arm
 //!
-//! UDP has no `accept()` yielding a per-peer socket: there is ONE bound socket,
-//! and a unicast link IS that socket addressed to the peer it learns from the
-//! first datagram. So the accept seam:
-//! - `bind_udp`s the socket into a single-shot `BoundListener::Udp(Some(..))`;
-//! - `accept_raw` `take`s the socket out (leaving `None`) and `peek`s the first
-//!   datagram's SOURCE to learn the peer WITHOUT consuming the InitSyn — the
-//!   datagram stays queued for the read driver's first `recv_from`;
+//! UDP has no `accept()` yielding a per-peer socket: there is ONE bound socket
+//! serving N peers. So the accept seam (R311y382 demux, superseding R311y381's
+//! single-shot model):
+//! - `bind_udp_demux` binds the socket into a `BoundListener::Udp` and spawns a
+//!   pump task that is the sole `recv_from` owner, routing each datagram to its
+//!   SOURCE's per-face channel;
+//! - `accept_raw` awaits a NEW src on the demux's new-face channel and hands back
+//!   an accepted face whose RX is that src's channel (its first datagram — the
+//!   InitSyn — pre-queued) and whose TX is the shared listener socket;
 //! - the peer is a REAL IP (`AcceptedPeer::Ip`, the datagram source), unlike the
 //!   unix/vsock/unixpipe families' anonymous accept.
 //!
@@ -209,66 +211,88 @@ async fn wz_accepts_a_session_over_udp_via_the_bind_endpoint_seam() {
     );
 }
 
-/// R311y381 — the SINGLE-SHOT mesh-safety mechanism. `BoundListener::Udp` wraps
-/// its socket in an `Option` so `accept_raw` `take`s it: a UDP listener yields
-/// EXACTLY ONE link (there is one socket), and a second `accept_raw` finds
-/// `None` and errors. This is what keeps a `--listen udp/..` in the mesh loop
-/// safe — the first accept is a real IP face, and the second onward is the
-/// existing `Step::Accepted(Err)` throttle rather than a spin creating duplicate
-/// faces off one shared socket. A shared-socket design (no `Option`) would let
-/// the second accept succeed, so this assertion discriminates the single-shot
-/// mechanism.
+/// R311y382 — the DEMUX discriminator (supersedes R311y381's single-shot test).
+/// `BoundListener::Udp` is now a multi-peer demux: two senders to one udp listen
+/// yield TWO distinct IP faces (`accept_raw` awaits each new src), and the
+/// listener's `local_addr` stays available (the pump owns the socket — there is
+/// no "consumed" state). The superseded single-shot model held EXACTLY ONE face
+/// (a second `accept_raw` `Err`ed — the F2 throttle) and reported `local_addr`
+/// as consumed after the first accept; these assertions INVERT that contract,
+/// discriminating that the demux (not the single-shot `Option<UdpSocket>`) is
+/// wired. If the single-shot model were still in place the second `accept_raw`
+/// would `Err` (this test would fail on the `expect`) and `local_addr` would be
+/// `Err` after the first accept.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn udp_bound_listener_is_single_shot() {
+async fn udp_listener_demuxes_a_second_peer() {
     let mut bound = bind_endpoint("udp/127.0.0.1:0")
         .await
         .expect("bind a udp listener");
     let addr = bound.local_addr().expect("udp listener addr");
 
-    // Send a datagram so the first accept's peek has a source to learn (peek
-    // blocks until a datagram arrives).
-    let sender = UdpSocket::bind("127.0.0.1:0")
+    // Two independent senders to the same listen addr.
+    let s1 = UdpSocket::bind("127.0.0.1:0")
         .await
-        .expect("bind a throwaway sender");
-    sender
-        .send_to(b"init-datagram", addr)
+        .expect("bind sender s1");
+    let s2 = UdpSocket::bind("127.0.0.1:0")
         .await
-        .expect("send the first datagram");
+        .expect("bind sender s2");
+    let s1_addr = s1.local_addr().expect("s1 addr");
+    let s2_addr = s2.local_addr().expect("s2 addr");
+    assert_ne!(s1_addr, s2_addr, "two distinct source ports");
 
-    // First accept: takes the socket, peeks the sender's source -> an IP peer.
-    let (accepted, peer) = bound
-        .accept_raw()
-        .await
-        .expect("the first accept peeks the peer");
+    // First src -> first face.
+    s1.send_to(b"peer-1", addr).await.expect("s1 send");
+    let (accepted1, peer1) = bound.accept_raw().await.expect("first accept");
     assert!(
-        matches!(peer, AcceptedPeer::Ip(_)),
+        matches!(peer1, AcceptedPeer::Ip(_)),
         "a udp accept yields a real IP peer"
     );
-
-    // Second accept: the socket was taken (single-shot) -> Err, NOT a second
-    // link off the same socket.
-    let second = bound.accept_raw().await;
-    assert!(
-        second.is_err(),
-        "a udp listener yields exactly one link; the second accept errors (single-shot)"
+    assert_eq!(
+        peer1.to_string(),
+        s1_addr.to_string(),
+        "first face keyed on s1's source"
     );
 
-    // The consumed listener's local_addr / display now report the taken state.
-    assert!(
-        bound.local_addr().is_err(),
-        "a consumed udp listener has no addr"
+    // Second src -> a REAL SECOND face (NOT an `Err` — the single-shot F2
+    // throttle is retired; the demux keys a fresh face on s2's source).
+    s2.send_to(b"peer-2", addr).await.expect("s2 send");
+    let (accepted2, peer2) = bound
+        .accept_raw()
+        .await
+        .expect("second accept succeeds (demux, not single-shot Err)");
+    assert_eq!(
+        peer2.to_string(),
+        s2_addr.to_string(),
+        "second face keyed on s2's source"
+    );
+    assert_ne!(
+        peer1.to_string(),
+        peer2.to_string(),
+        "two distinct demuxed peers"
     );
 
-    drop(accepted);
+    // The listener keeps its bound addr across accepts (the pump owns the
+    // socket; no "consumed" state, unlike the superseded single-shot model).
+    assert!(
+        bound.local_addr().is_ok(),
+        "a demux listener keeps its bound addr across accepts"
+    );
+
+    drop(accepted1);
+    drop(accepted2);
 }
 
-/// R311y381 — `accept_raw` is CANCEL-SAFE: a UDP accept that is dropped while its
-/// `peek` is still pending (a `select!` in the mesh loop choosing another arm)
-/// must NOT consume the listener's socket, so a subsequent accept still works.
-/// The fix peeks on the BORROWED socket and `take`s it only after the peek
-/// resolves; a `take` BEFORE the await would lose the socket on cancellation and
-/// permanently kill the listener — so this test is the discriminator for that
-/// ordering (it goes RED under take-before-peek).
+/// R311y382 — `accept_raw` stays CANCEL-SAFE under the demux: a UDP accept
+/// dropped while it awaits the next new src (a `select!` in the mesh loop
+/// choosing another arm) must NOT lose a subsequently-arriving face, so a later
+/// accept still works. Under the demux `accept_raw` is a bare
+/// `mpsc::Receiver::recv` (the demux's new-face channel), which tokio documents
+/// cancel-safe — a cancelled recv leaves any buffered `NewUdpFace` in the
+/// channel. (The superseded single-shot model earned cancel-safety by peeking on
+/// a BORROWED socket and taking it only after the peek resolved; the demux earns
+/// it for free from the channel.) The pump keeps running across the cancelled
+/// accept, so the datagram sent afterwards is learned and delivered as the next
+/// face.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn udp_accept_is_cancel_safe_when_dropped_mid_peek() {
     let mut bound = bind_endpoint("udp/127.0.0.1:0")
@@ -302,4 +326,140 @@ async fn udp_accept_is_cancel_safe_when_dropped_mid_peek() {
         "the surviving listener still accepts a real IP peer"
     );
     drop(accepted);
+}
+
+/// R311y382 (reviewer-C headline fix) — the one-shot accept path drops the
+/// `BoundListener` while an accepted face lives on via the shared pump guard. A
+/// THIRD-PARTY datagram from a NEW source arriving at the listen port must NOT
+/// tear down the established session. Before the fix the demux pump did `return`
+/// on the failed new-face handoff (the listener's `new_face_rx` is gone),
+/// dropping its `faces` map and CLOSING the live face's channel -> the acceptor
+/// session went `Lost` and the Put never arrived (a 1-packet, spoofable-src DoS).
+/// The fix drops the un-acceptable new src and keeps serving the accepted face.
+/// This is the discriminator: RED under the pre-fix `return`, GREEN after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn udp_stray_new_src_does_not_tear_down_a_one_shot_session() {
+    let payload = b"survives-the-stray".to_vec();
+
+    let mut bound = bind_endpoint("udp/127.0.0.1:0")
+        .await
+        .expect("bind a udp listener");
+    let addr = bound.local_addr().expect("udp listener addr");
+
+    // Establish one acceptor<->initiator session over the demux.
+    let acc_open = async {
+        let (accepted, peer) = bound.accept_raw().await.expect("accept the initiator");
+        assert!(matches!(peer, AcceptedPeer::Ip(_)));
+        let link = accepted
+            .handshake()
+            .await
+            .expect("udp post-accept handshake");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        accept_and_open_session(
+            link,
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established")
+    };
+    let init_open = async {
+        let locator = parse_any_locator(&format!("udp/{addr}")).expect("parse udp locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        connect_and_open_session(
+            locator,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established")
+    };
+    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+
+    // The one-shot consume-and-drop: the listener (and its `new_face_rx`) is gone;
+    // the pump lives on ONLY via the accepted face's Arc<UdpDemuxPump> clone.
+    drop(bound);
+
+    // A stray datagram from a NEW source arrives at the listen port. Under the
+    // pre-fix pump this failed the new-face handoff and RETURNED, closing the live
+    // face's channel and killing the established session.
+    let stray = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind a stray sender");
+    stray
+        .send_to(b"stray-new-src", addr)
+        .await
+        .expect("send the stray new-src datagram");
+
+    // The established session must survive: a Put from the initiator still reaches
+    // the acceptor's subscriber.
+    let fired = Arc::new(AtomicUsize::new(0));
+    let mut observer = ApplicationLayerObserver::new();
+    {
+        let fired = fired.clone();
+        let expect = payload.clone();
+        observer.subscribers.register(KEYEXPR, move |sample| {
+            assert_eq!(sample.payload(), &expect[..]);
+            fired.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+    let publisher = TokioSession::new(
+        opened_init.actions.clone(),
+        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(opened_init.clock),
+    );
+    let timeouts = SessionTimeouts::spec_defaults();
+    let drive_acc = drive_session_until_terminal(
+        &mut opened_acc.inbound,
+        &opened_acc.actions,
+        &mut opened_acc.engine,
+        None,
+        &opened_acc.clock,
+        &timeouts,
+        |event| observer.dispatch_event(event),
+    );
+    let drive_init = drive_session_until_terminal(
+        &mut opened_init.inbound,
+        &opened_init.actions,
+        &mut opened_init.engine,
+        None,
+        &opened_init.clock,
+        &timeouts,
+        |_| {},
+    );
+    let fired_probe = fired.clone();
+    let scenario = async move {
+        // Give the pump time to process the stray datagram (which pre-fix would
+        // have torn the session down) before the Put flows.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        publisher
+            .publish(KEYEXPR, &payload, PublishOptions::put())
+            .expect("publish builds and routes");
+        for _ in 0..100 {
+            if fired_probe.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("the Put was not delivered within ~3s (session torn down by the stray?)");
+    };
+
+    tokio::select! {
+        _ = drive_acc => panic!("acceptor drive ended (session torn down by the stray datagram)"),
+        _ = drive_init => panic!("initiator drive ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "the established one-shot session survived the stray new-src datagram"
+    );
 }

@@ -63,7 +63,10 @@ use crate::session_glue::{
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
 #[cfg(feature = "transport-link-udp")]
-use crate::udp_pipeline::{accept_udp_on, bind_udp, dial_udp, wire_udp_socket, UdpReadDriver};
+use crate::udp_pipeline::{
+    bind_udp_demux, dial_udp, wire_udp_demuxed, wire_udp_socket, NewUdpFace, UdpAcceptedInputs,
+    UdpDemux, UdpReadDriver,
+};
 #[cfg(feature = "transport-link-udp")]
 use std::net::SocketAddr;
 #[cfg(feature = "transport-link-udp")]
@@ -404,9 +407,21 @@ pub enum DialedLink {
     /// A connected stream, split downstream via [`wire_tcp_stream`].
     Tcp(TcpStream),
     /// A bound datagram socket + its unicast peer, shared downstream via
-    /// [`wire_udp_socket`].
+    /// [`wire_udp_socket`] — the DIAL side (this link owns its socket).
     #[cfg(feature = "transport-link-udp")]
     Udp { socket: UdpSocket, peer: SocketAddr },
+    /// An ACCEPTED datagram face from the multi-peer demux listener (R311y382):
+    /// its RX is the demux pump's per-src channel and its TX is the SHARED
+    /// listener socket, bundled in [`UdpAcceptedInputs`]; wired downstream via
+    /// [`wire_udp_demuxed`]. Distinct from [`Self::Udp`] because an accepted face
+    /// does NOT own a socket (the pump does) — it carries a channel receiver, a
+    /// shared-socket clone, and the pump keep-alive. Accept-only: the dial side
+    /// never produces it. `peer` is the datagram source the pump keyed on.
+    #[cfg(feature = "transport-link-udp")]
+    UdpDemuxed {
+        inputs: UdpAcceptedInputs,
+        peer: SocketAddr,
+    },
     /// A connected + link-handshaked serial tty, split downstream via
     /// [`wire_serial_stream`] (R311nv). Unlike TCP/UDP, the serial link
     /// handshake (INIT/INIT|ACK) has ALREADY run by the time the stream is
@@ -510,6 +525,8 @@ impl DialedLink {
             DialedLink::Tcp(_) => "tcp",
             #[cfg(feature = "transport-link-udp")]
             DialedLink::Udp { .. } => "udp",
+            #[cfg(feature = "transport-link-udp")]
+            DialedLink::UdpDemuxed { .. } => "udp",
             #[cfg(feature = "transport-link-serial")]
             DialedLink::Serial(_) => "serial",
             #[cfg(feature = "transport-link-tls")]
@@ -589,35 +606,40 @@ pub enum BoundListener {
     /// where the stream/unixsock/vsock families all block until a peer arrives).
     #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
     Unixpipe(UnixpipePaths),
-    /// A bound DATAGRAM socket wrapped in an `Option` for SINGLE-SHOT accept —
-    /// the first structurally-datagram acceptor (R311y381). UDP has no
-    /// `accept()` yielding a per-peer socket: there is ONE bound socket, and a
-    /// unicast link IS that socket addressed to the peer it learns from the first
-    /// datagram (`accept_udp_on` peeks the source). So [`Self::accept_raw`]
-    /// `take`s the socket out (leaving `None`) and moves it into the one
-    /// [`AcceptedLink::Udp`]. UNLIKE the unix/vsock/unixpipe families, the
+    /// A multi-peer DATAGRAM demux listener (R311y382) — the first
+    /// structurally-datagram acceptor. UDP has no `accept()` yielding a per-peer
+    /// socket: there is ONE bound socket serving N peers. [`bind_udp_demux`]
+    /// spawns a pump task that is the sole `recv_from` owner and routes each
+    /// datagram to its SOURCE's per-face channel; [`Self::accept_raw`] awaits a
+    /// NEW src on the demux's new-face channel and hands back a
+    /// [`AcceptedLink::UdpDemuxed`] whose RX is that src's channel (only its own
+    /// datagrams — no cross-talk) and whose TX is the shared listener socket. The
     /// accepted peer is a REAL IP ([`AcceptedPeer::Ip`]) — the datagram source —
-    /// so a UDP accept CAN key a mesh face. NO post-accept handshake (direct
-    /// wrap, like `tcp`).
+    /// so a UDP accept keys a mesh face; NO post-accept handshake (direct wrap,
+    /// like `tcp`).
     ///
-    /// DEFERRED — the many-peers-one-socket demux. The one-shot [`accept_bound`]
-    /// seam (and wz<->wz) is the tested, supported path; the multi-peer mesh loop
-    /// is honestly incomplete in two ways, both retired by a src-keyed-`Face`
-    /// demux (zenoh's `LinkManagerUnicastUdp`): (1) CROSS-TALK — the accepted
-    /// face holds an UNCONNECTED socket that `recv_from`s ANY source, and the
-    /// unicast path does not src-validate, so a SECOND peer to the same udp
-    /// listen is delivered into the FIRST face tagged with a foreign src (the
-    /// shipped dial side has this property too — mirrored faithfully, not
-    /// introduced here); (2) PERPETUAL THROTTLE — once the one face is accepted
-    /// the socket is `None`, so every mesh-loop re-arm of [`Self::accept_raw`]
-    /// returns `Err` at once -> the existing `Step::Accepted(Err)` throttle fires
-    /// every interval (bounded — no spin, no duplicate faces — but a
-    /// throttle-cadence `AcceptError` log + drive-latency jitter on the one live
-    /// face). udp is thus the FIRST arm whose `Err` path fires PERMANENTLY after
-    /// a SUCCESSFUL accept, where the stream families' post-accept re-arm merely
-    /// PENDS. Both are the one-shot seam's non-concern.
+    /// This SUPERSEDES the R311y381 single-shot `Option<UdpSocket>` model, which
+    /// held at most one udp face (a second `accept_raw` `Err`ed) and so had two
+    /// honestly-flagged mesh gaps the demux retires: F1 CROSS-TALK (the first
+    /// face's unconnected socket `recv_from`'d ANY source — now each face reads
+    /// only its src's channel) and F2 PERPETUAL-THROTTLE (a consumed socket
+    /// `Err`ed every mesh re-arm → the `Step::Accepted(Err)` throttle fired
+    /// forever — now a second src is a real second face and no-new-src merely
+    /// PENDS). The zenoh `LinkManagerUnicastUdp` (`accept_read_task`) mirror.
+    ///
+    /// KNOWN DIVERGENCE from zenoh (doc-only, deferred): zenoh keys unconnected
+    /// links on `(src, dst)` + `IP_PKTINFO` (recovering the local dst a peer
+    /// targeted); wz keys on `src` ONLY and replies from the single shared
+    /// listener socket. Equivalent for a concrete-IP `--listen udp/HOST:P` bind
+    /// (dst is invariant); for a WILDCARD `0.0.0.0` bind wz cannot reply from the
+    /// exact local address the peer targeted — no worse than the superseded
+    /// single-shot model. A one-shot spoofable src also leaves a `faces` map
+    /// entry until a later datagram reaps it (the demux brings udp to PARITY with
+    /// the uncapped TCP `accept_loop`, plus UDP src spoofability; zenoh caps at
+    /// the transport-manager accept layer, not here) — bounded per-face by the
+    /// pump's bounded channels, the map growth deferred.
     #[cfg(feature = "transport-link-udp")]
-    Udp(Option<UdpSocket>),
+    Udp(UdpDemux),
 }
 
 /// The peer of a link accepted by [`BoundListener::accept_raw`] — an IP
@@ -640,8 +662,8 @@ pub enum BoundListener {
 pub enum AcceptedPeer {
     /// The IP address of an accepted peer with a routable transport address —
     /// the stream family (tcp/ws/tls, the accepted `TcpStream`'s peer) and udp
-    /// (the datagram SOURCE `accept_udp_on` peeked, R311y381). Unlike the non-IP
-    /// families this keys a mesh face.
+    /// (the datagram SOURCE the demux pump keyed the face on, R311y382). Unlike
+    /// the non-IP families this keys a mesh face.
     Ip(std::net::SocketAddr),
     /// A non-IP transport peer (unixsock / vsock / unixpipe) — wz does not thread
     /// the accepted peer address (unix: genuinely unnamed; vsock: a real cid:port
@@ -735,13 +757,12 @@ impl BoundListener {
             // non-IP address type this per-variant String accessor exists for).
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
             BoundListener::Unixpipe(p) => format!("{} + {}", p.uplink, p.downlink),
-            // A UDP acceptor HAS a real bound IP address (unlike the same-host
-            // non-IP families) -- render it. Once accepted the socket is `take`n,
-            // leaving a consumed marker (the single-shot seam).
+            // A UDP demux listener HAS a real bound IP address (unlike the
+            // same-host non-IP families), cached at bind -- always available (the
+            // pump owns the socket; there is no consumed state, unlike the
+            // superseded single-shot model).
             #[cfg(feature = "transport-link-udp")]
-            BoundListener::Udp(Some(s)) => s.local_addr()?.to_string(),
-            #[cfg(feature = "transport-link-udp")]
-            BoundListener::Udp(None) => "<udp listener consumed>".to_string(),
+            BoundListener::Udp(demux) => demux.local_addr().to_string(),
         })
     }
 
@@ -788,15 +809,10 @@ impl BoundListener {
             // UDP DOES have an IP `SocketAddr` (the bound listen addr) -- unlike
             // the same-host non-IP families, the first non-tcp variant that
             // returns `Ok` here (an `--peer` / `--router-hat` zid-from-port
-            // derivation over a udp listen is well-defined). `take`n post-accept
-            // -> typed error.
+            // derivation over a udp listen is well-defined). Cached at bind (the
+            // demux pump owns the socket) -> always `Ok`, no consumed state.
             #[cfg(feature = "transport-link-udp")]
-            BoundListener::Udp(Some(s)) => s.local_addr(),
-            #[cfg(feature = "transport-link-udp")]
-            BoundListener::Udp(None) => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "the udp listener socket was already taken by accept_raw (single-shot)",
-            )),
+            BoundListener::Udp(demux) => Ok(demux.local_addr()),
         }
     }
 
@@ -877,40 +893,37 @@ impl BoundListener {
                     AcceptedPeer::NonIp("unixpipe"),
                 )
             }
-            // R311y381 — the FIRST datagram accept: UDP has no `accept()`. `take`
-            // the single bound socket (a second accept finds `None` -> Err, which
-            // the mesh loop's existing `Step::Accepted(Err)` throttle handles, so
-            // no dup faces off one socket and no new hot-spin guard), `peek` the
-            // first datagram's SOURCE to learn the peer WITHOUT consuming the
-            // InitSyn (it stays queued for the read driver's first `recv_from`),
-            // then direct-wrap. `peek_from` blocks until a datagram arrives, so
-            // the first accept self-rate-limits like a stream `accept`. The peer
-            // is a REAL IP -> `AcceptedPeer::Ip`, so a udp accept CAN key a mesh
-            // face (the many-peers-one-socket demux is the deferred mesh work).
+            // R311y382 — the multi-peer datagram accept: await a NEW src from the
+            // demux pump (each `recv_new_face` yields the next distinct peer, so a
+            // udp listener now holds N faces — F2's single-shot `Err` is retired).
+            // The pump's per-src channel becomes this face's RX (only its own
+            // datagrams — F1 cross-talk retired), the shared listener socket its
+            // TX, bundled in `UdpAcceptedInputs`. The peer is a REAL IP (the
+            // datagram source) -> `AcceptedPeer::Ip`, so a udp accept keys a mesh
+            // face.
+            //
+            // CANCEL-SAFETY: `recv_new_face` is a bare `mpsc::Receiver::recv`,
+            // cancel-safe like the loop's `recv_dial_intent` / `recv_reconcile`
+            // helpers — a `select!` dropping this accept mid-recv never loses a
+            // buffered `NewUdpFace` (it stays in the channel for the next accept).
+            // On a CLOSED channel (`None`, the pump died on a `recv_from` error)
+            // we PARK (`pending`) rather than return `Err`: an `Err` here would
+            // re-arm the `Step::Accepted(Err)` throttle every interval, which is
+            // exactly the F2 spin the demux exists to kill. A dead pump means "no
+            // more faces will ever come", i.e. stop accepting -- a perpetually
+            // pending accept arm, not a throttling one.
             #[cfg(feature = "transport-link-udp")]
-            BoundListener::Udp(opt) => {
-                // CANCEL-SAFETY: peek on the BORROWED socket (the only await) and
-                // `take` it only AFTER the peek resolves. The tcp/unixsock/vsock
-                // accepts are cancel-safe because they BORROW the listener across
-                // their await; a `take` BEFORE the await would instead lose the
-                // socket if this future is dropped mid-peek (a `select!` in the
-                // mesh loop choosing another arm), permanently killing the
-                // listener. With the peek first, a cancelled accept leaves the
-                // socket in `opt` for the next accept; the post-peek `take` has no
-                // await after it, so it is atomic.
-                let peer = {
-                    let socket = opt.as_ref().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::Unsupported,
-                            "the udp listener socket was already taken (single-shot accept)",
-                        )
-                    })?;
-                    accept_udp_on(socket).await?
+            BoundListener::Udp(demux) => {
+                let face = match demux.recv_new_face().await {
+                    Some(face) => face,
+                    None => std::future::pending::<NewUdpFace>().await,
                 };
-                let socket = opt
-                    .take()
-                    .expect("Some: the peek above borrowed it and no await mutates opt between");
-                (AcceptedLink::Udp { socket, peer }, AcceptedPeer::Ip(peer))
+                let peer = face.peer;
+                let inputs = demux.wire_inputs(face.inbound_rx);
+                (
+                    AcceptedLink::UdpDemuxed { inputs, peer },
+                    AcceptedPeer::Ip(peer),
+                )
             }
         })
     }
@@ -985,14 +998,16 @@ pub enum AcceptedLink {
     /// rendezvous), unlike the stream family's raw `TcpStream` awaiting a wrap.
     #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
     Unixpipe(UnixpipeLink),
-    /// A bound datagram socket + the unicast peer `accept_udp_on` learned — NO
+    /// An ACCEPTED datagram face from the multi-peer demux listener — NO
     /// post-accept handshake (like [`Self::Tcp`]); [`Self::handshake`] wraps it
-    /// directly as [`DialedLink::Udp`] (R311y381). Carries the SAME
-    /// `{ socket, peer }` the dial side's [`DialedLink::Udp`] does, so the
-    /// downstream `wire_udp_socket` share is shared, dialed or accepted.
+    /// directly as [`DialedLink::UdpDemuxed`] (R311y382). Carries the
+    /// [`UdpAcceptedInputs`] (the pump's per-src channel + a shared listener
+    /// socket clone + the pump keep-alive) — NOT an owned socket like the dial
+    /// side's [`DialedLink::Udp`], because the demux pump owns the socket. `peer`
+    /// is the datagram source the pump keyed this face on.
     #[cfg(feature = "transport-link-udp")]
-    Udp {
-        socket: UdpSocket,
+    UdpDemuxed {
+        inputs: UdpAcceptedInputs,
         peer: std::net::SocketAddr,
     },
 }
@@ -1028,11 +1043,12 @@ impl AcceptedLink {
             // connected, so like unixsock/vsock there is nothing to handshake.
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
             AcceptedLink::Unixpipe(link) => DialedLink::Unixpipe(link),
-            // Direct wrap, the acceptor mirror of dial_locator's
-            // `DialedLink::Udp` (R311y381) — the peeked datagram is still queued,
-            // so `wire_udp_socket`'s read driver reads the InitSyn as frame one.
+            // Direct wrap (R311y382) — an accepted demux face has no server
+            // handshake; the pump already queued its first datagram (the InitSyn)
+            // on the channel, which `wire_udp_demuxed`'s read driver reads as
+            // frame one.
             #[cfg(feature = "transport-link-udp")]
-            AcceptedLink::Udp { socket, peer } => DialedLink::Udp { socket, peer },
+            AcceptedLink::UdpDemuxed { inputs, peer } => DialedLink::UdpDemuxed { inputs, peer },
         })
     }
 
@@ -1057,7 +1073,7 @@ impl AcceptedLink {
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
             AcceptedLink::Unixpipe(_) => "",
             #[cfg(feature = "transport-link-udp")]
-            AcceptedLink::Udp { .. } => "",
+            AcceptedLink::UdpDemuxed { .. } => "",
         }
     }
 }
@@ -1478,16 +1494,16 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     "tls acceptor requires AcceptConfig.tls (a server cert + key)",
                 )),
             },
-            // R311y381 — a `udp/...` acceptor binds the datagram socket on the
-            // listen addr (`bind_udp`) into a SINGLE-SHOT `BoundListener::Udp`;
-            // `accept_raw` learns the peer from the first datagram. The accept
-            // mirror of dial_locator's `Proto::Udp => DialedLink::Udp`, gated the
-            // same way, with the cfg-off twin returning a typed `Unsupported` (a
-            // clearer message than the `other` extension-point catch-all).
+            // R311y382 — a `udp/...` acceptor binds the datagram socket on the
+            // listen addr and spawns the demux pump (`bind_udp_demux`) into a
+            // multi-peer `BoundListener::Udp`; `accept_raw` awaits each new src.
+            // The accept mirror of dial_locator's `Proto::Udp => DialedLink::Udp`,
+            // gated the same way, with the cfg-off twin returning a typed
+            // `Unsupported` (a clearer message than the `other` catch-all).
             #[cfg(feature = "transport-link-udp")]
-            Proto::Udp => Ok(BoundListener::Udp(Some(
-                bind_udp(ip.addr, ip.iface.as_deref()).await?,
-            ))),
+            Proto::Udp => Ok(BoundListener::Udp(
+                bind_udp_demux(ip.addr, ip.iface.as_deref()).await?,
+            )),
             #[cfg(not(feature = "transport-link-udp"))]
             Proto::Udp => Err(unsupported(
                 "udp acceptor requires the transport-link-udp feature",
@@ -1855,6 +1871,14 @@ pub fn wire_dialed_link_with_lowlatency(
         #[cfg(feature = "transport-link-udp")]
         DialedLink::Udp { socket, peer } => {
             let (inbound, outbound, handle) = wire_udp_socket(socket, peer);
+            (InboundLink::Udp(inbound), outbound, handle)
+        }
+        // R311y382 — an accepted demux face: RX is the pump's per-src channel,
+        // TX the shared listener socket (both in `inputs`), wired the same
+        // `InboundLink::Udp` shape as the dial side.
+        #[cfg(feature = "transport-link-udp")]
+        DialedLink::UdpDemuxed { inputs, peer } => {
+            let (inbound, outbound, handle) = wire_udp_demuxed(inputs, peer);
             (InboundLink::Udp(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-serial")]
@@ -3257,10 +3281,21 @@ mod tests {
     //    it from this list the same feature-aware way.
     #[tokio::test]
     async fn non_tcp_listen_accept_is_unsupported_without_io() {
-        // `mut` is used only on the ws-off arm (the push); silence unused_mut when
-        // ws is on and the list is already complete.
+        // `mut` is used only on the feature-off push arms; silence unused_mut
+        // when every acceptor is wired and the list is already complete.
         #[allow(unused_mut)]
-        let mut unwired = vec!["udp/127.0.0.1:7447", "tls/127.0.0.1:7447"];
+        let mut unwired = vec!["tls/127.0.0.1:7447"];
+        // R311y381 wired the UDP acceptor (and R311y382 generalized it to a
+        // multi-peer demux), so with `transport-link-udp` ON a `udp/…` listen
+        // BINDS + accepts (blocking on the first datagram / new src) — asserting
+        // "unsupported before any bind" would HANG (or AddrInUse-fail on a busy
+        // port), exactly like the `ws` acceptor below. With the backend OFF a
+        // `udp/…` listen is still an unwired extension point (`bind_locator`'s
+        // cfg-off arm -> `Unsupported`), so it stays in the list there. This
+        // mirrors the R311y374 ws exclusion; the udp accept path is proven e2e by
+        // `udp_seam_e2e` / `mesh_accept_loop_holds_two_udp_peers` instead.
+        #[cfg(not(feature = "transport-link-udp"))]
+        unwired.push("udp/127.0.0.1:7447");
         #[cfg(not(feature = "transport-link-ws"))]
         unwired.push("ws/127.0.0.1:7447");
         for s in unwired {

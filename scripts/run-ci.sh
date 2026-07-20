@@ -2242,9 +2242,19 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
 #      to prove `accept_loop` composes standalone (routing-accept pulls only
 #      transport-link-tcp + transport-unicast + futures-util, nothing else).
 # The demo-binary multi-peer e2e is Layer E3 (separate, --features routing-router).
+#
+# R311y382: step 1's `--features routing-accept` keeps DEFAULTS on, so
+# transport-link-udp (a default) is present and the udp-demux F2 discriminator
+# `mesh_accept_loop_holds_two_udp_peers` (gated all(routing-accept,
+# transport-link-udp)) already runs under `--lib accept_loop`. Step 1a re-runs it
+# under an EXPLICIT `routing-accept,transport-link-udp` (independent of the
+# default set, so a future `--no-default-features` edit to step 1 cannot silently
+# cfg it out) with a `1 passed` count-guard that reddens on a silent 0-tests (the
+# "proof that never runs" trap) — the C1al precedent for the off-default arm.
 layer_c1w_cargo_test_routing_accept() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-accept --lib accept_loop --quiet \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-udp --lib mesh_accept_loop_holds_two_udp_peers --quiet 2>&1 | grep -q '1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-accept --quiet -- -D warnings)
 }

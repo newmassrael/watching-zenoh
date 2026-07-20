@@ -2431,6 +2431,41 @@ mod tests {
         opened.drain_to_close().await;
     }
 
+    /// The UDP twin of [`idle_initiator`] (R311y382): dials `udp/<listen>` through
+    /// the scheme-keyed [`connect_and_open_session`] SSOT (which `dial_udp`s an
+    /// ephemeral socket and drives the handshake), holds until `go`, then drains.
+    /// Each initiator binds a distinct ephemeral source port, so the acceptor's
+    /// demux keys a distinct face per initiator — the multi-peer property the F2
+    /// discriminator asserts.
+    #[cfg(feature = "transport-link-udp")]
+    async fn udp_idle_initiator(listen: SocketAddr, zid: u8, mut go: watch::Receiver<bool>) {
+        use crate::session_open::{connect_and_open_session, DialConfig};
+        use wz_session_core::locator::parse_any_locator;
+        let locator = parse_any_locator(&format!("udp/{listen}")).expect("parse udp locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![zid; 4];
+        let mut opened = connect_and_open_session(
+            locator,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(10_000),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("udp initiator reaches Established");
+
+        let timeouts = SessionTimeouts::spec_defaults();
+        tokio::select! {
+            _ = go.wait_for(|&v| v) => {}
+            _ = drive_session_until_terminal(
+                &mut opened.inbound, &opened.actions, &mut opened.engine,
+                None, &opened.clock, &timeouts, |_e| {},
+            ) => {}
+        }
+        opened.drain_to_close().await;
+    }
+
     // ── tests ──────────────────────────────────────────────────────────
 
     /// The accept loop accepts N peers and holds all N faces concurrently
@@ -2481,6 +2516,83 @@ mod tests {
         assert_eq!(
             summary.peak_concurrent, N,
             "held all N faces simultaneously (high-water mark)"
+        );
+    }
+
+    /// R311y382 — the F2 DISCRIMINATOR: the demux holds N concurrent UDP faces off
+    /// ONE listen socket, retiring the single-shot model's perpetual throttle. Two
+    /// initiators (distinct ephemeral source ports) dial one `udp/..` listener
+    /// through the mesh accept loop; the demux keys a distinct face per source, so
+    /// both reach Established and are held at once (peak_concurrent == 2) with ZERO
+    /// `AcceptError`. Under the superseded single-shot model the first accept
+    /// `take`s the socket, the second `accept_raw` `Err`s every interval (the
+    /// throttle storm) AND the second initiator's datagrams cross-talk into the
+    /// first face, so only ONE face ever forms — `go` never flips and the test
+    /// times out (RED). NON-FLAKY: loopback UDP is lossless, so two clean
+    /// handshakes are deterministic (the same assumption udp_seam_e2e /
+    /// accept_loop_holds_n_concurrent_peers rely on). [[feedback-no-flaky-ever]]
+    #[cfg(feature = "transport-link-udp")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mesh_accept_loop_holds_two_udp_peers() {
+        use crate::session_open::bind_endpoint;
+        const N: usize = 2;
+        let listener = bind_endpoint("udp/127.0.0.1:0")
+            .await
+            .expect("bind a udp demux listener");
+        let addr = listener.local_addr().expect("udp listener addr");
+
+        // `go` flips when the Nth face is up: it ends the acceptor AND releases
+        // both initiators, so both are held simultaneously first.
+        let (go_tx, go_rx) = watch::channel(false);
+        let up = Arc::new(AtomicUsize::new(0));
+        let rejects = Arc::new(AtomicUsize::new(0));
+        let on_event = {
+            let up = up.clone();
+            let go_tx = go_tx.clone();
+            let rejects = rejects.clone();
+            move |event: &AcceptEvent| match event {
+                AcceptEvent::FaceUp(_) => {
+                    if up.fetch_add(1, SeqCst) + 1 == N {
+                        let _ = go_tx.send(true);
+                    }
+                }
+                AcceptEvent::AcceptError(_) => {
+                    rejects.fetch_add(1, SeqCst);
+                }
+                _ => {}
+            }
+        };
+        let acceptor = accept_loop(
+            listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+        let initiators = (0..N).map(|i| udp_idle_initiator(addr, (i as u8) + 1, go_rx.clone()));
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (summary, _) = tokio::join!(acceptor, join_all(initiators));
+            summary
+        })
+        .await
+        .expect("multi-peer udp accept completes within 20s (single-shot would hold only 1 face)");
+
+        assert_eq!(
+            summary.accepted, N,
+            "accepted both udp peers (demux, not the single-shot 1)"
+        );
+        assert_eq!(summary.established, N, "both udp peers reached Established");
+        assert_eq!(
+            summary.peak_concurrent, N,
+            "held both udp faces off ONE listen socket simultaneously (F2 retired)"
+        );
+        assert_eq!(
+            rejects.load(SeqCst),
+            0,
+            "no AcceptError throttle storm: accept_raw pends between srcs, never Errs (F2 retired)"
         );
     }
 
