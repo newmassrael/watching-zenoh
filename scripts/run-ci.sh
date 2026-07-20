@@ -6324,6 +6324,33 @@ else
     # Name every failed lane so the verdict is unmissable regardless of how large
     # the log is or how it was captured — no hunting for a buried FAIL line.
     echo "[$(_runci_ts)] ERROR run-ci: ${#FAILED_LAYERS[@]} layer(s) FAILED: ${FAILED_LAYERS[*]}" >&2
+    # Under GitHub Actions, ALSO surface the verdict + the actual failing lines as
+    # a `::error` annotation. Annotations render in the run summary and the
+    # `gh run view` ANNOTATIONS section even when `gh run view --log-failed`
+    # returns EMPTY — a gh-CLI log-archive parsing gap that (R311y377) hid the
+    # R311y376 Layer Z panic behind a bare "Process completed with exit code 1".
+    # The body lifts the panic location + message (`-A1`) and the per-test /
+    # per-suite FAILED verdict lines out of the run log, ANSI-stripped and
+    # %/newline-encoded for the annotation wire, so the reason is visible without
+    # downloading the log. Gated on GITHUB_ACTIONS so a local pre-push run stays
+    # plain text.
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+        _annot="see the full run log (gh api .../actions/jobs/<id>/logs)"
+        if [[ -n "${RUNCI_LOG_FILE:-}" && -f "$RUNCI_LOG_FILE" ]]; then
+            # Strip ANSI FIRST so the greps match uncolored text (robust even
+            # under a non-default CARGO_TERM_COLOR=always), then lift the panic
+            # location + its message (`-A1`), the per-test / per-suite FAILED
+            # verdicts, AND cargo/clippy `error:` / `error[EXXXX]` lines so a
+            # build/lint failure (no panic) is not left body-less. %/CR-encoded
+            # for the wire. Keep the fallback body if extraction is empty.
+            _extracted="$(sed 's/\x1b\[[0-9;]*m//g' "$RUNCI_LOG_FILE" \
+                | grep -aE -A1 'panicked at|(--- |result: )FAILED|^error(\[|:)' \
+                | sed 's/%/%25/g; s/\r//g; /^--$/d' \
+                | tail -n 40 | awk 'BEGIN{ORS="%0A"}{print}')"
+            [[ -n "$_extracted" ]] && _annot="$_extracted"
+        fi
+        echo "::error title=run-ci FAILED: ${FAILED_LAYERS[*]}::${_annot}"
+    fi
 fi
 [[ -n "${RUNCI_LOG_FILE:-}" ]] && echo "run-ci: full log -> $RUNCI_LOG_FILE"
 exit $overall

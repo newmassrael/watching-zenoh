@@ -459,6 +459,69 @@ pub mod common {
         }
     }
 
+    /// A generous TCP-accept readiness budget for a spawned `zenohd` — the
+    /// zenoh-full reference router. zenohd is a HEAVY external binary (full
+    /// config + plugin init before it binds a listener), so its cold start
+    /// under a contended CI runner routinely approaches, and can exceed, the
+    /// 5-10 s the lighter wz-ap-demo readiness waits use. R311y376 hosted CI hit
+    /// exactly this: a healthy zenohd bound at 10.07 s and the old fixed-10 s
+    /// gate flaked. This budget is safe to make large precisely BECAUSE
+    /// [`wait_for_tcp_accept_alive`] is liveness-aware — a zenohd that dies is
+    /// reported the instant it exits, so the full budget only ever elapses for
+    /// a genuinely-alive-but-not-yet-listening process, never a corpse.
+    pub const ZENOHD_TCP_ACCEPT_BUDGET: Duration = Duration::from_secs(30);
+
+    /// Poll `127.0.0.1:port` for TCP-accept readiness WHILE the spawned `child`
+    /// is still alive, returning `Ok(())` once a connect succeeds. The
+    /// liveness-aware, self-diagnosing successor to [`wait_for_tcp_accept`] for
+    /// a readiness gate that owns the process it is waiting on:
+    ///
+    /// - `Err` the instant `child` exits before accepting (a crash / bind
+    ///   conflict — no point spinning out the rest of `budget` on a dead
+    ///   process); the message carries the `ExitStatus`, so a zenohd that
+    ///   aborts on a port clash reads as `process exited ... (status: ...)`
+    ///   rather than the old blind `did not start ... within 10s`.
+    /// - `Err` on `budget` elapse, naming the port and budget.
+    ///
+    /// Because the exit path fires immediately, `budget` can be generous
+    /// (load headroom) without a dead child stalling the failure. The returned
+    /// `Err` string is the diagnosis the caller surfaces in its panic — so a
+    /// timeout is never opaque about which of the two happened.
+    pub fn wait_for_tcp_accept_alive(
+        child: &mut Child,
+        port: u16,
+        budget: Duration,
+    ) -> Result<(), String> {
+        use std::net::TcpStream;
+        let deadline = Instant::now() + budget;
+        loop {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return Ok(());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "process exited before accepting on 127.0.0.1:{port} (status: {status})"
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(format!(
+                        "try_wait on the spawned child failed while waiting on \
+                         127.0.0.1:{port}: {e}"
+                    ));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "did not start accepting tcp on 127.0.0.1:{port} within {budget:?} \
+                     (process still alive — genuinely slow to bind or hung)"
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Poll the captured tempfile every 50 ms until either `needle`
     /// appears in the contents or `timeout` elapses. Returns the
     /// matching snapshot on success or the final captured snapshot
@@ -1062,14 +1125,15 @@ pub mod common {
             .arg("none")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let guard = ChildGuard::wrap(
+        let mut guard = ChildGuard::wrap(
             "zenohd (reference router)",
             command.spawn().expect("spawn zenohd"),
         );
-        assert!(
-            wait_for_tcp_accept(accept_port, Duration::from_secs(10)),
-            "zenohd did not start accepting on 127.0.0.1:{accept_port} within 10s"
-        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), accept_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (reference router): {e}");
+        }
         // R311pi — close the TCP-accept-vs-handshake-ready gap with a real wz session.
         wait_for_zenohd_handshake_ready(handshake_probe, mk_probe_stderr);
         guard
@@ -1113,14 +1177,15 @@ pub mod common {
             .arg("none")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let guard = ChildGuard::wrap(
+        let mut guard = ChildGuard::wrap(
             "zenohd (ws dialer)",
             command.spawn().expect("spawn zenohd ws dialer"),
         );
-        assert!(
-            wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
-            "zenohd (ws dialer) did not start accepting tcp on 127.0.0.1:{tcp_port} within 10s"
-        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (ws dialer): {e}");
+        }
         guard
     }
 
@@ -1165,14 +1230,15 @@ pub mod common {
             .arg("none")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let guard = ChildGuard::wrap(
+        let mut guard = ChildGuard::wrap(
             "zenohd (tls dialer)",
             command.spawn().expect("spawn zenohd tls dialer"),
         );
-        assert!(
-            wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
-            "zenohd (tls dialer) did not start accepting tcp on 127.0.0.1:{tcp_port} within 10s"
-        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (tls dialer): {e}");
+        }
         guard
     }
 
@@ -1202,14 +1268,14 @@ pub mod common {
             .arg("transport/unicast/qos/enabled:false")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let guard = ChildGuard::wrap(
+        let mut guard = ChildGuard::wrap(
             "zenohd (reference router, lowlatency)",
             command.spawn().expect("spawn zenohd (lowlatency)"),
         );
-        assert!(
-            wait_for_tcp_accept(port, Duration::from_secs(10)),
-            "zenohd (lowlatency) did not start accepting on 127.0.0.1:{port} within 10s"
-        );
+        if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (lowlatency): {e}");
+        }
         wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), mk_probe_stderr);
         guard
     }
@@ -1361,14 +1427,15 @@ pub mod common {
             .arg("none")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let guard = ChildGuard::wrap(
+        let mut guard = ChildGuard::wrap(
             "zenohd (reference router, tls)",
             command.spawn().expect("spawn zenohd (tls)"),
         );
-        assert!(
-            wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
-            "zenohd (tls) did not start accepting on 127.0.0.1:{tcp_port} within 10s"
-        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (tls): {e}");
+        }
         wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{tcp_port}"), mk_probe_stderr);
         guard
     }
@@ -1411,14 +1478,15 @@ pub mod common {
             .arg("none")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let guard = ChildGuard::wrap(
+        let mut guard = ChildGuard::wrap(
             "zenohd (reference router, quic)",
             command.spawn().expect("spawn zenohd (quic)"),
         );
-        assert!(
-            wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
-            "zenohd (quic) did not start accepting on 127.0.0.1:{tcp_port} within 10s"
-        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (quic): {e}");
+        }
         wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{tcp_port}"), mk_probe_stderr);
         guard
     }
@@ -1578,11 +1646,23 @@ pub mod common {
 
 #[cfg(test)]
 mod tests {
-    use super::common::ChildGuard;
+    use super::common::{wait_for_tcp_accept_alive, ChildGuard, ZENOHD_TCP_ACCEPT_BUDGET};
+    use std::net::TcpListener;
     use std::process::Command;
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    /// Reserve an ephemeral port and immediately release it, yielding a port
+    /// number that is CLOSED (nothing listening) for the duration of a test —
+    /// so a `TcpStream::connect` to it fails with `ECONNREFUSED`, the "not yet
+    /// accepting" condition [`wait_for_tcp_accept_alive`] polls against.
+    fn closed_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+        port
+    }
 
     /// `kill -0 <pid>` portable liveness probe. Returns `true` when
     /// the kernel still tracks the PID (process exists, possibly
@@ -1658,6 +1738,113 @@ mod tests {
         assert!(
             !pid_alive(pid),
             "ChildGuard::drop did not reap PID {pid} after panic-unwind"
+        );
+    }
+
+    /// The structural property that fixes the R311y376 Layer Z flake: when the
+    /// spawned process exits before the port opens, the wait returns the INSTANT
+    /// it observes the exit — it does NOT spin out the (deliberately generous)
+    /// budget on a corpse. A `sleep 0` exits at once and never binds anything;
+    /// waited against a closed port with the zenohd budget, the helper must Err
+    /// in a small fraction of that budget. This is the discriminator against the
+    /// old blind `wait_for_tcp_accept` fixed-timeout poll: revert the liveness
+    /// check and this fails — it spins the full budget (~30 s) and the message
+    /// assertion trips first (the timeout label, not "process exited").
+    #[test]
+    fn wait_alive_fails_fast_when_child_exits_before_accepting() {
+        let port = closed_port();
+        let mut guard = ChildGuard::wrap(
+            "sleep-0 exits-immediately",
+            Command::new("sleep")
+                .arg("0")
+                .spawn()
+                .expect("spawn sleep 0"),
+        );
+        let budget = ZENOHD_TCP_ACCEPT_BUDGET;
+        let start = Instant::now();
+        let result = wait_for_tcp_accept_alive(guard.child_mut(), port, budget);
+        let elapsed = start.elapsed();
+        let err = result.expect_err("a process that exited must not report ready");
+        assert!(
+            err.contains("process exited"),
+            "exit must be self-labelled as an exit, got: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "liveness-aware wait must fail fast on child exit, not spin the \
+             30s budget; elapsed {elapsed:?}"
+        );
+    }
+
+    /// The timeout path stays honest for a LIVE-but-not-listening process: a
+    /// `sleep 60` never binds the port, so a short budget must elapse and the
+    /// Err must name the timeout (NOT misreport the alive child as exited).
+    #[test]
+    fn wait_alive_times_out_for_a_live_nonlistening_child() {
+        let port = closed_port();
+        let mut guard = ChildGuard::wrap(
+            "sleep-60 never-listens",
+            Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn sleep 60"),
+        );
+        let budget = Duration::from_millis(300);
+        let start = Instant::now();
+        let result = wait_for_tcp_accept_alive(guard.child_mut(), port, budget);
+        let elapsed = start.elapsed();
+        let err = result.expect_err("a non-listening child must not report ready");
+        assert!(
+            err.contains("did not start accepting"),
+            "a live-but-slow child must be labelled a timeout, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "the timeout must not fire before the budget; elapsed {elapsed:?}"
+        );
+    }
+
+    /// The success path: once a listener is accepting on the port, the wait
+    /// returns `Ok` promptly. Binding a `TcpListener` is enough — the kernel
+    /// completes the connect handshake into the accept backlog without an
+    /// explicit `accept()` call, which is exactly what a spawned router's bound
+    /// listener presents.
+    #[test]
+    fn wait_alive_returns_ok_once_the_port_accepts() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let port = listener.local_addr().expect("local_addr").port();
+        let mut guard = ChildGuard::wrap(
+            "sleep-60 alongside-listener",
+            Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn sleep 60"),
+        );
+        let start = Instant::now();
+        let result = wait_for_tcp_accept_alive(guard.child_mut(), port, Duration::from_secs(5));
+        let elapsed = start.elapsed();
+        result.expect("an accepting port must report ready");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "ready must be observed well within budget; elapsed {elapsed:?}"
+        );
+        drop(listener);
+    }
+
+    /// Guards the CURATIVE half of the fix that the timing tests above do NOT:
+    /// the R311y376 flake was a HEALTHY zenohd that bound at 10.07s under the old
+    /// fixed-10s gate, so the cure is the budget headroom, not just the liveness
+    /// fast-fail. Pin the floor — a revert of `ZENOHD_TCP_ACCEPT_BUDGET` toward
+    /// the old 10s (anything <= the observed 10.07s bind) fails HERE, so a budget
+    /// regression cannot ship green while reopening the exact flake the commit
+    /// title claims to kill (a liveness-only test would miss it).
+    #[test]
+    fn zenohd_accept_budget_keeps_headroom_over_the_observed_flake() {
+        assert!(
+            ZENOHD_TCP_ACCEPT_BUDGET >= Duration::from_secs(20),
+            "zenohd TCP-accept budget {ZENOHD_TCP_ACCEPT_BUDGET:?} must keep \
+             headroom over the 10.07s bind that flaked R311y376; a revert toward \
+             10s reopens it"
         );
     }
 }

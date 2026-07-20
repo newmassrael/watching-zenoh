@@ -75,8 +75,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
-    read_captured, storage_manager_plugin, wait_for_tcp_accept, zenoh_pico_cli_binary,
-    zenohd_binary, ChildGuard, PortReservation,
+    read_captured, storage_manager_plugin, wait_for_tcp_accept_alive, zenoh_pico_cli_binary,
+    zenohd_binary, ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
 
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
@@ -163,14 +163,13 @@ fn spawn_zenohd_storage_replica(port: u16) -> ChildGuard {
         .arg(&storage_cfg)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let guard = ChildGuard::wrap(
+    let mut guard = ChildGuard::wrap(
         "zenohd (storage-manager replication)",
         command.spawn().expect("spawn zenohd with storage-manager"),
     );
-    assert!(
-        wait_for_tcp_accept(port, Duration::from_secs(10)),
-        "zenohd did not start accepting on 127.0.0.1:{port} within 10s"
-    );
+    if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET) {
+        panic!("zenohd (storage-manager replication): {e}");
+    }
     guard
 }
 

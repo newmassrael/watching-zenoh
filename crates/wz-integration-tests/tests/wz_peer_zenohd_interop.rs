@@ -57,8 +57,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, wait_for_substring, wait_for_tcp_accept,
+    graceful_terminate, read_captured, wait_for_substring, wait_for_tcp_accept_alive,
     wait_for_zenohd_handshake_ready, wz_ap_demo_binary, zenohd_binary, ChildGuard, PortReservation,
+    ZENOHD_TCP_ACCEPT_BUDGET,
 };
 
 /// Spawn a real zenohd in `mode=peer` on `port` and block until it is
@@ -91,7 +92,7 @@ fn spawn_peer_zenohd(port: u16, linkstate: bool) -> ChildGuard {
         command.arg("--cfg").arg("routing/peer/mode:\"linkstate\"");
     }
     command.stdout(Stdio::null()).stderr(Stdio::null());
-    let guard = ChildGuard::wrap(
+    let mut guard = ChildGuard::wrap(
         if linkstate {
             "zenohd (linkstate peer)"
         } else {
@@ -99,10 +100,9 @@ fn spawn_peer_zenohd(port: u16, linkstate: bool) -> ChildGuard {
         },
         command.spawn().expect("spawn zenohd peer"),
     );
-    assert!(
-        wait_for_tcp_accept(port, Duration::from_secs(10)),
-        "zenohd (peer) did not start accepting on 127.0.0.1:{port} within 10s"
-    );
+    if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET) {
+        panic!("zenohd (peer): {e}");
+    }
     // Close the TCP-accept-vs-handshake-ready gap with a real wz Client session
     // (the shared readiness SSOT). A linkstate/gossip peer admits a Client
     // transport regardless of routing mode, so the anonymous probe reaches

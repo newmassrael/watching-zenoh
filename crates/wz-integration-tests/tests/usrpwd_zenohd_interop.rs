@@ -39,7 +39,7 @@ use std::time::Duration;
 use tempfile::NamedTempFile;
 
 use wz_integration_tests::common::{
-    wait_for_tcp_accept, zenohd_binary, ChildGuard, PortReservation,
+    wait_for_tcp_accept_alive, zenohd_binary, ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_open::{
@@ -84,14 +84,13 @@ fn spawn_usrpwd_zenohd(port: u16) -> (ChildGuard, NamedTempFile) {
         ))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let guard = ChildGuard::wrap(
+    let mut guard = ChildGuard::wrap(
         "zenohd (usrpwd auth)",
         command.spawn().expect("spawn zenohd with usrpwd auth"),
     );
-    assert!(
-        wait_for_tcp_accept(port, Duration::from_secs(10)),
-        "zenohd (usrpwd) did not start accepting on 127.0.0.1:{port} within 10s"
-    );
+    if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET) {
+        panic!("zenohd (usrpwd): {e}");
+    }
     (guard, dict)
 }
 

@@ -49,8 +49,8 @@ use std::time::Duration;
 use tempfile::NamedTempFile;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, wait_for_tcp_accept, zenohd_binary, ChildGuard,
-    PortReservation,
+    graceful_terminate, read_captured, wait_for_tcp_accept_alive, zenohd_binary, ChildGuard,
+    PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
 use wz_runtime_tokio::extauth_pubkey::{generate_keypair, PubKeyMethod};
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -142,14 +142,13 @@ fn spawn_pubkey_zenohd(port: u16) -> (ChildGuard, NamedTempFile, NamedTempFile, 
         .env("RUST_LOG", "zenoh=trace")
         .stdout(Stdio::from(out_writer))
         .stderr(Stdio::from(err_writer));
-    let guard = ChildGuard::wrap(
+    let mut guard = ChildGuard::wrap(
         "zenohd (pubkey auth)",
         command.spawn().expect("spawn zenohd with pubkey auth"),
     );
-    assert!(
-        wait_for_tcp_accept(port, Duration::from_secs(10)),
-        "zenohd (pubkey) did not start accepting on 127.0.0.1:{port} within 10s"
-    );
+    if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET) {
+        panic!("zenohd (pubkey): {e}");
+    }
     (guard, priv_pem, pub_pem, log)
 }
 
