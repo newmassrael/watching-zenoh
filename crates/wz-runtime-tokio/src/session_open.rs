@@ -63,7 +63,7 @@ use crate::session_glue::{
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
 #[cfg(feature = "transport-link-udp")]
-use crate::udp_pipeline::{dial_udp, wire_udp_socket, UdpReadDriver};
+use crate::udp_pipeline::{accept_udp_on, bind_udp, dial_udp, wire_udp_socket, UdpReadDriver};
 #[cfg(feature = "transport-link-udp")]
 use std::net::SocketAddr;
 #[cfg(feature = "transport-link-udp")]
@@ -589,6 +589,35 @@ pub enum BoundListener {
     /// where the stream/unixsock/vsock families all block until a peer arrives).
     #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
     Unixpipe(UnixpipePaths),
+    /// A bound DATAGRAM socket wrapped in an `Option` for SINGLE-SHOT accept —
+    /// the first structurally-datagram acceptor (R311y381). UDP has no
+    /// `accept()` yielding a per-peer socket: there is ONE bound socket, and a
+    /// unicast link IS that socket addressed to the peer it learns from the first
+    /// datagram (`accept_udp_on` peeks the source). So [`Self::accept_raw`]
+    /// `take`s the socket out (leaving `None`) and moves it into the one
+    /// [`AcceptedLink::Udp`]. UNLIKE the unix/vsock/unixpipe families, the
+    /// accepted peer is a REAL IP ([`AcceptedPeer::Ip`]) — the datagram source —
+    /// so a UDP accept CAN key a mesh face. NO post-accept handshake (direct
+    /// wrap, like `tcp`).
+    ///
+    /// DEFERRED — the many-peers-one-socket demux. The one-shot [`accept_bound`]
+    /// seam (and wz<->wz) is the tested, supported path; the multi-peer mesh loop
+    /// is honestly incomplete in two ways, both retired by a src-keyed-`Face`
+    /// demux (zenoh's `LinkManagerUnicastUdp`): (1) CROSS-TALK — the accepted
+    /// face holds an UNCONNECTED socket that `recv_from`s ANY source, and the
+    /// unicast path does not src-validate, so a SECOND peer to the same udp
+    /// listen is delivered into the FIRST face tagged with a foreign src (the
+    /// shipped dial side has this property too — mirrored faithfully, not
+    /// introduced here); (2) PERPETUAL THROTTLE — once the one face is accepted
+    /// the socket is `None`, so every mesh-loop re-arm of [`Self::accept_raw`]
+    /// returns `Err` at once -> the existing `Step::Accepted(Err)` throttle fires
+    /// every interval (bounded — no spin, no duplicate faces — but a
+    /// throttle-cadence `AcceptError` log + drive-latency jitter on the one live
+    /// face). udp is thus the FIRST arm whose `Err` path fires PERMANENTLY after
+    /// a SUCCESSFUL accept, where the stream families' post-accept re-arm merely
+    /// PENDS. Both are the one-shot seam's non-concern.
+    #[cfg(feature = "transport-link-udp")]
+    Udp(Option<UdpSocket>),
 }
 
 /// The peer of a link accepted by [`BoundListener::accept_raw`] — an IP
@@ -609,7 +638,10 @@ pub enum BoundListener {
 /// generalizes — the loop rejects it with a typed `Unsupported` rather than
 /// holding an unroutable face.
 pub enum AcceptedPeer {
-    /// The IP address of an accepted stream-family peer (tcp/ws/tls).
+    /// The IP address of an accepted peer with a routable transport address —
+    /// the stream family (tcp/ws/tls, the accepted `TcpStream`'s peer) and udp
+    /// (the datagram SOURCE `accept_udp_on` peeked, R311y381). Unlike the non-IP
+    /// families this keys a mesh face.
     Ip(std::net::SocketAddr),
     /// A non-IP transport peer (unixsock / vsock / unixpipe) — wz does not thread
     /// the accepted peer address (unix: genuinely unnamed; vsock: a real cid:port
@@ -645,6 +677,8 @@ impl BoundListener {
             BoundListener::Vsock(_) => "vsock",
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
             BoundListener::Unixpipe(_) => "unixpipe",
+            #[cfg(feature = "transport-link-udp")]
+            BoundListener::Udp(_) => "udp",
         }
     }
 
@@ -701,6 +735,13 @@ impl BoundListener {
             // non-IP address type this per-variant String accessor exists for).
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
             BoundListener::Unixpipe(p) => format!("{} + {}", p.uplink, p.downlink),
+            // A UDP acceptor HAS a real bound IP address (unlike the same-host
+            // non-IP families) -- render it. Once accepted the socket is `take`n,
+            // leaving a consumed marker (the single-shot seam).
+            #[cfg(feature = "transport-link-udp")]
+            BoundListener::Udp(Some(s)) => s.local_addr()?.to_string(),
+            #[cfg(feature = "transport-link-udp")]
+            BoundListener::Udp(None) => "<udp listener consumed>".to_string(),
         })
     }
 
@@ -743,6 +784,18 @@ impl BoundListener {
                 io::ErrorKind::Unsupported,
                 "a unixpipe listener has no IP SocketAddr (it addresses by FIFO path); \
                  use local_addr_display",
+            )),
+            // UDP DOES have an IP `SocketAddr` (the bound listen addr) -- unlike
+            // the same-host non-IP families, the first non-tcp variant that
+            // returns `Ok` here (an `--peer` / `--router-hat` zid-from-port
+            // derivation over a udp listen is well-defined). `take`n post-accept
+            // -> typed error.
+            #[cfg(feature = "transport-link-udp")]
+            BoundListener::Udp(Some(s)) => s.local_addr(),
+            #[cfg(feature = "transport-link-udp")]
+            BoundListener::Udp(None) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the udp listener socket was already taken by accept_raw (single-shot)",
             )),
         }
     }
@@ -824,6 +877,41 @@ impl BoundListener {
                     AcceptedPeer::NonIp("unixpipe"),
                 )
             }
+            // R311y381 — the FIRST datagram accept: UDP has no `accept()`. `take`
+            // the single bound socket (a second accept finds `None` -> Err, which
+            // the mesh loop's existing `Step::Accepted(Err)` throttle handles, so
+            // no dup faces off one socket and no new hot-spin guard), `peek` the
+            // first datagram's SOURCE to learn the peer WITHOUT consuming the
+            // InitSyn (it stays queued for the read driver's first `recv_from`),
+            // then direct-wrap. `peek_from` blocks until a datagram arrives, so
+            // the first accept self-rate-limits like a stream `accept`. The peer
+            // is a REAL IP -> `AcceptedPeer::Ip`, so a udp accept CAN key a mesh
+            // face (the many-peers-one-socket demux is the deferred mesh work).
+            #[cfg(feature = "transport-link-udp")]
+            BoundListener::Udp(opt) => {
+                // CANCEL-SAFETY: peek on the BORROWED socket (the only await) and
+                // `take` it only AFTER the peek resolves. The tcp/unixsock/vsock
+                // accepts are cancel-safe because they BORROW the listener across
+                // their await; a `take` BEFORE the await would instead lose the
+                // socket if this future is dropped mid-peek (a `select!` in the
+                // mesh loop choosing another arm), permanently killing the
+                // listener. With the peek first, a cancelled accept leaves the
+                // socket in `opt` for the next accept; the post-peek `take` has no
+                // await after it, so it is atomic.
+                let peer = {
+                    let socket = opt.as_ref().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::Unsupported,
+                            "the udp listener socket was already taken (single-shot accept)",
+                        )
+                    })?;
+                    accept_udp_on(socket).await?
+                };
+                let socket = opt
+                    .take()
+                    .expect("Some: the peek above borrowed it and no await mutates opt between");
+                (AcceptedLink::Udp { socket, peer }, AcceptedPeer::Ip(peer))
+            }
         })
     }
 
@@ -840,6 +928,7 @@ impl BoundListener {
                 feature = "transport-link-ws",
                 feature = "transport-link-tls",
                 feature = "transport-link-unixsock",
+                feature = "transport-link-udp",
                 all(feature = "transport-link-vsock", target_os = "linux"),
                 all(feature = "transport-link-unixpipe", target_os = "linux")
             ))]
@@ -896,6 +985,16 @@ pub enum AcceptedLink {
     /// rendezvous), unlike the stream family's raw `TcpStream` awaiting a wrap.
     #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
     Unixpipe(UnixpipeLink),
+    /// A bound datagram socket + the unicast peer `accept_udp_on` learned — NO
+    /// post-accept handshake (like [`Self::Tcp`]); [`Self::handshake`] wraps it
+    /// directly as [`DialedLink::Udp`] (R311y381). Carries the SAME
+    /// `{ socket, peer }` the dial side's [`DialedLink::Udp`] does, so the
+    /// downstream `wire_udp_socket` share is shared, dialed or accepted.
+    #[cfg(feature = "transport-link-udp")]
+    Udp {
+        socket: UdpSocket,
+        peer: std::net::SocketAddr,
+    },
 }
 
 impl AcceptedLink {
@@ -929,6 +1028,11 @@ impl AcceptedLink {
             // connected, so like unixsock/vsock there is nothing to handshake.
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
             AcceptedLink::Unixpipe(link) => DialedLink::Unixpipe(link),
+            // Direct wrap, the acceptor mirror of dial_locator's
+            // `DialedLink::Udp` (R311y381) — the peeked datagram is still queued,
+            // so `wire_udp_socket`'s read driver reads the InitSyn as frame one.
+            #[cfg(feature = "transport-link-udp")]
+            AcceptedLink::Udp { socket, peer } => DialedLink::Udp { socket, peer },
         })
     }
 
@@ -952,6 +1056,8 @@ impl AcceptedLink {
             AcceptedLink::Vsock(_) => "",
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
             AcceptedLink::Unixpipe(_) => "",
+            #[cfg(feature = "transport-link-udp")]
+            AcceptedLink::Udp { .. } => "",
         }
     }
 }
@@ -1372,6 +1478,20 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     "tls acceptor requires AcceptConfig.tls (a server cert + key)",
                 )),
             },
+            // R311y381 — a `udp/...` acceptor binds the datagram socket on the
+            // listen addr (`bind_udp`) into a SINGLE-SHOT `BoundListener::Udp`;
+            // `accept_raw` learns the peer from the first datagram. The accept
+            // mirror of dial_locator's `Proto::Udp => DialedLink::Udp`, gated the
+            // same way, with the cfg-off twin returning a typed `Unsupported` (a
+            // clearer message than the `other` extension-point catch-all).
+            #[cfg(feature = "transport-link-udp")]
+            Proto::Udp => Ok(BoundListener::Udp(Some(
+                bind_udp(ip.addr, ip.iface.as_deref()).await?,
+            ))),
+            #[cfg(not(feature = "transport-link-udp"))]
+            Proto::Udp => Err(unsupported(
+                "udp acceptor requires the transport-link-udp feature",
+            )),
             other => Err(unsupported(&format!(
                 "{other:?} acceptor is a not-yet-wired extension point"
             ))),

@@ -112,6 +112,42 @@ pub async fn dial_udp(peer: SocketAddr, iface: Option<&str>) -> io::Result<UdpSo
     Ok(socket)
 }
 
+/// Bind a UDP socket on `listen` for the ACCEPTOR side — the datagram twin of
+/// [`dial_udp`]'s ephemeral bind, but on a KNOWN address:port an Initiator can
+/// target. Returns the bound socket unwrapped; the scheme-keyed accept seam
+/// ([`crate::session_open::bind_locator`]) wraps it in a single-shot
+/// `BoundListener::Udp`, and [`accept_udp_on`] learns the peer from the first
+/// datagram. `#iface=` is honoured the same as [`dial_udp`] (SO_BINDTODEVICE,
+/// Linux/Android; a warn-no-op off-platform).
+pub async fn bind_udp(listen: SocketAddr, iface: Option<&str>) -> io::Result<UdpSocket> {
+    let socket = UdpSocket::bind(listen).await?;
+    if let Some(iface) = iface {
+        crate::iface_bind::bind_socket_to_device(&socket, iface)?;
+    }
+    Ok(socket)
+}
+
+/// Learn the unicast PEER of a UDP acceptor socket by PEEKING the first inbound
+/// datagram's source WITHOUT consuming it — the datagram stays queued so the
+/// wired [`UdpReadDriver`]'s first `recv_from` reads it as the session's first
+/// frame (typically the InitSyn). UDP has no `accept()` yielding a per-peer
+/// socket; the peer is the datagram source, and `peek_from` leaves the payload
+/// for the FSM — the exact peer-learning accept `udp_frag_e2e` / `udp_chaos_e2e`
+/// inline, lifted here for the scheme-keyed seam. Awaits readable, so a caller
+/// with no pending datagram BLOCKS until one arrives (the datagram twin of a
+/// blocking `accept`). The returned `SocketAddr` is a real IP peer (contrast the
+/// unix/vsock/unixpipe families' anonymous accept), so a UDP accept is
+/// `AcceptedPeer::Ip`, not `NonIp`.
+pub async fn accept_udp_on(socket: &UdpSocket) -> io::Result<SocketAddr> {
+    // A small probe buffer: `peek_from` copies at most this many bytes (which we
+    // discard) and returns the FULL source addr regardless of buffer size; the
+    // datagram is NOT consumed, so a payload larger than the probe stays intact
+    // in the kernel queue for the read driver's first `recv_from`.
+    let mut probe = [0u8; 64];
+    let (_n, peer) = socket.peek_from(&mut probe).await?;
+    Ok(peer)
+}
+
 /// Share a bound [`UdpSocket`] into the cooperating drivers the session FSM
 /// consumes: an inbound [`UdpReadDriver`] (`&mut LinkDriver` for the poll
 /// loop), an outbound `Arc<`[`UdpWriteDriver`]`>` (`BoxedLinkDriver` for
