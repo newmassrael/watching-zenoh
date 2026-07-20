@@ -2045,11 +2045,11 @@ where
             Step::Accepted(Ok((accepted, peer))) => {
                 // R311y378 — the mesh accept loop keys faces on the IP
                 // `SocketAddr` (`Face.peer`, zid-dedup, gossip locators), so a
-                // non-IP accepted peer (unixsock) has no routable locator and
-                // cannot join the mesh; the one-shot `accept_bound` path serves
-                // non-IP accept. A router that binds a non-IP `--listen` is a
-                // mis-config: report + drop the connection rather than hold an
-                // unroutable face.
+                // non-IP accepted peer (unixsock / vsock / unixpipe) has no
+                // routable locator and cannot join the mesh; the one-shot
+                // `accept_bound` path serves non-IP accept. A router that binds a
+                // non-IP `--listen` is a mis-config: report + drop the connection
+                // rather than hold an unroutable face.
                 let peer = match peer {
                     AcceptedPeer::Ip(addr) => addr,
                     AcceptedPeer::NonIp(name) => {
@@ -2061,6 +2061,16 @@ where
                             ),
                         )));
                         drop(accepted);
+                        // R311y380 — throttle before re-arming, the same guard the
+                        // `Step::Accepted(Err)` arm applies: unixpipe's accept is
+                        // SYNC + NON-BLOCKING (a FIFO open returns at once), so a
+                        // mis-configured `--listen unixpipe/..` in the mesh loop
+                        // would reject-and-re-arm at CPU speed without this sleep
+                        // (the stream/unixsock/vsock families block until a peer
+                        // arrives, so they self-rate-limit; unixpipe is the first
+                        // that does not). Bounds the mis-config to one reject per
+                        // throttle interval, matching zenoh's accept_task parity.
+                        clock.sleep(ACCEPT_ERROR_THROTTLE_MS).await;
                         continue;
                     }
                 };
@@ -2472,6 +2482,76 @@ mod tests {
             summary.peak_concurrent, N,
             "held all N faces simultaneously (high-water mark)"
         );
+    }
+
+    /// R311y380 — the THROTTLE discriminator. A `--listen unixpipe/..` fed to the
+    /// MESH accept loop is a mis-config (unixpipe accepts a NonIp peer with no
+    /// routable locator), and because unixpipe's accept is the FIRST NON-BLOCKING
+    /// accept (a FIFO open returns AT ONCE, unlike the tcp/unixsock/vsock accepts
+    /// that block until a peer connects), the NonIp-reject path would HOT-SPIN
+    /// without the `clock.sleep(ACCEPT_ERROR_THROTTLE_MS)` guard this round added.
+    ///
+    /// This binds a unixpipe listener that NO peer ever dials, runs the mesh loop
+    /// for a fixed ~300ms window, and asserts the reject count is SMALL — one per
+    /// throttle interval (~3), not the thousands a CPU-bound spin would produce.
+    /// The bound is deterministic FROM ABOVE (a slower host rejects FEWER, never
+    /// more, since each reject waits >= one 100ms interval), so it is non-flaky;
+    /// removing the throttle from the NonIp arm turns this RED (n = thousands).
+    /// The `>= 1` lower bound witnesses the reject path is actually exercised.
+    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mesh_accept_loop_throttles_a_nonblocking_unixpipe_reject() {
+        use crate::unixpipe_pipeline::bind_unixpipe;
+
+        let base = std::env::temp_dir()
+            .join(format!("wz-unixpipe-throttle-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let paths = bind_unixpipe(&base).expect("mkfifo the unixpipe rendezvous pair");
+        let listener = BoundListener::Unixpipe(paths);
+
+        let rejects = Arc::new(AtomicUsize::new(0));
+        let on_event = {
+            let rejects = rejects.clone();
+            move |event: &AcceptEvent| {
+                if let AcceptEvent::AcceptError(_) = event {
+                    rejects.fetch_add(1, SeqCst);
+                }
+            }
+        };
+
+        // The mesh loop accepts the (immediately-returning) NonIp peer, rejects it
+        // (unroutable), then throttles before re-arming — so it rejects about once
+        // per ACCEPT_ERROR_THROTTLE_MS (100ms) across the window.
+        const WINDOW_MS: u64 = 300;
+        let summary = accept_loop(
+            listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            tokio::time::sleep(Duration::from_millis(WINDOW_MS)),
+            on_event,
+            &NoOpForwarder,
+        )
+        .await;
+
+        let n = rejects.load(SeqCst);
+        assert!(
+            n >= 1,
+            "the non-blocking unixpipe NonIp accept must be rejected at least once"
+        );
+        assert!(
+            n <= 50,
+            "the NonIp reject is throttled, not hot-spinning: got {n} rejects in \
+             ~{WINDOW_MS}ms (a spin would be thousands)"
+        );
+        assert_eq!(
+            summary.accepted, 0,
+            "the unroutable NonIp peer is never a face"
+        );
+
+        let _ = std::fs::remove_file(format!("{base}_uplink"));
+        let _ = std::fs::remove_file(format!("{base}_downlink"));
     }
 
     /// A peer that connects then closes WITHOUT handshaking surfaces as

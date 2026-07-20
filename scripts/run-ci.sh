@@ -1717,26 +1717,39 @@ layer_c1ak_cargo_test_transport_stats() {
         && cargo clippy -p wz-session-core --all-targets --features transport-stats --quiet -- -D warnings)
 }
 
-# ─── Layer C1al — unixpipe link: locator parse + FIFO-pair backend e2e ─
+# ─── Layer C1al — unixpipe: locator + FIFO e2e + accept seam + throttle ─
 #
-# R311y10: the named-FIFO-pair sibling of C1aa (unixsock). transport-link-unixpipe
-# (OFF in the default set, Linux-only) carries a zenoh batch over a uplink +
-# downlink FIFO pair using tokio's native pipe support — the SAME StreamEnvelope
-# byte-stream framing as unixsock, reused unchanged. This lane:
+# R311y10 / R311y380: the named-FIFO-pair sibling of C1aa (unixsock).
+# transport-link-unixpipe (OFF in the default set, Linux-only) carries a zenoh
+# batch over a uplink + downlink FIFO pair using tokio's native pipe support —
+# the SAME StreamEnvelope byte-stream framing as unixsock, reused unchanged.
+# This lane:
 #   1. runs the locator tests (the `unixpipe/<path>` parse is `AnyLocator::Unixpipe`
 #      — ungated + platform-independent, like unixsock/vsock);
 #   2. runs the `unixpipe_e2e` integration test (gated all(transport-link-unixpipe,
 #      target_os="linux", transport-unicast)): two nodes reach Established over a
 #      loopback FIFO pair — the initiator via a `unixpipe/...` LOCATOR — and a Put
-#      is delivered byte-exact over the FIFO byte stream;
-#   3. clippy-gates the `transport-link-unixpipe` cfg (`--all-targets`);
-#   4. clippy-gates the LIB under `--no-default-features --features
+#      is delivered byte-exact. It ALSO carries the R311y380 accept-seam
+#      discriminator (`bind_endpoint("unixpipe/..")` -> BoundListener::accept_raw
+#      -> AcceptedLink::handshake), RED before the scheme-keyed bind arm lands;
+#   3. runs the R311y380 mesh-loop THROTTLE discriminator (routing-accept +
+#      transport-link-unixpipe): a never-dialed unixpipe listener in the mesh
+#      accept loop rejects its NON-BLOCKING NonIp accept ~once per throttle
+#      interval — without the guard it hot-spins (thousands of rejects), the RED;
+#   4. clippy-gates that same combo `--all-targets -- -D warnings` — `accept_loop`
+#      is `#[cfg(feature = "routing-accept")]` (NOT in the default set), so the
+#      plain-unixpipe clippy in step 5 compiles the throttle change OUT and would
+#      not lint it; this step is the one that -D-warnings-gates it;
+#   5. clippy-gates the `transport-link-unixpipe` cfg (`--all-targets`);
+#   6. clippy-gates the LIB under `--no-default-features --features
 #      transport-link-unixpipe` to prove `unixpipe_pipeline` composes standalone
 #      (it pulls transport-link-tcp's shared stream_link + libc for mkfifo).
 layer_c1al_cargo_test_unixpipe() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test unixpipe_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib mesh_accept_loop_throttles_a_nonblocking_unixpipe_reject --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixpipe --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixpipe --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixpipe --quiet -- -D warnings)
 }

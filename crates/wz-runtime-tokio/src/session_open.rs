@@ -159,7 +159,8 @@ use tokio_vsock::{VsockListener, VsockStream};
 // StreamEnvelope drivers, like unixsock/vsock.
 #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
 use crate::unixpipe_pipeline::{
-    dial_unixpipe, wire_unixpipe_stream, UnixpipeLink, UnixpipeReadDriver,
+    accept_unixpipe_on, bind_unixpipe, dial_unixpipe, wire_unixpipe_stream, UnixpipeLink,
+    UnixpipePaths, UnixpipeReadDriver,
 };
 
 /// Default cadence at which [`connect_and_open_session`] sweeps the host
@@ -574,6 +575,20 @@ pub enum BoundListener {
     /// stream family's `&`-accept never forced it).
     #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
     Vsock(VsockListener),
+    /// A bound unix named-pipe (FIFO-pair) rendezvous — NOT a listener object but
+    /// the resolved [`UnixpipePaths`] the [`bind_unixpipe`] `mkfifo` created;
+    /// [`accept_bound`] accepts a raw [`DialedLink::Unixpipe`] with NO post-accept
+    /// handshake (direct wrap, like `tcp` / `unixsock` / `vsock`). Non-IP like the
+    /// other same-host families (a FIFO open has no peer at all ->
+    /// [`AcceptedPeer::NonIp`]); Linux-only (the `read_write` open-rendezvous),
+    /// gated with the backend (R311y380). Unlike unixsock/vsock, the underlying
+    /// [`accept_unixpipe_on`] is SYNC + NON-BLOCKING (a FIFO open returns at once):
+    /// this is the FIRST non-blocking accept, and the reason the mesh
+    /// [`accept_loop`](crate::accept_loop) NonIp-reject path now throttles (an
+    /// immediate-returning accept in the reject loop would otherwise hot-spin,
+    /// where the stream/unixsock/vsock families all block until a peer arrives).
+    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    Unixpipe(UnixpipePaths),
 }
 
 /// The peer of a link accepted by [`BoundListener::accept_raw`] — an IP
@@ -596,9 +611,10 @@ pub enum BoundListener {
 pub enum AcceptedPeer {
     /// The IP address of an accepted stream-family peer (tcp/ws/tls).
     Ip(std::net::SocketAddr),
-    /// A non-IP transport peer (unixsock / vsock) — wz does not thread the
-    /// accepted peer address (unix: genuinely unnamed; vsock: a real cid:port it
-    /// drops), so the payload is the transport name for the log line.
+    /// A non-IP transport peer (unixsock / vsock / unixpipe) — wz does not thread
+    /// the accepted peer address (unix: genuinely unnamed; vsock: a real cid:port
+    /// it drops; unixpipe: a FIFO open has no peer at all), so the payload is the
+    /// transport name for the log line.
     NonIp(&'static str),
 }
 
@@ -627,6 +643,8 @@ impl BoundListener {
             BoundListener::Unixsock(_) => "unixsock",
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             BoundListener::Vsock(_) => "vsock",
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            BoundListener::Unixpipe(_) => "unixpipe",
         }
     }
 
@@ -678,6 +696,11 @@ impl BoundListener {
                 let a = l.local_addr()?;
                 format!("{}:{}", a.cid(), a.port())
             }
+            // A unixpipe rendezvous has no IP -- render the bound FIFO PAIR paths
+            // (uplink + downlink) the `mkfifo` created; those ARE its address (the
+            // non-IP address type this per-variant String accessor exists for).
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            BoundListener::Unixpipe(p) => format!("{} + {}", p.uplink, p.downlink),
         })
     }
 
@@ -713,6 +736,12 @@ impl BoundListener {
             BoundListener::Vsock(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "a vsock listener has no IP SocketAddr (it addresses by cid:port); \
+                 use local_addr_display",
+            )),
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            BoundListener::Unixpipe(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a unixpipe listener has no IP SocketAddr (it addresses by FIFO path); \
                  use local_addr_display",
             )),
         }
@@ -778,6 +807,23 @@ impl BoundListener {
                 let stream = accept_vsock_on(l).await?;
                 (AcceptedLink::Vsock(stream), AcceptedPeer::NonIp("vsock"))
             }
+            // R311y380 — the FIRST non-blocking accept: `accept_unixpipe_on` is a
+            // SYNC FIFO open (no `.await`, no listener `accept()`), so it returns
+            // AT ONCE. `paths` reborrows `&mut UnixpipePaths` -> `&UnixpipePaths`
+            // (the open reads the paths, never mutates), so the `&mut self`
+            // receiver over-constrains nothing here. Direct wrap, no post-accept
+            // handshake, anonymous peer -> NonIp, mirroring unixsock/vsock. Because
+            // this accept never blocks, the mesh `accept_loop` NonIp-reject path
+            // throttles (see its `Step::Accepted` handler) so a mis-configured
+            // `--listen unixpipe/..` router does not hot-spin.
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            BoundListener::Unixpipe(paths) => {
+                let link = accept_unixpipe_on(paths)?;
+                (
+                    AcceptedLink::Unixpipe(link),
+                    AcceptedPeer::NonIp("unixpipe"),
+                )
+            }
         })
     }
 
@@ -794,7 +840,8 @@ impl BoundListener {
                 feature = "transport-link-ws",
                 feature = "transport-link-tls",
                 feature = "transport-link-unixsock",
-                all(feature = "transport-link-vsock", target_os = "linux")
+                all(feature = "transport-link-vsock", target_os = "linux"),
+                all(feature = "transport-link-unixpipe", target_os = "linux")
             ))]
             other => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -842,6 +889,13 @@ pub enum AcceptedLink {
     /// directly as [`DialedLink::Vsock`] (R311y379).
     #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
     Vsock(VsockStream),
+    /// A connected unix named-pipe (FIFO-pair) link — NO post-accept handshake
+    /// (like [`Self::Tcp`] / [`Self::Unixsock`] / [`Self::Vsock`]);
+    /// [`Self::handshake`] wraps it directly as [`DialedLink::Unixpipe`]
+    /// (R311y380). Already a connected [`UnixpipeLink`] (the FIFO open IS the
+    /// rendezvous), unlike the stream family's raw `TcpStream` awaiting a wrap.
+    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    Unixpipe(UnixpipeLink),
 }
 
 impl AcceptedLink {
@@ -870,6 +924,11 @@ impl AcceptedLink {
             // `DialedLink::Vsock` (R311y379).
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             AcceptedLink::Vsock(stream) => DialedLink::Vsock(stream),
+            // Direct wrap, the acceptor mirror of dial_locator's
+            // `DialedLink::Unixpipe` (R311y380) — the FIFO link is already
+            // connected, so like unixsock/vsock there is nothing to handshake.
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            AcceptedLink::Unixpipe(link) => DialedLink::Unixpipe(link),
         })
     }
 
@@ -891,6 +950,8 @@ impl AcceptedLink {
             AcceptedLink::Unixsock(_) => "",
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             AcceptedLink::Vsock(_) => "",
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            AcceptedLink::Unixpipe(_) => "",
         }
     }
 }
@@ -1382,15 +1443,22 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             io::ErrorKind::Unsupported,
             "vsock accept requires the transport-link-vsock feature on Linux",
         )),
-        // R311y10 / R311y379 — a unixpipe acceptor would bind a `mkfifo` pair
-        // (`unixpipe_pipeline::bind_unixpipe` / `accept_unixpipe_on`) into a
-        // future `BoundListener::Unixpipe` arm, exactly as unixsock (y378) and
-        // vsock (y379) wired their non-`TcpListener` listeners into this seam.
-        // Not wired yet (a follow-up round); `udp` is the other remaining
-        // acceptor extension point. The DIAL side IS wired (`dial_locator`).
-        AnyLocator::Unixpipe(_) => Err(unsupported(
-            "unixpipe accept is a mkfifo pair bind (bind_unixpipe + accept_unixpipe_on); \
-             the BoundListener::Unixpipe arm is a follow-up, unwired here",
+        // R311y380 (accept-symmetry Stage 4, third arm) — a unixpipe acceptor
+        // `mkfifo`s the uplink+downlink FIFO PAIR (`bind_unixpipe`, SYNC like
+        // vsock's `bind_vsock` — no `.await`) into `BoundListener::Unixpipe`, the
+        // accept-side mirror of `dial_locator`'s `AnyLocator::Unixpipe =>
+        // DialedLink::Unixpipe`. Like the vsock arm, gated
+        // `all(transport-link-unixpipe, target_os = "linux")` (the FIFO
+        // `read_write` open-rendezvous is Linux-only), with the cfg-off/non-Linux
+        // twin returning a typed `Unsupported` so the always-present
+        // `AnyLocator::Unixpipe` variant (ungated in wz-session-core) stays
+        // exhaustive on every target. `udp` is the remaining acceptor extension
+        // point.
+        #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+        AnyLocator::Unixpipe(ep) => Ok(BoundListener::Unixpipe(bind_unixpipe(&ep.path)?)),
+        #[cfg(not(all(feature = "transport-link-unixpipe", target_os = "linux")))]
+        AnyLocator::Unixpipe(_ep) => Err(unsupported(
+            "unixpipe accept requires the transport-link-unixpipe feature on Linux",
         )),
     }
 }
