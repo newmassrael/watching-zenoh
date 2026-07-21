@@ -1406,6 +1406,114 @@ pub mod common {
         )
     }
 
+    /// Poll until the unixpipe request FIFO node `<base>_uplink` exists (a unixpipe
+    /// listener has bound) or the deadline passes. A unixpipe listener has no TCP
+    /// port, so readiness is the request-channel node appearing — the named-FIFO
+    /// analogue of [`wait_for_tcp_accept`]. R311y393 lifted this from
+    /// `wz_unixpipe_zenohd_interop`'s local copy when the data-plane leg
+    /// (`wz_unixpipe_zenohd_dataplane`) + [`spawn_zenohd_unixpipe_tcp`] became its
+    /// second + third consumers.
+    pub fn wait_for_unixpipe_request_fifo(base: &str, timeout: Duration) -> bool {
+        let node = format!("{base}_uplink");
+        let deadline = Instant::now() + timeout;
+        loop {
+            if Path::new(&node).exists() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// R311y393 — spawn a UNIXPIPE-enabled zenohd LISTENING on BOTH
+    /// `unixpipe/<base>` (for a wz client dial) and `tcp/127.0.0.1:<tcp_port>` (for
+    /// a pico client + the readiness gate), and block until it is HANDSHAKE-ready.
+    /// The named-FIFO sibling of [`spawn_zenohd_tcp_unixsock`] — but it CANNOT
+    /// delegate to [`spawn_zenohd_listeners`], which hardcodes the stock
+    /// [`zenohd_binary`]: a `unixpipe/` listener needs the SEPARATE
+    /// [`zenohd_unixpipe_binary`] oracle (zenoh's `default` omits
+    /// `transport_unixpipe`). So it mirrors the INLINE shape of
+    /// [`spawn_zenohd_tcp_tls`]: probe the TCP listener for readiness (a wz client
+    /// without unixpipe cannot drive a FIFO probe, and every `-l` listener binds at
+    /// startup, so the unixpipe listener is ready once TCP is), PLUS wait for the
+    /// `<base>_uplink` request FIFO node so a wz dial finds the request channel
+    /// present. Linux-only (the unixpipe backend's `read_write` open-rendezvous).
+    /// The caller owns request-FIFO cleanup.
+    pub fn spawn_zenohd_unixpipe_tcp(
+        unixpipe_base: &str,
+        tcp_port: u16,
+        mk_probe_stderr: impl FnMut() -> File,
+    ) -> ChildGuard {
+        let mut command = Command::new(zenohd_unixpipe_binary());
+        command
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("-l")
+            .arg(format!("unixpipe/{unixpipe_base}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut guard = ChildGuard::wrap(
+            "zenohd (unixpipe+tcp listener)",
+            command.spawn().expect("spawn zenohd unixpipe+tcp listener"),
+        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (unixpipe+tcp listener): {e}");
+        }
+        if !wait_for_unixpipe_request_fifo(unixpipe_base, Duration::from_secs(15)) {
+            panic!(
+                "zenohd did not create the unixpipe request FIFO {unixpipe_base}_uplink within 15s"
+            );
+        }
+        // Close the TCP-accept-vs-handshake-ready gap with a real wz session (the
+        // R311pi discipline in spawn_zenohd_listeners); the wz probe dials TCP, so
+        // it needs no unixpipe feature.
+        wait_for_zenohd_handshake_ready(&format!("tcp/127.0.0.1:{tcp_port}"), mk_probe_stderr);
+        guard
+    }
+
+    /// R311y393 — spawn a UNIXPIPE-enabled zenohd that DIALS a wz `unixpipe/<base>`
+    /// acceptor (`-e unixpipe/<base>`) while listening on `tcp/<tcp_port>` for a
+    /// pico client. The named-FIFO DIALER twin of [`spawn_zenohd_ws_dialer`] /
+    /// [`spawn_zenohd_tls_dialer`], verifying that wz's MULTI-CLIENT unixpipe
+    /// ACCEPTOR (R311y392) carries the DATA plane, not just the handshake: zenohd's
+    /// `UnicastPipeClient` invites wz's acceptor, and a pico `z_pub` on the tcp
+    /// listener routes ACROSS the accepted unixpipe link into the wz subscriber.
+    /// Needs the SEPARATE [`zenohd_unixpipe_binary`] oracle. The wz acceptor MUST
+    /// already be bound (its `<base>_uplink` request FIFO present) before this is
+    /// called, so the zenoh client's invitation lands. Readiness = zenohd accepting
+    /// on its tcp listener; the unixpipe dial to wz is witnessed on the wz side
+    /// ("session Established"). Linux-only.
+    pub fn spawn_zenohd_unixpipe_dialer(wz_unixpipe_base: &str, tcp_port: u16) -> ChildGuard {
+        let mut command = Command::new(zenohd_unixpipe_binary());
+        command
+            .arg("-e")
+            .arg(format!("unixpipe/{wz_unixpipe_base}"))
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut guard = ChildGuard::wrap(
+            "zenohd (unixpipe dialer)",
+            command.spawn().expect("spawn zenohd unixpipe dialer"),
+        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (unixpipe dialer): {e}");
+        }
+        guard
+    }
+
     /// Spawn a zenohd router listening on BOTH `tcp/` (for pico TCP clients and
     /// the readiness gate) and `tls/` (for a wz TLS client), presenting the
     /// server cert at `cert_path` / key at `key_path`, and block until it is
