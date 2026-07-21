@@ -1647,21 +1647,59 @@ pub mod common {
 #[cfg(test)]
 mod tests {
     use super::common::{wait_for_tcp_accept_alive, ChildGuard, ZENOHD_TCP_ACCEPT_BUDGET};
-    use std::net::TcpListener;
+    use socket2::{Domain, Socket, Type};
+    use std::net::{SocketAddr, TcpListener};
     use std::process::Command;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    /// Reserve an ephemeral port and immediately release it, yielding a port
-    /// number that is CLOSED (nothing listening) for the duration of a test —
-    /// so a `TcpStream::connect` to it fails with `ECONNREFUSED`, the "not yet
-    /// accepting" condition [`wait_for_tcp_accept_alive`] polls against.
-    fn closed_port() -> u16 {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-        let port = listener.local_addr().expect("local_addr").port();
-        drop(listener);
-        port
+    /// Reserve an ephemeral TCP port that STAYS closed (a `connect` gets
+    /// `ECONNREFUSED`) for as long as the returned [`Socket`] guard is held. The
+    /// socket is bound but NEVER `listen()`ed — std's `TcpListener::bind` always
+    /// `listen()`s, so a bound std listener would ACCEPT the connect against the
+    /// kernel backlog. The prior `bind`-then-`drop` leaked the port straight back
+    /// to the OS, which under a loaded CI run recycles it to an unrelated LIVE
+    /// listener — a TOCTOU race that flaked `wait_alive_fails_fast_...` (a
+    /// third party binds the "closed" port, so `wait_for_tcp_accept_alive`
+    /// connects and returns `Ok` before it observes the child exit). This is the
+    /// exact race the crate's `socket2` dep was ADDED to fix (but never wired
+    /// until now), mirroring the `refused_locator` helper in wz-runtime-tokio's
+    /// `static_scout_open.rs`. The caller MUST hold the guard for the whole test.
+    fn closed_port() -> (Socket, u16) {
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, None).expect("socket");
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
+        socket.bind(&bind.into()).expect("bind without listen");
+        let port = socket
+            .local_addr()
+            .expect("local_addr")
+            .as_socket()
+            .expect("ipv4 socket addr")
+            .port();
+        (socket, port)
+    }
+
+    /// R311y383 — the discriminator for the `closed_port` TOCTOU fix: the guard
+    /// RESERVES the port (a concurrent bind to it fails) AND keeps it CLOSED (a
+    /// connect is refused), for as long as the guard is held. Under the prior
+    /// bind-then-drop helper the port was NOT reserved — a parallel CI process
+    /// could rebind the "closed" port into a live listener, so
+    /// `wait_for_tcp_accept_alive` would connect and report the exited child as
+    /// ready (the `wait_alive_fails_fast` flake). The concurrent-bind-fails
+    /// assertion goes RED against that old helper (its dropped listener left the
+    /// port free to rebind).
+    #[test]
+    fn closed_port_reserves_the_port_and_refuses_connect() {
+        use std::net::TcpStream;
+        let (_guard, port) = closed_port();
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_err(),
+            "closed_port's guard must reserve the port against a concurrent bind"
+        );
+        assert!(
+            TcpStream::connect(("127.0.0.1", port)).is_err(),
+            "a bound-not-listening port must refuse connects (ECONNREFUSED)"
+        );
     }
 
     /// `kill -0 <pid>` portable liveness probe. Returns `true` when
@@ -1752,7 +1790,7 @@ mod tests {
     /// assertion trips first (the timeout label, not "process exited").
     #[test]
     fn wait_alive_fails_fast_when_child_exits_before_accepting() {
-        let port = closed_port();
+        let (_closed_guard, port) = closed_port();
         let mut guard = ChildGuard::wrap(
             "sleep-0 exits-immediately",
             Command::new("sleep")
@@ -1781,7 +1819,7 @@ mod tests {
     /// Err must name the timeout (NOT misreport the alive child as exited).
     #[test]
     fn wait_alive_times_out_for_a_live_nonlistening_child() {
-        let port = closed_port();
+        let (_closed_guard, port) = closed_port();
         let mut guard = ChildGuard::wrap(
             "sleep-60 never-listens",
             Command::new("sleep")
