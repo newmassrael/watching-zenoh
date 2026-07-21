@@ -30,6 +30,13 @@
 //!       acceptor carries the data plane, not just the handshake (ONE concurrent
 //!       client here — multi-client concurrency itself is a y392 handshake-level
 //!       proof) — the acceptor twin of the ws/tls acceptor cross-impl legs.
+//!   Leg 4 (multi-client):  TWO wz clients `--connect unixpipe/<b>` CONCURRENTLY on
+//!       ONE zenohd listener; a Put routes wz-pub --unixpipe--> zenohd --unixpipe-->
+//!       wz-sub across zenohd's TWO dedicated sub-pipe pairs. Exercises zenohd's
+//!       MULTI-CLIENT `UnicastPipeListener` (the foreign counterpart of wz's y392
+//!       acceptor) with a data plane; the second client runs under a DISTINCT `--zid`
+//!       (wz-ap-demo hardwires `0x01020304`; a duplicate zid is refused "Terminal",
+//!       transport-independent).
 //!
 //! `#[ignore]` (binary-dep e2e): needs a UNIXPIPE-ENABLED zenohd at
 //! `target/zenohd-unixpipe/zenohd` (stock zenohd omits `transport_unixpipe`; build
@@ -455,5 +462,152 @@ fn pico_put_routes_through_zenohd_to_wz_unixpipe_acceptor_subscriber() {
     assert!(
         fired_text.contains(publish_key),
         "wz fired but not on the routed keyexpr '{publish_key}'.\n{fired_text}"
+    );
+}
+
+/// Leg 4 — MULTI-CLIENT over unixpipe: TWO concurrent wz clients hold sessions to
+/// ONE zenohd `unixpipe/<base>` listener AT THE SAME TIME, and a Put routes between
+/// them across zenohd's TWO dedicated sub-pipe pairs (ingress from the publisher
+/// face, egress to the subscriber face). This exercises zenohd's MULTI-CLIENT
+/// `UnicastPipeListener` (the foreign counterpart of wz's R311y392 acceptor) with a
+/// real data plane, and proves two wz unixpipe DIALERS coexist concurrently on one
+/// listener. The two demo instances MUST present DISTINCT zids: wz-ap-demo hardwires
+/// zid `0x01020304`, and a router rejects a second session bearing a zid it already
+/// holds ("session open failed: Terminal") — transport-independent, NOT a unixpipe
+/// limitation — so the publisher runs under `--zid 0a0b0c0d`. Sub-first ordering
+/// installs the route on zenohd before the publisher's burst (deterministic, not a
+/// sleep).
+// wz-proves: transport-link-unixpipe wz->zenohd (concurrent multi-client)
+// wz-proves: pubsub-sample wz->wz via zenohd (across two unixpipe faces)
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd-unixpipe/zenohd + wz-ap-demo[+transport-link-unixpipe]"]
+fn wz_two_clients_route_a_put_via_one_zenohd_unixpipe_listener() {
+    let demo = wz_ap_demo_binary();
+    let base = unixpipe_base("mc");
+    cleanup(&base);
+    let tcp_res = PortReservation::pick();
+    let tcp_port = tcp_res.port();
+    let publish_key = "demo/unixpipe/mc-put";
+    let publish_value = "hello-multi-client-over-unixpipe";
+    // Distinct from wz-ap-demo's hardwired 0x01020304 so zenohd holds BOTH sessions.
+    let publisher_zid = "0a0b0c0d";
+
+    let mut zenohd = spawn_zenohd_unixpipe_tcp(&base, tcp_port, || {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    drop(tcp_res);
+
+    // Client 1 (subscriber, default zid) dials zenohd over unixpipe + declares a
+    // routed subscriber; wait until zenohd has the route before the publisher bursts.
+    let sub_stderr = tempfile::tempfile().expect("tempfile for wz sub stderr");
+    let sub_writer = sub_stderr.try_clone().expect("dup wz sub stderr handle");
+    let mut sub_reader = sub_stderr;
+    let mut sub = ChildGuard::wrap(
+        "wz-ap-demo (unixpipe client 1: --key)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("unixpipe/{base}"))
+            .arg("--key")
+            .arg(SUB_FILTER)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(sub_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo unixpipe client 1 (--key)"),
+    );
+    let sub_dialed = wait_for_substring(
+        &mut sub_reader,
+        "over unixpipe transport",
+        Duration::from_secs(10),
+    );
+    let declared = wait_for_substring(
+        &mut sub_reader,
+        "DECLARED ROUTED SUBSCRIBER",
+        Duration::from_secs(10),
+    );
+
+    // Client 2 (publisher, DISTINCT zid) dials the SAME zenohd unixpipe listener
+    // CONCURRENTLY with client 1 and bursts on a matching keyexpr; zenohd forwards
+    // it across the two dedicated sub-pipe pairs to client 1's subscriber.
+    let pub_stderr = tempfile::tempfile().expect("tempfile for wz pub stderr");
+    let pub_writer = pub_stderr.try_clone().expect("dup wz pub stderr handle");
+    let mut pub_reader = pub_stderr;
+    let mut publisher = declared.is_ok().then(|| {
+        ChildGuard::wrap(
+            "wz-ap-demo (unixpipe client 2: --publish --zid)",
+            Command::new(&demo)
+                .arg("--connect")
+                .arg(format!("unixpipe/{base}"))
+                .arg("--publish")
+                .arg(publish_key)
+                .arg("--value")
+                .arg(publish_value)
+                .arg("--zid")
+                .arg(publisher_zid)
+                .env("RUST_LOG", "info")
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(pub_writer))
+                .spawn()
+                .expect("spawn wz-ap-demo unixpipe client 2 (--publish --zid)"),
+        )
+    });
+
+    let pub_dialed = publisher.as_mut().map(|_| {
+        wait_for_substring(
+            &mut pub_reader,
+            "over unixpipe transport",
+            Duration::from_secs(10),
+        )
+    });
+    let fired = wait_for_substring(&mut sub_reader, "SUBSCRIBER FIRED", Duration::from_secs(15));
+
+    if let Some(p) = publisher.as_mut() {
+        let _ = p.child_mut().kill();
+        let _ = p.child_mut().wait();
+    }
+    let _ = sub.child_mut().kill();
+    let _ = sub.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+    cleanup(&base);
+
+    let sub_captured = read_captured(&mut sub_reader);
+    let pub_captured = read_captured(&mut pub_reader);
+    eprintln!("--- wz sub (client 1) stderr ---\n{sub_captured}");
+    eprintln!("--- wz pub (client 2) stderr ---\n{pub_captured}");
+
+    sub_dialed.unwrap_or_else(|c| {
+        panic!(
+            "wz client 1 never logged 'over unixpipe transport' within 10s — it did not dial \
+             zenohd over the unixpipe link.\n--- wz sub stderr ---\n{c}"
+        )
+    });
+    declared.unwrap_or_else(|c| {
+        panic!(
+            "wz client 1 never logged 'DECLARED ROUTED SUBSCRIBER' within 10s — the routed \
+             subscriber declare regressed.\n--- wz sub stderr ---\n{c}"
+        )
+    });
+    pub_dialed
+        .expect("client 2 was spawned once client 1 declared its subscriber")
+        .unwrap_or_else(|c| {
+            panic!(
+                "wz client 2 never logged 'over unixpipe transport' within 10s — the SECOND \
+                 concurrent wz client's unixpipe LINK never opened to zenohd.\n\
+                 --- wz pub stderr ---\n{c}"
+            )
+        });
+    let fired_text = fired.unwrap_or_else(|c| {
+        panic!(
+            "wz client 1 never logged 'SUBSCRIBER FIRED' within 15s — zenohd's multi-client \
+             unixpipe listener did not route client 2's Put across the two dedicated sub-pipe \
+             pairs to client 1's subscriber. If the pub stderr above shows 'session open failed: \
+             Terminal', the two demo instances shared a zid (both 0x01020304) and zenohd refused \
+             client 2's session — a distinct --zid is required.\n--- wz sub stderr ---\n{c}"
+        )
+    });
+    assert!(
+        fired_text.contains(publish_key),
+        "wz client 1 fired but not on the routed keyexpr '{publish_key}'.\n{fired_text}"
     );
 }

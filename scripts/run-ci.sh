@@ -5690,18 +5690,21 @@ layer_z_zenohd_interop() {
         (cd crates && WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
             --test wz_unixpipe_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
             | tee /dev/stderr | grep -q '2 passed') || return 1
-        # R311y393 — the wz<->zenohd unixpipe DATA-PLANE cross-impl (3 legs: forward
-        # wz-pub->pico-sub over the DIALED link, reverse pico-pub->wz-sub over the
-        # dialed link, and the ACCEPTOR-direction pico-pub->wz-sub across the link
-        # zenohd DIALED into wz's multi-client acceptor). The interop test above
-        # proves only the handshake; these prove a Put SAMPLE crosses the unixpipe
-        # link both ways AND across both the dialed + accepted link. Same
-        # unixpipe-zenohd oracle + the pico z_sub/z_pub checked at the lane top; same
-        # `--test-threads=1` isolation. Count-guarded (`3 passed`) so a dropped
-        # `#[ignore]` (0 selected -> exit 0) reddens instead of silently passing.
+        # R311y393/y394 — the wz<->zenohd unixpipe DATA-PLANE cross-impl (4 legs:
+        # forward wz-pub->pico-sub over the DIALED link, reverse pico-pub->wz-sub over
+        # the dialed link, the ACCEPTOR-direction pico-pub->wz-sub across the link
+        # zenohd DIALED into wz's multi-client acceptor, and R311y394's MULTI-CLIENT
+        # leg -- TWO concurrent wz clients on ONE zenohd unixpipe listener, a Put
+        # routed between them across zenohd's two dedicated sub-pipe pairs). The
+        # interop test above proves only the handshake; these prove a Put SAMPLE
+        # crosses the unixpipe link both ways, across both the dialed + accepted link,
+        # AND between two concurrent clients. Same unixpipe-zenohd oracle + the pico
+        # z_sub/z_pub checked at the lane top; same `--test-threads=1` isolation.
+        # Count-guarded (`4 passed`) so a dropped `#[ignore]` (0 selected -> exit 0)
+        # reddens instead of silently passing.
         (cd crates && WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
             --test wz_unixpipe_zenohd_dataplane -- --ignored --quiet --test-threads=1 2>&1 \
-            | tee /dev/stderr | grep -q '3 passed') || return 1
+            | tee /dev/stderr | grep -q '4 passed') || return 1
     elif [[ -n "${WZ_Z_REQUIRE:-}" ]]; then
         echo "  Layer Z FAIL — required (WZ_Z_REQUIRE set) but unixpipe zenohd absent" >&2
         echo "  ($zenohd_uxp; run: ZENOHD_UNIXPIPE=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" >&2
