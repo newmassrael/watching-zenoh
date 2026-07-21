@@ -167,113 +167,16 @@ jobs:
             crates -> target
             vendor/sce -> target
 
-      - name: Install protoc (mnemosyne-server build-script dep)
-        # R64.3 hotfix: cargo install of mnemosyne-cli pulls in the
-        # mnemosyne-server workspace member transitively; that crate's
-        # build script invokes prost-build which requires the
-        # `protoc` binary on PATH. The R64.2 install attempt passed
-        # cargo's argument parser but failed at build-script time
-        # with `Could not find protoc. ... apt-get install protobuf-compiler`.
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
-
-      - name: Install mnemosyne-cli (pinned)
-        # Delegated to scripts/install-mnemosyne-cli.sh (the single source
-        # of truth shared with release.yml) so the two workflows cannot
-        # drift. The script pins a known-good rev (deterministic — a future
-        # upstream `main` change cannot silently break this CI) and
-        # `--force`-rebuilds it, overriding any stale ~/.cargo/bin the
-        # rust-cache restored (the R408 `missing field docs` failure mode).
-        # The `|| { skip }` fallback keeps Layer A optional if the external
-        # install fails (network / upstream outage), GitHub-Actions-specific
-        # so it stays in the step, not the CI-agnostic script.
-        run: |
-          bash scripts/install-mnemosyne-cli.sh || {
-            echo "::warning::mnemosyne-cli install failed; Layer A skipped"
-            echo "MNEMOSYNE_SKIP=1" >> "$GITHUB_ENV"
-          }
-
-      - name: Build sce-codegen (vendor/sce)
-        run: bash scripts/build-sce.sh
-
-      # R408 (2026-06-04) retired the GENERATED.md render and the
-      # `generate-docs` cascade upstream (mnemosyne R395-R400): the
-      # atomic store is now the single directly-validated artifact, so
-      # there is no GENERATED.md to regenerate before Layer A. The former
-      # "Regenerate docs/GENERATED.md" step invoked `mnemosyne-cli
-      # generate-docs`, which now hard-errors (`mnemosyne.toml` no longer
-      # carries `[workspace].docs`) and broke every push; it is removed.
-      # validate-workspace (Layer A) runs store-direct and needs no
-      # pre-cascade.
-
-      # R65b dedupe: every Layer lane below delegates to
-      # scripts/run-ci.sh --layer X. The lane bodies (codec map,
-      # divergence allowlist, cargo invocations, deploy schema
-      # check) live in a single source of truth that both CI and
-      # the local pre-push hook (.githooks/pre-push) invoke, so
-      # the two paths cannot drift. Previously the CI yaml
-      # duplicated ~50 lines of lane logic that pre-push did not
-      # mirror; R64.1-R64.4 retrospect made that drift the
-      # process-level problem worth solving.
-
-      - name: Layer A — Mnemosyne workspace validate
-        if: env.MNEMOSYNE_SKIP != '1'
-        run: bash scripts/run-ci.sh --layer A
-
-      - name: Layer A2 — Envelope mid value= audit
-        # R117 yml sync — Layer A2 was added to scripts/run-ci.sh in
-        # R111 but never paired into the CI yml; this step closes
-        # that drift. Layer B's freshness gate (R114) lives INSIDE
-        # `--layer B` so CI gets it automatically; only A2 needed a
-        # separate yml step because it is a top-level layer.
-        run: bash scripts/run-ci.sh --layer A2
-
-      - name: Layer A3 — catalog status truthfulness
-        # Joins the Mnemosyne inventory catalog SSOT to the cargo-feature
-        # gate reality; rejects a reserved-but-gated / active-but-ungated
-        # status drift that neither the cargo-feature CI lanes nor
-        # validate-workspace can see. Top-level layer, so it needs its
-        # own yml step (same reason as A2).
-        #
-        # R311y299 — WZ_A3_REQUIRE=1, for the same reason A4 got it in
-        # R311y266 (and A3 should have got it then): a missing mnemosyne-cli
-        # disarmed this gate ENTIRELY and exited 0, while the install step
-        # above is deliberately fault-tolerant. The tool IS provisioned here,
-        # so its absence is a provisioning regression, not an honest skip.
-        env:
-          WZ_A3_REQUIRE: "1"
-        run: bash scripts/run-ci.sh --layer A3
-
-      - name: Layer A4 — cross-impl proof axis
-        # R311y259. A3 answers "is there a knob?" and "is it built?"; A4
-        # answers "is it PROVEN against a real foreign implementation?" —
-        # the question the north star ("zenoh + zenoh-pico FULL") actually
-        # turns on. Joins the catalog to the interop corpus (derived from
-        # the harness call graph) and to cargo's feature closure (which
-        # mechanically refutes a claim for code that is not compiled in).
-        # Top-level layer, so it needs its own yml step (same reason as A2).
-        #
-        # R311y266 — WZ_A4_REQUIRE=1: a missing mnemosyne-cli would otherwise
-        # disarm this gate ENTIRELY and exit 0, and the install step above is
-        # deliberately fault-tolerant (`|| warning; skip`), so one network blip
-        # would leave every invariant unchecked on a green build. Here the tool
-        # is provisioned, so its absence is a provisioning regression, not an
-        # honest skip — fail loudly instead.
-        env:
-          WZ_A4_REQUIRE: "1"
-        run: bash scripts/run-ci.sh --layer A4
-
-      - name: Layer B — verify-codegen.sh per codec
-        run: bash scripts/run-ci.sh --layer B
-
-      - name: Layer B2 — regen-diff (committed out/** == regenerated)
-        # R311y22e — server-enforce the committed-codegen freshness gate. It
-        # regenerates out/** via the `xtask` codegen SSOT and FAILs on any diff,
-        # so a hand-edited or stale committed artifact cannot land. R311y22a-d
-        # left this gate in the pre-push hook ONLY (bypassable via --no-verify /
-        # an uninstalled hook); R311y22e promotes it to a real CI step. The
-        # Linux `ci` job already has libxml2 + builds sce-codegen above (the Build
-        # sce-codegen step + Layer B), so the xtask's codegen toolchain is present.
-        run: bash scripts/run-ci.sh --layer B2
+      # Layers A/A2/A3/A4 + B/B2 and their two heavy tool installs
+      # (mnemosyne-cli ~88s, sce-codegen build ~121s) were SPLIT into the
+      # parallel `validate-codegen` job (R311y385) — none of them compiles
+      # crates/target, so the C/E test lanes below lose no warm-target reuse
+      # and this job's critical path sheds ~349s plus both installs. Same
+      # rationale as this file's interop and footprint splits.
+      #
+      # Every Layer lane below delegates to scripts/run-ci.sh --layer X, the
+      # single source of truth the local pre-push hook also invokes, so the
+      # two paths cannot drift (R65b).
 
       - name: Layer C0 — binary-dep test #[ignore] discipline
         # R235-hotfix — pre-flight scan: any wz-integration-tests
@@ -436,6 +339,97 @@ jobs:
         # faces (producer -> router -> matching subscriber). Self-contained
         # wz<->wz, no external runner like E3/E4.
         run: bash scripts/run-ci.sh --layer E5
+
+  # ─────────────────────────────────────────────────────────────────
+  # R311y385 — the VALIDATE + CODEGEN job. Layers A/A2/A3/A4 (Mnemosyne
+  # workspace validate + catalog/cross-impl truthfulness) and B/B2
+  # (per-codec verify-codegen + committed out/** regen-diff) ran as the
+  # first ~349s of the `ci` job, GATED behind its two heaviest provisioning
+  # steps: Install mnemosyne-cli (~88s, used ONLY by Layer A/A3/A4) and
+  # Build sce-codegen (~121s, used ONLY by Layer B/B2). Neither tool, and
+  # none of these layers, compiles crates/target — A3/A4 text-parse
+  # Cargo.toml + cfg sites, Layer B runs the vendor/sce binary, B2 builds
+  # xtask into its own target — so peeling them here costs the reduced `ci`
+  # job ZERO warm-target reuse across its C/E test lanes while removing both
+  # tool installs from the critical path. Baseline: the `ci` job was 14m49s
+  # with this block inline; the block is ~473s (cold) here in parallel, so
+  # the workflow critical path drops to the reduced `ci` (~9m). Same split
+  # rationale as this file's interop and footprint (Layer F) jobs — "must
+  # not eat the primary job's budget".
+  validate-codegen:
+    name: validate + codegen (Layers A + B)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (with submodules)
+        # fetch-depth: 0 mirrors the `ci` job (Layer A ran there historically
+        # with full history); submodules: recursive is load-bearing — Build
+        # sce-codegen resolves through vendor/sce.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        # cmake + libclang-dev for the sce-codegen / xtask (Layer B/B2)
+        # toolchain; perl for verify-codegen.sh Layer 2 include sort.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            libclang-dev \
+            clang \
+            perl
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # Distinct key from `ci` — this job's build set (sce-codegen +
+        # xtask) differs, and a shared key across differing sets thrashes
+        # (same reason footprint / interop carry their own keys).
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+          key: validate-codegen
+
+      - name: Install protoc (mnemosyne-server build-script dep)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Install mnemosyne-cli (pinned)
+        run: |
+          bash scripts/install-mnemosyne-cli.sh || {
+            echo "::warning::mnemosyne-cli install failed; Layer A skipped"
+            echo "MNEMOSYNE_SKIP=1" >> "$GITHUB_ENV"
+          }
+
+      - name: Build sce-codegen (vendor/sce)
+        run: bash scripts/build-sce.sh
+
+      - name: Layer A — Mnemosyne workspace validate
+        if: env.MNEMOSYNE_SKIP != '1'
+        run: bash scripts/run-ci.sh --layer A
+
+      - name: Layer A2 — Envelope mid value= audit
+        run: bash scripts/run-ci.sh --layer A2
+
+      - name: Layer A3 — catalog status truthfulness
+        env:
+          WZ_A3_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer A3
+
+      - name: Layer A4 — cross-impl proof axis
+        env:
+          WZ_A4_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer A4
+
+      - name: Layer B — verify-codegen.sh per codec
+        run: bash scripts/run-ci.sh --layer B
+
+      - name: Layer B2 — regen-diff (committed out/** == regenerated)
+        run: bash scripts/run-ci.sh --layer B2
 
   # ─────────────────────────────────────────────────────────────────
   # R311y351 — the CODEC-FOOTPRINT job. Layer F ran as the `ci` job's last
