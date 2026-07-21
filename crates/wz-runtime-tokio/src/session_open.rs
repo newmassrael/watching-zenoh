@@ -654,21 +654,34 @@ pub enum BoundListener {
 ///
 /// [`Display`](std::fmt::Display) renders the "accepted peer {..}" log line the
 /// one-shot [`accept_bound`] writes. The multi-peer
-/// [`accept_loop`](crate::accept_loop) keys mesh faces on the IP `SocketAddr`
-/// (`Face.peer`, zid-dedup, gossip locators), so a [`Self::NonIp`] peer has no
-/// routable locator and is one-shot-accept-only until the mesh graph
-/// generalizes — the loop rejects it with a typed `Unsupported` rather than
-/// holding an unroutable face.
+/// [`accept_loop`](crate::accept_loop) holds a mesh face per accepted peer keyed
+/// by its handshake zid, NOT by the transport address: an [`Self::Ip`] peer AND a
+/// mesh-capable [`Self::NonIp`] peer (unixsock / vsock — a genuine per-peer stream
+/// accept) both become held ZID-keyed faces (Slice B). Only a NON-mesh-capable
+/// acceptor is rejected by the loop — see
+/// [`AcceptedLink::supports_mesh_multi_peer`] (today only unixpipe, whose current
+/// single-connection non-blocking acceptor cannot feed a multi-accept loop; that
+/// is a wz acceptor-implementation gap, not a transport-inherent 1:1 — zenoh's
+/// `UnicastPipeListener` is multi-client, see `unixpipe_pipeline`).
+///
+/// `Clone`/`Debug`/`Eq` so it can ride [`Face`](crate::accept_loop::Face)`.peer`
+/// (the field the loop threads through `FaceUp`/`FaceDown`/`FaceFailed`) and the
+/// `#[derive(Debug)]` on [`AcceptEvent`](crate::accept_loop::AcceptEvent).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AcceptedPeer {
     /// The IP address of an accepted peer with a routable transport address —
     /// the stream family (tcp/ws/tls, the accepted `TcpStream`'s peer) and udp
-    /// (the datagram SOURCE the demux pump keyed the face on, R311y382). Unlike
-    /// the non-IP families this keys a mesh face.
+    /// (the datagram SOURCE the demux pump keyed the face on, R311y382). Its
+    /// `SocketAddr` is the face's log/event tag; the mesh keys the face on the
+    /// handshake zid, not this address.
     Ip(std::net::SocketAddr),
     /// A non-IP transport peer (unixsock / vsock / unixpipe) — wz does not thread
-    /// the accepted peer address (unix: genuinely unnamed; vsock: a real cid:port
-    /// it drops; unixpipe: a FIFO open has no peer at all), so the payload is the
-    /// transport name for the log line.
+    /// the accepted peer address (unix: genuinely unnamed; vsock: a
+    /// real cid:port it drops; unixpipe: a FIFO open has no peer at all), so the
+    /// payload is the transport name for the log line. A mesh-capable non-IP
+    /// acceptor (unixsock / vsock) is held as a ZID-keyed mesh face (Slice B); the
+    /// face's identity is the handshake zid, so the discarded transport address
+    /// does not matter to routing.
     NonIp(&'static str),
 }
 
@@ -1050,6 +1063,47 @@ impl AcceptedLink {
             #[cfg(feature = "transport-link-udp")]
             AcceptedLink::UdpDemuxed { inputs, peer } => DialedLink::UdpDemuxed { inputs, peer },
         })
+    }
+
+    /// Whether this accepted link's transport is a MESH-CAPABLE acceptor — i.e.
+    /// wz's CURRENT accept path for it yields multiple DISTINCT per-peer accepted
+    /// connections, so the multi-accept [`accept_loop`](crate::accept_loop) can
+    /// hold N faces off one listener. Every variant is `true` EXCEPT `Unixpipe`.
+    ///
+    /// `Unixpipe` is `false` NOT because unixpipe is inherently 1:1 — zenoh's
+    /// `UnicastPipeListener` is multi-client (an invitation handshake + a
+    /// per-connection dedicated sub-pipe pair) and wz's own `unixpipe_pipeline`
+    /// documents that multi-client acceptor as a future extension. It is `false`
+    /// because wz's CURRENT `accept_unixpipe_on` is a single-connection,
+    /// NON-BLOCKING FIFO open that returns at once whether or not a peer dialed:
+    /// fed to a multi-accept loop it would spin (the R311y380 throttle bounds the
+    /// symptom). When the multi-client unixpipe acceptor lands, this flips to
+    /// `true` and unixpipe joins the mesh through the SAME generalized loop.
+    ///
+    /// This is the loop's RUNTIME backstop (consulted in the `Step::Accepted` arm
+    /// of [`accept_loop`](crate::accept_loop)). A BIND-time twin on
+    /// [`BoundListener`] — for a mesh CALLER fail-fast that rejects a
+    /// non-mesh-capable `--listen` at bind rather than letting the loop
+    /// reject-loop each accept — is a follow-up slice. This match is wildcard-free
+    /// so a new `AcceptedLink` variant forces an explicit mesh decision here.
+    pub fn supports_mesh_multi_peer(&self) -> bool {
+        match self {
+            AcceptedLink::Tcp(_) => true,
+            #[cfg(feature = "transport-link-ws")]
+            AcceptedLink::Ws(_) => true,
+            #[cfg(feature = "transport-link-tls")]
+            AcceptedLink::Tls(..) => true,
+            #[cfg(feature = "transport-link-unixsock")]
+            AcceptedLink::Unixsock(_) => true,
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            AcceptedLink::Vsock(_) => true,
+            // The only non-mesh-capable acceptor today (see the doc): wz's current
+            // single-connection non-blocking unixpipe accept, NOT a transport truth.
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            AcceptedLink::Unixpipe(_) => false,
+            #[cfg(feature = "transport-link-udp")]
+            AcceptedLink::UdpDemuxed { .. } => true,
+        }
     }
 
     /// The one-shot [`accept_bound`]'s "accepted peer {peer}{note}" log suffix —

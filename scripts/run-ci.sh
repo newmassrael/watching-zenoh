@@ -2251,11 +2251,22 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
 # default set, so a future `--no-default-features` edit to step 1 cannot silently
 # cfg it out) with a `1 passed` count-guard that reddens on a silent 0-tests (the
 # "proof that never runs" trap) — the C1al precedent for the off-default arm.
+#
+# Slice B (non-IP mesh): step 1b runs the ENABLEMENT discriminator
+# `mesh_accept_loop_holds_two_unixsock_peers` (two unixsock clients held as
+# ZID-keyed faces off one listener; RED pre-Slice-B, where every NonIp accept was
+# rejected) under an EXPLICIT `routing-accept,transport-link-unixsock` with the
+# same `1 passed` count-guard. transport-link-unixsock is OFF-default, so without
+# this the test is cfg-compiled-OUT (the y380 trap). The added clippy step gates
+# `--all-targets --features routing-accept,transport-link-unixsock`, which is the
+# ONLY lane that compiles the `Step::Accepted` non-IP arm + the new tests.
 layer_c1w_cargo_test_routing_accept() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-accept --lib accept_loop --quiet \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-udp --lib mesh_accept_loop_holds_two_udp_peers --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixsock --lib mesh_accept_loop_holds_two_unixsock_peers --quiet 2>&1 | grep -q '1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixsock --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-accept --quiet -- -D warnings)
 }
 
