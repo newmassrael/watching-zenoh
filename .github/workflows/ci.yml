@@ -474,10 +474,30 @@ jobs:
   # and all of it is disk. That load now leaves the job that overflowed on
   # y296.
   footprint:
-    name: codec-footprint catalog truthfulness (Layer F)
+    name: codec-footprint Layer F (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-22.04
-    # F alone is ~13min; the cap is the `ci` job's, deliberately — this job
-    # exists so the two budgets are independent, not so this one is generous.
+    # R311y388 — SHARDED. F was ~13min as ONE job (13 codec lanes + baseline +
+    # minus-all-codecs + handshake-only, each a release+LTO build in its own
+    # --target-dir). It is now a matrix: each shard builds baseline + its
+    # round-robin codec subset (idx % SHARDS == shard) and thresholds those;
+    # shard 0 additionally runs the two whole-catalog lanes (minus-all-codecs,
+    # handshake-only). Wall-clock drops to ~the slowest shard (shard 0 ≈ 7
+    # lanes vs 16 serial). The per-lane build is byte-identical to before —
+    # only the SET of lanes per runner shrank — so the byte gate is unchanged.
+    #
+    # DROP-PROOF INVARIANT (co-located on purpose): `shard` MUST list exactly
+    # [0 .. WZ_FOOTPRINT_SHARDS-1]. The modulo partition covers every codec iff
+    # ALL N shards run; measure-codec-footprint.sh asserts SHARD < SHARDS and
+    # logs its codec subset, but it CANNOT see a missing shard. Change the
+    # matrix list and WZ_FOOTPRINT_SHARDS together, or a codec silently stops
+    # being byte-gated ("a skip is green").
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      WZ_FOOTPRINT_SHARDS: "4"
+      WZ_FOOTPRINT_SHARD: ${{ matrix.shard }}
     timeout-minutes: 30
     steps:
       - name: Checkout (with submodules)
@@ -521,16 +541,16 @@ jobs:
         # dependency graph every run. The build half it does not, and the name
         # says so deliberately — `workspaces: crates -> target` covers
         # `crates/target`, while every Layer F lane builds into
-        # `target/measure-codec-footprint/<lane>`. So this job's ~13min is a
-        # COLD number and stays one; the split, not a cache, is what bought the
-        # headroom. Caching that tree is a separate question with its own risk
-        # (this is the gate that measures bytes) and is not bundled in here.
-        # Distinct `key` for the same reason `interop` carries one: a shared key
-        # across jobs with different build sets thrashes.
+        # `target/measure-codec-footprint/<lane>`. So each shard's wall-clock is
+        # a COLD number and stays one; the R311y388 shard split, not a cache, is
+        # what bought the headroom. Caching that tree is a separate question with
+        # its own risk (this is the gate that measures bytes) and is not bundled
+        # in here. Per-shard `key` so the parallel matrix jobs don't race one
+        # cache save (same reason `interop` carries a distinct key).
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates -> target
-          key: footprint
+          key: footprint-shard-${{ matrix.shard }}
 
       - name: Layer F — codec-footprint catalog truthfulness gate
         # R311pt — F is host-only (python3 + cargo; no cross-toolchain).

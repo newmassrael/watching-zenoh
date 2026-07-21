@@ -156,6 +156,39 @@ while IFS= read -r f; do
     [[ "$f" == codec-* ]] && CODEC_FEATURES+=("$f")
 done <<< "$PRESET_FEATURES"
 
+# R311y388 — optional shard filter for parallel Layer F.
+# WZ_FOOTPRINT_SHARDS=n + WZ_FOOTPRINT_SHARD=i (0-based) restrict THIS run to
+# the codec lanes whose index % n == i (round-robin). Shards 0..n-1 PARTITION
+# the full codec set with no gap and no overlap, so a CI matrix over [0..n-1]
+# measures every codec exactly once (drop-proof: the modulo partition is a
+# property of the codec SET parsed above, independent of the matrix — the only
+# way to miss a codec is to run fewer than n shards, a static ci.yml invariant
+# co-located with WZ_FOOTPRINT_SHARDS). The baseline is (re)built on every
+# shard because every codec delta is computed against it. minus-all-codecs +
+# handshake-only are whole-catalog lanes (they exclude the FULL codec set, not a
+# per-codec one) and run ONLY on shard 0. Unset / SHARDS<=1 => run every lane
+# (unchanged local + default behavior).
+FULL_CODEC_FEATURES=("${CODEC_FEATURES[@]}")
+FOOTPRINT_SHARDS="${WZ_FOOTPRINT_SHARDS:-1}"
+FOOTPRINT_SHARD="${WZ_FOOTPRINT_SHARD:-0}"
+if [[ "$FOOTPRINT_SHARDS" -gt 1 ]]; then
+    if [[ "$FOOTPRINT_SHARD" -lt 0 || "$FOOTPRINT_SHARD" -ge "$FOOTPRINT_SHARDS" ]]; then
+        echo "measure-codec-footprint: WZ_FOOTPRINT_SHARD=$FOOTPRINT_SHARD out of range [0,$FOOTPRINT_SHARDS)" >&2
+        exit 2
+    fi
+    sharded=()
+    for i in "${!FULL_CODEC_FEATURES[@]}"; do
+        if [[ $(( i % FOOTPRINT_SHARDS )) -eq "$FOOTPRINT_SHARD" ]]; then
+            sharded+=("${FULL_CODEC_FEATURES[$i]}")
+        fi
+    done
+    CODEC_FEATURES=("${sharded[@]}")
+    echo "=== Layer F shard $FOOTPRINT_SHARD/$FOOTPRINT_SHARDS:" \
+         "${#CODEC_FEATURES[@]} of ${#FULL_CODEC_FEATURES[@]} codec lanes" \
+         "[${CODEC_FEATURES[*]}]" \
+         "$([[ $FOOTPRINT_SHARD -eq 0 ]] && echo '+ minus-all + handshake')" "==="
+fi
+
 measure "baseline" "$(build_feature_list '')"
 
 # R311n — each minus-$codec lane excludes the codec + its transitive
@@ -168,16 +201,19 @@ for codec in "${CODEC_FEATURES[@]}"; do
     measure "minus-$codec" "$(build_feature_list "$excludes")"
 done
 
-# minus-all-codecs: union of every codec's puller set.
+# minus-all-codecs: union of EVERY codec's puller set (the FULL catalog, not
+# the shard subset). R311y388: a whole-catalog lane, so it runs only on shard 0.
 ALL_CODEC_EXCLUDES=""
-for codec in "${CODEC_FEATURES[@]}"; do
+for codec in "${FULL_CODEC_FEATURES[@]}"; do
     var_name="PULLERS_${codec//-/_}"
     pullers="${!var_name:-$codec}"
     ALL_CODEC_EXCLUDES+=" $pullers"
 done
 # Dedupe via `tr` + `sort -u`.
 ALL_CODEC_EXCLUDES=$(echo "$ALL_CODEC_EXCLUDES" | tr ' ' '\n' | sort -u | tr '\n' ' ')
-measure "minus-all-codecs" "$(build_feature_list "$ALL_CODEC_EXCLUDES")"
+if [[ "$FOOTPRINT_SHARD" -eq 0 ]]; then
+    measure "minus-all-codecs" "$(build_feature_list "$ALL_CODEC_EXCLUDES")"
+fi
 
 # R311n — handshake-only lane. Start from preset-ap-client and
 # exclude EVERY body codec (push / declare / request / response /
@@ -232,11 +268,11 @@ while IFS= read -r f; do
         HANDSHAKE_EXCLUDES+=" $f"
     fi
 done <<< "$PRESET_FEATURES"
-measure "handshake-only" "$(build_feature_list "$HANDSHAKE_EXCLUDES")"
+if [[ "$FOOTPRINT_SHARD" -eq 0 ]]; then
+    measure "handshake-only" "$(build_feature_list "$HANDSHAKE_EXCLUDES")"
+fi
 
 baseline=$(cat "$TARGET_DIR_BASE/.baseline.size")
-minus_all=$(cat "$TARGET_DIR_BASE/.minus-all-codecs.size")
-handshake_only=$(cat "$TARGET_DIR_BASE/.handshake-only.size")
 
 format_delta() {
     local size="$1"
@@ -248,14 +284,18 @@ format_delta() {
 }
 
 echo ""
-echo "=== Footprint deltas (baseline minus configuration) ==="
+echo "=== Footprint deltas (baseline minus configuration) — shard $FOOTPRINT_SHARD/$FOOTPRINT_SHARDS ==="
 printf "  baseline:                     %10s bytes\n" "$baseline"
 for codec in "${CODEC_FEATURES[@]}"; do
     size=$(cat "$TARGET_DIR_BASE/.minus-$codec.size")
     printf "  minus %-24s %s\n" "$codec:" "$(format_delta "$size")"
 done
-printf "  minus-all-codecs delta:       %s\n" "$(format_delta "$minus_all")"
-printf "  handshake-only delta:         %s\n" "$(format_delta "$handshake_only")"
+if [[ "$FOOTPRINT_SHARD" -eq 0 ]]; then
+    minus_all=$(cat "$TARGET_DIR_BASE/.minus-all-codecs.size")
+    handshake_only=$(cat "$TARGET_DIR_BASE/.handshake-only.size")
+    printf "  minus-all-codecs delta:       %s\n" "$(format_delta "$minus_all")"
+    printf "  handshake-only delta:         %s\n" "$(format_delta "$handshake_only")"
+fi
 
 # R311n — threshold-based regression gate. Each codec-* feature is
 # expected to produce a minimum elision delta when its puller-aware
