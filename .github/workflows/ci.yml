@@ -54,6 +54,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # CI runners are EPHEMERAL (fresh checkout per run, no target-dir reuse),
+  # so incremental compilation builds per-crate incremental state that is
+  # never reused -- pure overhead across the ~200-combo feature matrix.
+  # Disable it on CI only (the workflow env, NOT run-ci.sh, so local dev keeps
+  # incremental's edit-rebuild benefit). A/B: compare the next run's
+  # `validate + verify + test` job wall-clock against the ~14m49s baseline.
+  CARGO_INCREMENTAL: "0"
   # The vendored SCE submodule + zenoh-pico submodule both need fetch.
   # checkout v4's submodule support honors .gitmodules per the
   # `submodules: recursive` flag below.
