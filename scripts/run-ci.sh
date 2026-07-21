@@ -5792,6 +5792,35 @@ layer_e5_router_forward() {
         --test wz_router_routes_pico_interop -- --ignored --test-threads=1 --quiet) || return 1
 }
 
+# ─── Layer E5u — router data-plane FORWARDING e2e OVER UNIXPIPE (R311y395) ──
+#
+# The ACCEPTOR-concurrency counterpart of R311y394 (the Layer Z dialer-concurrency
+# leg where two wz clients dialed ONE zenohd unixpipe listener): here WZ is the
+# multi-client routing LISTENER over IPC. A `wz-ap-demo --router unixpipe/<base>`
+# built with `--features routing-routes,transport-link-unixpipe` holds TWO
+# concurrent `--connect unixpipe/<base>` clients and forwards a Put across their
+# faces to a matching subscriber — the exact transport-mirror of Layer E5's TCP
+# `wz_router_forward`. Self-contained wz<->wz (NO external zenohd / pico oracle),
+# so it lives in the primary `ci` job beside E5, NOT the zenohd Layer Z. The
+# `routing-routes,transport-link-unixpipe` build is NOT produced by any other lane
+# (E5 lacks unixpipe; Layer Z's demo build lacks routing-routes), so this lane
+# builds its own binary. The test fn is `#![cfg(target_os = "linux")]` (unixpipe is
+# Linux-only) and starts `wz_router_`, so the default Layer E sweep's `--skip
+# wz_router` already excludes it from the oracle-less arbitrary-feature run. The
+# `grep -q '1 passed'` count-guard reddens on a dropped #[ignore] (0 selected ->
+# exit 0) the same way the Layer Z dataplane guard does.
+layer_e5u_router_unixpipe_forward() {
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        echo "Layer E5u SKIP (unixpipe is Linux-only; host is $(uname -s))"
+        return 0
+    fi
+    (cd crates && cargo build -p wz-ap-demo \
+        --features routing-routes,transport-link-unixpipe --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_unixpipe_forward -- --ignored --test-threads=1 --quiet 2>&1 \
+        | tee /dev/stderr | grep -q '1 passed') || return 1
+}
+
 # ─── Layer E6 — peer-MESH e2e (R311qg) ─────────────────────────────
 #
 # The dial+accept counterpart to Layer E3's accept-only hold: a `wz-ap-demo
@@ -6437,6 +6466,7 @@ run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1
 run_layer E4 layer_e4_router_reject || overall=1
 run_layer E5 layer_e5_router_forward || overall=1
+run_layer E5u layer_e5u_router_unixpipe_forward || overall=1
 run_layer E6 layer_e6_peer_mesh || overall=1
 run_layer E6b layer_e6b_adminspace_introspection || overall=1
 run_layer E6c layer_e6c_peer_multilink || overall=1

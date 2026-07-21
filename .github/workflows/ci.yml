@@ -340,6 +340,16 @@ jobs:
         # wz<->wz, no external runner like E3/E4.
         run: bash scripts/run-ci.sh --layer E5
 
+      - name: Layer E5u — router forwarding e2e OVER UNIXPIPE (routing-routes)
+        # R311y395 — the acceptor-concurrency counterpart of the Layer Z
+        # dialer-concurrency leg: builds wz-ap-demo with --features
+        # routing-routes,transport-link-unixpipe and asserts a wz --router
+        # unixpipe/<base> forwards a Put between TWO concurrent --connect
+        # unixpipe clients (wz is the multi-client routing listener over IPC).
+        # Self-contained wz<->wz, no external oracle; unixpipe is Linux-only and
+        # this runner is ubuntu, so the lane's Linux guard never SKIPs here.
+        run: bash scripts/run-ci.sh --layer E5u
+
   # ─────────────────────────────────────────────────────────────────
   # R311y385 — the VALIDATE + CODEGEN job. Layers A/A2/A3/A4 (Mnemosyne
   # workspace validate + catalog/cross-impl truthfulness) and B/B2
