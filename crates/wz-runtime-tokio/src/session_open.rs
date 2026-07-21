@@ -717,6 +717,44 @@ impl BoundListener {
         }
     }
 
+    /// Whether this bound listener's acceptor is MESH-CAPABLE — i.e. wz's CURRENT
+    /// accept path for it yields multiple DISTINCT per-peer connections, so the
+    /// multi-accept [`accept_loop`](crate::accept_loop) can hold N faces off it.
+    /// The BIND-time twin of [`AcceptedLink::supports_mesh_multi_peer`] (the loop's
+    /// RUNTIME backstop, consulted per-accept in `Step::Accepted`): the two match
+    /// the SAME transport to the SAME verdict, and a mesh CALLER (run_router)
+    /// consults THIS one to fail-fast a non-mesh-capable `--listen` at bind rather
+    /// than let the loop reject-throttle each accept forever (0 faces held). Every
+    /// variant is `true` EXCEPT `Unixpipe`.
+    ///
+    /// `Unixpipe` is `false` NOT because unixpipe is inherently 1:1 — zenoh's
+    /// `UnicastPipeListener` is multi-client — but because wz's CURRENT
+    /// `accept_unixpipe_on` is a single-connection, NON-BLOCKING FIFO open (see
+    /// [`AcceptedLink::supports_mesh_multi_peer`] for the full rationale). When the
+    /// multi-client unixpipe acceptor lands, BOTH twins flip to `true` together.
+    /// This match is wildcard-free so a new `BoundListener` variant forces an
+    /// explicit mesh decision here (and its twin above).
+    pub fn supports_mesh_multi_peer(&self) -> bool {
+        match self {
+            BoundListener::Tcp(_) => true,
+            #[cfg(feature = "transport-link-ws")]
+            BoundListener::Ws(_) => true,
+            #[cfg(feature = "transport-link-tls")]
+            BoundListener::Tls(..) => true,
+            #[cfg(feature = "transport-link-unixsock")]
+            BoundListener::Unixsock(_) => true,
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            BoundListener::Vsock(_) => true,
+            // The only non-mesh-capable acceptor today (see the doc + the
+            // `AcceptedLink` twin): wz's current single-connection non-blocking
+            // unixpipe accept, NOT a transport-inherent 1:1.
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            BoundListener::Unixpipe(_) => false,
+            #[cfg(feature = "transport-link-udp")]
+            BoundListener::Udp(_) => true,
+        }
+    }
+
     /// Log the "listening on {addr} ({transport})" line — observable before any
     /// peer connects (the race-free bind/accept split [`bind_tcp`] established).
     /// Composes [`Self::local_addr_display`] (the per-variant address) with
@@ -3362,5 +3400,50 @@ mod tests {
                 Ok(_) => panic!("{s} must not accept (accept only wired for tcp)"),
             }
         }
+    }
+
+    /// CALLER fail-fast slice — pins the BIND-time mesh-capability predicate
+    /// ([`BoundListener::supports_mesh_multi_peer`], the twin `run_router`
+    /// consults at bind) at the TRUE polarity: a tcp listener is mesh-capable.
+    /// The match is wildcard-free, so a NEW `BoundListener` variant forces a
+    /// compile-time decision; this pins the value for tcp (a representative
+    /// `true`). The FALSE-polarity twin is
+    /// `boundlistener_unixpipe_is_not_mesh_capable`.
+    #[tokio::test]
+    async fn boundlistener_tcp_is_mesh_capable() {
+        let l = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
+            .await
+            .expect("bind tcp");
+        let listener = BoundListener::Tcp(l);
+        assert!(
+            listener.supports_mesh_multi_peer(),
+            "a tcp listener is mesh-capable (N per-peer accepts off one listener)"
+        );
+    }
+
+    /// CALLER fail-fast slice — the FALSE-polarity twin of
+    /// `boundlistener_tcp_is_mesh_capable`: a unixpipe listener is NOT
+    /// mesh-capable (its CURRENT single-connection non-blocking acceptor cannot
+    /// feed a multi-accept loop — a wz acceptor gap, not a transport-inherent
+    /// 1:1). This is exactly the case `run_router`'s bind-time fail-fast rejects;
+    /// the `mkfifo` needs no dialer, so the `BoundListener::Unixpipe` is
+    /// constructible standalone (`bind_unixpipe` is sync — no runtime needed).
+    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    #[test]
+    fn boundlistener_unixpipe_is_not_mesh_capable() {
+        use crate::unixpipe_pipeline::bind_unixpipe;
+        let base = std::env::temp_dir()
+            .join(format!("wz-boundlistener-cap-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let paths = bind_unixpipe(&base).expect("mkfifo the unixpipe rendezvous pair");
+        let listener = BoundListener::Unixpipe(paths);
+        assert!(
+            !listener.supports_mesh_multi_peer(),
+            "a unixpipe listener is NOT mesh-capable (single-connection acceptor)"
+        );
+        drop(listener);
+        let _ = std::fs::remove_file(format!("{base}_uplink"));
+        let _ = std::fs::remove_file(format!("{base}_downlink"));
     }
 }

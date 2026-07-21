@@ -152,6 +152,22 @@ ws = ["wz/locator-ws"]
 # against zenohd's `unixsock-stream/` listener (zenoh-pico has no unixsock link,
 # so pico dials TCP and zenohd routes between the two).
 unixsock = ["wz/locator-unixsock"]
+# R311y390 (CALLER fail-fast slice) — opt-in `unixpipe/` (Unix named-pipe)
+# ACCEPT transport, forwarding the wz facade's `transport-link-unixpipe`. Unlike
+# the dial-side `ws`/`unixsock`/`tls`/`quic` passthroughs above, its ONLY purpose
+# in the demo is to make the mesh router's CALLER fail-fast REACHABLE: with it,
+# `--router unixpipe/<path>` BINDS a single-connection unixpipe listener, which
+# `run_router` then rejects at bind (a mesh router holds N faces; a unixpipe
+# acceptor is 1:1 today). WITHOUT it, the `unixpipe/` scheme still PARSES (the
+# locator leaf is ungated in wz-session-core), but `bind_locator` returns a
+# feature-gated `Unsupported` at bind because the accept backend is not compiled,
+# so `bind_endpoint("unixpipe/..").await?` errors BEFORE the mesh-capability guard
+# (dead code). NOT in `default` (preset-ap-client is TCP-only), so the footprint
+# baseline and every other lane build are unchanged; only the run-ci C1w-style
+# lane builds wz-ap-demo with it to run the fail-fast discriminator. Named to
+# mirror `wz/transport-link-unixpipe` (the accept-transport atom is not
+# dial-shaped, so no `locator-` rename).
+transport-link-unixpipe = ["wz/transport-link-unixpipe"]
 # R311y365 — opt-in `tls/` (TLS-over-TCP) DIAL transport, forwarding the wz
 # facade's `locator-tls` (which pulls `transport-link-tls`). The mirror of `ws`
 # / `unixsock`: NOT in `default` (preset-ap-client is TCP-only), so the

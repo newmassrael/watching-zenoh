@@ -2270,6 +2270,37 @@ layer_c1w_cargo_test_routing_accept() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-accept --quiet -- -D warnings)
 }
 
+# ─── Layer C1bl — the mesh router's CALLER fail-fast (R311y390) ─────
+#
+# The demo-binary twin of C1w's library backstop. The CALLER fail-fast slice
+# adds a BIND-time reject to the demo mesh router (`run_router` -> its testable
+# inner `run_router_until`): a `--listen unixpipe/..` binds a single-connection
+# unixpipe listener that the mesh accept loop cannot hold faces on
+# (`BoundListener::supports_mesh_multi_peer` = false, the bind-time twin of the
+# loop's `AcceptedLink` backstop), so it is rejected at bind with an `Unsupported`
+# error rather than reject-throttling every accept forever (0 faces held).
+#
+# `routing-router` AND `transport-link-unixpipe` are BOTH off-default (a DOUBLE
+# gate). Without transport-link-unixpipe the `unixpipe/` scheme STILL PARSES (the
+# locator leaf is ungated in wz-session-core), but `bind_locator` returns a
+# feature-gated `Unsupported` at BIND because the accept backend is not compiled,
+# so `bind_endpoint("unixpipe/..").await?` errors BEFORE the mesh-capability guard
+# (the guard is dead code without the feature). Layer E3/Z also compile
+# `run_router_until`'s body under `routing-router` (redundant compile coverage),
+# but ONLY this lane compiles the `caller_failfast_tests` module (it needs
+# transport-link-unixpipe + a test target) AND reaches a real
+# `BoundListener::Unixpipe` — the BEHAVIORAL proof (removing/inverting the guard
+# reddens this lane's discriminator; E3/Z stay green). Step 1 runs the
+# discriminator under an EXPLICIT `routing-router,transport-link-unixpipe` with a
+# `1 passed` count-guard that reddens on a silent 0-tests (the y380
+# proof-that-never-runs trap). Step 2 clippy-gates the same combo `--all-targets`
+# (the sole lane compiling the `caller_failfast_tests` module).
+layer_c1bl_cargo_test_router_failfast() {
+    (cd crates \
+        && cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe run_router_rejects_a_unixpipe_listen_at_bind --quiet 2>&1 | grep -q '1 passed' \
+        && cargo clippy -p wz-ap-demo --all-targets --features routing-router,transport-link-unixpipe --quiet -- -D warnings)
+}
+
 # ─── Layer C1x — routing-routes: forwarding kernel + forwarder unit + clippy ─
 #
 # R311qc: the data-plane forwarding atom (`routing::RouteTable` kernel +
@@ -6295,6 +6326,7 @@ run_layer C1bd layer_c1bd_locator_iface || overall=1
 run_layer C1be layer_c1be_cargo_test_query_value || overall=1
 run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
+run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1
 run_layer C1z layer_c1z_cargo_test_storage_driver || overall=1
