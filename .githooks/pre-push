@@ -1,143 +1,148 @@
 #!/usr/bin/env bash
-# pre-push hook — CI-equivalent local gate before publishing to remote.
+# pre-push hook — FAST local gate: SSOT integrity + changed-crate tests only.
 #
-# R64 retrospect: prior to this hook the only push-time gate was
-# `mnemosyne-cli validate-workspace`. CI yaml regressions (R64.1's
-# `--package` flag that cargo install does not accept) shipped to
-# remote and were observed only after the GitHub Actions runner
-# rejected them. The fix is to mirror CI's full gate-set locally
-# so push-time catches what land-then-CI used to.
+# POLICY (R311y386): the local push gate is DELIBERATELY NOT a full CI mirror.
+# Local push runs only:
+#   1. mnemosyne-cli validate-workspace   — the SSOT integrity gate (seconds).
+#   2. cargo test -p <crate>              — for ONLY the crates this push
+#                                           changes (default features).
+# The FULL validation surface — the feature-subset matrix, clippy, codegen
+# (Layers B/B2), footprint (F), cross-compile (G), QEMU (Q), interop (Z),
+# every non-default feature combo — is the HOSTED CI's job. It runs on every
+# push to main and gates there. A red hosted run is the accepted cost of a
+# fast local push.
 #
-# R224 retrospect: two corner cases produced false-negative gate
-# failures in concurrent / no-op push scenarios:
-#   (a) Git fires pre-push even for "nothing to push" invocations
-#       (e.g. redundant `git push` after another invocation already
-#       updated the remote). Without a stdin guard the hook ran the
-#       full ~50s CI gate against zero work, which then
-#   (b) raced cargo `crates/target` lock + sce-codegen rebuild
-#       against a concurrent run-ci.sh from an earlier push, surfacing
-#       spurious "Layer X FAIL" against a clean tree.
-# Two textbook guards (mirror the git protocol contract + the
-# coreutils flock(1) advisory-lock pattern):
-#   (a) Read the stdin ref tuples and short-circuit when no
-#       non-delete ref needs validation.
-#   (b) Acquire a non-blocking advisory lock around the run-ci
-#       execution so concurrent invocations fail explicitly
-#       instead of silently racing into phantom gate failures.
+# This REVERSES the R64..R311pt policy where this hook mirrored CI's whole
+# gate-set locally (~50s host-only floor, several minutes with the ARM / qemu
+# / zenohd toolchains present). That made every push slow and duplicated work
+# the ephemeral hosted runners re-do anyway. The trade is explicit: local no
+# longer "catches everything before push"; it catches SSOT drift + the changed
+# crates' own default-feature tests, and hosted CI is the single full gate.
 #
-# Delegates to `scripts/run-ci.sh` so CI and pre-push share one
-# source of truth for the lane definitions. Since R311pt retired the
-# cost-based opt-in axis, the default sweep this hook runs INCLUDES the
-# footprint / cross-compile / interop gates (F codec-footprint, G MCU
-# cross-compile, Q QEMU e2e + ROM footprint, Z zenohd interop) — each
-# graceful-SKIPs when its toolchain / external binary is absent, so a
-# host-only machine pays no extra cost while a machine that CAN measure
-# footprint gates it before every push. Only Layer M (multicast loopback)
-# stays opt-in (environment-flaky, not a cost gate). This closes the
-# staleness window R311iw left: footprint no longer drifts undetected
-# across a long unpushed arc (CI fires only on push; the local gate now
-# does not).
+# Coverage the changed-crate test does NOT give (all covered by hosted CI):
+#   - feature-gated lanes (a change behind a non-default cfg is not run here);
+#   - changes outside crates/ (sources/, out/, runtime/, deploy/, ci.yml);
+#   - clippy / fmt / footprint / cross-compile / interop.
+# If you want the old full sweep locally, run `bash scripts/run-ci.sh` by hand.
 #
-# Time cost (warm cache): host-only floor ~50s; with the ARM toolchain +
-# qemu + zenohd/pico binaries present, the footprint / cross-compile /
-# interop gates add several minutes — intentional, they must gate before
-# push. Up to ~5min+ on cold compile. The hook can be bypassed via
-# `git push --no-verify` for genuinely urgent hotfixes — that escape
-# hatch is the standard git contract; do not use it to dodge real
-# failures.
+# The empty-ref / delete-only short-circuit (R224a) is kept. The R224b flock
+# and the R250 HEAD-re-source are gone: they existed for the multi-lane
+# run-ci race (sce-codegen rebuild + crates/target thrash); a single
+# `cargo test -p <crate>` is serialized by cargo's own target-dir lock.
 #
 # Install via `git config core.hooksPath .githooks` (one-time per clone).
+# Bypass with `git push --no-verify` only for genuine hotfixes.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-# ─── R224 guard (a) — empty-ref / delete-only short-circuit ─────────
-# Git protocol: pre-push receives one whitespace-separated tuple per
-# ref on stdin as `<local_ref> <local_sha> <remote_ref> <remote_sha>`.
-# `local_sha == 40*"0"` means a delete-ref push (no new local commit
-# to validate). Empty stdin means "nothing to push" (a redundant
-# invocation racing another that already updated the remote). Either
-# case has zero work for the CI gate, so fast-exit before doing the
-# ~50s compile dance.
+# ─── R224a guard — empty-ref / delete-only short-circuit ────────────
+# Git protocol: pre-push receives one whitespace-separated tuple per ref on
+# stdin as `<local_ref> <local_sha> <remote_ref> <remote_sha>`. A
+# local_sha of 40*"0" is a delete-ref (no new commit to test); empty stdin
+# is "nothing to push". Either has zero work, so fast-exit. We keep the last
+# non-delete tuple's shas as the diff range for the changed-crate gate.
 zero_sha="0000000000000000000000000000000000000000"
+local_sha=""
+remote_sha=""
 has_work=0
-while read -r _local_ref local_sha _remote_ref _remote_sha; do
-    if [[ "$local_sha" != "$zero_sha" ]]; then
+while read -r _local_ref l_sha _remote_ref r_sha; do
+    if [[ "$l_sha" != "$zero_sha" ]]; then
         has_work=1
+        local_sha="$l_sha"
+        remote_sha="$r_sha"
     fi
 done
 if [[ $has_work -eq 0 ]]; then
-    echo "pre-push: nothing to push (no non-delete refs); skipping CI gate"
+    echo "pre-push: nothing to push (no non-delete refs); skipping gate"
     exit 0
 fi
 
-# ─── R224 guard (b) — non-blocking concurrent run-ci lock ───────────
-# Two concurrent `git push` invocations both fire pre-push and both
-# enter scripts/run-ci.sh, racing the shared `crates/target` cargo
-# lock + sce-codegen freshness rebuild + atomic store read paths.
-# flock(1) `-n` (non-blocking) acquires an advisory lock on a
-# git-dir-scoped sentinel; failure means another run-ci is already
-# in flight, in which case the textbook response is to fail loud
-# (so the user notices and re-pushes after the prior one finishes)
-# rather than to silently race or to wait an unbounded interval.
-# `flock` is part of util-linux on every Linux distro and on macOS
-# via Homebrew `flock`; mark the guard advisory so a missing binary
-# (e.g. a slimmed container) does not turn into a hard hook failure.
-if command -v flock >/dev/null 2>&1; then
-    lockfile="$(git rev-parse --git-dir)/run-ci.lock"
-    exec 200>"$lockfile"
-    if ! flock -n 200; then
-        echo "pre-push: another run-ci already running (lock: $lockfile)" >&2
-        echo "          wait for it to finish, then retry the push." >&2
+# ─── gate 1 — SSOT integrity (validate-workspace, seconds) ──────────
+# Fast and load-bearing: catches a bypassed typed-mutate primitive (raw
+# Edit on the sidecar JSON, a frozen-ledger violation, a new T1 orphan)
+# BEFORE it reaches origin. pre-commit runs this too, but pre-push re-runs
+# it because amends / rebases / manual atomic.json edits change post-commit
+# state the commit hook never saw. Advisory when the tool is absent.
+if command -v mnemosyne-cli >/dev/null 2>&1; then
+    echo "pre-push: mnemosyne-cli validate-workspace (SSOT gate) ..."
+    if ! mnemosyne-cli validate-workspace; then
+        echo "" >&2
+        echo "pre-push: validate-workspace FAILED — fix before push." >&2
+        echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
         exit 1
     fi
-fi
-
-if [[ ! -x scripts/run-ci.sh ]]; then
-    echo "pre-push: scripts/run-ci.sh missing or not executable" >&2
-    echo "  chmod +x scripts/run-ci.sh" >&2
-    exit 1
-fi
-
-# ─── R250 defence — re-source run-ci.sh from HEAD content ──────────
-# R247 retrospect: a commit can stage Layer X test sources + a
-# `scripts/run-ci.sh` edit that defines Layer X in the same change;
-# the hook should then exercise the NEW Layer X. The standard
-# Git contract is "pre-push fires after the commit lands on the
-# local branch", so `HEAD` already points at the to-be-pushed tip
-# and `git show HEAD:scripts/run-ci.sh` is the *committed* content
-# we should run — not the working-tree copy, which the user may
-# have dirtied (manual rollback, stash pop, partial-staging weirdness)
-# between commit-time and push-time.
-#
-# Mechanism: extract HEAD's `run-ci.sh` to a temp file and run that
-# under bash, keeping CWD at repo_root so the script's relative
-# references (`scripts/audit-mid-values.sh`, `scripts/verify-codegen.sh`,
-# `deploy/*.yaml`, etc.) resolve against the working-tree paths.
-# Even if `scripts/run-ci.sh` were reverted in the working tree
-# between the commit and the push, the hook still runs the version
-# the push would actually publish.
-#
-# `git show HEAD:<path>` exits non-zero when the path doesn't exist
-# in HEAD's tree (e.g. very first commit on a clone). Fall back to
-# the working-tree script in that edge case so first-bootstrap pushes
-# still work.
-tmp_run_ci="$(mktemp -t wz-run-ci.XXXXXX)"
-trap 'rm -f "$tmp_run_ci"' EXIT
-if git show HEAD:scripts/run-ci.sh >"$tmp_run_ci" 2>/dev/null \
-    && [[ -s "$tmp_run_ci" ]]; then
-    echo "pre-push: running CI-equivalent gate (HEAD:scripts/run-ci.sh) ..."
-    gate_cmd=(bash "$tmp_run_ci")
 else
-    echo "pre-push: HEAD has no scripts/run-ci.sh; falling back to working tree."
-    gate_cmd=(scripts/run-ci.sh)
+    echo "pre-push: mnemosyne-cli not on PATH; skipping SSOT gate (install to enable)."
 fi
-if ! "${gate_cmd[@]}"; then
+
+# ─── gate 2 — changed-crate tests (default features, fast) ──────────
+# Diff range: <remote_sha>..<local_sha>. A zero/absent remote_sha (a new
+# ref or first push) has no remote base — fall back to origin/main if it
+# exists, else skip (nothing to diff against). Only crates/<name>/ changes
+# map to a test target; everything else is hosted-CI-only.
+diff_base=""
+if [[ -n "$remote_sha" && "$remote_sha" != "$zero_sha" ]]; then
+    diff_base="$remote_sha"
+elif git rev-parse --verify --quiet origin/main >/dev/null; then
+    diff_base="origin/main"
+fi
+
+if [[ -z "$diff_base" ]]; then
+    echo "pre-push: no diff base (new ref, no origin/main); skipping changed-crate tests."
+    echo "          full validation runs on hosted CI."
+    exit 0
+fi
+
+mapfile -t changed_dirs < <(
+    git diff --name-only "$diff_base..$local_sha" -- 'crates/' 2>/dev/null \
+        | sed -nE 's#^crates/([^/]+)/.*#\1#p' \
+        | sort -u
+)
+
+if [[ ${#changed_dirs[@]} -eq 0 ]]; then
+    echo "pre-push: no crates/ changes in this push; skipping changed-crate tests."
+    echo "          full validation runs on hosted CI."
+    exit 0
+fi
+
+# Map each changed crate DIR to its cargo PACKAGE name (dir != package is
+# rare but allowed). A dir whose Cargo.toml is gone (renamed/deleted in the
+# diff) is skipped rather than failing the push.
+pkgs=()
+for d in "${changed_dirs[@]}"; do
+    manifest="crates/$d/Cargo.toml"
+    if [[ ! -f "$manifest" ]]; then
+        echo "pre-push:   crates/$d — Cargo.toml gone (renamed/deleted), skipping"
+        continue
+    fi
+    pkg="$(sed -nE 's/^name[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$manifest" | head -1)"
+    [[ -n "$pkg" ]] && pkgs+=("$pkg")
+done
+
+if [[ ${#pkgs[@]} -eq 0 ]]; then
+    echo "pre-push: no live changed crates to test; full validation runs on hosted CI."
+    exit 0
+fi
+
+echo "pre-push: testing changed crates only (default features): ${pkgs[*]}"
+echo "          feature-matrix / clippy / footprint / cross-compile / interop -> hosted CI."
+fail=0
+for pkg in "${pkgs[@]}"; do
+    echo "pre-push:   cargo test -p $pkg ..."
+    if ! (cd crates && cargo test -p "$pkg" --quiet); then
+        echo "pre-push:   $pkg tests FAILED" >&2
+        fail=1
+    fi
+done
+
+if [[ $fail -ne 0 ]]; then
     echo "" >&2
-    echo "pre-push: CI-equivalent gate failed — fix locally before push." >&2
+    echo "pre-push: changed-crate tests failed — fix before push." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
 
+echo "pre-push: changed-crate tests passed; full validation continues on hosted CI."
 exit 0

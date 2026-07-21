@@ -133,20 +133,26 @@ git config core.hooksPath .githooks
 - **commit-msg** — enforces `COMMIT_FORMAT.md` (subject and body
   ≤72 bytes per line, no multi-line bullet wraps, no
   Co-Authored-By / "Generated with Claude Code" / emoji).
-- **pre-push** — runs the FULL `scripts/run-ci.sh` (the
-  CI-equivalent gate: all host lanes C1 build / C2 clippy / E
-  integration plus the F/G/Q/Z footprint / cross-compile / interop
-  gates; only Layer M stays opt-in), NOT just `validate-workspace`
-  — that (Layer A) is only ONE lane within it. So a `git push` runs
-  the whole suite once, at push time, catching what land-then-CI
-  used to (it re-sources `run-ci.sh` from HEAD, the to-be-pushed
-  content, and holds a non-blocking flock so a concurrent run-ci
-  fails loud instead of racing `crates/target`). Layer A still
-  covers post-commit state changes (manual atomic.json edits,
-  amends, rebases). Cost: ~50s host-only floor, several minutes
-  with the ARM / qemu / zenohd / pico gates present; background it
-  when driving a push, it exceeds a short shell timeout. Bypass
-  only for genuine hotfixes via `git push --no-verify`.
+- **pre-push** — FAST local gate (R311y386), NOT a full CI mirror.
+  Runs only (1) `mnemosyne-cli validate-workspace` — the SSOT
+  integrity gate (seconds; catches a bypassed typed-mutate / new T1
+  orphan / frozen-ledger violation before origin; re-run past
+  pre-commit because amends / rebases change post-commit state) —
+  and (2) `cargo test -p <crate>` for ONLY the crates the push's
+  diff changes (default features; crate DIR → package name via its
+  Cargo.toml). The FULL validation surface — the feature-subset
+  matrix, C2 clippy, Layers B/B2 codegen, F/G/Q/Z footprint /
+  cross-compile / interop, every non-default combo — is the HOSTED
+  CI's job: it runs on every push to main and is the single full
+  gate. This REVERSES the R64..R311pt "mirror all of CI locally"
+  policy (~50s host floor, minutes with ARM / qemu / zenohd
+  present). The trade is explicit: local no longer catches
+  everything before push; a red hosted run is the accepted cost of
+  fast pushes. NOT covered locally (all on hosted CI): feature-gated
+  lanes, changes outside `crates/` (sources/, out/, runtime/,
+  deploy/, ci.yml), clippy / fmt / footprint. For the old full sweep
+  on demand, run `bash scripts/run-ci.sh` by hand. Bypass the hook
+  entirely with `git push --no-verify` for genuine hotfixes.
 
 `pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
 (install via
