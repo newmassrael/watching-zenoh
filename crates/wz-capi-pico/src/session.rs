@@ -356,16 +356,15 @@ async fn drive_listen(
         }
     };
     // CALLER fail-fast (mesh accept loop): pico's z_open(listen) holds N
-    // concurrent inbound peers off ONE listener, so a non-mesh-capable acceptor
-    // (a single-connection unixpipe, whose non-blocking FIFO open returns at
-    // once) would reject-throttle every accept forever -- "listening" yet
-    // holding 0 faces. Reject it here so z_open reports the open failure to the
-    // C caller (tx.send(false) -> Z_ERR_GENERIC), the pico twin of run_router's
-    // bind-time guard and the BIND-time twin of the accept loop's runtime
-    // `AcceptedLink::supports_mesh_multi_peer` backstop. Reachable only when
-    // `transport-link-unixpipe` is compiled (the sole non-mesh-capable acceptor
-    // today); otherwise `bind_endpoint` already errored above, so this guard
-    // runs but never rejects a mesh-capable (tcp/udp/..) listener.
+    // concurrent inbound peers off ONE listener, so a NON-mesh-capable acceptor
+    // (one that could not feed a multi-accept loop) is rejected here -- z_open
+    // reports the open failure to the C caller (tx.send(false) -> Z_ERR_GENERIC),
+    // the pico twin of run_router's bind-time guard and the BIND-time twin of the
+    // accept loop's runtime `AcceptedLink::supports_mesh_multi_peer` backstop.
+    // Since R311y392 (the multi-client unixpipe acceptor) NO transport is
+    // non-mesh-capable, so this guard never rejects today -- it stays as defensive
+    // code for a FUTURE non-mesh acceptor (unixpipe was the last one, and its
+    // R311y391 rejection was retired when the multi-client acceptor landed).
     if !listener.supports_mesh_multi_peer() {
         let _ = tx.send(false);
         return;

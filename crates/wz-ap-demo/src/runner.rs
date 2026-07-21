@@ -1451,12 +1451,14 @@ async fn run_router_until(
 
     let listener = bind_endpoint(listen).await?;
     // CALLER fail-fast (mesh accept loop): the router holds N faces off ONE
-    // listener, so a non-mesh-capable acceptor — a single-connection unixpipe,
-    // whose non-blocking FIFO open returns at once — would reject-throttle EVERY
-    // accept forever, "listening" yet holding 0 faces. Reject it at bind with a
-    // clear error instead. The BIND-time twin of the loop's runtime backstop
-    // (`AcceptedLink::supports_mesh_multi_peer`, the `Step::Accepted` arm); the
-    // one-shot `accept_bound` path serves such a listener, the mesh router cannot.
+    // listener, so a NON-mesh-capable acceptor (one that could not feed a
+    // multi-accept loop) is rejected at bind with a clear error instead of
+    // "listening" yet holding 0 faces. The BIND-time twin of the loop's runtime
+    // backstop (`AcceptedLink::supports_mesh_multi_peer`, the `Step::Accepted`
+    // arm). Since R311y392 (the multi-client unixpipe acceptor) NO transport is
+    // non-mesh-capable, so this never rejects today — it stays as defensive code
+    // for a FUTURE non-mesh acceptor (unixpipe was the last one; its R311y390
+    // rejection was retired when the multi-client acceptor landed).
     if !listener.supports_mesh_multi_peer() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -3645,48 +3647,39 @@ mod storage_host_volume_tests {
 ))]
 mod caller_failfast_tests {
     use super::run_router_until;
-    use std::io;
 
-    /// CALLER fail-fast discriminator — `run_router` (via its testable inner
-    /// `run_router_until`) REJECTS a `--listen unixpipe/..` at bind: the mesh
-    /// router holds N faces off ONE listener, but wz's current unixpipe acceptor
-    /// is single-connection (non-mesh-capable), so binding it and entering the
-    /// accept loop would reject-throttle every accept forever, holding 0 faces.
-    /// This witnesses the fail-fast returns an `Unsupported` error BEFORE the
-    /// accept loop runs.
+    /// R311y392 — the once-`reject` discriminator flipped to ACCEPT: `run_router`
+    /// (via its testable inner `run_router_until`) now ADMITS a `--listen
+    /// unixpipe/..` at bind. The multi-client acceptor makes a unixpipe listener
+    /// mesh-capable, so the bind-time guard no longer rejects it; the router binds,
+    /// enters the accept loop, and (with the injected immediately-ready shutdown)
+    /// returns `Ok(())`. Replaces the retired
+    /// `run_router_rejects_a_unixpipe_listen_at_bind` (R311y390), whose `expect_err`
+    /// the flip broke.
     ///
-    /// RED reproduction (proof this binds to the guard, not the vehicle): revert
-    /// the `if !listener.supports_mesh_multi_peer()` guard in `run_router_until`
-    /// -> the fn enters `accept_loop` with the injected immediately-ready shutdown
-    /// -> returns `Ok(())` (0 faces) -> this `expect_err` panics. The injected
-    /// `std::future::ready(())` is what makes the RED a clean FAIL rather than a
-    /// SIGTERM-wait hang.
+    /// RED reproduction (proof this binds to the flipped guard, not the vehicle):
+    /// RESTORE the rejection — make `BoundListener::supports_mesh_multi_peer` return
+    /// `false` for `Unixpipe` again -> `run_router_until` returns `Err(Unsupported)`
+    /// -> this `expect` panics. The injected `std::future::ready(())` makes the
+    /// GREEN path a clean immediate return rather than a SIGTERM-wait hang.
     #[tokio::test]
-    async fn run_router_rejects_a_unixpipe_listen_at_bind() {
+    async fn run_router_accepts_a_unixpipe_listen_at_bind() {
         let base = std::env::temp_dir()
-            .join(format!("wz-ap-demo-router-failfast-{}", std::process::id()))
+            .join(format!(
+                "wz-ap-demo-router-multiclient-{}",
+                std::process::id()
+            ))
             .to_string_lossy()
             .into_owned();
-        // Pre-clean any stale FIFO nodes from a crashed prior run (no-flaky):
-        // bind_unixpipe's mkfifo EEXIST-fails on a leftover pair.
+        // Pre-clean any stale FIFO node from a crashed prior run (no-flaky).
         let _ = std::fs::remove_file(format!("{base}_uplink"));
-        let _ = std::fs::remove_file(format!("{base}_downlink"));
 
         let listen = format!("unixpipe/{base}");
-        let err = run_router_until(&listen, std::future::ready(()))
+        run_router_until(&listen, std::future::ready(()))
             .await
-            .expect_err(
-                "the mesh router must reject a single-connection unixpipe --listen at bind",
-            );
-        assert_eq!(
-            err.kind(),
-            io::ErrorKind::Unsupported,
-            "a non-mesh-capable listener is rejected with Unsupported"
-        );
+            .expect("the mesh router admits a multi-client unixpipe --listen (R311y392)");
 
-        // bind_endpoint mkfifo'd the pair before the fail-fast returned (the
-        // BoundListener dropped inside the fn); unlink the FIFO nodes.
+        // The acceptor's teardown unlinks the base request node; best-effort here.
         let _ = std::fs::remove_file(format!("{base}_uplink"));
-        let _ = std::fs::remove_file(format!("{base}_downlink"));
     }
 }

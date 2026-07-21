@@ -2065,20 +2065,17 @@ where
             Step::Accepted(Ok((accepted, peer))) => {
                 // Slice B — the mesh accept loop holds a face per accepted peer
                 // keyed by its handshake zid, so an IP peer AND a mesh-capable
-                // non-IP peer (unixsock / vsock — a genuine per-peer stream accept)
-                // are both held as faces; `peer` (an `AcceptedPeer`) is threaded
-                // straight into the open future as a log/event tag. Only a
-                // NON-mesh-capable acceptor is rejected here: today just unixpipe,
-                // whose CURRENT wz acceptor is a single-connection NON-BLOCKING FIFO
-                // open (returns at once whether or not a peer dialed), so accepting
-                // it in a multi-accept loop would spin. That is a wz
-                // acceptor-implementation gap, not a transport-inherent 1:1 (see
-                // `AcceptedLink::supports_mesh_multi_peer`) — zenoh's
-                // `UnicastPipeListener` is multi-client. A caller fail-fast — a
-                // follow-up slice, a `BoundListener` twin of this predicate — WILL
-                // reject such a `--listen` at bind (runner.rs router / pico
-                // session.rs); TODAY this arm is the ONLY runtime guard against a
-                // non-mesh-capable acceptor reaching the loop.
+                // non-IP peer (unixsock / vsock / unixpipe — each a genuine per-peer
+                // stream accept) are all held as faces; `peer` (an `AcceptedPeer`)
+                // is threaded straight into the open future as a log/event tag. A
+                // NON-mesh-capable acceptor is rejected here — but since R311y392
+                // (the multi-client unixpipe acceptor) NO transport returns `false`
+                // from `AcceptedLink::supports_mesh_multi_peer`, so this arm is now
+                // purely DEFENSIVE: it stays as the runtime backstop for a FUTURE
+                // non-mesh acceptor (its `BoundListener` twin fail-fasts such a
+                // `--listen` at the mesh caller — runner.rs router / pico
+                // session.rs — before it ever reaches here). It fires for no
+                // transport today.
                 if !accepted.supports_mesh_multi_peer() {
                     on_event(&AcceptEvent::AcceptError(io::Error::new(
                         io::ErrorKind::Unsupported,
@@ -2089,14 +2086,14 @@ where
                         ),
                     )));
                     drop(accepted);
-                    // R311y380 — throttle before re-arming, the same guard the
-                    // `Step::Accepted(Err)` arm applies: unixpipe's accept is SYNC +
-                    // NON-BLOCKING (a FIFO open returns at once), so a mis-configured
-                    // `--listen unixpipe/..` reaching the mesh loop would
-                    // reject-and-re-arm at CPU speed without this sleep (the
-                    // stream/unixsock/vsock/udp families block or pend, so they
-                    // self-rate-limit). Bounds the mis-config to one reject per
-                    // throttle interval, matching zenoh's accept_task parity.
+                    // Throttle before re-arming, the same guard the
+                    // `Step::Accepted(Err)` arm applies: a hypothetical future
+                    // non-mesh acceptor that returned immediately (as the retired
+                    // R311y380 non-blocking unixpipe accept did) would otherwise
+                    // reject-and-re-arm at CPU speed without this sleep. Bounds the
+                    // mis-config to one reject per throttle interval, matching
+                    // zenoh's accept_task parity. (Dead code today — every transport
+                    // is mesh-capable since R311y392 — kept defensive.)
                     clock.sleep(ACCEPT_ERROR_THROTTLE_MS).await;
                     continue;
                 }
@@ -2529,6 +2526,42 @@ mod tests {
         opened.drain_to_close().await;
     }
 
+    /// The unixpipe twin of [`unixsock_idle_initiator`] (R311y392): dials a
+    /// `unixpipe/<base>` listener through the multi-client invitation handshake,
+    /// reaches Established, and idles until `go`. The multi-client acceptor gives
+    /// each initiator a DISTINCT dedicated FIFO pair, so N of these are held as N
+    /// ZID-keyed mesh faces at once — the property the mesh-join discriminator
+    /// asserts.
+    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    async fn unixpipe_idle_initiator(base: String, zid: u8, mut go: watch::Receiver<bool>) {
+        use crate::session_open::{connect_and_open_session, DialConfig};
+        use wz_session_core::locator::parse_any_locator;
+        let locator =
+            parse_any_locator(&format!("unixpipe/{base}")).expect("parse unixpipe locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![zid; 4];
+        let mut opened = connect_and_open_session(
+            locator,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(10_000),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("unixpipe initiator reaches Established");
+
+        let timeouts = SessionTimeouts::spec_defaults();
+        tokio::select! {
+            _ = go.wait_for(|&v| v) => {}
+            _ = drive_session_until_terminal(
+                &mut opened.inbound, &opened.actions, &mut opened.engine,
+                None, &opened.clock, &timeouts, |_e| {},
+            ) => {}
+        }
+        opened.drain_to_close().await;
+    }
+
     // ── tests ──────────────────────────────────────────────────────────
 
     /// The accept loop accepts N peers and holds all N faces concurrently
@@ -2748,82 +2781,99 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// R311y380 — the THROTTLE discriminator. A `--listen unixpipe/..` fed to the
-    /// MESH accept loop is a mis-config (unixpipe accepts a NonIp peer with no
-    /// routable locator), and because unixpipe's accept is the FIRST NON-BLOCKING
-    /// accept (a FIFO open returns AT ONCE, unlike the tcp/unixsock/vsock accepts
-    /// that block until a peer connects), the NonIp-reject path would HOT-SPIN
-    /// without the `clock.sleep(ACCEPT_ERROR_THROTTLE_MS)` guard this round added.
-    ///
-    /// This binds a unixpipe listener that NO peer ever dials, runs the mesh loop
-    /// for a fixed ~300ms window, and asserts the reject count is SMALL — one per
-    /// throttle interval (~3), not the thousands a CPU-bound spin would produce.
-    /// The bound is deterministic FROM ABOVE (a slower host rejects FEWER, never
-    /// more, since each reject waits >= one 100ms interval), so it is non-flaky;
-    /// removing the throttle from the NonIp arm turns this RED (n = thousands).
-    /// The `>= 1` lower bound witnesses the reject path is actually exercised.
+    /// R311y392 — the MESH-JOIN discriminator (replaces the retired R311y380
+    /// `mesh_accept_loop_throttles_a_nonblocking_unixpipe_reject`, whose whole
+    /// premise — a NON-mesh unixpipe reject-throttle — the multi-client acceptor
+    /// dissolved). Two initiators dial ONE `unixpipe/<base>` listener through the
+    /// invitation handshake and BOTH are held as ZID-keyed faces at once
+    /// (peak_concurrent == 2), with ZERO AcceptError — the direct unixpipe twin of
+    /// [`mesh_accept_loop_holds_two_unixsock_peers`]. RED on the OLD
+    /// single-connection acceptor: it returned one link immediately with no dialer
+    /// (a NonIp reject) and could not serve a second client, so peak was 0/1 and
+    /// `accepted != 2`. NON-FLAKY: a loopback FIFO pair is lossless + in-order, so
+    /// two clean handshakes are deterministic (the unixsock/udp N-peer siblings'
+    /// assumption). [[feedback-no-flaky-ever]]
     #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mesh_accept_loop_throttles_a_nonblocking_unixpipe_reject() {
-        use crate::unixpipe_pipeline::bind_unixpipe;
-
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mesh_accept_loop_holds_two_unixpipe_peers() {
+        use crate::session_open::bind_endpoint;
+        const N: usize = 2;
         let base = std::env::temp_dir()
-            .join(format!("wz-unixpipe-throttle-{}", std::process::id()))
+            .join(format!("wz-unixpipe-mesh-{}", std::process::id()))
             .to_string_lossy()
             .into_owned();
-        let paths = bind_unixpipe(&base).expect("mkfifo the unixpipe rendezvous pair");
-        let listener = BoundListener::Unixpipe(paths);
+        let listener = bind_endpoint(&format!("unixpipe/{base}"))
+            .await
+            .expect("bind a unixpipe listener");
 
+        // `go` flips when the Nth face is up: it ends the acceptor AND releases
+        // both initiators, so both are held simultaneously first.
+        let (go_tx, go_rx) = watch::channel(false);
+        let up = Arc::new(AtomicUsize::new(0));
         let rejects = Arc::new(AtomicUsize::new(0));
         let on_event = {
+            let up = up.clone();
+            let go_tx = go_tx.clone();
             let rejects = rejects.clone();
-            move |event: &AcceptEvent| {
-                if let AcceptEvent::AcceptError(_) = event {
+            move |event: &AcceptEvent| match event {
+                AcceptEvent::FaceUp(_) => {
+                    if up.fetch_add(1, SeqCst) + 1 == N {
+                        let _ = go_tx.send(true);
+                    }
+                }
+                AcceptEvent::AcceptError(_) => {
                     rejects.fetch_add(1, SeqCst);
                 }
+                _ => {}
             }
         };
-
-        // The mesh loop accepts the (immediately-returning) NonIp peer, rejects it
-        // (unroutable), then throttles before re-arming — so it rejects about once
-        // per ACCEPT_ERROR_THROTTLE_MS (100ms) across the window.
-        const WINDOW_MS: u64 = 300;
-        let summary = accept_loop(
+        let acceptor = accept_loop(
             listener,
             acceptor_params(),
             TokioTime::new(),
             DEFAULT_OPEN_TICK_MS,
-            tokio::time::sleep(Duration::from_millis(WINDOW_MS)),
+            shutdown_on(go_rx.clone()),
             on_event,
             &NoOpForwarder,
-        )
-        .await;
-
-        let n = rejects.load(SeqCst);
-        assert!(
-            n >= 1,
-            "the non-blocking unixpipe NonIp accept must be rejected at least once"
         );
-        assert!(
-            n <= 50,
-            "the NonIp reject is throttled, not hot-spinning: got {n} rejects in \
-             ~{WINDOW_MS}ms (a spin would be thousands)"
+        let initiators =
+            (0..N).map(|i| unixpipe_idle_initiator(base.clone(), (i as u8) + 1, go_rx.clone()));
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (summary, _) = tokio::join!(acceptor, join_all(initiators));
+            summary
+        })
+        .await
+        .expect("multi-peer unixpipe accept completes within 20s");
+
+        assert_eq!(
+            summary.accepted, N,
+            "accepted both unixpipe peers (a genuine per-peer dedicated-pipe accept)"
         );
         assert_eq!(
-            summary.accepted, 0,
-            "the unroutable NonIp peer is never a face"
+            summary.established, N,
+            "both unixpipe peers reached Established"
+        );
+        assert_eq!(
+            summary.peak_concurrent, N,
+            "held both unixpipe faces simultaneously (non-IP ZID-keyed mesh face)"
+        );
+        assert_eq!(
+            rejects.load(SeqCst),
+            0,
+            "no NonIp reject: unixpipe is a mesh-capable non-IP acceptor (R311y392)"
         );
 
         let _ = std::fs::remove_file(format!("{base}_uplink"));
-        let _ = std::fs::remove_file(format!("{base}_downlink"));
     }
 
     /// Slice B — pins the loop's mesh-capability BACKSTOP predicate
     /// ([`AcceptedLink::supports_mesh_multi_peer`], consulted in the
     /// `Step::Accepted` arm) at the TRUE polarity: tcp is mesh-capable. The match
     /// is wildcard-free, so a NEW `AcceptedLink` variant forces a decision at
-    /// compile time; this pins the value for tcp (a representative `true`). The
-    /// FALSE-polarity twin is `acceptedlink_unixpipe_is_not_mesh_capable`.
+    /// compile time; this pins the value for tcp (a representative `true`). Since
+    /// R311y392 every transport is mesh-capable — `acceptedlink_unixpipe_is_mesh_capable`
+    /// pins the once-`false` unixpipe arm at its new `true` polarity.
     #[tokio::test]
     async fn acceptedlink_tcp_is_mesh_capable() {
         use crate::session_open::AcceptedLink;
@@ -2843,36 +2893,39 @@ mod tests {
         );
     }
 
-    /// Slice B — the FALSE-polarity twin of `acceptedlink_tcp_is_mesh_capable`:
-    /// unixpipe is NOT mesh-capable (its CURRENT single-connection non-blocking
-    /// acceptor cannot feed a multi-accept loop — a wz acceptor gap, not a
-    /// transport-inherent 1:1). The FIFO open is non-blocking, so an
-    /// `AcceptedLink::Unixpipe` is constructible with no dialer — the very property
-    /// that makes it non-mesh, and exactly what the `Step::Accepted` backstop
-    /// rejects.
-    // `#[tokio::test]` not `#[test]`: `accept_unixpipe_on` opens tokio named pipes,
-    // which register with the reactor and so must run inside a runtime context.
+    /// R311y392 — the once-`false` unixpipe arm now pins at `true`: an accepted
+    /// unixpipe link (produced by the multi-client acceptor task after a client's
+    /// invitation handshake) IS mesh-capable, so the `Step::Accepted` backstop no
+    /// longer rejects it. Replaces the retired `acceptedlink_unixpipe_is_not_mesh_capable`.
+    /// Drives one real client through `dial_unixpipe` so the acceptor yields a
+    /// genuine `AcceptedLink::Unixpipe` (there is no standalone open any more — the
+    /// link only exists after a handshake).
     #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-    #[tokio::test]
-    async fn acceptedlink_unixpipe_is_not_mesh_capable() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acceptedlink_unixpipe_is_mesh_capable() {
         use crate::session_open::AcceptedLink;
-        use crate::unixpipe_pipeline::{accept_unixpipe_on, bind_unixpipe};
+        use crate::unixpipe_pipeline::{bind_unixpipe, dial_unixpipe};
         let base = std::env::temp_dir()
             .join(format!("wz-unixpipe-cap-{}", std::process::id()))
             .to_string_lossy()
             .into_owned();
-        let paths = bind_unixpipe(&base).expect("mkfifo the unixpipe rendezvous pair");
-        let link = accept_unixpipe_on(&paths).expect("open the unixpipe link (non-blocking)");
+        let mut acc = bind_unixpipe(&base)
+            .await
+            .expect("bind the unixpipe acceptor");
+        // Drive one client through the invitation handshake; the acceptor task
+        // yields the accepted listener-side link.
+        let dialer = tokio::spawn({
+            let base = base.clone();
+            async move { dial_unixpipe(&base).await }
+        });
+        let link = acc.recv_new_link().await.expect("accept one client");
+        let _client = dialer.await.unwrap().expect("dial completes");
         let accepted = AcceptedLink::Unixpipe(link);
         assert!(
-            !accepted.supports_mesh_multi_peer(),
-            "unixpipe accept is NOT mesh-capable (single-connection acceptor)"
+            accepted.supports_mesh_multi_peer(),
+            "unixpipe accept is mesh-capable (multi-client acceptor, R311y392)"
         );
-        // No BoundListener is constructed here; drop the paths (closing the FIFO
-        // FDs) before unlinking the FIFO nodes.
-        drop(paths);
-        let _ = std::fs::remove_file(format!("{base}_uplink"));
-        let _ = std::fs::remove_file(format!("{base}_downlink"));
+        drop(acc);
     }
 
     /// A peer that connects then closes WITHOUT handshaking surfaces as

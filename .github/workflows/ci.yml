@@ -739,6 +739,38 @@ jobs:
       - name: Layer E8 — router-hat data plane vs a zenoh-pico subscriber
         run: bash scripts/run-ci.sh --layer E8
 
+      - name: Cache the unixpipe-enabled zenohd binary (R311y392)
+        # A SEPARATE oracle from target/zenohd: zenoh's `default` omits
+        # transport_unixpipe (and crates.io cannot add a dependency feature), so the
+        # wz<->zenohd unixpipe interop needs a SOURCE build with
+        # `--features zenoh/transport_unixpipe`. Cached like the default oracle (a
+        # pure function of the version + build script); keyed on the script content
+        # so a changed recipe gets a fresh cache.
+        id: zenohd-unixpipe-cache
+        uses: actions/cache@v4
+        with:
+          path: target/zenohd-unixpipe
+          key: zenohd-unixpipe-1.5.0-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh') }}
+
+      - name: Build the unixpipe-enabled zenohd (cache miss only)
+        if: steps.zenohd-unixpipe-cache.outputs.cache-hit != 'true'
+        # ZENOHD_UNIXPIPE=1 selects the separate target + adds
+        # `--features zenoh/transport_unixpipe`; ZENOHD_ALLOW_CLONE=1 forces the
+        # source path (crates.io cannot add the feature). Cold cost is one extra
+        # zenohd build; the cache makes it ~zero thereafter.
+        env:
+          ZENOHD_UNIXPIPE: "1"
+          ZENOHD_ALLOW_CLONE: "1"
+        run: bash scripts/build-zenohd.sh
+
+      - name: Assert the unixpipe zenohd is present
+        # A restored-but-missing cache would make Layer Z's unixpipe legs FAIL under
+        # WZ_Z_REQUIRE (correct — the proof must run), but assert here for a clearer
+        # error than a mid-lane cargo-test failure.
+        run: |
+          test -x target/zenohd-unixpipe/zenohd \
+            || { echo "::error::unixpipe zenohd missing after build/restore — the wz<->zenohd unixpipe interop would FAIL under WZ_Z_REQUIRE"; exit 1; }
+
       - name: Layer Z — zenohd (zenoh-full) interop
         # The ONLY proofs against the canonical Rust implementation. Until this
         # step existed they ran on exactly one machine.

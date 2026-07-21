@@ -1717,7 +1717,7 @@ layer_c1ak_cargo_test_transport_stats() {
         && cargo clippy -p wz-session-core --all-targets --features transport-stats --quiet -- -D warnings)
 }
 
-# ─── Layer C1al — unixpipe: locator + FIFO e2e + accept seam + throttle ─
+# ─── Layer C1al — unixpipe: locator + FIFO e2e + accept seam + mesh-join ─
 #
 # R311y10 / R311y380: the named-FIFO-pair sibling of C1aa (unixsock).
 # transport-link-unixpipe (OFF in the default set, Linux-only) carries a zenoh
@@ -1732,14 +1732,17 @@ layer_c1ak_cargo_test_transport_stats() {
 #      is delivered byte-exact. It ALSO carries the R311y380 accept-seam
 #      discriminator (`bind_endpoint("unixpipe/..")` -> BoundListener::accept_raw
 #      -> AcceptedLink::handshake), RED before the scheme-keyed bind arm lands;
-#   3. runs the R311y380 mesh-loop THROTTLE discriminator (routing-accept +
-#      transport-link-unixpipe): a never-dialed unixpipe listener in the mesh
-#      accept loop rejects its NON-BLOCKING NonIp accept ~once per throttle
-#      interval — without the guard it hot-spins (thousands of rejects), the RED;
+#   3. runs the R311y392 mesh-JOIN discriminator (routing-accept +
+#      transport-link-unixpipe): TWO initiators dial ONE unixpipe listener through
+#      the multi-client invitation handshake and are BOTH held as ZID-keyed mesh
+#      faces (peak_concurrent == 2, zero AcceptError) — RED on the retired
+#      single-connection acceptor (held 0/1). Count-guarded (`grep -q '1 passed'`)
+#      so a future test-name drift reddens the lane rather than silently running
+#      0 tests (the "proof that never runs" trap this lane once lacked);
 #   4. clippy-gates that same combo `--all-targets -- -D warnings` — `accept_loop`
 #      is `#[cfg(feature = "routing-accept")]` (NOT in the default set), so the
-#      plain-unixpipe clippy in step 5 compiles the throttle change OUT and would
-#      not lint it; this step is the one that -D-warnings-gates it;
+#      plain-unixpipe clippy in step 5 compiles the accept-loop change OUT and
+#      would not lint it; this step is the one that -D-warnings-gates it;
 #   5. clippy-gates the `transport-link-unixpipe` cfg (`--all-targets`);
 #   6. clippy-gates the LIB under `--no-default-features --features
 #      transport-link-unixpipe` to prove `unixpipe_pipeline` composes standalone
@@ -1748,7 +1751,7 @@ layer_c1al_cargo_test_unixpipe() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test unixpipe_e2e --quiet \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib mesh_accept_loop_throttles_a_nonblocking_unixpipe_reject --quiet \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib mesh_accept_loop_holds_two_unixpipe_peers --quiet 2>&1 | grep -q '1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixpipe --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixpipe --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixpipe --quiet -- -D warnings)
@@ -2270,15 +2273,17 @@ layer_c1w_cargo_test_routing_accept() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-accept --quiet -- -D warnings)
 }
 
-# ─── Layer C1bl — the mesh router's CALLER fail-fast (R311y390) ─────
+# ─── Layer C1bl — the mesh router admits a multi-client unixpipe --listen (R311y392) ─
 #
-# The demo-binary twin of C1w's library backstop. The CALLER fail-fast slice
-# adds a BIND-time reject to the demo mesh router (`run_router` -> its testable
-# inner `run_router_until`): a `--listen unixpipe/..` binds a single-connection
-# unixpipe listener that the mesh accept loop cannot hold faces on
-# (`BoundListener::supports_mesh_multi_peer` = false, the bind-time twin of the
-# loop's `AcceptedLink` backstop), so it is rejected at bind with an `Unsupported`
-# error rather than reject-throttling every accept forever (0 faces held).
+# The demo-binary twin of C1w's library backstop. R311y390 added a BIND-time
+# reject to the demo mesh router (`run_router` -> its testable inner
+# `run_router_until`) for a NON-mesh-capable `--listen`; R311y392 made the
+# unixpipe acceptor multi-client, so `BoundListener::supports_mesh_multi_peer`
+# flipped `true` and the router now ADMITS a `--listen unixpipe/..` (binds + enters
+# the accept loop). This lane's discriminator flipped with it: it now witnesses the
+# router returns `Ok` for a unixpipe listen (RED if the guard's verdict is reverted
+# to `false`). The bind-time guard stays as defensive code for a future non-mesh
+# acceptor.
 #
 # `routing-router` AND `transport-link-unixpipe` are BOTH off-default (a DOUBLE
 # gate). Without transport-link-unixpipe the `unixpipe/` scheme STILL PARSES (the
@@ -2297,29 +2302,30 @@ layer_c1w_cargo_test_routing_accept() {
 # (the sole lane compiling the `caller_failfast_tests` module).
 layer_c1bl_cargo_test_router_failfast() {
     (cd crates \
-        && cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe run_router_rejects_a_unixpipe_listen_at_bind --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe run_router_accepts_a_unixpipe_listen_at_bind --quiet 2>&1 | grep -q '1 passed' \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-router,transport-link-unixpipe --quiet -- -D warnings)
 }
 
-# ─── Layer C1bm — the pico listener's CALLER fail-fast (R311y391) ─────
+# ─── Layer C1bm — pico admits a multi-client unixpipe listen (R311y392) ─────
 #
-# The pico twin of C1bl (run_router's fail-fast). pico's z_open(listen) holds N
-# concurrent inbound peers off ONE accept loop (listener_multipeer.rs), so
-# `drive_listen` now rejects a single-connection unixpipe --listen at bind
-# (consulting the SAME BoundListener::supports_mesh_multi_peer bind-time twin) ->
-# z_open returns Z_ERR_GENERIC. `transport-link-unixpipe` is a SUPERSET feature
-# (not a zenoh-pico-native link -- real pico has no unixpipe; the north star is a
-# composable superset of zenoh-full + zenoh-pico), off-default: without it the
-# `unixpipe/` scheme still parses but bind_locator returns a feature-gated
-# Unsupported at bind, so the guard is unreachable dead code. This is the ONLY
-# lane compiling the unixpipe_listen_failfast discriminator + reaching a real
-# BoundListener::Unixpipe through the pico C ABI. Step 1 runs the discriminator
-# under an EXPLICIT transport-link-unixpipe with a `1 passed` count-guard that
-# reddens on a silent 0-tests (the y380 proof-that-never-runs trap); step 2
-# clippy-gates the same feature `--all-targets`.
+# The pico twin of C1bl. R311y391 made pico's `z_open(listen=unixpipe/..)` REJECT
+# at bind (a single-connection acceptor cannot feed the mesh loop); R311y392 made
+# the acceptor multi-client, so `BoundListener::supports_mesh_multi_peer` flipped
+# `true` and `drive_listen`'s guard no longer rejects -> z_open returns Z_OK, a
+# listening pico session over unixpipe. This lane's discriminator flipped with it
+# (now asserts Z_OK; RED if the guard's verdict is reverted).
+# `transport-link-unixpipe` is a SUPERSET feature (not a zenoh-pico-native link --
+# real pico has no unixpipe; the north star is a composable superset of zenoh-full
+# + zenoh-pico), off-default: without it the `unixpipe/` scheme still parses but
+# bind_locator returns a feature-gated Unsupported at bind. This is the ONLY lane
+# compiling the unixpipe_listen_multiclient discriminator + reaching a real
+# BoundListener::Unixpipe through the pico C ABI. Step 1 runs it under an EXPLICIT
+# transport-link-unixpipe with a `1 passed` count-guard that reddens on a silent
+# 0-tests (the y380 proof-that-never-runs trap); step 2 clippy-gates the same
+# feature `--all-targets`.
 layer_c1bm_cargo_test_pico_failfast() {
     (cd crates \
-        && cargo test -p wz-capi-pico --features transport-link-unixpipe --test unixpipe_listen_failfast --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-capi-pico --features transport-link-unixpipe --test unixpipe_listen_multiclient --quiet 2>&1 | grep -q '1 passed' \
         && cargo clippy -p wz-capi-pico --all-targets --features transport-link-unixpipe --quiet -- -D warnings)
 }
 
@@ -5528,7 +5534,11 @@ layer_z_zenohd_interop() {
     # accept-and-hold mode (the multi-peer accept loop) for the ws-router-acceptor
     # leg below; a superset over the acceptor legs, inert for them (it adds a mode,
     # not a wire change), per the routing-routes-is-a-superset rationale.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency --quiet) || return 1
+    # R311y392 — `transport-link-unixpipe` added so the Layer Z binary carries the
+    # `unixpipe/` DIAL + `--listen unixpipe/` ACCEPT transports for the wz<->zenohd
+    # unixpipe cross-impl legs below (both directions). Additive: every TCP/WS/../..
+    # leg dials through the unchanged binary (real zenoh-pico has no unixpipe link).
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,transport-link-unixpipe --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients
@@ -5660,6 +5670,31 @@ layer_z_zenohd_interop() {
     # rejects only at the lookup (wz's wire is canonical-router decodable).
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test pubkey_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y392 — wz <-> zenohd UNIXPIPE cross-impl, BOTH directions (leg a: wz
+    # dials zenohd's UnicastPipeListener; leg b: zenohd's UnicastPipeClient dials
+    # wz's multi-client acceptor). Needs a UNIXPIPE-ENABLED zenohd — a SEPARATE
+    # source-only oracle (stock zenohd omits transport_unixpipe; crates.io cannot
+    # add it), built via `ZENOHD_UNIXPIPE=1 scripts/build-zenohd.sh` to
+    # target/zenohd-unixpipe/. Gated on its presence: a job that provisioned it runs
+    # the legs; absent + WZ_Z_REQUIRE => FAIL (the proof must run in the required
+    # job, ci.yml provisions it), absent otherwise => skip. The demo carries
+    # transport-link-unixpipe (built above). Same --test-threads=1 per-zenohd
+    # isolation. MUST precede the storage-replication leg below (whose plugin-absent
+    # skip returns from the lane early).
+    local zenohd_uxp="${WZ_ZENOHD_UNIXPIPE_BIN:-$PWD/target/zenohd-unixpipe/zenohd}"
+    if [[ -x "$zenohd_uxp" ]]; then
+        # Count-guard (`2 passed`) so a future edit that drops `#[ignore]` from the
+        # two legs — making `-- --ignored` select 0 tests and exit 0 — reddens the
+        # lane instead of silently passing; `tee /dev/stderr` keeps the output
+        # visible on failure. Extends the C1al/C1bl/C1bm count-guard discipline.
+        (cd crates && WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
+            --test wz_unixpipe_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
+            | tee /dev/stderr | grep -q '2 passed') || return 1
+    elif [[ -n "${WZ_Z_REQUIRE:-}" ]]; then
+        echo "  Layer Z FAIL — required (WZ_Z_REQUIRE set) but unixpipe zenohd absent" >&2
+        echo "  ($zenohd_uxp; run: ZENOHD_UNIXPIPE=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" >&2
+        return 1
+    fi
     # R311wo (A10) — wz<->zenohd storage-manager REPLICATION interop. Needs the
     # storage-manager plugin cdylib (built + installed by build-zenohd.sh from a
     # checkout); SKIP if absent (a crates.io-only zenohd has no plugin .so).

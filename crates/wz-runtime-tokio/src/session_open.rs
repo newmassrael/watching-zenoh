@@ -156,14 +156,17 @@ use crate::vsock_pipeline::{
 #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
 use tokio_vsock::{VsockListener, VsockStream};
 
-// R311y10 — the unixpipe arm: a same-host named-FIFO-pair link, Linux-only
-// (the tokio `read_write` open-rendezvous knob is target_os=linux). A connected
-// `UnixpipeLink` (a Receiver/Sender FIFO pair) reuses the shared `stream_link`
-// StreamEnvelope drivers, like unixsock/vsock.
+// R311y10 / R311y392 — the unixpipe arm: a same-host named-FIFO-pair link,
+// Linux-only (the tokio `read_write` open-rendezvous knob is target_os=linux). A
+// connected `UnixpipeLink` (a FIFO read/write pair) reuses the shared
+// `stream_link` StreamEnvelope drivers, like unixsock/vsock. R311y392 made the
+// acceptor MULTI-CLIENT + zenoh-wire-compatible: `bind_unixpipe` returns a
+// `UnixpipeAcceptor` (the spawned-task + channel handle, the udp demux twin) and
+// `accept_raw` awaits its next completed link.
 #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
 use crate::unixpipe_pipeline::{
-    accept_unixpipe_on, bind_unixpipe, dial_unixpipe, wire_unixpipe_stream, UnixpipeLink,
-    UnixpipePaths, UnixpipeReadDriver,
+    bind_unixpipe, dial_unixpipe, wire_unixpipe_stream, UnixpipeAcceptor, UnixpipeLink,
+    UnixpipeReadDriver,
 };
 
 /// Default cadence at which [`connect_and_open_session`] sweeps the host
@@ -592,20 +595,23 @@ pub enum BoundListener {
     /// stream family's `&`-accept never forced it).
     #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
     Vsock(VsockListener),
-    /// A bound unix named-pipe (FIFO-pair) rendezvous — NOT a listener object but
-    /// the resolved [`UnixpipePaths`] the [`bind_unixpipe`] `mkfifo` created;
-    /// [`accept_bound`] accepts a raw [`DialedLink::Unixpipe`] with NO post-accept
-    /// handshake (direct wrap, like `tcp` / `unixsock` / `vsock`). Non-IP like the
-    /// other same-host families (a FIFO open has no peer at all ->
-    /// [`AcceptedPeer::NonIp`]); Linux-only (the `read_write` open-rendezvous),
-    /// gated with the backend (R311y380). Unlike unixsock/vsock, the underlying
-    /// [`accept_unixpipe_on`] is SYNC + NON-BLOCKING (a FIFO open returns at once):
-    /// this is the FIRST non-blocking accept, and the reason the mesh
-    /// [`accept_loop`](crate::accept_loop) NonIp-reject path now throttles (an
-    /// immediate-returning accept in the reject loop would otherwise hot-spin,
-    /// where the stream/unixsock/vsock families all block until a peer arrives).
+    /// A bound MULTI-CLIENT unix named-pipe rendezvous (R311y392) — a
+    /// [`UnixpipeAcceptor`] owning the shared request channel + a spawned acceptor
+    /// task that runs each client's zenoh-compatible invitation handshake and
+    /// feeds the completed links over a channel. [`accept_bound`] / the mesh loop
+    /// accept a raw [`DialedLink::Unixpipe`] with NO post-accept handshake (the
+    /// invitation handshake already ran in the task; direct wrap, like `tcp` /
+    /// `unixsock` / `vsock`). Non-IP like the other same-host families (a FIFO open
+    /// has no IP peer -> [`AcceptedPeer::NonIp`]); Linux-only (the `read_write`
+    /// open-rendezvous), gated with the backend. Unlike the R311y380 single-
+    /// connection acceptor, `accept_raw` now BLOCKS on the task's new-link channel
+    /// (`recv`, cancel-safe) until a client completes the handshake — so unixpipe
+    /// is MESH-CAPABLE (holds N ZID-keyed faces) exactly like the stream families,
+    /// and the reject-throttle that bounded the old non-blocking accept is retired.
+    /// The udp demux [`crate::udp_pipeline::UdpDemux`] analogue for a streamed,
+    /// per-peer transport.
     #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-    Unixpipe(UnixpipePaths),
+    Unixpipe(UnixpipeAcceptor),
     /// A multi-peer DATAGRAM demux listener (R311y382) — the first
     /// structurally-datagram acceptor. UDP has no `accept()` yielding a per-peer
     /// socket: there is ONE bound socket serving N peers. [`bind_udp_demux`]
@@ -656,13 +662,12 @@ pub enum BoundListener {
 /// one-shot [`accept_bound`] writes. The multi-peer
 /// [`accept_loop`](crate::accept_loop) holds a mesh face per accepted peer keyed
 /// by its handshake zid, NOT by the transport address: an [`Self::Ip`] peer AND a
-/// mesh-capable [`Self::NonIp`] peer (unixsock / vsock — a genuine per-peer stream
-/// accept) both become held ZID-keyed faces (Slice B). Only a NON-mesh-capable
-/// acceptor is rejected by the loop — see
-/// [`AcceptedLink::supports_mesh_multi_peer`] (today only unixpipe, whose current
-/// single-connection non-blocking acceptor cannot feed a multi-accept loop; that
-/// is a wz acceptor-implementation gap, not a transport-inherent 1:1 — zenoh's
-/// `UnicastPipeListener` is multi-client, see `unixpipe_pipeline`).
+/// mesh-capable [`Self::NonIp`] peer (unixsock / vsock / unixpipe — each a genuine
+/// per-peer stream accept) both become held ZID-keyed faces (Slice B). Since
+/// R311y392 (the multi-client unixpipe acceptor) EVERY transport is mesh-capable,
+/// so the loop's NON-mesh-capable reject path (see
+/// [`AcceptedLink::supports_mesh_multi_peer`]) fires for no transport today; it
+/// stays as defensive code for a future non-mesh acceptor.
 ///
 /// `Clone`/`Debug`/`Eq` so it can ride [`Face`](crate::accept_loop::Face)`.peer`
 /// (the field the loop threads through `FaceUp`/`FaceDown`/`FaceFailed`) and the
@@ -679,9 +684,9 @@ pub enum AcceptedPeer {
     /// the accepted peer address (unix: genuinely unnamed; vsock: a
     /// real cid:port it drops; unixpipe: a FIFO open has no peer at all), so the
     /// payload is the transport name for the log line. A mesh-capable non-IP
-    /// acceptor (unixsock / vsock) is held as a ZID-keyed mesh face (Slice B); the
-    /// face's identity is the handshake zid, so the discarded transport address
-    /// does not matter to routing.
+    /// acceptor (unixsock / vsock / unixpipe, R311y392) is held as a ZID-keyed mesh
+    /// face (Slice B); the face's identity is the handshake zid, so the discarded
+    /// transport address does not matter to routing.
     NonIp(&'static str),
 }
 
@@ -724,16 +729,14 @@ impl BoundListener {
     /// RUNTIME backstop, consulted per-accept in `Step::Accepted`): the two match
     /// the SAME transport to the SAME verdict, and a mesh CALLER (run_router)
     /// consults THIS one to fail-fast a non-mesh-capable `--listen` at bind rather
-    /// than let the loop reject-throttle each accept forever (0 faces held). Every
-    /// variant is `true` EXCEPT `Unixpipe`.
-    ///
-    /// `Unixpipe` is `false` NOT because unixpipe is inherently 1:1 — zenoh's
-    /// `UnicastPipeListener` is multi-client — but because wz's CURRENT
-    /// `accept_unixpipe_on` is a single-connection, NON-BLOCKING FIFO open (see
-    /// [`AcceptedLink::supports_mesh_multi_peer`] for the full rationale). When the
-    /// multi-client unixpipe acceptor lands, BOTH twins flip to `true` together.
-    /// This match is wildcard-free so a new `BoundListener` variant forces an
-    /// explicit mesh decision here (and its twin above).
+    /// than let the loop reject-throttle each accept forever (0 faces held). Since
+    /// R311y392 EVERY variant is `true`: the multi-client unixpipe acceptor landed,
+    /// so `Unixpipe` flipped `false -> true` on BOTH twins together (the R311y380
+    /// single-connection acceptor was the only non-mesh transport). The guards stay
+    /// as defensive, wildcard-free code — a FUTURE non-mesh acceptor would return
+    /// `false` here and re-arm the caller fail-fast — but no transport returns
+    /// `false` today. This match is wildcard-free so a new `BoundListener` variant
+    /// forces an explicit mesh decision here (and its twin above).
     pub fn supports_mesh_multi_peer(&self) -> bool {
         match self {
             BoundListener::Tcp(_) => true,
@@ -745,11 +748,11 @@ impl BoundListener {
             BoundListener::Unixsock(_) => true,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             BoundListener::Vsock(_) => true,
-            // The only non-mesh-capable acceptor today (see the doc + the
-            // `AcceptedLink` twin): wz's current single-connection non-blocking
-            // unixpipe accept, NOT a transport-inherent 1:1.
+            // R311y392: the multi-client acceptor makes unixpipe mesh-capable, so
+            // this flipped `false -> true` (its `AcceptedLink` twin too). The
+            // acceptor holds N ZID-keyed faces exactly like the stream families.
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-            BoundListener::Unixpipe(_) => false,
+            BoundListener::Unixpipe(_) => true,
             #[cfg(feature = "transport-link-udp")]
             BoundListener::Udp(_) => true,
         }
@@ -803,11 +806,11 @@ impl BoundListener {
                 let a = l.local_addr()?;
                 format!("{}:{}", a.cid(), a.port())
             }
-            // A unixpipe rendezvous has no IP -- render the bound FIFO PAIR paths
-            // (uplink + downlink) the `mkfifo` created; those ARE its address (the
-            // non-IP address type this per-variant String accessor exists for).
+            // A unixpipe rendezvous has no IP -- render the bound listen BASE path
+            // (the request-channel rendezvous); that IS its address (the non-IP
+            // address type this per-variant String accessor exists for).
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-            BoundListener::Unixpipe(p) => format!("{} + {}", p.uplink, p.downlink),
+            BoundListener::Unixpipe(acc) => acc.base_path().to_string(),
             // A UDP demux listener HAS a real bound IP address (unlike the
             // same-host non-IP families), cached at bind -- always available (the
             // pump owns the socket; there is no consumed state, unlike the
@@ -927,18 +930,24 @@ impl BoundListener {
                 let stream = accept_vsock_on(l).await?;
                 (AcceptedLink::Vsock(stream), AcceptedPeer::NonIp("vsock"))
             }
-            // R311y380 — the FIRST non-blocking accept: `accept_unixpipe_on` is a
-            // SYNC FIFO open (no `.await`, no listener `accept()`), so it returns
-            // AT ONCE. `paths` reborrows `&mut UnixpipePaths` -> `&UnixpipePaths`
-            // (the open reads the paths, never mutates), so the `&mut self`
-            // receiver over-constrains nothing here. Direct wrap, no post-accept
-            // handshake, anonymous peer -> NonIp, mirroring unixsock/vsock. Because
-            // this accept never blocks, the mesh `accept_loop` NonIp-reject path
-            // throttles (see its `Step::Accepted` handler) so a mis-configured
-            // `--listen unixpipe/..` router does not hot-spin.
+            // R311y392 — the MULTI-CLIENT unixpipe accept: await the acceptor
+            // task's next completed link (its zenoh-compatible invitation handshake
+            // already ran INSIDE the task, so nothing multi-step runs in this
+            // cancel-prone `select!` arm). `recv_new_link` is a bare `mpsc::recv`,
+            // cancel-safe like the udp / dial-intent helpers -- a `select!`
+            // dropping this accept never loses a buffered link (it stays in the
+            // channel). On a CLOSED channel (the acceptor task ended) we PARK
+            // (`pending`) rather than return `Err`: an `Err` would re-arm the
+            // `Step::Accepted(Err)` throttle, exactly the spin the blocking accept
+            // now avoids (the R311y380 non-blocking-accept throttle is retired).
+            // Direct wrap, anonymous peer -> NonIp, mirroring unixsock/vsock;
+            // unixpipe is now mesh-capable (holds N ZID-keyed faces).
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-            BoundListener::Unixpipe(paths) => {
-                let link = accept_unixpipe_on(paths)?;
+            BoundListener::Unixpipe(acc) => {
+                let link = match acc.recv_new_link().await {
+                    Some(link) => link,
+                    None => std::future::pending::<UnixpipeLink>().await,
+                };
                 (
                     AcceptedLink::Unixpipe(link),
                     AcceptedPeer::NonIp("unixpipe"),
@@ -1106,24 +1115,23 @@ impl AcceptedLink {
     /// Whether this accepted link's transport is a MESH-CAPABLE acceptor — i.e.
     /// wz's CURRENT accept path for it yields multiple DISTINCT per-peer accepted
     /// connections, so the multi-accept [`accept_loop`](crate::accept_loop) can
-    /// hold N faces off one listener. Every variant is `true` EXCEPT `Unixpipe`.
+    /// hold N faces off one listener. Since R311y392 EVERY variant is `true`.
     ///
-    /// `Unixpipe` is `false` NOT because unixpipe is inherently 1:1 — zenoh's
-    /// `UnicastPipeListener` is multi-client (an invitation handshake + a
-    /// per-connection dedicated sub-pipe pair) and wz's own `unixpipe_pipeline`
-    /// documents that multi-client acceptor as a future extension. It is `false`
-    /// because wz's CURRENT `accept_unixpipe_on` is a single-connection,
-    /// NON-BLOCKING FIFO open that returns at once whether or not a peer dialed:
-    /// fed to a multi-accept loop it would spin (the R311y380 throttle bounds the
-    /// symptom). When the multi-client unixpipe acceptor lands, this flips to
-    /// `true` and unixpipe joins the mesh through the SAME generalized loop.
+    /// `Unixpipe` flipped `false -> true` at R311y392 when the multi-client acceptor
+    /// landed: unixpipe's invitation handshake + per-connection dedicated sub-pipe
+    /// pair (the zenoh `UnicastPipeListener` protocol) now yields N distinct
+    /// per-peer links from one listener, wired the udp-demux way (a spawned acceptor
+    /// task feeds completed links over a channel; `accept_raw` blocks on `recv`).
+    /// The old R311y380 `accept_unixpipe_on` was a single-connection non-blocking
+    /// open — the only non-mesh transport, and the reason the reject-throttle
+    /// existed; both are retired.
     ///
     /// This is the loop's RUNTIME backstop (consulted in the `Step::Accepted` arm
-    /// of [`accept_loop`](crate::accept_loop)). A BIND-time twin on
-    /// [`BoundListener`] — for a mesh CALLER fail-fast that rejects a
-    /// non-mesh-capable `--listen` at bind rather than letting the loop
-    /// reject-loop each accept — is a follow-up slice. This match is wildcard-free
-    /// so a new `AcceptedLink` variant forces an explicit mesh decision here.
+    /// of [`accept_loop`](crate::accept_loop)); its BIND-time twin on
+    /// [`BoundListener`] fail-fasts a non-mesh `--listen` at the mesh caller. Both
+    /// stay as defensive, wildcard-free code for a FUTURE non-mesh acceptor, but no
+    /// transport returns `false` today. This match is wildcard-free so a new
+    /// `AcceptedLink` variant forces an explicit mesh decision here.
     pub fn supports_mesh_multi_peer(&self) -> bool {
         match self {
             AcceptedLink::Tcp(_) => true,
@@ -1135,10 +1143,10 @@ impl AcceptedLink {
             AcceptedLink::Unixsock(_) => true,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             AcceptedLink::Vsock(_) => true,
-            // The only non-mesh-capable acceptor today (see the doc): wz's current
-            // single-connection non-blocking unixpipe accept, NOT a transport truth.
+            // R311y392: the multi-client acceptor makes unixpipe mesh-capable, so
+            // this flipped `false -> true` (its `BoundListener` twin too).
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-            AcceptedLink::Unixpipe(_) => false,
+            AcceptedLink::Unixpipe(_) => true,
             #[cfg(feature = "transport-link-udp")]
             AcceptedLink::UdpDemuxed { .. } => true,
         }
@@ -1412,14 +1420,16 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             io::ErrorKind::Unsupported,
             "vsock session-open requires the transport-link-vsock feature on a Linux target",
         )),
-        // R311y10 — a `unixpipe/...` endpoint dials through the named-FIFO-pair
-        // backend: `dial_unixpipe` opens the dialer's (receiver, sender) FIFO
-        // ends (no dial-time handshake — the FIFO open IS the rendezvous, ready
-        // for the uniform split, like unixsock). `dial_unixpipe` is SYNC (a FIFO
-        // open is non-blocking) but must run within the tokio runtime, which this
-        // async dial seam provides. No cert config (like unixsock/udp).
+        // R311y10 / R311y392 — a `unixpipe/...` endpoint dials through the
+        // named-FIFO backend: `dial_unixpipe` runs the client half of the zenoh
+        // invitation handshake (detect the listener, reserve a dedicated pair,
+        // 3-way suffix confirm) and returns the connected dedicated pair (no
+        // post-dial session handshake — ready for the uniform split, like
+        // unixsock). ASYNC now (the invitation handshake awaits the peer), running
+        // within the tokio runtime this async dial seam provides. No cert config
+        // (like unixsock/udp).
         #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-        AnyLocator::Unixpipe(ep) => Ok(DialedLink::Unixpipe(dial_unixpipe(&ep.path)?)),
+        AnyLocator::Unixpipe(ep) => Ok(DialedLink::Unixpipe(dial_unixpipe(&ep.path).await?)),
         // R311y10 — `AnyLocator::Unixpipe` is an ALWAYS-present, PLATFORM-
         // INDEPENDENT variant (the unixpipe locator leaf is ungated in
         // wz-session-core), so this arm must exist on every target / feature
@@ -1671,19 +1681,19 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             io::ErrorKind::Unsupported,
             "vsock accept requires the transport-link-vsock feature on Linux",
         )),
-        // R311y380 (accept-symmetry Stage 4, third arm) — a unixpipe acceptor
-        // `mkfifo`s the uplink+downlink FIFO PAIR (`bind_unixpipe`, SYNC like
-        // vsock's `bind_vsock` — no `.await`) into `BoundListener::Unixpipe`, the
-        // accept-side mirror of `dial_locator`'s `AnyLocator::Unixpipe =>
-        // DialedLink::Unixpipe`. Like the vsock arm, gated
-        // `all(transport-link-unixpipe, target_os = "linux")` (the FIFO
-        // `read_write` open-rendezvous is Linux-only), with the cfg-off/non-Linux
-        // twin returning a typed `Unsupported` so the always-present
-        // `AnyLocator::Unixpipe` variant (ungated in wz-session-core) stays
-        // exhaustive on every target. `udp` is the remaining acceptor extension
-        // point.
+        // R311y380 / R311y392 (accept-symmetry Stage 4, third arm) — a unixpipe
+        // acceptor `mkfifo`s the base request channel + spawns the multi-client
+        // acceptor task (`bind_unixpipe`, now ASYNC like `bind_udp_demux` — it
+        // spawns a task) into `BoundListener::Unixpipe`, the accept-side mirror of
+        // `dial_locator`'s `AnyLocator::Unixpipe => DialedLink::Unixpipe`. Like the
+        // vsock arm, gated `all(transport-link-unixpipe, target_os = "linux")` (the
+        // FIFO `read_write` open-rendezvous is Linux-only), with the
+        // cfg-off/non-Linux twin returning a typed `Unsupported` so the
+        // always-present `AnyLocator::Unixpipe` variant (ungated in
+        // wz-session-core) stays exhaustive on every target. `udp` is the remaining
+        // acceptor extension point.
         #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-        AnyLocator::Unixpipe(ep) => Ok(BoundListener::Unixpipe(bind_unixpipe(&ep.path)?)),
+        AnyLocator::Unixpipe(ep) => Ok(BoundListener::Unixpipe(bind_unixpipe(&ep.path).await?)),
         #[cfg(not(all(feature = "transport-link-unixpipe", target_os = "linux")))]
         AnyLocator::Unixpipe(_ep) => Err(unsupported(
             "unixpipe accept requires the transport-link-unixpipe feature on Linux",
@@ -3407,8 +3417,9 @@ mod tests {
     /// consults at bind) at the TRUE polarity: a tcp listener is mesh-capable.
     /// The match is wildcard-free, so a NEW `BoundListener` variant forces a
     /// compile-time decision; this pins the value for tcp (a representative
-    /// `true`). The FALSE-polarity twin is
-    /// `boundlistener_unixpipe_is_not_mesh_capable`.
+    /// `true`). Since R311y392 every transport is mesh-capable —
+    /// `boundlistener_unixpipe_is_mesh_capable` pins the once-`false` unixpipe arm
+    /// at its new `true` polarity.
     #[tokio::test]
     async fn boundlistener_tcp_is_mesh_capable() {
         let l = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
@@ -3421,29 +3432,29 @@ mod tests {
         );
     }
 
-    /// CALLER fail-fast slice — the FALSE-polarity twin of
-    /// `boundlistener_tcp_is_mesh_capable`: a unixpipe listener is NOT
-    /// mesh-capable (its CURRENT single-connection non-blocking acceptor cannot
-    /// feed a multi-accept loop — a wz acceptor gap, not a transport-inherent
-    /// 1:1). This is exactly the case `run_router`'s bind-time fail-fast rejects;
-    /// the `mkfifo` needs no dialer, so the `BoundListener::Unixpipe` is
-    /// constructible standalone (`bind_unixpipe` is sync — no runtime needed).
+    /// R311y392 — the once-`false` unixpipe arm now pins at `true`: the
+    /// multi-client acceptor (`bind_unixpipe`, async — it spawns the acceptor task)
+    /// makes a unixpipe listener mesh-capable, so `run_router`'s bind-time fail-fast
+    /// no longer rejects it. Replaces the retired
+    /// `boundlistener_unixpipe_is_not_mesh_capable` (whose FALSE assertion the flip
+    /// broke). The `AcceptedLink` twin is pinned by `acceptedlink_unixpipe_*` in
+    /// accept_loop.
     #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-    #[test]
-    fn boundlistener_unixpipe_is_not_mesh_capable() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boundlistener_unixpipe_is_mesh_capable() {
         use crate::unixpipe_pipeline::bind_unixpipe;
         let base = std::env::temp_dir()
             .join(format!("wz-boundlistener-cap-{}", std::process::id()))
             .to_string_lossy()
             .into_owned();
-        let paths = bind_unixpipe(&base).expect("mkfifo the unixpipe rendezvous pair");
-        let listener = BoundListener::Unixpipe(paths);
+        let acc = bind_unixpipe(&base)
+            .await
+            .expect("bind the unixpipe acceptor");
+        let listener = BoundListener::Unixpipe(acc);
         assert!(
-            !listener.supports_mesh_multi_peer(),
-            "a unixpipe listener is NOT mesh-capable (single-connection acceptor)"
+            listener.supports_mesh_multi_peer(),
+            "a unixpipe listener is mesh-capable (multi-client acceptor, R311y392)"
         );
         drop(listener);
-        let _ = std::fs::remove_file(format!("{base}_uplink"));
-        let _ = std::fs::remove_file(format!("{base}_downlink"));
     }
 }

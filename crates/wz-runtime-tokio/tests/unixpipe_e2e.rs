@@ -9,11 +9,11 @@
 //! R311y10 — wz<->wz session end to end over a real loopback unix named-pipe
 //! (FIFO-pair) link.
 //!
-//! The FIFO sibling of `unixsock_e2e`: the acceptor `mkfifo`s an uplink +
-//! downlink FIFO pair (`bind_unixpipe`) and opens its `(receiver, sender)` ends
-//! (`accept_unixpipe_on`); the initiator dials a `unixpipe/<path>` LOCATOR
-//! through the dial seam (`connect_and_open_session` -> `dial_locator` ->
-//! `dial_unixpipe`), which opens the mirror ends. Both nodes reach Established
+//! The FIFO sibling of `unixsock_e2e`: the acceptor `bind_unixpipe`s the
+//! multi-client request channel + acceptor task and awaits the next accepted link
+//! (`recv_new_link`); the initiator dials a `unixpipe/<path>` LOCATOR through the
+//! dial seam (`connect_and_open_session` -> `dial_locator` -> `dial_unixpipe`),
+//! which runs the zenoh-compatible invitation handshake. Both nodes reach Established
 //! over the FIFO byte stream (the SAME StreamEnvelope framing as TCP/unixsock,
 //! reused unchanged via tokio's native `pipe::Sender`/`Receiver`) and a `Put`
 //! published on the initiator is delivered byte-exact to a subscriber on the
@@ -39,7 +39,7 @@ use wz_runtime_tokio::session_open::{
     DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex;
-use wz_runtime_tokio::unixpipe_pipeline::{accept_unixpipe_on, bind_unixpipe};
+use wz_runtime_tokio::unixpipe_pipeline::bind_unixpipe;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -62,12 +62,15 @@ async fn wz_to_wz_over_unixpipe_reaches_established_and_delivers_put() {
         .to_string_lossy()
         .into_owned();
 
-    // mkfifo the rendezvous pair BEFORE the dialer opens it (the bind/accept
-    // split): the acceptor owns the FIFOs so they outlive both sessions.
-    let paths = bind_unixpipe(&base).expect("bind unixpipe fifo pair");
+    // Bind the multi-client acceptor (creates the request channel + spawns the
+    // acceptor task). The initiator's dial drives the invitation handshake; the
+    // task yields the accepted listener-side link.
+    let mut acc = bind_unixpipe(&base)
+        .await
+        .expect("bind the unixpipe acceptor");
 
     let acc_open = async {
-        let link = accept_unixpipe_on(&paths).expect("accept unixpipe peer");
+        let link = acc.recv_new_link().await.expect("accept a unixpipe client");
         let mut params = fixture_session_init_params();
         params.zid = vec![0x02; 4]; // distinct from the initiator
         accept_and_open_session(
@@ -179,8 +182,11 @@ async fn wz_to_wz_over_unixpipe_reaches_established_and_delivers_put() {
         "exactly one delivery from the Put over the unixpipe link"
     );
 
-    let _ = std::fs::remove_file(&paths.uplink);
-    let _ = std::fs::remove_file(&paths.downlink);
+    // The acceptor's Drop unlinks the base request node; dedicated per-connection
+    // nodes auto-unlink via their read-end Drop. Best-effort base cleanup for a
+    // crashed prior run.
+    drop(acc);
+    let _ = std::fs::remove_file(format!("{base}_uplink"));
 }
 
 /// A unique FIFO-pair base path for the accept-seam test (a distinct suffix from
@@ -200,7 +206,7 @@ fn unique_seam_pipe_base() -> String {
 ///
 /// This is the DISCRIMINATOR the delivery test
 /// [`wz_to_wz_over_unixpipe_reaches_established_and_delivers_put`] cannot be:
-/// that test drives the RAW primitives (`bind_unixpipe` / `accept_unixpipe_on` +
+/// that test drives the RAW pipeline API (`bind_unixpipe` / `recv_new_link` +
 /// a hand-wrapped `DialedLink::Unixpipe`), so it stays GREEN even while the
 /// scheme-keyed `bind_locator` returns `Unsupported` for `AnyLocator::Unixpipe`.
 /// THIS test binds through `bind_endpoint` — the seam a `--listen unixpipe/..`
@@ -227,10 +233,11 @@ async fn wz_accepts_a_session_over_unixpipe_via_the_bind_endpoint_seam() {
     );
 
     let acc_open = async {
-        // The pub accept seam: accept one raw peer (a SYNC, non-blocking FIFO
-        // open — no `listener.accept()`), then run the (no-op for unixpipe)
-        // post-accept handshake into the SAME DialedLink the dial side produces,
-        // exactly what the one-shot `accept_bound` drives internally.
+        // The pub accept seam: accept one peer (R311y392 — `accept_raw` awaits the
+        // acceptor task's next completed invitation handshake, cancel-safe), then
+        // run the (no-op for unixpipe) post-accept handshake into the SAME
+        // DialedLink the dial side produces, exactly what one-shot `accept_bound`
+        // drives internally.
         let (accepted, _peer) = bound
             .accept_raw()
             .await

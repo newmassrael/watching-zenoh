@@ -372,6 +372,28 @@ pub mod common {
         path
     }
 
+    /// Locate the UNIXPIPE-enabled `zenohd` (R311y392): the `WZ_ZENOHD_UNIXPIPE_BIN`
+    /// env override, else `scripts/build-zenohd.sh ZENOHD_UNIXPIPE=1`'s
+    /// `target/zenohd-unixpipe/zenohd` install. A SEPARATE binary from
+    /// [`zenohd_binary`] because zenoh's `default` feature set omits
+    /// `transport_unixpipe` (and `cargo install` cannot add it), so a unixpipe
+    /// zenohd needs a source build with `--features zenoh/transport_unixpipe` — kept
+    /// out of the default oracle to preserve its "one identity". Panics with the
+    /// build hint if absent, the same prereq discipline as [`zenohd_binary`].
+    pub fn zenohd_unixpipe_binary() -> PathBuf {
+        if let Ok(p) = std::env::var("WZ_ZENOHD_UNIXPIPE_BIN") {
+            return PathBuf::from(p);
+        }
+        let path = project_root().join("target/zenohd-unixpipe/zenohd");
+        assert!(
+            path.is_file(),
+            "unixpipe-enabled zenohd missing at {}; set WZ_ZENOHD_UNIXPIPE_BIN or run \
+             `ZENOHD_UNIXPIPE=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh` first",
+            path.display()
+        );
+        path
+    }
+
     /// Locate the `zenoh-plugin-storage-manager` dynamic plugin
     /// (`libzenoh_plugin_storage_manager.so`): the `WZ_STORAGE_MANAGER_SO`
     /// env override, else `scripts/build-zenohd.sh`'s

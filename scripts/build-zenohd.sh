@@ -46,6 +46,21 @@ BUILD_DIR="$ROOT/target/zenohd-build"
 TOOLCHAIN="1.85.0"
 ZENOHD_VERSION="${ZENOHD_VERSION:-1.5.0}"
 
+# R311y392 — the unixpipe-enabled variant. zenoh's `default` feature set OMITS
+# transport_unixpipe (zenoh/Cargo.toml), and `cargo install` (source B) cannot add
+# a dependency feature, so a unixpipe zenohd requires a SOURCE build with
+# `--features zenoh/transport_unixpipe`. It is installed to a SEPARATE target so the
+# default oracle's "one identity" (used by every other Layer Z test) is unchanged;
+# the wz<->zenohd unixpipe interop test points WZ_ZENOHD_UNIXPIPE_BIN at it. Enable
+# with ZENOHD_UNIXPIPE=1 (which also implies a source build — set
+# ZENOHD_ALLOW_CLONE=1 on a machine with no cargo git checkout).
+UNIXPIPE_FEATURE=""
+if [[ "${ZENOHD_UNIXPIPE:-0}" -eq 1 ]]; then
+    INSTALL_DIR="$ROOT/target/zenohd-unixpipe"
+    BUILD_DIR="$ROOT/target/zenohd-unixpipe-build"
+    UNIXPIPE_FEATURE="--features zenoh/transport_unixpipe"
+fi
+
 if ! rustup toolchain list 2>/dev/null | grep -q "^$TOOLCHAIN"; then
     echo "build-zenohd: toolchain $TOOLCHAIN not installed" >&2
     echo "  run: rustup toolchain install $TOOLCHAIN" >&2
@@ -102,9 +117,10 @@ if [[ -n "$ZH" ]]; then
         echo "  set ZENOHD_VERSION=$checkout_version, or ZENOHD_FORCE_CRATES_IO=1 for the crates.io path." >&2
         exit 1
     fi
-    echo "build-zenohd: building zenohd (release, +$TOOLCHAIN) ..." >&2
+    echo "build-zenohd: building zenohd (release, +$TOOLCHAIN)${UNIXPIPE_FEATURE:+ [+transport_unixpipe]} ..." >&2
+    # shellcheck disable=SC2086  # UNIXPIPE_FEATURE is an intentional word-split flag
     CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build -p zenohd --release \
-        --manifest-path "$ZH/Cargo.toml"
+        $UNIXPIPE_FEATURE --manifest-path "$ZH/Cargo.toml"
     SRC_BIN="$BUILD_DIR/release/zenohd"
     # R311wo (A10) — also build the storage-manager plugin (cdylib) from the SAME
     # checkout, so its ABI-compat hash (zenoh version + rustc) matches the zenohd
@@ -112,11 +128,27 @@ if [[ -n "$ZH" ]]; then
     # test (wz_zenohd_storage_replication.rs) needs it. Only source A can produce
     # the cdylib: `cargo install` (source B) yields binaries, not the plugin .so,
     # so a crates.io build leaves it absent and the interop test SKIPs.
-    echo "build-zenohd: building zenoh-plugin-storage-manager (release) ..." >&2
-    CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
-        -p zenoh-plugin-storage-manager --release --manifest-path "$ZH/Cargo.toml"
-    SO_SRC="$BUILD_DIR/release/libzenoh_plugin_storage_manager.so"
+    # The unixpipe variant is a transport-only interop oracle — it does NOT need
+    # the storage-manager plugin (the A10 storage test uses the default oracle), so
+    # skip the extra cdylib build for it.
+    if [[ "${ZENOHD_UNIXPIPE:-0}" -eq 1 ]]; then
+        SO_SRC=""
+    else
+        echo "build-zenohd: building zenoh-plugin-storage-manager (release) ..." >&2
+        CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
+            -p zenoh-plugin-storage-manager --release --manifest-path "$ZH/Cargo.toml"
+        SO_SRC="$BUILD_DIR/release/libzenoh_plugin_storage_manager.so"
+    fi
 else
+    # The unixpipe variant CANNOT come from source B: `cargo install` builds the
+    # published binary and cannot add `zenoh/transport_unixpipe`, so a crates.io
+    # zenohd has no unixpipe transport. Require a source build.
+    if [[ "${ZENOHD_UNIXPIPE:-0}" -eq 1 ]]; then
+        echo "build-zenohd: ZENOHD_UNIXPIPE=1 needs a SOURCE build (crates.io cannot add" >&2
+        echo "  zenoh/transport_unixpipe). Set ZENOHD_ALLOW_CLONE=1 (or provide a cargo" >&2
+        echo "  git checkout) and re-run." >&2
+        exit 1
+    fi
     # Source B — deterministic crates.io install (fresh-clone reproducible).
     # --locked pins to the published Cargo.lock; --root keeps the install tree
     # inside target/ so it is git-ignored and clean-able like any build output.
