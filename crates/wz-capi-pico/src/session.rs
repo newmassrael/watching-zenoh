@@ -355,6 +355,21 @@ async fn drive_listen(
             return;
         }
     };
+    // CALLER fail-fast (mesh accept loop): pico's z_open(listen) holds N
+    // concurrent inbound peers off ONE listener, so a non-mesh-capable acceptor
+    // (a single-connection unixpipe, whose non-blocking FIFO open returns at
+    // once) would reject-throttle every accept forever -- "listening" yet
+    // holding 0 faces. Reject it here so z_open reports the open failure to the
+    // C caller (tx.send(false) -> Z_ERR_GENERIC), the pico twin of run_router's
+    // bind-time guard and the BIND-time twin of the accept loop's runtime
+    // `AcceptedLink::supports_mesh_multi_peer` backstop. Reachable only when
+    // `transport-link-unixpipe` is compiled (the sole non-mesh-capable acceptor
+    // today); otherwise `bind_endpoint` already errored above, so this guard
+    // runs but never rejects a mesh-capable (tcp/udp/..) listener.
+    if !listener.supports_mesh_multi_peer() {
+        let _ = tx.send(false);
+        return;
+    }
     // The bind is the WHOLE of pico's `z_open(listen)`: it binds + listens,
     // spawns an async accept task, and returns with zero peers and no error.
     // Unblocking here — before any peer exists — is the R2 fix; Round 1 awaited

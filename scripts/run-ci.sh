@@ -2301,6 +2301,28 @@ layer_c1bl_cargo_test_router_failfast() {
         && cargo clippy -p wz-ap-demo --all-targets --features routing-router,transport-link-unixpipe --quiet -- -D warnings)
 }
 
+# ─── Layer C1bm — the pico listener's CALLER fail-fast (R311y391) ─────
+#
+# The pico twin of C1bl (run_router's fail-fast). pico's z_open(listen) holds N
+# concurrent inbound peers off ONE accept loop (listener_multipeer.rs), so
+# `drive_listen` now rejects a single-connection unixpipe --listen at bind
+# (consulting the SAME BoundListener::supports_mesh_multi_peer bind-time twin) ->
+# z_open returns Z_ERR_GENERIC. `transport-link-unixpipe` is a SUPERSET feature
+# (not a zenoh-pico-native link -- real pico has no unixpipe; the north star is a
+# composable superset of zenoh-full + zenoh-pico), off-default: without it the
+# `unixpipe/` scheme still parses but bind_locator returns a feature-gated
+# Unsupported at bind, so the guard is unreachable dead code. This is the ONLY
+# lane compiling the unixpipe_listen_failfast discriminator + reaching a real
+# BoundListener::Unixpipe through the pico C ABI. Step 1 runs the discriminator
+# under an EXPLICIT transport-link-unixpipe with a `1 passed` count-guard that
+# reddens on a silent 0-tests (the y380 proof-that-never-runs trap); step 2
+# clippy-gates the same feature `--all-targets`.
+layer_c1bm_cargo_test_pico_failfast() {
+    (cd crates \
+        && cargo test -p wz-capi-pico --features transport-link-unixpipe --test unixpipe_listen_failfast --quiet 2>&1 | grep -q '1 passed' \
+        && cargo clippy -p wz-capi-pico --all-targets --features transport-link-unixpipe --quiet -- -D warnings)
+}
+
 # ─── Layer C1x — routing-routes: forwarding kernel + forwarder unit + clippy ─
 #
 # R311qc: the data-plane forwarding atom (`routing::RouteTable` kernel +
@@ -6327,6 +6349,7 @@ run_layer C1be layer_c1be_cargo_test_query_value || overall=1
 run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
+run_layer C1bm layer_c1bm_cargo_test_pico_failfast || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1
 run_layer C1z layer_c1z_cargo_test_storage_driver || overall=1

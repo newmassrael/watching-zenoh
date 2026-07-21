@@ -43,6 +43,23 @@ name = "wz_capi_pico"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# R311y391 (CALLER fail-fast, pico half) — off-default `unixpipe/` (Unix
+# named-pipe) ACCEPT transport, forwarding wz-runtime-tokio's
+# `transport-link-unixpipe`. This is a SUPERSET feature, NOT a zenoh-pico-native
+# link: real zenoh-pico has no unixpipe (TCP/UDP/serial/WS/TLS/BLE/raweth), but
+# the north star is a composable SUPERSET of zenoh-full + zenoh-pico (superset,
+# not mirror), and wz-capi-pico is the AP-profile C ABI over the full wz runtime
+# (which HAS unixpipe) -- so a pico C program can opt into a same-host unixpipe
+# transport a fixed zenoh-pico binary cannot. It makes the mesh listener's CALLER
+# fail-fast REACHABLE: with it, `z_open(listen="unixpipe/..")` binds a
+# single-connection unixpipe listener, which `drive_listen` then rejects at bind
+# (a mesh listener holds N faces; a unixpipe acceptor is 1:1 today). WITHOUT it
+# the `unixpipe/` scheme still parses but `bind_locator` returns a feature-gated
+# `Unsupported` at bind, so `bind_endpoint` errors before the guard. NOT enabled
+# by any default; only the run-ci C1bl-style pico lane builds with it.
+transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe"]
+
 [lints]
 workspace = true
 
