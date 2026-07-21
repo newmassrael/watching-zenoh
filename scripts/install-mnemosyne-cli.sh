@@ -24,16 +24,17 @@
 
 set -euo pipefail
 
-# github.com/newmassrael/mnemosyne @ R732 (DEBT-M entity-kind inheritance
-# tree) — the rev whose CLI reads the current atomic-store schema_version
-# (34) and defines CURRENT_SCHEMA_VERSION 37, so a later mutation migrates
-# the store up to 37 and this same pin still reads it (reader max >= store).
-# The prior pin (R730, 6871b925) defines only schema <= 35; adopting the
-# R731/R732 upstream (fact_counts multiset custody + entity-kind inheritance
-# tree) moved the local --path binary to R732, so the pin moves in step to
-# keep local pre-push and CI on one mnemosyne version. Kept in step with the
-# locally-installed `--path` binary (mnemosyne-cli 0.1.0 5807bd5).
-MNEMOSYNE_REV="5807bd5cd53d4b9dea85a6560a2dfe22b02252bc"
+# github.com/newmassrael/mnemosyne @ R754 (2d-projection harness follow-ons)
+# — the newest PUSHED rev (origin/main), whose CLI defines
+# CURRENT_SCHEMA_VERSION 39. It reads the store's schema_version (38, written by
+# the R748 CLI at the R311y389 append) and migrates the store up to 39 on the
+# NEXT mutation, still reading it in the meantime (reader max >= store). The
+# store staying one schema behind the pin is the designed lazy-migrate path, not
+# a drift. The prior pin (R748, 7ec9eec) defines only schema <= 38; the author
+# pushed the R749-R754 ladder (schema 38 -> 39) upstream, so the pin moves to
+# R754 in step. Kept in step with the locally-installed `--path` binary
+# (mnemosyne-cli 0.1.0 3bf4c8d).
+MNEMOSYNE_REV="3bf4c8da195f6e81820c333cabcb270a2f37f96c"
 
 cargo install --git https://github.com/newmassrael/mnemosyne \
   --rev "$MNEMOSYNE_REV" --bin mnemosyne-cli --force mnemosyne-cli
