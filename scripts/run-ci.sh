@@ -5538,7 +5538,13 @@ layer_z_zenohd_interop() {
     # `unixpipe/` DIAL + `--listen unixpipe/` ACCEPT transports for the wz<->zenohd
     # unixpipe cross-impl legs below (both directions). Additive: every TCP/WS/../..
     # leg dials through the unchanged binary (real zenoh-pico has no unixpipe link).
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,transport-link-unixpipe --quiet) || return 1
+    # R311y400 — `vsock` added so the Layer Z binary carries the `--listen vsock/`
+    # AF_VSOCK ACCEPT transport for the host-only vsock cross-impl leg below. Additive
+    # (a new locator arm, inert for every other leg). This COMPILE-gates the demo's
+    # vsock acceptor arm on EVERY CI run even though the leg itself runs only on a
+    # vsock-capable host (the runner has no vsock_loopback) — the same compile-on-CI /
+    # run-on-host split as the C1ab vsock lane.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,transport-link-unixpipe,vsock --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients
@@ -5735,6 +5741,38 @@ layer_z_zenohd_interop() {
         echo "  Layer Z FAIL — required (WZ_Z_REQUIRE set) but unixpipe zenohd absent" >&2
         echo "  ($zenohd_uxp; run: ZENOHD_UNIXPIPE=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" >&2
         return 1
+    fi
+    # R311y400 — wz VSOCK ACCEPTOR cross-impl (transport-link-vsock zenohd->wz): the
+    # AF_VSOCK sibling of the ws/tls/unixsock/udp acceptor legs, closing the LAST
+    # accept-direction cross-impl gap. A real zenohd DIALS the wz
+    # `--listen vsock/VMADDR_CID_LOCAL:<port>` acceptor (BoundListener::Vsock /
+    # bind_vsock — direct wrap, proven wz<->wz by vsock_e2e), and a pico z_put routes
+    # through zenohd ACROSS the AF_VSOCK loopback link into the wz acceptor's
+    # subscriber. wz binds ONLY vsock (no TCP listener), so vsock is the sole
+    # wz<->zenohd transport. zenoh-pico has no vsock client, so zenohd is the only
+    # foreign vsock dialer; the demo carries `vsock` (built above).
+    #
+    # HOST-ONLY, unlike every other Layer Z leg: AF_VSOCK loopback needs the
+    # `vsock_loopback` kernel module AND a VSOCK-enabled zenohd (target/zenohd-vsock/ —
+    # a SEPARATE source build; zenoh's default omits transport_vsock). The hosted CI
+    # runner has neither and ci.yml does NOT provision them, so this leg SKIPs when the
+    # vsock oracle is absent — even under WZ_Z_REQUIRE (this is the same kernel-gated
+    # host-only treatment as vsock_e2e / the C1ab lane; the demo still COMPILES with
+    # vsock on every CI run above). A vsock-capable host builds the oracle with
+    # `ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh` to run it.
+    # Count-guarded (`1 passed`) so a dropped `#[ignore]` (0 selected -> exit 0)
+    # reddens instead of silently passing. Same --test-threads=1 per-zenohd isolation.
+    # MUST precede the storage-replication leg below (whose plugin-absent skip returns
+    # from the lane early).
+    local zenohd_vsock="${WZ_ZENOHD_VSOCK_BIN:-$PWD/target/zenohd-vsock/zenohd}"
+    if [[ -x "$zenohd_vsock" ]]; then
+        (cd crates && WZ_ZENOHD_VSOCK_BIN="$zenohd_vsock" cargo test -p wz-integration-tests \
+            --test wz_vsock_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
+            | tee /dev/stderr | grep -q '1 passed') || return 1
+    else
+        echo "  Layer Z SKIP — vsock acceptor interop (host-only): vsock zenohd absent" >&2
+        echo "  ($zenohd_vsock; a vsock-capable host builds it via" >&2
+        echo "   ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" >&2
     fi
     # R311wo (A10) — wz<->zenohd storage-manager REPLICATION interop. Needs the
     # storage-manager plugin cdylib (built + installed by build-zenohd.sh from a

@@ -394,6 +394,31 @@ pub mod common {
         path
     }
 
+    /// Locate the VSOCK-enabled `zenohd` (R311y400): the `WZ_ZENOHD_VSOCK_BIN`
+    /// env override, else `scripts/build-zenohd.sh ZENOHD_VSOCK=1`'s
+    /// `target/zenohd-vsock/zenohd` install. A SEPARATE binary from
+    /// [`zenohd_binary`] for the same reason as [`zenohd_unixpipe_binary`]:
+    /// zenoh's `default` feature set omits `transport_vsock` (and `cargo install`
+    /// cannot add it), so a vsock zenohd needs a source build with
+    /// `--features zenoh/transport_vsock` — kept out of the default oracle to
+    /// preserve its "one identity". Unlike the unixpipe oracle it is NOT
+    /// provisioned in hosted CI (the runner has no `vsock_loopback`), so its Layer
+    /// Z leg SKIPs rather than FAILs when this binary is absent. Panics with the
+    /// build hint if absent, the same prereq discipline as [`zenohd_binary`].
+    pub fn zenohd_vsock_binary() -> PathBuf {
+        if let Ok(p) = std::env::var("WZ_ZENOHD_VSOCK_BIN") {
+            return PathBuf::from(p);
+        }
+        let path = project_root().join("target/zenohd-vsock/zenohd");
+        assert!(
+            path.is_file(),
+            "vsock-enabled zenohd missing at {}; set WZ_ZENOHD_VSOCK_BIN or run \
+             `ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh` first",
+            path.display()
+        );
+        path
+    }
+
     /// Locate the `zenoh-plugin-storage-manager` dynamic plugin
     /// (`libzenoh_plugin_storage_manager.so`): the `WZ_STORAGE_MANAGER_SO`
     /// env override, else `scripts/build-zenohd.sh`'s
@@ -1336,6 +1361,45 @@ pub mod common {
             wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
         {
             panic!("zenohd (udp dialer): {e}");
+        }
+        guard
+    }
+
+    /// R311y400 — spawn a VSOCK-enabled zenohd that DIALS a wz `vsock/<cid>:<port>`
+    /// acceptor (`-e vsock/<cid>:<port>`) while listening on `tcp/<tcp_port>` for a
+    /// pico client. The AF_VSOCK DIALER twin of [`spawn_zenohd_unixsock_dialer`],
+    /// verifying wz's vsock ACCEPTOR (`BoundListener::Vsock` / `bind_vsock` — direct
+    /// wrap, no post-accept handshake — proven wz<->wz by `vsock_e2e`). Needs the
+    /// SEPARATE [`zenohd_vsock_binary`] oracle: zenoh's `default` omits
+    /// `transport_vsock` (and `cargo install` cannot add it), so a vsock zenohd needs
+    /// a source build — the same reason unixpipe needs its own oracle. The caller
+    /// passes a PRE-FORMATTED `vsock/<cid>:<port>` endpoint (vsock is NonIp with an
+    /// EPHEMERAL kernel-assigned port learned from the wz acceptor's listen line —
+    /// like the ws/tls dialers take a pre-rendered endpoint, unlike the bare-path
+    /// unixsock dialer). zenoh-pico has NO vsock client, so zenohd is the only
+    /// foreign vsock dialer. Readiness = zenohd accepting on its tcp listener; the
+    /// vsock dial to wz is witnessed on the wz side ("session Established"). Linux +
+    /// AF_VSOCK-loopback host only.
+    pub fn spawn_zenohd_vsock_dialer(wz_vsock_endpoint: &str, tcp_port: u16) -> ChildGuard {
+        let mut command = Command::new(zenohd_vsock_binary());
+        command
+            .arg("-e")
+            .arg(wz_vsock_endpoint)
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut guard = ChildGuard::wrap(
+            "zenohd (vsock dialer)",
+            command.spawn().expect("spawn zenohd vsock dialer"),
+        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (vsock dialer): {e}");
         }
         guard
     }

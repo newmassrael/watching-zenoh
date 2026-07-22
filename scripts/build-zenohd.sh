@@ -54,11 +54,30 @@ ZENOHD_VERSION="${ZENOHD_VERSION:-1.5.0}"
 # the wz<->zenohd unixpipe interop test points WZ_ZENOHD_UNIXPIPE_BIN at it. Enable
 # with ZENOHD_UNIXPIPE=1 (which also implies a source build — set
 # ZENOHD_ALLOW_CLONE=1 on a machine with no cargo git checkout).
-UNIXPIPE_FEATURE=""
+#
+# R311y400 — the vsock-enabled variant, the SAME pattern: zenoh's `default` also
+# OMITS transport_vsock, so a vsock zenohd needs a SOURCE build with
+# `--features zenoh/transport_vsock`, installed to target/zenohd-vsock/. Enable with
+# ZENOHD_VSOCK=1. Used ONLY by the host-only wz vsock ACCEPTOR interop
+# (wz_vsock_acceptor_zenohd_interop) on a vsock-capable host (AF_VSOCK loopback);
+# NOT provisioned in hosted CI (the runner has no vsock_loopback), so unlike the
+# unixpipe oracle its Layer Z leg SKIPs rather than FAILs when absent.
+#
+# The two variants are mutually exclusive (one oracle identity per build); the
+# shared VARIANT_FEATURE / VARIANT_NAME carry the selected transport feature so the
+# build + storage-skip + source-B-reject logic below stays single-path.
+VARIANT_FEATURE=""
+VARIANT_NAME=""
 if [[ "${ZENOHD_UNIXPIPE:-0}" -eq 1 ]]; then
     INSTALL_DIR="$ROOT/target/zenohd-unixpipe"
     BUILD_DIR="$ROOT/target/zenohd-unixpipe-build"
-    UNIXPIPE_FEATURE="--features zenoh/transport_unixpipe"
+    VARIANT_FEATURE="--features zenoh/transport_unixpipe"
+    VARIANT_NAME="transport_unixpipe"
+elif [[ "${ZENOHD_VSOCK:-0}" -eq 1 ]]; then
+    INSTALL_DIR="$ROOT/target/zenohd-vsock"
+    BUILD_DIR="$ROOT/target/zenohd-vsock-build"
+    VARIANT_FEATURE="--features zenoh/transport_vsock"
+    VARIANT_NAME="transport_vsock"
 fi
 
 if ! rustup toolchain list 2>/dev/null | grep -q "^$TOOLCHAIN"; then
@@ -117,10 +136,10 @@ if [[ -n "$ZH" ]]; then
         echo "  set ZENOHD_VERSION=$checkout_version, or ZENOHD_FORCE_CRATES_IO=1 for the crates.io path." >&2
         exit 1
     fi
-    echo "build-zenohd: building zenohd (release, +$TOOLCHAIN)${UNIXPIPE_FEATURE:+ [+transport_unixpipe]} ..." >&2
-    # shellcheck disable=SC2086  # UNIXPIPE_FEATURE is an intentional word-split flag
+    echo "build-zenohd: building zenohd (release, +$TOOLCHAIN)${VARIANT_NAME:+ [+$VARIANT_NAME]} ..." >&2
+    # shellcheck disable=SC2086  # VARIANT_FEATURE is an intentional word-split flag
     CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build -p zenohd --release \
-        $UNIXPIPE_FEATURE --manifest-path "$ZH/Cargo.toml"
+        $VARIANT_FEATURE --manifest-path "$ZH/Cargo.toml"
     SRC_BIN="$BUILD_DIR/release/zenohd"
     # R311wo (A10) — also build the storage-manager plugin (cdylib) from the SAME
     # checkout, so its ABI-compat hash (zenoh version + rustc) matches the zenohd
@@ -128,10 +147,10 @@ if [[ -n "$ZH" ]]; then
     # test (wz_zenohd_storage_replication.rs) needs it. Only source A can produce
     # the cdylib: `cargo install` (source B) yields binaries, not the plugin .so,
     # so a crates.io build leaves it absent and the interop test SKIPs.
-    # The unixpipe variant is a transport-only interop oracle — it does NOT need
-    # the storage-manager plugin (the A10 storage test uses the default oracle), so
-    # skip the extra cdylib build for it.
-    if [[ "${ZENOHD_UNIXPIPE:-0}" -eq 1 ]]; then
+    # A transport variant (unixpipe / vsock) is a transport-only interop oracle — it
+    # does NOT need the storage-manager plugin (the A10 storage test uses the default
+    # oracle), so skip the extra cdylib build for it.
+    if [[ -n "$VARIANT_FEATURE" ]]; then
         SO_SRC=""
     else
         echo "build-zenohd: building zenoh-plugin-storage-manager (release) ..." >&2
@@ -140,13 +159,13 @@ if [[ -n "$ZH" ]]; then
         SO_SRC="$BUILD_DIR/release/libzenoh_plugin_storage_manager.so"
     fi
 else
-    # The unixpipe variant CANNOT come from source B: `cargo install` builds the
-    # published binary and cannot add `zenoh/transport_unixpipe`, so a crates.io
-    # zenohd has no unixpipe transport. Require a source build.
-    if [[ "${ZENOHD_UNIXPIPE:-0}" -eq 1 ]]; then
-        echo "build-zenohd: ZENOHD_UNIXPIPE=1 needs a SOURCE build (crates.io cannot add" >&2
-        echo "  zenoh/transport_unixpipe). Set ZENOHD_ALLOW_CLONE=1 (or provide a cargo" >&2
-        echo "  git checkout) and re-run." >&2
+    # A transport variant CANNOT come from source B: `cargo install` builds the
+    # published binary and cannot add `zenoh/$VARIANT_NAME`, so a crates.io zenohd has
+    # no such transport. Require a source build.
+    if [[ -n "$VARIANT_FEATURE" ]]; then
+        echo "build-zenohd: a variant build (zenoh/$VARIANT_NAME) needs a SOURCE build" >&2
+        echo "  (crates.io cannot add a dependency feature). Set ZENOHD_ALLOW_CLONE=1 (or" >&2
+        echo "  provide a cargo git checkout) and re-run." >&2
         exit 1
     fi
     # Source B — deterministic crates.io install (fresh-clone reproducible).

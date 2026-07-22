@@ -152,6 +152,18 @@ ws = ["wz/locator-ws"]
 # against zenohd's `unixsock-stream/` listener (zenoh-pico has no unixsock link,
 # so pico dials TCP and zenohd routes between the two).
 unixsock = ["wz/locator-unixsock"]
+# R311y400 — opt-in `vsock/` (AF_VSOCK) transport, forwarding the wz facade's
+# `locator-vsock` (which pulls `transport-link-vsock`; the facade closure
+# `locator-vsock = ["transport-link-vsock"]` means eliding vsock needs BOTH dropped).
+# The mirror of `unixsock`, but exercised ACCEPTOR-shaped: its purpose in the demo is
+# a `--listen vsock/<cid>:<port>` acceptor that a foreign zenohd dials in the
+# host-only vsock cross-impl leg (wz_vsock_acceptor_zenohd_interop). NOT in `default`
+# (preset-ap-client carries tcp+udp, not vsock), so the footprint baseline and every
+# other lane build are unchanged; only run-ci Layer Z builds wz-ap-demo with it.
+# AF_VSOCK loopback is Linux + kernel-module-gated (vsock_loopback), so the leg
+# runs only on a vsock-capable host — unlike the ws/tls/unixsock/udp acceptor legs it
+# does NOT run on hosted CI (the runner has no vsock_loopback).
+vsock = ["wz/locator-vsock"]
 # R311y390 (CALLER fail-fast slice) — opt-in `unixpipe/` (Unix named-pipe)
 # ACCEPT transport, forwarding the wz facade's `transport-link-unixpipe`. Unlike
 # the dial-side `ws`/`unixsock`/`tls`/`quic` passthroughs above, its ONLY purpose
