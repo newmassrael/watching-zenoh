@@ -5592,6 +5592,19 @@ layer_z_zenohd_interop() {
     # --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_unixsock_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y399 — wz UDP-DEMUX ACCEPTOR cross-impl (transport-link-udp zenohd->wz):
+    # the DATAGRAM sibling of the ws/tls/unixsock acceptor legs above, and the first
+    # cross-impl proof of a structurally-datagram wz acceptor. A real zenohd DIALS
+    # the wz `--listen udp/127.0.0.1:0` acceptor (bind_udp_demux -> BoundListener::Udp
+    # wired in R311y382, proven wz<->wz by udp_seam_e2e), and a pico z_put routes
+    # through zenohd ACROSS the udp link into the wz acceptor's subscriber. The
+    # existing wz_to_zenohd_router udp leg proves only the wz udp DIALER (wz->zenohd);
+    # this is the reverse (acceptor) direction. wz binds ONLY udp (no TCP listener),
+    # so udp is the sole wz<->zenohd transport. udp is in STOCK zenohd + the demo
+    # DEFAULT preset (no build-line change, unlike ws/tls/unixsock). Same
+    # --test-threads=1 per-zenohd isolation.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_udp_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y376 — wz ROUTER ws ACCEPTOR cross-impl (accept-symmetry Stage 3): the
     # MULTI-PEER accept loop (`--router` / peer_loop, not just one-shot `--listen`)
     # now accepts a foreign non-tcp face. A real zenohd DIALS the wz `--router

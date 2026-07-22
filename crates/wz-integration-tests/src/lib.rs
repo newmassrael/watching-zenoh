@@ -1301,6 +1301,45 @@ pub mod common {
         guard
     }
 
+    /// R311y399 — spawn a zenohd that DIALS a wz `udp/...` acceptor
+    /// (`-e udp/<wz_udp_endpoint>`) while also listening on `tcp/<tcp_port>` for a
+    /// pico client. The DATAGRAM DIALER sibling of [`spawn_zenohd_ws_dialer`] /
+    /// [`spawn_zenohd_tls_dialer`], verifying wz's UDP-demux ACCEPTOR
+    /// (`BoundListener::Udp` / `bind_udp_demux`, R311y382 — the first structurally-
+    /// datagram acceptor). Like the ws/tls dialers it takes a PRE-FORMATTED
+    /// endpoint (udp is IP-based -- `AcceptedPeer::Ip` = the datagram source -- so
+    /// the caller renders `udp/<ip:port>`, unlike the NonIp path dialers). Uses the
+    /// DEFAULT [`zenohd_binary`]: udp is in zenoh's default features (the existing
+    /// wz->zenohd udp leg dials stock zenohd's udp listener), so no special oracle.
+    /// zenoh-pico HAS a udp client, but here pico attaches to zenohd over TCP and
+    /// only the zenohd->wz hop is udp, so zenohd is the foreign udp dialer under
+    /// test. Readiness = zenohd accepting on its tcp listener; the udp dial to wz is
+    /// witnessed on the wz side ("session Established"). No handshake-probe param
+    /// (like the ws/tls dialers): this zenohd DIALS out.
+    pub fn spawn_zenohd_udp_dialer(wz_udp_endpoint: &str, tcp_port: u16) -> ChildGuard {
+        let mut command = Command::new(zenohd_binary());
+        command
+            .arg("-e")
+            .arg(wz_udp_endpoint)
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut guard = ChildGuard::wrap(
+            "zenohd (udp dialer)",
+            command.spawn().expect("spawn zenohd udp dialer"),
+        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (udp dialer): {e}");
+        }
+        guard
+    }
+
     /// R311y372 — spawn a zenohd router with the LOWLATENCY unicast transport
     /// enabled. zenoh refuses `transport/unicast/lowlatency` unless qos is also
     /// disabled ("'lowlatency' is incompatible with 'qos'",
