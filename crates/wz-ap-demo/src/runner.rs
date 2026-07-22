@@ -2608,7 +2608,49 @@ pub(crate) async fn run_router_hat(
     const APP_TICK_MS: u64 = 250;
 
     let listener = bind_endpoint(listen).await?;
-    let local = listener.local_addr()?;
+    // Non-IP-safe addressing (R311y396): the log line + the adminspace `local_data`
+    // dial locator render from the per-variant display (`local_addr_display`, total
+    // over every transport), and the port-derived zid fallback applies ONLY when the
+    // listener has an IP `SocketAddr`. A non-IP listen (unixpipe / unixsock / vsock)
+    // has no port to derive a distinct routing zid from, so it REQUIRES an explicit
+    // `--zid` (the zenoh-faithful config-id; the port derivation is a demo IP-only
+    // convenience). `local_addr()` is the IP accessor that errors for the non-IP
+    // families, so it is taken as an `Option`, never `?`-propagated (the R311y392
+    // multi-client unixpipe acceptor already makes such a listen mesh-capable).
+    let local_display = listener.local_addr_display()?;
+    let local_ip: Option<std::net::SocketAddr> = listener.local_addr().ok();
+
+    // The node's DISTINCT routing zid (the run_peer discipline) — the mesh graph
+    // keys on it (RouterForwarder dedups faces by zid). Computed BEFORE the
+    // "listening on" log so a non-IP listen without `--zid` fails fast rather than
+    // announcing a listen it will not serve. An explicit `--zid` override WINS for
+    // ANY transport (deterministic mesh master election). Absent it, derive a
+    // distinct zid from the listen port — but only an IP listener HAS a port; a
+    // non-IP (unixpipe / …) listen must supply `--zid`.
+    let node_zid: Vec<u8> = match zid_override {
+        Some(zid) => zid,
+        None => match local_ip {
+            Some(addr) => {
+                let port = addr.port();
+                vec![
+                    (ROUTER_HAT_ZID_PREFIX >> 8) as u8,
+                    (ROUTER_HAT_ZID_PREFIX & 0xff) as u8,
+                    (port >> 8) as u8,
+                    (port & 0xff) as u8,
+                ]
+            }
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "wz-ap-demo router-hat: --router-hat {listen:?} is a non-IP \
+                         transport (unixpipe / unixsock / vsock) with no listen port to \
+                         derive a distinct routing zid from; pass an explicit --zid <hex>"
+                    ),
+                ));
+            }
+        },
+    };
 
     // Parse the outbound dial targets (empty for a listen-only router; non-empty
     // for router-to-router federation, ACTIVATION-4). A malformed target fails
@@ -2657,27 +2699,14 @@ pub(crate) async fn run_router_hat(
     let _ = connect_after;
 
     log::info!(
-        "wz-ap-demo router-hat: listening on {local}; dialing {} configured \
+        "wz-ap-demo router-hat: listening on {local_display}; dialing {} configured \
          router(s), presenting WhatAmI::Router and forwarding across the router \
          and peer meshes (dual-tier RouterForwarder)",
         dials.len()
     );
 
     let mut params = demo_session_init_params(NodeKind::RouterHat);
-    // A DISTINCT routing zid per node (the run_peer discipline), derived from the
-    // listen port so the demo's zids never collide — the mesh graph keys on it.
-    let port = local.port();
-    // An explicit `--zid` override WINS (deterministic mesh master election);
-    // otherwise derive a distinct zid from the listen port so the demo's zids never
-    // collide.
-    params.zid = zid_override.unwrap_or_else(|| {
-        vec![
-            (ROUTER_HAT_ZID_PREFIX >> 8) as u8,
-            (ROUTER_HAT_ZID_PREFIX & 0xff) as u8,
-            (port >> 8) as u8,
-            (port & 0xff) as u8,
-        ]
-    });
+    params.zid = node_zid;
 
     // The dual-mesh router forwarder. Self is a WhatAmI::Router in BOTH meshes
     // (the ctor seeds both nets with Router); its zid is this node's own trusted
@@ -2806,11 +2835,17 @@ pub(crate) async fn run_router_hat(
         let version = env!("CARGO_PKG_VERSION").to_string();
         // The admin `local_data` dial locator: the router sets no forwarder
         // self-locator, but its listen address is a faithful `local_data` locator
-        // (withheld on an unspecified bind, the run_peer discipline).
-        let locators: Vec<String> = if local.ip().is_unspecified() {
-            Vec::new()
-        } else {
-            vec![format!("tcp/{local}")]
+        // (withheld on an unspecified IP bind, the run_peer discipline). The scheme
+        // is `transport_name()` in BOTH arms — an IP listen is `tcp/`/`ws/`/`tls/`/
+        // `udp/` by its actual transport (not hardcoded tcp), a non-IP listen is
+        // its scheme+path (`unixpipe/<base>`, the same string a client `--connect`s
+        // — advertised rather than withheld since it has no wildcard bind).
+        let locators: Vec<String> = match local_ip {
+            Some(addr) if !addr.ip().is_unspecified() => {
+                vec![format!("{}/{}", listener.transport_name(), addr)]
+            }
+            Some(_) => Vec::new(),
+            None => vec![format!("{}/{}", listener.transport_name(), local_display)],
         };
         let queryable_key = admin_queryable_key(&zid_hex, whatami_str);
         let routers_view = forwarder.routers_net_view();
@@ -3680,6 +3715,53 @@ mod caller_failfast_tests {
             .expect("the mesh router admits a multi-client unixpipe --listen (R311y392)");
 
         // The acceptor's teardown unlinks the base request node; best-effort here.
+        let _ = std::fs::remove_file(format!("{base}_uplink"));
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "router-hat-router",
+    feature = "transport-link-unixpipe",
+    target_os = "linux"
+))]
+mod router_hat_failfast_tests {
+    use super::run_router_hat;
+
+    /// R311y396 — a non-IP unixpipe `--router-hat` listen WITHOUT `--zid` fails fast:
+    /// `run_router_hat` binds the listener, then returns `Err(InvalidInput)` because a
+    /// unixpipe listen has no port to derive a distinct routing zid from and no
+    /// `zid_override` was supplied. The message names `--zid` (the R311y396 fix),
+    /// distinguishing it from the pre-R311y396 `local_addr()?` reject ("a unixpipe
+    /// listener has no IP SocketAddr"), so this unit binds to the product-code seam,
+    /// not just to "some error". The `None` zid_override makes the fn return BEFORE
+    /// `peer_loop` (the Err is raised at zid derivation), so this is a clean
+    /// non-hanging unit test — no SIGTERM injection needed.
+    ///
+    /// RED reproduction (proof it binds to the R311y396 seam, not the vehicle):
+    /// RESTORE `let local = listener.local_addr()?;` at the top of `run_router_hat`
+    /// -> the fn errors with "no IP SocketAddr" (no "--zid" substring) -> the
+    /// substring assert below fails.
+    #[tokio::test]
+    async fn run_router_hat_without_zid_on_a_unixpipe_listen_fails_fast() {
+        let base = std::env::temp_dir()
+            .join(format!("wz-ap-demo-rh-failfast-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        // Pre-clean any stale FIFO node from a crashed prior run (no-flaky).
+        let _ = std::fs::remove_file(format!("{base}_uplink"));
+
+        let listen = format!("unixpipe/{base}");
+        let err = run_router_hat(&listen, &[], None, false, None)
+            .await
+            .expect_err("a non-IP unixpipe --router-hat without --zid must fail fast");
+        assert!(
+            err.to_string().contains("--zid"),
+            "the fail-fast must name --zid (the R311y396 fix), got: {err}"
+        );
+
+        // bind_endpoint created the request node; its acceptor Drop unlinks it, but
+        // SIGKILL-safe best-effort cleanup here too (mirrors the sibling test).
         let _ = std::fs::remove_file(format!("{base}_uplink"));
     }
 }

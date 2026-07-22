@@ -350,6 +350,16 @@ jobs:
         # this runner is ubuntu, so the lane's Linux guard never SKIPs here.
         run: bash scripts/run-ci.sh --layer E5u
 
+      - name: Layer E7u — router-hat (true Router) forwarding OVER UNIXPIPE
+        # R311y396 — the product-code counterpart of E5u (beside it in the fast
+        # `ci` job, NOT the interop job: self-contained wz<->wz, no oracle).
+        # run_router_hat's addressing seam is made non-IP safe (a non-IP listen
+        # requires an explicit --zid), so a wz --router-hat (a true WhatAmI::Router)
+        # binds a unixpipe listener and forwards a Put between two distinct-zid
+        # --connect unixpipe clients. unixpipe is Linux-only and this runner is
+        # ubuntu, so the lane's Linux guard never SKIPs here.
+        run: bash scripts/run-ci.sh --layer E7u
+
   # ─────────────────────────────────────────────────────────────────
   # R311y385 — the VALIDATE + CODEGEN job. Layers A/A2/A3/A4 (Mnemosyne
   # workspace validate + catalog/cross-impl truthfulness) and B/B2

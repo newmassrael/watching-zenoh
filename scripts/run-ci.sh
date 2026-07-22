@@ -6236,6 +6236,43 @@ layer_e7c_router_adminspace_linkstate() {
         --test wz_router_hat_adminspace_linkstate_interop -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E7u — router-hat (TRUE Router) forwarding OVER UNIXPIPE (R311y396) ──
+#
+# The PRODUCT-CODE counterpart of Layer E5u (which proved the star --router over
+# unixpipe test-only): R311y396 makes run_router_hat's addressing seam non-IP safe
+# (the log + admin locator render from local_addr_display; the zid uses an explicit
+# --zid for any transport, IP keeps the port-derived fallback, a non-IP listen
+# REQUIRES --zid), so a wz --router-hat (a true wire WhatAmI::Router) binds a
+# unixpipe listener and forwards a Put between two DISTINCT-zid --connect unixpipe
+# clients. Two guarded steps: (1) the fast product-code fail-fast UNIT
+# (run_router_hat on a unixpipe listen WITHOUT --zid returns an Err naming --zid,
+# binding to the R311y396 seam vs the pre-fix "no IP SocketAddr"); (2) the e2e
+# forward. Self-contained wz<->wz (NO external oracle), so it lives in the primary
+# `ci` job beside E5u (NOT beside E7, which is in the oracle-required interop job),
+# NOT the zenohd Layer Z. No pre-existing lane builds
+# router-hat-router,transport-link-unixpipe together, so this lane builds its own
+# binary. The test fns start `wz_router_hat_` / `run_router_hat_`, so the default
+# Layer E sweep's `--skip wz_router` excludes the e2e from the oracle-less run.
+# Linux-only (unixpipe); the count-guards redden on a dropped test.
+layer_e7u_router_hat_unixpipe_forward() {
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        echo "Layer E7u SKIP (unixpipe is Linux-only; host is $(uname -s))"
+        return 0
+    fi
+    # (1) the R311y396 product-code fail-fast unit (non-IP router-hat REQUIRES --zid).
+    (cd crates && cargo test -p wz-ap-demo \
+        --features router-hat-router,transport-link-unixpipe \
+        run_router_hat_without_zid_on_a_unixpipe_listen_fails_fast \
+        -- --test-threads=1 --quiet 2>&1 | tee /dev/stderr | grep -q '1 passed') || return 1
+    # (2) the e2e: build the router-hat+unixpipe binary, then route a Put between two
+    #     distinct-zid --connect unixpipe clients through the true-Router.
+    (cd crates && cargo build -p wz-ap-demo \
+        --features router-hat-router,transport-link-unixpipe --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_unixpipe_forward -- --ignored --test-threads=1 --quiet 2>&1 \
+        | tee /dev/stderr | grep -q '1 passed') || return 1
+}
+
 # ─── Layer E8 — router-hat CROSS-IMPL vs zenoh-pico (P4 §5.21) ───
 #
 # The dual-mesh RouterForwarder proven against a FOREIGN zenoh client: a wz
@@ -6478,6 +6515,7 @@ run_layer E6h layer_e6h_adminspace_config_hotreload || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1
+run_layer E7u layer_e7u_router_hat_unixpipe_forward || overall=1
 run_layer E8 layer_e8_router_hat_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
