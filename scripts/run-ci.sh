@@ -6273,6 +6273,43 @@ layer_e7u_router_hat_unixpipe_forward() {
         | tee /dev/stderr | grep -q '1 passed') || return 1
 }
 
+# ─── Layer E6u — peer (WhatAmI::Peer) forwarding OVER UNIXPIPE (R311y397) ──
+#
+# The peer run-mode counterpart of Layer E5u (star --router, test-only) and E7u
+# (--router-hat, a true Router): R311y397 adds a --zid override to run_peer and makes
+# its addressing seam non-IP safe (the log + self locator render from
+# local_addr_display; the zid uses an explicit --zid for any transport, IP keeps the
+# port-derived fallback, a non-IP listen REQUIRES --zid), so a wz --peer binds a
+# unixpipe listener and forwards a Put between two DISTINCT-zid --connect unixpipe
+# clients (deliver_to_client_subscribers routes among the peer's co-attached client
+# faces). Two guarded steps: (1) the fast product-code fail-fast UNIT (run_peer on a
+# unixpipe listen WITHOUT --zid returns an Err naming --zid, binding to the R311y397
+# seam vs the pre-fix "no IP SocketAddr"); (2) the e2e forward. Self-contained
+# wz<->wz (NO external oracle), so it lives in the primary `ci` job beside E5u/E7u,
+# NOT the oracle-required interop job. No pre-existing lane builds
+# routing-peer,transport-link-unixpipe together, so this lane builds its own binary.
+# The test fns start `wz_peer_` / `run_peer_`, so the default Layer E sweep's `--skip
+# wz_peer` excludes the e2e from the oracle-less run. Linux-only (unixpipe); the
+# count-guards redden on a dropped test.
+layer_e6u_peer_unixpipe_forward() {
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        echo "Layer E6u SKIP (unixpipe is Linux-only; host is $(uname -s))"
+        return 0
+    fi
+    # (1) the R311y397 product-code fail-fast unit (non-IP peer REQUIRES --zid).
+    (cd crates && cargo test -p wz-ap-demo \
+        --features routing-peer,transport-link-unixpipe \
+        run_peer_without_zid_on_a_unixpipe_listen_fails_fast \
+        -- --test-threads=1 --quiet 2>&1 | tee /dev/stderr | grep -q '1 passed') || return 1
+    # (2) the e2e: build the peer+unixpipe binary, then route a Put between two
+    #     distinct-zid --connect unixpipe clients through the peer.
+    (cd crates && cargo build -p wz-ap-demo \
+        --features routing-peer,transport-link-unixpipe --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_unixpipe_forward -- --ignored --test-threads=1 --quiet 2>&1 \
+        | tee /dev/stderr | grep -q '1 passed') || return 1
+}
+
 # ─── Layer E8 — router-hat CROSS-IMPL vs zenoh-pico (P4 §5.21) ───
 #
 # The dual-mesh RouterForwarder proven against a FOREIGN zenoh client: a wz
@@ -6504,6 +6541,7 @@ run_layer E3 layer_e3_router_multi_peer || overall=1
 run_layer E4 layer_e4_router_reject || overall=1
 run_layer E5 layer_e5_router_forward || overall=1
 run_layer E5u layer_e5u_router_unixpipe_forward || overall=1
+run_layer E6u layer_e6u_peer_unixpipe_forward || overall=1
 run_layer E6 layer_e6_peer_mesh || overall=1
 run_layer E6b layer_e6b_adminspace_introspection || overall=1
 run_layer E6c layer_e6c_peer_multilink || overall=1

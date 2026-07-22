@@ -265,6 +265,21 @@ fn main() -> ExitCode {
                     (false, false) => None,
                 }
             };
+            // `--zid <hex>` (optional): PIN this peer's routing zid instead of
+            // deriving it from the ephemeral listen port. REQUIRED for a non-IP
+            // listen (unixpipe / unixsock / vsock has no port to derive a distinct
+            // mesh-graph zid from — R311y397); also gives a deterministic IP mesh id.
+            // Mirrors the --router-hat parse.
+            let zid_override: Option<Vec<u8>> = match parse_pair(rest, "--zid") {
+                Some(h) => match parse_zid_hex(&h) {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) => {
+                        eprintln!("wz-ap-demo: --zid {e}");
+                        return ExitCode::from(2);
+                    }
+                },
+                None => None,
+            };
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -279,6 +294,7 @@ fn main() -> ExitCode {
                     no_admin_read,
                     put_key,
                     put_payload,
+                    zid_override,
                     #[cfg(feature = "transport-multilink")]
                     max_links,
                     #[cfg(feature = "transport-qos")]

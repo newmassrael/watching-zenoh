@@ -360,6 +360,16 @@ jobs:
         # ubuntu, so the lane's Linux guard never SKIPs here.
         run: bash scripts/run-ci.sh --layer E7u
 
+      - name: Layer E6u — peer (WhatAmI::Peer) forwarding OVER UNIXPIPE
+        # R311y397 — the peer run-mode counterpart of E5u/E7u (beside them in the
+        # fast `ci` job, NOT the interop job: self-contained wz<->wz, no oracle).
+        # run_peer gains a --zid override and a non-IP-safe addressing seam (a non-IP
+        # listen requires an explicit --zid), so a wz --peer binds a unixpipe listener
+        # and forwards a Put between two distinct-zid --connect unixpipe clients.
+        # unixpipe is Linux-only and this runner is ubuntu, so the lane's Linux guard
+        # never SKIPs here.
+        run: bash scripts/run-ci.sh --layer E6u
+
   # ─────────────────────────────────────────────────────────────────
   # R311y385 — the VALIDATE + CODEGEN job. Layers A/A2/A3/A4 (Mnemosyne
   # workspace validate + catalog/cross-impl truthfulness) and B/B2
