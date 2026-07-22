@@ -361,10 +361,11 @@ async fn drive_listen(
     // reports the open failure to the C caller (tx.send(false) -> Z_ERR_GENERIC),
     // the pico twin of run_router's bind-time guard and the BIND-time twin of the
     // accept loop's runtime `AcceptedLink::supports_mesh_multi_peer` backstop.
-    // Since R311y392 (the multi-client unixpipe acceptor) NO transport is
-    // non-mesh-capable, so this guard never rejects today -- it stays as defensive
-    // code for a FUTURE non-mesh acceptor (unixpipe was the last one, and its
-    // R311y391 rejection was retired when the multi-client acceptor landed).
+    // R311y401's quic IS non-mesh-capable, but a quic listen never reaches this
+    // guard: bind_endpoint passes AcceptConfig::default() (no quic cert), so
+    // bind_locator rejects a quic listen at cert-absence FIRST. So this guard still
+    // never rejects today -- it stays as defensive code, live only for a future
+    // non-mesh acceptor that binds cert-free.
     if !listener.supports_mesh_multi_peer() {
         let _ = tx.send(false);
         return;

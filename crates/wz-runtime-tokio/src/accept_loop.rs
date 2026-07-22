@@ -2068,14 +2068,15 @@ where
                 // non-IP peer (unixsock / vsock / unixpipe — each a genuine per-peer
                 // stream accept) are all held as faces; `peer` (an `AcceptedPeer`)
                 // is threaded straight into the open future as a log/event tag. A
-                // NON-mesh-capable acceptor is rejected here — but since R311y392
-                // (the multi-client unixpipe acceptor) NO transport returns `false`
-                // from `AcceptedLink::supports_mesh_multi_peer`, so this arm is now
-                // purely DEFENSIVE: it stays as the runtime backstop for a FUTURE
-                // non-mesh acceptor (its `BoundListener` twin fail-fasts such a
-                // `--listen` at the mesh caller — runner.rs router / pico
-                // session.rs — before it ever reaches here). It fires for no
-                // transport today.
+                // NON-mesh-capable acceptor is rejected here. R311y401's quic is the
+                // first `false` from `AcceptedLink::supports_mesh_multi_peer`, but
+                // under the SHIPPED callers this arm still fires for no transport: a
+                // `--router`/`--peer quic/` is rejected EARLIER at bind cert-absence
+                // (the mesh callers — runner.rs router / pico session.rs — thread no
+                // quic cert), so a quic `AcceptedLink` reaches here only via a
+                // direct-API caller that bound a quic listener WITH a cert. This arm
+                // stays the runtime backstop; its `BoundListener` twin is the
+                // bind-time first line.
                 if !accepted.supports_mesh_multi_peer() {
                     on_event(&AcceptEvent::AcceptError(io::Error::new(
                         io::ErrorKind::Unsupported,
@@ -2092,8 +2093,9 @@ where
                     // R311y380 non-blocking unixpipe accept did) would otherwise
                     // reject-and-re-arm at CPU speed without this sleep. Bounds the
                     // mis-config to one reject per throttle interval, matching
-                    // zenoh's accept_task parity. (Dead code today — every transport
-                    // is mesh-capable since R311y392 — kept defensive.)
+                    // zenoh's accept_task parity. (Reached today only by a direct-API
+                    // quic caller; the shipped `--router quic/` path is rejected at
+                    // bind cert-absence first — kept as the runtime backstop.)
                     clock.sleep(ACCEPT_ERROR_THROTTLE_MS).await;
                     continue;
                 }
@@ -2872,7 +2874,9 @@ mod tests {
     /// `Step::Accepted` arm) at the TRUE polarity: tcp is mesh-capable. The match
     /// is wildcard-free, so a NEW `AcceptedLink` variant forces a decision at
     /// compile time; this pins the value for tcp (a representative `true`). Since
-    /// R311y392 every transport is mesh-capable — `acceptedlink_unixpipe_is_mesh_capable`
+    /// R311y392 the stream + same-host families are mesh-capable (R311y401's quic is
+    /// the first `false`; its BIND twin is pinned by `boundlistener_quic_is_not_mesh_capable`,
+    /// and this AcceptedLink polarity is compiler-forced by the wildcard-free match) — `acceptedlink_unixpipe_is_mesh_capable`
     /// pins the once-`false` unixpipe arm at its new `true` polarity.
     #[tokio::test]
     async fn acceptedlink_tcp_is_mesh_capable() {

@@ -1289,6 +1289,57 @@ pub mod common {
         guard
     }
 
+    /// R311y401 — spawn a zenohd that DIALS a wz `quic/<ip:port>` acceptor
+    /// (`-e quic/<wz>`) while listening on `tcp/<tcp_port>` for a pico client. The
+    /// QUIC twin of [`spawn_zenohd_tls_dialer`], verifying wz's QUIC ACCEPTOR
+    /// (`BoundListener::Quic` / `bind_quic` + `accept_quic_on`, R311y401). Uses the
+    /// DEFAULT [`zenohd_binary`]: QUIC is in zenoh's default features (the existing
+    /// wz->zenohd quic dial legs dial stock zenohd's `quic/` listener), so no special
+    /// oracle. zenoh's QUIC link reads its trust config from the SAME
+    /// `transport.link.tls` block as the tls link (there is no separate quic cert
+    /// block), so the dialer config is byte-identical to the tls dialer's — only the
+    /// `-e` scheme differs: `root_ca_certificate` (trusting wz's self-signed
+    /// `localhost` cert) + `verify_name_on_connect: false` (the by-IP dial verifies
+    /// the chain-of-trust only, not the SAN). Readiness = zenohd accepting on its tcp
+    /// listener; the quic dial to wz is witnessed on the wz side ("session
+    /// Established"). zenoh-pico's CLI has no quic, so zenohd is the only foreign quic
+    /// dialer.
+    pub fn spawn_zenohd_quic_dialer(
+        wz_quic_endpoint: &str,
+        tcp_port: u16,
+        ca_cert_path: &str,
+    ) -> ChildGuard {
+        let cfg_path = format!("{ca_cert_path}.dialer.zenohd.json5");
+        let cfg = format!(
+            "{{ transport: {{ link: {{ tls: {{ \
+             root_ca_certificate: {ca_cert_path:?}, verify_name_on_connect: false }} }} }} }}"
+        );
+        std::fs::write(&cfg_path, cfg).expect("write zenohd quic dialer config");
+        let mut command = Command::new(zenohd_binary());
+        command
+            .arg("-e")
+            .arg(wz_quic_endpoint)
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("--config")
+            .arg(&cfg_path)
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut guard = ChildGuard::wrap(
+            "zenohd (quic dialer)",
+            command.spawn().expect("spawn zenohd quic dialer"),
+        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (quic dialer): {e}");
+        }
+        guard
+    }
+
     /// R311y398 — spawn a zenohd that DIALS a wz `unixsock-stream/<path>` acceptor
     /// (`-e unixsock-stream/<path>`) while also listening on `tcp/<tcp_port>` for a
     /// pico client. The AF_UNIX-stream DIALER sibling of [`spawn_zenohd_ws_dialer`]

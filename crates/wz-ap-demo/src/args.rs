@@ -48,6 +48,17 @@ pub(crate) enum Role {
         /// runner.rs); the reconnect/router paths are out of demo scope.
         tls_cert: Option<String>,
         tls_key: Option<String>,
+        /// R311y401 — `--quic-cert <path>` / `--quic-key <path>`: the cert chain +
+        /// private key PEM a `quic/...` --listen PRESENTS to a dialing peer (the
+        /// QUIC twin of `tls_cert` / `tls_key`; SEPARATE flags because the demo builds
+        /// QUIC's own server config (TLS-1.3 + ALPN hq-29) from them — the cert PEM
+        /// itself is interchangeable, only the built ServerConfig differs).
+        /// Feature-uniform (always parsed); `None` without the flags OR when built
+        /// without the `quic` feature, in which case a `quic/...` listen surfaces the
+        /// runtime's typed `Unsupported`. BOTH are required together for QUIC. Read
+        /// by `establish_link`'s Acceptor arm (`build_accept_config`, runner.rs).
+        quic_cert: Option<String>,
+        quic_key: Option<String>,
     },
     /// R311y365 — `tls_ca` is the `--tls-ca <path>` root-CA PEM a `tls/...`
     /// --connect verifies zenoh's/the peer's server cert against (server name

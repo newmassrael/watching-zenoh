@@ -5611,6 +5611,25 @@ layer_z_zenohd_interop() {
     # --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_udp_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y401 — wz QUIC ACCEPTOR cross-impl (transport-link-quic zenohd->wz): the
+    # cert-transport sibling of the tls acceptor leg above. A real zenohd DIALS the wz
+    # `--listen quic/...` acceptor (BoundListener::Quic / bind_quic + accept_quic_on,
+    # the accept SEAM wired in R311y401 on top of the pre-existing quic pipeline
+    # primitives proven wz<->wz by quic_e2e), trusting wz's self-signed localhost cert
+    # (zenoh's quic link reads the SAME transport.link.tls config block as tls), and a
+    # pico z_put routes through zenohd ACROSS the quic link into the wz acceptor's
+    # subscriber. The existing wz_to_zenohd_router quic legs prove only the wz quic
+    # DIALER (wz->zenohd); this is the reverse (acceptor) direction, closing the
+    # accept-direction cross-impl set. zenoh-pico's CLI has no quic, so zenohd is the
+    # only foreign quic dialer. QUIC is in STOCK zenohd + the demo carries `quic`
+    # (built above) -- NO build-line change (like udp/unixsock, unlike the
+    # vsock/unixpipe oracles); it RUNS on hosted CI (UDP loopback needs no kernel
+    # module, unlike vsock). Same --test-threads=1 per-zenohd isolation. Count-guarded
+    # (`1 passed`, the y400 vsock-leg precedent) so a dropped `#[ignore]` (0 selected
+    # -> exit 0) reddens instead of silently passing.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
+        | tee /dev/stderr | grep -q '1 passed') || return 1
     # R311y376 — wz ROUTER ws ACCEPTOR cross-impl (accept-symmetry Stage 3): the
     # MULTI-PEER accept loop (`--router` / peer_loop, not just one-shot `--listen`)
     # now accepts a foreign non-tcp face. A real zenohd DIALS the wz `--router

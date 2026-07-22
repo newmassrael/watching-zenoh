@@ -461,6 +461,13 @@ fn main() -> ExitCode {
             // build_accept_config); `None` for a non-tls listen.
             tls_cert: parse_pair(rest, "--tls-cert"),
             tls_key: parse_pair(rest, "--tls-key"),
+            // R311y401 — the cert-chain + private-key PEM paths a `quic/...` --listen
+            // PRESENTS (the QUIC twin of --tls-cert/--tls-key; SEPARATE flags since the
+            // demo builds QUIC's own server config (TLS-1.3 + ALPN hq-29) from them,
+            // the cert PEM itself being interchangeable). Applied only on the one-shot
+            // accept path; `None` for a non-quic listen.
+            quic_cert: parse_pair(rest, "--quic-cert"),
+            quic_key: parse_pair(rest, "--quic-key"),
         },
         (None, Some(addr)) => Role::Initiator {
             connect: addr,
@@ -796,11 +803,17 @@ fn main() -> ExitCode {
             listen,
             tls_cert,
             tls_key,
+            quic_cert,
+            quic_key,
         } => {
             log::info!("listen  = {listen}");
             if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
                 log::info!("tls-cert = {cert}");
                 log::info!("tls-key  = {key}");
+            }
+            if let (Some(cert), Some(key)) = (quic_cert, quic_key) {
+                log::info!("quic-cert = {cert}");
+                log::info!("quic-key  = {key}");
             }
         }
         Role::Initiator {
