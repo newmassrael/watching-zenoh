@@ -1264,6 +1264,43 @@ pub mod common {
         guard
     }
 
+    /// R311y398 — spawn a zenohd that DIALS a wz `unixsock-stream/<path>` acceptor
+    /// (`-e unixsock-stream/<path>`) while also listening on `tcp/<tcp_port>` for a
+    /// pico client. The AF_UNIX-stream DIALER sibling of [`spawn_zenohd_ws_dialer`]
+    /// / [`spawn_zenohd_tls_dialer`], verifying wz's unixsock ACCEPTOR (the
+    /// `bind_locator` `AnyLocator::Unixsock` arm wired in R311y378 + `accept_bound`'s
+    /// direct wrap — no post-accept handshake, like tcp). Unlike the unixpipe dialer,
+    /// this uses the DEFAULT [`zenohd_binary`]: the unixsock link is in stock zenohd's
+    /// build (the existing wz->zenohd unixsock leg dials it), so no special oracle is
+    /// needed. zenoh-pico's CLI has no unixsock client, so zenohd is the only foreign
+    /// unixsock dialer. Readiness = zenohd accepting on its tcp listener; the unixsock
+    /// dial to wz is witnessed on the wz side ("session Established"). No
+    /// handshake-probe param (like the ws/tls dialers): this zenohd DIALS out, and the
+    /// wz-side log is the Established witness.
+    pub fn spawn_zenohd_unixsock_dialer(wz_unixsock_path: &str, tcp_port: u16) -> ChildGuard {
+        let mut command = Command::new(zenohd_binary());
+        command
+            .arg("-e")
+            .arg(format!("unixsock-stream/{wz_unixsock_path}"))
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut guard = ChildGuard::wrap(
+            "zenohd (unixsock dialer)",
+            command.spawn().expect("spawn zenohd unixsock dialer"),
+        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (unixsock dialer): {e}");
+        }
+        guard
+    }
+
     /// R311y372 — spawn a zenohd router with the LOWLATENCY unicast transport
     /// enabled. zenoh refuses `transport/unicast/lowlatency` unless qos is also
     /// disabled ("'lowlatency' is incompatible with 'qos'",

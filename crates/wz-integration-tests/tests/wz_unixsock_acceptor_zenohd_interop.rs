@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! R311y398 — §5.1 transport / §5.2 locator — CROSS-IMPL validation of the wz
+//! UNIXSOCK (AF_UNIX stream) ACCEPTOR (`transport-link-unixsock`, zenohd->wz
+//! direction).
+//!
+//! The existing `wz_to_zenohd_router.rs` unixsock leg proves the wz unixsock
+//! DIALER (wz `--connect unixsock-stream/...` against zenohd's `unixsock-stream/`
+//! listener — `transport-link-unixsock wz->zenohd`). The REVERSE — a foreign peer
+//! DIALING a wz `unixsock-stream/...` acceptor — had no cross-impl proof: wz's
+//! unixsock ACCEPTOR arm (`bind_locator`'s `AnyLocator::Unixsock` + `accept_bound`'s
+//! direct wrap) landed in R311y378 and is proven wz<->wz
+//! (`wz_runtime_tokio::unixsock_e2e::wz_to_wz_over_unixsock_...`), but no
+//! INDEPENDENT impl had ever dialed it. This is that proof — the AF_UNIX sibling of
+//! `wz_ws_acceptor_zenohd_interop` / `wz_tls_acceptor_zenohd_interop`.
+//!
+//! Vehicle: zenoh-pico has NO unixsock client, so a real **zenohd** is the only
+//! available foreign unixsock dialer. Topology (a STAR through zenohd):
+//!
+//!   pico `z_pub` --tcp--> zenohd --unixsock--> wz `--listen unixsock-stream/...` (subscriber)
+//!
+//! zenohd DIALS the wz unixsock acceptor (`-e unixsock-stream/<path>`) and also
+//! listens on tcp for the pico publisher; a pico `z_pub` on that tcp listener
+//! routes through zenohd and ACROSS the unixsock link to the wz acceptor, whose
+//! subscriber fires. The pico publisher never speaks unixsock and never knows wz's
+//! socket path, so the wz subscriber firing is a definitive witness that (1) wz
+//! accepted a real foreign **unixsock** session (the zenohd dial completed the
+//! zenoh handshake over AF_UNIX) and (2) data crossed that unixsock link into wz.
+//!
+//! Discriminator (binds to the unixsock acceptor): a `wz-ap-demo` built WITHOUT
+//! the `unixsock` feature rejects a `unixsock-stream/...` listen with a typed
+//! `Unsupported` ("unixsock accept requires the transport-link-unixsock feature")
+//! — it never binds, so there is no acceptor for zenohd to dial and the subscriber
+//! never fires. Only `--features unixsock` compiles the `BoundListener::Unixsock`
+//! arm. The unique keyexpr the pico z_pub uses pins THIS Put crossing the unixsock
+//! link (a bare "SUBSCRIBER FIRED" on nothing else could be a stale artifact).
+//!
+//! `#[ignore]` (binary-dep e2e): needs the reference `zenohd` (STOCK build — the
+//! unixsock link is in zenoh's default features, no special oracle), a `wz-ap-demo`
+//! built with `--features unixsock`, AND the zenoh-pico CLI (`z_pub`). Runs on the
+//! `--ignored` Layer Z lane; the `zenohd` substring in the fn name keeps the
+//! default Layer E sweep's `--skip zenohd` from running it against an
+//! arbitrary-feature binary.
+
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use wz_integration_tests::common::{
+    read_captured, spawn_publishing_zpub, spawn_zenohd_unixsock_dialer, wait_for_substring,
+    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
+};
+
+const SUB_FILTER: &str = "demo/unixsock/**";
+const PUBLISH_KEY: &str = "demo/unixsock/acc";
+const PUBLISH_VALUE: &str = "hello-unixsock-acceptor-via-zenohd";
+
+/// pico `z_pub` -> zenohd (tcp) -> wz `--listen unixsock-stream/...` (unixsock): a
+/// real zenohd dials the wz AF_UNIX acceptor, and a pico publisher's Put routes
+/// across that unixsock link to the wz subscriber — the `transport-link-unixsock`
+/// atom's first cross-impl proof in the zenohd->wz (acceptor) direction.
+// wz-proves: transport-link-unixsock zenohd->wz
+// wz-proves: session-unicast-open zenohd->wz
+#[test]
+#[ignore = "binary-dep e2e: needs zenohd (stock) + wz-ap-demo[+unixsock] + zenoh-pico z_pub; runs via --ignored"]
+fn wz_unixsock_acceptor_receives_pico_put_via_zenohd() {
+    let demo = wz_ap_demo_binary();
+    let z_pub = zenoh_pico_cli_binary("z_pub");
+    let sock_path = std::env::temp_dir()
+        .join(format!(
+            "wz-unixsock-acc-zenohd-{}.sock",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .into_owned();
+    // Clear a stale socket from a crashed run (bind_unixsock also unlinks, but keep
+    // the pre-bind path clean so the exists() bound-check below is unambiguous).
+    let _ = std::fs::remove_file(&sock_path);
+
+    let tcp_res = PortReservation::pick();
+    let tcp_port = tcp_res.port();
+    let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
+
+    // wz is the unixsock ACCEPTOR (`--listen unixsock-stream/<path>`) + a routed
+    // subscriber on SUB_FILTER.
+    let wz_stderr = tempfile::tempfile().expect("tempfile for wz acceptor stderr");
+    let wz_writer = wz_stderr.try_clone().expect("dup wz stderr handle");
+    let mut wz_reader = wz_stderr;
+    let mut wz = ChildGuard::wrap(
+        "wz-ap-demo (--listen unixsock-stream --key)",
+        Command::new(&demo)
+            .arg("--listen")
+            .arg(format!("unixsock-stream/{sock_path}"))
+            .arg("--key")
+            .arg(SUB_FILTER)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(wz_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --listen unixsock-stream --key"),
+    );
+
+    // The wz acceptor must be BOUND (its AF_UNIX socket file present) before zenohd
+    // dials. `bind_unixsock` binds SYNCHRONOUSLY before the "(unixsock)" listen log,
+    // so the log — plus the socket file on disk — is the bound witness.
+    let listening = wait_for_substring(&mut wz_reader, "(unixsock)", Duration::from_secs(10));
+    let bound = listening.is_ok() && Path::new(&sock_path).exists();
+
+    // zenohd DIALS wz's unixsock acceptor (`-e unixsock-stream/<path>`) + listens on
+    // tcp for pico. Spawned only after wz is bound so the connect finds the socket.
+    let mut zenohd = bound.then(|| spawn_zenohd_unixsock_dialer(&sock_path, tcp_port));
+    drop(tcp_res);
+
+    // wz accepts the zenohd unixsock dial + completes the handshake, then (on
+    // Established) declares its routed subscriber onto the accepted session,
+    // installing the route on zenohd.
+    let established = zenohd.as_ref().map(|_| {
+        wait_for_substring(
+            &mut wz_reader,
+            "session Established",
+            Duration::from_secs(10),
+        )
+    });
+    let declared = matches!(&established, Some(Ok(_))).then(|| {
+        wait_for_substring(
+            &mut wz_reader,
+            "DECLARED ROUTED SUBSCRIBER",
+            Duration::from_secs(10),
+        )
+    });
+
+    // pico z_pub over TCP — after wz's routed subscriber declaration reached zenohd
+    // (route installed); the 30x burst covers residual propagation lag (no-flaky).
+    let z_pub_child = matches!(&declared, Some(Ok(_))).then(|| {
+        spawn_publishing_zpub(
+            &z_pub,
+            PUBLISH_KEY,
+            PUBLISH_VALUE,
+            &tcp_endpoint,
+            "zenohd-unixsock",
+            || tempfile::tempfile().expect("tempfile for z_pub stdout"),
+        )
+    });
+
+    let fired = wait_for_substring(&mut wz_reader, "SUBSCRIBER FIRED", Duration::from_secs(15));
+
+    if let Some(mut c) = z_pub_child {
+        let _ = c.child_mut().kill();
+        let _ = c.child_mut().wait();
+    }
+    if let Some(z) = zenohd.as_mut() {
+        let _ = z.child_mut().kill();
+        let _ = z.child_mut().wait();
+    }
+    let _ = wz.child_mut().kill();
+    let _ = wz.child_mut().wait();
+    let _ = std::fs::remove_file(&sock_path);
+
+    let wz_captured = read_captured(&mut wz_reader);
+    eprintln!("--- wz unixsock acceptor stderr ---\n{wz_captured}");
+
+    assert!(
+        bound,
+        "wz-ap-demo did not bind the unixsock acceptor (its '(unixsock)' listen line + \
+         '{sock_path}' socket file) within 10s.\n--- wz stderr ---\n{wz_captured}"
+    );
+    established
+        .expect("zenohd dialer was spawned once wz was bound")
+        .unwrap_or_else(|c| {
+            panic!(
+                "wz acceptor never logged 'session Established' within 10s — zenohd's unixsock \
+                 dial did not complete the handshake with wz's acceptor.\n--- wz stderr ---\n{c}"
+            )
+        });
+    declared
+        .expect("the DECLARED-ROUTED-SUBSCRIBER wait runs once the session Established")
+        .unwrap_or_else(|c| {
+            panic!(
+                "wz-ap-demo never logged 'DECLARED ROUTED SUBSCRIBER' within 10s of Established — \
+                 the acceptor-side routed subscriber declare regressed.\n--- wz stderr ---\n{c}"
+            )
+        });
+    let fired_text = fired.unwrap_or_else(|c| {
+        panic!(
+            "wz never logged 'SUBSCRIBER FIRED' within 15s — the pico Put did not route through \
+             zenohd and across the unixsock link into wz's acceptor's subscriber.\n\
+             --- wz stderr ---\n{c}"
+        )
+    });
+
+    // The fired sample must carry the agreed keyexpr — a UNIQUE keyexpr only this
+    // pico z_pub publishes, so the fire pins THIS Put crossing the unixsock link (a
+    // bare "SUBSCRIBER FIRED" on nothing else could be a stale artifact). The exact
+    // payload LENGTH is NOT asserted: `spawn_publishing_zpub` uses the zenoh-pico
+    // `z_pub` example, which prefixes each sample with a `[ idx] ` counter, so the
+    // wire payload is longer than PUBLISH_VALUE — the keyexpr uniqueness is the
+    // discriminator (as in the sibling `wz_unixpipe_zenohd_dataplane` leg 3).
+    assert!(
+        fired_text.contains(PUBLISH_KEY),
+        "the wz subscriber fired, but not on the routed keyexpr '{PUBLISH_KEY}'.\n{fired_text}"
+    );
+}

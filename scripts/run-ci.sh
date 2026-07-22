@@ -5579,6 +5579,19 @@ layer_z_zenohd_interop() {
     # zenohd is the only foreign tls dialer. The demo is already built with `tls`.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_tls_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y398 — wz UNIXSOCK ACCEPTOR cross-impl (transport-link-unixsock zenohd->wz):
+    # the AF_UNIX-stream sibling of the ws/tls acceptor legs above. A real zenohd
+    # DIALS the wz `--listen unixsock-stream/<path>` acceptor (the
+    # BoundListener::Unixsock arm wired in R311y378, proven wz<->wz by unixsock_e2e),
+    # and a pico z_put routes through zenohd ACROSS the unixsock link into the wz
+    # acceptor's subscriber. The existing wz_to_zenohd_router unixsock leg proves only
+    # the wz unixsock DIALER (wz->zenohd); this is the reverse (acceptor) direction.
+    # zenoh-pico's CLI has no unixsock client, so zenohd is the only foreign unixsock
+    # dialer. The unixsock link is in STOCK zenohd (no special oracle, unlike the
+    # unixpipe legs); the demo is already built with `unixsock` above. Same
+    # --test-threads=1 per-zenohd isolation.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_unixsock_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y376 — wz ROUTER ws ACCEPTOR cross-impl (accept-symmetry Stage 3): the
     # MULTI-PEER accept loop (`--router` / peer_loop, not just one-shot `--listen`)
     # now accepts a foreign non-tcp face. A real zenohd DIALS the wz `--router
