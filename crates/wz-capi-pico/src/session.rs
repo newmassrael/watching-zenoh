@@ -59,12 +59,15 @@ use wz_runtime_tokio::session_glue::{
     SessionInitParams, SessionTimeouts, SigningKey, WhatAmI,
 };
 use wz_runtime_tokio::session_open::{
-    bind_endpoint, dial_endpoint, initiate_and_open_session, DialConfig, OpenedSession,
-    DEFAULT_OPEN_TICK_MS,
+    bind_endpoint_with_config, dial_endpoint, initiate_and_open_session, AcceptConfig, DialConfig,
+    OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 
 use crate::abi::{z_moved_config_t, z_owned_config_t};
-use crate::config::{ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY};
+use crate::config::{
+    ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY,
+    Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY, Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY,
+};
 use crate::faces::{CApiForwarder, SharedSession, DIAL_FACE_ID};
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
@@ -328,10 +331,47 @@ async fn drive_dial(
     drop(writer_handle);
 }
 
+/// R311y406 — build the LISTEN [`AcceptConfig`] from the native
+/// `Z_CONFIG_TLS_LISTEN_{CERTIFICATE,PRIVATE_KEY}_KEY` PEM file paths (the peer of the
+/// demo's `build_accept_config`). Both-or-neither. The key name mirrors zenoh-pico's
+/// tls block, which zenoh reuses for quic; pico wires it into the QUIC acceptor slot
+/// (pico has no `transport-link-tls` acceptor). Without `transport-link-quic` the
+/// quic backend is not compiled, so a `quic/` listen surfaces `Unsupported` at bind
+/// regardless — the paths are ignored and the cert-free default is returned.
+#[cfg(feature = "transport-link-quic")]
+fn listen_accept_config(cert: Option<&str>, key: Option<&str>) -> std::io::Result<AcceptConfig> {
+    use wz_runtime_tokio::session_open::QuicAcceptConfig;
+    use wz_runtime_tokio::tls_config::read_pem_file;
+    match (cert, key) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert_pem = read_pem_file(cert_path)?;
+            let key_pem = read_pem_file(key_path)?;
+            let quic = QuicAcceptConfig::from_cert_key_pem(&cert_pem, &key_pem)?;
+            Ok(AcceptConfig::default().with_quic(quic))
+        }
+        (None, None) => Ok(AcceptConfig::default()),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a quic/... listen needs BOTH the listen certificate and private-key config values",
+        )),
+    }
+}
+
+/// The `transport-link-quic`-less build: a `quic/...` listen surfaces the runtime's
+/// typed `Unsupported` at bind, so the listen-cert config values are inert.
+#[cfg(not(feature = "transport-link-quic"))]
+fn listen_accept_config(cert: Option<&str>, key: Option<&str>) -> std::io::Result<AcceptConfig> {
+    let _ = (cert, key);
+    Ok(AcceptConfig::default())
+}
+
 /// The `listen` role: bind, unblock `z_open` immediately, then hold N
 /// concurrent inbound peers until `z_close` — pico's non-blocking listener.
+#[allow(clippy::too_many_arguments)]
 async fn drive_listen(
     endpoint: String,
+    listen_cert: Option<String>,
+    listen_key: Option<String>,
     shared: Arc<SharedSession>,
     tx: mpsc::Sender<bool>,
     shutdown: Arc<Notify>,
@@ -348,7 +388,20 @@ async fn drive_listen(
             return;
         }
     };
-    let listener = match bind_endpoint(&endpoint).await {
+    // R311y406 — thread the LISTEN server cert (native Z_CONFIG_TLS_LISTEN_* keys)
+    // into the bind's AcceptConfig, so a `z_open(listen="quic/..")` carrying the cert
+    // presents it (was a cert-free `bind_endpoint` -> cert-absence reject). Building
+    // the QuicAcceptConfig needs `transport-link-quic`; without that feature the quic
+    // backend is not compiled, so a quic listen surfaces `Unsupported` at bind
+    // regardless -- the cert paths are inert (see `listen_accept_config`).
+    let accept_cfg = match listen_accept_config(listen_cert.as_deref(), listen_key.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            let _ = tx.send(false);
+            return;
+        }
+    };
+    let listener = match bind_endpoint_with_config(&endpoint, &accept_cfg).await {
         Ok(listener) => listener,
         Err(_) => {
             let _ = tx.send(false);
@@ -360,12 +413,10 @@ async fn drive_listen(
     // (one that could not feed a multi-accept loop) is rejected here -- z_open
     // reports the open failure to the C caller (tx.send(false) -> Z_ERR_GENERIC),
     // the pico twin of run_router's bind-time guard and the BIND-time twin of the
-    // accept loop's runtime `AcceptedLink::supports_mesh_multi_peer` backstop.
-    // R311y401's quic IS non-mesh-capable, but a quic listen never reaches this
-    // guard: bind_endpoint passes AcceptConfig::default() (no quic cert), so
-    // bind_locator rejects a quic listen at cert-absence FIRST. So this guard still
-    // never rejects today -- it stays as defensive code, live only for a future
-    // non-mesh acceptor that binds cert-free.
+    // accept loop's runtime `AcceptedLink::supports_mesh_multi_peer` backstop. Since
+    // R311y404 every acceptor (quic incl., via its deferred-handshake split) is
+    // mesh-capable, so this guard rejects no shipped transport; it stays defensive
+    // for a future non-mesh acceptor.
     if !listener.supports_mesh_multi_peer() {
         let _ = tx.send(false);
         return;
@@ -405,6 +456,8 @@ async fn drive_listen(
 fn open_blocking(
     connect: Option<String>,
     listen: Option<String>,
+    listen_cert: Option<String>,
+    listen_key: Option<String>,
     dial_whatami: WhatAmI,
 ) -> Result<SessionState, ZResult> {
     let clock = TokioTime::new();
@@ -457,6 +510,8 @@ fn open_blocking(
                     (None, Some(endpoint)) => {
                         drive_listen(
                             endpoint,
+                            listen_cert,
+                            listen_key,
                             drive_shared,
                             tx,
                             drive_shutdown,
@@ -520,6 +575,17 @@ pub unsafe extern "C" fn z_open(
 
         let connect = cfg.get(Z_CONFIG_CONNECT_KEY).map(str::to_owned);
         let listen = cfg.get(Z_CONFIG_LISTEN_KEY).map(str::to_owned);
+        // R311y406 — the LISTEN server cert (cert-chain + private-key PEM FILE PATHS) a
+        // cert-bearing listener presents, from zenoh-pico's native listen-cert config
+        // keys (the tls-block keys zenoh reuses for quic). pico wires them into the QUIC
+        // acceptor (`transport-link-quic`, no tls acceptor). `None` (cert-free
+        // tcp/ws/udp listen) keeps the default bind.
+        let listen_cert = cfg
+            .get(Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY)
+            .map(str::to_owned);
+        let listen_key = cfg
+            .get(Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY)
+            .map(str::to_owned);
         // The dial role's whatami is config-driven, mirroring pico's
         // `_z_config_get_mode` (`~/zenoh-pico/src/net/session.c:120-140`,
         // default CLIENT): `mode=peer` opens a dialing PEER, otherwise CLIENT.
@@ -544,7 +610,7 @@ pub unsafe extern "C" fn z_open(
             return crate::result::Z_ERR_INVALID;
         }
 
-        match open_blocking(connect, listen, dial_whatami) {
+        match open_blocking(connect, listen, listen_cert, listen_key, dial_whatami) {
             Ok(state) => {
                 *zs = z_owned_session_t {
                     _val: Box::into_raw(Box::new(state)) as *mut c_void,

@@ -25,6 +25,16 @@ pub const Z_CONFIG_MODE_KEY: u8 = 0x40;
 pub const Z_CONFIG_CONNECT_KEY: u8 = 0x41;
 /// pico `Z_CONFIG_LISTEN_KEY` (config.h.in:103).
 pub const Z_CONFIG_LISTEN_KEY: u8 = 0x42;
+/// pico `Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY` (config.h.in:168) — the private-key PEM
+/// FILE PATH a cert-bearing listener presents. R311y406: value mirrors zenoh-pico's
+/// native key. The name is zenoh's tls-block key, which zenoh reuses for quic;
+/// wz-capi-pico wires it into the QUIC acceptor (it ships `transport-link-quic`, not a
+/// tls acceptor), so today it keys a `quic/` listen.
+pub const Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY: u8 = 0x4D;
+/// pico `Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY` (config.h.in:170) — the cert-chain PEM
+/// FILE PATH a cert-bearing listener presents (the peer of
+/// [`Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY`]). R311y406, value mirrors zenoh-pico's.
+pub const Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY: u8 = 0x4F;
 
 /// The boxed payload behind a `z_owned_config_t` handle.
 #[derive(Clone, Default)]

@@ -726,13 +726,12 @@ pub enum BoundListener {
     /// [`accept_loop`](crate::accept_loop)'s `select!`, so one endpoint holds N
     /// ZID-keyed faces. The accepted peer is a REAL IP ([`AcceptedPeer::Ip`], from
     /// `Incoming::remote_address()` — named before the handshake), like udp. Reaching
-    /// the mesh loop needs a quic cert: since R311y405 the `--router quic/` CLI threads
-    /// one (`--quic-cert`/`--quic-key` -> `AcceptConfig.quic`), so a shipped
-    /// `--router quic/` now binds and feeds the loop; the `--peer`/`--router-hat quic/`
-    /// callers still thread none (cert-threading for those is deferred), so their bind
-    /// hits `bind_locator`'s cert-absence `Unsupported` first. The one-shot
-    /// `--listen quic/` acceptor also uses this split (via [`accept_bound`]), now with
-    /// the crypto in its `handshake` step.
+    /// the mesh loop needs a quic cert, and every shipped listen caller now threads one
+    /// (`--quic-cert`/`--quic-key` -> `AcceptConfig.quic`): the `--router` (R311y405),
+    /// `--peer`, and `--router-hat` (R311y406) CLI paths, the one-shot `--listen quic/`
+    /// (via [`accept_bound`]), and pico's `z_open(listen=quic/)`. So a quic listen binds
+    /// whenever a cert is supplied; only a cert-LESS bind (a direct-API caller passing
+    /// [`AcceptConfig::default`]) hits `bind_locator`'s cert-absence `Unsupported`.
     #[cfg(feature = "transport-link-quic")]
     Quic(Endpoint),
 }
@@ -757,9 +756,9 @@ pub enum BoundListener {
 /// quic mesh-capable too (its deferred-handshake split), so the loop's NON-mesh-capable
 /// reject path (see [`AcceptedLink::supports_mesh_multi_peer`]) fires for NO transport
 /// today — every bound listener holds N ZID-keyed faces. A quic listener reaches the
-/// loop with a threaded cert: the `--router quic/` CLI threads one since R311y405, and
-/// a direct-API caller can too; `--peer`/`--router-hat quic/` stay cert-free (deferred),
-/// so their bind is rejected at cert-absence first.
+/// loop with a threaded cert: the `--router` (R311y405) + `--peer`/`--router-hat`
+/// (R311y406) CLI paths and pico all thread one, as can a direct-API caller; only a
+/// cert-LESS bind hits cert-absence.
 ///
 /// `Clone`/`Debug`/`Eq` so it can ride [`Face`](crate::accept_loop::Face)`.peer`
 /// (the field the loop threads through `FaceUp`/`FaceDown`/`FaceFailed`) and the
@@ -827,13 +826,12 @@ impl BoundListener {
     /// R311y392 the stream + same-host families are all `true`, and R311y404 flips
     /// `Quic` `false -> true` (its deferred-handshake split moves the crypto off the
     /// accept path, so a quic endpoint holds N per-peer faces like the rest) — every
-    /// variant is now mesh-capable. Since R311y405 a SHIPPED `--router quic/` DOES hit
-    /// this predicate: the CLI threads a cert (`--quic-cert` -> `AcceptConfig.quic`) so
-    /// `bind_locator` binds rather than cert-absence-rejecting. `--peer`/`--router-hat
-    /// quic/` still thread none (deferred), so their bind is rejected at cert-absence
-    /// first; a direct-API caller with a cert also reaches here. This match is
-    /// wildcard-free so a new `BoundListener` variant forces an explicit mesh decision
-    /// here (and its twin above).
+    /// variant is now mesh-capable. A SHIPPED quic listen DOES hit this predicate: the
+    /// `--router` (R311y405) + `--peer`/`--router-hat` (R311y406) CLI paths and pico all
+    /// thread a cert (`--quic-cert` -> `AcceptConfig.quic`), so `bind_locator` binds
+    /// rather than cert-absence-rejecting; only a cert-LESS bind is rejected first. This
+    /// match is wildcard-free so a new `BoundListener` variant forces an explicit mesh
+    /// decision here (and its twin above).
     pub fn supports_mesh_multi_peer(&self) -> bool {
         match self {
             BoundListener::Tcp(_) => true,
@@ -857,10 +855,10 @@ impl BoundListener {
             // `accept_quic_incoming` arrival; the crypto + first bidi stream defer to
             // `AcceptedLink::handshake` in the spawned open future) moves the slow
             // crypto off the accept loop's `select!`, so one endpoint holds N
-            // ZID-keyed faces like tls. Since R311y405 the `--router quic/` CLI threads
-            // a cert (`--quic-cert` -> `AcceptConfig.quic`), so it binds and reaches
-            // here; `--peer`/`--router-hat quic/` stay cert-free (deferred) and are
-            // rejected at cert-absence first, as is any cert-less direct-API caller.
+            // ZID-keyed faces like tls. Every shipped quic listen threads a cert
+            // (`--quic-cert` -> `AcceptConfig.quic`): --router (R311y405), --peer /
+            // --router-hat (R311y406), pico, and the one-shot --listen; so it binds and
+            // reaches here. Only a cert-LESS bind is rejected at cert-absence first.
             #[cfg(feature = "transport-link-quic")]
             BoundListener::Quic(_) => true,
         }
@@ -1301,11 +1299,10 @@ impl AcceptedLink {
     /// `false -> true`: its deferred-handshake split (the crypto runs in
     /// [`Self::handshake`], off the accept path) makes a quic accept loop-safe, so the
     /// backstop no longer rejects it. A quic listener reaches the loop with a threaded
-    /// cert: the `--router quic/` CLI threads one since R311y405, and a direct-API
-    /// caller can too; the `--peer`/`--router-hat quic/` CLI paths stay cert-free
-    /// (deferred) so they are rejected at bind cert-absence first. This match is
-    /// wildcard-free so a new `AcceptedLink` variant forces an explicit mesh decision
-    /// here.
+    /// cert: the `--router` (R311y405) + `--peer`/`--router-hat` (R311y406) CLI paths
+    /// and pico all thread one, as can a direct-API caller; only a cert-LESS bind is
+    /// rejected at cert-absence first. This match is wildcard-free so a new
+    /// `AcceptedLink` variant forces an explicit mesh decision here.
     pub fn supports_mesh_multi_peer(&self) -> bool {
         match self {
             AcceptedLink::Tcp(_) => true,

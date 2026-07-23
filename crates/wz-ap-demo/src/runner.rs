@@ -216,6 +216,34 @@ fn apply_tls_ca(cfg: DialConfig, _tls_ca: &Option<String>) -> io::Result<DialCon
     Ok(cfg)
 }
 
+/// R311y406 — the four `--<scheme>-cert` / `--<scheme>-key` PEM paths a mesh listen
+/// PRESENTS, as ONE named bundle. Used by [`run_router_hat`] (whose positional arg
+/// list is already long, so a named bundle both keeps it under the argument-count
+/// lint AND rules out a cert/key or tls/quic transposition at the call site).
+/// `Default` (all `None`) is the cert-free bind; [`Self::build`] threads them via
+/// [`build_accept_config`]. (`run_peer` carries the same four inside [`PeerOpts`];
+/// `run_router` passes them positionally — each caller's existing arg style.)
+#[cfg(feature = "router-hat-router")]
+#[derive(Default)]
+pub(crate) struct AcceptCertPaths {
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
+    pub quic_cert: Option<String>,
+    pub quic_key: Option<String>,
+}
+
+#[cfg(feature = "router-hat-router")]
+impl AcceptCertPaths {
+    fn build(&self) -> io::Result<AcceptConfig> {
+        build_accept_config(
+            &self.tls_cert,
+            &self.tls_key,
+            &self.quic_cert,
+            &self.quic_key,
+        )
+    }
+}
+
 /// R311y375/y401 — build the [`AcceptConfig`] for a one-shot `--listen`, the accept
 /// mirror of [`build_dial_config`]. Cert-free acceptors (tcp/ws/udp) take
 /// [`AcceptConfig::default`]; a cert acceptor threads its `--<scheme>-cert` +
@@ -1726,6 +1754,15 @@ pub(crate) struct PeerOpts {
     /// clamp forces the effective priority back to DEFAULT downstream).
     #[cfg(feature = "transport-qos")]
     pub publish_band: Option<PublishBand>,
+    /// R311y406 — the server cert a `--peer tls/...` / `--peer quic/...` PRESENTS
+    /// (`--tls-cert`/`--tls-key`, `--quic-cert`/`--quic-key`), threaded into the
+    /// bind's `AcceptConfig` exactly as the one-shot `--listen` and `--router`
+    /// (R311y405) do. `None` (cert-free tcp/ws/udp) keeps the default bind. Both
+    /// slots of a pair are required together (enforced by `build_accept_config`).
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
+    pub quic_cert: Option<String>,
+    pub quic_key: Option<String>,
 }
 
 #[cfg(feature = "routing-peer")]
@@ -1734,6 +1771,22 @@ pub(crate) async fn run_peer(
     dial_targets: &[String],
     opts: &PeerOpts,
     interceptors: &crate::InterceptorOpts,
+) -> io::Result<()> {
+    run_peer_until(listen, dial_targets, opts, interceptors, shutdown_signal()).await
+}
+
+/// The testable inner of [`run_peer`] (R311y406) — takes the shutdown as a parameter
+/// so a unit test can inject an immediately-ready future and witness the bind (e.g. a
+/// cert-threaded `--peer quic/` ADMIT) WITHOUT hanging on the real SIGTERM/SIGINT
+/// signal. [`run_peer`] is the production wrapper that passes [`shutdown_signal`]. The
+/// peer twin of [`run_router_until`].
+#[cfg(feature = "routing-peer")]
+async fn run_peer_until(
+    listen: &str,
+    dial_targets: &[String],
+    opts: &PeerOpts,
+    interceptors: &crate::InterceptorOpts,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
     // Destructure into the same local names + types the body uses (the Options as
     // `Option<&str>`), so the bundle is purely a signature change.
@@ -1764,7 +1817,7 @@ pub(crate) async fn run_peer(
         AutoConnect, AutoConnectStrategy, DownsamplingRule, InterceptorConfig, LinkstateForwarder,
         LowPassRule, Permission, SubjectSelector, WhatAmI, Zid,
     };
-    use wz::runtime_tokio::session_open::bind_endpoint;
+    use wz::runtime_tokio::session_open::bind_endpoint_with_config;
 
     // Per-peer routing zid = an explicit `--zid` when given, else this 2-byte prefix
     // + the listen port (derived below; R311y397 — the `--zid` override, when
@@ -1780,7 +1833,18 @@ pub(crate) async fn run_peer(
     // its received-data count. Fast enough to publish soon after convergence.
     const APP_TICK_MS: u64 = 250;
 
-    let listener = bind_endpoint(listen).await?;
+    // R311y406 — thread the peer's server cert (PeerOpts.{tls,quic}_cert/key) into
+    // the bind's AcceptConfig via the SAME build_accept_config the one-shot `--listen`
+    // and `--router` (R311y405) use, so a `--peer tls/...` / `--peer quic/...` presents
+    // its cert (was bind_endpoint's cert-free default -> cert-absence reject). A
+    // cert-free transport (tcp/ws/udp) keeps its None slots and binds unchanged.
+    let accept_cfg = build_accept_config(
+        &opts.tls_cert,
+        &opts.tls_key,
+        &opts.quic_cert,
+        &opts.quic_key,
+    )?;
+    let listener = bind_endpoint_with_config(listen, &accept_cfg).await?;
     // Non-IP-safe addressing (R311y397, mirroring run_router_hat's R311y396 seam):
     // the "listening on" log + the self dial locator render from the per-variant
     // display (`local_addr_display`, total over every transport), and the
@@ -2301,7 +2365,7 @@ pub(crate) async fn run_peer(
         params,
         TokioTime::new(),
         DEFAULT_OPEN_TICK_MS,
-        shutdown_signal(),
+        shutdown,
         |event: &AcceptEvent| log_face_event("peer", event),
         &forwarder,
     );
@@ -2711,7 +2775,35 @@ pub(crate) async fn run_peer(
 /// asserts on teardown output without racing the 250 ms tick). Runs until the
 /// graceful-shutdown signal (SIGTERM / SIGINT).
 #[cfg(feature = "router-hat-router")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_router_hat(
+    listen: &str,
+    dial_targets: &[String],
+    connect_after: Option<(u64, Vec<String>)>,
+    multicast_qos: bool,
+    zid_override: Option<Vec<u8>>,
+    cert_paths: &AcceptCertPaths,
+) -> io::Result<()> {
+    run_router_hat_until(
+        listen,
+        dial_targets,
+        connect_after,
+        multicast_qos,
+        zid_override,
+        cert_paths,
+        shutdown_signal(),
+    )
+    .await
+}
+
+/// The testable inner of [`run_router_hat`] (R311y406) — takes the shutdown as a
+/// parameter so a unit test can inject an immediately-ready future and witness the
+/// bind (e.g. a cert-threaded `--router-hat quic/` ADMIT) WITHOUT hanging on the real
+/// SIGTERM/SIGINT signal. [`run_router_hat`] is the production wrapper that passes
+/// [`shutdown_signal`]. The router-hat twin of [`run_router_until`] / [`run_peer_until`].
+#[cfg(feature = "router-hat-router")]
+#[allow(clippy::too_many_arguments)]
+async fn run_router_hat_until(
     listen: &str,
     dial_targets: &[String],
     connect_after: Option<(u64, Vec<String>)>,
@@ -2727,6 +2819,9 @@ pub(crate) async fn run_router_hat(
     // shared_nodes) keys on zid, so a deterministic zid makes a federation e2e's
     // master choice reproducible — a port-derived zid varies per run (flaky).
     zid_override: Option<Vec<u8>>,
+    // R311y406 — the server cert a `--router-hat tls/...` / `quic/...` presents.
+    cert_paths: &AcceptCertPaths,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
     #[cfg(not(feature = "router-multicast-faces"))]
@@ -2735,7 +2830,7 @@ pub(crate) async fn run_router_hat(
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::Zid;
     use wz::runtime_tokio::router_forward::RouterForwarder;
-    use wz::runtime_tokio::session_open::bind_endpoint;
+    use wz::runtime_tokio::session_open::bind_endpoint_with_config;
 
     // Distinct 2-byte zid prefix ("rh") so a router-hat node and a peer bound to
     // the same port still derive DIFFERENT routing zids: RouterForwarder dedups
@@ -2748,7 +2843,11 @@ pub(crate) async fn run_router_hat(
     // data); matches the peer's so the witnesses log promptly after convergence.
     const APP_TICK_MS: u64 = 250;
 
-    let listener = bind_endpoint(listen).await?;
+    // R311y406 — thread the router-hat's server cert (--tls-cert/--quic-cert) into the
+    // bind's AcceptConfig via the shared build_accept_config, so a `--router-hat tls/`
+    // / `--router-hat quic/` presents its cert (was bind_endpoint's cert-free default).
+    let accept_cfg = cert_paths.build()?;
+    let listener = bind_endpoint_with_config(listen, &accept_cfg).await?;
     // Non-IP-safe addressing (R311y396): the log line + the adminspace `local_data`
     // dial locator render from the per-variant display (`local_addr_display`, total
     // over every transport), and the port-derived zid fallback applies ONLY when the
@@ -3051,7 +3150,7 @@ pub(crate) async fn run_router_hat(
         params,
         TokioTime::new(),
         DEFAULT_OPEN_TICK_MS,
-        shutdown_signal(),
+        shutdown,
         |event: &AcceptEvent| log_face_event("router-hat", event),
         &forwarder,
     );
@@ -3920,6 +4019,62 @@ mod router_quic_cert_tests {
     }
 }
 
+#[cfg(all(test, feature = "router-hat-router", feature = "quic"))]
+mod router_hat_quic_cert_tests {
+    use super::{run_router_hat_until, AcceptCertPaths};
+
+    /// R311y406 — the `--router-hat quic/` cert-threading discriminator: run_router_hat
+    /// (via its testable inner run_router_hat_until) now ADMITS a quic listen when the
+    /// AcceptCertPaths bundle carries --quic-cert/--quic-key (was rejected at bind
+    /// cert-absence). The router-hat twin of run_peer_admits / run_router_admits. The
+    /// injected immediately-ready shutdown returns peer_loop WITHOUT a peer, so no
+    /// handshake round-trip races.
+    ///
+    /// RED reproduction: RESTORE a cert-free bind in run_router_hat_until
+    /// (`AcceptCertPaths::default().build()` or bind_endpoint) -> cert-absence -> the
+    /// expect panics. NON-FLAKY: pid-unique temp cert, quic/127.0.0.1:0 OS port,
+    /// ready() shutdown. [[feedback-no-flaky-ever]]
+    #[tokio::test]
+    async fn run_router_hat_admits_a_quic_listen_with_cert_at_bind() {
+        use wz_runtime_tokio_test_support::localhost_cert_key_pem;
+        let (cert_pem, key_pem) = localhost_cert_key_pem();
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let cert_path = dir
+            .join(format!("wz-ap-demo-rh-quic-cert-{pid}.pem"))
+            .to_string_lossy()
+            .into_owned();
+        let key_path = dir
+            .join(format!("wz-ap-demo-rh-quic-key-{pid}.pem"))
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&cert_path, cert_pem.as_bytes()).expect("write cert pem");
+        std::fs::write(&key_path, key_pem.as_bytes()).expect("write key pem");
+
+        let cert_paths = AcceptCertPaths {
+            tls_cert: None,
+            tls_key: None,
+            quic_cert: Some(cert_path.clone()),
+            quic_key: Some(key_path.clone()),
+        };
+        let result = run_router_hat_until(
+            "quic/127.0.0.1:0",
+            &[],
+            None,
+            false,
+            None,
+            &cert_paths,
+            std::future::ready(()),
+        )
+        .await;
+
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+        result
+            .expect("the router-hat admits a quic --router-hat listen with --quic-cert (R311y406)");
+    }
+}
+
 #[cfg(all(
     test,
     feature = "router-hat-router",
@@ -3953,9 +4108,17 @@ mod router_hat_failfast_tests {
         let _ = std::fs::remove_file(format!("{base}_uplink"));
 
         let listen = format!("unixpipe/{base}");
-        let err = run_router_hat(&listen, &[], None, false, None)
-            .await
-            .expect_err("a non-IP unixpipe --router-hat without --zid must fail fast");
+        // R311y406 — cert-free unixpipe: the AcceptCertPaths quartet is all-None.
+        let err = run_router_hat(
+            &listen,
+            &[],
+            None,
+            false,
+            None,
+            &super::AcceptCertPaths::default(),
+        )
+        .await
+        .expect_err("a non-IP unixpipe --router-hat without --zid must fail fast");
         assert!(
             err.to_string().contains("--zid"),
             "the fail-fast must name --zid (the R311y396 fix), got: {err}"
@@ -3964,6 +4127,86 @@ mod router_hat_failfast_tests {
         // bind_endpoint created the request node; its acceptor Drop unlinks it, but
         // SIGKILL-safe best-effort cleanup here too (mirrors the sibling test).
         let _ = std::fs::remove_file(format!("{base}_uplink"));
+    }
+}
+
+#[cfg(all(test, feature = "routing-peer", feature = "quic"))]
+mod peer_quic_cert_tests {
+    use super::{run_peer_until, PeerOpts};
+    use crate::InterceptorOpts;
+
+    /// R311y406 — the `--peer quic/` cert-threading discriminator: run_peer (via its
+    /// testable inner run_peer_until) now ADMITS a quic listen when PeerOpts carries
+    /// --quic-cert/--quic-key (was rejected at bind cert-absence, run_peer having bound
+    /// cert-free via bind_endpoint). The QUIC/peer twin of
+    /// run_router_admits_a_quic_listen_with_cert_at_bind (R311y405). The injected
+    /// immediately-ready shutdown returns peer_loop WITHOUT a peer connecting, so there
+    /// is no handshake round-trip to race (a bind-only witness).
+    ///
+    /// RED reproduction: RESTORE a cert-free bind in run_peer_until
+    /// (bind_endpoint_with_config with AcceptConfig::default) -> bind_locator rejects
+    /// the quic listen at cert-absence -> run_peer_until returns Err -> this expect
+    /// panics. NON-FLAKY: pid-unique temp cert, quic/127.0.0.1:0 OS port, ready()
+    /// shutdown. [[feedback-no-flaky-ever]]
+    #[tokio::test]
+    async fn run_peer_admits_a_quic_listen_with_cert_at_bind() {
+        use wz_runtime_tokio_test_support::localhost_cert_key_pem;
+        let (cert_pem, key_pem) = localhost_cert_key_pem();
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let cert_path = dir
+            .join(format!("wz-ap-demo-peer-quic-cert-{pid}.pem"))
+            .to_string_lossy()
+            .into_owned();
+        let key_path = dir
+            .join(format!("wz-ap-demo-peer-quic-key-{pid}.pem"))
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&cert_path, cert_pem.as_bytes()).expect("write cert pem");
+        std::fs::write(&key_path, key_pem.as_bytes()).expect("write key pem");
+
+        let opts = PeerOpts {
+            publish_key: None,
+            subscribe_key: None,
+            unsubscribe_after_data: false,
+            autoconnect: false,
+            config_queryable: false,
+            config_writable: false,
+            config_write_permit: false,
+            no_admin_read: false,
+            put_key: None,
+            put_payload: None,
+            zid_override: None,
+            #[cfg(feature = "transport-multilink")]
+            max_links: 1,
+            #[cfg(feature = "transport-qos")]
+            qos: false,
+            #[cfg(feature = "transport-qos")]
+            publish_band: None,
+            tls_cert: None,
+            tls_key: None,
+            quic_cert: Some(cert_path.clone()),
+            quic_key: Some(key_path.clone()),
+        };
+        let interceptors = InterceptorOpts {
+            acl_deny: None,
+            downsample: None,
+            max_payload: None,
+        };
+
+        let result = run_peer_until(
+            "quic/127.0.0.1:0",
+            &[],
+            &opts,
+            &interceptors,
+            std::future::ready(()),
+        )
+        .await;
+
+        // Best-effort cleanup BEFORE the assert (a bind failure still unlinks).
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+        result.expect("the mesh peer admits a quic --peer listen with --quic-cert (R311y406)");
     }
 }
 
@@ -4022,6 +4265,10 @@ mod peer_failfast_tests {
             qos: false,
             #[cfg(feature = "transport-qos")]
             publish_band: None,
+            tls_cert: None,
+            tls_key: None,
+            quic_cert: None,
+            quic_key: None,
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,

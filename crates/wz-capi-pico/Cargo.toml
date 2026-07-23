@@ -59,6 +59,15 @@ crate-type = ["cdylib", "rlib"]
 # `Unsupported` at bind, so `bind_endpoint` errors before the guard. NOT enabled
 # by any default; only the run-ci C1bl-style pico lane builds with it.
 transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe"]
+# R311y406 — off-default `quic/` ACCEPT transport, forwarding wz-runtime-tokio's
+# `transport-link-quic`. Unlike unixpipe, quic IS a zenoh-pico-native link (though
+# stock zenoh-pico's quic is client-dial only); wz-capi-pico adds the LISTEN side
+# with a server cert threaded from the native `Z_CONFIG_TLS_LISTEN_{CERTIFICATE,
+# PRIVATE_KEY}_KEY` config values (zenoh feeds ONE tls block to both tls + quic).
+# With it, `z_open(listen="quic/..")` + those cert keys binds a mesh quic listener
+# (the --peer/--router/--router-hat demo twin, R311y405/y406); without it the
+# `quic/` scheme still parses but `bind_locator` returns `Unsupported` at bind.
+transport-link-quic = ["wz-runtime-tokio/transport-link-quic"]
 
 [lints]
 workspace = true
@@ -124,3 +133,11 @@ getrandom = "0.2"
 version = "1"
 default-features = false
 features = ["rt-multi-thread", "sync", "macros"]
+
+# R311y406 — the sibling fixture crate (DEV-only), for the quic-listen cert
+# discriminator's self-signed `localhost` cert. Never enters a `cargo build` (only
+# `cargo test` unifies it); no cycle (test-support -> wz-runtime-tokio, not -> pico).
+[dev-dependencies]
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
+    "tls-fixtures",
+] }

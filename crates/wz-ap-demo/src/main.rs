@@ -311,6 +311,13 @@ fn main() -> ExitCode {
                     qos,
                     #[cfg(feature = "transport-qos")]
                     publish_band,
+                    // R311y406 — a `--peer tls/...` / `--peer quic/...` threads its
+                    // server cert via the same flags the `--listen`/`--router` paths
+                    // use; cert-free schemes leave them None.
+                    tls_cert: parse_pair(rest, "--tls-cert"),
+                    tls_key: parse_pair(rest, "--tls-key"),
+                    quic_cert: parse_pair(rest, "--quic-cert"),
+                    quic_key: parse_pair(rest, "--quic-key"),
                 },
                 InterceptorOpts {
                     acl_deny,
@@ -407,6 +414,14 @@ fn main() -> ExitCode {
                 connect_after,
                 multicast_qos,
                 zid_override,
+                // R311y406 — a `--router-hat tls/...` / `quic/...` threads its server
+                // cert via the same flags the other listen paths use.
+                crate::runner::AcceptCertPaths {
+                    tls_cert: parse_pair(rest, "--tls-cert"),
+                    tls_key: parse_pair(rest, "--tls-key"),
+                    quic_cert: parse_pair(rest, "--quic-cert"),
+                    quic_key: parse_pair(rest, "--quic-key"),
+                },
             );
         }
         #[cfg(not(feature = "router-hat-router"))]
@@ -1174,6 +1189,7 @@ fn run_router_hat_mode(
     connect_after: Option<(u64, Vec<String>)>,
     multicast_qos: bool,
     zid_override: Option<Vec<u8>>,
+    cert_paths: crate::runner::AcceptCertPaths,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -1189,6 +1205,7 @@ fn run_router_hat_mode(
         connect_after,
         multicast_qos,
         zid_override,
+        &cert_paths,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

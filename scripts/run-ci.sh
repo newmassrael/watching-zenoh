@@ -2318,12 +2318,22 @@ layer_c1w_cargo_test_routing_accept() {
 # `routing-router,quic` with the same `1 passed` count-guard, plus its clippy gate
 # (the sole lane compiling `router_quic_cert_tests`, which needs the `quic` feature
 # + the test-support tls-fixtures dev-dep for the self-signed cert).
+#
+# R311y406 — the same cert-threading extended to the other two mesh callers:
+# `run_peer_admits_a_quic_listen_with_cert_at_bind` (routing-peer,quic) and
+# `run_router_hat_admits_a_quic_listen_with_cert_at_bind` (router-hat-router,quic),
+# each a guarded test + clippy gate. (The pico `z_open(listen=quic/)` cert twin is
+# Layer C1bm's `quic_listen_cert`.)
 layer_c1bl_cargo_test_router_failfast() {
     (cd crates \
         && cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe run_router_accepts_a_unixpipe_listen_at_bind --quiet 2>&1 | grep -q '1 passed' \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-router,transport-link-unixpipe --quiet -- -D warnings \
         && cargo test -p wz-ap-demo --features routing-router,quic run_router_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -q '1 passed' \
-        && cargo clippy -p wz-ap-demo --all-targets --features routing-router,quic --quiet -- -D warnings)
+        && cargo clippy -p wz-ap-demo --all-targets --features routing-router,quic --quiet -- -D warnings \
+        && cargo test -p wz-ap-demo --features routing-peer,quic run_peer_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -q '1 passed' \
+        && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,quic --quiet -- -D warnings \
+        && cargo test -p wz-ap-demo --features router-hat-router,quic run_router_hat_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -q '1 passed' \
+        && cargo clippy -p wz-ap-demo --all-targets --features router-hat-router,quic --quiet -- -D warnings)
 }
 
 # ─── Layer C1bm — pico admits a multi-client unixpipe listen (R311y392) ─────
@@ -2342,11 +2352,15 @@ layer_c1bl_cargo_test_router_failfast() {
 # BoundListener::Unixpipe through the pico C ABI. Step 1 runs it under an EXPLICIT
 # transport-link-unixpipe with a `1 passed` count-guard that reddens on a silent
 # 0-tests (the y380 proof-that-never-runs trap); step 2 clippy-gates the same
-# feature `--all-targets`.
+# feature `--all-targets`. R311y406 — steps 3+4 are the pico quic-listen cert twin:
+# `quic_listen_cert` (z_open(listen=quic/) + the native Z_CONFIG_TLS_LISTEN_* cert keys
+# binds) under transport-link-quic with the same `1 passed` guard + clippy gate.
 layer_c1bm_cargo_test_pico_failfast() {
     (cd crates \
         && cargo test -p wz-capi-pico --features transport-link-unixpipe --test unixpipe_listen_multiclient --quiet 2>&1 | grep -q '1 passed' \
-        && cargo clippy -p wz-capi-pico --all-targets --features transport-link-unixpipe --quiet -- -D warnings)
+        && cargo clippy -p wz-capi-pico --all-targets --features transport-link-unixpipe --quiet -- -D warnings \
+        && cargo test -p wz-capi-pico --features transport-link-quic --test quic_listen_cert --quiet 2>&1 | grep -q '1 passed' \
+        && cargo clippy -p wz-capi-pico --all-targets --features transport-link-quic --quiet -- -D warnings)
 }
 
 # ─── Layer C1x — routing-routes: forwarding kernel + forwarder unit + clippy ─
