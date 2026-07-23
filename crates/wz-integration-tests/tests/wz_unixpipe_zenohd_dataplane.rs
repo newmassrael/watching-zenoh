@@ -101,9 +101,9 @@ const SUB_FILTER: &str = "demo/unixpipe/**";
 /// to a real zenoh-pico `z_sub`. The pico sink prints the received value, so this
 /// asserts the keyexpr AND the payload survived the unixpipe crossing; the
 /// `over unixpipe transport` wz witness rules out a silent non-unixpipe path.
-// wz-proves: codec-frame wz->zenohd (over unixpipe)
-// wz-proves: codec-push wz->zenohd (over unixpipe)
-// wz-proves: pubsub-sample wz->pico (across unixpipe)
+// wz-proves: codec-frame wz->zenohd
+// wz-proves: codec-push wz->zenohd
+// wz-proves: pubsub-sample wz->pico
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd-unixpipe/zenohd + wz-ap-demo[+transport-link-unixpipe] + zenoh-pico z_sub"]
 fn wz_put_over_unixpipe_routes_through_zenohd_to_pico_zsub() {
@@ -212,9 +212,9 @@ fn wz_put_over_unixpipe_routes_through_zenohd_to_pico_zsub() {
 /// The wz fire log carries `payload_len`, not the value, and pico `z_pub` formats
 /// its payload, so — like `wz_routed_subscribe_from_zenohd` — the discriminator is
 /// the UNIQUE keyexpr on the fired sample.
-// wz-proves: declare-subscriber wz->zenohd (over unixpipe)
-// wz-proves: codec-frame zenohd->wz (over unixpipe)
-// wz-proves: pubsub-sample pico->wz (across unixpipe)
+// wz-proves: declare-subscriber wz->zenohd
+// wz-proves: codec-frame zenohd->wz
+// wz-proves: pubsub-sample pico->wz
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd-unixpipe/zenohd + wz-ap-demo[+transport-link-unixpipe] + zenoh-pico z_pub"]
 fn pico_put_routes_through_zenohd_over_unixpipe_to_wz_subscriber() {
@@ -330,9 +330,9 @@ fn pico_put_routes_through_zenohd_over_unixpipe_to_wz_subscriber() {
 /// `wz_ws_acceptor_zenohd_interop` / `wz_tls_acceptor_zenohd_interop`. The pico
 /// publisher never speaks unixpipe and never knows wz's base, so the wz subscriber
 /// firing is a definitive witness that data crossed the accepted unixpipe link.
-// wz-proves: transport-link-unixpipe zenohd->wz (acceptor)
-// wz-proves: codec-frame zenohd->wz (over accepted unixpipe)
-// wz-proves: pubsub-sample pico->wz (across accepted unixpipe)
+// wz-proves: transport-link-unixpipe zenohd->wz
+// wz-proves: codec-frame zenohd->wz
+// wz-proves: pubsub-sample pico->wz
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd-unixpipe/zenohd + wz-ap-demo[+transport-link-unixpipe] + zenoh-pico z_pub"]
 fn pico_put_routes_through_zenohd_to_wz_unixpipe_acceptor_subscriber() {
@@ -477,8 +477,8 @@ fn pico_put_routes_through_zenohd_to_wz_unixpipe_acceptor_subscriber() {
 /// limitation — so the publisher runs under `--zid 0a0b0c0d`. Sub-first ordering
 /// installs the route on zenohd before the publisher's burst (deterministic, not a
 /// sleep).
-// wz-proves: transport-link-unixpipe wz->zenohd (concurrent multi-client)
-// wz-proves: pubsub-sample wz->wz via zenohd (across two unixpipe faces)
+// wz-proves: transport-link-unixpipe wz->zenohd
+// wz-proves: pubsub-sample zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd-unixpipe/zenohd + wz-ap-demo[+transport-link-unixpipe]"]
 fn wz_two_clients_route_a_put_via_one_zenohd_unixpipe_listener() {

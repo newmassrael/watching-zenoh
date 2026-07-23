@@ -56,10 +56,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TESTS_DIR = REPO_ROOT / "crates" / "wz-integration-tests" / "tests"
 LIB_RS = REPO_ROOT / "crates" / "wz-integration-tests" / "src" / "lib.rs"
 
-# The foreign roots: the only two functions that resolve a foreign binary path.
+# The foreign roots: the functions that resolve a foreign binary path. `zenohd_binary`
+# is the STOCK zenohd; `zenohd_unixpipe_binary` (R311y392) and `zenohd_vsock_binary`
+# (R311y400) are the SAME zenoh-full router built with an extra transport feature its
+# `default` set omits (transport_unixpipe / transport_vsock). They resolve a genuine
+# zenohd binary, so a test that spawns one over the variant oracle IS a foreign zenohd
+# witness. Omitting them (the pre-R311y402 state) mis-classed every unixpipe/vsock
+# acceptor test as pico-only: the dataplane file's `zenohd->wz` claims then failed A4-7
+# against a `[pico]` class, and Layer A4 was red for 6 rounds unseen (pre-push stopped
+# running A4 at R311y386). Any future feature-variant oracle resolver belongs here too.
 FOREIGN_ROOTS = {
     "zenoh_pico_cli_binary": "pico",
     "zenohd_binary": "zenohd",
+    "zenohd_unixpipe_binary": "zenohd",
+    "zenohd_vsock_binary": "zenohd",
 }
 # A wz binary is EXTERNAL (needs #[ignore]) but not FOREIGN (cannot witness parity).
 # The package each root resolves to is what Layer A4's containment arm needs: the

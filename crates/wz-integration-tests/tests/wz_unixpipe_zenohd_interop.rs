@@ -73,6 +73,8 @@ fn cleanup(base: &str) {
 
 /// Leg a — wz DIALS zenohd over unixpipe and reaches Established (wz's client
 /// invitation protocol vs zenohd's `UnicastPipeListener`).
+// wz-proves: transport-link-unixpipe wz->zenohd
+// wz-proves: session-unicast-open wz->zenohd
 #[test]
 #[ignore = "binary-dep: needs target/zenohd-unixpipe/zenohd + wz-ap-demo[+transport-link-unixpipe]"]
 fn wz_client_reaches_established_against_zenohd_over_unixpipe() {
@@ -141,6 +143,8 @@ fn wz_client_reaches_established_against_zenohd_over_unixpipe() {
 /// Leg b — zenohd DIALS wz over unixpipe and wz reaches Established (zenohd's
 /// `UnicastPipeClient` vs wz's MULTI-CLIENT acceptor; exercises the flock the wz
 /// listener holds on the dedicated uplink reader that a zenoh client probes).
+// wz-proves: transport-link-unixpipe zenohd->wz
+// wz-proves: session-unicast-open zenohd->wz
 #[test]
 #[ignore = "binary-dep: needs target/zenohd-unixpipe/zenohd + wz-ap-demo[+transport-link-unixpipe]"]
 fn wz_acceptor_reaches_established_from_zenohd_over_unixpipe() {
