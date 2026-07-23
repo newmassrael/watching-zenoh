@@ -2396,6 +2396,7 @@ dependencies = [
  "tokio",
  "wz",
  "wz-ap-demo-app",
+ "wz-runtime-tokio-test-support",
 ]
 
 [[package]]

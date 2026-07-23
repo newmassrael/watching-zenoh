@@ -119,8 +119,18 @@ fn main() -> ExitCode {
     // without it rejects the flag rather than silently no-op'ing, so the catalog
     // claim and the binary stay in lockstep.
     if let Some(router_addr) = parse_pair(rest, "--router") {
+        // R311y405 — a `--router tls/...` / `--router quic/...` threads its server
+        // cert via the same `--<scheme>-cert` / `--<scheme>-key` flags the one-shot
+        // `--listen` acceptor uses, so mesh quic/tls works end-to-end (was rejected
+        // at bind cert-absence). Cert-free schemes (tcp/ws/udp) leave them None.
         #[cfg(feature = "routing-router")]
-        return run_router_mode(router_addr);
+        return run_router_mode(
+            router_addr,
+            parse_pair(rest, "--tls-cert"),
+            parse_pair(rest, "--tls-key"),
+            parse_pair(rest, "--quic-cert"),
+            parse_pair(rest, "--quic-key"),
+        );
         #[cfg(not(feature = "routing-router"))]
         {
             let _ = router_addr;
@@ -1056,7 +1066,13 @@ fn build_demo_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 /// graceful-shutdown signal. Separate from the single-session `run_demo` entry
 /// because a router has no per-face application behaviour — it only holds peers.
 #[cfg(feature = "routing-router")]
-fn run_router_mode(addr: String) -> ExitCode {
+fn run_router_mode(
+    addr: String,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
+    quic_cert: Option<String>,
+    quic_key: Option<String>,
+) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
         Ok(rt) => rt,
@@ -1065,7 +1081,9 @@ fn run_router_mode(addr: String) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match runtime.block_on(crate::runner::run_router(&addr)) {
+    match runtime.block_on(crate::runner::run_router(
+        &addr, &tls_cert, &tls_key, &quic_cert, &quic_key,
+    )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wz-ap-demo: {e}");

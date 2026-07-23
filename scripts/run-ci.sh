@@ -2310,10 +2310,20 @@ layer_c1w_cargo_test_routing_accept() {
 # `1 passed` count-guard that reddens on a silent 0-tests (the y380
 # proof-that-never-runs trap). Step 2 clippy-gates the same combo `--all-targets`
 # (the sole lane compiling the `caller_failfast_tests` module).
+#
+# R311y405 — steps 3+4 are the quic twin: the `--router quic/` cert-threading
+# discriminator `run_router_admits_a_quic_listen_with_cert_at_bind` (the router now
+# ADMITS a `quic/...` --listen once `--quic-cert`/`--quic-key` are threaded; RED if
+# `run_router_until` reverts to the cert-free `bind_endpoint`) under an EXPLICIT
+# `routing-router,quic` with the same `1 passed` count-guard, plus its clippy gate
+# (the sole lane compiling `router_quic_cert_tests`, which needs the `quic` feature
+# + the test-support tls-fixtures dev-dep for the self-signed cert).
 layer_c1bl_cargo_test_router_failfast() {
     (cd crates \
         && cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe run_router_accepts_a_unixpipe_listen_at_bind --quiet 2>&1 | grep -q '1 passed' \
-        && cargo clippy -p wz-ap-demo --all-targets --features routing-router,transport-link-unixpipe --quiet -- -D warnings)
+        && cargo clippy -p wz-ap-demo --all-targets --features routing-router,transport-link-unixpipe --quiet -- -D warnings \
+        && cargo test -p wz-ap-demo --features routing-router,quic run_router_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -q '1 passed' \
+        && cargo clippy -p wz-ap-demo --all-targets --features routing-router,quic --quiet -- -D warnings)
 }
 
 # ─── Layer C1bm — pico admits a multi-client unixpipe listen (R311y392) ─────

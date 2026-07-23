@@ -1491,8 +1491,22 @@ fn log_face_event(node_label: &str, event: &wz::runtime_tokio::accept_loop::Acce
 /// Acceptor params (whatami Peer) — the well-tested accept direction; a true
 /// `WhatAmI::Router` wire value is a later refinement, not part of this atom.
 #[cfg(feature = "routing-router")]
-pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
-    run_router_until(listen, shutdown_signal()).await
+pub(crate) async fn run_router(
+    listen: &str,
+    tls_cert: &Option<String>,
+    tls_key: &Option<String>,
+    quic_cert: &Option<String>,
+    quic_key: &Option<String>,
+) -> io::Result<()> {
+    run_router_until(
+        listen,
+        tls_cert,
+        tls_key,
+        quic_cert,
+        quic_key,
+        shutdown_signal(),
+    )
+    .await
 }
 
 /// The testable inner of [`run_router`] (CALLER fail-fast slice) — takes the
@@ -1503,23 +1517,33 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
 #[cfg(feature = "routing-router")]
 async fn run_router_until(
     listen: &str,
+    tls_cert: &Option<String>,
+    tls_key: &Option<String>,
+    quic_cert: &Option<String>,
+    quic_key: &Option<String>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
     use wz::runtime_tokio::accept_loop::{accept_loop, AcceptEvent};
-    use wz::runtime_tokio::session_open::bind_endpoint;
+    use wz::runtime_tokio::session_open::bind_endpoint_with_config;
 
-    let listener = bind_endpoint(listen).await?;
+    // R311y405 — thread the `--<scheme>-cert` / `--<scheme>-key` into the bind's
+    // AcceptConfig (the SAME build_accept_config the one-shot `--listen` Acceptor
+    // uses), so a `--router tls/...` / `--router quic/...` presents its server cert.
+    // Was `bind_endpoint(listen)` (a cert-free `AcceptConfig::default()`), which made
+    // `bind_locator` reject a tls/quic router listen at cert-absence -- the follow-up
+    // `bind_endpoint`'s own doc named. A cert-free transport (tcp/ws/udp) still binds
+    // (its cert slots stay None).
+    let accept_cfg = build_accept_config(tls_cert, tls_key, quic_cert, quic_key)?;
+    let listener = bind_endpoint_with_config(listen, &accept_cfg).await?;
     // CALLER fail-fast (mesh accept loop): the router holds N faces off ONE
     // listener, so a NON-mesh-capable acceptor (one that could not feed a
     // multi-accept loop) is rejected at bind with a clear error instead of
     // "listening" yet holding 0 faces. The BIND-time twin of the loop's runtime
     // backstop (`AcceptedLink::supports_mesh_multi_peer`, the `Step::Accepted`
-    // arm). R311y401's quic IS non-mesh-capable, but a `--router quic/` never reaches
-    // this guard: `bind_endpoint` passes `AcceptConfig::default()` (no quic cert), so
-    // `bind_locator` rejects a quic listen at cert-absence FIRST (above, on the `?`).
-    // So this guard still never rejects today — it stays as defensive code, live only
-    // for a future non-mesh acceptor that binds cert-free.
+    // arm). Since R311y404 EVERY acceptor (quic included, via its deferred-handshake
+    // split) is mesh-capable, so this guard rejects no shipped transport today -- it
+    // stays as defensive code, live only for a future non-mesh acceptor.
     if !listener.supports_mesh_multi_peer() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -3827,12 +3851,72 @@ mod caller_failfast_tests {
         let _ = std::fs::remove_file(format!("{base}_uplink"));
 
         let listen = format!("unixpipe/{base}");
-        run_router_until(&listen, std::future::ready(()))
+        // R311y405 — a cert-free unixpipe listen: all four cert slots are `&None`
+        // (the run_router_until signature grew a tls/quic cert-path quartet).
+        run_router_until(&listen, &None, &None, &None, &None, std::future::ready(()))
             .await
             .expect("the mesh router admits a multi-client unixpipe --listen (R311y392)");
 
         // The acceptor's teardown unlinks the base request node; best-effort here.
         let _ = std::fs::remove_file(format!("{base}_uplink"));
+    }
+}
+
+#[cfg(all(test, feature = "routing-router", feature = "quic"))]
+mod router_quic_cert_tests {
+    use super::run_router_until;
+
+    /// R311y405 — the `--router quic/` cert-threading discriminator: the mesh router
+    /// now ADMITS a `quic/...` --listen WHEN its `--quic-cert` / `--quic-key` are
+    /// threaded. Was rejected at bind cert-absence — `run_router` bound with a
+    /// cert-free `AcceptConfig::default()` (via `bind_endpoint`), the follow-up
+    /// `bind_endpoint`'s own doc named. Now `run_router_until` builds the AcceptConfig
+    /// from the cert paths (the SAME `build_accept_config` the one-shot `--listen`
+    /// uses) + `bind_endpoint_with_config`, so a cert-bearing quic listen binds; the
+    /// injected immediately-ready shutdown makes the accept loop return `Ok`. The QUIC
+    /// twin of `run_router_accepts_a_unixpipe_listen_at_bind`.
+    ///
+    /// RED reproduction (proof it binds to the cert-threading seam, not the vehicle):
+    /// RESTORE `bind_endpoint(listen)` (the cert-free default) in `run_router_until`
+    /// -> `bind_locator` rejects the quic listen at cert-absence -> `run_router_until`
+    /// returns `Err(Unsupported)` -> this `expect` panics.
+    ///
+    /// NON-FLAKY: a fresh self-signed `localhost` cert is written to a process-unique
+    /// temp path, `quic/127.0.0.1:0` binds an OS-chosen port, and the `ready(())`
+    /// shutdown returns the loop WITHOUT awaiting a peer — no network round-trip
+    /// races. Cert files are removed after the bind (best-effort, like the unixpipe
+    /// sibling's FIFO cleanup). [[feedback-no-flaky-ever]]
+    #[tokio::test]
+    async fn run_router_admits_a_quic_listen_with_cert_at_bind() {
+        use wz_runtime_tokio_test_support::localhost_cert_key_pem;
+        let (cert_pem, key_pem) = localhost_cert_key_pem();
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let cert_path = dir
+            .join(format!("wz-ap-demo-router-quic-cert-{pid}.pem"))
+            .to_string_lossy()
+            .into_owned();
+        let key_path = dir
+            .join(format!("wz-ap-demo-router-quic-key-{pid}.pem"))
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&cert_path, cert_pem.as_bytes()).expect("write cert pem");
+        std::fs::write(&key_path, key_pem.as_bytes()).expect("write key pem");
+
+        let result = run_router_until(
+            "quic/127.0.0.1:0",
+            &None,
+            &None,
+            &Some(cert_path.clone()),
+            &Some(key_path.clone()),
+            std::future::ready(()),
+        )
+        .await;
+
+        // Best-effort cleanup BEFORE the assert, so a bind failure still unlinks.
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+        result.expect("the mesh router admits a quic --listen with --quic-cert (R311y405)");
     }
 }
 

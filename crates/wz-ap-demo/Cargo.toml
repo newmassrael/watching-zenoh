@@ -120,6 +120,18 @@ env_logger = "0.11"
 # each `send_*` method on `SessionLinkActions` stays signature-stable,
 # its body branches on the matching `codec-*` feature, and consumers
 # never need their own mirror.
+
+# R311y405 — the sibling fixture crate (the sanctioned test-fixture home),
+# DEV-only: the `--router quic/` cert-threading discriminator
+# (`run_router_admits_a_quic_listen_with_cert_at_bind`) needs a self-signed
+# `localhost` cert. A dev-dependency never enters a `cargo build` (footprint /
+# release stay untouched — only `cargo test` unifies it); no cycle
+# (test-support -> wz-runtime-tokio, not -> wz-ap-demo).
+[dev-dependencies]
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
+    "tls-fixtures",
+] }
+
 [features]
 default = ["preset-ap-client"]
 # Production preset forwards the wz facade's preset-ap-client contract + the
