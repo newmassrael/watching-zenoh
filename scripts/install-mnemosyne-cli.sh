@@ -24,17 +24,18 @@
 
 set -euo pipefail
 
-# github.com/newmassrael/mnemosyne @ R754 (2d-projection harness follow-ons)
+# github.com/newmassrael/mnemosyne @ R757 (B1b store scene_cast projection)
 # — the newest PUSHED rev (origin/main), whose CLI defines
-# CURRENT_SCHEMA_VERSION 39. It reads the store's schema_version (38, written by
-# the R748 CLI at the R311y389 append) and migrates the store up to 39 on the
-# NEXT mutation, still reading it in the meantime (reader max >= store). The
-# store staying one schema behind the pin is the designed lazy-migrate path, not
-# a drift. The prior pin (R748, 7ec9eec) defines only schema <= 38; the author
-# pushed the R749-R754 ladder (schema 38 -> 39) upstream, so the pin moves to
-# R754 in step. Kept in step with the locally-installed `--path` binary
-# (mnemosyne-cli 0.1.0 3bf4c8d).
-MNEMOSYNE_REV="3bf4c8da195f6e81820c333cabcb270a2f37f96c"
+# CURRENT_SCHEMA_VERSION 41 and READS the schema-41 store. REQUIRED bump: the
+# R311y401 append (this repo's own commit, with the same d9e2bee CLI locally)
+# migrated the store 39 -> 41, and the prior pin (R754, 3bf4c8d) defines only
+# schema <= 39, so its validate-workspace rejected the schema-41 store
+# ("schema version mismatch: store=41 expected <= 39") — the Layer A red on the
+# R311y400/y401 hosted CI runs. A reader whose max < store cannot lazy-migrate,
+# so the pin must move UP to a reader that covers the store. Kept in step with
+# the locally-installed `--path` binary (mnemosyne-cli 0.1.0 d9e2bee), which
+# validated this workspace clean (orphan new=+0) all session.
+MNEMOSYNE_REV="d9e2beed24dbfca9b8ffa46c180d1cfa755e8fce"
 
 cargo install --git https://github.com/newmassrael/mnemosyne \
   --rev "$MNEMOSYNE_REV" --bin mnemosyne-cli --force mnemosyne-cli
