@@ -2068,15 +2068,13 @@ where
                 // non-IP peer (unixsock / vsock / unixpipe — each a genuine per-peer
                 // stream accept) are all held as faces; `peer` (an `AcceptedPeer`)
                 // is threaded straight into the open future as a log/event tag. A
-                // NON-mesh-capable acceptor is rejected here. R311y401's quic is the
-                // first `false` from `AcceptedLink::supports_mesh_multi_peer`, but
-                // under the SHIPPED callers this arm still fires for no transport: a
-                // `--router`/`--peer quic/` is rejected EARLIER at bind cert-absence
-                // (the mesh callers — runner.rs router / pico session.rs — thread no
-                // quic cert), so a quic `AcceptedLink` reaches here only via a
-                // direct-API caller that bound a quic listener WITH a cert. This arm
-                // stays the runtime backstop; its `BoundListener` twin is the
-                // bind-time first line.
+                // NON-mesh-capable acceptor is rejected here. Since R311y404 quic is
+                // mesh-capable too (its deferred-handshake split moved the crypto off
+                // this accept path), so `AcceptedLink::supports_mesh_multi_peer` is
+                // `true` for EVERY transport and this reject arm fires for none. It
+                // stays the runtime backstop for a future non-mesh acceptor (the
+                // wildcard-free match forces the decision); its `BoundListener` twin is
+                // the bind-time first line.
                 if !accepted.supports_mesh_multi_peer() {
                     on_event(&AcceptEvent::AcceptError(io::Error::new(
                         io::ErrorKind::Unsupported,
@@ -2564,6 +2562,80 @@ mod tests {
         opened.drain_to_close().await;
     }
 
+    /// The quic twin of [`unixsock_idle_initiator`] (R311y404): dials a
+    /// `quic/<addr>` listener through the cert-threaded [`connect_and_open_session`]
+    /// SSOT (`DialConfig.quic`, exactly the `quic_e2e` dial path), reaches
+    /// Established, and idles until `go`. Each initiator is a distinct client on the
+    /// SAME quic endpoint, so the DEFERRED-handshake acceptor holds each as a
+    /// DISTINCT ZID-keyed mesh face — the property the mesh-join discriminator
+    /// asserts. Builds its own client config trusting the acceptor's self-signed
+    /// `localhost` cert (SNI `localhost`, the self-trust-anchor pattern).
+    ///
+    /// SHUTDOWN IS GATED ON INITIATOR COMPLETION, not the acceptor's FaceUp (unlike
+    /// the lossless-IPC siblings, which flip `go` from the acceptor's Nth FaceUp).
+    /// The LAST initiator to reach Established flips `go`, which both ends the
+    /// acceptor and releases every initiator. This is load-bearing for QUIC: all
+    /// connections share the ONE server-endpoint UDP socket, so tearing the acceptor
+    /// down on its own FaceUp — while a peer initiator is still awaiting its final
+    /// handshake datagram (OpenAck) — would close that shared socket under the
+    /// in-flight initiator (retransmit to a closed port -> `LinkLost(OsError)`, a
+    /// teardown race the independent-fd siblings never hit). Since the acceptor's
+    /// per-face Established (it SENT OpenAck) precedes the initiator's (it RECEIVED
+    /// it), "all N initiators Established" already implies the acceptor recorded N
+    /// FaceUps -> `peak_concurrent == N` holds before shutdown.
+    #[cfg(feature = "transport-link-quic")]
+    #[allow(clippy::too_many_arguments)]
+    async fn quic_idle_initiator(
+        addr: SocketAddr,
+        cert_pem: String,
+        zid: u8,
+        up: Arc<AtomicUsize>,
+        n: usize,
+        go_tx: watch::Sender<bool>,
+        mut go: watch::Receiver<bool>,
+    ) {
+        use crate::quic_config::quic_client_config_from_pem;
+        use crate::session_open::{connect_and_open_session, DialConfig, QuicDialConfig};
+        use wz_session_core::locator::parse_any_locator;
+        let locator = parse_any_locator(&format!("quic/{addr}")).expect("parse quic locator");
+        let client_config = quic_client_config_from_pem(cert_pem.as_bytes(), None)
+            .expect("build quic client config");
+        let cfg = DialConfig::default().with_quic(QuicDialConfig {
+            client_config,
+            server_name: "localhost".to_string(),
+        });
+        let mut params = fixture_session_init_params();
+        params.zid = vec![zid; 4];
+        let mut opened = connect_and_open_session(
+            locator,
+            params,
+            &cfg,
+            TokioTime::new(),
+            Some(10_000),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("quic initiator reaches Established");
+
+        // This initiator is now Established. Only once ALL N are (the acceptor holds
+        // N faces by then) do we flip `go` to shut the acceptor down — never before,
+        // or the shared-endpoint teardown would kill an in-flight peer (see the fn
+        // doc). Flipping `go` also releases this + every other initiator's idle wait.
+        if up.fetch_add(1, SeqCst) + 1 == n {
+            let _ = go_tx.send(true);
+        }
+
+        let timeouts = SessionTimeouts::spec_defaults();
+        tokio::select! {
+            _ = go.wait_for(|&v| v) => {}
+            _ = drive_session_until_terminal(
+                &mut opened.inbound, &opened.actions, &mut opened.engine,
+                None, &opened.clock, &timeouts, |_e| {},
+            ) => {}
+        }
+        opened.drain_to_close().await;
+    }
+
     // ── tests ──────────────────────────────────────────────────────────
 
     /// The accept loop accepts N peers and holds all N faces concurrently
@@ -2869,14 +2941,121 @@ mod tests {
         let _ = std::fs::remove_file(format!("{base}_uplink"));
     }
 
+    /// R311y404 — the MESH-JOIN discriminator for QUIC. Two initiators dial ONE
+    /// `quic/<addr>` endpoint through the cert-threaded handshake and BOTH are held
+    /// as ZID-keyed faces at once (peak_concurrent == 2), with ZERO AcceptError — the
+    /// quic twin of [`mesh_accept_loop_holds_two_unixpipe_peers`]. RED on the
+    /// pre-R311y404 acceptor: `supports_mesh_multi_peer` was `false`, so the
+    /// `Step::Accepted` arm reject-throttle-dropped EVERY quic accept (0 faces held,
+    /// `accepted == 0`, `peak == 0`); the deferred-handshake split flips it `true` and
+    /// runs the crypto OFF the accept path, so both peers land as faces. GATING: the
+    /// accept_loop mod is `routing-accept`-gated, so this test compiles only when the
+    /// harness names `routing-accept` alongside `transport-link-quic` (a bare
+    /// `transport-link-quic` build compiles the whole loop — and this test — OUT).
+    /// NON-FLAKY: shutdown is gated on ALL initiators reaching Established
+    /// ([`quic_idle_initiator`] flips `go`), NOT the acceptor's FaceUp — QUIC's
+    /// connections share one endpoint UDP socket, so an acceptor-FaceUp shutdown
+    /// could close it under a peer still awaiting its OpenAck (`LinkLost`); gating on
+    /// initiator completion closes that teardown race. [[feedback-no-flaky-ever]]
+    /// [[feedback-flaky-rootcause-never-revert]]
+    #[cfg(feature = "transport-link-quic")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mesh_accept_loop_holds_two_quic_peers() {
+        use crate::quic_config::quic_server_config_from_pem;
+        use crate::session_open::{bind_locator, AcceptConfig, QuicAcceptConfig};
+        use wz_runtime_tokio_test_support::localhost_cert_key_pem;
+        use wz_session_core::locator::parse_any_locator;
+        const N: usize = 2;
+
+        // Self-signed `localhost` cert (SAN `localhost`), the self-trust-anchor
+        // quic_e2e pattern: the acceptor presents it, the clients trust the same PEM.
+        let (cert_pem, key_pem) = localhost_cert_key_pem();
+        let server_config =
+            quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
+                .expect("build quic server config");
+
+        // Bind the mesh-capable quic acceptor through the real bind seam
+        // (`Proto::Quic` -> `BoundListener::Quic` given `AcceptConfig.quic`).
+        let accept_cfg = AcceptConfig::default().with_quic(QuicAcceptConfig { server_config });
+        let locator = parse_any_locator("quic/127.0.0.1:0").expect("parse quic locator");
+        let listener = bind_locator(locator, &accept_cfg)
+            .await
+            .expect("bind a quic listener");
+        let addr = listener.local_addr().expect("quic listener local addr");
+
+        // `go` flips when all N INITIATORS reach Established (each initiator counts
+        // itself up; the last one sends), NOT on the acceptor's Nth FaceUp: the
+        // acceptor must outlive every initiator's handshake because they share one
+        // endpoint UDP socket (see `quic_idle_initiator`). By then the acceptor holds
+        // all N faces (its per-face Established precedes the initiator's), so
+        // `peak_concurrent == N` is already recorded when shutdown fires.
+        let (go_tx, go_rx) = watch::channel(false);
+        let up = Arc::new(AtomicUsize::new(0));
+        let rejects = Arc::new(AtomicUsize::new(0));
+        let on_event = {
+            let rejects = rejects.clone();
+            move |event: &AcceptEvent| {
+                if let AcceptEvent::AcceptError(_) = event {
+                    rejects.fetch_add(1, SeqCst);
+                }
+            }
+        };
+        let acceptor = accept_loop(
+            listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+        let initiators = (0..N).map(|i| {
+            quic_idle_initiator(
+                addr,
+                cert_pem.clone(),
+                (i as u8) + 1,
+                up.clone(),
+                N,
+                go_tx.clone(),
+                go_rx.clone(),
+            )
+        });
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (summary, _) = tokio::join!(acceptor, join_all(initiators));
+            summary
+        })
+        .await
+        .expect("multi-peer quic accept completes within 20s");
+
+        assert_eq!(
+            summary.accepted, N,
+            "accepted both quic peers (a genuine per-peer connection accept)"
+        );
+        assert_eq!(
+            summary.established, N,
+            "both quic peers reached Established"
+        );
+        assert_eq!(
+            summary.peak_concurrent, N,
+            "held both quic faces simultaneously (deferred-handshake ZID-keyed mesh face)"
+        );
+        assert_eq!(
+            rejects.load(SeqCst),
+            0,
+            "no reject: quic is a mesh-capable acceptor (R311y404 deferred split)"
+        );
+    }
+
     /// Slice B — pins the loop's mesh-capability BACKSTOP predicate
     /// ([`AcceptedLink::supports_mesh_multi_peer`], consulted in the
     /// `Step::Accepted` arm) at the TRUE polarity: tcp is mesh-capable. The match
     /// is wildcard-free, so a NEW `AcceptedLink` variant forces a decision at
     /// compile time; this pins the value for tcp (a representative `true`). Since
-    /// R311y392 the stream + same-host families are mesh-capable (R311y401's quic is
-    /// the first `false`; its BIND twin is pinned by `boundlistener_quic_is_not_mesh_capable`,
-    /// and this AcceptedLink polarity is compiler-forced by the wildcard-free match) — `acceptedlink_unixpipe_is_mesh_capable`
+    /// R311y392 the stream + same-host families are mesh-capable (and R311y404's quic
+    /// too, via its deferred-handshake split; its BIND twin is pinned by
+    /// `boundlistener_quic_is_mesh_capable`, and this AcceptedLink polarity is
+    /// compiler-forced by the wildcard-free match) — `acceptedlink_unixpipe_is_mesh_capable`
     /// pins the once-`false` unixpipe arm at its new `true` polarity.
     #[tokio::test]
     async fn acceptedlink_tcp_is_mesh_capable() {

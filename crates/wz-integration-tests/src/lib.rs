@@ -1292,7 +1292,8 @@ pub mod common {
     /// R311y401 — spawn a zenohd that DIALS a wz `quic/<ip:port>` acceptor
     /// (`-e quic/<wz>`) while listening on `tcp/<tcp_port>` for a pico client. The
     /// QUIC twin of [`spawn_zenohd_tls_dialer`], verifying wz's QUIC ACCEPTOR
-    /// (`BoundListener::Quic` / `bind_quic` + `accept_quic_on`, R311y401). Uses the
+    /// (`BoundListener::Quic` / `bind_quic` + the deferred `accept_quic_incoming` /
+    /// `complete_quic_accept` split, R311y401 acceptor / R311y404 deferral). Uses the
     /// DEFAULT [`zenohd_binary`]: QUIC is in zenoh's default features (the existing
     /// wz->zenohd quic dial legs dial stock zenohd's `quic/` listener), so no special
     /// oracle. zenoh's QUIC link reads its trust config from the SAME

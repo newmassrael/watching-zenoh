@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
-    ClientConfig as QuinnClientConfig, Connection, Endpoint, RecvStream, SendStream,
+    ClientConfig as QuinnClientConfig, Connection, Endpoint, Incoming, RecvStream, SendStream,
     ServerConfig as QuinnServerConfig, TransportConfig,
 };
 use tokio::sync::mpsc;
@@ -195,17 +195,17 @@ pub(crate) fn quic_server_endpoint(
 }
 
 /// Accept one inbound QUIC connection from a *borrowed* server [`Endpoint`] and
-/// complete its handshake — the shared accept-handshake SSOT for BOTH the stream
-/// backend ([`accept_quic_on`]) and the datagram backend
-/// ([`crate::quic_datagram_pipeline::accept_quic_datagram_on`]). Returns the
-/// established [`Connection`] BEFORE any stream is accepted; the caller chooses
-/// `accept_bi` (stream) vs riding datagrams. Borrowing the endpoint lets a
-/// multi-peer acceptor loop.
+/// complete its handshake — the accept-handshake SSOT for the DATAGRAM backend
+/// ([`crate::quic_datagram_pipeline::accept_quic_datagram_on`]). Composes the
+/// fast [`accept_quic_incoming`] arrival with the crypto handshake
+/// (`incoming.await`); returns the established [`Connection`] BEFORE any stream is
+/// accepted, since the datagram path rides datagrams rather than `accept_bi`-ing a
+/// stream. Datagram-only (`transport-link-quic-datagram`): the STREAM backend went
+/// through the split [`accept_quic_incoming`] / [`complete_quic_accept`] halves at
+/// R311y404 (so the crypto defers off the accept loop) and no longer routes here.
+#[cfg(feature = "transport-link-quic-datagram")]
 pub(crate) async fn accept_quic_connection(endpoint: &Endpoint) -> io::Result<Connection> {
-    let incoming = endpoint
-        .accept()
-        .await
-        .ok_or_else(|| io_other("quic endpoint closed before a peer connected"))?;
+    let incoming = accept_quic_incoming(endpoint).await?;
     incoming.await.map_err(io_other)
 }
 
@@ -244,22 +244,59 @@ pub fn bind_quic(addr: SocketAddr, server_config: Arc<RustlsServerConfig>) -> io
     quic_server_endpoint(addr, server_config, 1)
 }
 
-/// Accept ONE inbound QUIC connection from a *borrowed* server [`Endpoint`],
-/// complete its handshake (the shared [`accept_quic_connection`]), and accept the
-/// peer's single bidirectional stream — the QUIC mirror of
-/// [`crate::link_pipeline::accept_tcp_on`]. Returns a [`QuicLink`] (the endpoint
-/// is cloned in as the keep-alive). `accept_bi` resolves once the peer (the
-/// initiator) opens + writes the stream — which the wz handshake does immediately
-/// (the initiator's InitSyn is the first wire byte).
-pub async fn accept_quic_on(endpoint: &Endpoint) -> io::Result<QuicLink> {
-    let connection = accept_quic_connection(endpoint).await?;
+/// Accept the ARRIVAL of one inbound QUIC connection attempt from a *borrowed*
+/// server [`Endpoint`] WITHOUT completing its crypto handshake — the fast,
+/// non-blocking HALF of the accept the multi-peer
+/// [`accept_loop`](crate::accept_loop) runs in its `select!` arm. Returns the
+/// pending [`Incoming`], whose [`Incoming::remote_address`] already names the peer
+/// (before the handshake); the caller drives the crypto to completion LATER via
+/// [`complete_quic_accept`], off the accept path. This is the QUIC analogue of the
+/// cheap TCP `accept` that precedes the DEFERRED tls SERVER handshake — a stalled
+/// peer handshake never blocks accepting the next peer, which is what makes the
+/// quic acceptor mesh-capable (R311y404). `None` (endpoint closed) maps to an
+/// `io` error, matching [`accept_quic_connection`].
+pub async fn accept_quic_incoming(endpoint: &Endpoint) -> io::Result<Incoming> {
+    endpoint
+        .accept()
+        .await
+        .ok_or_else(|| io_other("quic endpoint closed before a peer connected"))
+}
+
+/// Complete an [`accept_quic_incoming`] arrival: drive the QUIC crypto handshake
+/// to an established [`Connection`] (`incoming.await`), then accept the peer's
+/// single bidirectional stream (`accept_bi`) — the DEFERRED, potentially-slow HALF
+/// of the accept, run in the spawned per-face open future (never the accept loop's
+/// `select!` arm), the tls-server-handshake analogue. Yields the SAME [`QuicLink`]
+/// the inline [`accept_quic_on`] produces; `endpoint` is the keep-alive clone
+/// (`Incoming` holds an internal `EndpointRef`, but the public [`QuicLink`]
+/// contract carries an [`Endpoint`] handle so the link outlives the listener).
+/// `accept_bi` resolves once the peer (the initiator) opens + writes the stream —
+/// which the wz handshake does immediately (its InitSyn is the first wire byte).
+pub async fn complete_quic_accept(incoming: Incoming, endpoint: Endpoint) -> io::Result<QuicLink> {
+    let connection = incoming.await.map_err(io_other)?;
     let (send, recv) = connection.accept_bi().await.map_err(io_other)?;
     Ok(QuicLink {
-        endpoint: endpoint.clone(),
+        endpoint,
         connection,
         send,
         recv,
     })
+}
+
+/// Accept ONE inbound QUIC connection from a *borrowed* server [`Endpoint`],
+/// complete its handshake, and accept the peer's single bidirectional stream — the
+/// QUIC mirror of [`crate::link_pipeline::accept_tcp_on`], INLINE (crypto + stream
+/// back to back). Composes the [`accept_quic_incoming`] arrival with the deferred
+/// [`complete_quic_accept`], so the split-half primitives stay the one SSOT. Since
+/// R311y404 BOTH the one-shot [`crate::session_open::accept_bound`] AND the
+/// multi-peer accept loop go through the two halves directly (accept_raw's arrival +
+/// handshake's completion, so the crypto defers off the accept path); the only
+/// remaining caller of this inline entry is the wz<->wz `quic_e2e` test, which wants
+/// the crypto + stream back-to-back in one call. Returns a [`QuicLink`] (the
+/// endpoint is cloned in as the keep-alive).
+pub async fn accept_quic_on(endpoint: &Endpoint) -> io::Result<QuicLink> {
+    let incoming = accept_quic_incoming(endpoint).await?;
+    complete_quic_accept(incoming, endpoint.clone()).await
 }
 
 /// Wire a [`QuicLink`] into the cooperating drivers the session FSM consumes: an

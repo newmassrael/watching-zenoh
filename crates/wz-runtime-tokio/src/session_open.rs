@@ -114,13 +114,16 @@ use tokio_rustls::TlsStream;
 // threaded via `DialConfig.quic`.
 #[cfg(feature = "transport-link-quic")]
 use crate::quic_pipeline::{
-    accept_quic_on, bind_quic, dial_quic, wire_quic_stream, QuicLink, QuicReadDriver,
+    accept_quic_incoming, bind_quic, complete_quic_accept, dial_quic, wire_quic_stream, QuicLink,
+    QuicReadDriver,
 };
 // The bound QUIC server endpoint `BoundListener::Quic` carries (R311y401) — quinn's
 // `Endpoint` owns the baked-in server crypto config, so the accept variant needs no
-// separate `Arc<ServerConfig>` alongside it (unlike `BoundListener::Tls`).
+// separate `Arc<ServerConfig>` alongside it (unlike `BoundListener::Tls`). The
+// deferred accept (R311y404) also threads a quinn `Incoming` (a pending, not-yet-
+// handshaked connection arrival) as the `AcceptedLink::Quic` in-flight state.
 #[cfg(feature = "transport-link-quic")]
-use quinn::Endpoint;
+use quinn::{Endpoint, Incoming};
 
 // R311y8 — the QUIC DATAGRAM arm, like udp/ws, rides this tcp+unicast-gated
 // module as an additive DATAGRAM transport. Reuses `DialConfig.quic` (same
@@ -711,25 +714,23 @@ pub enum BoundListener {
     /// `Endpoint` OWNS the server crypto config (baked in at [`bind_quic`] from
     /// [`AcceptConfig::quic`]), so this variant carries ONLY the endpoint — unlike
     /// [`Self::Tls`], which carries a separate `Arc<ServerConfig>` alongside its
-    /// `TcpListener`. [`Self::accept_raw`] runs the FULL QUIC handshake INLINE
-    /// (`accept_quic_on`: connection accept + the first bidi stream), so the resulting
-    /// [`AcceptedLink::Quic`] is a completed link wrapped directly — no DEFERRED
-    /// handshake, so [`AcceptedLink::handshake`] is a no-op wrap (the direct-wrap
-    /// family's shape). But note the crypto runs INLINE here, NOT deferred like `tls`
-    /// (whose `accept_raw` does only the cheap TCP accept) and NOT pumped like udp
-    /// (whose demux reads the first datagram off the accept path in a background
-    /// task) — the two designs that keep tls/udp mesh-capable. The accepted peer is a
-    /// REAL IP ([`AcceptedPeer::Ip`], via `connection.remote_address()`), like udp.
-    /// NOT mesh-capable today ([`Self::supports_mesh_multi_peer`] returns `false`):
-    /// the inline handshake would block the multi-peer
-    /// [`accept_loop`](crate::accept_loop)'s `select!` (a mesh-capable quic would need
-    /// a tls-style DEFERRED-handshake split, or a spawned-pump like udp-demux). The
-    /// one-shot `--listen quic/` acceptor (this scope) is unaffected — it never
-    /// consults the mesh guard. A `--router`/`--peer quic/` is rejected EARLIER at
-    /// bind: the shipped mesh callers thread no quic cert, so `bind_locator`'s
-    /// cert-absence `Unsupported` fires before the mesh guard is reached — the guard
-    /// is the defensive second line (live only for a direct-API caller that binds a
-    /// quic listener WITH a cert then feeds it to the loop).
+    /// `TcpListener`. [`Self::accept_raw`] does only the cheap connection ARRIVAL
+    /// ([`accept_quic_incoming`]: `endpoint.accept()`, no crypto), yielding an
+    /// [`AcceptedLink::Quic`] that carries the pending `Incoming`; the crypto
+    /// handshake + the first bidi stream are DEFERRED to [`AcceptedLink::handshake`]
+    /// (R311y404), run in the spawned per-face open future — exactly the tls model
+    /// (whose `accept_raw` does only the cheap TCP accept, crypto deferred). That
+    /// deferral is what makes quic MESH-CAPABLE ([`Self::supports_mesh_multi_peer`]
+    /// returns `true`): a slow peer handshake can no longer block the multi-peer
+    /// [`accept_loop`](crate::accept_loop)'s `select!`, so one endpoint holds N
+    /// ZID-keyed faces. The accepted peer is a REAL IP ([`AcceptedPeer::Ip`], from
+    /// `Incoming::remote_address()` — named before the handshake), like udp. Reaching
+    /// the mesh loop still needs a quic cert: the shipped `--router`/`--peer quic/`
+    /// mesh callers thread none, so `bind_locator`'s cert-absence `Unsupported` fires
+    /// first — the live mesh path today is a direct-API caller that binds a quic
+    /// listener WITH a cert and feeds it to the loop (the CLI cert-threading is a
+    /// separate slice). The one-shot `--listen quic/` acceptor also uses this split
+    /// (via [`accept_bound`]), now with the crypto in its `handshake` step.
     #[cfg(feature = "transport-link-quic")]
     Quic(Endpoint),
 }
@@ -750,11 +751,12 @@ pub enum BoundListener {
 /// by its handshake zid, NOT by the transport address: an [`Self::Ip`] peer AND a
 /// mesh-capable [`Self::NonIp`] peer (unixsock / vsock / unixpipe — each a genuine
 /// per-peer stream accept) both become held ZID-keyed faces (Slice B). Since
-/// R311y392 the stream + same-host families are all mesh-capable; R311y401's quic is
-/// the first non-mesh acceptor, but the loop's NON-mesh-capable reject path (see
-/// [`AcceptedLink::supports_mesh_multi_peer`]) still fires for no transport under the
-/// SHIPPED callers — a `--router quic/` is rejected earlier at bind cert-absence, so
-/// a quic listener reaches the loop only via a direct-API caller (bound with a cert).
+/// R311y392 the stream + same-host families are all mesh-capable, and R311y404 makes
+/// quic mesh-capable too (its deferred-handshake split), so the loop's NON-mesh-capable
+/// reject path (see [`AcceptedLink::supports_mesh_multi_peer`]) fires for NO transport
+/// today — every bound listener holds N ZID-keyed faces. A quic listener reaches the
+/// loop via a direct-API caller bound WITH a cert (the shipped `--router quic/` is
+/// still rejected earlier at bind cert-absence — a separate cert-threading slice).
 ///
 /// `Clone`/`Debug`/`Eq` so it can ride [`Face`](crate::accept_loop::Face)`.peer`
 /// (the field the loop threads through `FaceUp`/`FaceDown`/`FaceFailed`) and the
@@ -819,15 +821,16 @@ impl BoundListener {
     /// the SAME transport to the SAME verdict, and a mesh CALLER (run_router)
     /// consults THIS one to fail-fast a non-mesh-capable `--listen` at bind rather
     /// than let the loop reject-throttle each accept forever (0 faces held). Since
-    /// R311y392 the stream + same-host families are all `true`; R311y401's `Quic` is
-    /// the FIRST to return `false` again (its inline accept-handshake is not
-    /// multi-peer-loop-safe). Note this bind-time predicate is NOT the enforcement
-    /// point a SHIPPED `--router`/`--peer quic/` hits: the mesh callers thread no quic
-    /// cert, so `bind_locator` rejects a quic listen at cert-absence FIRST; this guard
-    /// is a defensive second line (reached only by a direct-API caller that binds a
-    /// quic listener WITH a cert). This match is wildcard-free so a new
-    /// `BoundListener` variant forces an explicit mesh decision here (and its twin
-    /// above).
+    /// R311y392 the stream + same-host families are all `true`, and R311y404 flips
+    /// `Quic` `false -> true` (its deferred-handshake split moves the crypto off the
+    /// accept path, so a quic endpoint holds N per-peer faces like the rest) — every
+    /// variant is now mesh-capable. Note this bind-time predicate is NOT the
+    /// enforcement point a SHIPPED `--router`/`--peer quic/` hits: the mesh callers
+    /// thread no quic cert, so `bind_locator` rejects a quic listen at cert-absence
+    /// FIRST; a quic listener reaches the loop only via a direct-API caller that binds
+    /// WITH a cert (the CLI cert-threading is a separate slice). This match is
+    /// wildcard-free so a new `BoundListener` variant forces an explicit mesh decision
+    /// here (and its twin above).
     pub fn supports_mesh_multi_peer(&self) -> bool {
         match self {
             BoundListener::Tcp(_) => true,
@@ -846,16 +849,17 @@ impl BoundListener {
             BoundListener::Unixpipe(_) => true,
             #[cfg(feature = "transport-link-udp")]
             BoundListener::Udp(_) => true,
-            // R311y401 — quic is the FIRST non-mesh acceptor (the `false` the
-            // "defensive, wildcard-free" guard anticipated): its accept runs the
-            // crypto handshake INLINE (accept_quic_on), which would block the
-            // multi-peer accept_loop's `select!` (a mesh-capable quic would need a
-            // tls-style deferred split or a spawned-pump). The shipped mesh callers
-            // thread no quic cert, so a `--router`/`--peer quic/` is rejected earlier
-            // at bind cert-absence; this predicate is the defensive second line, and
-            // the one-shot `--listen quic/` acceptor never consults it.
+            // R311y404 — quic joins the mesh-capable family (`false -> true`): its
+            // deferred-handshake split (accept_raw does only the cheap
+            // `accept_quic_incoming` arrival; the crypto + first bidi stream defer to
+            // `AcceptedLink::handshake` in the spawned open future) moves the slow
+            // crypto off the accept loop's `select!`, so one endpoint holds N
+            // ZID-keyed faces like tls. The shipped mesh callers still thread no quic
+            // cert, so a `--router`/`--peer quic/` is rejected earlier at bind
+            // cert-absence; the live mesh path is a direct-API caller bound WITH a
+            // cert (the CLI cert-threading is a separate slice).
             #[cfg(feature = "transport-link-quic")]
-            BoundListener::Quic(_) => false,
+            BoundListener::Quic(_) => true,
         }
     }
 
@@ -1096,22 +1100,28 @@ impl BoundListener {
                     AcceptedPeer::Ip(peer),
                 )
             }
-            // R311y401 — the QUIC accept: `accept_quic_on` runs the FULL handshake
-            // INLINE (connection accept + the first bidi stream), so the returned link
-            // is COMPLETE and `handshake` direct-wraps it (no deferred handshake).
-            // Unlike tls (cheap TCP accept here, crypto deferred) AND unlike udp (the
-            // demux pump reads the first datagram OFF this path) the crypto is INLINE
-            // here — the reason quic is not loop-safe. `Box`ed (a QuicLink is large,
-            // matching DialedLink::Quic). The peer is a REAL IP -> Ip. Because this
-            // runs inline, quic is `supports_mesh_multi_peer == false`; the one-shot
-            // `accept_bound` (which handshakes inline by contract) is the intended
-            // caller, and the multi-peer loop never reaches this arm for a shipped
-            // caller (its quic listen is rejected earlier at bind cert-absence).
+            // R311y404 — the QUIC accept, DEFERRED-handshake split (was inline at
+            // R311y401): `accept_quic_incoming` does only the cheap connection ARRIVAL
+            // (`endpoint.accept()`, no crypto), like tls's cheap TCP accept here. The
+            // pending `Incoming` rides the `AcceptedLink::Quic` (with an `Endpoint`
+            // keep-alive clone) into the spawned open future, where `handshake` runs
+            // the crypto + first bidi stream (`complete_quic_accept`) OFF the accept
+            // loop's `select!` — the reason quic is now loop-safe and mesh-capable. The
+            // peer is a REAL IP, read from `Incoming::remote_address()` BEFORE the
+            // handshake (unlike the old `connection.remote_address()`, which needed the
+            // completed connection). `Box`ed (an `Incoming` carries the quinn proto
+            // state, matching the boxed DialedLink::Quic on the far side).
             #[cfg(feature = "transport-link-quic")]
             BoundListener::Quic(ep) => {
-                let link = accept_quic_on(ep).await?;
-                let peer = link.connection.remote_address();
-                (AcceptedLink::Quic(Box::new(link)), AcceptedPeer::Ip(peer))
+                let incoming = accept_quic_incoming(ep).await?;
+                let peer = incoming.remote_address();
+                (
+                    AcceptedLink::Quic {
+                        incoming: Box::new(incoming),
+                        endpoint: ep.clone(),
+                    },
+                    AcceptedPeer::Ip(peer),
+                )
             }
         })
     }
@@ -1199,13 +1209,20 @@ pub enum AcceptedLink {
         inputs: UdpAcceptedInputs,
         peer: std::net::SocketAddr,
     },
-    /// A fully-accepted QUIC link (R311y401) — the crypto handshake already ran
-    /// INLINE in [`BoundListener::accept_raw`] (`accept_quic_on`), so like the
-    /// same-host direct-wrap family there is NO deferred handshake:
-    /// [`Self::handshake`] wraps it directly as [`DialedLink::Quic`]. `Box`ed (a
-    /// [`QuicLink`] is large, matching [`DialedLink::Quic`]).
+    /// A pending QUIC connection ARRIVAL awaiting its DEFERRED crypto handshake
+    /// (R311y404, was a completed inline link at R311y401) — the quinn `Incoming`
+    /// that [`BoundListener::accept_raw`] took off `endpoint.accept()` WITHOUT
+    /// running the crypto, plus the [`Endpoint`] keep-alive clone the resulting
+    /// [`QuicLink`] needs. [`Self::handshake`] runs the crypto + first bidi stream
+    /// (`complete_quic_accept`) into [`DialedLink::Quic`], deferred off the accept
+    /// loop like the ws/tls SERVER handshake — the split that makes quic
+    /// mesh-capable. The `Incoming` is `Box`ed (it carries the quinn proto state),
+    /// matching the boxed [`DialedLink::Quic`] the handshake yields.
     #[cfg(feature = "transport-link-quic")]
-    Quic(Box<QuicLink>),
+    Quic {
+        incoming: Box<Incoming>,
+        endpoint: Endpoint,
+    },
 }
 
 impl AcceptedLink {
@@ -1214,7 +1231,7 @@ impl AcceptedLink {
     /// shared, dialed or accepted) — the acceptor twin of [`dial_locator`]'s
     /// per-scheme client handshake, and the mechanism SSOT the consuming one-shot
     /// [`accept_bound`] also drives. Runs in the spawned per-face open future (not
-    /// the accept loop's `select!` arm), so a slow ws/tls handshake never stalls
+    /// the accept loop's `select!` arm), so a slow ws/tls/quic handshake never stalls
     /// accepting the next peer.
     pub async fn handshake(self) -> io::Result<DialedLink> {
         Ok(match self {
@@ -1245,12 +1262,16 @@ impl AcceptedLink {
             // frame one.
             #[cfg(feature = "transport-link-udp")]
             AcceptedLink::UdpDemuxed { inputs, peer } => DialedLink::UdpDemuxed { inputs, peer },
-            // Direct wrap (R311y401) — the QUIC crypto handshake already ran inline
-            // in accept_raw (accept_quic_on), so there is nothing to handshake here,
-            // like the same-host direct-wrap family. Yields the SAME
+            // R311y404 — the DEFERRED QUIC handshake (was a direct wrap at R311y401,
+            // when the crypto ran inline in accept_raw): `complete_quic_accept` drives
+            // the crypto (`incoming.await`) + accepts the first bidi stream here, in
+            // the spawned open future, so a slow peer handshake never stalls the accept
+            // loop — the ws/tls-server-handshake analogue. Yields the SAME
             // `DialedLink::Quic` the dial side produces (shared downstream wiring).
             #[cfg(feature = "transport-link-quic")]
-            AcceptedLink::Quic(link) => DialedLink::Quic(link),
+            AcceptedLink::Quic { incoming, endpoint } => {
+                DialedLink::Quic(Box::new(complete_quic_accept(*incoming, endpoint).await?))
+            }
         })
     }
 
@@ -1258,8 +1279,9 @@ impl AcceptedLink {
     /// wz's CURRENT accept path for it yields multiple DISTINCT per-peer accepted
     /// connections, so the multi-accept [`accept_loop`](crate::accept_loop) can
     /// hold N faces off one listener. Since R311y392 the stream + same-host families
-    /// are `true`; R311y401's `Quic` is the first `false` (see the loop-safety note
-    /// below).
+    /// are `true`, and R311y404 flips `Quic` to `true` (its deferred-handshake split;
+    /// see the loop-safety note below) — every accepted-link variant is now
+    /// mesh-capable.
     ///
     /// `Unixpipe` flipped `false -> true` at R311y392 when the multi-client acceptor
     /// landed: unixpipe's invitation handshake + per-connection dedicated sub-pipe
@@ -1272,12 +1294,13 @@ impl AcceptedLink {
     ///
     /// This is the loop's RUNTIME backstop (consulted in the `Step::Accepted` arm of
     /// [`accept_loop`](crate::accept_loop)); its BIND-time twin on [`BoundListener`]
-    /// fail-fasts a non-mesh `--listen` at the mesh caller. R311y401's `Quic` is the
-    /// FIRST to return `false` (its inline accept-handshake is not loop-safe). Note
-    /// the backstop does not FIRE for quic under the shipped callers — a quic listener
-    /// only reaches the loop via a direct-API caller that binds it WITH a cert; the
-    /// `--router`/`--peer quic/` CLI path is rejected earlier at bind cert-absence
-    /// (its BIND twin's note). This match is wildcard-free so a new `AcceptedLink`
+    /// fail-fasts a non-mesh `--listen` at the mesh caller. R311y404 flips `Quic`
+    /// `false -> true`: its deferred-handshake split (the crypto runs in
+    /// [`Self::handshake`], off the accept path) makes a quic accept loop-safe, so the
+    /// backstop no longer rejects it. A quic listener reaches the loop via a
+    /// direct-API caller that binds it WITH a cert; the `--router`/`--peer quic/` CLI
+    /// path is rejected earlier at bind cert-absence (its BIND twin's note — a separate
+    /// cert-threading slice). This match is wildcard-free so a new `AcceptedLink`
     /// variant forces an explicit mesh decision here.
     pub fn supports_mesh_multi_peer(&self) -> bool {
         match self {
@@ -1296,12 +1319,12 @@ impl AcceptedLink {
             AcceptedLink::Unixpipe(_) => true,
             #[cfg(feature = "transport-link-udp")]
             AcceptedLink::UdpDemuxed { .. } => true,
-            // R311y401 — quic is the FIRST non-mesh accepted link (its BoundListener
-            // twin returns `false` too): the inline accept-handshake is not
-            // loop-safe, so the multi-peer loop never holds a quic face. The one-shot
-            // accept path does not consult this.
+            // R311y404 — quic joins the mesh-capable family (`false -> true`, its
+            // BoundListener twin too): the deferred-handshake split runs the crypto in
+            // `handshake` (off the accept loop), so a quic accept is loop-safe and the
+            // multi-peer loop holds N quic faces like tls.
             #[cfg(feature = "transport-link-quic")]
-            AcceptedLink::Quic(_) => false,
+            AcceptedLink::Quic { .. } => true,
         }
     }
 
@@ -1327,12 +1350,12 @@ impl AcceptedLink {
             AcceptedLink::Unixpipe(_) => "",
             #[cfg(feature = "transport-link-udp")]
             AcceptedLink::UdpDemuxed { .. } => "",
-            // Direct wrap: the QUIC crypto ran inline in accept_raw, so `handshake`
-            // is a no-op wrap -> no DEFERRED-handshake completion note, like the
-            // same-host direct-wrap family. The listen line's "(quic)" tag +
-            // "session Established" are the transport witnesses.
+            // R311y404 — quic now DEFERS its crypto handshake to `handshake`
+            // (`complete_quic_accept`), like tls, so it earns a completion witness note
+            // (was `""` when the crypto ran inline in accept_raw). Mirrors the tls
+            // wording; logged after the deferred handshake succeeds.
             #[cfg(feature = "transport-link-quic")]
-            AcceptedLink::Quic(_) => "",
+            AcceptedLink::Quic { .. } => "; quic server handshake",
         }
     }
 }
@@ -3598,8 +3621,8 @@ mod tests {
     /// compile-time decision; this pins the value for tcp (a representative
     /// `true`). Since R311y392 the stream + same-host families are mesh-capable —
     /// `boundlistener_unixpipe_is_mesh_capable` pins the once-`false` unixpipe arm at
-    /// its new `true` polarity; `boundlistener_quic_is_not_mesh_capable` (R311y401)
-    /// pins quic at the first `false`.
+    /// its new `true` polarity; `boundlistener_quic_is_mesh_capable` (R311y404) pins
+    /// quic at its new `true` polarity (was the once-`false` inline-handshake arm).
     #[tokio::test]
     async fn boundlistener_tcp_is_mesh_capable() {
         let l = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
@@ -3638,18 +3661,19 @@ mod tests {
         drop(listener);
     }
 
-    /// R311y401 — quic is the FIRST `false` from the bind-time mesh predicate (all
-    /// other transports are `true`): its accept runs the crypto handshake INLINE
-    /// (`accept_quic_on`), which would block the multi-peer loop's `select!`. Pins
-    /// that `false` polarity so a future accidental flip to `true` — which would let a
-    /// direct-API caller feed the loop an inline-blocking quic accept — is caught.
-    /// This pins the BIND-time twin (the one `run_router`/pico consult); the
-    /// `AcceptedLink::Quic` twin's `false` is compiler-forced (the wildcard-free
-    /// match) and its accept path is exercised by the `wz_quic_acceptor_zenohd_interop`
-    /// cross-impl e2e.
+    /// R311y404 — the once-`false` quic arm now pins at `true`: the
+    /// deferred-handshake split (`accept_raw` does only the cheap
+    /// `accept_quic_incoming` arrival; the crypto + first bidi stream defer to
+    /// `AcceptedLink::handshake` in the spawned open future) moves the slow crypto off
+    /// the accept loop's `select!`, so a quic endpoint holds N per-peer faces and its
+    /// bind-time predicate is mesh-capable. Replaces the retired
+    /// `boundlistener_quic_is_not_mesh_capable` (whose FALSE assertion the flip broke).
+    /// The `AcceptedLink::Quic` twin's `true` is compiler-forced (the wildcard-free
+    /// match); the end-to-end N-faces property is proven by
+    /// `mesh_accept_loop_holds_two_quic_peers` in accept_loop.
     #[cfg(feature = "transport-link-quic")]
     #[tokio::test]
-    async fn boundlistener_quic_is_not_mesh_capable() {
+    async fn boundlistener_quic_is_mesh_capable() {
         use wz_runtime_tokio_test_support::localhost_cert_key_pem;
         let (cert_pem, key_pem) = localhost_cert_key_pem();
         let server_config = crate::quic_config::quic_server_config_from_pem(
@@ -3662,8 +3686,8 @@ mod tests {
             .expect("bind quic endpoint");
         let listener = BoundListener::Quic(ep);
         assert!(
-            !listener.supports_mesh_multi_peer(),
-            "a quic listener is NOT mesh-capable (inline accept-handshake, R311y401)"
+            listener.supports_mesh_multi_peer(),
+            "a quic listener is mesh-capable (deferred-handshake split, R311y404)"
         );
         drop(listener);
     }

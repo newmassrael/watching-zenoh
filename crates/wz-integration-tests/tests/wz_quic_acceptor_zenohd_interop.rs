@@ -14,8 +14,10 @@
 //! `BoundListener::Quic` arm (mirroring the tls acceptor): `bind_locator`'s
 //! `Proto::Quic` binds a QUIC server `Endpoint` carrying the `ServerConfig` (from
 //! `AcceptConfig.quic`, the accept mirror of `DialConfig.quic`), and `accept_raw`
-//! runs the QUIC handshake (`accept_quic_on`) INLINE — the direct-wrap acceptor twin
-//! of `dial_locator`'s `Proto::Quic => dial_quic`. This is that cross-impl proof.
+//! takes the connection ARRIVAL while `handshake` runs the QUIC crypto: R311y401
+//! wired the seam with the crypto inline; R311y404 split it into the deferred
+//! `accept_quic_incoming` / `complete_quic_accept` halves (the tls-style split that
+//! makes quic mesh-capable). This is that cross-impl proof.
 //!
 //! Vehicle: the vendored zenoh-pico CLI is not built with quic, so a real
 //! **zenohd** is the foreign quic dialer. Topology (a STAR through zenohd):
@@ -130,9 +132,10 @@ fn wz_quic_acceptor_receives_pico_put_via_zenohd() {
     let mut zenohd = spawn_zenohd_quic_dialer(&wz_quic_endpoint, zenohd_tcp_port, &cert_path);
 
     // Cross-impl witness #1: the wz acceptor completed the QUIC (TLS-1.3) + zenoh
-    // handshake with the real zenohd dialer. QUIC runs its crypto handshake inline in
-    // accept_raw (direct-wrap family, no deferred "server handshake" note like tls),
-    // so "session Established" is the handshake-completion witness.
+    // handshake with the real zenohd dialer. Since R311y404 QUIC DEFERS its crypto
+    // handshake off the accept path (`complete_quic_accept` in the spawned open
+    // future, the tls-style split that makes quic mesh-capable); "session Established"
+    // is the transport-agnostic handshake-completion witness this test pins.
     let established = wait_for_substring(
         &mut wz_reader,
         "session Established",

@@ -2263,13 +2263,23 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
 # this the test is cfg-compiled-OUT (the y380 trap). The added clippy step gates
 # `--all-targets --features routing-accept,transport-link-unixsock`, which is the
 # ONLY lane that compiles the `Step::Accepted` non-IP arm + the new tests.
+#
+# R311y404 (mesh-capable quic): step 1c runs the MESH-JOIN discriminator
+# `mesh_accept_loop_holds_two_quic_peers` (two quic clients held as ZID-keyed faces
+# off one endpoint; RED pre-y404, where quic's `supports_mesh_multi_peer == false`
+# reject-throttled every accept) under an EXPLICIT `routing-accept,transport-link-quic`
+# with the same `1 passed` count-guard. transport-link-quic is OFF-default, so
+# without this the test is cfg-compiled-OUT (the y380 trap); the matching clippy step
+# gates `--all-targets --features routing-accept,transport-link-quic`.
 layer_c1w_cargo_test_routing_accept() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-accept --lib accept_loop --quiet \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-udp --lib mesh_accept_loop_holds_two_udp_peers --quiet 2>&1 | grep -q '1 passed' \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixsock --lib mesh_accept_loop_holds_two_unixsock_peers --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib mesh_accept_loop_holds_two_quic_peers --quiet 2>&1 | grep -q '1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixsock --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-quic --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-accept --quiet -- -D warnings)
 }
 
