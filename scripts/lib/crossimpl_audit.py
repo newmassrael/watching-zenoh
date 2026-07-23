@@ -135,6 +135,37 @@ FOREIGN_NON_OBSERVABLE = {
 IMPL_TAGS_BUILT = {"FOUNDATIONAL", "PARTIAL"}
 KIND_CLASS = corpus.KIND_CLASS
 
+# ── Host-gated hosted-CI legs ─────────────────────────────────────────────────────
+#
+# A `--test` target a hosted lane NAMES, but whose leg ECHO-SKIPS on the hosted runner
+# instead of executing -- host-gated on a capability the runner lacks and ci.yml does
+# NOT provision. ci_executes must not count these as hosted-CI-executed: a proof that
+# echo-skips there has NO hosted witness, so it belongs in the PROVEN-WITH-NO-HOSTED-CI-
+# WITNESS report, not the [executed by hosted CI] count. Without this, the static
+# lane-names-the-target model (ci_executes) reads the leg as executed and the atom's
+# ONLY witness silently vanishes from the no-witness safety report -- the exact
+# skip-looks-green failure this axis exists to catch (R311y402 surfaced it: the vsock
+# acceptor cross-impl became a counted zenohd proof, and its Layer Z leg echo-skips).
+#
+# Declared, with reason, and made FALSIFIABLE by assert_host_gated_ci_targets():
+#   (a) each entry is still NAMED by a hosted lane -- else it excludes nothing (stale);
+#   (b) its Layer Z leg is WZ_Z_REQUIRE-EXEMPT in run-ci.sh (a bare echo-skip, not the
+#       `_z_unavailable` / WZ_Z_REQUIRE FAIL every RUNNING Z leg uses) -- else the leg
+#       is REQUIRED to run on the hosted job and the exclusion is wrong.
+# If ci.yml ever provisions the oracle (so the leg runs on hosted CI), REMOVE the entry
+# -- the atom then earns a real hosted witness. Same "declare, then gate" shape as
+# FOREIGN_NON_OBSERVABLE: the set is falsifiable by evidence, not a silent hardcode.
+# The WZ_Z_REQUIRE signal is Layer-Z-specific, so this is NOT auto-derived across all
+# lanes: a naive "oracle guard without the required-FAIL" scan false-matches the pico
+# E6/E7 legs (their `[[ -x <pico> ]]` guard uses a different required mechanism), which
+# is exactly the fragile-derivation this module warns against elsewhere.
+HOST_GATED_CI_TARGETS = {
+    "wz_vsock_acceptor_zenohd_interop":
+        "AF_VSOCK loopback needs the vsock_loopback kernel module + a vsock-enabled "
+        "zenohd oracle; the hosted runner has neither and ci.yml provisions neither, so "
+        "the Layer Z vsock leg echo-skips even under WZ_Z_REQUIRE (run-ci.sh).",
+}
+
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
 # A proof that never runs is not a proof. The interop tests are #[ignore]d and their
@@ -276,6 +307,10 @@ def ci_executes(test, cf) -> bool:
     if not test.has_ignore:
         return "C1" in HOSTED
     target = cf.path.stem
+    # A hosted lane may NAME this target while its leg echo-skips on the runner; a leg
+    # that never executes there is not a hosted witness (see HOST_GATED_CI_TARGETS).
+    if target in HOST_GATED_CI_TARGETS:
+        return False
     for lane, targets in LANE_TARGETS.items():
         if lane in HOSTED and target in targets:
             return True
@@ -287,6 +322,39 @@ def ci_executes(test, cf) -> bool:
 HOSTED = hosted_ci_layers()
 LANE_TARGETS = lane_test_targets()
 E_SKIPS = layer_e_skips()
+
+
+def assert_host_gated_ci_targets() -> list[str]:
+    """Falsify the HOST_GATED_CI_TARGETS declarations; returns human-readable problems.
+
+    (a) a declared target must still be NAMED by a hosted lane -- else it excludes
+    nothing and is stale. (b) the leg that runs it must be WZ_Z_REQUIRE-EXEMPT in
+    run-ci.sh: if the `local <oracle>=`-delimited leg chunk that names its `--test`
+    also names WZ_Z_REQUIRE, the leg FAILs when required, i.e. it RUNS on the hosted
+    job and the exclusion is wrong. Both are derived from the same sources ci_executes
+    uses, so the declaration cannot rot silently into a lie the way a bare hardcode would.
+    """
+    problems: list[str] = []
+    bodies = lane_bodies()
+    for target in HOST_GATED_CI_TARGETS:
+        hosting = [lane for lane in HOSTED if target in LANE_TARGETS.get(lane, set())]
+        if not hosting:
+            problems.append(
+                "%s: declared host-gated but no hosted lane names it as a --test target "
+                "(stale -- it excludes nothing; remove it)" % target)
+            continue
+        for lane in hosting:
+            chunk = next(
+                (c for c in re.split(r"\n\s+local ", bodies.get(lane, ""))
+                 if re.search(r"--test %s\b" % re.escape(target), c)),
+                "")
+            if "WZ_Z_REQUIRE" in chunk or "_z_unavailable" in chunk:
+                problems.append(
+                    "%s: declared host-gated but its %s leg enforces the required-FAIL "
+                    "(WZ_Z_REQUIRE / _z_unavailable), so it RUNS on the hosted job -- the "
+                    "exclusion is wrong (remove it)"
+                    % (target, lane))
+    return problems
 
 # Which binary a corpus test drives comes from the corpus module's CALL-GRAPH resolution
 # (cf.binary), not from a grep in this file -- a grep here would re-introduce exactly the
@@ -445,8 +513,11 @@ def main() -> int:
     # authority this axis exists to end, so it gets named.
     proven_without_ci_witness = sorted(full - ci_full_only - ci_partial_only)
 
+    fail_host_gated = assert_host_gated_ci_targets()
+
     ok = not (fail_name or fail_denominator or fail_foreign or fail_undeclared
-              or fail_containment or fail_excluded or fail_kind or fail_malformed)
+              or fail_containment or fail_excluded or fail_kind or fail_malformed
+              or fail_host_gated)
 
     corpus_files = [cf for cf in files if cf.classes]
     n_tests = sum(len(cf.tests) for cf in corpus_files)
@@ -484,6 +555,10 @@ def main() -> int:
         print("      claim comes from a lane it does not run.)")
     print("  UNPROVEN (%d, actionable): %s" % (len(unproven), ", ".join(unproven) if unproven else "(none)"))
     print("  witnesses-no-atom (declared `none`): %d" % len(none_tests))
+    if HOST_GATED_CI_TARGETS:
+        print("  HOST-GATED hosted-CI targets (named by a lane but echo-skip on the "
+              "runner, so NOT counted as hosted-executed): %s"
+              % ", ".join(sorted(HOST_GATED_CI_TARGETS)))
 
     hosted = hosted_ci_layers()
     opt_in = opt_in_lanes()
@@ -565,6 +640,13 @@ def main() -> int:
         for rel, fn, atom, kind, classes in fail_kind:
             print("    - %s::%s claims `%s %s` but the file's foreign classes are [%s]"
                   % (rel, fn, atom, kind, classes))
+
+    if fail_host_gated:
+        ok = False
+        print("FAIL [A4-8] HOST_GATED_CI_TARGETS declaration is stale/wrong: %d"
+              % len(fail_host_gated))
+        for p in fail_host_gated:
+            print("    - %s" % p)
 
     if ok:
         print("cross-impl proof audit OK")
