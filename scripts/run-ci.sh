@@ -5664,6 +5664,32 @@ layer_z_zenohd_interop() {
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
         | tee /dev/stderr | grep -q '1 passed') || return 1
+    # R311y407 — wz MESH QUIC acceptor cross-impl (transport-link-quic x mesh accept
+    # loop x zenohd->wz): a real zenohd DIALS a wz `--peer quic/...` / `--router-hat
+    # quic/...` MESH listen and both FEDERATES over it AND routes real pub/sub DATA
+    # across it BOTH ways. The uncovered intersection the y401 one-shot quic acceptor
+    # leg above does NOT reach: y401 dials the ONE-SHOT `--listen quic/` (single
+    # observe face, no federation); y376 is the ws (not quic) mesh acceptor, hold-only;
+    # the y404 mesh_accept_loop_holds_two_quic_peers unit is wz<->wz only; the y406
+    # run_peer/run_router_hat quic-cert units are bind-only (no peer connects); and
+    # the wz_peer/router_hat_zenohd_interop legs federate over TCP with wz as the
+    # DIALER. This is the first proof a FOREIGN impl JOINS wz's MESH (peer_loop /
+    # router-hat) over an encrypted QUIC listen wz ACCEPTS, exercising the y404
+    # deferred-handshake quic accept split inside the mesh loop + the y406 cert
+    # threading. FIVE legs: (1) --router-hat routers_net converges + wz decodes the
+    # LinkStateList OAM; (2) --peer forms a MUTUAL linkstate edge; (3) a gossip-dialer
+    # NEUTER proves leg-2's reciprocal witness is load-bearing (no edge); (4) a pico
+    # z_pub behind zenohd's Put crosses the quic mesh INTO wz's subscriber; (5) wz's
+    # Put crosses the quic mesh OUT to a pico z_sub behind zenohd. All over a quic-ONLY
+    # listen (no tcp fallback path). STOCK zenohd (quic is a zenoh default) + the pico
+    # z_pub/z_sub CLIs (checked at the top of this lane); the demo carries `quic` +
+    # `router-hat-router` (pulls routing-peer for --peer), built above -- NO build-line
+    # change. Count-guarded (`5 passed`, the y401 precedent) so a dropped `#[ignore]`
+    # on any leg (fewer selected -> exit 0) reddens instead of silently passing. Same
+    # --test-threads=1 per-zenohd isolation.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_mesh_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
+        | tee /dev/stderr | grep -q '5 passed') || return 1
     # R311y376 — wz ROUTER ws ACCEPTOR cross-impl (accept-symmetry Stage 3): the
     # MULTI-PEER accept loop (`--router` / peer_loop, not just one-shot `--listen`)
     # now accepts a foreign non-tcp face. A real zenohd DIALS the wz `--router
