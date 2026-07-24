@@ -2283,12 +2283,27 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
 # pin `boundlistener_quic_datagram_is_mesh_capable` (same guard) so the once-only-
 # compiled bind predicate `BoundListener::QuicDatagram => true` actually executes its
 # assertion in CI (a wrong `false` reddens here, not just at a clippy compile).
+#
+# R311y409 (reliable-quic bind-pin RUN + C1w hosted): the quic slice gains the
+# BIND-time pin step `boundlistener_quic_is_mesh_capable` (right after the quic accept
+# unit), closing the sibling asymmetry y408 left — the datagram twin ran its bind-pin
+# (step 1e above) but the reliable-quic bind predicate `BoundListener::Quic => true`
+# executed in NO lane, only clippy-compiled. RED+TWIN by falsification: flip that arm
+# to `false` and ONLY this new step reddens (the quic accept unit consults the
+# `AcceptedLink` RUNTIME twin, not the BoundListener bind predicate, so it stays green
+# — the same isolation the datagram pair has). Same `1 passed` count-guard. R311y409
+# ALSO hosts this whole C1w lane on ci.yml's feature-gates job (it ran only in a local
+# full sweep before — the "gate that never runs hosted reports success by silence"
+# hazard, the exact reason that job exists), so both quic + datagram bind-pins and
+# C1w's mesh accept units are now continuously enforced, not decorative (the unixpipe
+# mesh unit lives in the still-local-only C1al, out of y409 scope).
 layer_c1w_cargo_test_routing_accept() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-accept --lib accept_loop --quiet \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-udp --lib mesh_accept_loop_holds_two_udp_peers --quiet 2>&1 | grep -q '1 passed' \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixsock --lib mesh_accept_loop_holds_two_unixsock_peers --quiet 2>&1 | grep -q '1 passed' \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib mesh_accept_loop_holds_two_quic_peers --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib boundlistener_quic_is_mesh_capable --quiet 2>&1 | grep -q '1 passed' \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib mesh_accept_loop_holds_two_quic_datagram_peers --quiet 2>&1 | grep -q '1 passed' \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib boundlistener_quic_datagram_is_mesh_capable --quiet 2>&1 | grep -q '1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept --quiet -- -D warnings \

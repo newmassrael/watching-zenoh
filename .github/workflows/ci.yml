@@ -1152,6 +1152,27 @@ jobs:
       - name: Layer C1j — runtime-tokio subset BEHAVIOUR (R311y330/y331 NEGs)
         run: bash scripts/run-ci.sh --layer C1j
 
+      # Hosted R311y409 — C1w (routing-accept multi-peer accept_loop + the off-default
+      # quic / quic-datagram MESH pins) was defined in scripts/run-ci.sh but never in
+      # this workflow's --layer set, so the WHOLE lane ran ONLY in a local full sweep:
+      # the exact "a gate that never runs hosted reports success by silence" hazard
+      # this job exists to break (verified — the last green push's hosted log had 0
+      # C1w lines). y409 also added the reliable-quic BIND-time pin
+      # `boundlistener_quic_is_mesh_capable` (the datagram twin already ran its bind-pin
+      # in C1w; the quic one executed in NO lane, only clippy-compiled). Both bind-pins
+      # + C1w's mesh accept units are proven by falsification (flip the
+      # `BoundListener::supports_mesh_multi_peer` arm to `false` -> only that pin
+      # reddens; the accept unit sees the `AcceptedLink` RUNTIME twin), so hosting
+      # converts them from decorative to continuously enforced.
+      # Cost, measured not guessed: 25s warm to ~95s partial-cache locally (5
+      # off-default feature-set test compiles + clippy gates); the 30-minute budget
+      # absorbs it beside C1j's ~193s worst even on a cold quic recompile. Its subsets (routing-accept x transport-link-{unixsock,quic,
+      # quic-datagram}) are off-default and composed by no other hosted lane — Layer
+      # C1's --workspace unifies features ON, never these routing-accept-gated
+      # multi-peer accept subsets.
+      - name: Layer C1w — routing-accept multi-peer accept + quic/datagram mesh pins (R311y409)
+        run: bash scripts/run-ci.sh --layer C1w
+
   portability:
     name: portability (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
