@@ -212,6 +212,14 @@ tls = ["wz/locator-tls"]
 # `DialConfig::with_quic` — the cert-plumbing the quic cross-impl legs 14/15 dial
 # against zenohd's `quic/` listener with (zenoh-pico dials TCP; zenohd routes).
 quic = ["wz/locator-quic"]
+# R311y408 — opt-in `quic-datagram/` (QUIC unreliable-DATAGRAM, RFC9221) ACCEPTOR
+# transport, forwarding the wz facade's `transport-link-quic-datagram` (which
+# implies `transport-link-quic`). Composes `quic` for the shared --quic-cert/--quic-
+# key cert plumbing (datagrams reuse the SAME cert as the stream backend, matching
+# zenoh's shared transport.link.tls block). NOT in `default`; only run-ci Layer Z
+# builds wz-ap-demo with it so a `--listen quic-datagram/` acceptor can accept a
+# real zenohd-quic-datagram dialer (`-e quic/<wz>?rel=0`) -- the cross-impl proof.
+quic-datagram = ["quic", "wz/transport-link-quic-datagram"]
 # R311y369 — opt-in namespace prefixing (`--namespace <prefix>`), forwarding the
 # wz facade's `routing-namespace`. The mirror of `ws`/`tls`/`quic`: NOT in
 # `default` (preset-ap-client omits it), so the footprint baseline and every

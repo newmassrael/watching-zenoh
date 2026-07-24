@@ -131,7 +131,8 @@ use quinn::{Endpoint, Incoming};
 // `transport-link-quic`.
 #[cfg(feature = "transport-link-quic-datagram")]
 use crate::quic_datagram_pipeline::{
-    dial_quic_datagram, wire_quic_datagram, QuicDatagramLink, QuicDatagramReadDriver,
+    bind_quic_datagram, complete_quic_datagram_accept, dial_quic_datagram, wire_quic_datagram,
+    QuicDatagramLink, QuicDatagramReadDriver,
 };
 
 // R311ob — the WS arm, like udp, rides this tcp+unicast-gated module as an
@@ -734,6 +735,24 @@ pub enum BoundListener {
     /// [`AcceptConfig::default`]) hits `bind_locator`'s cert-absence `Unsupported`.
     #[cfg(feature = "transport-link-quic")]
     Quic(Endpoint),
+    /// A bound QUIC server [`Endpoint`] serving the unreliable-DATAGRAM transport
+    /// (RFC9221, R311y408) — the datagram sibling of [`Self::Quic`]. Structurally
+    /// identical at the accept layer (one bound endpoint yields a per-peer
+    /// `Connection` via `accept`), so the accept seam MIRRORS `Quic` exactly: the
+    /// crypto config is baked in at [`bind_quic_datagram`] from [`AcceptConfig::quic`]
+    /// (datagrams reuse the SAME cert as the stream backend, matching zenoh, whose
+    /// quic + quic_datagram links share the `transport.link.tls` block), and
+    /// [`Self::accept_raw`] does only the cheap connection ARRIVAL
+    /// ([`accept_quic_incoming`]) while the crypto DEFERS to
+    /// [`AcceptedLink::handshake`] ([`complete_quic_datagram_accept`], which drops the
+    /// `accept_bi` — datagrams open no stream). That deferral is what makes the
+    /// datagram acceptor MESH-CAPABLE ([`Self::supports_mesh_multi_peer`] `true`),
+    /// exactly like [`Self::Quic`] since R311y404. The accepted peer is a REAL IP
+    /// ([`AcceptedPeer::Ip`], from `Incoming::remote_address()`). `transport-link-
+    /// quic-datagram` implies `transport-link-quic`, so `accept_quic_incoming` is in
+    /// scope.
+    #[cfg(feature = "transport-link-quic-datagram")]
+    QuicDatagram(Endpoint),
 }
 
 /// The peer of a link accepted by [`BoundListener::accept_raw`] — an IP
@@ -812,6 +831,8 @@ impl BoundListener {
             BoundListener::Udp(_) => "udp",
             #[cfg(feature = "transport-link-quic")]
             BoundListener::Quic(_) => "quic",
+            #[cfg(feature = "transport-link-quic-datagram")]
+            BoundListener::QuicDatagram(_) => "quic-datagram",
         }
     }
 
@@ -861,6 +882,9 @@ impl BoundListener {
             // reaches here. Only a cert-LESS bind is rejected at cert-absence first.
             #[cfg(feature = "transport-link-quic")]
             BoundListener::Quic(_) => true,
+            // Mesh-capable for the SAME reason as `Quic` (deferred crypto handshake).
+            #[cfg(feature = "transport-link-quic-datagram")]
+            BoundListener::QuicDatagram(_) => true,
         }
     }
 
@@ -928,6 +952,8 @@ impl BoundListener {
             // readable here, race-free before any accept).
             #[cfg(feature = "transport-link-quic")]
             BoundListener::Quic(ep) => ep.local_addr()?.to_string(),
+            #[cfg(feature = "transport-link-quic-datagram")]
+            BoundListener::QuicDatagram(ep) => ep.local_addr()?.to_string(),
         })
     }
 
@@ -983,6 +1009,8 @@ impl BoundListener {
             // listen), read from the quinn Endpoint.
             #[cfg(feature = "transport-link-quic")]
             BoundListener::Quic(ep) => ep.local_addr(),
+            #[cfg(feature = "transport-link-quic-datagram")]
+            BoundListener::QuicDatagram(ep) => ep.local_addr(),
         }
     }
 
@@ -1124,6 +1152,23 @@ impl BoundListener {
                     AcceptedPeer::Ip(peer),
                 )
             }
+            // R311y408 — the datagram twin of the `Quic` arm: the cheap connection
+            // ARRIVAL (`accept_quic_incoming`, shared with the stream backend since
+            // `transport-link-quic-datagram` implies `transport-link-quic`), crypto
+            // DEFERRED to `handshake` (`complete_quic_datagram_accept`). Real-IP peer
+            // from `Incoming::remote_address()` before the handshake.
+            #[cfg(feature = "transport-link-quic-datagram")]
+            BoundListener::QuicDatagram(ep) => {
+                let incoming = accept_quic_incoming(ep).await?;
+                let peer = incoming.remote_address();
+                (
+                    AcceptedLink::QuicDatagram {
+                        incoming: Box::new(incoming),
+                        endpoint: ep.clone(),
+                    },
+                    AcceptedPeer::Ip(peer),
+                )
+            }
         })
     }
 
@@ -1224,6 +1269,18 @@ pub enum AcceptedLink {
         incoming: Box<Incoming>,
         endpoint: Endpoint,
     },
+    /// A pending QUIC-DATAGRAM connection ARRIVAL awaiting its DEFERRED crypto
+    /// handshake (R311y408) — the datagram twin of [`Self::Quic`]. Identical shape
+    /// (the quinn `Incoming` [`BoundListener::accept_raw`] took off
+    /// `endpoint.accept()` WITHOUT crypto + the [`Endpoint`] keep-alive clone);
+    /// [`Self::handshake`] runs the crypto ([`complete_quic_datagram_accept`]) into
+    /// [`DialedLink::QuicDatagram`], deferred off the accept loop like `Quic`. It
+    /// drops the `accept_bi` the reliable path runs — datagrams open no stream.
+    #[cfg(feature = "transport-link-quic-datagram")]
+    QuicDatagram {
+        incoming: Box<Incoming>,
+        endpoint: Endpoint,
+    },
 }
 
 impl AcceptedLink {
@@ -1273,6 +1330,15 @@ impl AcceptedLink {
             AcceptedLink::Quic { incoming, endpoint } => {
                 DialedLink::Quic(Box::new(complete_quic_accept(*incoming, endpoint).await?))
             }
+            // R311y408 — the DEFERRED QUIC-DATAGRAM handshake, the datagram twin of
+            // the `Quic` arm: `complete_quic_datagram_accept` drives the crypto
+            // (`incoming.await`) in the spawned open future, minus the `accept_bi`
+            // (datagrams open no stream). Yields the SAME `DialedLink::QuicDatagram`
+            // the dial side produces (shared downstream `wire_quic_datagram`).
+            #[cfg(feature = "transport-link-quic-datagram")]
+            AcceptedLink::QuicDatagram { incoming, endpoint } => DialedLink::QuicDatagram(
+                Box::new(complete_quic_datagram_accept(*incoming, endpoint).await?),
+            ),
         })
     }
 
@@ -1326,6 +1392,9 @@ impl AcceptedLink {
             // multi-peer loop holds N quic faces like tls.
             #[cfg(feature = "transport-link-quic")]
             AcceptedLink::Quic { .. } => true,
+            // Mesh-capable for the SAME reason as `Quic` (deferred crypto handshake).
+            #[cfg(feature = "transport-link-quic-datagram")]
+            AcceptedLink::QuicDatagram { .. } => true,
         }
     }
 
@@ -1357,6 +1426,10 @@ impl AcceptedLink {
             // wording; logged after the deferred handshake succeeds.
             #[cfg(feature = "transport-link-quic")]
             AcceptedLink::Quic { .. } => "; quic server handshake",
+            // R311y408 — the datagram twin defers its crypto to `handshake` too, so
+            // it earns the same completion-witness note (datagram-tagged).
+            #[cfg(feature = "transport-link-quic-datagram")]
+            AcceptedLink::QuicDatagram { .. } => "; quic-datagram server handshake",
         }
     }
 }
@@ -1812,6 +1885,29 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             #[cfg(not(feature = "transport-link-quic"))]
             Proto::Quic => Err(unsupported(
                 "quic acceptor requires the transport-link-quic feature",
+            )),
+            // R311y408 — a `quic-datagram/...` acceptor binds a QUIC server
+            // `Endpoint` serving the unreliable-datagram transport (RFC9221), the
+            // crypto config baked in from `AcceptConfig.quic` (datagrams reuse the
+            // SAME cert as the stream backend, matching zenoh's shared
+            // `transport.link.tls` block). The exact datagram twin of the
+            // `Proto::Quic` arm above: `bind_quic_datagram` is SYNC (`?`, not
+            // `.await`) and takes no iface (a quinn Endpoint owns its socket). Absent
+            // the cert config => typed `Unsupported`, so it is opt-in — the accept
+            // mirror of dial_locator's `Proto::QuicDatagram => match &cfg.quic`.
+            #[cfg(feature = "transport-link-quic-datagram")]
+            Proto::QuicDatagram => match &cfg.quic {
+                Some(q) => Ok(BoundListener::QuicDatagram(bind_quic_datagram(
+                    ip.addr,
+                    q.server_config.clone(),
+                )?)),
+                None => Err(unsupported(
+                    "quic-datagram acceptor requires AcceptConfig.quic (a server cert + key)",
+                )),
+            },
+            #[cfg(not(feature = "transport-link-quic-datagram"))]
+            Proto::QuicDatagram => Err(unsupported(
+                "quic-datagram acceptor requires the transport-link-quic-datagram feature",
             )),
             other => Err(unsupported(&format!(
                 "{other:?} acceptor is a not-yet-wired extension point"

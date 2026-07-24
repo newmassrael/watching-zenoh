@@ -274,6 +274,27 @@ pub async fn accept_quic_datagram_on(endpoint: &Endpoint) -> io::Result<QuicData
     })
 }
 
+/// Complete the DEFERRED crypto handshake of a QUIC datagram connection ARRIVAL —
+/// the pending `Incoming` that [`crate::session_open::BoundListener::accept_raw`]
+/// took off `endpoint.accept()` WITHOUT running the crypto. The datagram mirror of
+/// [`crate::quic_pipeline::complete_quic_accept`], minus the `accept_bi` (datagrams
+/// open no stream). Run in the spawned per-face open future (via
+/// [`crate::session_open::AcceptedLink::handshake`]) so a slow/stalled peer
+/// handshake never blocks the multi-peer accept loop's `select!` — the split that
+/// makes the quic-datagram ACCEPTOR mesh-capable, exactly as R311y404 did for the
+/// reliable quic acceptor. The `endpoint` is the keep-alive clone the resulting
+/// [`QuicDatagramLink`] must outlive on.
+pub async fn complete_quic_datagram_accept(
+    incoming: quinn::Incoming,
+    endpoint: Endpoint,
+) -> io::Result<QuicDatagramLink> {
+    let connection = incoming.await.map_err(io::Error::other)?;
+    Ok(QuicDatagramLink {
+        endpoint,
+        connection,
+    })
+}
+
 /// Wire a [`QuicDatagramLink`] into the cooperating drivers the session FSM
 /// consumes: an inbound [`QuicDatagramReadDriver`] (`&mut LinkDriver` for the
 /// poll loop), an outbound `Arc<`[`QuicDatagramWriteDriver`]`>` (`BoxedLinkDriver`
