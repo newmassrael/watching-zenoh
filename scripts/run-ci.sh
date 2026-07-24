@@ -1747,11 +1747,26 @@ layer_c1ak_cargo_test_transport_stats() {
 #   6. clippy-gates the LIB under `--no-default-features --features
 #      transport-link-unixpipe` to prove `unixpipe_pipeline` composes standalone
 #      (it pulls transport-link-tcp's shared stream_link + libc for mkfifo).
+#
+# R311y410 (unixpipe bind-pin RUN + C1al hosted): step 3b RUNS the BIND-time pin
+# `boundlistener_unixpipe_is_mesh_capable` (right after the step-3 mesh accept unit,
+# same `routing-accept,transport-link-unixpipe` set so it reuses that test binary),
+# closing the sibling asymmetry the quic/datagram pins closed in C1w (R311y408/y409):
+# the unixpipe accept unit ran (step 3) but the bind predicate
+# `BoundListener::Unixpipe => true` executed in NO lane, only clippy-compiled. RED+TWIN
+# by falsification: flip that arm to `false` and ONLY this new step reddens — the step-3
+# accept unit consults the `AcceptedLink` RUNTIME twin, not the BoundListener bind
+# predicate, so it stays green (the same isolation the quic pair has). Same `1 passed`
+# count-guard. R311y410 ALSO hosts this whole C1al lane on ci.yml's feature-gates job (it
+# ran only in a local full sweep before — the "gate that never runs hosted reports
+# success by silence" hazard, the exact reason that job exists), mirroring how y409
+# hosted C1w. The vsock twin C1ab stays local-only (out of y410 scope).
 layer_c1al_cargo_test_unixpipe() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test unixpipe_e2e --quiet \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib mesh_accept_loop_holds_two_unixpipe_peers --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib boundlistener_unixpipe_is_mesh_capable --quiet 2>&1 | grep -q '1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixpipe --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixpipe --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixpipe --quiet -- -D warnings)

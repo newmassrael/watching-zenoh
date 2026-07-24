@@ -1060,10 +1060,12 @@ jobs:
   # non-Linux target is an invalid `dep:` reference by construction (they are
   # Linux-only backends). R311y305: the prior clause here claimed these are
   # "verified by the ci job's Linux lanes C1al / vsock" — that is STALE. C1al
-  # (unixpipe) and C1ab (vsock) are defined in scripts/run-ci.sh but are NOT in
-  # this workflow's enumerated --layer set, so they run only in a local full
-  # sweep, not on the hosted ci job. The Linux-only-ness is enforced at the
-  # Cargo `[target.'cfg(...)']` layer, not by a hosted lane.
+  # (unixpipe) and C1ab (vsock) were both defined in scripts/run-ci.sh but NOT
+  # in this workflow's enumerated --layer set, running only in a local full
+  # sweep. R311y410 UPDATE: C1al is now hosted on the feature-gates job below
+  # (a Linux lane), so the unixpipe backend IS again verified by a hosted Linux
+  # lane; C1ab (vsock) stays local-only. Either way the Linux-only-ness is
+  # enforced at the Cargo `[target.'cfg(...)']` layer, not by a hosted lane.
   feature-gates:
     name: feature-gate NEG lanes (subsets no other job composes)
     runs-on: ubuntu-22.04
@@ -1172,6 +1174,28 @@ jobs:
       # multi-peer accept subsets.
       - name: Layer C1w — routing-accept multi-peer accept + quic/datagram mesh pins (R311y409)
         run: bash scripts/run-ci.sh --layer C1w
+
+      # Hosted R311y410 — C1al (unixpipe: locator + FIFO e2e + the mesh-JOIN accept
+      # unit + the R311y410 BIND-time pin + 3 clippy gates) was defined in
+      # scripts/run-ci.sh but never in this workflow's --layer set, so the WHOLE lane
+      # ran ONLY in a local full sweep — the "a gate that never runs hosted reports
+      # success by silence" hazard this job exists to break (the same one y409 just
+      # closed for C1w; the last green push's hosted log had 0 C1al lines). y410 also
+      # added the unixpipe BIND-time pin `boundlistener_unixpipe_is_mesh_capable`, which
+      # executed in NO lane before (the mesh accept unit ran, but the bind predicate
+      # `BoundListener::Unixpipe => true` only clippy-compiled). Both are proven by
+      # falsification (flip the arm to `false` -> only the bind-pin reddens; the accept
+      # unit sees the `AcceptedLink` RUNTIME twin and stays green), so hosting converts
+      # them from decorative to continuously enforced.
+      # Cost, measured not guessed: 13s warm locally (`Layer C1al pass (13s)`) for the
+      # FIFO e2e + mesh unit + bind-pin + 3 clippy gates over the off-default
+      # transport-link-unixpipe set; a cold off-default unixpipe compile is longer but
+      # the 30-minute budget absorbs it beside C1j's ~193s worst. Its subset
+      # (routing-accept x transport-link-unixpipe, Linux-only) is off-default and
+      # composed by no other hosted lane — Layer C1's --workspace unifies features ON,
+      # never this routing-accept-gated multi-client unixpipe accept subset.
+      - name: Layer C1al — unixpipe FIFO e2e + mesh accept + bind-pin (R311y410)
+        run: bash scripts/run-ci.sh --layer C1al
 
   portability:
     name: portability (${{ matrix.os }})
