@@ -5498,7 +5498,7 @@ _z_unavailable() {
         echo "  Layer Z FAIL — required (WZ_Z_REQUIRE set) but $1" >&2
         return 1
     fi
-    _z_unavailable "$1" || return 1
+    echo "  Layer Z SKIP ($1)"
     return 0
 }
 
