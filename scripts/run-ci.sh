@@ -2271,15 +2271,30 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
 # with the same `1 passed` count-guard. transport-link-quic is OFF-default, so
 # without this the test is cfg-compiled-OUT (the y380 trap); the matching clippy step
 # gates `--all-targets --features routing-accept,transport-link-quic`.
+#
+# R311y408 (mesh-capable quic-datagram): step 1d runs the MESH-JOIN discriminator
+# `mesh_accept_loop_holds_two_quic_datagram_peers` (two quic-datagram clients held as
+# ZID-keyed faces off one endpoint; RED if the QuicDatagram `supports_mesh_multi_peer`
+# arm is reverted to `false`, which reject-throttles the second accept) under an
+# EXPLICIT `routing-accept,transport-link-quic-datagram` with the same `1 passed`
+# count-guard. transport-link-quic-datagram is OFF-default, so without this the test is
+# cfg-compiled-OUT (the y380 trap); the matching clippy step gates `--all-targets
+# --features routing-accept,transport-link-quic-datagram`. Step 1e RUNS the BIND-time
+# pin `boundlistener_quic_datagram_is_mesh_capable` (same guard) so the once-only-
+# compiled bind predicate `BoundListener::QuicDatagram => true` actually executes its
+# assertion in CI (a wrong `false` reddens here, not just at a clippy compile).
 layer_c1w_cargo_test_routing_accept() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-accept --lib accept_loop --quiet \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-udp --lib mesh_accept_loop_holds_two_udp_peers --quiet 2>&1 | grep -q '1 passed' \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixsock --lib mesh_accept_loop_holds_two_unixsock_peers --quiet 2>&1 | grep -q '1 passed' \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib mesh_accept_loop_holds_two_quic_peers --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib mesh_accept_loop_holds_two_quic_datagram_peers --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib boundlistener_quic_datagram_is_mesh_capable --quiet 2>&1 | grep -q '1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixsock --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-quic --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-quic-datagram --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-accept --quiet -- -D warnings)
 }
 
@@ -5578,7 +5593,13 @@ layer_z_zenohd_interop() {
     # vsock acceptor arm on EVERY CI run even though the leg itself runs only on a
     # vsock-capable host (the runner has no vsock_loopback) — the same compile-on-CI /
     # run-on-host split as the C1ab vsock lane.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,transport-link-unixpipe,vsock --quiet) || return 1
+    # R311y408 — `quic-datagram` added so the Layer Z binary carries the `--listen
+    # quic-datagram/` RFC9221 unreliable-DATAGRAM ACCEPT transport for the
+    # quic-datagram acceptor cross-impl leg below. Additive (a new locator arm, inert
+    # for every other leg); it IMPLIES `quic` (shared cert plumbing), already present.
+    # quic-datagram is in zenoh's DEFAULT features and zenohd enables `zenoh/default`,
+    # so the DEFAULT oracle dials it -- NO special oracle (unlike vsock/unixpipe).
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,transport-link-unixpipe,vsock --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients
@@ -5690,6 +5711,28 @@ layer_z_zenohd_interop() {
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_mesh_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
         | tee /dev/stderr | grep -q '5 passed') || return 1
+    # R311y408 — wz QUIC-DATAGRAM ACCEPTOR cross-impl (transport-link-quic-datagram
+    # zenohd->wz): the RFC9221 unreliable-datagram twin of the y401 one-shot quic
+    # acceptor leg above. A real zenohd DIALS the wz `--listen quic-datagram/...`
+    # acceptor (BoundListener::QuicDatagram / bind_quic_datagram + the deferred
+    # accept_quic_incoming / complete_quic_datagram_accept split wired in R311y408 on
+    # top of the quic_datagram_pipeline primitives proven wz<->wz by quic_datagram_e2e),
+    # trusting wz's self-signed localhost cert (datagrams reuse the SAME
+    # transport.link.tls cert as reliable quic). zenoh gives the datagram link NO
+    # distinct scheme -- its prefix is `quic` and the datagram link is selected by the
+    # reliability metadata, so zenohd dials `quic/<wz>?rel=0` while wz names its acceptor
+    # `quic-datagram/...`; on the wire it is one QUIC handshake then RFC9221 datagram
+    # frames (no stream). A pico z_put routes through zenohd ACROSS the datagram link
+    # into the wz acceptor's subscriber. quic-datagram is in STOCK zenoh's DEFAULT
+    # features (the DEFAULT oracle carries it, verified identical footprint to a
+    # `zenoh/transport_quic_datagram` build) + the demo carries `quic-datagram` (built
+    # above) -- NO special oracle, like udp/quic and unlike vsock/unixpipe; it RUNS on
+    # hosted CI (UDP loopback needs no kernel module). Same --test-threads=1 per-zenohd
+    # isolation. Count-guarded (`1 passed`, the y401 precedent) so a dropped `#[ignore]`
+    # (0 selected -> exit 0) reddens instead of silently passing.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
+        | tee /dev/stderr | grep -q '1 passed') || return 1
     # R311y376 — wz ROUTER ws ACCEPTOR cross-impl (accept-symmetry Stage 3): the
     # MULTI-PEER accept loop (`--router` / peer_loop, not just one-shot `--listen`)
     # now accepts a foreign non-tcp face. A real zenohd DIALS the wz `--router

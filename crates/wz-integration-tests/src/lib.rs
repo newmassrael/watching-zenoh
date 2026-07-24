@@ -1341,6 +1341,65 @@ pub mod common {
         guard
     }
 
+    /// R311y408 — spawn a zenohd that DIALS a wz `quic-datagram/<ip:port>` acceptor
+    /// over the QUIC unreliable-DATAGRAM transport (RFC9221) while listening on
+    /// `tcp/<tcp_port>` for a pico client. The DATAGRAM twin of
+    /// [`spawn_zenohd_quic_dialer`], verifying wz's QUIC-DATAGRAM ACCEPTOR
+    /// (`BoundListener::QuicDatagram` / `bind_quic_datagram` + the deferred
+    /// `accept_quic_incoming` / `complete_quic_datagram_accept` split, R311y408).
+    ///
+    /// zenoh does NOT give its datagram link a distinct scheme: its
+    /// `QUIC_DATAGRAM_LOCATOR_PREFIX` is `"quic"` (the SAME prefix as reliable quic),
+    /// and stream-vs-datagram is selected by the locator's reliability metadata
+    /// `rel` — `quic/<addr>?rel=0` is best-effort, which
+    /// `io/zenoh-link/src/lib.rs` routes to `LinkKind::QuicDatagram` when both the
+    /// `transport_quic` and `transport_quic_datagram` features are on. So the caller
+    /// passes wz's datagram acceptor address (`127.0.0.1:<port>`) and this helper
+    /// renders zenoh's `-e quic/<wz-ip:port>?rel=0`. `transport_quic_datagram` is in
+    /// zenoh's DEFAULT feature set and zenohd enables `zenoh/default`, so the DEFAULT
+    /// [`zenohd_binary`] carries it — no special oracle (unlike the vsock/unixpipe
+    /// variants; verified: the default oracle and a `--features
+    /// zenoh/transport_quic_datagram` build have identical datagram footprint). zenoh's
+    /// QUIC link reads its trust config from the SAME `transport.link.tls` block as
+    /// tls (no separate quic block), so the dialer config is byte-identical to the
+    /// reliable-quic dialer's — only the `-e` (scheme + `?rel=0`) differs. zenoh-pico's
+    /// CLI has no quic, so zenohd is the only foreign quic-datagram dialer.
+    pub fn spawn_zenohd_quic_datagram_dialer(
+        wz_quic_datagram_addr: &str,
+        tcp_port: u16,
+        ca_cert_path: &str,
+    ) -> ChildGuard {
+        let cfg_path = format!("{ca_cert_path}.dialer.zenohd.json5");
+        let cfg = format!(
+            "{{ transport: {{ link: {{ tls: {{ \
+             root_ca_certificate: {ca_cert_path:?}, verify_name_on_connect: false }} }} }} }}"
+        );
+        std::fs::write(&cfg_path, cfg).expect("write zenohd quic-datagram dialer config");
+        let mut command = Command::new(zenohd_binary());
+        command
+            .arg("-e")
+            .arg(format!("quic/{wz_quic_datagram_addr}?rel=0"))
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("--config")
+            .arg(&cfg_path)
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut guard = ChildGuard::wrap(
+            "zenohd (quic-datagram dialer)",
+            command.spawn().expect("spawn zenohd quic-datagram dialer"),
+        );
+        if let Err(e) =
+            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("zenohd (quic-datagram dialer): {e}");
+        }
+        guard
+    }
+
     /// R311y398 — spawn a zenohd that DIALS a wz `unixsock-stream/<path>` acceptor
     /// (`-e unixsock-stream/<path>`) while also listening on `tcp/<tcp_port>` for a
     /// pico client. The AF_UNIX-stream DIALER sibling of [`spawn_zenohd_ws_dialer`]

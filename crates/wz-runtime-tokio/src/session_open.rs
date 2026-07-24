@@ -1832,10 +1832,16 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // server upgrade happens per-accept in `accept_bound` (`accept_ws`
             // over the accepted stream), so the bind is the SAME `bind_tcp` the
             // `tcp` arm uses — only the `BoundListener` variant differs. With the
-            // backend off, `Ws` falls to the catch-all `Unsupported` below.
+            // backend off, a typed `Unsupported` (the same shape as the udp/quic
+            // arms), keeping the `Proto` match EXHAUSTIVE — the accept mirror of
+            // dial_locator's ws arm (R311y408 removed the Ip-arm catch-all).
             #[cfg(feature = "transport-link-ws")]
             Proto::Ws => Ok(BoundListener::Ws(
                 bind_tcp(ip.addr, ip.iface.as_deref()).await?,
+            )),
+            #[cfg(not(feature = "transport-link-ws"))]
+            Proto::Ws => Err(unsupported(
+                "ws acceptor requires the transport-link-ws feature",
             )),
             // R311y375 — a `tls/...` acceptor also LISTENS on plain TCP; the rustls
             // SERVER handshake runs per-accept in `accept_bound`, using the
@@ -1852,6 +1858,13 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     "tls acceptor requires AcceptConfig.tls (a server cert + key)",
                 )),
             },
+            // With the backend off, a typed `Unsupported` (the same shape as the
+            // udp/quic arms), keeping the `Proto` match EXHAUSTIVE — the accept
+            // mirror of dial_locator's tls not(feature) arm.
+            #[cfg(not(feature = "transport-link-tls"))]
+            Proto::Tls => Err(unsupported(
+                "tls acceptor requires the transport-link-tls feature",
+            )),
             // R311y382 — a `udp/...` acceptor binds the datagram socket on the
             // listen addr and spawns the demux pump (`bind_udp_demux`) into a
             // multi-peer `BoundListener::Udp`; `accept_raw` awaits each new src.
@@ -1909,9 +1922,14 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             Proto::QuicDatagram => Err(unsupported(
                 "quic-datagram acceptor requires the transport-link-quic-datagram feature",
             )),
-            other => Err(unsupported(&format!(
-                "{other:?} acceptor is a not-yet-wired extension point"
-            ))),
+            // R311y408 — the `Proto` match is EXHAUSTIVE: all 6 IP-family variants
+            // carry a feature + not(feature) arm, mirroring dial_locator. No
+            // catch-all — a NEW `Proto` variant forces a compile-time decision here
+            // (the fail-fast the once-present `other` arm silently absorbed).
+            // Adding the always-covered QuicDatagram arm exhausted the enum, which
+            // made that catch-all unreachable under any ws+tls build (a
+            // -D unreachable-patterns error the partial `--features quic-datagram`
+            // build never surfaced — the y408 feature-split lesson).
         },
         AnyLocator::Named {
             proto,
@@ -3800,6 +3818,39 @@ mod tests {
         assert!(
             listener.supports_mesh_multi_peer(),
             "a quic listener is mesh-capable (deferred-handshake split, R311y404)"
+        );
+        drop(listener);
+    }
+
+    /// R311y408 — the quic-DATAGRAM twin of `boundlistener_quic_is_mesh_capable`:
+    /// pins the BIND-time predicate `BoundListener::QuicDatagram(_) => true` at its
+    /// `true` polarity. The wildcard-free match compiler-forces the arm to EXIST but
+    /// not its VALUE, so a wrong `false` would make `run_router`/`run_peer`'s
+    /// bind-time mesh fail-fast wrongly reject a `--router quic-datagram/` bind with
+    /// no other test catching it (the sibling-asymmetry the tcp/unixpipe/quic pins
+    /// close). The `AcceptedLink::QuicDatagram` twin's `true` — consulted by the
+    /// accept loop's `Step::Accepted` backstop — is pinned separately by
+    /// `mesh_accept_loop_holds_two_quic_datagram_peers` in accept_loop.
+    #[cfg(feature = "transport-link-quic-datagram")]
+    #[tokio::test]
+    async fn boundlistener_quic_datagram_is_mesh_capable() {
+        use wz_runtime_tokio_test_support::localhost_cert_key_pem;
+        let (cert_pem, key_pem) = localhost_cert_key_pem();
+        let server_config = crate::quic_config::quic_server_config_from_pem(
+            cert_pem.as_bytes(),
+            key_pem.as_bytes(),
+            None,
+        )
+        .expect("build quic server config");
+        let ep = crate::quic_datagram_pipeline::bind_quic_datagram(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            server_config,
+        )
+        .expect("bind quic-datagram endpoint");
+        let listener = BoundListener::QuicDatagram(ep);
+        assert!(
+            listener.supports_mesh_multi_peer(),
+            "a quic-datagram listener is mesh-capable (deferred-handshake split, R311y408)"
         );
         drop(listener);
     }

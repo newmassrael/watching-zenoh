@@ -2636,6 +2636,71 @@ mod tests {
         opened.drain_to_close().await;
     }
 
+    /// R311y408 — the quic-DATAGRAM twin of [`quic_idle_initiator`]: dials a
+    /// `quic-datagram/<addr>` listener through the SAME cert-threaded
+    /// [`connect_and_open_session`] SSOT (`DialConfig.quic` — the datagram dial
+    /// reuses the reliable-quic client cert, exactly the `quic_datagram_e2e` dial
+    /// path), reaches Established over the RFC9221 unreliable-DATAGRAM link (NO
+    /// stream), and idles until `go`. Each initiator is a distinct client on the
+    /// SAME server-endpoint UDP socket, so the DEFERRED-handshake datagram acceptor
+    /// holds each as a DISTINCT ZID-keyed mesh face — the property
+    /// [`mesh_accept_loop_holds_two_quic_datagram_peers`] asserts. The shutdown
+    /// discipline is IDENTICAL to the reliable-quic initiator (gated on ALL
+    /// initiators reaching Established, never the acceptor's FaceUp), for the same
+    /// shared-UDP-socket teardown-race reason spelled out on [`quic_idle_initiator`].
+    #[cfg(feature = "transport-link-quic-datagram")]
+    #[allow(clippy::too_many_arguments)]
+    async fn quic_datagram_idle_initiator(
+        addr: SocketAddr,
+        cert_pem: String,
+        zid: u8,
+        up: Arc<AtomicUsize>,
+        n: usize,
+        go_tx: watch::Sender<bool>,
+        mut go: watch::Receiver<bool>,
+    ) {
+        use crate::quic_config::quic_client_config_from_pem;
+        use crate::session_open::{connect_and_open_session, DialConfig, QuicDialConfig};
+        use wz_session_core::locator::parse_any_locator;
+        let locator = parse_any_locator(&format!("quic-datagram/{addr}"))
+            .expect("parse quic-datagram locator");
+        let client_config = quic_client_config_from_pem(cert_pem.as_bytes(), None)
+            .expect("build quic client config");
+        let cfg = DialConfig::default().with_quic(QuicDialConfig {
+            client_config,
+            server_name: "localhost".to_string(),
+        });
+        let mut params = fixture_session_init_params();
+        params.zid = vec![zid; 4];
+        let mut opened = connect_and_open_session(
+            locator,
+            params,
+            &cfg,
+            TokioTime::new(),
+            Some(10_000),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("quic-datagram initiator reaches Established");
+
+        // See `quic_idle_initiator`: flip `go` only once ALL N are Established (the
+        // acceptor holds N faces by then), never on a per-initiator FaceUp, so the
+        // shared server-endpoint UDP socket is never torn down under an in-flight peer.
+        if up.fetch_add(1, SeqCst) + 1 == n {
+            let _ = go_tx.send(true);
+        }
+
+        let timeouts = SessionTimeouts::spec_defaults();
+        tokio::select! {
+            _ = go.wait_for(|&v| v) => {}
+            _ = drive_session_until_terminal(
+                &mut opened.inbound, &opened.actions, &mut opened.engine,
+                None, &opened.clock, &timeouts, |_e| {},
+            ) => {}
+        }
+        opened.drain_to_close().await;
+    }
+
     // ── tests ──────────────────────────────────────────────────────────
 
     /// The accept loop accepts N peers and holds all N faces concurrently
@@ -3044,6 +3109,120 @@ mod tests {
             rejects.load(SeqCst),
             0,
             "no reject: quic is a mesh-capable acceptor (R311y404 deferred split)"
+        );
+    }
+
+    /// R311y408 — the quic-DATAGRAM twin of [`mesh_accept_loop_holds_two_quic_peers`]:
+    /// the RFC9221 unreliable-datagram acceptor holds TWO ZID-keyed mesh faces off
+    /// ONE bound server endpoint. Binds a `quic-datagram/...` listener through the
+    /// real seam (`Proto::QuicDatagram` -> `BoundListener::QuicDatagram` given
+    /// `AcceptConfig.quic`), then two initiators dial the same endpoint and both
+    /// reach Established, held simultaneously (peak_concurrent == 2) with ZERO
+    /// `AcceptError`. THE DISCRIMINATOR for `supports_mesh_multi_peer == true` on the
+    /// QuicDatagram acceptor: if the `AcceptedLink::QuicDatagram` arm (consulted by
+    /// the `Step::Accepted` backstop) returned `false`, the loop would reject-
+    /// throttle-drop the SECOND accept — `rejects > 0`, `peak == 1`, `go` never
+    /// flips, timeout (RED). The deferred `complete_quic_datagram_accept` split
+    /// (R311y408, mirroring R311y404's reliable-quic split) is what runs the crypto
+    /// OFF the accept path so both peers land as faces. GATING: the accept_loop mod
+    /// is `routing-accept`-gated, so this test compiles only when the harness names
+    /// `routing-accept` alongside `transport-link-quic-datagram` (a bare
+    /// `transport-link-quic-datagram` build compiles the whole loop — and this test —
+    /// OUT). NON-FLAKY: shutdown is gated on ALL initiators reaching Established
+    /// ([`quic_datagram_idle_initiator`] flips `go`), NOT the acceptor's FaceUp —
+    /// datagram connections share one endpoint UDP socket, and loopback UDP is
+    /// lossless, so two clean handshakes are deterministic (the same assumption
+    /// `mesh_accept_loop_holds_two_udp_peers` / `quic_datagram_e2e` rely on).
+    /// [[feedback-no-flaky-ever]] [[feedback-flaky-rootcause-never-revert]]
+    #[cfg(feature = "transport-link-quic-datagram")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mesh_accept_loop_holds_two_quic_datagram_peers() {
+        use crate::quic_config::quic_server_config_from_pem;
+        use crate::session_open::{bind_locator, AcceptConfig, QuicAcceptConfig};
+        use wz_runtime_tokio_test_support::localhost_cert_key_pem;
+        use wz_session_core::locator::parse_any_locator;
+        const N: usize = 2;
+
+        // Self-signed `localhost` cert: the acceptor presents it, the clients trust
+        // the same PEM (the self-trust-anchor quic_datagram_e2e pattern). Datagrams
+        // reuse the SAME server cert as the reliable-quic backend.
+        let (cert_pem, key_pem) = localhost_cert_key_pem();
+        let server_config =
+            quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
+                .expect("build quic server config");
+
+        // Bind the mesh-capable quic-datagram acceptor through the real bind seam
+        // (`Proto::QuicDatagram` -> `BoundListener::QuicDatagram` given `AcceptConfig.quic`).
+        let accept_cfg = AcceptConfig::default().with_quic(QuicAcceptConfig { server_config });
+        let locator =
+            parse_any_locator("quic-datagram/127.0.0.1:0").expect("parse quic-datagram locator");
+        let listener = bind_locator(locator, &accept_cfg)
+            .await
+            .expect("bind a quic-datagram listener");
+        let addr = listener
+            .local_addr()
+            .expect("quic-datagram listener local addr");
+
+        // `go` flips when all N INITIATORS reach Established (each counts itself up;
+        // the last one sends), NOT on the acceptor's Nth FaceUp — the shared-endpoint
+        // teardown-race guard (see `quic_datagram_idle_initiator`). By then the
+        // acceptor holds all N faces (its per-face Established precedes the
+        // initiator's), so `peak_concurrent == N` is already recorded at shutdown.
+        let (go_tx, go_rx) = watch::channel(false);
+        let up = Arc::new(AtomicUsize::new(0));
+        let rejects = Arc::new(AtomicUsize::new(0));
+        let on_event = {
+            let rejects = rejects.clone();
+            move |event: &AcceptEvent| {
+                if let AcceptEvent::AcceptError(_) = event {
+                    rejects.fetch_add(1, SeqCst);
+                }
+            }
+        };
+        let acceptor = accept_loop(
+            listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+        let initiators = (0..N).map(|i| {
+            quic_datagram_idle_initiator(
+                addr,
+                cert_pem.clone(),
+                (i as u8) + 1,
+                up.clone(),
+                N,
+                go_tx.clone(),
+                go_rx.clone(),
+            )
+        });
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (summary, _) = tokio::join!(acceptor, join_all(initiators));
+            summary
+        })
+        .await
+        .expect("multi-peer quic-datagram accept completes within 20s");
+
+        assert_eq!(
+            summary.accepted, N,
+            "accepted both quic-datagram peers (a genuine per-peer connection accept)"
+        );
+        assert_eq!(
+            summary.established, N,
+            "both quic-datagram peers reached Established"
+        );
+        assert_eq!(
+            summary.peak_concurrent, N,
+            "held both quic-datagram faces simultaneously (deferred-handshake ZID-keyed mesh face)"
+        );
+        assert_eq!(
+            rejects.load(SeqCst),
+            0,
+            "no reject: quic-datagram is a mesh-capable acceptor (R311y408 deferred split)"
         );
     }
 
