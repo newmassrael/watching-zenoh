@@ -207,9 +207,26 @@ fn locators_from_wire(locators: Option<Vec<LocatorOwned>>) -> Option<Vec<String>
 /// Both `Zid` and the old `Vec<u8>` agree with zenoh for every CANONICAL wire
 /// zid, because zenoh's codec trims trailing zeros (`size()`), so a received
 /// zid never has a trailing-zero byte — the only inputs where a zero-extended
-/// prefix could order differently. A non-canonical self zid (a handshake
-/// `Vec<u8>` with a trailing zero) is the one latent corner; the handshake
-/// supplies canonical zids, so it is unreachable today.
+/// prefix could order differently.
+///
+/// R311y411: that "latent corner" — a non-canonical SELF zid carrying a trailing
+/// zero — was NOT unreachable, and the cost of assuming it was is recorded here.
+/// `wz-ap-demo` derives its mesh zid from its listen PORT, so an ephemeral port
+/// whose low byte is `0x00` (1 in 256) produced a 4-byte self zid ending in zero.
+/// The peer announced it, zenohd canonicalised it to 3 bytes on the wire, and the
+/// LinkStateList flood came back carrying the TRIMMED form — which no longer
+/// compared equal to self. The node then entered its OWN topology graph as a
+/// phantom third peer with no edges, and the spanning-tree next-hop computation
+/// silently stopped forwarding: a wz `--publish` peer's data never left the box.
+/// Measured at 5 failures in 184 mesh-lane runs, every one of them with a
+/// zero-low-byte port.
+///
+/// So [`from_slice`](Self::from_slice) now CANONICALISES — trailing zero bytes are
+/// trimmed on construction, exactly as `uhlc::ID::size()` computes significance
+/// (`MAX_SIZE - leading_zeros(u128::from_le_bytes(..))/8`, uhlc-0.8.1 `src/id.rs:67`,
+/// which is what zenoh's `ZenohIdProto` wraps). Identity is therefore the VALUE, not
+/// the byte count the caller happened to pass, and the ordering equivalence above
+/// holds unconditionally rather than only for canonical inputs.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Zid {
     bytes: [u8; 16],
@@ -220,18 +237,30 @@ impl Zid {
     /// The maximum zid length (zenoh `ZenohIdProto::MAX_SIZE`).
     pub const MAX_SIZE: usize = 16;
 
-    /// From TRUSTED, already-canonical bytes — this node's own zid, or a
-    /// handshake neighbour's — infallible, truncated to 16 and canonically
-    /// zero-padded. For an UNTRUSTED zid decoded off the wire use the
-    /// validating `TryFrom<&[u8]>` / `TryFrom<Vec<u8>>` instead, which reject an
-    /// empty / all-zero / oversized one rather than silently admitting or
-    /// truncating it. A slice longer than 16 is truncated defensively (the wire
-    /// ingest already rejects an oversized zid via `TryFrom` before it reaches
-    /// here).
+    /// From TRUSTED bytes — this node's own zid, or a handshake neighbour's —
+    /// infallible, truncated to 16, zero-padded, and CANONICALISED: trailing zero
+    /// bytes do not count toward the length, so `[0x70, 0x72, 0x83, 0x00]` and
+    /// `[0x70, 0x72, 0x83]` are the SAME zid. That is the identity rule of the
+    /// canonical impl (`uhlc::ID::size()` counts significant LE bytes, and zenoh's
+    /// `ZenohIdProto` is a transparent wrapper over it), so a zid that survives a
+    /// round trip through the wire — where zenoh trims — still compares equal to
+    /// the one this node started with. Constructing without trimming is what let a
+    /// node fail to recognise ITSELF in a link-state flood (see the type doc).
+    ///
+    /// For an UNTRUSTED zid decoded off the wire use the validating
+    /// `TryFrom<&[u8]>` / `TryFrom<Vec<u8>>` instead, which reject an empty /
+    /// all-zero / oversized one rather than silently admitting or truncating it. A
+    /// slice longer than 16 is truncated defensively (the wire ingest already
+    /// rejects an oversized zid via `TryFrom` before it reaches here).
     pub fn from_slice(src: &[u8]) -> Self {
         let mut bytes = [0u8; 16];
-        let len = src.len().min(Self::MAX_SIZE);
-        bytes[..len].copy_from_slice(&src[..len]);
+        let copied = src.len().min(Self::MAX_SIZE);
+        bytes[..copied].copy_from_slice(&src[..copied]);
+        // Canonical length = significant LE bytes, i.e. trailing zeros trimmed.
+        let len = bytes[..copied]
+            .iter()
+            .rposition(|&b| b != 0)
+            .map_or(0, |i| i + 1);
         Zid {
             bytes,
             len: len as u8,
@@ -1755,14 +1784,22 @@ mod tests {
     }
 
     #[test]
-    fn zid_ord_matches_vec_u8_ord_including_zero_extended_prefixes() {
-        // F2 (session-review): the canonical zero-padding makes the derived Zid
-        // Ord byte-for-byte identical to the trimmed Vec<u8> ordering it
-        // replaced. This is LOAD-BEARING for the cross-impl edge-jitter
-        // tie-break (update_edge orders the pair by Ord, then hashes le16) and
-        // was previously asserted only in prose. The decisive cases are
-        // zero-extended prefixes — where the [u8;16] bytes compare equal and the
-        // `len` field must break the tie the same way Vec<u8> does.
+    fn zid_ord_matches_zenoh_le16_ordering_and_folds_zero_extension() {
+        // F2 (session-review): Zid Ord is LOAD-BEARING for the cross-impl
+        // edge-jitter tie-break (update_edge orders the pair by Ord, then hashes
+        // le16), so it must agree with the peer that participates in that
+        // tie-break: ZENOH. `ZenohIdProto` is a transparent wrapper over
+        // `uhlc::ID`, whose Ord is lexicographic over the 16-byte LE array — so
+        // that array, not a `Vec<u8>` of the bytes the caller passed, is the
+        // reference this pins against.
+        //
+        // R311y411 retired the previous `Vec<u8>` proxy. It agreed with zenoh for
+        // every canonical zid but diverged on zero-extended prefixes, where it
+        // ordered `[1]` BEFORE `[1, 0]` — treating them as two identities. zenoh
+        // treats them as ONE (`ID::size()` counts significant LE bytes), and
+        // `from_slice` now canonicalises to match; a node that got this wrong
+        // could not recognise its own zid coming back off the wire (see the Zid
+        // type doc for the failure it caused).
         let cases: &[&[u8]] = &[
             &[1],
             &[1, 0],
@@ -1777,14 +1814,15 @@ mod tests {
             for b in cases {
                 assert_eq!(
                     Zid::from_slice(a).cmp(&Zid::from_slice(b)),
-                    a.to_vec().cmp(&b.to_vec()),
-                    "Zid Ord must match Vec<u8> Ord for {a:?} vs {b:?}"
+                    Zid::from_slice(a).le16().cmp(&Zid::from_slice(b).le16()),
+                    "Zid Ord must match zenoh's 16-byte LE ordering for {a:?} vs {b:?}"
                 );
             }
         }
-        // the specific prefix tie-break the invariant rests on.
-        assert!(Zid::from_slice(&[1]) < Zid::from_slice(&[1, 0]));
+        // A zero-extended prefix is the SAME identity, not an adjacent one.
+        assert_eq!(Zid::from_slice(&[1]), Zid::from_slice(&[1, 0]));
         assert!(Zid::from_slice(&[1, 0]) < Zid::from_slice(&[1, 5]));
+        assert!(Zid::from_slice(&[1, 9]) < Zid::from_slice(&[1, 9, 3]));
     }
 
     #[test]
@@ -1858,12 +1896,15 @@ mod tests {
         let z = Zid::from_slice(&[0x1a, 0x2b, 0x0c]);
         assert_eq!(z.to_string(), "1a2b0c");
         assert_eq!(format!("{z:?}"), "Zid(1a2b0c)");
-        // a zero byte within the trimmed length is preserved (no integer-style
+        // A zero byte INSIDE the identity is preserved (no integer-style
         // stripping) and the order is NOT reversed — the deliberate divergence
         // from zenoh's u128 ZenohIdProto::Display, which would render the first
-        // zid "c2b1a" and this one "1".
-        let lead0 = Zid::from_slice(&[0x01, 0x00]);
-        assert_eq!(lead0.to_string(), "0100");
+        // zid "c2b1a".
+        let inner0 = Zid::from_slice(&[0x01, 0x00, 0x02]);
+        assert_eq!(inner0.to_string(), "010002");
+        // A TRAILING zero is not part of the identity at all (R311y411
+        // canonicalisation), so it is not rendered — `[0x01, 0x00]` IS `[0x01]`.
+        assert_eq!(Zid::from_slice(&[0x01, 0x00]).to_string(), "01");
     }
 
     #[test]
@@ -3546,6 +3587,70 @@ mod tests {
         assert!(
             b.edge_weight(&zid(0x0A), &zid(0x0B)).is_some(),
             "the A<->B edge formed from wire-decoded links"
+        );
+    }
+
+    /// R311y411 — a zid is its VALUE, not the byte count the caller passed.
+    ///
+    /// `wz-ap-demo` derives its mesh zid from its listen port, so a port with a
+    /// `0x00` low byte yields `[0x70, 0x72, hi, 0x00]`. zenoh trims trailing zeros
+    /// on the wire (`uhlc::ID::size()`), so that zid comes BACK from a neighbour's
+    /// LinkStateList as 3 bytes. Before this round the two forms were different
+    /// values, so the node did not recognise ITSELF and entered its own graph as a
+    /// phantom peer — which silently broke spanning-tree forwarding.
+    #[test]
+    fn zid_from_slice_canonicalises_trailing_zero_bytes() {
+        let padded = Zid::from_slice(&[0x70, 0x72, 0x83, 0x00]);
+        let trimmed = Zid::from_slice(&[0x70, 0x72, 0x83]);
+        assert_eq!(padded.len(), 3, "a trailing zero byte is not significant");
+        assert_eq!(
+            padded, trimmed,
+            "the padded and wire-trimmed forms must be the SAME zid — a node that \
+             fails this cannot recognise itself in a link-state flood"
+        );
+        assert_eq!(padded.as_slice(), trimmed.as_slice());
+        // Hash agreement matters too: the graph keys nodes by zid.
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(padded);
+        assert!(
+            set.contains(&trimmed),
+            "the two forms must hash alike, or a HashMap-keyed graph stores both"
+        );
+        // Multiple trailing zeros, and the interior zero that must SURVIVE.
+        assert_eq!(Zid::from_slice(&[0x01, 0x00, 0x00, 0x00]).len(), 1);
+        assert_eq!(
+            Zid::from_slice(&[0x01, 0x00, 0x02]).len(),
+            3,
+            "interior zero is significant"
+        );
+        // All-zero has no significant bytes; the validating ctor rejects it outright.
+        assert_eq!(Zid::from_slice(&[0x00, 0x00]).len(), 0);
+        assert!(Zid::try_from(&[0x00u8, 0x00][..]).is_err());
+    }
+
+    /// R311y411 — the graph consequence of the rule above: ingesting a link-state
+    /// that names SELF in its wire-trimmed form must not add a second node.
+    ///
+    /// This is the shape the flake took end to end — the node's own zid arrived
+    /// back trimmed inside a neighbour's flood, and a non-canonical self zid made
+    /// it a stranger.
+    #[test]
+    fn self_zid_arriving_wire_trimmed_is_not_a_second_node() {
+        // Self, built the way a port-derived demo zid is: trailing zero byte.
+        let me = Zid::from_slice(&[0x70, 0x72, 0x83, 0x00]);
+        let net = LinkstateNetwork::new(me, WhatAmI::Peer);
+        assert_eq!(net.node_count(), 1, "self only");
+        // The SAME identity as it comes back off the wire (zenoh trimmed it).
+        let from_wire = Zid::try_from(&[0x70u8, 0x72, 0x83][..]).expect("canonical wire zid");
+        assert_eq!(
+            net.node_count(),
+            1,
+            "the wire form of self must not be a new node"
+        );
+        assert_eq!(
+            from_wire, me,
+            "self recognition is what keeps the spanning-tree next-hop correct"
         );
     }
 }

@@ -5776,15 +5776,20 @@ layer_z_zenohd_interop() {
     # to a pico z_sub; (6) a TRANSPORT neuter -- the SAME endpoint/cert dialed WITHOUT
     # `?rel=0` (reliable quic) never brings a face up (`served 0 peer(s)`), which is
     # what pins legs 1-5 to the DATAGRAM data plane (the mesh listen line carries no
-    # transport tag). STOCK zenohd (transport_quic_datagram is a zenoh default) + the
-    # pico z_pub/z_sub CLIs; the demo carries `quic-datagram` + `router-hat-router`
+    # transport tag); (7) a REGRESSION leg pinning a peer whose zid ends in a ZERO
+    # BYTE -- the deterministic form of a Zid-canonicalisation bug this lane exposed
+    # (a self zid arriving back wire-trimmed became a phantom node and silently broke
+    # spanning-tree forwarding; 6 failures in 250 runs, every one a zero-low-byte
+    # port). STOCK zenohd (transport_quic_datagram is a zenoh default) + the pico
+    # z_pub/z_sub CLIs; the demo carries `quic-datagram` + `router-hat-router`
     # (pulls routing-peer for --peer), built above -- NO build-line change.
-    # Count-guarded (`6 passed`, the y401 precedent) so a dropped `#[ignore]` on any
-    # leg (fewer selected -> exit 0) reddens instead of silently passing. Same
+    # Count-guarded and ANCHORED (`^test result: ok. 7 passed`) so a dropped
+    # `#[ignore]` (fewer selected) AND a FAILED result line both redden -- the
+    # unanchored sibling form matches `FAILED. N passed; 1 failed`. Same
     # --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_mesh_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -q '6 passed') || return 1
+        | tee /dev/stderr | grep -qE '^test result: ok\. 7 passed') || return 1
     # R311y376 — wz ROUTER ws ACCEPTOR cross-impl (accept-symmetry Stage 3): the
     # MULTI-PEER accept loop (`--router` / peer_loop, not just one-shot `--listen`)
     # now accepts a foreign non-tcp face. A real zenohd DIALS the wz `--router

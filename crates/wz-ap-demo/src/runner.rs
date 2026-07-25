@@ -3199,6 +3199,9 @@ async fn run_router_hat_until(
     // S3 sub-plane reachability barrier latch.
     #[cfg(feature = "router-multicast-faces")]
     let mut announced_mcast_group_subs = false;
+    // R311y411 — ingest-witness latch, the router-hat twin of the peer loop's
+    // `announced_ingest`. See its use below for why the router tier needs one.
+    let mut announced_ingest = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -3231,6 +3234,24 @@ async fn run_router_hat_until(
                 if routers > last_announced_routers {
                     last_announced_routers = routers;
                     log::info!("wz-ap-demo router-hat: routers-net converged ({routers} node(s))");
+                }
+                // R311y411 — INGEST witness, mirroring the peer loop's (this loop had
+                // none). `routers-net converged` above rises on `add_link` from the
+                // INIT-derived zid+whatami, i.e. it is HANDSHAKE-satisfiable and says
+                // nothing about the link-state WIRE. But the shutdown summary's
+                // `learned mesh topology` is gated on `forwarder.ingested() > 0`, which
+                // only rises inside `ingest_inbound_linkstate_tier` — a real
+                // `LinkStateList` decode. A topology e2e that settles on convergence
+                // and then terminates can therefore race the flood and lose a witness
+                // it already earned. This is the deterministic post-ingest barrier that
+                // closes that window, and it matters most on an UNRELIABLE link
+                // (quic-datagram), where a missed flood is never retransmitted.
+                if !announced_ingest && forwarder.ingested() > 0 {
+                    announced_ingest = true;
+                    log::info!(
+                        "wz-ap-demo router-hat: ingested neighbour link-state ({} so far)",
+                        forwarder.ingested()
+                    );
                 }
                 // Transit witness: a Push crossed this router. The peers know only
                 // THIS router's address (no autoconnect), so a rise proves the data

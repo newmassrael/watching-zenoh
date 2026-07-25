@@ -591,6 +591,103 @@ pub mod common {
         }
     }
 
+    /// The LIVENESS-AWARE capture wait (R311y411): poll the captured tempfile until
+    /// `extract` yields a value, but ALSO poll the spawned child, and give up the
+    /// instant the child is a corpse instead of burning the whole budget.
+    ///
+    /// [`wait_for_substring`] has no `try_wait`, so a child that dies at 0.1s still
+    /// costs its caller the full timeout — and the caller then has to GUESS why,
+    /// because the exit status was never collected. That is the same defect
+    /// [`wait_for_tcp_accept_alive`] already fixed for the accept probe, and it is
+    /// the reason [`ZENOHD_TCP_ACCEPT_BUDGET`] is documented as safe to make large:
+    /// the full budget should only ever elapse for a genuinely-alive-but-not-yet-
+    /// ready process, never a corpse. A log-line wait needs the same guarantee, so
+    /// it gets the same shape.
+    ///
+    /// `extract` returns `None` for "not readable yet", which folds the retry for a
+    /// partially-written line into the same loop as the liveness check — see
+    /// [`parse_announced_tcp_port`], whose terminator requirement depends on being
+    /// re-polled rather than accepted early.
+    ///
+    /// `what` names the awaited thing for the error text. `Err` carries a diagnosis:
+    /// either the child's real `ExitStatus` (a corpse — the actionable case, e.g. a
+    /// malformed `--config` aborting the process) or the timeout note, plus the
+    /// captured output so the caller can surface it.
+    pub fn wait_for_capture_alive<T>(
+        child: &mut Child,
+        file: &mut File,
+        budget: Duration,
+        what: &str,
+        mut extract: impl FnMut(&str) -> Option<T>,
+    ) -> Result<T, String> {
+        let deadline = Instant::now() + budget;
+        loop {
+            let captured = read_captured(file);
+            if let Some(value) = extract(&captured) {
+                return Ok(value);
+            }
+            // Liveness BEFORE the deadline check: a corpse is terminal, so there is
+            // nothing left to wait for. The capture is re-read first (above) so
+            // output the child flushed just before dying is not lost to the race.
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "process exited before {what} (status: {status})\n\
+                         --- captured output ---\n{captured}"
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(format!(
+                        "try_wait on the spawned child failed while waiting for \
+                         {what}: {e}"
+                    ));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "did not reach {what} within {budget:?} (process still alive — \
+                     genuinely slow, or hung)\n--- captured output ---\n{captured}"
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Extract the port from zenohd's `Zenoh can be reached at: tcp/127.0.0.1:<port>`
+    /// announcement (R311y411). Pure so it is unit-testable without a zenohd.
+    ///
+    /// Requires a TERMINATING non-digit after the port. A capture file can in
+    /// principle be read mid-write, and accepting a digit run that ends at
+    /// end-of-capture would silently yield a TRUNCATED port (`337` for `33763`) —
+    /// which is worse than any error, because the caller would then probe a port
+    /// nobody is listening on and blame the child. zenohd writes the line with its
+    /// trailing newline in one `write(2)`, so demanding the terminator costs nothing
+    /// on the real path and closes the torn-read hole by construction.
+    ///
+    /// Returns `None` when the needle is absent, when no digits follow it, when the
+    /// digits are unterminated, or when they do not parse as a `u16`.
+    pub fn parse_announced_tcp_port(captured: &str, needle: &str) -> Option<u16> {
+        let rest = captured.split(needle).nth(1)?;
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() || digits.len() == rest.len() {
+            // Unterminated: the capture ended inside (or exactly at the end of) the
+            // digit run, so the port may be truncated. Treat as not-yet-readable.
+            return None;
+        }
+        digits.parse().ok()
+    }
+
+    /// The `RUST_LOG` filter the spawned `wz-ap-demo` children run with. `info` is the
+    /// level every witness this crate asserts on is logged at, so it is the default —
+    /// but a hardcoded level is also what blocks a diagnostic run: the topology
+    /// witnesses report COUNTS (`peak 3 node(s)`), while the identity of a node and
+    /// the locators it advertised are `debug` (`linkstate_forward`'s "discovered peer
+    /// {zid} reachable at {locators}"). `WZ_TEST_DEMO_LOG` lets an investigation raise
+    /// it without editing the harness.
+    pub fn demo_log_filter() -> String {
+        std::env::var("WZ_TEST_DEMO_LOG").unwrap_or_else(|_| "info".to_string())
+    }
     /// RAII guard for a spawned `std::process::Child` that guarantees
     /// the process is killed + reaped even if the calling test panics
     /// between `spawn()` and the explicit cleanup line. R305 retires
@@ -688,7 +785,7 @@ pub mod common {
                 .arg(addr)
                 .arg("--key")
                 .arg(key)
-                .env("RUST_LOG", "info")
+                .env("RUST_LOG", demo_log_filter())
                 .stdout(Stdio::null())
                 .stderr(Stdio::from(writer))
                 .spawn()
@@ -745,7 +842,7 @@ pub mod common {
             label,
             Command::new(demo)
                 .args(args)
-                .env("RUST_LOG", "info")
+                .env("RUST_LOG", demo_log_filter())
                 .stdout(Stdio::null())
                 .stderr(Stdio::from(writer))
                 .spawn()
@@ -1349,16 +1446,24 @@ pub mod common {
     ///
     /// The sibling dialer helpers take a caller-CHOSEN `tcp_port`, and every
     /// acceptor-direction caller derives it arithmetically from the wz listen port
-    /// (`wz_port.wrapping_add(1)`), on the reasoning that a UDP and a TCP port live in
-    /// different protocol namespaces so they cannot collide. That reasoning is
-    /// incomplete: it rules out a collision with wz's OWN socket, not with the rest of
-    /// the machine. `wz_port + 1` is an ordinary port in the ephemeral range, and any
+    /// (`wz_port.wrapping_add(1)`). The quic-family callers justify that in-comment by
+    /// "a UDP and a TCP port live in different protocol namespaces, so they cannot
+    /// collide" (the ws/tls callers give a different reason, or none — and there the
+    /// wz port is itself TCP, so the namespace argument never applied at all). Either
+    /// way the conclusion does not hold: it rules out a collision with wz's OWN socket,
+    /// not with the rest of the machine. `wz_port + 1` is an ordinary port in the ephemeral range, and any
     /// other process — including a client socket opened moments earlier by this same
     /// test lane — may already hold it. When it does, zenohd logs `Address already in
     /// use (os error 98)` and exits **255** before accepting, and the readiness probe
     /// fails with "process exited before accepting". Measured on this workspace at
     /// R311y411: 1 failure in 30 consecutive runs of a 6-leg lane, reproduced
     /// deterministically by binding the derived port before the spawn.
+    ///
+    /// The rate is not the ~0.003% a uniform-random collision would give: the
+    /// amplifier is TIME_WAIT. zenohd does not set `SO_REUSEADDR` on its listener, so
+    /// every client socket this lane opens and closes leaves its ephemeral port
+    /// unbindable for ~60s, and the derived port lands in exactly that range. A
+    /// campaign accumulates hundreds of them.
     ///
     /// There is no way to hand a child process a port that is guaranteed free — a
     /// reserve-then-release helper only narrows the same TOCTOU window. So this helper
@@ -1386,6 +1491,14 @@ pub mod common {
         let mut reader = stdout;
         let mut command = Command::new(zenohd_binary());
         command
+            // PIN the log level. This helper is the only one in the crate that reads
+            // zenohd's LOG rather than probing its socket, so the announcement it
+            // parses is a functional dependency, not diagnostics: zenohd builds its
+            // filter with `EnvFilter::try_from_default_env()`, so an inherited
+            // `RUST_LOG=warn` silently filters the line away and every leg then burns
+            // its full budget on a healthy process. `spawn_on_ephemeral_port` pins the
+            // same variable for the wz demo for the same reason.
+            .env("RUST_LOG", "z=info")
             .arg("-e")
             .arg(dial_locator)
             .arg("-l")
@@ -1402,31 +1515,24 @@ pub mod common {
             label,
             command.spawn().expect("spawn zenohd ephemeral-tcp dialer"),
         );
-        let captured = wait_for_substring(&mut reader, LISTEN_LINE, ZENOHD_TCP_ACCEPT_BUDGET)
-            .unwrap_or_else(|c| {
-                panic!(
-                    "{label}: never announced a bound tcp listener within \
-                     {ZENOHD_TCP_ACCEPT_BUDGET:?} — it could not start (a bad --config \
-                     or a missing trust anchor exits it before the listen)\n\
-                     --- zenohd stdout ---\n{c}"
-                )
-            });
-        let port: u16 = captured
-            .split(LISTEN_LINE)
-            .nth(1)
-            .and_then(|rest| {
-                rest.chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect::<String>()
-                    .parse()
-                    .ok()
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "{label}: announced a tcp listener but its port did not parse — the \
-                     zenohd log format changed\n--- zenohd stdout ---\n{captured}"
-                )
-            });
+        // LIVENESS-AWARE: a zenohd that dies at startup (bad --config, unreadable
+        // trust anchor) reports its real ExitStatus here in milliseconds instead of
+        // costing the full budget and leaving the caller to guess the cause.
+        let port = wait_for_capture_alive(
+            guard.child_mut(),
+            &mut reader,
+            ZENOHD_TCP_ACCEPT_BUDGET,
+            "announcing its bound tcp listener",
+            |captured| parse_announced_tcp_port(captured, LISTEN_LINE),
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "{label}: {e}\n\
+                 (if the process is alive and the capture looks empty, the announcement \
+                 was filtered out of zenohd's log — this helper pins RUST_LOG=z=info for \
+                 exactly that reason, so a hit here means the log FORMAT moved)"
+            )
+        });
         if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET)
         {
             panic!("{label}: {e}");
@@ -2001,7 +2107,7 @@ pub mod common {
                 .arg("wz/zenohd/readiness-probe")
                 .arg("--value")
                 .arg("ready")
-                .env("RUST_LOG", "info")
+                .env("RUST_LOG", demo_log_filter())
                 .stdout(Stdio::null())
                 .stderr(Stdio::from(probe_writer))
                 .spawn()
@@ -2357,6 +2463,141 @@ mod tests {
             "zenohd TCP-accept budget {ZENOHD_TCP_ACCEPT_BUDGET:?} must keep \
              headroom over the 10.07s bind that flaked R311y376; a revert toward \
              10s reopens it"
+        );
+    }
+
+    /// R311y411 — the port parser must REFUSE an unterminated digit run.
+    ///
+    /// A capture file can be read while the child is mid-write. Accepting a digit
+    /// run that ends at end-of-capture would hand back a TRUNCATED port (`337` for
+    /// `33763`), and the caller would then probe a port nobody is listening on and
+    /// blame the child. The parser therefore demands a terminating non-digit; this
+    /// pins that, since a torn read is exactly the case a live run does not produce.
+    #[test]
+    fn parse_announced_tcp_port_refuses_an_unterminated_digit_run() {
+        use super::common::parse_announced_tcp_port;
+        const NEEDLE: &str = "Zenoh can be reached at: tcp/127.0.0.1:";
+
+        // Complete line (the real shape: zenohd writes it with its trailing \n).
+        assert_eq!(
+            parse_announced_tcp_port(&format!("INFO {NEEDLE}33763\n"), NEEDLE),
+            Some(33763),
+            "a terminated port must parse"
+        );
+        // TORN: the write is observed mid-digits. Truncating to 337 would be worse
+        // than any error, so the parser must report not-yet-readable instead.
+        assert_eq!(
+            parse_announced_tcp_port(&format!("INFO {NEEDLE}337"), NEEDLE),
+            None,
+            "an unterminated digit run must NOT yield a truncated port"
+        );
+        // Torn exactly at the colon: no digits at all.
+        assert_eq!(
+            parse_announced_tcp_port(&format!("INFO {NEEDLE}"), NEEDLE),
+            None,
+            "the needle with no digits must not parse"
+        );
+        // The needle never appeared.
+        assert_eq!(
+            parse_announced_tcp_port("INFO some other line\n", NEEDLE),
+            None,
+            "an absent needle must not parse"
+        );
+        // Out of u16 range -> refuse rather than wrap.
+        assert_eq!(
+            parse_announced_tcp_port(&format!("INFO {NEEDLE}70000\n"), NEEDLE),
+            None,
+            "a port outside u16 must not parse"
+        );
+    }
+
+    /// R311y411 — the liveness-aware capture wait must report a CORPSE in
+    /// milliseconds, not burn its budget.
+    ///
+    /// `wait_for_substring` has no `try_wait`, so a child that dies at startup
+    /// costs the caller the full timeout and the caller must then GUESS the cause.
+    /// This pins the fixed behaviour: a real exit status, promptly, with the
+    /// captured output attached. `sh -c 'exit 3'` stands in for the real case (a
+    /// zenohd aborting on a malformed `--config`) with no external binary.
+    #[test]
+    fn wait_for_capture_alive_reports_a_corpse_instead_of_waiting() {
+        use super::common::wait_for_capture_alive;
+        use std::process::{Command, Stdio};
+
+        let capture = tempfile::tempfile().expect("tempfile for child capture");
+        let writer = capture.try_clone().expect("dup capture handle");
+        let mut reader = capture;
+        let mut child = Command::new("sh")
+            .args(["-c", "echo starting; exit 3"])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the corpse stand-in");
+
+        let budget = Duration::from_secs(30);
+        let started = Instant::now();
+        let outcome: Result<(), String> = wait_for_capture_alive(
+            &mut child,
+            &mut reader,
+            budget,
+            "a line that never comes",
+            |captured| captured.contains("NEVER").then_some(()),
+        );
+        let elapsed = started.elapsed();
+        let _ = child.wait();
+
+        let err = outcome.expect_err("a dead child cannot produce the needle");
+        assert!(
+            err.contains("exit status: 3"),
+            "the error must carry the child's REAL exit status (the signal that \
+             diagnoses a startup failure), got: {err}"
+        );
+        assert!(
+            err.contains("starting"),
+            "the error must carry the captured output, got: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "a corpse must be reported promptly, not after the {budget:?} budget; \
+             took {elapsed:?}"
+        );
+    }
+
+    /// R311y411 — and the same wait must still return the extracted value for a
+    /// LIVE child, polling until the line is complete (the twin of the corpse pin
+    /// above: a fail-fast that also fails the happy path proves nothing).
+    #[test]
+    fn wait_for_capture_alive_extracts_from_a_live_child() {
+        use super::common::{parse_announced_tcp_port, wait_for_capture_alive};
+        use std::process::{Command, Stdio};
+        const NEEDLE: &str = "reached at: tcp/127.0.0.1:";
+
+        let capture = tempfile::tempfile().expect("tempfile for child capture");
+        let writer = capture.try_clone().expect("dup capture handle");
+        let mut reader = capture;
+        // Announce only after a delay, so the wait genuinely polls; then stay alive.
+        let child = Command::new("sh")
+            .args([
+                "-c",
+                "sleep 0.3; echo \"reached at: tcp/127.0.0.1:41059\"; sleep 30",
+            ])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the live stand-in");
+        let mut guard = ChildGuard::wrap("live capture stand-in", child);
+
+        let port = wait_for_capture_alive(
+            guard.child_mut(),
+            &mut reader,
+            Duration::from_secs(30),
+            "announcing its port",
+            |captured| parse_announced_tcp_port(captured, NEEDLE),
+        );
+        assert_eq!(
+            port,
+            Ok(41059),
+            "the wait must return the announced port for a live child"
         );
     }
 }

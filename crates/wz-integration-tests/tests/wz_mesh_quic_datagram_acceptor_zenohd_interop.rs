@@ -127,8 +127,12 @@
 //! one-shot leg does: zenoh implements no ARQ, and a QUIC DATAGRAM frame is never
 //! retransmitted, so a dropped `LinkStateList` flood would simply never arrive (the
 //! control-plane legs are single-flood, fire-and-forget). The data legs are
-//! self-healing by construction — the pico `z_pub` burst is 30 Puts and wz's
-//! `--publish` peer emits one per app tick — but the control-plane legs are not.
+//! self-healing only for the PAYLOAD — the pico `z_pub` burst is 30 Puts and wz's
+//! `--publish` peer emits one per app tick — but NOT for the subscription DECLARE that
+//! precedes them: a `--subscribe` peer declares its interest ONCE (runner.rs), and
+//! re-advertisement is event-driven off a tree recompute, not periodic. Lose the
+//! Declare and all 30 Puts are correctly dropped. So no leg here is fully self-healing;
+//! the control-plane legs simply have no redundancy at all.
 //! This is the same loopback-lossless precedent as `mesh_accept_loop_holds_two_udp_
 //! peers` / `quic_datagram_e2e` / the y408 acceptor leg, stated here rather than
 //! assumed. The 15s witness budgets are NOT a loss mitigation (a lost datagram never
@@ -380,6 +384,25 @@ fn wz_router_hat_federates_with_a_quic_datagram_dialing_zenohd() {
         "router-hat: routers-net converged (2 node(s))",
         Duration::from_secs(15),
     );
+    // BARRIER (R311y411): settle on the INGEST witness before terminating. Witness #2
+    // below reads the shutdown summary's `learned mesh topology`, which is gated on
+    // `forwarder.ingested() > 0` — a real `LinkStateList` decode. Convergence alone is
+    // handshake-satisfiable and can precede the flood by an app tick, so terminating on
+    // it races a witness this leg has already earned. Legs 2/3 settle on their own
+    // post-ingest barriers for exactly this reason; the router-hat loop grew the
+    // matching in-run witness in R311y411 so this leg can too. On an UNRELIABLE link a
+    // lost flood is never retransmitted, so the budget is scheduler slack, not a retry.
+    let ingested = if converged.is_ok() {
+        wait_for_substring(
+            &mut wz_reader,
+            "router-hat: ingested neighbour link-state",
+            Duration::from_secs(15),
+        )
+    } else {
+        // Convergence already failed; its panic below is the report. Do not spend a
+        // second budget waiting for a flood that cannot arrive.
+        Err(String::new())
+    };
 
     // Graceful shutdown so wz logs its `learned mesh topology` summary.
     graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
@@ -396,6 +419,14 @@ fn wz_router_hat_federates_with_a_quic_datagram_dialing_zenohd() {
              --- wz mesh quic-datagram router-hat stderr ---\n{c}"
         )
     });
+    assert!(
+        ingested.is_ok(),
+        "wz --router-hat converged its router tier over quic-datagram but never logged \
+         the in-run `ingested neighbour link-state` witness within 15s — no \
+         `LinkStateList` flood was decoded, so witness #2 below could only pass by \
+         accident of timing\n\
+         --- wz mesh quic-datagram router-hat stderr ---\n{wz_captured}"
+    );
     // Cross-impl witness #2 (load-bearing): wz DECODED >=1 of zenohd's `LinkStateList`
     // OAM floods carried in RFC9221 datagram frames (`forwarder.ingested() > 0`).
     // Convergence is handshake-satisfiable; THIS is what a `LinkStateList` codec
@@ -588,8 +619,9 @@ fn wz_peer_receives_pico_data_across_a_quic_datagram_mesh_link() {
     // Barrier: the mesh converged over datagrams (wz formed the mutual edge). Only then
     // has wz's subscription had a mesh to advertise across, so zenohd can route a
     // publisher's Put back to it. The 30-Put burst below absorbs the residual
-    // route-install slack after this — and, on this UNRELIABLE link, any single
-    // dropped datagram.
+    // route-install slack after this, and on this UNRELIABLE link a dropped Put — but
+    // NOT a dropped subscription Declare, which is sent once and would strand the whole
+    // burst (see the reliability caveat in this file's header).
     let converged = wait_for_substring(
         &mut wz_reader,
         "peer: reciprocal mesh link confirmed",
@@ -741,7 +773,11 @@ fn wz_peer_publishes_data_across_a_quic_datagram_mesh_link_to_pico() {
 /// exclude "a reliable-quic session on the same UDP port satisfied those witnesses".
 /// It also runs on every green pass, rather than being a mutation someone must
 /// remember to re-apply.
-// wz-proves: transport-link-quic-datagram zenohd->wz
+// `partial`, deliberately: this leg carries ZERO datagram frames. It witnesses the
+// bind arm and the deferred accept against a foreign dialer, but the arrival it
+// reaches (`accept_quic_incoming`) is SHARED with the stream backend, so the datagram
+// DATA plane is proven by legs 1/2/4/5, not here.
+// wz-proves: transport-link-quic-datagram zenohd->wz partial
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,quic-datagram + zenohd peer); Layer Z runs via --ignored"]
 fn wz_peer_reliable_quic_dialer_never_joins_the_datagram_mesh() {
@@ -777,7 +813,7 @@ fn wz_peer_reliable_quic_dialer_never_joins_the_datagram_mesh() {
     let _ = zenohd.child_mut().wait();
     eprintln!("--- wz mesh quic-datagram peer (reliable-dial neuter) stderr ---\n{wz_captured}");
 
-    failed.unwrap_or_else(|c| {
+    let failed_text = failed.unwrap_or_else(|c| {
         panic!(
             "wz --peer never logged a FAILED face against a RELIABLE-quic dialer within \
              15s — the dialer never reached wz's datagram acceptor at all, so this leg \
@@ -785,6 +821,22 @@ fn wz_peer_reliable_quic_dialer_never_joins_the_datagram_mesh() {
              --- wz mesh quic-datagram peer (reliable-dial neuter) stderr ---\n{c}"
         )
     });
+    // The face must die at the ZENOH handshake (`Terminal`), NOT at QUIC/TLS. Without
+    // this, any pre-zenoh failure satisfies the leg: a wrong trust anchor also logs a
+    // FAILED face (as `AcceptHandshake(... invalid peer certificate ...)`) and every
+    // absence assertion below would still hold — so the leg would pass while proving
+    // nothing about datagram-vs-stream. Pinning the CAUSE is what makes leg 6 citable
+    // on its own as this file's transport discriminator: the QUIC/TLS-1.3 handshake
+    // SUCCEEDED, and the session died only because wz's datagram acceptor drops the
+    // `accept_bi` and never reads the stream zenohd wrote its `InitSyn` on.
+    assert!(
+        failed_text.contains("peer: face 0 FAILED") && failed_text.contains(", Terminal)"),
+        "wz's face against a RELIABLE-quic dialer must fail as `Terminal` (the zenoh \
+         handshake giving up on a stream nobody reads), not at QUIC/TLS — a crypto or \
+         trust-anchor failure would satisfy every absence assertion below while saying \
+         nothing about the datagram data plane\n\
+         --- wz mesh quic-datagram peer (reliable-dial neuter) stderr ---\n{failed_text}"
+    );
     // No face ever came UP: the reliable session never completed wz's zenoh handshake.
     assert!(
         !wz_captured.contains("peer: face 0 UP"),
@@ -819,4 +871,103 @@ fn wz_peer_reliable_quic_dialer_never_joins_the_datagram_mesh() {
         "wz --peer summary must report '0 graph edge(s)' against a RELIABLE-quic dialer\n\
          --- wz mesh quic-datagram peer (reliable-dial neuter) stderr ---\n{wz_captured}"
     );
+}
+
+/// Leg 7 (REGRESSION, R311y411) — a peer whose zid ends in a ZERO BYTE still
+/// recognises itself, and still routes data OUT.
+///
+/// This is the deterministic form of a flake that cost 6 failures in 250 runs of
+/// this very lane. `wz-ap-demo` derives its mesh zid from its listen PORT, so an
+/// ephemeral port with a `0x00` low byte (1 in 256) produced a self zid ending in
+/// zero. zenoh's identity is the VALUE — `uhlc::ID::size()` counts significant LE
+/// bytes — so the flood came back carrying the TRIMMED form, which wz's
+/// non-canonical `Zid` did not compare equal to self. The node entered its own
+/// topology graph as a phantom third peer with no edges, and the spanning-tree
+/// next-hop computation then silently stopped forwarding: the `--publish` peer's
+/// data never left the box (5 of the 6 failures), or the router tier counted 3
+/// nodes and skipped the `(2 node(s))` witness entirely (the 6th).
+///
+/// `--zid 70728300` pins that shape with no lottery: the trailing zero is
+/// explicit. RED against a `Zid::from_slice` that keeps the caller's length
+/// (phantom node present, `peak 3 node(s)`, pico receives NOTHING); GREEN once the
+/// constructor canonicalises. The `peak 2` assertion is what binds this leg to the
+/// zid fix rather than to the data plane in general — leg 5 already covers the
+/// latter with a port-derived zid.
+// wz-proves: routing-peer zenohd->wz partial
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,quic-datagram + zenohd peer + zenoh-pico z_sub); Layer Z runs via --ignored"]
+fn wz_peer_with_a_trailing_zero_zid_still_routes_data_out() {
+    let demo = wz_ap_demo_binary();
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+    let (cert_path, key_path, _cleanup) = write_wz_cert("z0");
+
+    // The zid whose LAST byte is zero — the canonicalisation discriminator.
+    let (mut wz_guard, mut wz_reader, udp_port) = spawn_wz_peer_quic_datagram(
+        &demo,
+        &cert_path,
+        &key_path,
+        &["--zid", "70728300", "--publish", KEYEXPR],
+    );
+
+    let wz_datagram_addr = format!("127.0.0.1:{udp_port}");
+    let (mut zenohd, zenohd_tcp_port) = spawn_zenohd_quic_datagram_mesh_dialer(
+        &wz_datagram_addr,
+        &cert_path,
+        DialerMode::LinkstatePeer,
+        DialLink::Datagram,
+    );
+
+    let converged = wait_for_substring(
+        &mut wz_reader,
+        "peer: reciprocal mesh link confirmed",
+        Duration::from_secs(15),
+    );
+    if converged.is_err() {
+        let c = read_captured(&mut wz_reader);
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        let _ = zenohd.child_mut().kill();
+        let _ = zenohd.child_mut().wait();
+        panic!(
+            "wz <-> zenohd peer mesh never converged over quic-datagram within 15s — the \
+             zid regression leg cannot start\n--- wz stderr ---\n{c}"
+        );
+    }
+
+    let z_sub_endpoint = format!("tcp/127.0.0.1:{zenohd_tcp_port}");
+    let (mut z_sub_guard, mut z_sub_reader) =
+        spawn_subscribed_zsub(&z_sub, "demo/**", &z_sub_endpoint, "zenohd", tempfile);
+
+    let received = wait_for_substring(
+        &mut z_sub_reader,
+        &format!("Received ('{KEYEXPR}': '{WZ_PUBLISH_PAYLOAD}')"),
+        Duration::from_secs(15),
+    );
+
+    let _ = z_sub_guard.child_mut().kill();
+    let _ = z_sub_guard.child_mut().wait();
+    graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+    let wz_captured = read_captured(&mut wz_reader);
+    let z_sub_captured = read_captured(&mut z_sub_reader);
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+    eprintln!("--- wz mesh quic-datagram peer (trailing-zero zid) stderr ---\n{wz_captured}");
+
+    received.unwrap_or_else(|c| {
+        panic!(
+            "pico z_sub behind zenohd never received the Put from a wz peer whose zid ends \
+             in a zero byte — the peer did not recognise its own zid in the link-state \
+             flood, so it entered its own graph as a phantom node and the spanning tree \
+             stopped forwarding\n--- pico z_sub stdout ---\n{c}\n\
+             --- wz stderr ---\n{wz_captured}"
+        )
+    });
+    // The load-bearing witness for THIS leg: exactly two nodes — self and zenohd.
+    // A phantom self-node shows up as three, which is the state that broke routing.
+    assert!(
+        wz_captured.contains(", peak 2 node(s) in topology graph,"),
+        "a wz peer whose zid ends in a zero byte must see exactly 2 nodes (self + \
+         zenohd); a third is its OWN zid arriving back wire-trimmed and failing to \
+         compare equal to self\n--- wz stderr ---\n{wz_captured}"
+    );
+    let _ = z_sub_captured;
 }
