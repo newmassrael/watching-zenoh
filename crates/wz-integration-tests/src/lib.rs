@@ -1341,6 +1341,99 @@ pub mod common {
         guard
     }
 
+    /// R311y411 — spawn a zenohd that DIALS `dial_locator` while listening on an
+    /// OS-ASSIGNED loopback TCP port, and return BOTH the guard and the port zenohd
+    /// ACTUALLY bound (for the readiness probe and for pointing pico clients at it).
+    ///
+    /// ## Why the port is discovered, not chosen
+    ///
+    /// The sibling dialer helpers take a caller-CHOSEN `tcp_port`, and every
+    /// acceptor-direction caller derives it arithmetically from the wz listen port
+    /// (`wz_port.wrapping_add(1)`), on the reasoning that a UDP and a TCP port live in
+    /// different protocol namespaces so they cannot collide. That reasoning is
+    /// incomplete: it rules out a collision with wz's OWN socket, not with the rest of
+    /// the machine. `wz_port + 1` is an ordinary port in the ephemeral range, and any
+    /// other process — including a client socket opened moments earlier by this same
+    /// test lane — may already hold it. When it does, zenohd logs `Address already in
+    /// use (os error 98)` and exits **255** before accepting, and the readiness probe
+    /// fails with "process exited before accepting". Measured on this workspace at
+    /// R311y411: 1 failure in 30 consecutive runs of a 6-leg lane, reproduced
+    /// deterministically by binding the derived port before the spawn.
+    ///
+    /// There is no way to hand a child process a port that is guaranteed free — a
+    /// reserve-then-release helper only narrows the same TOCTOU window. So this helper
+    /// inverts the direction: zenohd binds `tcp/127.0.0.1:0`, the KERNEL picks a free
+    /// port, and the test reads it back from zenohd's own
+    /// `Zenoh can be reached at: tcp/127.0.0.1:<port>` line. Nothing is guessed, so
+    /// there is no window to lose. Readiness is still the `wait_for_tcp_accept_alive`
+    /// probe on the discovered port, so callers keep the same guarantee.
+    ///
+    /// `config_path` is the optional `--config` JSON5 (trust anchors, routing mode);
+    /// the caller writes it. `stdout` is the capture file the caller supplies (this
+    /// lib crate cannot depend on the dev-only `tempfile`), and it must stay readable
+    /// — the port line is parsed out of it.
+    pub fn spawn_zenohd_dialer_on_ephemeral_tcp(
+        label: &'static str,
+        dial_locator: &str,
+        config_path: Option<&str>,
+        stdout: File,
+    ) -> (ChildGuard, u16) {
+        /// zenohd's orchestrator announces each bound listener with this prefix; the
+        /// port digits follow it directly.
+        const LISTEN_LINE: &str = "Zenoh can be reached at: tcp/127.0.0.1:";
+
+        let writer = stdout.try_clone().expect("dup zenohd stdout handle");
+        let mut reader = stdout;
+        let mut command = Command::new(zenohd_binary());
+        command
+            .arg("-e")
+            .arg(dial_locator)
+            .arg("-l")
+            .arg("tcp/127.0.0.1:0")
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null());
+        if let Some(cfg) = config_path {
+            command.arg("--config").arg(cfg);
+        }
+        let mut guard = ChildGuard::wrap(
+            label,
+            command.spawn().expect("spawn zenohd ephemeral-tcp dialer"),
+        );
+        let captured = wait_for_substring(&mut reader, LISTEN_LINE, ZENOHD_TCP_ACCEPT_BUDGET)
+            .unwrap_or_else(|c| {
+                panic!(
+                    "{label}: never announced a bound tcp listener within \
+                     {ZENOHD_TCP_ACCEPT_BUDGET:?} — it could not start (a bad --config \
+                     or a missing trust anchor exits it before the listen)\n\
+                     --- zenohd stdout ---\n{c}"
+                )
+            });
+        let port: u16 = captured
+            .split(LISTEN_LINE)
+            .nth(1)
+            .and_then(|rest| {
+                rest.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .ok()
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label}: announced a tcp listener but its port did not parse — the \
+                     zenohd log format changed\n--- zenohd stdout ---\n{captured}"
+                )
+            });
+        if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("{label}: {e}");
+        }
+        (guard, port)
+    }
+
     /// R311y408 — spawn a zenohd that DIALS a wz `quic-datagram/<ip:port>` acceptor
     /// over the QUIC unreliable-DATAGRAM transport (RFC9221) while listening on
     /// `tcp/<tcp_port>` for a pico client. The DATAGRAM twin of

@@ -5763,6 +5763,28 @@ layer_z_zenohd_interop() {
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
         | tee /dev/stderr | grep -q '1 passed') || return 1
+    # R311y411 — wz MESH QUIC-DATAGRAM ACCEPTOR cross-impl: the y407 mesh-quic leg's
+    # UNRELIABLE twin. A real zenohd JOINS wz's MESH (`--peer` / `--router-hat
+    # quic-datagram/...`, the accept LOOP -- not the y408 one-shot `--listen` above)
+    # over RFC9221 datagram frames, and real pub/sub data crosses that mesh link BOTH
+    # ways. zenoh gives the datagram link no distinct scheme, so zenohd dials
+    # `quic/<wz>?rel=0` while wz names its listen `quic-datagram/...`. SIX legs:
+    # (1) --router-hat routers_net converges + wz decodes the LinkStateList OAM;
+    # (2) --peer forms a MUTUAL linkstate edge; (3) a gossip-dialer ROUTING neuter
+    # proves leg-2's reciprocal witness is load-bearing (0 edges); (4) a pico z_pub
+    # behind zenohd's Put crosses the datagram mesh INTO wz; (5) wz's Put crosses OUT
+    # to a pico z_sub; (6) a TRANSPORT neuter -- the SAME endpoint/cert dialed WITHOUT
+    # `?rel=0` (reliable quic) never brings a face up (`served 0 peer(s)`), which is
+    # what pins legs 1-5 to the DATAGRAM data plane (the mesh listen line carries no
+    # transport tag). STOCK zenohd (transport_quic_datagram is a zenoh default) + the
+    # pico z_pub/z_sub CLIs; the demo carries `quic-datagram` + `router-hat-router`
+    # (pulls routing-peer for --peer), built above -- NO build-line change.
+    # Count-guarded (`6 passed`, the y401 precedent) so a dropped `#[ignore]` on any
+    # leg (fewer selected -> exit 0) reddens instead of silently passing. Same
+    # --test-threads=1 per-zenohd isolation.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_mesh_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
+        | tee /dev/stderr | grep -q '6 passed') || return 1
     # R311y376 — wz ROUTER ws ACCEPTOR cross-impl (accept-symmetry Stage 3): the
     # MULTI-PEER accept loop (`--router` / peer_loop, not just one-shot `--listen`)
     # now accepts a foreign non-tcp face. A real zenohd DIALS the wz `--router
