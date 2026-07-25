@@ -1736,7 +1736,7 @@ layer_c1ak_cargo_test_transport_stats() {
 #      transport-link-unixpipe): TWO initiators dial ONE unixpipe listener through
 #      the multi-client invitation handshake and are BOTH held as ZID-keyed mesh
 #      faces (peak_concurrent == 2, zero AcceptError) — RED on the retired
-#      single-connection acceptor (held 0/1). Count-guarded (`grep -q '1 passed'`)
+#      single-connection acceptor (held 0/1). Count-guarded (`grep -qE '^test result: ok. 1 passed'`)
 #      so a future test-name drift reddens the lane rather than silently running
 #      0 tests (the "proof that never runs" trap this lane once lacked);
 #   4. clippy-gates that same combo `--all-targets -- -D warnings` — `accept_loop`
@@ -1765,8 +1765,8 @@ layer_c1al_cargo_test_unixpipe() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test unixpipe_e2e --quiet \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib mesh_accept_loop_holds_two_unixpipe_peers --quiet 2>&1 | grep -q '1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib boundlistener_unixpipe_is_mesh_capable --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib mesh_accept_loop_holds_two_unixpipe_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib boundlistener_unixpipe_is_mesh_capable --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixpipe --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixpipe --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixpipe --quiet -- -D warnings)
@@ -2315,12 +2315,12 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
 layer_c1w_cargo_test_routing_accept() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-accept --lib accept_loop --quiet \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-udp --lib mesh_accept_loop_holds_two_udp_peers --quiet 2>&1 | grep -q '1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixsock --lib mesh_accept_loop_holds_two_unixsock_peers --quiet 2>&1 | grep -q '1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib mesh_accept_loop_holds_two_quic_peers --quiet 2>&1 | grep -q '1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib boundlistener_quic_is_mesh_capable --quiet 2>&1 | grep -q '1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib mesh_accept_loop_holds_two_quic_datagram_peers --quiet 2>&1 | grep -q '1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib boundlistener_quic_datagram_is_mesh_capable --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-udp --lib mesh_accept_loop_holds_two_udp_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixsock --lib mesh_accept_loop_holds_two_unixsock_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib mesh_accept_loop_holds_two_quic_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib boundlistener_quic_is_mesh_capable --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib mesh_accept_loop_holds_two_quic_datagram_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib boundlistener_quic_datagram_is_mesh_capable --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixsock --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-quic --quiet -- -D warnings \
@@ -2371,13 +2371,13 @@ layer_c1w_cargo_test_routing_accept() {
 # Layer C1bm's `quic_listen_cert`.)
 layer_c1bl_cargo_test_router_failfast() {
     (cd crates \
-        && cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe run_router_accepts_a_unixpipe_listen_at_bind --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe run_router_accepts_a_unixpipe_listen_at_bind --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-router,transport-link-unixpipe --quiet -- -D warnings \
-        && cargo test -p wz-ap-demo --features routing-router,quic run_router_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-ap-demo --features routing-router,quic run_router_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-router,quic --quiet -- -D warnings \
-        && cargo test -p wz-ap-demo --features routing-peer,quic run_peer_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-ap-demo --features routing-peer,quic run_peer_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,quic --quiet -- -D warnings \
-        && cargo test -p wz-ap-demo --features router-hat-router,quic run_router_hat_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-ap-demo --features router-hat-router,quic run_router_hat_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-ap-demo --all-targets --features router-hat-router,quic --quiet -- -D warnings)
 }
 
@@ -2402,9 +2402,9 @@ layer_c1bl_cargo_test_router_failfast() {
 # binds) under transport-link-quic with the same `1 passed` guard + clippy gate.
 layer_c1bm_cargo_test_pico_failfast() {
     (cd crates \
-        && cargo test -p wz-capi-pico --features transport-link-unixpipe --test unixpipe_listen_multiclient --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-capi-pico --features transport-link-unixpipe --test unixpipe_listen_multiclient --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-capi-pico --all-targets --features transport-link-unixpipe --quiet -- -D warnings \
-        && cargo test -p wz-capi-pico --features transport-link-quic --test quic_listen_cert --quiet 2>&1 | grep -q '1 passed' \
+        && cargo test -p wz-capi-pico --features transport-link-quic --test quic_listen_cert --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-capi-pico --all-targets --features transport-link-quic --quiet -- -D warnings)
 }
 
@@ -5714,7 +5714,7 @@ layer_z_zenohd_interop() {
     # -> exit 0) reddens instead of silently passing.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -q '1 passed') || return 1
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     # R311y407 — wz MESH QUIC acceptor cross-impl (transport-link-quic x mesh accept
     # loop x zenohd->wz): a real zenohd DIALS a wz `--peer quic/...` / `--router-hat
     # quic/...` MESH listen and both FEDERATES over it AND routes real pub/sub DATA
@@ -5740,7 +5740,7 @@ layer_z_zenohd_interop() {
     # --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_mesh_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -q '5 passed') || return 1
+        | tee /dev/stderr | grep -qE '^test result: ok\. 5 passed') || return 1
     # R311y408 — wz QUIC-DATAGRAM ACCEPTOR cross-impl (transport-link-quic-datagram
     # zenohd->wz): the RFC9221 unreliable-datagram twin of the y401 one-shot quic
     # acceptor leg above. A real zenohd DIALS the wz `--listen quic-datagram/...`
@@ -5762,7 +5762,7 @@ layer_z_zenohd_interop() {
     # (0 selected -> exit 0) reddens instead of silently passing.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -q '1 passed') || return 1
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     # R311y411 — wz MESH QUIC-DATAGRAM ACCEPTOR cross-impl: the y407 mesh-quic leg's
     # UNRELIABLE twin. A real zenohd JOINS wz's MESH (`--peer` / `--router-hat
     # quic-datagram/...`, the accept LOOP -- not the y408 one-shot `--listen` above)
@@ -5900,7 +5900,7 @@ layer_z_zenohd_interop() {
         # visible on failure. Extends the C1al/C1bl/C1bm count-guard discipline.
         (cd crates && WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
             --test wz_unixpipe_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-            | tee /dev/stderr | grep -q '2 passed') || return 1
+            | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed') || return 1
         # R311y393/y394 — the wz<->zenohd unixpipe DATA-PLANE cross-impl (4 legs:
         # forward wz-pub->pico-sub over the DIALED link, reverse pico-pub->wz-sub over
         # the dialed link, the ACCEPTOR-direction pico-pub->wz-sub across the link
@@ -5915,7 +5915,7 @@ layer_z_zenohd_interop() {
         # reddens instead of silently passing.
         (cd crates && WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
             --test wz_unixpipe_zenohd_dataplane -- --ignored --quiet --test-threads=1 2>&1 \
-            | tee /dev/stderr | grep -q '4 passed') || return 1
+            | tee /dev/stderr | grep -qE '^test result: ok\. 4 passed') || return 1
     elif [[ -n "${WZ_Z_REQUIRE:-}" ]]; then
         echo "  Layer Z FAIL — required (WZ_Z_REQUIRE set) but unixpipe zenohd absent" >&2
         echo "  ($zenohd_uxp; run: ZENOHD_UNIXPIPE=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" >&2
@@ -5947,7 +5947,7 @@ layer_z_zenohd_interop() {
     if [[ -x "$zenohd_vsock" ]]; then
         (cd crates && WZ_ZENOHD_VSOCK_BIN="$zenohd_vsock" cargo test -p wz-integration-tests \
             --test wz_vsock_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-            | tee /dev/stderr | grep -q '1 passed') || return 1
+            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     else
         echo "  Layer Z SKIP — vsock acceptor interop (host-only): vsock zenohd absent" >&2
         echo "  ($zenohd_vsock; a vsock-capable host builds it via" >&2
@@ -6050,7 +6050,7 @@ layer_e5_router_forward() {
 # builds its own binary. The test fn is `#![cfg(target_os = "linux")]` (unixpipe is
 # Linux-only) and starts `wz_router_`, so the default Layer E sweep's `--skip
 # wz_router` already excludes it from the oracle-less arbitrary-feature run. The
-# `grep -q '1 passed'` count-guard reddens on a dropped #[ignore] (0 selected ->
+# `grep -qE '^test result: ok. 1 passed'` count-guard reddens on a dropped #[ignore] (0 selected ->
 # exit 0) the same way the Layer Z dataplane guard does.
 layer_e5u_router_unixpipe_forward() {
     if [[ "$(uname -s)" != "Linux" ]]; then
@@ -6061,7 +6061,7 @@ layer_e5u_router_unixpipe_forward() {
         --features routing-routes,transport-link-unixpipe --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_unixpipe_forward -- --ignored --test-threads=1 --quiet 2>&1 \
-        | tee /dev/stderr | grep -q '1 passed') || return 1
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
 }
 
 # ─── Layer E6 — peer-MESH e2e (R311qg) ─────────────────────────────
@@ -6506,14 +6506,14 @@ layer_e7u_router_hat_unixpipe_forward() {
     (cd crates && cargo test -p wz-ap-demo \
         --features router-hat-router,transport-link-unixpipe \
         run_router_hat_without_zid_on_a_unixpipe_listen_fails_fast \
-        -- --test-threads=1 --quiet 2>&1 | tee /dev/stderr | grep -q '1 passed') || return 1
+        -- --test-threads=1 --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     # (2) the e2e: build the router-hat+unixpipe binary, then route a Put between two
     #     distinct-zid --connect unixpipe clients through the true-Router.
     (cd crates && cargo build -p wz-ap-demo \
         --features router-hat-router,transport-link-unixpipe --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_unixpipe_forward -- --ignored --test-threads=1 --quiet 2>&1 \
-        | tee /dev/stderr | grep -q '1 passed') || return 1
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
 }
 
 # ─── Layer E6u — peer (WhatAmI::Peer) forwarding OVER UNIXPIPE (R311y397) ──
@@ -6543,14 +6543,14 @@ layer_e6u_peer_unixpipe_forward() {
     (cd crates && cargo test -p wz-ap-demo \
         --features routing-peer,transport-link-unixpipe \
         run_peer_without_zid_on_a_unixpipe_listen_fails_fast \
-        -- --test-threads=1 --quiet 2>&1 | tee /dev/stderr | grep -q '1 passed') || return 1
+        -- --test-threads=1 --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     # (2) the e2e: build the peer+unixpipe binary, then route a Put between two
     #     distinct-zid --connect unixpipe clients through the peer.
     (cd crates && cargo build -p wz-ap-demo \
         --features routing-peer,transport-link-unixpipe --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_unixpipe_forward -- --ignored --test-threads=1 --quiet 2>&1 \
-        | tee /dev/stderr | grep -q '1 passed') || return 1
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
 }
 
 # ─── Layer E8 — router-hat CROSS-IMPL vs zenoh-pico (P4 §5.21) ───

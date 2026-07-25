@@ -115,13 +115,12 @@
 //! running against an arbitrary-feature binary (a stray `--peer` server would hang
 //! to SIGTERM). Keep the `wz_peer` / `wz_router` fn prefix if renaming.
 
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
     graceful_terminate, read_captured, spawn_on_ephemeral_port, spawn_publishing_zpub,
-    spawn_subscribed_zsub, spawn_zenohd_quic_dialer, wait_for_substring, wait_for_tcp_accept_alive,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, zenohd_binary, ChildGuard, ZENOHD_TCP_ACCEPT_BUDGET,
+    spawn_subscribed_zsub, spawn_zenohd_dialer_on_ephemeral_tcp, spawn_zenohd_quic_dialer,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
@@ -210,10 +209,9 @@ fn spawn_wz_peer_quic(
 /// cfg-custom-zenohd precedent.
 fn spawn_zenohd_peer_quic_dialer(
     wz_quic_endpoint: &str,
-    tcp_port: u16,
     ca_cert_path: &str,
     linkstate: bool,
-) -> ChildGuard {
+) -> (ChildGuard, u16) {
     let cfg_path = format!("{ca_cert_path}.dialer.zenohd.json5");
     // The tls trust block (chain-of-trust for the by-IP dial) PLUS the peer routing
     // mode, in one JSON5 config. `routing/peer/mode` is included ONLY for the
@@ -234,28 +232,11 @@ fn spawn_zenohd_peer_quic_dialer(
     } else {
         "zenohd (gossip-peer quic dialer)"
     };
-    let mut command = Command::new(zenohd_binary());
-    command
-        .arg("-e")
-        .arg(wz_quic_endpoint)
-        .arg("-l")
-        .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-        .arg("--config")
-        .arg(&cfg_path)
-        .arg("--no-multicast-scouting")
-        .arg("--rest-http-port")
-        .arg("none")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let mut guard = ChildGuard::wrap(
-        label,
-        command.spawn().expect("spawn zenohd peer quic dialer"),
-    );
-    if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
-    {
-        panic!("{label}: {e}");
-    }
-    guard
+    // R311y411 — the tcp listener is EPHEMERAL and its port DISCOVERED (see
+    // `spawn_zenohd_dialer_on_ephemeral_tcp`): the `wz_port + 1` derivation this
+    // used to take is not collision-free, and a taken port makes zenohd exit 255
+    // before accepting.
+    spawn_zenohd_dialer_on_ephemeral_tcp(label, wz_quic_endpoint, Some(&cfg_path))
 }
 
 /// Leg 1 — the ROUTER-tier federation floor over a QUIC mesh listen. wz
@@ -294,17 +275,8 @@ fn wz_router_hat_federates_with_a_quic_dialing_zenohd() {
     // zenohd (STOCK, default router) DIALS the wz quic mesh listen over quic
     // (`-e quic/<wz>`, trusting wz's cert), listening on a distinct tcp port for
     // its readiness probe.
-    // R311y411 CORRECTION: `+1` is NOT collision-free. It is an ordinary
-    // ephemeral-range port that another process may already hold — usually a
-    // TIME_WAIT remnant of this lane's own client sockets, since zenohd sets no
-    // SO_REUSEADDR — and zenohd then exits 255 with `Address already in use`
-    // before accepting (measured 1-in-30 on the mesh quic-datagram lane). The
-    // race-free replacement is `spawn_zenohd_dialer_on_ephemeral_tcp` (zenohd
-    // binds :0; the test reads the kernel-assigned port back from its
-    // announcement). Migrating this caller is carried work, not done here.
-    let zenohd_tcp_port = quic_port.wrapping_add(1).max(1024);
     let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
-    let mut zenohd = spawn_zenohd_quic_dialer(&wz_quic_endpoint, zenohd_tcp_port, &cert_path);
+    let (mut zenohd, _zenohd_tcp_port) = spawn_zenohd_quic_dialer(&wz_quic_endpoint, &cert_path);
 
     // Cross-impl witness #1: the router tier converged to 2 nodes over the quic
     // link (self + the quic-dialing zenohd). Fires on `add_link` from the
@@ -363,11 +335,9 @@ fn wz_peer_federates_with_a_quic_dialing_linkstate_zenohd() {
         spawn_wz_peer_quic(&demo, &cert_path, &key_path, &[]);
 
     // zenohd (mode=peer, routing/peer/mode=linkstate) DIALS the wz quic mesh listen.
-    // (see the R311y411 CORRECTION above: this `+1` is not collision-free)
-    let zenohd_tcp_port = quic_port.wrapping_add(1).max(1024);
     let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
-    let mut zenohd =
-        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, zenohd_tcp_port, &cert_path, true);
+    let (mut zenohd, _zenohd_tcp_port) =
+        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, true);
 
     // Settle on the in-run reciprocal-link witness: wz ingested zenohd's linkstate
     // flood over the quic link AND formed the mutual graph edge (the full-linkstate
@@ -433,11 +403,9 @@ fn wz_peer_gossip_quic_dialer_yields_no_linkstate_edge() {
         spawn_wz_peer_quic(&demo, &cert_path, &key_path, &[]);
 
     // zenohd in DEFAULT gossip peer mode (linkstate=false) DIALS the wz quic listen.
-    // (see the R311y411 CORRECTION above: this `+1` is not collision-free)
-    let zenohd_tcp_port = quic_port.wrapping_add(1).max(1024);
     let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
-    let mut zenohd =
-        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, zenohd_tcp_port, &cert_path, false);
+    let (mut zenohd, _zenohd_tcp_port) =
+        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, false);
 
     // Settle on the INGEST witness (not the reciprocal one — a gossip flood never
     // trips it): wz decoded the gossip self-announcement over the quic link. This
@@ -514,11 +482,9 @@ fn wz_peer_receives_pico_data_across_a_quic_mesh_link() {
     let (mut wz_guard, mut wz_reader, quic_port) =
         spawn_wz_peer_quic(&demo, &cert_path, &key_path, &["--subscribe", "demo/**"]);
 
-    // (see the R311y411 CORRECTION above: this `+1` is not collision-free)
-    let zenohd_tcp_port = quic_port.wrapping_add(1).max(1024);
     let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
-    let mut zenohd =
-        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, zenohd_tcp_port, &cert_path, true);
+    let (mut zenohd, zenohd_tcp_port) =
+        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, true);
 
     // Barrier: the mesh converged over quic (wz formed the mutual edge). Only then
     // has wz's subscription had a mesh to advertise across, so zenohd can route a
@@ -600,11 +566,9 @@ fn wz_peer_publishes_data_across_a_quic_mesh_link_to_pico() {
     let (mut wz_guard, mut wz_reader, quic_port) =
         spawn_wz_peer_quic(&demo, &cert_path, &key_path, &["--publish", KEYEXPR]);
 
-    // (see the R311y411 CORRECTION above: this `+1` is not collision-free)
-    let zenohd_tcp_port = quic_port.wrapping_add(1).max(1024);
     let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
-    let mut zenohd =
-        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, zenohd_tcp_port, &cert_path, true);
+    let (mut zenohd, zenohd_tcp_port) =
+        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, true);
 
     // Barrier: the mesh converged over quic before attaching the pico subscriber,
     // so its subscription propagates into wz (deactivating wz's write-filter) over

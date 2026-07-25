@@ -328,7 +328,6 @@ fn spawn_zenohd_quic_datagram_mesh_dialer(
         label,
         &format!("quic/{wz_datagram_addr}{}", link.locator_suffix()),
         Some(&cfg_path),
-        tempfile(),
     )
 }
 

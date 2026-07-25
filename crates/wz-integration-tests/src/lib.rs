@@ -1309,28 +1309,8 @@ pub mod common {
     /// wz is witnessed on the wz side: "ws server upgrade" + "session
     /// Established"). No handshake-probe param: unlike the `-l`-only helpers, this
     /// zenohd DIALS out, and the wz-side log is the Established witness.
-    pub fn spawn_zenohd_ws_dialer(wz_ws_endpoint: &str, tcp_port: u16) -> ChildGuard {
-        let mut command = Command::new(zenohd_binary());
-        command
-            .arg("-e")
-            .arg(wz_ws_endpoint)
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut guard = ChildGuard::wrap(
-            "zenohd (ws dialer)",
-            command.spawn().expect("spawn zenohd ws dialer"),
-        );
-        if let Err(e) =
-            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
-        {
-            panic!("zenohd (ws dialer): {e}");
-        }
-        guard
+    pub fn spawn_zenohd_ws_dialer(wz_ws_endpoint: &str) -> (ChildGuard, u16) {
+        spawn_zenohd_dialer_on_ephemeral_tcp("zenohd (ws dialer)", wz_ws_endpoint, None)
     }
 
     /// R311y375 — spawn a zenohd that DIALS a wz `tls/...` acceptor
@@ -1350,40 +1330,18 @@ pub mod common {
     /// tls dialer. Readiness = zenohd accepting on its tcp listener; the tls dial
     /// to wz is witnessed on the wz side ("tls server handshake" + "Established").
     /// The caller owns the cert/key/config file cleanup.
-    pub fn spawn_zenohd_tls_dialer(
-        wz_tls_endpoint: &str,
-        tcp_port: u16,
-        ca_cert_path: &str,
-    ) -> ChildGuard {
+    pub fn spawn_zenohd_tls_dialer(wz_tls_endpoint: &str, ca_cert_path: &str) -> (ChildGuard, u16) {
         let cfg_path = format!("{ca_cert_path}.dialer.zenohd.json5");
         let cfg = format!(
             "{{ transport: {{ link: {{ tls: {{ \
              root_ca_certificate: {ca_cert_path:?}, verify_name_on_connect: false }} }} }} }}"
         );
         std::fs::write(&cfg_path, cfg).expect("write zenohd tls dialer config");
-        let mut command = Command::new(zenohd_binary());
-        command
-            .arg("-e")
-            .arg(wz_tls_endpoint)
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-            .arg("--config")
-            .arg(&cfg_path)
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut guard = ChildGuard::wrap(
+        spawn_zenohd_dialer_on_ephemeral_tcp(
             "zenohd (tls dialer)",
-            command.spawn().expect("spawn zenohd tls dialer"),
-        );
-        if let Err(e) =
-            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
-        {
-            panic!("zenohd (tls dialer): {e}");
-        }
-        guard
+            wz_tls_endpoint,
+            Some(&cfg_path),
+        )
     }
 
     /// R311y401 — spawn a zenohd that DIALS a wz `quic/<ip:port>` acceptor
@@ -1404,38 +1362,19 @@ pub mod common {
     /// dialer.
     pub fn spawn_zenohd_quic_dialer(
         wz_quic_endpoint: &str,
-        tcp_port: u16,
         ca_cert_path: &str,
-    ) -> ChildGuard {
+    ) -> (ChildGuard, u16) {
         let cfg_path = format!("{ca_cert_path}.dialer.zenohd.json5");
         let cfg = format!(
             "{{ transport: {{ link: {{ tls: {{ \
              root_ca_certificate: {ca_cert_path:?}, verify_name_on_connect: false }} }} }} }}"
         );
         std::fs::write(&cfg_path, cfg).expect("write zenohd quic dialer config");
-        let mut command = Command::new(zenohd_binary());
-        command
-            .arg("-e")
-            .arg(wz_quic_endpoint)
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-            .arg("--config")
-            .arg(&cfg_path)
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut guard = ChildGuard::wrap(
+        spawn_zenohd_dialer_on_ephemeral_tcp(
             "zenohd (quic dialer)",
-            command.spawn().expect("spawn zenohd quic dialer"),
-        );
-        if let Err(e) =
-            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
-        {
-            panic!("zenohd (quic dialer): {e}");
-        }
-        guard
+            wz_quic_endpoint,
+            Some(&cfg_path),
+        )
     }
 
     /// R311y411 — spawn a zenohd that DIALS `dial_locator` while listening on an
@@ -1474,21 +1413,30 @@ pub mod common {
     /// probe on the discovered port, so callers keep the same guarantee.
     ///
     /// `config_path` is the optional `--config` JSON5 (trust anchors, routing mode);
-    /// the caller writes it. `stdout` is the capture file the caller supplies (this
-    /// lib crate cannot depend on the dev-only `tempfile`), and it must stay readable
-    /// — the port line is parsed out of it.
+    /// the caller writes it. The capture the port is parsed out of is OWNED here —
+    /// this lib crate cannot depend on the dev-only `tempfile`, so it opens a
+    /// pid+counter-unique file under the temp dir and unlinks it before returning.
+    /// Keeping it internal is what lets every sibling dialer delegate without
+    /// threading a capture handle through its own signature.
     pub fn spawn_zenohd_dialer_on_ephemeral_tcp(
         label: &'static str,
         dial_locator: &str,
         config_path: Option<&str>,
-        stdout: File,
     ) -> (ChildGuard, u16) {
         /// zenohd's orchestrator announces each bound listener with this prefix; the
         /// port digits follow it directly.
         const LISTEN_LINE: &str = "Zenoh can be reached at: tcp/127.0.0.1:";
 
-        let writer = stdout.try_clone().expect("dup zenohd stdout handle");
-        let mut reader = stdout;
+        // Unique per spawn: several dialers can be live in one test process.
+        static CAPTURE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let capture_path =
+            std::env::temp_dir().join(format!("wz-zenohd-dialer-{}-{seq}.log", std::process::id()));
+        let writer = File::create(&capture_path).expect("create zenohd capture file");
+        let mut reader = File::open(&capture_path).expect("open zenohd capture file");
+        // Unlink NOW: the two handles keep it alive until they drop, so the file never
+        // outlives the spawn even if the caller panics.
+        let _ = std::fs::remove_file(&capture_path);
         let mut command = Command::new(zenohd_binary());
         command
             // PIN the log level. This helper is the only one in the crate that reads
@@ -1565,38 +1513,19 @@ pub mod common {
     /// CLI has no quic, so zenohd is the only foreign quic-datagram dialer.
     pub fn spawn_zenohd_quic_datagram_dialer(
         wz_quic_datagram_addr: &str,
-        tcp_port: u16,
         ca_cert_path: &str,
-    ) -> ChildGuard {
+    ) -> (ChildGuard, u16) {
         let cfg_path = format!("{ca_cert_path}.dialer.zenohd.json5");
         let cfg = format!(
             "{{ transport: {{ link: {{ tls: {{ \
              root_ca_certificate: {ca_cert_path:?}, verify_name_on_connect: false }} }} }} }}"
         );
         std::fs::write(&cfg_path, cfg).expect("write zenohd quic-datagram dialer config");
-        let mut command = Command::new(zenohd_binary());
-        command
-            .arg("-e")
-            .arg(format!("quic/{wz_quic_datagram_addr}?rel=0"))
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-            .arg("--config")
-            .arg(&cfg_path)
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut guard = ChildGuard::wrap(
+        spawn_zenohd_dialer_on_ephemeral_tcp(
             "zenohd (quic-datagram dialer)",
-            command.spawn().expect("spawn zenohd quic-datagram dialer"),
-        );
-        if let Err(e) =
-            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
-        {
-            panic!("zenohd (quic-datagram dialer): {e}");
-        }
-        guard
+            &format!("quic/{wz_quic_datagram_addr}?rel=0"),
+            Some(&cfg_path),
+        )
     }
 
     /// R311y398 — spawn a zenohd that DIALS a wz `unixsock-stream/<path>` acceptor

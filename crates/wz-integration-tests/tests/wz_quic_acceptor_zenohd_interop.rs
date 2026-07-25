@@ -126,17 +126,8 @@ fn wz_quic_acceptor_receives_pico_put_via_zenohd() {
 
     // ── zenohd: DIAL the wz quic acceptor over quic (trusting wz's cert), listen on
     //    tcp for the pico pub.
-    // R311y411 CORRECTION: `+1` is NOT collision-free. It is an ordinary
-    // ephemeral-range port that another process may already hold — usually a
-    // TIME_WAIT remnant of this lane's own client sockets, since zenohd sets no
-    // SO_REUSEADDR — and zenohd then exits 255 with `Address already in use`
-    // before accepting (measured 1-in-30 on the mesh quic-datagram lane). The
-    // race-free replacement is `spawn_zenohd_dialer_on_ephemeral_tcp` (zenohd
-    // binds :0; the test reads the kernel-assigned port back from its
-    // announcement). Migrating this caller is carried work, not done here.
-    let zenohd_tcp_port = quic_port.wrapping_add(1).max(1024);
     let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
-    let mut zenohd = spawn_zenohd_quic_dialer(&wz_quic_endpoint, zenohd_tcp_port, &cert_path);
+    let (mut zenohd, zenohd_tcp_port) = spawn_zenohd_quic_dialer(&wz_quic_endpoint, &cert_path);
 
     // Cross-impl witness #1: the wz acceptor completed the QUIC (TLS-1.3) + zenoh
     // handshake with the real zenohd dialer. Since R311y404 QUIC DEFERS its crypto
