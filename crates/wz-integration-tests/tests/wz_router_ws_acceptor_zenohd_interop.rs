@@ -79,9 +79,9 @@ fn wz_router_ws_acceptor_holds_a_zenohd_ws_face() {
         r_stderr,
     );
 
-    // ── zenohd: DIAL the wz ws router over ws, listen on tcp (unused here — no
-    //    pico leg; this atom is accept, not forward). Its tcp port is fixed
-    //    relative to the wz port so parallel runs never collide.
+    // ── zenohd: DIAL the wz ws router over ws. Its tcp listener is unused here (no
+    //    pico client on this leg) and its port is OS-assigned, read back from
+    //    zenohd's own announcement (R311y411/y412) — no port is ever guessed.
     let wz_ws_endpoint = format!("ws/127.0.0.1:{ws_port}");
     let (mut zenohd, _zenohd_tcp_port) = spawn_zenohd_ws_dialer(&wz_ws_endpoint);
 

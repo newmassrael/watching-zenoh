@@ -49,7 +49,7 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     read_captured, spawn_publishing_zpub, spawn_zenohd_unixsock_dialer, wait_for_substring,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
+    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
 const SUB_FILTER: &str = "demo/unixsock/**";
@@ -78,10 +78,6 @@ fn wz_unixsock_acceptor_receives_pico_put_via_zenohd() {
     // the pre-bind path clean so the exists() bound-check below is unambiguous).
     let _ = std::fs::remove_file(&sock_path);
 
-    let tcp_res = PortReservation::pick();
-    let tcp_port = tcp_res.port();
-    let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
-
     // wz is the unixsock ACCEPTOR (`--listen unixsock-stream/<path>`) + a routed
     // subscriber on SUB_FILTER.
     let wz_stderr = tempfile::tempfile().expect("tempfile for wz acceptor stderr");
@@ -109,8 +105,13 @@ fn wz_unixsock_acceptor_receives_pico_put_via_zenohd() {
 
     // zenohd DIALS wz's unixsock acceptor (`-e unixsock-stream/<path>`) + listens on
     // tcp for pico. Spawned only after wz is bound so the connect finds the socket.
-    let mut zenohd = bound.then(|| spawn_zenohd_unixsock_dialer(&sock_path, tcp_port));
-    drop(tcp_res);
+    // R311y412 — the tcp port is DISCOVERED from zenohd's own announcement (see
+    // `spawn_zenohd_dialer_on_ephemeral_tcp`), so it exists only once the dialer is up.
+    let (mut zenohd, tcp_port) = match bound.then(|| spawn_zenohd_unixsock_dialer(&sock_path)) {
+        Some((guard, port)) => (Some(guard), Some(port)),
+        None => (None, None),
+    };
+    let tcp_endpoint = format!("tcp/127.0.0.1:{}", tcp_port.unwrap_or_default());
 
     // wz accepts the zenohd unixsock dial + completes the handshake, then (on
     // Established) declares its routed subscriber onto the accepted session,

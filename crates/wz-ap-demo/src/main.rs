@@ -1058,10 +1058,30 @@ fn parse_zid_hex(h: &str) -> Result<Vec<u8>, String> {
     if !h.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("invalid hex in {h:?}"));
     }
-    (0..h.len())
+    let bytes: Vec<u8> = (0..h.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&h[i..i + 2], 16).map_err(|_| format!("invalid hex in {h:?}")))
-        .collect()
+        .collect::<Result<_, _>>()?;
+    // R311y412 — enforce zenoh's zid VALIDITY at the CLI boundary, the same rule the
+    // wire ctor `Zid::try_from` applies. Two gaps this closes:
+    //   * all-zero (`--zid 00`) has no significant bytes, so it is not an identity at
+    //     all; the node bound and then lost face after face forever.
+    //   * over 16 bytes silently CORRUPTS the wire in release: `handshake_encode`'s
+    //     `(zid_len - 1) & 0x0F` wraps, so a 17-byte zid encodes as length 1. The
+    //     `debug_assert!` there catches it in debug builds only.
+    if bytes.iter().all(|&b| b == 0) {
+        return Err(format!(
+            "must have at least one non-zero byte — zenoh identity is the VALUE, and \
+             an all-zero zid ({h:?}) is empty"
+        ));
+    }
+    if bytes.len() > 16 {
+        return Err(format!(
+            "must be at most 16 bytes (got {} in {h:?}) — zenoh's ZenohId MAX_SIZE",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
 }
 
 /// The demo's multi-thread tokio runtime (2 workers + io + time) — the SSOT for

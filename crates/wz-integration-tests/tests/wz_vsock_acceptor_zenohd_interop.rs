@@ -54,7 +54,7 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     read_captured, spawn_publishing_zpub, spawn_zenohd_vsock_dialer, wait_for_substring,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
+    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
 const SUB_FILTER: &str = "demo/vsock/**";
@@ -92,10 +92,6 @@ fn wz_vsock_acceptor_receives_pico_put_via_zenohd() {
     let demo = wz_ap_demo_binary();
     let z_pub = zenoh_pico_cli_binary("z_pub");
 
-    let tcp_res = PortReservation::pick();
-    let tcp_port = tcp_res.port();
-    let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
-
     // wz is the vsock ACCEPTOR (`--listen vsock/VMADDR_CID_LOCAL:VMADDR_PORT_ANY`, an
     // EPHEMERAL kernel-assigned port on the loopback CID) + a routed subscriber on
     // SUB_FILTER.
@@ -127,9 +123,14 @@ fn wz_vsock_acceptor_receives_pico_put_via_zenohd() {
 
     // zenohd DIALS wz's vsock acceptor (`-e vsock/VMADDR_CID_LOCAL:<port>`) + listens
     // on tcp for pico. Spawned only after wz is bound (the port is known).
-    let mut zenohd =
-        port.map(|p| spawn_zenohd_vsock_dialer(&format!("vsock/VMADDR_CID_LOCAL:{p}"), tcp_port));
-    drop(tcp_res);
+    // R311y412 — the tcp port is DISCOVERED from zenohd's own announcement (see
+    // `spawn_zenohd_dialer_on_ephemeral_tcp`), so it exists only once the dialer is up.
+    let (mut zenohd, tcp_port) =
+        match port.map(|p| spawn_zenohd_vsock_dialer(&format!("vsock/VMADDR_CID_LOCAL:{p}"))) {
+            Some((guard, tcp)) => (Some(guard), Some(tcp)),
+            None => (None, None),
+        };
+    let tcp_endpoint = format!("tcp/127.0.0.1:{}", tcp_port.unwrap_or_default());
 
     // wz accepts the zenohd vsock dial + completes the handshake, then (on Established)
     // declares its routed subscriber onto the accepted session, installing the route

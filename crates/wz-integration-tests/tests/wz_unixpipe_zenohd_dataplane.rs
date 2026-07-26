@@ -54,7 +54,7 @@ use std::time::Duration;
 use wz_integration_tests::common::{
     read_captured, spawn_publishing_zpub, spawn_subscribed_zsub, spawn_zenohd_unixpipe_dialer,
     spawn_zenohd_unixpipe_tcp, wait_for_substring, wait_for_unixpipe_request_fifo,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
+    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
 /// A per-process-unique unixpipe base path under the temp dir; the request FIFO is
@@ -111,18 +111,18 @@ fn wz_put_over_unixpipe_routes_through_zenohd_to_pico_zsub() {
     let z_sub = zenoh_pico_cli_binary("z_sub");
     let base = unixpipe_base("fwd");
     cleanup(&base);
-    let tcp_res = PortReservation::pick();
-    let tcp_port = tcp_res.port();
-    let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
     let publish_key = "demo/unixpipe/dp-fwd";
     let publish_value = "hello-from-wz-over-unixpipe";
 
     // zenohd LISTENS on unixpipe (for wz) + tcp (for pico); ready = tcp accept +
     // handshake probe + the request FIFO present.
-    let mut zenohd = spawn_zenohd_unixpipe_tcp(&base, tcp_port, || {
+    // R311y412 — the tcp port is DISCOVERED from zenohd's own announcement rather
+    // than reserved-then-released (the release opens a window another process can win,
+    // and zenohd then exits 255 before accepting).
+    let (mut zenohd, tcp_port) = spawn_zenohd_unixpipe_tcp(&base, || {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(tcp_res);
+    let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
 
     // pico z_sub over TCP — returns once it logs "Declaring Subscriber on", i.e.
     // the route is installed on zenohd, so the wz Put lands on a present route.
@@ -222,16 +222,16 @@ fn pico_put_routes_through_zenohd_over_unixpipe_to_wz_subscriber() {
     let z_pub = zenoh_pico_cli_binary("z_pub");
     let base = unixpipe_base("rev");
     cleanup(&base);
-    let tcp_res = PortReservation::pick();
-    let tcp_port = tcp_res.port();
-    let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
     let publish_key = "demo/unixpipe/dp-rev";
     let publish_value = "hello-routed-to-wz-over-unixpipe";
 
-    let mut zenohd = spawn_zenohd_unixpipe_tcp(&base, tcp_port, || {
+    // R311y412 — the tcp port is DISCOVERED from zenohd's own announcement rather
+    // than reserved-then-released (the release opens a window another process can win,
+    // and zenohd then exits 255 before accepting).
+    let (mut zenohd, tcp_port) = spawn_zenohd_unixpipe_tcp(&base, || {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(tcp_res);
+    let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
 
     // wz DIALS zenohd over UNIXPIPE and declares a ROUTED subscriber.
     let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
@@ -340,9 +340,6 @@ fn pico_put_routes_through_zenohd_to_wz_unixpipe_acceptor_subscriber() {
     let z_pub = zenoh_pico_cli_binary("z_pub");
     let base = unixpipe_base("acc");
     cleanup(&base);
-    let tcp_res = PortReservation::pick();
-    let tcp_port = tcp_res.port();
-    let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
     let publish_key = "demo/unixpipe/dp-acc";
     let publish_value = "hello-to-wz-unixpipe-acceptor";
 
@@ -375,12 +372,14 @@ fn pico_put_routes_through_zenohd_to_wz_unixpipe_acceptor_subscriber() {
     // zenohd DIALS wz's unixpipe acceptor (`-e unixpipe/<base>`) + listens on tcp
     // for pico. Spawned only after wz is bound so the UnicastPipeClient invitation
     // finds the request FIFO.
-    let mut zenohd = if bound {
-        Some(spawn_zenohd_unixpipe_dialer(&base, tcp_port))
-    } else {
-        None
+    // R311y412 — the tcp port is DISCOVERED from zenohd's own announcement rather
+    // than reserved-then-released (the release opens a window another process can win,
+    // and zenohd then exits 255 before accepting).
+    let (mut zenohd, tcp_port) = match bound.then(|| spawn_zenohd_unixpipe_dialer(&base)) {
+        Some((guard, port)) => (Some(guard), Some(port)),
+        None => (None, None),
     };
-    drop(tcp_res);
+    let tcp_endpoint = format!("tcp/127.0.0.1:{}", tcp_port.unwrap_or_default());
 
     // wz accepts the zenohd unixpipe dial + completes the handshake, then (on
     // Established) declares its routed subscriber onto the accepted session,
@@ -485,17 +484,17 @@ fn wz_two_clients_route_a_put_via_one_zenohd_unixpipe_listener() {
     let demo = wz_ap_demo_binary();
     let base = unixpipe_base("mc");
     cleanup(&base);
-    let tcp_res = PortReservation::pick();
-    let tcp_port = tcp_res.port();
     let publish_key = "demo/unixpipe/mc-put";
     let publish_value = "hello-multi-client-over-unixpipe";
     // Distinct from wz-ap-demo's hardwired 0x01020304 so zenohd holds BOTH sessions.
     let publisher_zid = "0a0b0c0d";
 
-    let mut zenohd = spawn_zenohd_unixpipe_tcp(&base, tcp_port, || {
+    // R311y412 — the tcp port is DISCOVERED from zenohd's own announcement rather
+    // than reserved-then-released (the release opens a window another process can win,
+    // and zenohd then exits 255 before accepting).
+    let (mut zenohd, _tcp_port) = spawn_zenohd_unixpipe_tcp(&base, || {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(tcp_res);
 
     // Client 1 (subscriber, default zid) dials zenohd over unixpipe + declares a
     // routed subscriber; wait until zenohd has the route before the publisher bursts.

@@ -157,7 +157,7 @@ use std::time::Duration;
 use wz_integration_tests::common::{
     graceful_terminate, read_captured, spawn_on_ephemeral_port, spawn_publishing_zpub,
     spawn_subscribed_zsub, spawn_zenohd_dialer_on_ephemeral_tcp, wait_for_substring,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
+    wz_ap_demo_binary, zenoh_pico_cli_binary, zenohd_binary, ChildGuard,
 };
 use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
@@ -302,9 +302,10 @@ fn spawn_wz_peer_quic_datagram(
 ///
 /// The port is DISCOVERED, not chosen: [`spawn_zenohd_dialer_on_ephemeral_tcp`] has
 /// zenohd bind `tcp/127.0.0.1:0` and reads the bound port back out of zenohd's own
-/// announcement. The `wz_port + 1` derivation the sibling acceptor tests use is a
+/// announcement. The `wz_port + 1` derivation every acceptor test USED to take was a
 /// measured flake source (see that helper's doc) — 1 failure in 30 runs of this very
-/// lane, `Address already in use` -> zenohd exit 255.
+/// lane, `Address already in use` -> zenohd exit 255. R311y412 retired the last of
+/// them, so no test in this crate names a zenohd port any more.
 fn spawn_zenohd_quic_datagram_mesh_dialer(
     wz_datagram_addr: &str,
     ca_cert_path: &str,
@@ -325,8 +326,10 @@ fn spawn_zenohd_quic_datagram_mesh_dialer(
         (DialerMode::GossipPeer, _) => "zenohd (gossip-peer quic-datagram dialer)",
     };
     spawn_zenohd_dialer_on_ephemeral_tcp(
+        &zenohd_binary(),
         label,
-        &format!("quic/{wz_datagram_addr}{}", link.locator_suffix()),
+        Some(&format!("quic/{wz_datagram_addr}{}", link.locator_suffix())),
+        &[],
         Some(&cfg_path),
     )
 }

@@ -62,7 +62,7 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     read_captured, spawn_on_ephemeral_port, spawn_publishing_zpub, spawn_zenohd_udp_dialer,
-    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, PortReservation,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
 };
 
 const SUB_FILTER: &str = "demo/udp/**";
@@ -99,12 +99,13 @@ fn wz_udp_acceptor_receives_pico_put_via_zenohd() {
     // zenohd DIALS the wz udp acceptor (`-e udp/127.0.0.1:<udp_port>`) + listens on
     // tcp for the pico publisher. A reserved tcp port (dropped just before zenohd
     // binds it) keeps parallel runs collision-free.
-    let tcp_res = PortReservation::pick();
-    let tcp_port = tcp_res.port();
-    let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
     let wz_udp_endpoint = format!("udp/127.0.0.1:{udp_port}");
-    let mut zenohd = spawn_zenohd_udp_dialer(&wz_udp_endpoint, tcp_port);
-    drop(tcp_res);
+    // R311y412 — the tcp port is DISCOVERED from zenohd's own announcement, not
+    // reserved-then-released: the release opens a window in which any other process
+    // can take the port, and zenohd then exits 255 before accepting (measured 5
+    // failures in 210 runs of this lane under ephemeral-port churn).
+    let (mut zenohd, tcp_port) = spawn_zenohd_udp_dialer(&wz_udp_endpoint);
+    let tcp_endpoint = format!("tcp/127.0.0.1:{tcp_port}");
 
     // wz accepts the zenohd udp dial + completes the handshake, then (on Established)
     // declares its routed subscriber onto the accepted session, installing the route

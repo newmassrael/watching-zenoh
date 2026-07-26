@@ -120,7 +120,7 @@ use std::time::Duration;
 use wz_integration_tests::common::{
     graceful_terminate, read_captured, spawn_on_ephemeral_port, spawn_publishing_zpub,
     spawn_subscribed_zsub, spawn_zenohd_dialer_on_ephemeral_tcp, spawn_zenohd_quic_dialer,
-    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, zenohd_binary, ChildGuard,
 };
 use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
@@ -236,7 +236,13 @@ fn spawn_zenohd_peer_quic_dialer(
     // `spawn_zenohd_dialer_on_ephemeral_tcp`): the `wz_port + 1` derivation this
     // used to take is not collision-free, and a taken port makes zenohd exit 255
     // before accepting.
-    spawn_zenohd_dialer_on_ephemeral_tcp(label, wz_quic_endpoint, Some(&cfg_path))
+    spawn_zenohd_dialer_on_ephemeral_tcp(
+        &zenohd_binary(),
+        label,
+        Some(wz_quic_endpoint),
+        &[],
+        Some(&cfg_path),
+    )
 }
 
 /// Leg 1 — the ROUTER-tier federation floor over a QUIC mesh listen. wz

@@ -360,8 +360,17 @@ cd "$repo_root"
 # Force cargo/rustc to line-oriented, color-free, progress-bar-free output so a
 # captured log is clean text in EVERY sink (tty / redirect / pipe): a `\r`
 # progress-bar rewrite or ANSI colour escape corrupts a persisted log and
-# defeats post-hoc grep. A caller's explicit value wins (the `:-` override).
-export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-never}"
+# defeats post-hoc grep.
+#
+# R311y412 — colour is now FORCED off rather than merely defaulted. The lane
+# count-guards match `^test result: ok. N passed` at line start, which an ANSI
+# escape would break, and `.github/workflows/ci.yml` exports
+# CARGO_TERM_COLOR=always for the whole hosted job — so the old `:-` default let
+# the one environment we cannot edit from here win over the invariant the guards
+# depend on. Today cargo does not forward colour to libtest, so this is
+# defence-in-depth, not a live fix; it is one line instead of an ANSI strip at
+# every guarded pipeline.
+export CARGO_TERM_COLOR=never
 export CARGO_TERM_PROGRESS_WHEN="${CARGO_TERM_PROGRESS_WHEN:-never}"
 
 # Self-tee ALL stdout+stderr to a persistent per-run logfile, so the FULL run is
@@ -1838,7 +1847,7 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         `# on B, so a dropped dialed link comes back onto the SAME session. The count` \
         `# guard (grep ' 1 passed') reddens the lane if a feature-set edit ever` \
         `# cfg-outs the '#![cfg(all(...))]'-gated file to 0 tests (silent green).` \
-        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet 2>&1 | tee /dev/stderr | grep -q ' 1 passed' \
+        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed' \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
         `# R311y219a — the per-face priority-band + reliability-axis POLICY unit` \
         `# tests live in accept_loop::tests (gated transport-multilink) inside the` \
@@ -1846,7 +1855,7 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         `# module gate to compile+run. No prior --lib lane combined them, so they` \
         `# were CI-invisible; ML_DEPLOY_FEATURES has both. The ' 2 passed' guard` \
         `# reddens the lane if a feature-set edit ever cfg-outs them to a silent 0.` \
-        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --lib --quiet -- multilink_priority_range multilink_pref_for 2>&1 | tee /dev/stderr | grep -q ' 2 passed' \
+        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --lib --quiet -- multilink_priority_range multilink_pref_for 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed' \
         && cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet -- -D warnings \
@@ -1877,7 +1886,7 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         `# 'grep 1 passed' asserts the test actually RAN ('cargo test <substring>'` \
         `# exits 0 on ZERO matches, so a future cfg-out would otherwise pass green);` \
         `# 'tee /dev/stderr' keeps the full cargo output in the CI log.` \
-        && cargo test -p wz-runtime-tokio --features transport-multilink --lib reset_for_reopen_preserves_shared_sn_while_a_link_is_live --quiet 2>&1 | tee /dev/stderr | grep -q ' 1 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-multilink --lib reset_for_reopen_preserves_shared_sn_while_a_link_is_live --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-runtime-tokio --features transport-multilink --lib --quiet -- -D warnings \
         `# the guard lives in wz-session-core; clippy-floor the ex-XOR combo THERE` \
         `# too (invocation 5's runtime-tokio clippy would not lint the guard body).` \
@@ -3607,7 +3616,7 @@ layer_c1bg_cargo_test_storage_backend_filesystem() {
         --features storage-backend-filesystem --lib filesystem_storage --quiet 2>&1)" \
         || { echo "$out"; return 1; }
     echo "$out"
-    grep -qE 'test result: ok\. [1-9][0-9]* passed' <<< "$out" \
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<< "$out" \
         || { echo "  C1bg FAIL: 0 filesystem_storage tests ran (filter matched nothing)"; return 1; }
     # R311y280 — the live-driver composition + durability proof (+ its discriminator).
     local comp
@@ -3616,7 +3625,7 @@ layer_c1bg_cargo_test_storage_backend_filesystem() {
         --lib manager_restart --quiet 2>&1)" \
         || { echo "$comp"; return 1; }
     echo "$comp"
-    grep -qE 'test result: ok\. [1-9][0-9]* passed' <<< "$comp" \
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<< "$comp" \
         || { echo "  C1bg FAIL: 0 manager_restart composition tests ran (filter matched nothing)"; return 1; }
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets \
@@ -3657,7 +3666,7 @@ layer_c1bh_cargo_test_storage_host_dir() {
         --features storage-backend-filesystem --bin wz-ap-demo storage_host_volume --quiet 2>&1)" \
         || { echo "$out"; return 1; }
     echo "$out"
-    grep -qE 'test result: ok\. [1-9][0-9]* passed' <<< "$out" \
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<< "$out" \
         || { echo "  C1bh FAIL: 0 storage_host_volume tests ran (filter matched nothing)"; return 1; }
     (cd crates \
         && cargo clippy -p wz-ap-demo --features storage-backend-filesystem --quiet -- -D warnings \

@@ -81,7 +81,8 @@ fn wz_ws_acceptor_receives_pico_put_via_zenohd() {
     );
 
     // ── zenohd: DIAL the wz ws acceptor over ws, listen on tcp for the pico pub.
-    //    Its tcp listener port is derived from the wz port.
+    //    Its tcp listener port is OS-assigned and read back from zenohd's own
+    //    announcement (R311y411/y412), so no port is ever guessed.
     let wz_ws_endpoint = format!("ws/127.0.0.1:{ws_port}");
     let (mut zenohd, zenohd_tcp_port) = spawn_zenohd_ws_dialer(&wz_ws_endpoint);
 

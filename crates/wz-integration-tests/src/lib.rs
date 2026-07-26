@@ -686,7 +686,16 @@ pub mod common {
     /// {zid} reachable at {locators}"). `WZ_TEST_DEMO_LOG` lets an investigation raise
     /// it without editing the harness.
     pub fn demo_log_filter() -> String {
-        std::env::var("WZ_TEST_DEMO_LOG").unwrap_or_else(|_| "info".to_string())
+        const FLOOR: &str = "wz_ap_demo=info";
+        match std::env::var("WZ_TEST_DEMO_LOG") {
+            Err(_) => "info".to_string(),
+            // A bare level ("debug") already covers every module. A module-scoped
+            // filter might not, and dropping `wz_ap_demo` removes the witnesses the
+            // lanes assert on — a healthy run then fails with a convincing but FALSE
+            // transport diagnosis. Append the floor so raising detail can only ADD.
+            Ok(v) if v.contains("wz_ap_demo") || !v.contains('=') => v,
+            Ok(v) => format!("{v},{FLOOR}"),
+        }
     }
     /// RAII guard for a spawned `std::process::Child` that guarantees
     /// the process is killed + reaped even if the calling test panics
@@ -809,9 +818,18 @@ pub mod common {
             .split(marker)
             .nth(1)
             .unwrap_or_else(|| panic!("no '{marker}' in:\n{captured}"));
-        rest.chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>()
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        // R311y412 — REQUIRE a terminating non-digit, the same rule as the zenohd-side
+        // `parse_announced_tcp_port`. A capture can be read mid-write, and a digit run
+        // that ends at end-of-capture may be TRUNCATED (`337` for `33763`); the caller
+        // would then probe a port nobody bound and blame the child. Panicking here
+        // names the real condition instead.
+        assert!(
+            !digits.is_empty() && digits.len() < rest.len(),
+            "unterminated port after '{marker}' — the capture was read mid-write, so \
+             the digits may be truncated:\n{captured}"
+        );
+        digits
             .parse()
             .unwrap_or_else(|e| panic!("unparseable port after '{marker}': {e}\n{captured}"))
     }
@@ -855,12 +873,22 @@ pub mod common {
         // time). wait_for_substring returns the instant the marker appears, so the
         // wider window costs a green run NOTHING — it only raises the false-timeout
         // ceiling for a slow-scheduled start.
-        let captured = wait_for_substring(&mut reader, listen_marker, Duration::from_secs(10))
-            .unwrap_or_else(|c| {
-                let _ = guard.child_mut().kill();
-                let _ = guard.child_mut().wait();
-                panic!("{label} did not bind within 10s\n--- {label} stderr ---\n{c}");
-            });
+        // R311y412 — LIVENESS-aware, like the zenohd-side wait: a demo that dies at
+        // startup (a bad flag, an unreadable cert) used to cost the full 10s and then
+        // be misreported as "did not bind" — a corpse diagnosed as slow, with its exit
+        // status never collected. Measured 10.03s -> 0.105s on an `exit 3` stand-in.
+        let captured = wait_for_capture_alive(
+            guard.child_mut(),
+            &mut reader,
+            Duration::from_secs(10),
+            "binding its listen port",
+            |c| c.contains(listen_marker).then(|| c.to_string()),
+        )
+        .unwrap_or_else(|e| {
+            let _ = guard.child_mut().kill();
+            let _ = guard.child_mut().wait();
+            panic!("{label}: {e}");
+        });
         let port = listen_port(&captured);
         (guard, reader, port)
     }
@@ -1297,7 +1325,7 @@ pub mod common {
     }
 
     /// R311y374 — spawn a zenohd that DIALS a wz `ws/...` acceptor
-    /// (`-e ws/<wz_ws_endpoint>`) while also listening on `tcp/<tcp_port>` for a
+    /// (`-e ws/<wz_ws_endpoint>`) while also listening on an OS-assigned tcp port (RETURNED beside the guard) for a
     /// pico client. This is the FOREIGN WebSocket DIALER that verifies wz's new ws
     /// ACCEPTOR (the `bind_locator` ws arm + `accept_locator`'s RFC6455 server
     /// upgrade): zenoh-pico has NO ws client (`z_sub -e ws/...` returns "Unable to
@@ -1310,11 +1338,17 @@ pub mod common {
     /// Established"). No handshake-probe param: unlike the `-l`-only helpers, this
     /// zenohd DIALS out, and the wz-side log is the Established witness.
     pub fn spawn_zenohd_ws_dialer(wz_ws_endpoint: &str) -> (ChildGuard, u16) {
-        spawn_zenohd_dialer_on_ephemeral_tcp("zenohd (ws dialer)", wz_ws_endpoint, None)
+        spawn_zenohd_dialer_on_ephemeral_tcp(
+            &zenohd_binary(),
+            "zenohd (ws dialer)",
+            Some(wz_ws_endpoint),
+            &[],
+            None,
+        )
     }
 
     /// R311y375 — spawn a zenohd that DIALS a wz `tls/...` acceptor
-    /// (`-e tls/<wz>`) while listening on `tcp/<tcp_port>` for a pico client. The
+    /// (`-e tls/<wz>`) while listening on an OS-assigned tcp port (RETURNED beside the guard) for a pico client. The
     /// TLS DIALER twin of [`spawn_zenohd_ws_dialer`], verifying wz's new tls
     /// ACCEPTOR (`bind_locator`'s `Proto::Tls` arm + `accept_bound`'s rustls server
     /// handshake). zenohd trusts wz's self-signed cert via
@@ -1338,14 +1372,16 @@ pub mod common {
         );
         std::fs::write(&cfg_path, cfg).expect("write zenohd tls dialer config");
         spawn_zenohd_dialer_on_ephemeral_tcp(
+            &zenohd_binary(),
             "zenohd (tls dialer)",
-            wz_tls_endpoint,
+            Some(wz_tls_endpoint),
+            &[],
             Some(&cfg_path),
         )
     }
 
     /// R311y401 — spawn a zenohd that DIALS a wz `quic/<ip:port>` acceptor
-    /// (`-e quic/<wz>`) while listening on `tcp/<tcp_port>` for a pico client. The
+    /// (`-e quic/<wz>`) while listening on an OS-assigned tcp port (RETURNED beside the guard) for a pico client. The
     /// QUIC twin of [`spawn_zenohd_tls_dialer`], verifying wz's QUIC ACCEPTOR
     /// (`BoundListener::Quic` / `bind_quic` + the deferred `accept_quic_incoming` /
     /// `complete_quic_accept` split, R311y401 acceptor / R311y404 deferral). Uses the
@@ -1371,8 +1407,10 @@ pub mod common {
         );
         std::fs::write(&cfg_path, cfg).expect("write zenohd quic dialer config");
         spawn_zenohd_dialer_on_ephemeral_tcp(
+            &zenohd_binary(),
             "zenohd (quic dialer)",
-            wz_quic_endpoint,
+            Some(wz_quic_endpoint),
+            &[],
             Some(&cfg_path),
         )
     }
@@ -1383,14 +1421,20 @@ pub mod common {
     ///
     /// ## Why the port is discovered, not chosen
     ///
-    /// The sibling dialer helpers take a caller-CHOSEN `tcp_port`, and every
-    /// acceptor-direction caller derives it arithmetically from the wz listen port
-    /// (`wz_port.wrapping_add(1)`). The quic-family callers justify that in-comment by
+    /// Every zenohd dialer used to take a caller-CHOSEN `tcp_port`, by one of two
+    /// routes, and R311y412 retired both in favour of this one.
+    ///
+    /// The first was arithmetic: `wz_port.wrapping_add(1)`, justified in-comment by
     /// "a UDP and a TCP port live in different protocol namespaces, so they cannot
-    /// collide" (the ws/tls callers give a different reason, or none — and there the
-    /// wz port is itself TCP, so the namespace argument never applied at all). Either
-    /// way the conclusion does not hold: it rules out a collision with wz's OWN socket,
-    /// not with the rest of the machine. `wz_port + 1` is an ordinary port in the ephemeral range, and any
+    /// collide". That rules out a collision with wz's OWN socket, not with the rest of
+    /// the machine. The second was `PortReservation::pick` — bind an ephemeral port,
+    /// read it, drop the listener, hand the number to the child. That is better (a
+    /// `bind(0)` never returns a port still in TIME_WAIT) but NOT sufficient, and the
+    /// difference was measured rather than argued: under an external process cycling
+    /// loopback ephemeral sockets, the reserve-then-release lanes failed 5/210
+    /// (`wz_udp_acceptor`) and 3/210 (`wz_unixsock_acceptor`) with this exact
+    /// signature, while the discovery lanes here were 0/330. The window between the
+    /// release and the child's bind is real and losable. `wz_port + 1` is an ordinary port in the ephemeral range, and any
     /// other process — including a client socket opened moments earlier by this same
     /// test lane — may already hold it. When it does, zenohd logs `Address already in
     /// use (os error 98)` and exits **255** before accepting, and the readiness probe
@@ -1404,13 +1448,19 @@ pub mod common {
     /// unbindable for ~60s, and the derived port lands in exactly that range. A
     /// campaign accumulates hundreds of them.
     ///
-    /// There is no way to hand a child process a port that is guaranteed free — a
-    /// reserve-then-release helper only narrows the same TOCTOU window. So this helper
-    /// inverts the direction: zenohd binds `tcp/127.0.0.1:0`, the KERNEL picks a free
-    /// port, and the test reads it back from zenohd's own
-    /// `Zenoh can be reached at: tcp/127.0.0.1:<port>` line. Nothing is guessed, so
-    /// there is no window to lose. Readiness is still the `wait_for_tcp_accept_alive`
-    /// probe on the discovered port, so callers keep the same guarantee.
+    /// There is no way to hand a child process a port that is guaranteed free — every
+    /// reserve-then-release scheme only narrows the same TOCTOU window, and zenohd's
+    /// CLI offers no fd-inheritance or socket-activation flag to close it. So this
+    /// helper inverts the direction: zenohd binds `tcp/127.0.0.1:0`, the KERNEL picks
+    /// a free port and the child never lets go of it, and the test reads the number
+    /// back from zenohd's own `Zenoh can be reached at: tcp/127.0.0.1:<port>` line.
+    /// Nothing is guessed, so there is no window to lose. Readiness is still the
+    /// `wait_for_tcp_accept_alive` probe on the discovered port, so callers keep the
+    /// same guarantee.
+    ///
+    /// `PortReservation` survives for the ports this route cannot serve — a wz-side
+    /// listen the test must name BEFORE the process starts. Where the child can be
+    /// made to announce, this helper is strictly better.
     ///
     /// `config_path` is the optional `--config` JSON5 (trust anchors, routing mode);
     /// the caller writes it. The capture the port is parsed out of is OWNED here —
@@ -1419,8 +1469,10 @@ pub mod common {
     /// Keeping it internal is what lets every sibling dialer delegate without
     /// threading a capture handle through its own signature.
     pub fn spawn_zenohd_dialer_on_ephemeral_tcp(
+        zenohd_bin: &std::path::Path,
         label: &'static str,
-        dial_locator: &str,
+        dial_locator: Option<&str>,
+        extra_listens: &[String],
         config_path: Option<&str>,
     ) -> (ChildGuard, u16) {
         /// zenohd's orchestrator announces each bound listener with this prefix; the
@@ -1432,12 +1484,26 @@ pub mod common {
         let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let capture_path =
             std::env::temp_dir().join(format!("wz-zenohd-dialer-{}-{seq}.log", std::process::id()));
-        let writer = File::create(&capture_path).expect("create zenohd capture file");
-        let mut reader = File::open(&capture_path).expect("open zenohd capture file");
-        // Unlink NOW: the two handles keep it alive until they drop, so the file never
-        // outlives the spawn even if the caller panics.
+        // create_new = O_CREAT|O_EXCL: the name is predictable, and a plain create
+        // FOLLOWS a symlink someone may have planted at that path in a world-writable
+        // temp dir, truncating whatever it points at. O_EXCL fails on any existing
+        // path, symlink included, so the attack becomes a loud error rather than a
+        // silent write to a victim file. (`tempfile` gets this right, but it is a
+        // dev-dependency and this is the lib target.)
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&capture_path)
+            .unwrap_or_else(|e| panic!("create zenohd capture file {capture_path:?}: {e}"));
+        let reader = File::open(&capture_path);
+        // Unlink NOW so the file cannot outlive the spawn even if the caller panics —
+        // and BEFORE the reader is unwrapped, so a failed open leaks nothing.
         let _ = std::fs::remove_file(&capture_path);
-        let mut command = Command::new(zenohd_binary());
+        // The CHILD's stdout fd keeps the inode alive from here on; the parent's own
+        // `writer` is closed right after `spawn`, and `reader` dies with this call.
+        let mut reader =
+            reader.unwrap_or_else(|e| panic!("open zenohd capture file {capture_path:?}: {e}"));
+        let mut command = Command::new(zenohd_bin);
         command
             // PIN the log level. This helper is the only one in the crate that reads
             // zenohd's LOG rather than probing its socket, so the announcement it
@@ -1447,8 +1513,6 @@ pub mod common {
             // its full budget on a healthy process. `spawn_on_ephemeral_port` pins the
             // same variable for the wz demo for the same reason.
             .env("RUST_LOG", "z=info")
-            .arg("-e")
-            .arg(dial_locator)
             .arg("-l")
             .arg("tcp/127.0.0.1:0")
             .arg("--no-multicast-scouting")
@@ -1456,6 +1520,15 @@ pub mod common {
             .arg("none")
             .stdout(Stdio::from(writer))
             .stderr(Stdio::null());
+        // Additional listeners (e.g. a unixpipe endpoint alongside the tcp one). Only a
+        // TCP announcement carries the `tcp/127.0.0.1:` needle, so a non-tcp extra
+        // listen can never be mistaken for the port being discovered.
+        if let Some(dial) = dial_locator {
+            command.arg("-e").arg(dial);
+        }
+        for listen in extra_listens {
+            command.arg("-l").arg(listen);
+        }
         if let Some(cfg) = config_path {
             command.arg("--config").arg(cfg);
         }
@@ -1490,7 +1563,7 @@ pub mod common {
 
     /// R311y408 — spawn a zenohd that DIALS a wz `quic-datagram/<ip:port>` acceptor
     /// over the QUIC unreliable-DATAGRAM transport (RFC9221) while listening on
-    /// `tcp/<tcp_port>` for a pico client. The DATAGRAM twin of
+    /// an OS-assigned tcp port (RETURNED beside the guard) for a pico client. The DATAGRAM twin of
     /// [`spawn_zenohd_quic_dialer`], verifying wz's QUIC-DATAGRAM ACCEPTOR
     /// (`BoundListener::QuicDatagram` / `bind_quic_datagram` + the deferred
     /// `accept_quic_incoming` / `complete_quic_datagram_accept` split, R311y408).
@@ -1522,14 +1595,16 @@ pub mod common {
         );
         std::fs::write(&cfg_path, cfg).expect("write zenohd quic-datagram dialer config");
         spawn_zenohd_dialer_on_ephemeral_tcp(
+            &zenohd_binary(),
             "zenohd (quic-datagram dialer)",
-            &format!("quic/{wz_quic_datagram_addr}?rel=0"),
+            Some(&format!("quic/{wz_quic_datagram_addr}?rel=0")),
+            &[],
             Some(&cfg_path),
         )
     }
 
     /// R311y398 — spawn a zenohd that DIALS a wz `unixsock-stream/<path>` acceptor
-    /// (`-e unixsock-stream/<path>`) while also listening on `tcp/<tcp_port>` for a
+    /// (`-e unixsock-stream/<path>`) while also listening on an OS-assigned tcp port (RETURNED beside the guard) for a
     /// pico client. The AF_UNIX-stream DIALER sibling of [`spawn_zenohd_ws_dialer`]
     /// / [`spawn_zenohd_tls_dialer`], verifying wz's unixsock ACCEPTOR (the
     /// `bind_locator` `AnyLocator::Unixsock` arm wired in R311y378 + `accept_bound`'s
@@ -1541,32 +1616,18 @@ pub mod common {
     /// dial to wz is witnessed on the wz side ("session Established"). No
     /// handshake-probe param (like the ws/tls dialers): this zenohd DIALS out, and the
     /// wz-side log is the Established witness.
-    pub fn spawn_zenohd_unixsock_dialer(wz_unixsock_path: &str, tcp_port: u16) -> ChildGuard {
-        let mut command = Command::new(zenohd_binary());
-        command
-            .arg("-e")
-            .arg(format!("unixsock-stream/{wz_unixsock_path}"))
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut guard = ChildGuard::wrap(
+    pub fn spawn_zenohd_unixsock_dialer(wz_unixsock_path: &str) -> (ChildGuard, u16) {
+        spawn_zenohd_dialer_on_ephemeral_tcp(
+            &zenohd_binary(),
             "zenohd (unixsock dialer)",
-            command.spawn().expect("spawn zenohd unixsock dialer"),
-        );
-        if let Err(e) =
-            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
-        {
-            panic!("zenohd (unixsock dialer): {e}");
-        }
-        guard
+            Some(&format!("unixsock-stream/{wz_unixsock_path}")),
+            &[],
+            None,
+        )
     }
 
     /// R311y399 — spawn a zenohd that DIALS a wz `udp/...` acceptor
-    /// (`-e udp/<wz_udp_endpoint>`) while also listening on `tcp/<tcp_port>` for a
+    /// (`-e udp/<wz_udp_endpoint>`) while also listening on an OS-assigned tcp port (RETURNED beside the guard) for a
     /// pico client. The DATAGRAM DIALER sibling of [`spawn_zenohd_ws_dialer`] /
     /// [`spawn_zenohd_tls_dialer`], verifying wz's UDP-demux ACCEPTOR
     /// (`BoundListener::Udp` / `bind_udp_demux`, R311y382 — the first structurally-
@@ -1580,32 +1641,18 @@ pub mod common {
     /// test. Readiness = zenohd accepting on its tcp listener; the udp dial to wz is
     /// witnessed on the wz side ("session Established"). No handshake-probe param
     /// (like the ws/tls dialers): this zenohd DIALS out.
-    pub fn spawn_zenohd_udp_dialer(wz_udp_endpoint: &str, tcp_port: u16) -> ChildGuard {
-        let mut command = Command::new(zenohd_binary());
-        command
-            .arg("-e")
-            .arg(wz_udp_endpoint)
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut guard = ChildGuard::wrap(
+    pub fn spawn_zenohd_udp_dialer(wz_udp_endpoint: &str) -> (ChildGuard, u16) {
+        spawn_zenohd_dialer_on_ephemeral_tcp(
+            &zenohd_binary(),
             "zenohd (udp dialer)",
-            command.spawn().expect("spawn zenohd udp dialer"),
-        );
-        if let Err(e) =
-            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
-        {
-            panic!("zenohd (udp dialer): {e}");
-        }
-        guard
+            Some(wz_udp_endpoint),
+            &[],
+            None,
+        )
     }
 
     /// R311y400 — spawn a VSOCK-enabled zenohd that DIALS a wz `vsock/<cid>:<port>`
-    /// acceptor (`-e vsock/<cid>:<port>`) while listening on `tcp/<tcp_port>` for a
+    /// acceptor (`-e vsock/<cid>:<port>`) while listening on an OS-assigned tcp port (RETURNED beside the guard) for a
     /// pico client. The AF_VSOCK DIALER twin of [`spawn_zenohd_unixsock_dialer`],
     /// verifying wz's vsock ACCEPTOR (`BoundListener::Vsock` / `bind_vsock` — direct
     /// wrap, no post-accept handshake — proven wz<->wz by `vsock_e2e`). Needs the
@@ -1619,28 +1666,14 @@ pub mod common {
     /// foreign vsock dialer. Readiness = zenohd accepting on its tcp listener; the
     /// vsock dial to wz is witnessed on the wz side ("session Established"). Linux +
     /// AF_VSOCK-loopback host only.
-    pub fn spawn_zenohd_vsock_dialer(wz_vsock_endpoint: &str, tcp_port: u16) -> ChildGuard {
-        let mut command = Command::new(zenohd_vsock_binary());
-        command
-            .arg("-e")
-            .arg(wz_vsock_endpoint)
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut guard = ChildGuard::wrap(
+    pub fn spawn_zenohd_vsock_dialer(wz_vsock_endpoint: &str) -> (ChildGuard, u16) {
+        spawn_zenohd_dialer_on_ephemeral_tcp(
+            &zenohd_vsock_binary(),
             "zenohd (vsock dialer)",
-            command.spawn().expect("spawn zenohd vsock dialer"),
-        );
-        if let Err(e) =
-            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
-        {
-            panic!("zenohd (vsock dialer): {e}");
-        }
-        guard
+            Some(wz_vsock_endpoint),
+            &[],
+            None,
+        )
     }
 
     /// R311y372 — spawn a zenohd router with the LOWLATENCY unicast transport
@@ -1822,29 +1855,19 @@ pub mod common {
     /// The caller owns request-FIFO cleanup.
     pub fn spawn_zenohd_unixpipe_tcp(
         unixpipe_base: &str,
-        tcp_port: u16,
         mk_probe_stderr: impl FnMut() -> File,
-    ) -> ChildGuard {
-        let mut command = Command::new(zenohd_unixpipe_binary());
-        command
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-            .arg("-l")
-            .arg(format!("unixpipe/{unixpipe_base}"))
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut guard = ChildGuard::wrap(
+    ) -> (ChildGuard, u16) {
+        // R311y412 — LISTENER-only (no `-e`), so the shared discovery primitive takes
+        // `None` for the dial locator and the unixpipe endpoint as an extra listen.
+        // Only a TCP announcement carries the needle, so the unixpipe listen cannot be
+        // mistaken for the port being discovered.
+        let (guard, tcp_port) = spawn_zenohd_dialer_on_ephemeral_tcp(
+            &zenohd_unixpipe_binary(),
             "zenohd (unixpipe+tcp listener)",
-            command.spawn().expect("spawn zenohd unixpipe+tcp listener"),
+            None,
+            &[format!("unixpipe/{unixpipe_base}")],
+            None,
         );
-        if let Err(e) =
-            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
-        {
-            panic!("zenohd (unixpipe+tcp listener): {e}");
-        }
         if !wait_for_unixpipe_request_fifo(unixpipe_base, Duration::from_secs(15)) {
             panic!(
                 "zenohd did not create the unixpipe request FIFO {unixpipe_base}_uplink within 15s"
@@ -1854,11 +1877,11 @@ pub mod common {
         // R311pi discipline in spawn_zenohd_listeners); the wz probe dials TCP, so
         // it needs no unixpipe feature.
         wait_for_zenohd_handshake_ready(&format!("tcp/127.0.0.1:{tcp_port}"), mk_probe_stderr);
-        guard
+        (guard, tcp_port)
     }
 
     /// R311y393 — spawn a UNIXPIPE-enabled zenohd that DIALS a wz `unixpipe/<base>`
-    /// acceptor (`-e unixpipe/<base>`) while listening on `tcp/<tcp_port>` for a
+    /// acceptor (`-e unixpipe/<base>`) while listening on an OS-assigned tcp port (RETURNED beside the guard) for a
     /// pico client. The named-FIFO DIALER twin of [`spawn_zenohd_ws_dialer`] /
     /// [`spawn_zenohd_tls_dialer`], verifying that wz's MULTI-CLIENT unixpipe
     /// ACCEPTOR (R311y392) carries the DATA plane, not just the handshake: zenohd's
@@ -1869,28 +1892,14 @@ pub mod common {
     /// called, so the zenoh client's invitation lands. Readiness = zenohd accepting
     /// on its tcp listener; the unixpipe dial to wz is witnessed on the wz side
     /// ("session Established"). Linux-only.
-    pub fn spawn_zenohd_unixpipe_dialer(wz_unixpipe_base: &str, tcp_port: u16) -> ChildGuard {
-        let mut command = Command::new(zenohd_unixpipe_binary());
-        command
-            .arg("-e")
-            .arg(format!("unixpipe/{wz_unixpipe_base}"))
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut guard = ChildGuard::wrap(
+    pub fn spawn_zenohd_unixpipe_dialer(wz_unixpipe_base: &str) -> (ChildGuard, u16) {
+        spawn_zenohd_dialer_on_ephemeral_tcp(
+            &zenohd_unixpipe_binary(),
             "zenohd (unixpipe dialer)",
-            command.spawn().expect("spawn zenohd unixpipe dialer"),
-        );
-        if let Err(e) =
-            wait_for_tcp_accept_alive(guard.child_mut(), tcp_port, ZENOHD_TCP_ACCEPT_BUDGET)
-        {
-            panic!("zenohd (unixpipe dialer): {e}");
-        }
-        guard
+            Some(&format!("unixpipe/{wz_unixpipe_base}")),
+            &[],
+            None,
+        )
     }
 
     /// Spawn a zenohd router listening on BOTH `tcp/` (for pico TCP clients and
@@ -2395,6 +2404,23 @@ mod tests {
         );
     }
 
+    /// The capture pair the PRODUCTION helper builds: writer via `create_new`
+    /// (O_EXCL), reader via a separate `open`, file unlinked immediately — two
+    /// independent open file descriptions, so the offsets cannot interfere.
+    fn shipped_capture_pair(tag: &str) -> (std::fs::File, std::fs::File) {
+        let path =
+            std::env::temp_dir().join(format!("wz-capture-twin-{tag}-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create twin capture");
+        let reader = std::fs::File::open(&path).expect("open twin capture");
+        let _ = std::fs::remove_file(&path);
+        (writer, reader)
+    }
+
     /// R311y411 — the port parser must REFUSE an unterminated digit run.
     ///
     /// A capture file can be read while the child is mid-write. Accepting a digit
@@ -2453,9 +2479,11 @@ mod tests {
         use super::common::wait_for_capture_alive;
         use std::process::{Command, Stdio};
 
-        let capture = tempfile::tempfile().expect("tempfile for child capture");
-        let writer = capture.try_clone().expect("dup capture handle");
-        let mut reader = capture;
+        // The SHIPPED arrangement: two independent open file descriptions (writer via
+        // create_new, reader via open), NOT `try_clone`, which shares the file OFFSET
+        // so a reader rewind can destroy the child's already-written output. A twin
+        // built on the abandoned shape would not be evidence for what ships.
+        let (writer, mut reader) = shipped_capture_pair("corpse");
         let mut child = Command::new("sh")
             .args(["-c", "echo starting; exit 3"])
             .stdout(Stdio::from(writer))
@@ -2501,9 +2529,8 @@ mod tests {
         use std::process::{Command, Stdio};
         const NEEDLE: &str = "reached at: tcp/127.0.0.1:";
 
-        let capture = tempfile::tempfile().expect("tempfile for child capture");
-        let writer = capture.try_clone().expect("dup capture handle");
-        let mut reader = capture;
+        // Same shipped create/open pair as the corpse twin above.
+        let (writer, mut reader) = shipped_capture_pair("live");
         // Announce only after a delay, so the wait genuinely polls; then stay alive.
         let child = Command::new("sh")
             .args([
