@@ -1242,7 +1242,7 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1bm
 
   transport-modes:
-    name: transport-MODE lanes (the §5.1 mode axis; no other job composes them)
+    name: transport-MODE lanes (the §5.1 mode axis)
     runs-on: ubuntu-22.04
     # Its OWN runner, for the reason the feature-gates job states above: every
     # lane below is a DISTINCT off-default feature set, hence a distinct set of
@@ -1251,49 +1251,124 @@ jobs:
     #
     # R311y413 closed the transport-link-KIND axis — all 10 `transport-link-*`
     # kinds now gate hosted. This job closes the ORTHOGONAL axis: transport
-    # MODES. Enumerated from the cargo feature SSOT (the `transport-*` keys in
-    # crates/wz/Cargo.toml, minus the link kinds) there are 11 modes. THREE ride
-    # wz-runtime-tokio's `default` set and so already gate through Layer C1's
-    # `cargo test --workspace`: transport-unicast, -keepalive, -batching. The
-    # other EIGHT are off-default and, before this job, gated on NO hosted lane
-    # at all — fragmentation, lowlatency, compression, shm, stats, qos,
-    # multilink, multicast. Measured, not assumed: the last fully-green hosted
-    # run (30206063204, R311y413) has ZERO log lines for any of the 16 lanes
-    # below, while the identical grep finds the hosted C1al / C1w / C1t lanes.
+    # MODES. The enumeration rule is "off-default transport-TIER atoms", which
+    # is the `transport-*` keys in crates/wz/Cargo.toml minus the 10 link kinds
+    # (11 modes) PLUS `reassembly`, a transport-tier atom that does not carry
+    # the prefix. THREE modes ride wz-runtime-tokio's `default` set and so gate
+    # through Layer C1 by construction: transport-unicast, -keepalive,
+    # -batching. The remaining eight are off-default: fragmentation,
+    # lowlatency, compression, shm, stats, qos, multilink, multicast.
     #
-    # Hosting a lane only helps if the lane can go red, so R311y414 first
-    # hardened these: 34 previously-BARE `cargo test` steps across them gained
-    # anchored `^test result: ok\. N passed` guards at their MEASURED counts —
-    # 28 through the new `_runci_guarded_test` helper, 6 through the inline form
-    # Layer C1ba already used. The hazard those close is exact: `cargo test
-    # <filter>` exits 0 when the filter matches nothing, and an `--ignored` run
-    # selects nothing the moment its `#[ignore]` is dropped. Each guard shape
-    # was falsified locally — perturb the count or the filter and the lane
-    # reddens, cargo output intact in the log.
+    # What "unhosted" precisely meant before this job, MEASURED per mode rather
+    # than assumed (an earlier draft of this comment claimed the eight "gated on
+    # NO hosted lane at all", which review falsified):
+    #  - lowlatency / compression / shm / stats / multilink: nothing hosted ran
+    #    a single one of their cases. Verified by running Layer C1's exact
+    #    command with each subject's filter — every summary line reads 0 passed.
+    #  - fragmentation, multicast, and the session-core half of qos: PARTIALLY
+    #    and ACCIDENTALLY covered inside Layer C1's `cargo test --workspace`.
+    #    Not because anything gates them, but because `wz-integration-tests`'
+    #    dev-dependency pins (crates/wz-integration-tests/Cargo.toml:87 for
+    #    wz-session-core, :118-121 for wz-runtime-tokio) unify onto the shared
+    #    builds — the unification the same file's R311wq "honesty fix" records
+    #    after the opposite claim proved wrong. Measured under C1's command:
+    #    multicast_glue 18, qos_emit_tests 2, udp_frag_e2e 1, udp_chaos_e2e 3,
+    #    layer3_reassembly_rx 4. What C1 does NOT reach, in the same builds:
+    #    the runtime-side qos units (is_qos exclusivity, multilink::), every
+    #    `--no-default-features` multicast-only build, the mode COMPOSITION
+    #    matrices, and every clippy gate. And a dev-dep edit removes that
+    #    coverage silently, because no gate declares it.
+    # So the honest claim is per-SUBJECT: before this job, no hosted lane's
+    # SUBJECT was a transport mode. Measured: the last fully-green hosted run
+    # (30206063204, R311y413) has ZERO log lines for any of the 16 lanes below,
+    # while the identical grep finds the hosted C1al / C1w / C1t lanes.
     #
-    # All 16 are pure cargo on ubuntu-22.04: no zenohd, no zenoh-pico, no vsock
-    # module, and deliberately no real multicast socket — the multicast lanes
-    # drive recording links and in-process channels, so none of them depends on
-    # runner multicast behaviour. Layer M (active-scouting multicast loopback)
-    # is the one mode lane left out ON PURPOSE: run-ci.sh keeps it opt-in
-    # (`--layer M` / WZ_RUN_LAYER_M=1) precisely because it is environment-flaky,
-    # and a flaky hosted gate is worse than an honest local one.
+    # LANE-SELECTION RULE, stated because the boundary is not self-evident: a
+    # lane belongs here when its SUBJECT is a transport mode (its header names
+    # the mode) or when it is a mode-COMPOSITION matrix. Lanes that merely
+    # compose a mode while being about something else stay out and stay
+    # local-only — C1m (the lwIP platform port, seven transport-multicast
+    # arms), C1n (the MCU acceptor, a reassembly arm) and C3 (the per-package
+    # --all-targets matrix, three multicast clippy combos). They are a real
+    # remaining gap, in the isolated-platform-crate genre rather than this one.
     #
-    # Cost, measured not guessed (warm local, one `--layer X` run each): 171s
-    # for all 16 — C1ba 36s, C1bb 29s, C1l 23s, C1bc 22s, C1q 17s, E6c 8s,
-    # C1af 7s, C1ae 6s, C1ad/C1ag/E6d 5s, C1ak 4s, C1p/C1r/C1s/C4e 1s each. A
-    # cold runner recompiles every off-default subset from scratch, so this job
-    # takes the 45-minute budget rather than feature-gates' 30.
+    # Hosting a lane only helps if the lane can go red, so R311y414 hardened
+    # these first, through the `_runci_guarded_test` helper in run-ci.sh: 47
+    # guarded steps across the 16 lanes, each asserting `^test result: ok\. N
+    # passed` at its MEASURED count. 32 of them were previously BARE, 12 are
+    # new subject-scoped runs, and 3 replace an older inline `grep -q` form.
+    # The hazard is exact: `cargo test <filter>` exits 0 when the filter matches
+    # nothing, and an `--ignored` run selects nothing the moment its
+    # `#[ignore]` is dropped. Eight unfiltered whole-crate runs across four
+    # lanes stay BARE on purpose (C1l x4, C1p x2, C1r, C1s — 126 summary lines
+    # between them, where neither an exact count nor `>=1` asserts anything),
+    # but each of those
+    # lanes now ALSO runs its own subject target-scoped and guarded, which is
+    # what a whole-crate exit code cannot show. Every guard shape was falsified
+    # locally: perturb a count, a filter, a feature or an `#[ignore]` and the
+    # lane reddens with cargo's output intact.
+    #
+    # All 16 are pure cargo on ubuntu-22.04 with NO foreign-binary prerequisite
+    # — no zenohd, no zenoh-pico CLI, no vsock module — which is what matters
+    # here, because a lane with such a prerequisite could SKIP green. Three of
+    # them do drive a C toolchain through cargo (C1r cc-builds lwIP from
+    # vendor/lwip; E6c/E6d build wz-integration-tests, whose dev-deps cmake-build
+    # vendor/zenoh-pico), which is why the recursive checkout and the cmake /
+    # clang / perl install below are load-bearing, not boilerplate. No lane
+    # touches a real multicast socket: the multicast lanes drive recording links
+    # and in-process channels, so none depends on runner multicast behaviour.
+    # Layer M (active-scouting multicast loopback) is the one mode lane left out
+    # ON PURPOSE: run-ci.sh keeps it opt-in (`--layer M` / WZ_RUN_LAYER_M=1)
+    # precisely because it is environment-flaky, and a flaky hosted gate is
+    # worse than an honest local one.
+    #
+    # Cost, measured not guessed, and calibrated against a real hosted run
+    # rather than a single warm sample. Local medians over this repo's own
+    # ~490 archived run-ci logs (n=66-76 per lane) total 184s for the 16;
+    # p90 totals 523s. The reference point: the feature-gates job's 15 lanes
+    # have the SAME 184s local-median total and took 604s hosted on run
+    # 30206063204, i.e. hosted ~= 3.3x local median (rust-cache prunes
+    # workspace-member artefacts, so "warm" never applies hosted). That
+    # projects ~10 min typical and ~29 min at p90 for this job — hence the
+    # 45-minute budget rather than feature-gates' 30. Tail lanes, in order:
+    # C1ba (med 39s / p90 178s), C1bb, C1bc, C1l.
     timeout-minutes: 45
     steps:
+      # The `ci` job's remedy after R311y296 died with `No space left on
+      # device`, applied here for the same reason it was applied there: this
+      # job's lanes are the disk-heaviest in the workflow after `ci` itself —
+      # C1l runs whole-package `cargo test -p wz-runtime-tokio` under two
+      # distinct feature sets, linking all 58 of that crate's test targets each
+      # time, and C1p does the same for wz-session-core. The `df -h` bracket is
+      # not decoration: the original failure was undiagnosable precisely because
+      # nothing ever reported free space.
+      - name: Free runner disk space (headroom for the mode-matrix lanes)
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          # `|| true` throughout: a path absent on a future runner image must
+          # not fail the build — this step is headroom, not a gate.
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          echo "=== free space AFTER prune ==="
+          df -h /
+
       - name: Checkout (with submodules)
-        # `recursive`: wz-session-core compiles against sce_forge_runtime from
-        # vendor/sce, so the lanes below do not build without it.
+        # `recursive` is load-bearing three times over here: wz-session-core
+        # compiles against sce_forge_runtime from vendor/sce, C1r cc-builds lwIP
+        # from vendor/lwip, and E6c/E6d pull wz-integration-tests whose dev-deps
+        # cmake-build vendor/zenoh-pico. A narrowed checkout breaks those lanes.
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install system dependencies
+        # cmake + clang/libclang are for those two C builds (bindgen included);
+        # perl matches the sibling job's set.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cmake libclang-dev clang perl

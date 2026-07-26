@@ -459,6 +459,9 @@ run_layer() {
     if [[ -n "$ONLY_LAYER" && "$ONLY_LAYER" != "$name" ]]; then
         return 0
     fi
+    # Record that the requested --layer actually exists; the end-of-run check
+    # turns an unmatched name into a FAILURE instead of a silent green.
+    LAYER_MATCHED=1
     if [[ -n "$RESUME" ]] && _ckpt_passed "$name"; then
         echo "[$(_runci_ts)] INFO  Layer $name SKIP (resume: already passed on this tree)"
         return 0
@@ -495,10 +498,17 @@ run_layer() {
 #             legitimately, where an exact number would only breed churn — the
 #             R311y280 Layer C1bg precedent.
 #
-# The command runs in `crates/` with its output CAPTURED and re-echoed rather
-# than piped into grep, because a pipeline would (a) swallow cargo's diagnostics
-# on failure and (b) race `grep -q`'s early exit against its upstream's SIGPIPE
-# under this script's `set -o pipefail`.
+# The command runs in `crates/`. Its output is STREAMED (`tee /dev/stderr`, so a
+# lane killed by the job's `timeout-minutes` still leaves its diagnostics in the
+# log — R311y414 review finding) AND captured for the assert. The assert reads
+# the captured copy rather than sitting in the pipe, because a `... | grep -q`
+# stage races its upstream's SIGPIPE against `grep`'s early exit under this
+# script's `set -o pipefail` — a false RED once the post-summary output exceeds
+# the pipe buffer.
+#
+# <expect> is validated up front: `+` or a POSITIVE integer. `0` is rejected on
+# purpose — "assert that nothing ran" is never the intent, and accepting it
+# would silently re-open the hazard this helper closes.
 _runci_guarded_test() {
     local label="$1" expect="$2"
     shift 2
@@ -506,16 +516,17 @@ _runci_guarded_test() {
     if [[ "$expect" == "+" ]]; then
         pat='^test result: ok\. [1-9][0-9]* passed'
         want=">=1 passed"
-    else
+    elif [[ "$expect" =~ ^[1-9][0-9]*$ ]]; then
         pat="^test result: ok\. ${expect} passed"
         want="exactly ${expect} passed"
+    else
+        echo "  ${label} FAIL: guard expectation must be '+' or a positive integer, got '${expect}'"
+        return 1
     fi
-    if ! out="$( (cd crates && "$@") 2>&1 )"; then
-        echo "$out"
+    if ! out="$( (cd crates && "$@") 2>&1 | tee /dev/stderr )"; then
         echo "  ${label} FAIL: \`$*\` exited non-zero"
         return 1
     fi
-    echo "$out"
     if ! grep -qE "$pat" <<< "$out"; then
         echo "  ${label} FAIL: expected ${want} from \`$*\` — no libtest summary matched, so the run either printed a DIFFERENT count or selected NO tests (which still exits 0)"
         return 1
@@ -1362,6 +1373,15 @@ layer_c1ad_cargo_test_lowlatency() {
 layer_c1bb_cargo_test_qos() {
     _runci_guarded_test C1bb + cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib --quiet \
         || return 1
+    # R311y414 review — the `+` above is necessary (301 cases, an exact number
+    # would red on every unrelated session-core test) but NOT sufficient: it
+    # cannot see this lane's own subject go dark. Measured, the same feature set
+    # minus transport-qos drops the sweep to 276 and the `qos` filter from 21 to
+    # 12, so the qos-gated session-core cases would vanish under a still-green
+    # `+`. The exact 21 pins them; nothing else in this lane covers the
+    # session-core side (its other exact guards are all wz-runtime-tokio).
+    _runci_guarded_test C1bb 21 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
+        || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features transport-fragmentation --quiet -- -D warnings \
@@ -1980,39 +2000,51 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # The deploy-active e2e drives the production `peer_loop` accept/dial path, so
     # it needs the `routing-accept`/`routing-peer` loop module compiled in.
     local ML_DEPLOY_FEATURES="$ML_FEATURES,routing-peer"
+    # R311y414 — every test step in this lane is now a `_runci_guarded_test`
+    # call. Six were BARE; the other three carried the older inline
+    # `tee /dev/stderr | grep -qE` form, which the helper's own docstring rejects
+    # (a `grep -q` stage can win the race against its upstream's SIGPIPE under
+    # `set -o pipefail` and turn a SATISFIED guard into a false RED). The first
+    # cut of this round kept the inline form here, arguing the helper's `cd
+    # crates` cannot compose inside the lane's single `(cd crates && ...)` chain
+    # — review disproved that: splitting the chain into guarded calls plus
+    # clippy-only subshells is exactly what C1bb/C1bc did, and it also gives
+    # each step a labelled FAIL diagnostic naming WHICH of the nine missed.
+    _runci_guarded_test C1ba 5 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet \
+        || return 1
+    # R311y218 — qos x multilink composition: the qos-gated e2e proves the
+    # _with_multilink entrypoints negotiate is_qos over the 0x4 handshake
+    # (both-offer -> is_qos true; qos=false control -> false). The 5 -> 6 count
+    # step IS that proof: the qos build activates one more case.
+    _runci_guarded_test C1ba 6 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet \
+        || return 1
+    _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet \
+        || return 1
+    # R311y219 — qos x multilink PRIORITY segregation over the DEPLOY path: the
+    # transport-qos deploy build activates the #[cfg(transport-qos)] priority
+    # test (an EXPRESS + a LOW Put ride DISTINCT physical links; the reliability
+    # tests stay green with the band inert). Runs BOTH deploy tests with qos on.
+    _runci_guarded_test C1ba 3 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES,transport-qos" --test session_multilink_deploy_e2e --quiet \
+        || return 1
+    # R311y212 slice-2 — the per-link AUTO-RE-ADD e2e: A's production peer_loop
+    # (max_links=2, dials B twice) re-dials + re-JOINs a link the harness kills
+    # on B, so a dropped dialed link comes back onto the SAME session. The count
+    # guard reddens the lane if a feature-set edit ever cfg-outs the
+    # '#![cfg(all(...))]'-gated file to 0 tests (silent green).
+    _runci_guarded_test C1ba 1 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet \
+        || return 1
+    _runci_guarded_test C1ba 5 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
+        || return 1
+    # R311y219a — the per-face priority-band + reliability-axis POLICY unit
+    # tests live in accept_loop::tests (gated transport-multilink) inside the
+    # routing-accept/peer-gated module, so they need BOTH multilink AND the
+    # module gate to compile+run. No prior --lib lane combined them, so they
+    # were CI-invisible; ML_DEPLOY_FEATURES has both.
+    _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --lib --quiet -- multilink_priority_range multilink_pref_for \
+        || return 1
+    _runci_guarded_test C1ba 3 cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet \
+        || return 1
     (cd crates \
-        `# R311y414 — the six previously-bare test steps in this lane now carry` \
-        `# anchored count guards too. They use THIS lane's established` \
-        `# 'tee /dev/stderr | grep -qE' form rather than the _runci_guarded_test` \
-        `# helper the sibling mode lanes adopted, because the lane is one '&&'` \
-        `# chain inside a single '(cd crates ...)' subshell, where the helper's` \
-        `# own 'cd crates' cannot compose.` \
-        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 5 passed' \
-        `# R311y218 — qos x multilink composition: the qos-gated e2e proves the` \
-        `# _with_multilink entrypoints negotiate is_qos over the 0x4 handshake` \
-        `# (both-offer -> is_qos true; qos=false control -> false).` \
-        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 6 passed' \
-        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed' \
-        `# R311y219 — qos x multilink PRIORITY segregation over the DEPLOY path: the` \
-        `# transport-qos deploy build activates the #[cfg(transport-qos)] priority` \
-        `# test (an EXPRESS + a LOW Put ride DISTINCT physical links; the reliability` \
-        `# tests stay green with the band inert). Runs BOTH deploy tests with qos on.` \
-        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES,transport-qos" --test session_multilink_deploy_e2e --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 3 passed' \
-        `# R311y212 slice-2 — the per-link AUTO-RE-ADD e2e: A's production peer_loop` \
-        `# (max_links=2, dials B twice) re-dials + re-JOINs a link the harness kills` \
-        `# on B, so a dropped dialed link comes back onto the SAME session. The count` \
-        `# guard (grep ' 1 passed') reddens the lane if a feature-set edit ever` \
-        `# cfg-outs the '#![cfg(all(...))]'-gated file to 0 tests (silent green).` \
-        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_readd_e2e --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed' \
-        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 5 passed' \
-        `# R311y219a — the per-face priority-band + reliability-axis POLICY unit` \
-        `# tests live in accept_loop::tests (gated transport-multilink) inside the` \
-        `# routing-accept/peer-gated module, so they need BOTH multilink AND the` \
-        `# module gate to compile+run. No prior --lib lane combined them, so they` \
-        `# were CI-invisible; ML_DEPLOY_FEATURES has both. The ' 2 passed' guard` \
-        `# reddens the lane if a feature-set edit ever cfg-outs them to a silent 0.` \
-        && cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --lib --quiet -- multilink_priority_range multilink_pref_for 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed' \
-        && cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 3 passed' \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet -- -D warnings \
         `# R311y218 — clippy the qos x multilink composition (entrypoint qos param,` \
@@ -2035,14 +2067,16 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         `# seam (those TX paths route through send_wire_this_link). Same class the` \
         `# C1m lane caught for send_wire on a bare transport-multicast MCU build.` \
         && cargo clippy -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-close --lib --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,transport-keepalive --lib --quiet -- -D warnings \
-        `# R311y211 invocation 5 — the ex-XOR coexistence proof: default features` \
-        `# (which carry session-reconnect) + transport-multilink now COMPILE and the` \
-        `# reset_for_reopen runtime guard preserves the survivor's shared SN. The` \
-        `# 'grep 1 passed' asserts the test actually RAN ('cargo test <substring>'` \
-        `# exits 0 on ZERO matches, so a future cfg-out would otherwise pass green);` \
-        `# 'tee /dev/stderr' keeps the full cargo output in the CI log.` \
-        && cargo test -p wz-runtime-tokio --features transport-multilink --lib reset_for_reopen_preserves_shared_sn_while_a_link_is_live --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed' \
+        && cargo clippy -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,transport-keepalive --lib --quiet -- -D warnings) \
+        || return 1
+    # R311y211 invocation 5 — the ex-XOR coexistence proof: default features
+    # (which carry session-reconnect) + transport-multilink now COMPILE and the
+    # reset_for_reopen runtime guard preserves the survivor's shared SN. The
+    # count guard asserts the test actually RAN (`cargo test <substring>` exits
+    # 0 on ZERO matches, so a future cfg-out would otherwise pass green).
+    _runci_guarded_test C1ba 1 cargo test -p wz-runtime-tokio --features transport-multilink --lib reset_for_reopen_preserves_shared_sn_while_a_link_is_live --quiet \
+        || return 1
+    (cd crates \
         && cargo clippy -p wz-runtime-tokio --features transport-multilink --lib --quiet -- -D warnings \
         `# the guard lives in wz-session-core; clippy-floor the ex-XOR combo THERE` \
         `# too (invocation 5's runtime-tokio clippy would not lint the guard body).` \
@@ -3444,7 +3478,32 @@ layer_c1o_keyexpr_gating_behavior() {
 # clippy resolves DEFAULT features only, so these transport-fragmentation-gated
 # files were rustc-checked by the test build above but never clippy-linted
 # (gate-skew, same shape the C1u/C1v lanes close for tls/ws).
+#
+# R311y414 — the four whole-crate runs stay BARE on purpose (they emit 126
+# libtest summary lines between them, so neither an exact count nor a `>=1`
+# says anything), but bare is exactly why this lane could go green on nothing:
+# `cargo test -p wz-runtime-tokio --features reassembly` passes with hundreds of
+# unrelated cases while every fragmentation-gated TARGET sits at 0. Measured on
+# the unperturbed tree: under `reassembly` alone udp_chaos_e2e / udp_frag_e2e /
+# layer3_reassembly_tx really are 0-test targets (they need
+# transport-fragmentation), and under transport-fragmentation they carry 3 / 1 /
+# 1. So the lane now ALSO runs its own subjects target-scoped with exact guards
+# -- the per-target counts are what the whole-crate exit code cannot show.
 layer_c1l_reassembly() {
+    _runci_guarded_test C1l 16 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
+        || return 1
+    _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features reassembly --test layer3_reassembly_rx --quiet \
+        || return 1
+    _runci_guarded_test C1l 16 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
+        || return 1
+    _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx --quiet \
+        || return 1
+    _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_rx --quiet \
+        || return 1
+    _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation --test udp_frag_e2e --quiet \
+        || return 1
+    _runci_guarded_test C1l 3 cargo test -p wz-runtime-tokio --features transport-fragmentation --test udp_chaos_e2e --quiet \
+        || return 1
     (cd crates \
         && cargo test -p wz-session-core --features reassembly --quiet \
         && cargo test -p wz-runtime-tokio --features reassembly --quiet \
@@ -3472,7 +3531,19 @@ layer_c1l_reassembly() {
 # SSOT moved here from wz-runtime-tokio::multicast_glue) gates on
 # session-multicast + codec-join + alloc; the first arm keeps the
 # codec-join-less Router composition honest.
+#
+# R311y414 — same treatment as C1l: the two whole-crate runs stay bare (they
+# pass on hundreds of unrelated session-core cases and would not move if the
+# multicast module cfg'd out), so the lane now ALSO runs its OWN subject
+# filtered, with the counts that make the composition visible -- `multicast`
+# selects 32 cases on bare session-multicast and 48 once reassembly + codec-push
+# + codec-join compose in. The 32 -> 48 step is the proof the second feature set
+# is doing something.
 layer_c1p_multicast() {
+    _runci_guarded_test C1p 32 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+        || return 1
+    _runci_guarded_test C1p 48 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+        || return 1
     (cd crates \
         && cargo test -p wz-session-core --features session-multicast --quiet) \
         && (cd crates \
@@ -3644,14 +3715,21 @@ layer_c1n_mcu_session_acceptor() {
 # (the multicast profile is fixed on its wz dep), so one test + one clippy
 # pass cover it.
 #
-# R311y414 — a `>=1 passed` guard (not an exact count): the crate's three
-# summary lines are legitimately `0 / 1 / 0` (empty lib + the e2e + empty
-# doctests), so the invariant worth asserting is that the e2e case did not
-# vanish, which a bare run would have reported as green.
+# R311y414 — the crate's whole-crate run legitimately prints `0 / 1 / 0` (empty
+# lib + the one e2e + empty doctests), so the invariant worth asserting is that
+# the e2e case itself did not vanish -- which a bare run reports as green and an
+# unscoped guard would stop witnessing the moment the lib gains a test. Hence a
+# target-scoped exact guard on `--test host_multicast_e2e`.
 layer_c1r_mcu_multicast_e2e() {
-    _runci_guarded_test C1r + cargo test -p wz-mcu-multicast-e2e --quiet \
+    # R311y414 review — TARGET-SCOPED, not a whole-crate `+`. A `+` on the
+    # whole-crate run asserts only that SOME target had >=1 case, so the day the
+    # (today empty) lib gains its first test the guard would stop witnessing the
+    # e2e at all. Scoping to the one target that carries the scenario makes the
+    # assertion structural; the whole-crate run below still executes everything.
+    _runci_guarded_test C1r 1 cargo test -p wz-mcu-multicast-e2e --test host_multicast_e2e --quiet \
         || return 1
     (cd crates \
+        && cargo test -p wz-mcu-multicast-e2e --quiet \
         && cargo clippy -p wz-mcu-multicast-e2e --all-targets --quiet -- -D warnings)
 }
 
@@ -3679,9 +3757,14 @@ layer_c1r_mcu_multicast_e2e() {
 # unification, and a dev-dependency edit that pulls it back in cfg's
 # `new_multicast` away — which a bare run would report as green.
 layer_c1s_runtime_tokio_multicast_tests() {
-    _runci_guarded_test C1s 4 cargo test -p wz-runtime-tokio-multicast-tests --quiet \
+    # R311y414 review — `--lib`-scoped for the same reason as C1r: an unscoped
+    # guard is satisfied by ANY summary line in the run, so it would survive the
+    # arrival of a second target printing the same count. The whole-crate run
+    # below still covers everything the crate grows.
+    _runci_guarded_test C1s 4 cargo test -p wz-runtime-tokio-multicast-tests --lib --quiet \
         || return 1
     (cd crates \
+        && cargo test -p wz-runtime-tokio-multicast-tests --quiet \
         && cargo clippy -p wz-runtime-tokio-multicast-tests --all-targets --quiet -- -D warnings)
 }
 
@@ -7009,6 +7092,17 @@ run_layer M layer_m_scouting_multicast || overall=1
 run_layer Z layer_z_zenohd_interop || overall=1
 
 echo ""
+# R311y414 — a `--layer <name>` that matches NO lane used to run nothing and
+# exit 0: `run_layer` returns 0 for every non-matching name and no one asked
+# afterwards whether ANY name had matched. That is the same "a gate reports
+# success by silence" class this round exists to close, and the exposure grew
+# with it (the new transport-modes job alone names 16 layer strings that must
+# stay in sync across two files). An unmatched --layer is now a hard failure.
+if [[ -n "$ONLY_LAYER" && "${LAYER_MATCHED:-0}" -ne 1 ]]; then
+    echo "[$(_runci_ts)] ERROR run-ci: --layer '$ONLY_LAYER' matched no lane — nothing ran (typo, or the lane was renamed/removed)" >&2
+    FAILED_LAYERS+=("--layer $ONLY_LAYER (no such lane)")
+    overall=1
+fi
 if [[ $overall -eq 0 ]]; then
     echo "[$(_runci_ts)] INFO  run-ci: all required layers pass"
 else
@@ -7020,8 +7114,9 @@ else
     # `gh run view` ANNOTATIONS section even when `gh run view --log-failed`
     # returns EMPTY — a gh-CLI log-archive parsing gap that (R311y377) hid the
     # R311y376 Layer Z panic behind a bare "Process completed with exit code 1".
-    # The body lifts the panic location + message (`-A1`) and the per-test /
-    # per-suite FAILED verdict lines out of the run log, ANSI-stripped and
+    # The body lifts the panic location + message (`-A1`), the per-test /
+    # per-suite FAILED verdict lines, AND (R311y414) any lane's own
+    # `  <LANE> FAIL: ...` diagnostic out of the run log, ANSI-stripped and
     # %/newline-encoded for the annotation wire, so the reason is visible without
     # downloading the log. Gated on GITHUB_ACTIONS so a local pre-push run stays
     # plain text.
@@ -7035,7 +7130,7 @@ else
             # build/lint failure (no panic) is not left body-less. %/CR-encoded
             # for the wire. Keep the fallback body if extraction is empty.
             _extracted="$(sed 's/\x1b\[[0-9;]*m//g' "$RUNCI_LOG_FILE" \
-                | grep -aE -A1 'panicked at|(--- |result: )FAILED|^error(\[|:)' \
+                | grep -aE -A1 'panicked at|(--- |result: )FAILED|^error(\[|:)| FAIL: ' \
                 | sed 's/%/%25/g; s/\r//g; /^--$/d' \
                 | tail -n 40 | awk 'BEGIN{ORS="%0A"}{print}')"
             [[ -n "$_extracted" ]] && _annot="$_extracted"
