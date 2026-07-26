@@ -1241,6 +1241,120 @@ jobs:
       - name: Layer C1bm — pico unixpipe/quic --listen admit (R311y413)
         run: bash scripts/run-ci.sh --layer C1bm
 
+  transport-modes:
+    name: transport-MODE lanes (the §5.1 mode axis; no other job composes them)
+    runs-on: ubuntu-22.04
+    # Its OWN runner, for the reason the feature-gates job states above: every
+    # lane below is a DISTINCT off-default feature set, hence a distinct set of
+    # `crates/target` artifacts, and the `ci` job declares it has no disk
+    # headroom left.
+    #
+    # R311y413 closed the transport-link-KIND axis — all 10 `transport-link-*`
+    # kinds now gate hosted. This job closes the ORTHOGONAL axis: transport
+    # MODES. Enumerated from the cargo feature SSOT (the `transport-*` keys in
+    # crates/wz/Cargo.toml, minus the link kinds) there are 11 modes. THREE ride
+    # wz-runtime-tokio's `default` set and so already gate through Layer C1's
+    # `cargo test --workspace`: transport-unicast, -keepalive, -batching. The
+    # other EIGHT are off-default and, before this job, gated on NO hosted lane
+    # at all — fragmentation, lowlatency, compression, shm, stats, qos,
+    # multilink, multicast. Measured, not assumed: the last fully-green hosted
+    # run (30206063204, R311y413) has ZERO log lines for any of the 16 lanes
+    # below, while the identical grep finds the hosted C1al / C1w / C1t lanes.
+    #
+    # Hosting a lane only helps if the lane can go red, so R311y414 first
+    # hardened these: 34 previously-BARE `cargo test` steps across them gained
+    # anchored `^test result: ok\. N passed` guards at their MEASURED counts —
+    # 28 through the new `_runci_guarded_test` helper, 6 through the inline form
+    # Layer C1ba already used. The hazard those close is exact: `cargo test
+    # <filter>` exits 0 when the filter matches nothing, and an `--ignored` run
+    # selects nothing the moment its `#[ignore]` is dropped. Each guard shape
+    # was falsified locally — perturb the count or the filter and the lane
+    # reddens, cargo output intact in the log.
+    #
+    # All 16 are pure cargo on ubuntu-22.04: no zenohd, no zenoh-pico, no vsock
+    # module, and deliberately no real multicast socket — the multicast lanes
+    # drive recording links and in-process channels, so none of them depends on
+    # runner multicast behaviour. Layer M (active-scouting multicast loopback)
+    # is the one mode lane left out ON PURPOSE: run-ci.sh keeps it opt-in
+    # (`--layer M` / WZ_RUN_LAYER_M=1) precisely because it is environment-flaky,
+    # and a flaky hosted gate is worse than an honest local one.
+    #
+    # Cost, measured not guessed (warm local, one `--layer X` run each): 171s
+    # for all 16 — C1ba 36s, C1bb 29s, C1l 23s, C1bc 22s, C1q 17s, E6c 8s,
+    # C1af 7s, C1ae 6s, C1ad/C1ag/E6d 5s, C1ak 4s, C1p/C1r/C1s/C4e 1s each. A
+    # cold runner recompiles every off-default subset from scratch, so this job
+    # takes the 45-minute budget rather than feature-gates' 30.
+    timeout-minutes: 45
+    steps:
+      - name: Checkout (with submodules)
+        # `recursive`: wz-session-core compiles against sce_forge_runtime from
+        # vendor/sce, so the lanes below do not build without it.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake libclang-dev clang perl
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      # ─── the single-mode lanes ───────────────────────────────────────────
+      - name: Layer C1ad — transport-lowlatency ext + lean tx/rx + e2e (R311y414)
+        run: bash scripts/run-ci.sh --layer C1ad
+      - name: Layer C1ae — transport-compression lz4 wrap + ext 0x6 + e2e (R311y414)
+        run: bash scripts/run-ci.sh --layer C1ae
+      - name: Layer C1af — transport-shm provider + live swap + e2e (R311y414)
+        run: bash scripts/run-ci.sh --layer C1af
+      - name: Layer C1ak — transport-stats per-session counters (R311y414)
+        run: bash scripts/run-ci.sh --layer C1ak
+      - name: Layer C1l — transport-fragmentation / reassembly subsystem (R311y414)
+        run: bash scripts/run-ci.sh --layer C1l
+
+      # C1ag is the 3-way COMPOSITION (lowlatency + compression + shm on one
+      # session) that no single-mode lane can prove.
+      - name: Layer C1ag — transport-advanced 3-way composition (R311y414)
+        run: bash scripts/run-ci.sh --layer C1ag
+
+      # ─── multicast: session FSM, runtime glue, and the multicast-ONLY
+      # Session surface (a crate that exists because `transport-unicast` must
+      # stay out of the feature unification) ───────────────────────────────
+      - name: Layer C1p — multicast session FSM + dispatcher (R311y414)
+        run: bash scripts/run-ci.sh --layer C1p
+      - name: Layer C1q — multicast transport drive loop (R311y414)
+        run: bash scripts/run-ci.sh --layer C1q
+      - name: Layer C1s — multicast-only Session surface, isolated crate (R311y414)
+        run: bash scripts/run-ci.sh --layer C1s
+      - name: Layer C1r — MCU multicast e2e, isolated crate (R311y414)
+        run: bash scripts/run-ci.sh --layer C1r
+      - name: Layer C4e — transport-axis (multicast WITHOUT unicast) build+clippy (R311y414)
+        run: bash scripts/run-ci.sh --layer C4e
+
+      # ─── qos + multilink, including their cross-mode compositions ────────
+      - name: Layer C1bb — transport-qos ext_qos wire + per-priority SN conduits (R311y414)
+        run: bash scripts/run-ci.sh --layer C1bb
+      - name: Layer C1bc — multicast per-priority QoS conduit activation (R311y414)
+        run: bash scripts/run-ci.sh --layer C1bc
+      - name: Layer C1ba — transport-multilink N-link aggregation (R311y414)
+        run: bash scripts/run-ci.sh --layer C1ba
+
+      # The two DEMO-BINARY mode lanes: everything above drives libraries, these
+      # two drive a real `wz-ap-demo --peer` process pair over loopback. wz<->wz
+      # only (no pico/zenohd prereq, so no SKIP path can quietly green them).
+      - name: Layer E6c — multilink aggregation from the demo binary (R311y414)
+        run: bash scripts/run-ci.sh --layer E6c
+      - name: Layer E6d — prioritized publish over aggregated multilink (R311y414)
+        run: bash scripts/run-ci.sh --layer E6d
+
   portability:
     name: portability (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
