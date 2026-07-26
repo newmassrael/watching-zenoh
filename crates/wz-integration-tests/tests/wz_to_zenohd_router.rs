@@ -87,7 +87,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
-    read_captured, spawn_publishing_zpub, spawn_subscribed_zsub, spawn_zenohd,
+    read_captured, spawn_publishing_zpub, spawn_subscribed_zsub, spawn_zenohd_on_ephemeral_tcp,
     spawn_zenohd_tcp_quic, spawn_zenohd_tcp_tls, spawn_zenohd_tcp_udp, spawn_zenohd_tcp_unixsock,
     spawn_zenohd_tcp_ws, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
     PortReservation,
@@ -137,12 +137,11 @@ fn zenohd_tls_cert_paths(tcp_port: u16) -> (String, String) {
 #[ignore = "binary-dep e2e (zenohd router); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_client_reaches_established_against_zenohd() {
     let demo = wz_ap_demo_binary();
-    let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let mut zenohd = spawn_zenohd(port, || {
+    // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming one
+    // in advance is what let another process hold it and zenohd exit 255.
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(port_res);
 
     let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
     let demo_stderr_writer = demo_stderr
@@ -198,17 +197,16 @@ fn wz_client_reaches_established_against_zenohd() {
 fn wz_publish_routes_through_zenohd_to_pico_zsub() {
     let demo = wz_ap_demo_binary();
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let endpoint = format!("tcp/127.0.0.1:{port}");
     let publish_key = "demo/zenohd";
     let sub_key = "demo/**";
     let publish_value = "hello-from-wz-via-zenohd";
 
-    let mut zenohd = spawn_zenohd(port, || {
+    // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming
+    // one in advance is what let another process hold it and zenohd exit 255.
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(port_res);
+    let endpoint = format!("tcp/127.0.0.1:{port}");
 
     // ── pico z_sub: a client of zenohd, subscribed and ready (retried past any
     //    transient one-shot open failure). Its declared subscription is the
@@ -294,17 +292,16 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub() {
 fn wz_routed_subscribe_from_zenohd() {
     let demo = wz_ap_demo_binary();
     let z_pub = zenoh_pico_cli_binary("z_pub");
-    let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let endpoint = format!("tcp/127.0.0.1:{port}");
     let publish_key = "demo/zenohd";
     let sub_filter = "demo/**";
     let publish_value = "hello-routed-to-wz";
 
-    let mut zenohd = spawn_zenohd(port, || {
+    // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming
+    // one in advance is what let another process hold it and zenohd exit 255.
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(port_res);
+    let endpoint = format!("tcp/127.0.0.1:{port}");
 
     // ── wz-ap-demo: a CLIENT of zenohd that declares a ROUTED subscriber.
     //    `--key` now emits `Declare(DeclSubscriber)` (R311ou), so wait until
@@ -407,16 +404,15 @@ fn wz_routed_subscribe_from_zenohd() {
 fn wz_queryable_replies_via_zenohd_to_pico_zget() {
     let demo = wz_ap_demo_binary();
     let z_get = zenoh_pico_cli_binary("z_get");
-    let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let endpoint = format!("tcp/127.0.0.1:{port}");
     let queryable_key = "demo/zenohd";
     let reply_value = "reply-from-wz-queryable";
 
-    let mut zenohd = spawn_zenohd(port, || {
+    // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming
+    // one in advance is what let another process hold it and zenohd exit 255.
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(port_res);
+    let endpoint = format!("tcp/127.0.0.1:{port}");
 
     // ── wz-ap-demo: a CLIENT of zenohd that declares a ROUTED queryable.
     //    `--queryable` now emits `Declare(DeclQueryable)` (R311ow), so wait until
@@ -564,16 +560,15 @@ fn wz_queryable_replies_via_zenohd_to_pico_zget() {
 fn wz_liveliness_token_visible_via_zenohd_to_pico_zget_liveliness() {
     let demo = wz_ap_demo_binary();
     let z_get_liveliness = zenoh_pico_cli_binary("z_get_liveliness");
-    let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let endpoint = format!("tcp/127.0.0.1:{port}");
     let token_keyexpr = "group1/zenohd";
     let query_pattern = "group1/**";
 
-    let mut zenohd = spawn_zenohd(port, || {
+    // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming
+    // one in advance is what let another process hold it and zenohd exit 255.
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(port_res);
+    let endpoint = format!("tcp/127.0.0.1:{port}");
 
     // ── wz-ap-demo: a CLIENT of zenohd that declares a liveliness TOKEN.
     //    `--declare-token` emits a `Declare(DeclToken)` and holds the RAII
@@ -740,16 +735,15 @@ fn spawn_ready_z_queryable(
 fn wz_query_routed_to_pico_queryable_via_zenohd() {
     let demo = wz_ap_demo_binary();
     let z_queryable = zenoh_pico_cli_binary("z_queryable");
-    let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let endpoint = format!("tcp/127.0.0.1:{port}");
     let query_key = "demo/zenohd";
     let reply_value = "pico-reply-to-wz";
 
-    let mut zenohd = spawn_zenohd(port, || {
+    // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming
+    // one in advance is what let another process hold it and zenohd exit 255.
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(port_res);
+    let endpoint = format!("tcp/127.0.0.1:{port}");
 
     // ── pico z_queryable: a queryable on demo/zenohd, ready (declared on zenohd)
     //    before wz queries, and PERSISTING across wz attempts (it loops).
@@ -909,16 +903,15 @@ fn spawn_declaring_z_liveliness(
 fn pico_liveliness_token_visible_via_zenohd_to_wz_subscriber() {
     let demo = wz_ap_demo_binary();
     let z_liveliness = zenoh_pico_cli_binary("z_liveliness");
-    let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let endpoint = format!("tcp/127.0.0.1:{port}");
     let token_keyexpr = "group1/zenoh-pico";
     let subscribe_pattern = "group1/**";
 
-    let mut zenohd = spawn_zenohd(port, || {
+    // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming
+    // one in advance is what let another process hold it and zenohd exit 255.
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(port_res);
+    let endpoint = format!("tcp/127.0.0.1:{port}");
 
     // ── wz-ap-demo: a CLIENT of zenohd that declares a liveliness SUBSCRIBER via
     //    `--liveliness-subscribe` + `--liveliness-subscribe-history` (history =
@@ -2079,9 +2072,6 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_udp() {
 fn wz_namespaced_publish_routes_through_zenohd_to_pico_zsub() {
     let demo = wz_ap_demo_binary();
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let endpoint = format!("tcp/127.0.0.1:{port}");
     // The app publishes the BARE keyexpr; --namespace prefixes it on the wire.
     let publish_key = "data";
     let namespace = "myns";
@@ -2089,10 +2079,12 @@ fn wz_namespaced_publish_routes_through_zenohd_to_pico_zsub() {
     let wire_key = "myns/data";
     let publish_value = "hello-from-wz-namespaced";
 
-    let mut zenohd = spawn_zenohd(port, || {
+    // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming
+    // one in advance is what let another process hold it and zenohd exit 255.
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(port_res);
+    let endpoint = format!("tcp/127.0.0.1:{port}");
 
     // ── pico z_sub on the NAMESPACED keyexpr: it only receives if wz's egress
     //    prefixed the bare `data` to `myns/data` on the wire.

@@ -629,3 +629,97 @@ fn wz_peer_publishes_data_across_a_quic_mesh_link_to_pico() {
         )
     });
 }
+
+/// Leg 6 (REGRESSION, R311y413) — the reliable-quic twin of the datagram lane's
+/// trailing-zero-zid leg.
+///
+/// `Zid` canonicalisation (R311y411) is a ROUTING-layer fix, not a datagram one: a
+/// peer whose zid ends in a zero byte failed to recognise itself when a neighbour's
+/// LinkStateList returned it wire-trimmed, entered its own graph as a phantom node,
+/// and stopped forwarding. `wz-ap-demo` derives its mesh zid from its listen PORT, so
+/// EVERY mesh lane carried the same 1-in-256 exposure — but only the datagram lane
+/// pinned it. This closes that asymmetry: the same defect, over the reliable quic
+/// mesh link this file owns.
+///
+/// `--zid 70728300` makes it deterministic. RED against a `Zid::from_slice` that keeps
+/// the caller's length: phantom node, `peak 3 node(s)`, and the pico subscriber
+/// receives nothing.
+// wz-proves: routing-peer zenohd->wz partial
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,quic + zenohd peer + zenoh-pico z_sub); Layer Z runs via --ignored"]
+fn wz_peer_with_a_trailing_zero_zid_still_routes_data_out_over_quic() {
+    let demo = wz_ap_demo_binary();
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+    let (cert_path, key_path, _cleanup) = write_wz_cert("z0");
+
+    let (mut wz_guard, mut wz_reader, quic_port) = spawn_on_ephemeral_port(
+        &demo,
+        &[
+            "--peer",
+            "quic/127.0.0.1:0",
+            "--quic-cert",
+            &cert_path,
+            "--quic-key",
+            &key_path,
+            "--zid",
+            "70728300",
+            "--publish",
+            KEYEXPR,
+        ],
+        "peer: listening on 127.0.0.1:",
+        "wz mesh quic peer (trailing-zero zid)",
+        tempfile(),
+    );
+
+    let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
+    let (mut zenohd, zenohd_tcp_port) =
+        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, true);
+
+    let converged = wait_for_substring(
+        &mut wz_reader,
+        "peer: reciprocal mesh link confirmed",
+        Duration::from_secs(15),
+    );
+    if converged.is_err() {
+        let c = read_captured(&mut wz_reader);
+        graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+        let _ = zenohd.child_mut().kill();
+        let _ = zenohd.child_mut().wait();
+        panic!(
+            "wz <-> zenohd peer mesh never converged over quic within 15s\n--- wz stderr ---\n{c}"
+        );
+    }
+
+    let z_sub_endpoint = format!("tcp/127.0.0.1:{zenohd_tcp_port}");
+    let (mut z_sub_guard, mut z_sub_reader) =
+        spawn_subscribed_zsub(&z_sub, "demo/**", &z_sub_endpoint, "zenohd", tempfile);
+
+    let received = wait_for_substring(
+        &mut z_sub_reader,
+        &format!("Received ('{KEYEXPR}': '{WZ_PUBLISH_PAYLOAD}')"),
+        Duration::from_secs(15),
+    );
+
+    let _ = z_sub_guard.child_mut().kill();
+    let _ = z_sub_guard.child_mut().wait();
+    graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
+    let wz_captured = read_captured(&mut wz_reader);
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+    eprintln!("--- wz mesh quic peer (trailing-zero zid) stderr ---\n{wz_captured}");
+
+    received.unwrap_or_else(|c| {
+        panic!(
+            "pico z_sub behind zenohd never received the Put from a wz peer whose zid \
+             ends in a zero byte — the peer did not recognise its own zid in the \
+             link-state flood over the RELIABLE quic mesh link\n\
+             --- pico z_sub stdout ---\n{c}\n--- wz stderr ---\n{wz_captured}"
+        )
+    });
+    assert!(
+        wz_captured.contains(", peak 2 node(s) in topology graph,"),
+        "a wz peer whose zid ends in a zero byte must see exactly 2 nodes (self + \
+         zenohd); a third is its OWN zid arriving back wire-trimmed\n\
+         --- wz stderr ---\n{wz_captured}"
+    );
+}

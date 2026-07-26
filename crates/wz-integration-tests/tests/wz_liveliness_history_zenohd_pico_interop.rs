@@ -48,8 +48,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, spawn_zenohd, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
-    ChildGuard, PortReservation,
+    read_captured, spawn_zenohd_on_ephemeral_tcp, wait_for_substring, wz_ap_demo_binary,
+    zenoh_pico_cli_binary, ChildGuard,
 };
 
 /// The literal pico declares, and the exact string the replay must carry. The
@@ -79,14 +79,13 @@ const SAMPLE_TIMEOUT: Duration = Duration::from_secs(20);
 fn run_arm(history: bool) -> String {
     let demo = wz_ap_demo_binary();
     let z_liveliness = zenoh_pico_cli_binary("z_liveliness");
-    let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let endpoint = format!("tcp/127.0.0.1:{port}");
 
-    let mut zenohd = spawn_zenohd(port, || {
+    // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming
+    // one in advance is what let another process hold it and zenohd exit 255.
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(port_res);
+    let endpoint = format!("tcp/127.0.0.1:{port}");
 
     let pico_stdout = tempfile::tempfile().expect("tempfile for z_liveliness stdout");
     let pico_stdout_writer = pico_stdout.try_clone().expect("dup z_liveliness handle");

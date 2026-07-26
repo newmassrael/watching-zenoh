@@ -58,8 +58,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, spawn_zenohd, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
-    ChildGuard, PortReservation,
+    read_captured, spawn_zenohd_on_ephemeral_tcp, wait_for_substring, wz_ap_demo_binary,
+    zenoh_pico_cli_binary, ChildGuard,
 };
 
 /// A TIMING MARGIN, and deliberately not described as more than that.
@@ -89,9 +89,6 @@ const GET_HOLD_MS: u64 = 1_500;
 fn wz_liveliness_get_decodes_a_pico_token_answered_by_zenohd() {
     let demo = wz_ap_demo_binary();
     let z_liveliness = zenoh_pico_cli_binary("z_liveliness");
-    let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let endpoint = format!("tcp/127.0.0.1:{port}");
     // The filter is a wildcard and the token is a literal, so the reply asserted
     // below can only be the result of a real intersect against a real token --
     // not an echo of what wz asked for.
@@ -99,10 +96,12 @@ fn wz_liveliness_get_decodes_a_pico_token_answered_by_zenohd() {
     let pico_token = "demo/token/pico";
 
     // ── zenohd: the router, and the only responder in this topology ──────────
-    let mut zenohd = spawn_zenohd(port, || {
+    // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming
+    // one in advance is what let another process hold it and zenohd exit 255.
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    drop(port_res);
+    let endpoint = format!("tcp/127.0.0.1:{port}");
 
     // ── zenoh-pico z_liveliness: the foreign TOKEN ORIGIN, a client of zenohd ─
     let pico_stdout = tempfile::tempfile().expect("tempfile for z_liveliness stdout");

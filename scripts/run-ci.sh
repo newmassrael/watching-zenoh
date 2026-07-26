@@ -5740,7 +5740,10 @@ layer_z_zenohd_interop() {
     # LinkStateList OAM; (2) --peer forms a MUTUAL linkstate edge; (3) a gossip-dialer
     # NEUTER proves leg-2's reciprocal witness is load-bearing (no edge); (4) a pico
     # z_pub behind zenohd's Put crosses the quic mesh INTO wz's subscriber; (5) wz's
-    # Put crosses the quic mesh OUT to a pico z_sub behind zenohd. All over a quic-ONLY
+    # Put crosses the quic mesh OUT to a pico z_sub behind zenohd; (6) a REGRESSION
+    # leg pinning a peer whose zid ends in a ZERO BYTE (R311y413 — the reliable-quic
+    # twin of the datagram lane's leg, since the Zid canonicalisation it guards is a
+    # ROUTING fix that every mesh lane depends on). All over a quic-ONLY
     # listen (no tcp fallback path). STOCK zenohd (quic is a zenoh default) + the pico
     # z_pub/z_sub CLIs (checked at the top of this lane); the demo carries `quic` +
     # `router-hat-router` (pulls routing-peer for --peer), built above -- NO build-line
@@ -5749,7 +5752,7 @@ layer_z_zenohd_interop() {
     # --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_mesh_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 5 passed') || return 1
+        | tee /dev/stderr | grep -qE '^test result: ok\. 6 passed') || return 1
     # R311y408 — wz QUIC-DATAGRAM ACCEPTOR cross-impl (transport-link-quic-datagram
     # zenohd->wz): the RFC9221 unreliable-datagram twin of the y401 one-shot quic
     # acceptor leg above. A real zenohd DIALS the wz `--listen quic-datagram/...`

@@ -19,7 +19,6 @@ pub mod common {
     //! the flake background.
 
     use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom};
     use std::net::{Ipv4Addr, TcpListener};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
@@ -461,10 +460,38 @@ pub mod common {
     /// content (lossy-decoded with U+FFFD markers at the offending
     /// position) — diagnostic, not blocking. Caught at the R302b
     /// pre-push gate, fixed in this round before retry.
+    /// R311y413 — reads POSITIONALLY (`pread`), never seeking.
+    ///
+    /// The previous `seek(0)` + `read_to_end` moved the file OFFSET, and across this
+    /// crate the capture handle is overwhelmingly a `try_clone()` of the handle given
+    /// to the child as stdout. `try_clone` is `dup(2)`: the two descriptors share one
+    /// open file description, hence ONE offset. So a poll from the parent rewound the
+    /// CHILD's write position, and the child's next write landed at the start,
+    /// overwriting output already captured. Reproduced deterministically (child writes
+    /// AAA, parent rewinds, child writes BBB): the AAA line is GONE under `try_clone`
+    /// and intact under two independent descriptions. In the wild it is a low-rate
+    /// corruption — the window between the seek and the read is microseconds — which
+    /// is exactly the profile of a witness that "sometimes isn't there".
+    ///
+    /// `read_at` takes the offset as an argument and leaves the description's own
+    /// offset untouched, so the hazard is closed for EVERY caller at once rather than
+    /// by migrating 171 capture sites to independent descriptions.
     pub fn read_captured(file: &mut File) -> String {
-        file.seek(SeekFrom::Start(0)).expect("seek to start");
+        use std::os::unix::fs::FileExt;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).expect("read captured bytes");
+        let mut buf = [0u8; 8192];
+        let mut at = 0u64;
+        loop {
+            match file.read_at(&mut buf, at) {
+                Ok(0) => break,
+                Ok(n) => {
+                    bytes.extend_from_slice(&buf[..n]);
+                    at += n as u64;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => panic!("read captured bytes at offset {at}: {e}"),
+            }
+        }
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
@@ -1322,6 +1349,31 @@ pub mod common {
             &format!("127.0.0.1:{port}"),
             mk_probe_stderr,
         )
+    }
+
+    /// R311y413 — the DISCOVERING form of [`spawn_zenohd`], and the one to reach for.
+    ///
+    /// zenohd binds `tcp/127.0.0.1:0` and this returns the port the kernel gave it, so
+    /// no caller names a port that another process may already hold. Keep the
+    /// port-taking [`spawn_zenohd`] only where the port must be NAMED in advance —
+    /// today that is the same-port RESPAWN in `wz_reconnect_zenohd_pico_interop`,
+    /// whose whole subject is a fresh process reachable at the endpoint the killed one
+    /// used. There the first spawn can still discover, and its port is what the second
+    /// is given.
+    pub fn spawn_zenohd_on_ephemeral_tcp(
+        mut mk_probe_stderr: impl FnMut() -> File,
+    ) -> (ChildGuard, u16) {
+        let (guard, port) = spawn_zenohd_dialer_on_ephemeral_tcp(
+            &zenohd_binary(),
+            "zenohd (reference router)",
+            None,
+            &[],
+            None,
+        );
+        // R311pi — close the TCP-accept-vs-handshake-ready gap with a real wz session,
+        // exactly as the port-taking form does.
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
+        (guard, port)
     }
 
     /// R311y374 — spawn a zenohd that DIALS a wz `ws/...` acceptor
@@ -2401,6 +2453,69 @@ mod tests {
             "zenohd TCP-accept budget {ZENOHD_TCP_ACCEPT_BUDGET:?} must keep \
              headroom over the 10.07s bind that flaked R311y376; a revert toward \
              10s reopens it"
+        );
+    }
+
+    /// R311y413 — a parent poll must not rewind the WRITER's position.
+    ///
+    /// The crate's capture handles are overwhelmingly `try_clone()` duplicates of the
+    /// handle given to the child as stdout. `try_clone` is `dup(2)`: one open file
+    /// description, hence ONE offset shared by both. A seeking reader sets that offset
+    /// to 0 for the duration of its read, and a write landing in that window goes to
+    /// the START of the file, destroying output already captured.
+    ///
+    /// The window is microseconds, so a single-threaded test cannot expose it (the
+    /// read restores the offset to EOF before the next write). This twin forces it: a
+    /// writer thread appends continuously while the main thread polls, and every line
+    /// must survive. RED-verified — with the seeking reader this loses lines.
+    #[test]
+    fn read_captured_does_not_rewind_a_shared_offset_writer() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        const LINES: usize = 400;
+        let path =
+            std::env::temp_dir().join(format!("wz-shared-offset-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        // read+write, exactly what `tempfile::tempfile()` hands the capture sites
+        // before they `try_clone` it for the child.
+        let writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create shared-offset capture");
+        // THE hazardous arrangement, on purpose: shared offset.
+        let mut reader = writer.try_clone().expect("dup the capture handle");
+        let _ = std::fs::remove_file(&path);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let writer_done = Arc::clone(&done);
+        let scribe = thread::spawn(move || {
+            let mut w = writer;
+            for i in 0..LINES {
+                writeln!(w, "line{i:04}").expect("child-side write");
+            }
+            writer_done.store(true, Ordering::Release);
+        });
+        // Poll like `wait_for_substring` does, but without its sleep, to maximise the
+        // number of reads that overlap a write.
+        while !done.load(Ordering::Acquire) {
+            let _ = super::common::read_captured(&mut reader);
+        }
+        scribe.join().expect("scribe thread");
+        let last = super::common::read_captured(&mut reader);
+
+        let missing: Vec<usize> = (0..LINES)
+            .filter(|i| !last.contains(&format!("line{i:04}\n")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "a poll must not rewind the writer — {} of {LINES} lines were overwritten \
+             (first missing: {:?}). A seeking reader on a SHARED offset does this.",
+            missing.len(),
+            missing.first()
         );
     }
 
