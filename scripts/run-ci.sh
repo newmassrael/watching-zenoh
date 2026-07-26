@@ -999,13 +999,23 @@ layer_c1c_cargo_test_codec_declare() {
 # The frag-OFF invocation stays — it proves the serial backend composes in
 # a minimal build with no reassembly subsystem. A matching frag-ON clippy
 # gate lints the otherwise cfg'd-out fragmentation test.
+#
+# R311y413 — HOSTED on ci.yml's feature-gates job (completes the link-kind
+# e2e family: all 10 transport-link-* kinds now gate hosted). The three
+# targeted runtime steps (serial_pipeline lib; serial_pty_e2e frag-off /
+# frag-on) gained anchored exact-count guards (3 / 1 / 2 passed). The two
+# leading `cargo test -p wz-session-core --features transport-link-serial`
+# whole-crate runs stay bare (cargo-exit-gated): an exact `N passed` guard
+# is impractical for a whole-crate run whose count churns with unrelated
+# session-core tests; a serial regression still reddens via cargo's exit.
+# openpty PTY pairs are standard on Linux runners -> pure cargo, hostable.
 layer_c1t_cargo_test_serial() {
     (cd crates \
         && cargo test -p wz-session-core --features transport-link-serial --quiet \
         && cargo test -p wz-session-core --no-default-features --features transport-link-serial --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial,transport-fragmentation --quiet -- -D warnings)
 }
@@ -1028,6 +1038,13 @@ layer_c1t_cargo_test_serial() {
 #   4. clippy-gates the LIB under `--no-default-features --features
 #      transport-link-tls` to prove `tls_pipeline` composes standalone (it
 #      needs only the forwarded `transport-link-tcp`, not `transport-unicast`).
+#
+# R311y413 — HOSTED on ci.yml's feature-gates job. The combined
+# `--test tls_e2e --test session_reconnect_e2e --test tls_pem_mtls_e2e` run
+# was SPLIT into three per-binary steps, each with its anchored exact-count
+# guard (2 / 5 / 6 passed), so a 0-tests drift in ANY one binary reddens
+# (the combined form could not — one binary going quiet was invisible).
+# tls loopback uses in-process self-signed certs -> pure cargo, hostable.
 layer_c1u_cargo_test_tls() {
     # R311oe — also run session_reconnect_e2e here: its `tls_reconnect` module
     # (gated all(transport-link-tls, transport-unicast)) proves a TLS session's
@@ -1050,7 +1067,9 @@ layer_c1u_cargo_test_tls() {
     # invocation the module is empty and the cert-PEM/mTLS path is unexercised.
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --test session_reconnect_e2e --test tls_pem_mtls_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-tls --test session_reconnect_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 5 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_pem_mtls_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 6 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-tls --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-tls --quiet -- -D warnings)
 }
@@ -1078,10 +1097,16 @@ layer_c1u_cargo_test_tls() {
 #   5. clippy-gates the LIB under `--no-default-features --features
 #      transport-link-ws` to prove `ws_pipeline` composes standalone (it needs
 #      no `transport-link-tcp` — WS is datagram-flow, not StreamEnvelope).
+#
+# R311y413 — HOSTED on ci.yml's feature-gates job. The combined
+# `--test ws_e2e --test session_reconnect_e2e` run was SPLIT into two
+# per-binary steps, each with its anchored exact-count guard (1 / 5 passed).
+# ws loopback is pure cargo, hostable.
 layer_c1v_cargo_test_ws() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --test session_reconnect_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-ws --test session_reconnect_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 5 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-ws --quiet -- -D warnings)
 }
@@ -1112,11 +1137,16 @@ layer_c1v_cargo_test_ws() {
 #      `transport-unicast` session-open integration). NO reconnect e2e: a unix
 #      socket is `NotReconnectable` (non-IP, outside the reconnect set), so —
 #      unlike C1u/C1v — there is no reconnect module to exercise.
+#
+# R311y413 — HOSTED on ci.yml's feature-gates job (link-kind e2e family
+# closure). The unixsock_pipeline + unixsock_e2e steps gained anchored
+# `^test result: ok\. 3 passed` / `2 passed` count-guards (were bare). A unix
+# socket loopback needs no kernel module -> pure cargo, hostable.
 layer_c1aa_cargo_test_unixsock() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-unixsock --lib unixsock_pipeline --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-unixsock --test unixsock_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-unixsock --lib unixsock_pipeline --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-unixsock --test unixsock_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixsock --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixsock --quiet -- -D warnings)
 }
@@ -1146,6 +1176,14 @@ layer_c1aa_cargo_test_unixsock() {
 #      pulls only `transport-link-tcp`'s shared `stream_link` + tokio-vsock, no
 #      `transport-unicast` session-open integration). NO reconnect e2e: vsock is
 #      `NotReconnectable` (non-IP), like unixsock.
+#
+# R311y413 — HOSTED on ci.yml's feature-gates job. NO count-guard, deliberately:
+# every vsock test is `#[ignore]` (AF_VSOCK loopback needs the `vsock_loopback`
+# kernel module, absent on the runner), so this lane is a COMPILE + clippy gate —
+# the only lane building the vsock backend off-default. It stays robust without a
+# `N passed` guard: a cfg-out reddens at COMPILE, and a dropped `#[ignore]` runs
+# the test and EPERM-reddens on the module-less runner. The live data path is
+# proven by the TCP/TLS/unixsock lanes.
 layer_c1ab_cargo_test_vsock() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
@@ -1178,10 +1216,16 @@ layer_c1ab_cargo_test_vsock() {
 #      quinn + the tls rustls cert stack, no `transport-unicast` session-open
 #      integration). NO reconnect e2e yet (a QUIC reconnect would re-dial the
 #      `quic/...` locator like tls/ws — a clean follow-up; deferred here).
+#
+# R311y413 — the `quic_e2e` step gained the anchored `^test result: ok\. 1 passed`
+# count-guard (was a bare `cargo test`, so a future 0-tests cfg-out would have
+# passed silently — the y412 hardening convention applied to a lane about to run
+# hosted), and this whole lane is now HOSTED on ci.yml's feature-gates job (see
+# that step's comment for the never-hosted-gate rationale).
 layer_c1ac_cargo_test_quic() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-quic --test quic_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-quic --test quic_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic --quiet -- -D warnings)
 }
@@ -1698,10 +1742,15 @@ layer_c1ai_cargo_test_liveliness_history() {
 #   4. clippy-gates the LIB under `--no-default-features --features
 #      transport-link-quic-datagram` to prove `quic_datagram_pipeline` composes
 #      standalone (it pulls transport-link-quic's quinn + tls stack + `bytes`).
+#
+# R311y413 — the `quic_datagram_e2e` step gained the anchored
+# `^test result: ok\. 1 passed` count-guard (was bare, a silent-0-tests risk), and
+# this whole lane is now HOSTED on ci.yml's feature-gates job (see that step's
+# comment). The datagram sibling of C1ac's hosting.
 layer_c1aj_cargo_test_quic_datagram() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic-datagram --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic-datagram --quiet -- -D warnings)
 }
@@ -2378,6 +2427,11 @@ layer_c1w_cargo_test_routing_accept() {
 # `run_router_hat_admits_a_quic_listen_with_cert_at_bind` (router-hat-router,quic),
 # each a guarded test + clippy gate. (The pico `z_open(listen=quic/)` cert twin is
 # Layer C1bm's `quic_listen_cert`.)
+#
+# R311y413 — HOSTED on ci.yml's feature-gates job. Its 4 admit discriminators
+# already carry anchored `^test result: ok\. 1 passed` count-guards (no run-ci
+# change), so hosting converts an already-falsification-proven lane from local-only
+# to continuously enforced.
 layer_c1bl_cargo_test_router_failfast() {
     (cd crates \
         && cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe run_router_accepts_a_unixpipe_listen_at_bind --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
@@ -2409,6 +2463,10 @@ layer_c1bl_cargo_test_router_failfast() {
 # feature `--all-targets`. R311y406 — steps 3+4 are the pico quic-listen cert twin:
 # `quic_listen_cert` (z_open(listen=quic/) + the native Z_CONFIG_TLS_LISTEN_* cert keys
 # binds) under transport-link-quic with the same `1 passed` guard + clippy gate.
+#
+# R311y413 — HOSTED on ci.yml's feature-gates job. Both discriminators already carry
+# anchored `^test result: ok\. 1 passed` count-guards (no run-ci change), so hosting
+# converts an already-falsification-proven lane from local-only to enforced.
 layer_c1bm_cargo_test_pico_failfast() {
     (cd crates \
         && cargo test -p wz-capi-pico --features transport-link-unixpipe --test unixpipe_listen_multiclient --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \

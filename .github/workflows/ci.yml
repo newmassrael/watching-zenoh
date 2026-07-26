@@ -1062,10 +1062,11 @@ jobs:
   # "verified by the ci job's Linux lanes C1al / vsock" — that is STALE. C1al
   # (unixpipe) and C1ab (vsock) were both defined in scripts/run-ci.sh but NOT
   # in this workflow's enumerated --layer set, running only in a local full
-  # sweep. R311y410 UPDATE: C1al is now hosted on the feature-gates job below
-  # (a Linux lane), so the unixpipe backend IS again verified by a hosted Linux
-  # lane; C1ab (vsock) stays local-only. Either way the Linux-only-ness is
-  # enforced at the Cargo `[target.'cfg(...)']` layer, not by a hosted lane.
+  # sweep. R311y410/y413 UPDATE: C1al (unixpipe) AND C1ab (vsock) are now BOTH
+  # hosted on the feature-gates job below (Linux lanes), so both backends are
+  # verified by a hosted Linux lane (vsock as a COMPILE + clippy gate; its e2e is
+  # #[ignore] for lack of the vsock_loopback module). Either way the Linux-only-ness
+  # is enforced at the Cargo `[target.'cfg(...)']` layer, not by a hosted lane.
   feature-gates:
     name: feature-gate NEG lanes (subsets no other job composes)
     runs-on: ubuntu-22.04
@@ -1196,6 +1197,49 @@ jobs:
       # never this routing-accept-gated multi-client unixpipe accept subset.
       - name: Layer C1al — unixpipe FIFO e2e + mesh accept + bind-pin (R311y410)
         run: bash scripts/run-ci.sh --layer C1al
+
+      # Hosted R311y413 — the remaining never-hosted transport lanes, the same "a
+      # gate that never runs hosted reports success by silence" hazard y409 (C1w) and
+      # y410 (C1al) closed. All were defined in scripts/run-ci.sh but absent from this
+      # workflow's --layer set, so they ran ONLY in a local full sweep. This batch
+      # COMPLETES the transport-link-kind e2e family: every one of the 10
+      # transport-link-* kinds now gates on hosted CI — tcp/udp via Layer C1's default
+      # `cargo test --workspace`, and the eight off-default kinds via dedicated lanes
+      # (unixpipe=C1al[y410]; vsock=C1ab, quic=C1ac, quic-datagram=C1aj here;
+      # unixsock=C1aa, tls=C1u, ws=C1v, serial=C1t here). It also hosts the two
+      # demo/pico --listen ADMIT lanes (C1bl/C1bm). Each was proven to gate BY
+      # FALSIFICATION before hosting (measured, not guessed):
+      #  - link-kind e2e (C1aa/C1u/C1v/C1ac/C1aj/C1t): the bare `cargo test --test X`
+      #    steps gained anchored `^test result: ok\. N passed` count-guards with the
+      #    MEASURED count; the multi-binary tls/ws lanes were SPLIT per-binary so a
+      #    single binary going quiet reddens (the combined form hid it). A bogus filter
+      #    -> 0 tests -> the guard reddens. C1t's two whole-crate wz-session-core runs
+      #    stay bare (exact-count impractical; cargo-exit-gated).
+      #  - C1ab (vsock): a COMPILE + clippy gate (all vsock tests are #[ignore] for the
+      #    absent vsock_loopback module); a planted `-D warnings` lint reddens the lane.
+      #  - C1bl / C1bm (demo-router / pico --listen admit): flipping
+      #    `BoundListener::supports_mesh_multi_peer`'s Unixpipe arm to `false` reddens
+      #    both (the router/pico REJECT the unixpipe listen) — real admit behaviour.
+      # No zenohd/pico/vsock-module provisioning; all pure cargo on ubuntu-22.04
+      # (quinn/ring, rustls/tls, openpty, tokio-vsock all build with clang+perl).
+      - name: Layer C1aa — unixsock link e2e (R311y413)
+        run: bash scripts/run-ci.sh --layer C1aa
+      - name: Layer C1u — tls link e2e + reconnect + mTLS (R311y413)
+        run: bash scripts/run-ci.sh --layer C1u
+      - name: Layer C1v — ws link e2e + reconnect (R311y413)
+        run: bash scripts/run-ci.sh --layer C1v
+      - name: Layer C1ac — quic link e2e (R311y413)
+        run: bash scripts/run-ci.sh --layer C1ac
+      - name: Layer C1aj — quic-datagram link e2e (R311y413)
+        run: bash scripts/run-ci.sh --layer C1aj
+      - name: Layer C1ab — vsock backend compile + clippy (R311y413)
+        run: bash scripts/run-ci.sh --layer C1ab
+      - name: Layer C1t — serial (PTY) link e2e (R311y413)
+        run: bash scripts/run-ci.sh --layer C1t
+      - name: Layer C1bl — demo-router unixpipe/quic --listen admit (R311y413)
+        run: bash scripts/run-ci.sh --layer C1bl
+      - name: Layer C1bm — pico unixpipe/quic --listen admit (R311y413)
+        run: bash scripts/run-ci.sh --layer C1bm
 
   portability:
     name: portability (${{ matrix.os }})
