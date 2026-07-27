@@ -707,12 +707,40 @@ layer_0_preflight_lints() {
     (( fmt_rc == 0 )) || return 1
     echo "  fmt --check OK (${fmt_dirs[*]})"
 
-    # 0.2 actionlint (optional)
+    # 0.2 actionlint — optional locally, REQUIRED where WZ_LINT_REQUIRE=1.
+    #
+    # R311y416 — the hosted ci job sets WZ_LINT_REQUIRE=1 and installs a
+    # pinned actionlint, so a missing binary there is a provisioning
+    # regression that must fail RED. Without this axis the download could
+    # break and the lane would keep printing SKIP and returning 0 — the
+    # "success by silence" shape this file spent R311y415 closing for fmt.
+    # Same idiom as WZ_QZ_REQUIRE / WZ_A3_REQUIRE.
     if ! command -v actionlint >/dev/null 2>&1; then
+        if [[ "${WZ_LINT_REQUIRE:-0}" == "1" ]]; then
+            echo "  Layer0 FAIL: actionlint REQUIRED (WZ_LINT_REQUIRE=1) but not on PATH" >&2
+            return 1
+        fi
         echo "  actionlint SKIP (not installed; install: go install github.com/rhysd/actionlint/cmd/actionlint@latest)"
         return 0
     fi
-    actionlint .github/workflows/*.yml
+    # actionlint runs its shellcheck integration ONLY if shellcheck is on
+    # PATH, and silently drops those checks otherwise. Every finding this
+    # repo has ever had from actionlint came through shellcheck (3 at
+    # R311y416, all SC1090/SC2086 in the zephyr job), so an actionlint
+    # without shellcheck is a near-empty gate that still exits 0. Under
+    # WZ_LINT_REQUIRE the absence is therefore fatal too.
+    if ! command -v shellcheck >/dev/null 2>&1; then
+        if [[ "${WZ_LINT_REQUIRE:-0}" == "1" ]]; then
+            echo "  Layer0 FAIL: shellcheck REQUIRED (WZ_LINT_REQUIRE=1) but not on PATH — actionlint would silently drop its shellcheck checks" >&2
+            return 1
+        fi
+        echo "  actionlint: shellcheck absent — SC* checks will be skipped"
+    fi
+    if ! actionlint .github/workflows/*.yml; then
+        echo "  Layer0 FAIL: actionlint reported findings (see above)" >&2
+        return 1
+    fi
+    echo "  actionlint OK ($(actionlint --version | head -1))"
 }
 
 # ─── Layer A — mnemosyne validate-workspace ─────────────────────────

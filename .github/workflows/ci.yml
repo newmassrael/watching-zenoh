@@ -128,14 +128,20 @@ jobs:
         # cmake + libclang-dev are needed by zenoh-pico-sys (cmake
         # crate + bindgen). perl is GA on Ubuntu but listed for
         # documentation completeness — used by verify-codegen.sh
-        # Layer 2 include-block sort step.
+        # Layer 2 include-block sort step. R311y416 — shellcheck is listed
+        # EXPLICITLY rather than relied on from the runner image: actionlint
+        # runs its shellcheck integration only when shellcheck is on PATH
+        # and silently drops those checks otherwise, and every actionlint
+        # finding this repo has had came through shellcheck. An image change
+        # would quietly hollow out the Layer 0 lint half.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake \
             libclang-dev \
             clang \
-            perl
+            perl \
+            shellcheck
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # `rustup show` materialises the toolchain the repo pins — channel +
@@ -182,7 +188,33 @@ jobs:
       # changed-crate `cargo test -p` and never calls run-ci.sh. Hosted CI
       # is now the only place the full lane set runs.
 
-      - name: Layer 0 — preflight lints (cargo fmt --check)
+      - name: Install actionlint (pinned + checksum-verified)
+        # R311y416 — Layer 0's actionlint half had been SKIPping on every
+        # runner since it was written, because nothing installed the binary.
+        # R311y414 and R311y415 both DISCLOSED that rather than closing it;
+        # this is the close.
+        #
+        # A pinned release tarball, not `go install ...@latest`: an unpinned
+        # linter turns an upstream release into a spontaneous red on an
+        # unrelated push, which is the same reproducibility trade
+        # rust-toolchain.toml and MNEMOSYNE_REV already make here. The
+        # sha256 is the one published in the release's own checksums.txt.
+        # Bumping the pin is a deliberate commit — expect new findings.
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        run: |
+          set -euo pipefail
+          tgz="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSLf -o "$tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tgz}"
+          echo "${ACTIONLINT_SHA256}  ${tgz}" | sha256sum -c -
+          tar xzf "$tgz" actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          rm -f "$tgz" actionlint
+          actionlint --version
+
+      - name: Layer 0 — preflight lints (cargo fmt --check + actionlint)
         # R311y415 — Layer 0 existed in run-ci.sh but appeared in NO hosted
         # `--layer` set, and .githooks/pre-push stopped running it at
         # R311y386 (the fast-gate reversal, whose own header lists fmt among
@@ -220,11 +252,16 @@ jobs:
         # It DOES need the recursive checkout above: `cargo fmt --all`
         # resolves the whole workspace manifest, so a tree without
         # vendor/sce fails in `cargo metadata` before rustfmt ever runs.
-        # Layer 0 also carries an OPTIONAL actionlint sub-step. No step in
-        # either workflow installs actionlint, so it is EXPECTED to SKIP
-        # here too, leaving this step gating fmt and only fmt — confirm on
-        # the first hosted run. Wiring actionlint up is a deliberate
-        # deferral (y414 disclosed the same gap), not an oversight.
+        # R311y416 — Layer 0's actionlint half is REAL here now. The step
+        # above installs a pinned, checksum-verified binary, and
+        # WZ_LINT_REQUIRE=1 makes an absent actionlint OR an absent
+        # shellcheck FATAL instead of a SKIP, so a broken download reds the
+        # lane rather than quietly restoring the state y414/y415 disclosed.
+        # The 3 pre-existing findings (SC1090 x2, SC2086, all in the
+        # zephyr-mcu job) were fixed in the same commit that turned this on,
+        # so it lands green rather than red-then-fix.
+        env:
+          WZ_LINT_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer 0
 
       - name: Layer C0 — binary-dep test #[ignore] discipline
@@ -1030,6 +1067,7 @@ jobs:
         # auto-selects the SDK, installed to ~/zephyr-sdk-1.0.1 (HOME default).
         run: |
           python3.12 -m venv ~/zephyrproject/.venv
+          # shellcheck source=/dev/null  # created by the venv line above
           . ~/zephyrproject/.venv/bin/activate
           python -m pip install --upgrade pip
           pip install west tqdm
@@ -1057,7 +1095,7 @@ jobs:
           test -x ~/zephyrproject/.venv/bin/west
           test -d ~/zephyrproject/zephyr/boards
           test -d ~/.cmake/packages/Zephyr-sdk
-          find ~/zephyr-sdk-${ZEPHYR_SDK_VERSION} -name arm-zephyr-eabi-gcc -type f \
+          find ~/zephyr-sdk-"${ZEPHYR_SDK_VERSION}" -name arm-zephyr-eabi-gcc -type f \
             | grep -q . || { echo "arm-zephyr-eabi toolchain missing in SDK"; exit 1; }
           echo "Zephyr provisioning verified (venv + zephyr tree + SDK arm toolchain)."
 
@@ -1088,6 +1126,7 @@ jobs:
         env:
           WZ_QZ_REQUIRE: "1"
         run: |
+          # shellcheck source=/dev/null  # provisioned by the venv step above
           . ~/zephyrproject/.venv/bin/activate
           bash scripts/run-ci.sh --layer Qz
 
