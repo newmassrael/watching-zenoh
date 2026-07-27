@@ -176,10 +176,15 @@ HOST_GATED_CI_TARGETS = {
 # Which lane carries which class is a small declared map; WHICH LANES HOSTED CI ACTUALLY
 # RUNS is derived from .github/workflows/ci.yml, so the disclosure cannot rot when the
 # workflow changes. (R311y264 wired E2/E6/E6b/E8/Z in, and the printed line moved with it
-# without an edit here -- which is the property to keep.) The remaining hole is Layer M:
-# it is opt-in, so it runs on NO default path at all, not even the pre-push full run --
-# see opt_in_lanes(), and the PROVEN-WITH-NO-HOSTED-CI-WITNESS roll-up that names the
-# atoms resting on it.
+# without an edit here -- which is the property to keep.) Layer M used to be the hole
+# named here: opt-in, so it ran on NO default path at all, not even the pre-push full run,
+# and the atoms whose only witnesses live there sat in the headline `proven` regardless.
+# R311y421 wired it onto the interop job with WZ_M_REQUIRE=1, so it is hosted now. It is
+# STILL opt-in locally -- the guard opt_in_lanes() reads is deliberately unchanged, since
+# a local sweep on a box without multicast should not hard-fail -- which is why the two
+# populations can still differ for it. The PROVEN-WITH-NO-HOSTED-CI-WITNESS roll-up
+# remains the thing to read; it is derived, so it will name whatever the next such lane is
+# without an edit here.
 # R311y271 — CLASS_LANES WAS HARDCODED, AND IT HAD ALREADY ROTTED. The comment above
 # claimed "R311y264 wired E2/E6/E6b/E8/Z in, and the printed line moved with it without an
 # edit here". It did not: the disclosure intersects this map with the hosted set, so a lane

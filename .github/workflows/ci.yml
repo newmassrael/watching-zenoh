@@ -950,6 +950,52 @@ jobs:
           test -x target/zenohd-unixpipe/zenohd \
             || { echo "::error::unixpipe zenohd missing after build/restore — the wz<->zenohd unixpipe interop would FAIL under WZ_Z_REQUIRE"; exit 1; }
 
+      - name: Probe AF_VSOCK loopback capability (MEASUREMENT, not a gate — R311y421)
+        # DELIBERATELY NOT A GATE, and this is the whole point of the step: it always
+        # exits 0 and no proof rests on it. `transport-link-vsock` is the last atom
+        # Layer A4 reports in the headline `proven` with no hosted witness, and it is
+        # blocked by TWO things — the `vsock_loopback` kernel module, and a
+        # vsock-enabled zenohd oracle (a separate source build; zenoh's default omits
+        # transport_vsock). The oracle is a known, cached recipe (ZENOHD_VSOCK=1,
+        # exactly like the unixpipe variant above). The KERNEL half is an unknown
+        # about this runner image that no amount of local measurement can settle:
+        # vsock_loopback is an in-kernel transport (Linux 5.6+) needing no hypervisor
+        # vsock device, so it SHOULD load on an Azure VM, but "should" is not a
+        # measurement.
+        #
+        # Shipping a required lane on that guess would be shipping a probably-red
+        # gate; shipping a lane that skips green would be the hollow gate this repo
+        # keeps closing. So this round ships the measurement instead, and the NEXT
+        # round spends the oracle build only if the capability is real. Until then
+        # the bookkeeping stays honest on its own: A4 still lists vsock under
+        # HOST_GATED_CI_TARGETS and still counts it as having no hosted witness,
+        # and assert_host_gated_ci_targets() falsifies that declaration both ways.
+        run: |
+          echo "=== AF_VSOCK loopback capability on this runner ==="
+          uname -r
+          sudo modprobe vsock_loopback 2>&1 || echo "modprobe vsock_loopback: FAILED"
+          lsmod | grep -i vsock || echo "(no vsock modules loaded)"
+          ls -l /dev/vsock 2>&1 || echo "(no /dev/vsock)"
+          python3 - <<'PY' || true
+          import socket
+          # VMADDR_PORT_ANY, not 0. Port 0 on AF_VSOCK is a PRIVILEGED-port request
+          # and returns EACCES for an unprivileged process even on a host where
+          # vsock works perfectly -- measured on the author's box, where the real
+          # vsock interop passes. A probe that reported FAILED for that reason would
+          # send the next round chasing a kernel problem that is not there.
+          VMADDR_CID_LOCAL, VMADDR_PORT_ANY = 1, 0xFFFFFFFF
+          try:
+              s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+              s.bind((VMADDR_CID_LOCAL, VMADDR_PORT_ANY))
+              s.listen(1)
+              print("AF_VSOCK bind+listen on VMADDR_CID_LOCAL:", s.getsockname(), "OK ->",
+                    "the oracle build is worth provisioning next round")
+              s.close()
+          except (AttributeError, OSError) as exc:
+              print(f"AF_VSOCK bind+listen on VMADDR_CID_LOCAL: FAILED ({exc}) ->",
+                    "vsock stays legitimately host-gated; record it rather than chase it")
+          PY
+
       - name: Layer Z — zenohd (zenoh-full) interop
         # The ONLY proofs against the canonical Rust implementation. Until this
         # step existed they ran on exactly one machine.
@@ -963,6 +1009,39 @@ jobs:
         env:
           WZ_Z_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer Z
+
+      - name: Layer M — multicast loopback + wz<->pico multicast interop (R311y421)
+        # WHY THIS LANE MOVED FROM OPT-IN TO HOSTED. Layer A4 reports three atoms
+        # sitting in the headline `proven` with NO hosted witness of any kind; for
+        # router-multicast-faces and transport-multicast (and codec-join's `full`
+        # claims) the reason is that EVERY witness they have is in this lane, which
+        # was opt-in and so ran on no default path at all — not hosted, not even the
+        # pre-push sweep. A proof that runs nowhere is not a proof, and that is the
+        # exact false authority the A4 axis exists to end.
+        #
+        # ON THIS JOB rather than a new one: these witnesses are wz<->pico multicast
+        # interop tests, and this job already builds the zenoh-pico CLI. A separate
+        # runner would pay that build again to gain nothing.
+        #
+        # THE FLAKINESS RATIONALE WAS RE-READ, NOT INHERITED. run-ci.sh kept this
+        # lane opt-in because "a CI CONTAINER without a multicast route on the
+        # default interface drops the IGMP join". GitHub's hosted runners are full
+        # VMs with a default route, not containers; the tests use 224.0.0.224 (the
+        # link-local control block) joined with INADDR_ANY and multicast_loop(true),
+        # so both ends are the same host and the datagram never leaves it. Measured
+        # locally: 5/5 green, 0 skips, 15-26s. None of that proves the RUNNER can
+        # join — only a run here can — so the lane now prints a multicast preflight
+        # (routes, links, a real IGMP join attempt) before its first test, and a
+        # failure is therefore readable as environment-versus-code in ONE run.
+        #
+        # WZ_M_REQUIRE=1 makes every SKIP path in the lane fatal, including the
+        # opt-in gate and the pico-CLI prereq. Same rule as WZ_Z_REQUIRE above: this
+        # job guarantees the CLI, so a SKIP here would be a provisioning regression
+        # wearing a green badge — and it would restore, silently, precisely the
+        # no-hosted-witness state this step exists to end.
+        env:
+          WZ_M_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer M
 
   # ─────────────────────────────────────────────────────────────────
   # R311iw — embedded cross-compile + QEMU job. Layer G (per-triple
@@ -1495,10 +1574,14 @@ jobs:
     # clang / perl install below are load-bearing, not boilerplate. No lane
     # touches a real multicast socket: the multicast lanes drive recording links
     # and in-process channels, so none depends on runner multicast behaviour.
-    # Layer M (active-scouting multicast loopback) is the one mode lane left out
-    # ON PURPOSE: run-ci.sh keeps it opt-in (`--layer M` / WZ_RUN_LAYER_M=1)
-    # precisely because it is environment-flaky, and a flaky hosted gate is
-    # worse than an honest local one.
+    # Layer M (active-scouting multicast loopback) stays out of THIS job, but is
+    # no longer unhosted: R311y421 wired it onto the `interop` job, which already
+    # builds the zenoh-pico CLI its witnesses need, with WZ_M_REQUIRE=1. It was
+    # kept opt-in until then on a flakiness rationale about CI CONTAINERS, which
+    # hosted runners are not; the lane now runs a multicast preflight so an
+    # environment failure there is legible rather than a mystery red. run-ci.sh
+    # still treats it as opt-in for LOCAL sweeps, which is why it is absent from
+    # the lane list below.
     #
     # Cost, measured not guessed, and calibrated against a real hosted run
     # rather than a single warm sample. Local medians over this repo's own

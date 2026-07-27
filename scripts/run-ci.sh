@@ -6001,10 +6001,60 @@ layer_q_qemu_mcu_e2e() {
 # with transport-fragmentation for the oversize-put e2e (publisher
 # fragments at the group batch budget, subscriber reassembles).
 layer_m_scouting_multicast() {
-    if [[ "$ONLY_LAYER" != "M" && "${WZ_RUN_LAYER_M:-0}" -ne 1 ]]; then
+    # R311y421 — WZ_M_REQUIRE arms this lane the way WZ_QZ_REQUIRE / WZ_A3_REQUIRE
+    # arm theirs: every SKIP path below becomes a hard FAIL, and the opt-in gate
+    # itself no longer applies. Hosted CI sets it.
+    #
+    # WHY THIS LANE IS BEING HOSTED AT ALL, against its own opt-in rationale.
+    # Layer A4 reports three atoms sitting in the headline `proven` with NO
+    # hosted-CI witness of any kind — router-multicast-faces, transport-multicast
+    # (and codec-join's `full` claims) — and for these two the reason is that
+    # EVERY witness they have lives in this lane, which is opt-in and therefore
+    # runs on no default path at all, not even the pre-push sweep. A proof that
+    # runs nowhere is not a proof.
+    #
+    # THE FLAKINESS RATIONALE, RE-READ RATHER THAN INHERITED. The comment above
+    # this function says multicast is "environment-dependent: a CI CONTAINER
+    # without a multicast route on the default interface drops the IGMP join".
+    # That is a claim about containers, and GitHub's hosted runners are full VMs
+    # with a default route, not containers. The tests also use 224.0.0.224 — the
+    # link-local control block — joined with INADDR_ANY and
+    # set_multicast_loop_v4(true), so sender and receiver are the same host and
+    # the datagram never needs to leave it. Measured here: 5/5 green, 0 skips,
+    # 15-26s. None of that PROVES the runner can join; it only means the
+    # inherited rationale does not obviously apply to this environment, and the
+    # only way to settle that is to run it there. The preflight below exists so
+    # the answer is diagnosable in ONE run rather than an unexplained red.
+    local m_required=0
+    [[ "${WZ_M_REQUIRE:-0}" == "1" ]] && m_required=1
+    if (( ! m_required )) && [[ "$ONLY_LAYER" != "M" && "${WZ_RUN_LAYER_M:-0}" -ne 1 ]]; then
         echo "Layer M SKIP (opt-in environment-flaky lane; --layer M or WZ_RUN_LAYER_M=1)"
         return 0
     fi
+    # PREFLIGHT — report the multicast capability of THIS host before any test
+    # runs, so a failure downstream can be read as "the environment cannot join"
+    # versus "the code broke". Purely diagnostic: it never decides the lane,
+    # because a probe that gates would just be a second place for the same
+    # question to be answered wrongly.
+    echo "  M preflight: multicast environment"
+    ip route show type multicast 2>/dev/null | sed 's/^/    route: /' || true
+    ip -o link show up 2>/dev/null | awk -F': ' '{print "    link: " $2}' | head -5 || true
+    python3 - <<'PY' 2>&1 | sed 's/^/    /' || true
+import socket, struct
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", 0))
+    mreq = struct.pack("4s4s", socket.inet_aton("224.0.0.224"),
+                       socket.inet_aton("0.0.0.0"))
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    print("IGMP join 224.0.0.224 via INADDR_ANY: OK")
+    s.close()
+except OSError as exc:
+    print(f"IGMP join 224.0.0.224 via INADDR_ANY: FAILED ({exc})")
+    print("  -> the lane's tests cannot pass here; this is the environment,")
+    print("     not the code.")
+PY
     # R311od — `transport-link-tls` is added so the `round3_tls` module
     # (active scouting -> `tls/...` open over the R311oc config-threaded seam)
     # compiles and its `#[ignore]` test runs here. Without it that module is
@@ -6044,7 +6094,18 @@ layer_m_scouting_multicast() {
     # M, never the default Layer E sweep. Graceful SKIP when the pico CLI
     # is absent mirrors Layer E's prereq discipline so `--layer M` without
     # pico-CLI prep does not hard-fail.
+    # R311y421 — under WZ_M_REQUIRE this is FATAL, not a skip. The pico
+    # interop tests below are the ONLY witnesses router-multicast-faces and
+    # transport-multicast have; a hosted job that provisions the pico CLI and
+    # then skips them would restore, silently, exactly the state this round is
+    # closing. Same shape as the WZ_QZ_REQUIRE / WZ_A3_REQUIRE arming.
     if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
+        if (( m_required )); then
+            echo "  Layer M FAIL: zenoh-pico CLI absent but WZ_M_REQUIRE=1 — this job" >&2
+            echo "    provisions it, so its absence is a provisioning regression, not a" >&2
+            echo "    reason to skip the only witnesses two atoms have." >&2
+            return 1
+        fi
         echo "Layer M SKIP wz->pico multicast interop (zenoh-pico CLI not built; \
 run: bash scripts/build-zenoh-pico-cli.sh)"
         return 0
