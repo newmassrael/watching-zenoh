@@ -84,11 +84,14 @@ jobs:
       - name: Install mnemosyne-cli (pinned)
         # Delegated to the shared scripts/install-mnemosyne-cli.sh (pinned
         # rev + --force), the single source of truth with ci.yml.
-        run: |
-          bash scripts/install-mnemosyne-cli.sh || {
-            echo "::warning::mnemosyne-cli install failed; Layer A skipped"
-            echo "MNEMOSYNE_SKIP=1" >> "$GITHUB_ENV"
-          }
+        # R311y417 — the `|| { ::warning; MNEMOSYNE_SKIP=1 }` fallback is GONE,
+        # and so is the guard it fed on Layer A below. The argument is already
+        # written in this file, at the Layer A3 step: "this job PROVISIONS
+        # mnemosyne-cli, so its absence is a provisioning regression, not an
+        # honest skip". R311y300 applied that to A3 and left Layer A — the
+        # SSOT gate itself — still able to skip into a green release. Same
+        # hollow-gate class R311y416 closed for actionlint in ci.yml.
+        run: bash scripts/install-mnemosyne-cli.sh
 
       - name: Build sce-codegen (vendor/sce)
         run: bash scripts/build-sce.sh
@@ -102,7 +105,6 @@ jobs:
       # land. Delegating to scripts/run-ci.sh keeps the two workflows
       # in lockstep.
       - name: Layer A — Mnemosyne workspace validate
-        if: env.MNEMOSYNE_SKIP != '1'
         run: bash scripts/run-ci.sh --layer A
 
       - name: Layer A2 — Envelope mid value= audit

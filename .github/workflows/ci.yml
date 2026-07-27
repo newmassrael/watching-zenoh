@@ -132,8 +132,20 @@ jobs:
         # EXPLICITLY rather than relied on from the runner image: actionlint
         # runs its shellcheck integration only when shellcheck is on PATH
         # and silently drops those checks otherwise, and every actionlint
-        # finding this repo has had came through shellcheck. An image change
-        # would quietly hollow out the Layer 0 lint half.
+        # finding this repo's workflows have produced came through shellcheck
+        # (swept across all 83 revisions of .github/workflows/ at R311y417).
+        # R311y417 corrects the follow-on claim that an image change "would
+        # quietly hollow out the Layer 0 lint half": with WZ_LINT_REQUIRE=1
+        # added by the same y416 commit it would red LOUDLY at the
+        # shellcheck check, not go quiet. Listing it here keeps that tripwire
+        # from firing on image drift. Note the ASYMMETRY, disclosed rather
+        # than fixed: actionlint is pinned + checksummed below while
+        # shellcheck floats on apt — its version rides the `runs-on:
+        # ubuntu-22.04` pin, which resolves to 0.8.0-2 today, matching the
+        # author's box. A runner-OS bump IS a shellcheck bump and should
+        # expect new findings. Measured at R311y417: shellcheck 0.8.0 /
+        # 0.9.0 / 0.10.0 all agree on this tree (0 findings) and on its
+        # parent (the same 3), so the exposure is latent, not live.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -189,16 +201,19 @@ jobs:
       # is now the only place the full lane set runs.
 
       - name: Install actionlint (pinned + checksum-verified)
-        # R311y416 — Layer 0's actionlint half had been SKIPping on every
-        # runner since it was written, because nothing installed the binary.
-        # R311y414 and R311y415 both DISCLOSED that rather than closing it;
-        # this is the close.
+        # R311y416 — Layer 0's actionlint half had never once executed:
+        # nothing installed the binary, and the ONE hosted run the lane ever
+        # had before this (30233462393) logged `actionlint SKIP`. R311y414
+        # and R311y415 both DISCLOSED that rather than closing it; this is
+        # the close. (R311y417 narrowed "SKIPping on every runner", which
+        # implied a history of runners; there was exactly one.)
         #
         # A pinned release tarball, not `go install ...@latest`: an unpinned
         # linter turns an upstream release into a spontaneous red on an
         # unrelated push, which is the same reproducibility trade
-        # rust-toolchain.toml and MNEMOSYNE_REV already make here. The
-        # sha256 is the one published in the release's own checksums.txt.
+        # rust-toolchain.toml and scripts/install-mnemosyne-cli.sh's
+        # MNEMOSYNE_REV already make in this repo. The sha256 is the one
+        # published in the release's own checksums.txt.
         # Bumping the pin is a deliberate commit — expect new findings.
         env:
           ACTIONLINT_VERSION: "1.7.12"
@@ -206,12 +221,20 @@ jobs:
         run: |
           set -euo pipefail
           tgz="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -sSLf -o "$tgz" \
+          # R311y417 — `trap` so a checksum mismatch or a truncated fetch does
+          # not leave a partial tarball in $GITHUB_WORKSPACE for later steps.
+          trap 'rm -f "$tgz" actionlint' EXIT
+          # R311y417 — retries. A single transient network blip on an
+          # unrelated push would otherwise red the build, which the repo's
+          # no-flaky-ever rule does not accept for a provisioning step.
+          # Still LOUD on a real failure: -f keeps HTTP errors non-zero and
+          # the sha256 check below is unconditional.
+          curl -sSLf --retry 3 --retry-all-errors --retry-delay 2 \
+            --connect-timeout 10 --max-time 120 -o "$tgz" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tgz}"
           echo "${ACTIONLINT_SHA256}  ${tgz}" | sha256sum -c -
           tar xzf "$tgz" actionlint
           sudo install -m 0755 actionlint /usr/local/bin/actionlint
-          rm -f "$tgz" actionlint
           actionlint --version
 
       - name: Layer 0 — preflight lints (cargo fmt --check + actionlint)
@@ -229,25 +252,27 @@ jobs:
         # gated by nothing, and the whole hook path is skipped by
         # `--no-verify` or an uninstalled core.hooksPath.
         #
-        # First of the Layer lanes (5 setup steps precede it), so a
+        # First of the Layer lanes (6 setup steps precede it — R311y417:
+        # y416 added the actionlint install and left the count at 5), so a
         # fmt-dirty push is rejected before the expensive lanes, not after.
         # `cargo fmt --check` compiles nothing and rustfmt is already
         # materialised by rust-toolchain.toml's `components`, so the step
         # needs no extra install — but it is not free. MEASURED HOSTED:
-        # 23s on run 30233462393, its first hosted execution, covering
-        # `crates` plus the 6 auto-discovered deploy workspaces (the log
-        # names all seven). The job came in at 599s, inside the 584-928s
-        # band the feature-gates comment records for the runs before this
-        # step existed.
-        # R311y415 projected ~45-75s and was WRONG BY 2-3x, high. The
-        # local number is 26-30s at 99% CPU, so the round reasoned from
-        # single-thread ratios on this job's other 99%-CPU lanes (0.9x for
-        # Layer D, 1.56x for C0) instead of R311y414's 3.29x parallel-lane
-        # ratio. The real ratio for this lane is ~0.8x: the runner beats
-        # the author's box on it. Rejecting the 3.29x borrow was right —
-        # it would have said 80-100s — but a borrowed ratio stayed wrong
-        # even after narrowing to same-CPU-profile lanes, and only the
-        # hosted run settled it.
+        # 23s on run 30233462393 (fmt only — actionlint was still SKIPping
+        # there), and 29s on run 30235292100 once R311y416 armed the
+        # actionlint half; the install step adds 0.8s and actionlint itself
+        # 0.9s. Job totals 599s then 625s, both inside the 584-928s band
+        # the feature-gates comment records from before this step existed.
+        # R311y415 projected ~45-75s and was WRONG BY 2-3x, high.
+        # DO NOT DERIVE A MULTIPLIER FROM THIS. y415 wrote "the real ratio
+        # is ~0.8x" off a single sample (23s hosted / 26-30s local); the
+        # very next run gives 29s against 18-21s local, i.e. 1.4-1.6x the
+        # other way, and both sides swing ~40% run to run. What the
+        # measurements settle is the ORDER — tens of seconds — not a ratio.
+        # The narrower lesson that survives: y414's 3.29x is a parallel
+        # cargo-test number and this lane is 99% CPU single-threaded, so
+        # borrowing it was wrong; borrowing from same-CPU-profile lanes was
+        # also wrong. Measure the lane.
         #
         # It DOES need the recursive checkout above: `cargo fmt --all`
         # resolves the whole workspace manifest, so a tree without
@@ -515,17 +540,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
 
       - name: Install mnemosyne-cli (pinned)
-        run: |
-          bash scripts/install-mnemosyne-cli.sh || {
-            echo "::warning::mnemosyne-cli install failed; Layer A skipped"
-            echo "MNEMOSYNE_SKIP=1" >> "$GITHUB_ENV"
-          }
+        # R311y417 — the `|| { ::warning; MNEMOSYNE_SKIP=1 }` fallback that used
+        # to wrap this is GONE, and with it the `if: env.MNEMOSYNE_SKIP != '1'`
+        # guard on Layer A below. That pair demoted this repo's CENTRAL SSOT
+        # gate to a warning: an install failure SKIPped Layer A and the job went
+        # GREEN. It is the identical hollow-gate shape R311y416 closed for
+        # actionlint one job over, generalised in that round's own carry ("an
+        # exit 0 from a tool that skipped its real work is indistinguishable
+        # from a pass") and then not applied here. An install failure is a
+        # provisioning regression; it now reds this step.
+        run: bash scripts/install-mnemosyne-cli.sh
 
       - name: Build sce-codegen (vendor/sce)
         run: bash scripts/build-sce.sh
 
       - name: Layer A — Mnemosyne workspace validate
-        if: env.MNEMOSYNE_SKIP != '1'
         run: bash scripts/run-ci.sh --layer A
 
       - name: Layer A2 — Envelope mid value= audit

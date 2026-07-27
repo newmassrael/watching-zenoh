@@ -5,9 +5,12 @@
 # run-ci.sh — CI-equivalent local check.
 #
 # Single source of truth for the gate-set the GitHub Actions
-# workflow runs. Both `.github/workflows/ci.yml` and the local
+# workflow runs. R311y417 — this used to add "and the local
 # `.githooks/pre-push` hook invoke this script so the two paths
-# cannot drift (R64.1 retrospect: a CI yaml change without local
+# cannot drift". R311y386 removed that: pre-push runs
+# validate-workspace plus a changed-crate `cargo test -p` and never
+# calls this script. Hosted CI is the only caller of the full lane
+# set; run it by hand for a local sweep. (R64.1 retrospect: a CI yaml change without local
 # verification land-then-fail pattern is exactly what this script
 # prevents).
 #
@@ -315,11 +318,14 @@
 #                                      # fingerprint over HEAD + tracked diff +
 #                                      # untracked content invalidates on ANY
 #                                      # source edit -> full re-run. Opt-in; the
-#                                      # default sweep + pre-push hook run all.
+#                                      # the default sweep runs all (R311y417:
+#                                      # not the pre-push hook — see the header).
 #   WZ_RUN_LAYER_M=1 scripts/run-ci.sh # add the opt-in environment-flaky M lane
 #
 # Time cost (warm cache):
-#   Layer 0: <2s   A: <1s   B: ~30s   C1: ~10s   C2: ~5s   D: <1s
+#   Layer 0: ~20s  A: <1s   B: ~30s   C1: ~10s   C2: ~5s   D: <1s
+#     (R311y417 — "<2s" predated the 7-workspace fmt sweep and actionlint;
+#      measured 18-30s local, 23-29s hosted)
 #   Host-only floor ~50s incremental / ~5min cold. With the cross-
 #   toolchain + zenohd/pico binaries present, the default sweep also
 #   runs F (codec footprint ~5-10min) + G (7-target cross-compile) +
@@ -410,8 +416,9 @@ _runci_ts() { date +'%Y-%m-%dT%H:%M:%S%z'; }
 # tree. SAFETY (the R311gf lesson — a subset run must never hide a break a source
 # edit introduced): the fingerprint hashes HEAD + the full tracked diff + every
 # untracked file's content, so ANY source change invalidates the checkpoint and
-# forces a full re-run. Opt-in only — the default sweep and the pre-push hook
-# pass no --resume, so they run every layer unconditionally; they still WRITE the
+# forces a full re-run. Opt-in only — the default sweep passes no --resume
+# (R311y417: nor does any hook; R311y386 stopped pre-push from calling this
+# script at all), so it runs every layer unconditionally; it still WRITEs the
 # checkpoint (a killed full sweep is then resumable). Disabled under --layer (that
 # mode owns lane selection). The ledger lives in .git (untracked), like the
 # pre-push run-ci.lock.
@@ -629,14 +636,17 @@ run_qemu_case() {
 # `bash scripts/run-ci.sh --layer 0` by hand when you touch a
 # `deploy/*` workspace, which is the half pre-commit cannot see.
 #
-# actionlint stays optional (SKIP if not installed) — yaml workflow
-# lint is a nice-to-have, not a correctness gate. R311y415: no step
-# in either workflow installs actionlint (grep `.github/` — the only
-# hits are comments), so it is EXPECTED to SKIP hosted too, leaving
-# Layer 0 gating fmt and only fmt. Confirm on the first hosted run.
-# Installing it is a deliberate DEFERRAL, not an oversight: y414
-# disclosed the same gap and this round leaves it open rather than
-# taking a new lint's findings unmeasured. It is a named carry.
+# actionlint: optional LOCALLY, MANDATORY on the hosted ci job.
+# R311y416 wired it — the job installs a pinned v1.7.12 (+sha256) and
+# sets WZ_LINT_REQUIRE=1, so an absent actionlint or shellcheck is
+# FATAL there, while both stay non-fatal locally so a dev without
+# them is not blocked. Confirmed on run 30235292100:
+# `actionlint OK (1.7.12)`. This closed the gap y414 and y415 each
+# disclosed. R311y417 — the text that used to sit here still called
+# it "optional", "EXPECTED to SKIP hosted" and "a deliberate
+# DEFERRAL"; every clause was false the moment y416 landed, and it
+# survived because the round edited this function without re-reading
+# its own header. Same class y415 spent a round retracting.
 layer_0_preflight_lints() {
     # 0.1 cargo fmt --check across every workspace (mandatory). crates/ is
     # the primary workspace; each deploy/*/ that carries its OWN
@@ -715,32 +725,72 @@ layer_0_preflight_lints() {
     # break and the lane would keep printing SKIP and returning 0 — the
     # "success by silence" shape this file spent R311y415 closing for fmt.
     # Same idiom as WZ_QZ_REQUIRE / WZ_A3_REQUIRE.
+    # R311y417 — GITHUB_ACTIONS is a second, independent trigger for REQUIRE
+    # mode. WZ_LINT_REQUIRE is a bare string contract across two files
+    # (ci.yml sets it, this function reads it); drop or typo either side and
+    # the gate silently reverts to SKIP-green, which is the failure this lane
+    # exists to prevent. Any hosted run provisions actionlint, so asserting
+    # unconditionally under GITHUB_ACTIONS costs nothing and removes the
+    # single point of failure. Same belt-and-braces as y414 making an
+    # unknown `--layer` a hard error instead of a silent no-op.
+    local lint_required=0
+    [[ "${WZ_LINT_REQUIRE:-0}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]] \
+        && lint_required=1
     if ! command -v actionlint >/dev/null 2>&1; then
-        if [[ "${WZ_LINT_REQUIRE:-0}" == "1" ]]; then
-            echo "  Layer0 FAIL: actionlint REQUIRED (WZ_LINT_REQUIRE=1) but not on PATH" >&2
+        if [[ "$lint_required" == "1" ]]; then
+            echo "  Layer0 FAIL: actionlint REQUIRED (WZ_LINT_REQUIRE=1 or GITHUB_ACTIONS) but not on PATH" >&2
             return 1
         fi
-        echo "  actionlint SKIP (not installed; install: go install github.com/rhysd/actionlint/cmd/actionlint@latest)"
+        # R311y417 — points at the PIN, not `@latest`. The install step in
+        # ci.yml argues that an unpinned linter is a spontaneous-red hazard;
+        # telling a developer to fetch @latest here would hand them a
+        # different finding set than the gate grades against.
+        echo "  actionlint SKIP (not installed; install the ci pin — see the \"Install actionlint\" step in .github/workflows/ci.yml)"
         return 0
     fi
     # actionlint runs its shellcheck integration ONLY if shellcheck is on
-    # PATH, and silently drops those checks otherwise. Every finding this
-    # repo has ever had from actionlint came through shellcheck (3 at
-    # R311y416, all SC1090/SC2086 in the zephyr job), so an actionlint
-    # without shellcheck is a near-empty gate that still exits 0. Under
-    # WZ_LINT_REQUIRE the absence is therefore fatal too.
+    # PATH, and silently drops those checks otherwise. Its other 36
+    # documented check categories are native and DO still run — R311y417
+    # corrects y416's "near-empty gate", which undersold the tool it was
+    # justifying. The load-bearing fact is narrower and measured: every
+    # finding this repo's workflows have ever produced came through the
+    # shellcheck integration (swept at R311y417 across all 83 historical
+    # revisions of .github/workflows/ — 103 finding lines, 103 of them
+    # shellcheck-backed, zero native). So on THIS repo an actionlint
+    # without shellcheck would have passed the dirty tree: with the
+    # y416 fixes reverted it exits 1 with shellcheck and 0 without.
+    # Under WZ_LINT_REQUIRE the absence is therefore fatal too.
     if ! command -v shellcheck >/dev/null 2>&1; then
-        if [[ "${WZ_LINT_REQUIRE:-0}" == "1" ]]; then
-            echo "  Layer0 FAIL: shellcheck REQUIRED (WZ_LINT_REQUIRE=1) but not on PATH — actionlint would silently drop its shellcheck checks" >&2
+        if [[ "$lint_required" == "1" ]]; then
+            echo "  Layer0 FAIL: shellcheck REQUIRED (WZ_LINT_REQUIRE=1 or GITHUB_ACTIONS) but not on PATH — actionlint would silently drop its shellcheck checks" >&2
             return 1
         fi
         echo "  actionlint: shellcheck absent — SC* checks will be skipped"
     fi
-    if ! actionlint .github/workflows/*.yml; then
+    # R311y417 — NO path argument. y416 passed `.github/workflows/*.yml`,
+    # which silently skips `.yaml` files; GitHub accepts BOTH extensions
+    # (workflow-syntax docs: "must have either a `.yml` or `.yaml` file
+    # extension"), so a future `deploy.yaml` would have been linted by
+    # nothing while the lane stayed green — the exact success-by-silence
+    # class this lane was armed to close. Bare `actionlint` auto-discovers
+    # the project from cwd (run_layer cd's to the repo root), covers both
+    # extensions and subdirectories, and is still LOUD on the empty cases:
+    # no workflow files -> rc=3 "no YAML file was found", no .github ->
+    # rc=3 "no project was found". Verified all four ways at R311y417.
+    # Known limit, recorded rather than implied: composite
+    # `.github/actions/*/action.yml` files are NOT linted by actionlint at
+    # all. This repo has none today.
+    local al_version
+    al_version=$(actionlint --version 2>/dev/null | head -1) || al_version=""
+    [[ -n "$al_version" ]] || al_version="version unknown"
+    if ! actionlint; then
         echo "  Layer0 FAIL: actionlint reported findings (see above)" >&2
         return 1
     fi
-    echo "  actionlint OK ($(actionlint --version | head -1))"
+    # Log BOTH versions: shellcheck rides on the `runs-on` image rather
+    # than a pin (see the ci.yml install step), so the only record of
+    # which one graded a green run is this line.
+    echo "  actionlint OK (${al_version}; $(shellcheck --version 2>/dev/null | awk '/^version:/{print "shellcheck " $2}' || true))"
 }
 
 # ─── Layer A — mnemosyne validate-workspace ─────────────────────────
@@ -7226,8 +7276,12 @@ else
     # returns EMPTY — a gh-CLI log-archive parsing gap that (R311y377) hid the
     # R311y376 Layer Z panic behind a bare "Process completed with exit code 1".
     # The body lifts the panic location + message (`-A1`), the per-test /
-    # per-suite FAILED verdict lines, AND (R311y414) any lane's own
-    # `  <LANE> FAIL: ...` diagnostic out of the run log, ANSI-stripped and
+    # per-suite FAILED verdict lines, (R311y414) any lane's own
+    # `  <LANE> FAIL: ...` diagnostic, AND (R311y417) actionlint's own
+    # `.github/workflows/<f>:<line>:<col>: ...` finding lines — without that
+    # last alternative a Layer 0 lint red produced a body reading only
+    # "actionlint reported findings (see above)", i.e. it told the reader to
+    # go do the very thing this annotation exists to spare them. ANSI-stripped and
     # %/newline-encoded for the annotation wire, so the reason is visible without
     # downloading the log. Gated on GITHUB_ACTIONS so a local pre-push run stays
     # plain text.
@@ -7241,7 +7295,7 @@ else
             # build/lint failure (no panic) is not left body-less. %/CR-encoded
             # for the wire. Keep the fallback body if extraction is empty.
             _extracted="$(sed 's/\x1b\[[0-9;]*m//g' "$RUNCI_LOG_FILE" \
-                | grep -aE -A1 'panicked at|(--- |result: )FAILED|^error(\[|:)| FAIL: ' \
+                | grep -aE -A1 'panicked at|(--- |result: )FAILED|^error(\[|:)| FAIL: |^\.github/workflows/[^ ]+:[0-9]+:[0-9]+: ' \
                 | sed 's/%/%25/g; s/\r//g; /^--$/d' \
                 | tail -n 40 | awk 'BEGIN{ORS="%0A"}{print}')"
             [[ -n "$_extracted" ]] && _annot="$_extracted"
