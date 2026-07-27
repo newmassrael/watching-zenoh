@@ -1574,6 +1574,26 @@ jobs:
       - name: Layer C1o — keyexpr wildcard gating (R311y425)
         run: bash scripts/run-ci.sh --layer C1o
 
+      # R311y426 — the STORAGE group, the second of the three R311y425 named as
+      # remaining. C1z alone carried 16 filtered runs, all bare, which is why it
+      # was not in that batch; C1bg was already guarded but with an inline
+      # `>= 1 passed` form that catches an empty selection and not a shrinking
+      # one, so it moves to exact counts like the three R311y414 converted.
+      # Between them they hold 8 of the 31 remaining orphan selectors.
+      #
+      # Budget check, since this job's ceiling moved to 45 one round ago: it
+      # measured 14m37s with C1y, the R311y425 eleven add ~4.6 min at the median
+      # and ~16.6 at p90, and these two add ~5.6 / ~8.7. That lands near 25 min
+      # typical and ~40 at p90 — inside 45, and the reason ROUTING (C1x, C1ax,
+      # C1ay, E7b) and ADMINSPACE (C1am, C1an, C1ao, E7c) are NOT here: adding
+      # routing's ~17.5 min p90 would put this job over its own ceiling. They
+      # need their own runner, and now for a TIME reason that is measured rather
+      # than the disk one R311y424 disproved.
+      - name: Layer C1z — storage driver (backend/history/aligner) (R311y426)
+        run: bash scripts/run-ci.sh --layer C1z
+      - name: Layer C1bg — filesystem storage backend + manager restart (R311y426)
+        run: bash scripts/run-ci.sh --layer C1bg
+
       # The measurement this job's own header asks for and has never had: it
       # declares "THIS JOB HAS NO OTHER DISK HEADROOM" while recording that
       # end-of-job free space is UNKNOWN rather than known-tight, and that "a

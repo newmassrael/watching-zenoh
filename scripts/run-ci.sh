@@ -3087,41 +3087,57 @@ layer_c1y_cargo_test_routing_peer() {
 # are Locality::Remote, so no single-session loopback can drive them). `--lib`
 # excludes integration tests, so the e2e needs its own `--test` invocation.
 layer_c1z_cargo_test_storage_driver() {
+    _runci_guarded_test "C1z storage" 27 \
+        cargo test -p wz-session-core --features storage-backend --lib storage --quiet || return 1
+    _runci_guarded_test "C1z storage" 35 \
+        cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet || return 1
+    _runci_guarded_test "C1z storage_manager_service" 5 \
+        cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet || return 1
+    _runci_guarded_test "C1z storage_strip_prefix" 6 \
+        cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
+    _runci_guarded_test "C1z storage" 40 \
+        cargo test -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --lib storage --quiet || return 1
+    _runci_guarded_test "C1z storage" 50 \
+        cargo test -p wz-session-core --features storage-history,storage-mgr-strip-prefix --lib storage --quiet || return 1
+    _runci_guarded_test "C1z storage" 39 \
+        cargo test -p wz-session-core --features storage-mgr-wildcard-updates --lib storage --quiet || return 1
+    _runci_guarded_test "C1z storage" 53 \
+        cargo test -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --lib storage --quiet || return 1
+    _runci_guarded_test "C1z storage" 127 \
+        cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet || return 1
+    _runci_guarded_test "C1z storage_service" 9 \
+        cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet || return 1
+    _runci_guarded_test "C1z storage_service" 10 \
+        cargo test -p wz-runtime-tokio --features storage-backend,storage-mgr-strip-prefix,declare-subscriber,pubsub-allow-loop --lib storage_service --quiet || return 1
+    _runci_guarded_test "C1z storage" 46 \
+        cargo test -p wz-session-core --features storage-mgr-garbage-collection --lib storage --quiet || return 1
+    _runci_guarded_test "C1z storage_gc_service" 3 \
+        cargo test -p wz-runtime-tokio --features storage-mgr-garbage-collection --lib storage_gc_service --quiet || return 1
+    _runci_guarded_test "C1z storage" 38 \
+        cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet || return 1
+    _runci_guarded_test "C1z storage_aligner_convergence_e2e" 1 \
+        cargo test -p wz-runtime-tokio --features storage-aligner --test storage_aligner_convergence_e2e --quiet || return 1
+    _runci_guarded_test "C1z storage" 11 \
+        cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features storage-backend --lib storage --quiet \
-        && cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-multi-storage-host --quiet \
-        && cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet \
         && cargo clippy -p wz-session-core --features storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-session-core --features storage-history,storage-mgr-strip-prefix --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-history,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-strip-prefix --quiet \
-        && cargo test -p wz-session-core --features storage-mgr-wildcard-updates --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-mgr-wildcard-updates --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-wildcard-updates --quiet \
-        && cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-complete-flag --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features storage-backend,storage-mgr-strip-prefix,declare-subscriber,pubsub-allow-loop --lib storage_service --quiet \
         && cargo clippy -p wz-runtime-tokio --features storage-backend,storage-mgr-strip-prefix,declare-subscriber,pubsub-allow-loop --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-complete-flag --quiet \
-        && cargo test -p wz-session-core --features storage-mgr-garbage-collection --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-mgr-garbage-collection --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features storage-mgr-garbage-collection --lib storage_gc_service --quiet \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-garbage-collection --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-garbage-collection --quiet \
-        && cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet \
-        && cargo test -p wz-runtime-tokio --features storage-aligner --test storage_aligner_convergence_e2e --quiet \
-        && cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features storage-aligner --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features storage-history --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features storage-aligner --quiet -- -D warnings \
@@ -4196,23 +4212,19 @@ layer_c1bf_cargo_clippy_all_features() {
 #   4. clippy-gate the LIB under `--no-default-features --features
 #      storage-backend-filesystem` — the module composes standalone over the
 #      minimal seam forward.
+# R311y426 — the two inline `>= 1 passed` guards are replaced by
+# `_runci_guarded_test` at EXACT counts, the same substitution R311y414 made for
+# three other inline forms. `>= 1` catches the empty selection but not a set that
+# silently shrinks; the counts below are measured on this tree.
 layer_c1bg_cargo_test_storage_backend_filesystem() {
-    local out
-    out="$(cd crates && cargo test -p wz-runtime-tokio \
-        --features storage-backend-filesystem --lib filesystem_storage --quiet 2>&1)" \
-        || { echo "$out"; return 1; }
-    echo "$out"
-    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<< "$out" \
-        || { echo "  C1bg FAIL: 0 filesystem_storage tests ran (filter matched nothing)"; return 1; }
+    _runci_guarded_test "C1bg filesystem_storage" 14 \
+        cargo test -p wz-runtime-tokio \
+        --features storage-backend-filesystem --lib filesystem_storage --quiet || return 1
     # R311y280 — the live-driver composition + durability proof (+ its discriminator).
-    local comp
-    comp="$(cd crates && cargo test -p wz-runtime-tokio \
+    _runci_guarded_test "C1bg manager_restart" 2 \
+        cargo test -p wz-runtime-tokio \
         --features storage-mgr-multi-storage-host,storage-backend-filesystem,pubsub-allow-loop,declare-subscriber \
-        --lib manager_restart --quiet 2>&1)" \
-        || { echo "$comp"; return 1; }
-    echo "$comp"
-    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<< "$comp" \
-        || { echo "  C1bg FAIL: 0 manager_restart composition tests ran (filter matched nothing)"; return 1; }
+        --lib manager_restart --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features storage-backend-filesystem --quiet -- -D warnings \
