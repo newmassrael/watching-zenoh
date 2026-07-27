@@ -157,8 +157,12 @@ wz_schema_pin_gate() {
 #
 # DISCLOSED LIMIT: this proves the two moved together, NOT that the new rev's
 # CURRENT_SCHEMA_VERSION actually equals the new ceiling. Verifying that needs
-# the pinned source, which no local hook has; the honest check for it belongs
-# in ci.yml beside the `cargo install --rev`, and is not built here.
+# the pinned build, which no git hook has — hooks never install. R311y419 built
+# it where the build does exist: scripts/verify-mnemosyne-pin.sh, run from the
+# tail of scripts/install-mnemosyne-cli.sh, so it fires on both workflows and on
+# any local install. The split is therefore honest but real — a ceiling can be
+# wrong locally for as long as nobody reinstalls the pinned CLI, and the first
+# thing that notices is hosted CI.
 wz_schema_pin_cochange_gate() {
     local hook="$1" idx_ceiling head_ceiling idx_rev head_rev
     git rev-parse --verify --quiet HEAD >/dev/null || return 0   # initial commit

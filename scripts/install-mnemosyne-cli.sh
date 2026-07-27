@@ -86,15 +86,31 @@ MNEMOSYNE_REV="d7f048b56a734790b4a9875d53b9c7c9a579e4f9"
 # schema_version exceeds it. MNEMOSYNE_REV and MNEMOSYNE_MAX_SCHEMA are ONE
 # fact in two forms — never move the rev without re-reading
 # CURRENT_SCHEMA_VERSION at the new rev and moving this with it. That pairing
-# is now gated too: pre-commit refuses a ceiling that moves while the rev
-# stands still, because the ceiling is the gate's ONLY oracle and raising it
-# alone merely silences the gate. What is still NOT gated, and is the honest
-# next step, is that the new rev's CURRENT_SCHEMA_VERSION really equals the new
-# ceiling — that needs the pinned source, so it belongs in ci.yml beside the
-# `cargo install --rev` below.
-# shellcheck disable=SC2034  # read by .githooks/pre-commit as text, so it has
-                            # no in-script use; keep the one-line literal form.
+# is now gated twice over: pre-commit refuses a ceiling that moves while the rev
+# stands still (the ceiling is that gate's ONLY oracle, so raising it alone
+# merely silences it), and R311y419 closed the hole that pairing could not
+# reach — that the ceiling is the pinned reader's REAL CURRENT_SCHEMA_VERSION
+# and not a mis-read of upstream source. See the tail of this script.
 MNEMOSYNE_MAX_SCHEMA="43"
 
 cargo install --git https://github.com/newmassrael/mnemosyne \
   --rev "$MNEMOSYNE_REV" --bin mnemosyne-cli --force mnemosyne-cli
+
+# R311y419 — ask the binary just installed what schema it actually reads, and
+# refuse to hand a mismatched pin to the rest of the job.
+#
+# CALLED FROM HERE, not wired as a separate ci.yml step, so that it cannot be
+# forgotten by a caller. This script exists because ci.yml and release.yml must
+# not drift; a gate bolted onto one workflow would reintroduce exactly that
+# drift, and a gate that is defined but not wired is the hollow-gate shape
+# R311y416/y417 kept finding. Every route that installs the pinned CLI — both
+# workflows, and any local `bash scripts/install-mnemosyne-cli.sh` — now runs
+# it. Git hooks do NOT: they never install, so they still verify the store
+# against the ceiling without ever verifying the ceiling itself.
+#
+# MNEMOSYNE_MAX_SCHEMA is passed in rather than re-parsed out of this file: the
+# value compared is then the one that was actually used, and
+# scripts/lib/schema-pin-gate.sh stays the single textual parser of these two
+# constants. That in-script use is also why the SC2034 disable this assignment
+# used to carry is gone — the constant is live code now, not inert text.
+bash "$(dirname "${BASH_SOURCE[0]}")/verify-mnemosyne-pin.sh" "$MNEMOSYNE_MAX_SCHEMA"
