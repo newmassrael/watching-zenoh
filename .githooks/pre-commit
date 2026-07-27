@@ -77,6 +77,9 @@ if [[ -n "$staged_manifests" && -z "$staged_lockfile" ]]; then
     else
         echo "pre-commit: Cargo.toml change staged WITHOUT crates/Cargo.lock,"  >&2
         echo "and the working-tree Cargo.lock differs from HEAD:" >&2
+        # shellcheck disable=SC2001  # per-LINE prefix over a multi-line
+        # variable; bash pattern substitution cannot anchor to ^ of each line,
+        # so the suggested ${var//a/b} form cannot express this.
         echo "$staged_manifests" | sed 's/^/    manifest: /' >&2
         echo "" >&2
         echo "  R52.1 retrospect: a manifest change without its lock-delta" >&2
@@ -104,6 +107,8 @@ if [[ -n "$staged_rs" ]]; then
         echo "" >&2
         echo "pre-commit: cargo fmt --check FAIL" >&2
         echo "  staged crates/**.rs files:" >&2
+        # shellcheck disable=SC2001  # per-LINE prefix; see the note on the
+        # matching sed in Check 1.
         echo "$staged_rs" | sed 's/^/    /' >&2
         echo "" >&2
         echo "  fix: (cd crates && cargo fmt --all) && git add -u" >&2

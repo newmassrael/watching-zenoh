@@ -50,6 +50,9 @@ set -uo pipefail
 # both this table AND the §6.7 caveat together via a new Round
 # entry — never one without the other (atomic ledger + CI gate
 # must record the same footprint truth).
+# shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
+                            # namerefs in the `case "$artifact"` dispatch below; shellcheck
+                            # cannot follow a nameref, so the use is invisible to it.
 declare -A BASELINE_TEXT=(
     # R311bq — thumbv6m baseline drops from 23660 -> 18584 (-5076 B)
     # because the microbit deploy now goes through the sync-only main
@@ -116,12 +119,18 @@ declare -A BASELINE_TEXT=(
     ["thumbv7em-none-eabihf"]=25360
     ["thumbv8m.main-none-eabi"]=26148
 )
+# shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
+                            # namerefs in the `case "$artifact"` dispatch below; shellcheck
+                            # cannot follow a nameref, so the use is invisible to it.
 declare -A BASELINE_DATA=(
     ["thumbv6m-none-eabi"]=4
     ["thumbv7m-none-eabi"]=4
     ["thumbv7em-none-eabihf"]=4
     ["thumbv8m.main-none-eabi"]=4
 )
+# shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
+                            # namerefs in the `case "$artifact"` dispatch below; shellcheck
+                            # cannot follow a nameref, so the use is invisible to it.
 declare -A BASELINE_BSS=(
     # R311iu — +184 B uniform across all targets: the IGMP memp pool
     # (memp_memory_IGMP_GROUP_base 131 B + memp_tab_IGMP_GROUP 4 B +
@@ -161,6 +170,9 @@ declare -A BASELINE_BSS=(
 # multicast transport's ROM over the bare-UDP floor (~50 KB vs mcu-qemu-demo's
 # ~20 KB); data the static .data; bss the 256 KB heap + lwIP/IGMP pools
 # (HEAP_SIZE-dominated, INFO-only per the R311bj caveat (c)).
+# shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
+                            # namerefs in the `case "$artifact"` dispatch below; shellcheck
+                            # cannot follow a nameref, so the use is invisible to it.
 declare -A BASELINE_MC_TEXT=(
     # R311mi — initial measurement (cross-test lwIP port, opt-level=s + LTO).
     # R311pr — rebased after multicast/session feature accretion since R311mi
@@ -214,10 +226,16 @@ declare -A BASELINE_MC_TEXT=(
     ["thumbv7m-none-eabi"]=50956
     ["thumbv7em-none-eabihf"]=51096
 )
+# shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
+                            # namerefs in the `case "$artifact"` dispatch below; shellcheck
+                            # cannot follow a nameref, so the use is invisible to it.
 declare -A BASELINE_MC_DATA=(
     ["thumbv7m-none-eabi"]=4
     ["thumbv7em-none-eabihf"]=4
 )
+# shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
+                            # namerefs in the `case "$artifact"` dispatch below; shellcheck
+                            # cannot follow a nameref, so the use is invisible to it.
 declare -A BASELINE_MC_BSS=(
     # 256 KB heap + lwIP/IGMP static pools. INFO-only (HEAP_SIZE-dominated).
     # R311y21 — rebased 270100 -> 272268 (accumulated lwIP/pool drift, matching

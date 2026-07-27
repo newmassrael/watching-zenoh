@@ -364,7 +364,7 @@ if [[ -z "$repo_root" ]]; then
     echo "run-ci: must be invoked from within a git checkout of watching-zenoh" >&2
     exit 2
 fi
-cd "$repo_root"
+cd "$repo_root" || exit 2
 
 # ─── production logging: complete, clean, leveled ──────────────────
 # Force cargo/rustc to line-oriented, color-free, progress-bar-free output so a
@@ -717,7 +717,9 @@ layer_0_preflight_lints() {
     (( fmt_rc == 0 )) || return 1
     echo "  fmt --check OK (${fmt_dirs[*]})"
 
-    # 0.2 actionlint — optional locally, REQUIRED where WZ_LINT_REQUIRE=1.
+    # 0.3 actionlint — optional locally, REQUIRED where WZ_LINT_REQUIRE=1.
+    # (0.2 below runs first; both are gated on the same lint_required axis,
+    # and the shellcheck-presence resolution they share is hoisted above 0.2.)
     #
     # R311y416 — the hosted ci job sets WZ_LINT_REQUIRE=1 and installs a
     # pinned actionlint, so a missing binary there is a provisioning
@@ -736,6 +738,93 @@ layer_0_preflight_lints() {
     local lint_required=0
     [[ "${WZ_LINT_REQUIRE:-0}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]] \
         && lint_required=1
+
+    # Presence of shellcheck is resolved HERE, before either lint runs,
+    # because BOTH depend on it and they fail differently without it. (Note
+    # the phrasing: a comment starting with the word itself is a DIRECTIVE.
+    # See 0.2 below.) R311y419 moved
+    # this up from inside the actionlint block: it used to sit after that
+    # block's `return 0`, so a developer without actionlint skipped the script
+    # lint below as well, even with shellcheck installed. Two independent tools
+    # must not share one another's absence.
+    #
+    # For actionlint the dependency is indirect: it runs its shellcheck
+    # integration ONLY if shellcheck is on PATH, and silently drops those
+    # checks otherwise. Its other 36 documented check categories are native and
+    # DO still run — R311y417 corrects y416's "near-empty gate", which
+    # undersold the tool it was justifying. The load-bearing fact is narrower
+    # and measured: every finding this repo's workflows have ever produced came
+    # through its shellcheck integration (swept at R311y417 across all 83
+    # historical revisions of .github/workflows/ — 103 finding lines, 103 of
+    # them shellcheck-backed, zero native). So on THIS repo an actionlint
+    # without shellcheck would have passed the dirty tree: with the y416 fixes
+    # reverted it exits 1 with shellcheck and 0 without. Under WZ_LINT_REQUIRE
+    # the absence is therefore fatal to both.
+    local have_shellcheck=1
+    if ! command -v shellcheck >/dev/null 2>&1; then
+        if [[ "$lint_required" == "1" ]]; then
+            echo "  Layer0 FAIL: shellcheck REQUIRED (WZ_LINT_REQUIRE=1 or GITHUB_ACTIONS) but not on PATH — 0.2 cannot run and actionlint would silently drop its shellcheck checks" >&2
+            return 1
+        fi
+        have_shellcheck=0
+        echo "  shellcheck absent — 0.2 SKIP, and actionlint SC* checks will be skipped"
+    fi
+
+    # 0.2 shellcheck over the repo's OWN shell — the surface actionlint does
+    # NOT reach. actionlint (0.3) shellchecks the `run:` blocks INSIDE
+    # .github/workflows/; scripts/*.sh, scripts/lib/*.sh and .githooks/* are
+    # disjoint from that, and until R311y419 they were linted by NOTHING. That
+    # is what R311y418 disclosed after hand-checking ~150 new hook lines.
+    #
+    # Hand-checking is also precisely what missed the defect this lane found on
+    # its first run, in THIS file: two prose comments began with the word
+    # `shellcheck`, which shellcheck reads as a malformed DIRECTIVE
+    # (SC1073/SC1072) and then abandons the enclosing brace group over
+    # (SC1009). All ~13k lines of run-ci.sh — including this function, the one
+    # that runs the linters — were therefore analysed by nothing, and four real
+    # findings sat behind that silence: an unguarded `cd "$repo_root"`, two
+    # unquoted expansions inside a `date -d @$…`, and two dead locals. A
+    # comment whose first token STARTS WITH `shellcheck` is a directive, not
+    # prose (the match is a prefix — `shellcheck-backed` triggers it too, which
+    # is how the second one survived the sweep for the first). Keep the word
+    # off the start of a comment line.
+    #
+    # Severity is left at shellcheck's default (style and up) rather than
+    # narrowed to warnings: the whole surface is clean at that bar today, so
+    # nothing is bought by grading looser, and SC2086-class quoting findings
+    # are `info` — exactly the kind this lane should keep catching.
+    if [[ "$have_shellcheck" == "1" ]]; then
+        # No mapfile: schema-pin-gate.sh already avoids it for bash 3.2 (stock
+        # macOS), and a lint lane is a poor place to reintroduce the dependency.
+        # .githooks/* entries are extensionless, so they are admitted by SHEBANG
+        # rather than by name — a future non-shell file dropped in that
+        # directory then neither breaks the lane nor silently widens it.
+        local -a sc_files=()
+        local scf
+        while IFS= read -r scf; do
+            case "$scf" in
+                *.sh) sc_files+=("$scf") ;;
+                .githooks/*)
+                    [[ -f "$scf" ]] \
+                        && head -n1 "$scf" | grep -qE '^#!.*\b(ba)?sh\b' \
+                        && sc_files+=("$scf") ;;
+            esac
+        done < <(git ls-files -- '*.sh' '.githooks/*')
+        # DISCOVERY FLOOR, same contract as fmt_dirs_min above: without it a
+        # pathspec that stops matching degrades to "linted fewer files" and
+        # still prints OK. Bump it in the same commit that adds a script.
+        local -r sc_files_min=18   # 15 scripts/**.sh + 3 .githooks @ R311y419
+        if (( ${#sc_files[@]} < sc_files_min )); then
+            echo "  Layer0 FAIL: shellcheck discovery found ${#sc_files[@]} file(s), expected >= ${sc_files_min}" >&2
+            return 1
+        fi
+        if ! shellcheck "${sc_files[@]}"; then
+            echo "  Layer0 FAIL: shellcheck reported findings (see above)" >&2
+            return 1
+        fi
+        echo "  shellcheck OK (${#sc_files[@]} files)"
+    fi
+
     if ! command -v actionlint >/dev/null 2>&1; then
         if [[ "$lint_required" == "1" ]]; then
             echo "  Layer0 FAIL: actionlint REQUIRED (WZ_LINT_REQUIRE=1 or GITHUB_ACTIONS) but not on PATH" >&2
@@ -747,25 +836,6 @@ layer_0_preflight_lints() {
         # different finding set than the gate grades against.
         echo "  actionlint SKIP (not installed; install the ci pin — see the \"Install actionlint\" step in .github/workflows/ci.yml)"
         return 0
-    fi
-    # actionlint runs its shellcheck integration ONLY if shellcheck is on
-    # PATH, and silently drops those checks otherwise. Its other 36
-    # documented check categories are native and DO still run — R311y417
-    # corrects y416's "near-empty gate", which undersold the tool it was
-    # justifying. The load-bearing fact is narrower and measured: every
-    # finding this repo's workflows have ever produced came through the
-    # shellcheck integration (swept at R311y417 across all 83 historical
-    # revisions of .github/workflows/ — 103 finding lines, 103 of them
-    # shellcheck-backed, zero native). So on THIS repo an actionlint
-    # without shellcheck would have passed the dirty tree: with the
-    # y416 fixes reverted it exits 1 with shellcheck and 0 without.
-    # Under WZ_LINT_REQUIRE the absence is therefore fatal too.
-    if ! command -v shellcheck >/dev/null 2>&1; then
-        if [[ "$lint_required" == "1" ]]; then
-            echo "  Layer0 FAIL: shellcheck REQUIRED (WZ_LINT_REQUIRE=1 or GITHUB_ACTIONS) but not on PATH — actionlint would silently drop its shellcheck checks" >&2
-            return 1
-        fi
-        echo "  actionlint: shellcheck absent — SC* checks will be skipped"
     fi
     # R311y417 — NO path argument. y416 passed `.github/workflows/*.yml`,
     # which silently skips `.yaml` files; GitHub accepts BOTH extensions
@@ -868,7 +938,7 @@ layer_b_verify_codegen() {
     bin_mtime_epoch="$(stat -c '%Y' vendor/sce/target/release/sce-codegen 2>/dev/null || echo 0)"
     if [[ "$sce_head_epoch" -gt 0 && "$bin_mtime_epoch" -gt 0 \
           && "$bin_mtime_epoch" -lt "$sce_head_epoch" ]]; then
-        echo "Layer B: sce-codegen stale (built $(date -d @$bin_mtime_epoch +%F) vs pin $(date -d @$sce_head_epoch +%F)); rebuilding"
+        echo "Layer B: sce-codegen stale (built $(date -d @"$bin_mtime_epoch" +%F) vs pin $(date -d @"$sce_head_epoch" +%F)); rebuilding"
         bash scripts/build-sce.sh >/dev/null 2>&1 || {
             echo "Layer B FAIL: sce-codegen rebuild failed" >&2
             return 1
@@ -5646,7 +5716,7 @@ layer_q_qemu_mcu_e2e() {
     # (a separate slim-reassembly-pool concern, not wired here). A DIFFERENT
     # WZ_LWIP_PORT than the mps2 lanes, so it is its own block, not a tuple row.
     if grep -q "^thumbv6m-none-eabi$" <<< "$installed"; then
-        local mb_port mb_bin
+        local mb_port
         mb_port="$(realpath crates/lwip-sys/port/microbit-minimal)"
         if WZ_LWIP_PORT="$mb_port" cargo build --release \
             --manifest-path deploy/mcu-session-acceptor/Cargo.toml \
@@ -7080,7 +7150,7 @@ layer_qz_zephyr_boot() {
         _qz_unavailable "west not on PATH nor in the venv"; return $?
     fi
 
-    local build_dir elf qlog qpid i fail=0
+    local build_dir elf qlog qpid fail=0
     build_dir="$(mktemp -d)/zbuild"
     elf="$build_dir/zephyr/zephyr.elf"
 
@@ -7121,7 +7191,7 @@ layer_qz_zephyr_boot() {
         -icount shift=6,align=off,sleep=off -rtc clock=vm -net none \
         -kernel "$elf" >"$qlog" 2>&1 &
     qpid=$!
-    for i in $(seq 1 350); do
+    for _ in $(seq 1 350); do
         grep -qE '^ZEPHYR-WZ ' "$qlog" 2>/dev/null && break
         kill -0 "$qpid" 2>/dev/null || break
         sleep 0.1

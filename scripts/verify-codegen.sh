@@ -430,7 +430,7 @@ if [[ -f "$LAYER3_TEST_FILE" ]]; then
     else
         printf "verify-codegen: layer 3 (wire-interop): FAIL (see %s)\n" \
             "$WORK/layer3.log"
-        cat "$WORK/layer3.log" | tail -10
+        tail -10 "$WORK/layer3.log"
         exit 1
     fi
 else

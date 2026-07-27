@@ -285,6 +285,16 @@ jobs:
         # The 3 pre-existing findings (SC1090 x2, SC2086, all in the
         # zephyr-mcu job) were fixed in the same commit that turned this on,
         # so it lands green rather than red-then-fix.
+        # R311y419 — WZ_LINT_REQUIRE now arms a THIRD lane, 0.2: shellcheck
+        # over the repo's own scripts/*.sh + .githooks/*, a surface disjoint
+        # from the workflow `run:` blocks actionlint covers and previously
+        # linted by nothing. Its pre-existing findings were likewise fixed in
+        # the same commit, so this too lands green — but the count is worth
+        # recording because it is not the one a first look gives: 11 were
+        # visible, and 2 of those were malformed-directive parse errors
+        # (SC1073/SC1072) that had suppressed analysis of ALL of run-ci.sh;
+        # clearing them exposed 4 more, for 13 ordinary findings resolved.
+        # Local cost +1s over 18 files; the fmt half still dominates the lane.
         env:
           WZ_LINT_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer 0
