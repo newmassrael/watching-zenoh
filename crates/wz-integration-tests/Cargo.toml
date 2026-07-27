@@ -102,12 +102,35 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 # RX path. R311nm — `transport-multicast` pinned so the multicast JOIN
 # interop e2e (tests/wz_publisher_to_pico_multicast_zsub.rs) compiles the
 # in-library multicast publisher (`drive_multicast_session` +
-# `multicast_put_literal`). resolver=2 keeps these dev-dep features from
-# unifying into wz-runtime-tokio's OWN lib/test build under Layer C1
-# (`cargo test --workspace`) — verified: no frag- or multicast-gated test
-# runs in the C1 region — so the feature-OFF default composition stays
-# owned by C1 and the feature-ON wz-runtime-tokio build stays owned by the
-# C1l (frag) / Layer M (multicast) lanes.
+# `multicast_put_literal`). R311y415 — honesty fix, the same one R311wq
+# already applied to the `storage-aligner` pin below. The earlier claim
+# here — that resolver=2 keeps these two pins from unifying into
+# wz-runtime-tokio's OWN lib/test build under Layer C1 (`cargo test
+# --workspace`), "verified: no frag- or multicast-gated test runs in the
+# C1 region" — was WRONG, and R311y414 spent a review BLOCKER on it.
+# Under `--workspace` a dev-dep feature DOES unify onto the shared build.
+# Measured for THESE TWO PINS specifically — `cargo test -p
+# wz-runtime-tokio --features transport-fragmentation,transport-multicast
+# --lib -- --list` is 331 against 306 for the bare `-p` form, so the pins
+# add 25 lib tests (18 of them `multicast_glue`, countable with
+# `--list | grep -c '^multicast_glue'`). The frag-gated integration
+# targets go from 0-test targets under the isolated `-p` build to
+# udp_frag_e2e 1 / udp_chaos_e2e 3 / layer3_reassembly_tx 1 /
+# layer3_reassembly_rx 4 under C1 (reassembly_rx rides along because
+# `transport-fragmentation = [.., "reassembly"]`).
+# Do NOT cite C1's own 413-test lib binary as this pin's evidence: 82 of
+# the 413-vs-306 delta come from the OTHER pins in this same dep table
+# (storage-aligner, access-extauth-usrpwd and friends), so 413 measures
+# the table, not these two entries.
+# The coverage is ADDITIVE in the strict sense — the 306 isolated test
+# names are a subset of C1's 413, verified by diffing `--list` output, so
+# nothing goes dark — but C1 is not a feature-OFF composition proof FOR
+# wz-runtime-tokio OR wz-session-core (the two crates this table pins;
+# other members do run at their own defaults), and the SUBJECT-scoped
+# proof still belongs to the C1l (frag) / Layer M (multicast) lanes.
+# These counts are a snapshot: the R311wq note below still records 279
+# for the same isolated measurement that now reads 306. Re-run the
+# commands rather than trusting either number.
 # R311ny — the R311nx `transport-link-serial` pin here is GONE. It was a
 # workaround for a now-eliminated skew: `AnyLocator::Serial` used to be
 # gated on wz-session-core's feature while wz-runtime-tokio's dial match

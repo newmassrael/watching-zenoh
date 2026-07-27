@@ -14,10 +14,14 @@
 #      (0bee3be) was fmt-dirty and only got caught at pre-push by
 #      run-ci.sh Layer 0, requiring an R311at-fmt-fix ledger entry to
 #      record the cosmetic correction. This local gate catches fmt
-#      drift earlier so ledger-only commits stay ledger-only. The
-#      pre-push run-ci.sh Layer 0 `cargo fmt --all -- --check` remains
-#      the backup (R64.1 single-source-of-truth invariant). Skipped
-#      silently when no crates/**.rs is staged — mnemosyne-only
+#      drift earlier so ledger-only commits stay ledger-only.
+#      R311y415 — the backup is no longer "pre-push run-ci.sh Layer 0":
+#      R311y386 removed run-ci.sh from the pre-push hook entirely. The
+#      backup is now the HOSTED ci job, which runs `--layer 0`. Note the
+#      scope difference that makes both worth having: this check runs
+#      `cargo fmt` in `crates` only, while Layer 0 also covers the six
+#      standalone `deploy/*` workspaces, which nothing local gates.
+#      Skipped silently when no crates/**.rs is staged — mnemosyne-only
 #      commits pay zero rustfmt boot cost.
 #
 #   3. Mnemosyne SSOT gate. Blocks the commit if

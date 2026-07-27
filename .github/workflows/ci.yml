@@ -174,9 +174,52 @@ jobs:
       # and this job's critical path sheds ~349s plus both installs. Same
       # rationale as this file's interop and footprint splits.
       #
-      # Every Layer lane below delegates to scripts/run-ci.sh --layer X, the
-      # single source of truth the local pre-push hook also invokes, so the
-      # two paths cannot drift (R65b).
+      # Every Layer lane below delegates to scripts/run-ci.sh --layer X, so
+      # lane logic lives in exactly one file (R65b). R311y415 — this used to
+      # add "the single source of truth the local pre-push hook also
+      # invokes, so the two paths cannot drift". R311y386 removed that
+      # delegation: .githooks/pre-push runs validate-workspace plus a
+      # changed-crate `cargo test -p` and never calls run-ci.sh. Hosted CI
+      # is now the only place the full lane set runs.
+
+      - name: Layer 0 — preflight lints (cargo fmt --check)
+        # R311y415 — Layer 0 existed in run-ci.sh but appeared in NO hosted
+        # `--layer` set, and .githooks/pre-push stopped running it at
+        # R311y386 (the fast-gate reversal, whose own header lists fmt among
+        # what it deliberately no longer covers).
+        #
+        # A first cut of this comment concluded "so fmt was gated nowhere".
+        # Review falsified that: `.githooks/pre-commit` Check 2 already runs
+        # `(cd crates && cargo fmt --all -- --check)` whenever a
+        # `crates/**.rs` is staged. The gap this step closes is narrower and
+        # still real — pre-commit filters on `^crates/.+\.rs$` and runs only
+        # in `crates`, so the SIX auto-discovered `deploy/*` workspaces were
+        # gated by nothing, and the whole hook path is skipped by
+        # `--no-verify` or an uninstalled core.hooksPath.
+        #
+        # First of the Layer lanes (5 setup steps precede it), so a
+        # fmt-dirty push is rejected before the expensive lanes, not after.
+        # `cargo fmt --check` compiles nothing and rustfmt is already
+        # materialised by rust-toolchain.toml's `components`, so the step
+        # needs no extra install — but it is not free. Measured 26-30s on
+        # the author's box (2026-07-27) over `crates` plus the 6
+        # auto-discovered deploy workspaces, at 99% CPU: the lane is
+        # single-threaded, so R311y414's 3.29x hosted ratio does NOT
+        # transfer (most of that ratio is a 32-core to 4-vCPU drop on
+        # parallel cargo-test lanes). Single-thread ratios measured on this
+        # job's other 99%-CPU lanes are 0.9x (D) and 1.56x (C0), which
+        # PROJECTS ~45-75s here. That is a projection: this step has never
+        # run hosted. Replace it with the measured value afterwards.
+        #
+        # It DOES need the recursive checkout above: `cargo fmt --all`
+        # resolves the whole workspace manifest, so a tree without
+        # vendor/sce fails in `cargo metadata` before rustfmt ever runs.
+        # Layer 0 also carries an OPTIONAL actionlint sub-step. No step in
+        # either workflow installs actionlint, so it is EXPECTED to SKIP
+        # here too, leaving this step gating fmt and only fmt — confirm on
+        # the first hosted run. Wiring actionlint up is a deliberate
+        # deferral (y414 disclosed the same gap), not an oversight.
+        run: bash scripts/run-ci.sh --layer 0
 
       - name: Layer C0 — binary-dep test #[ignore] discipline
         # R235-hotfix — pre-flight scan: any wz-integration-tests
@@ -830,12 +873,14 @@ jobs:
   # footprint drift accumulate undetected on BOTH the CI path (never
   # triggered) AND the pre-push path (opt-in, never set). R311pt retired
   # the cost-based opt-in axis: F/G/Q/Z are now default-on in
-  # scripts/run-ci.sh, so the pre-push hook gates footprint locally before
-  # every push (graceful SKIP where the toolchain is absent). This CI job
-  # is now the toolchain-provisioning MIRROR of that gate, not its only
-  # home. Lane logic stays in scripts/run-ci.sh (the R65b single source of
-  # truth shared with pre-push); this job only installs the toolchain and
-  # invokes the lanes, so the two paths cannot drift.
+  # scripts/run-ci.sh. R311y415 — this block then said "so the pre-push hook
+  # gates footprint locally before every push" and that lane logic is
+  # "shared with pre-push", both of which R311y386 killed: that round cut
+  # the hook to validate-workspace + a changed-crate `cargo test -p`, and
+  # its own header names footprint among what it no longer covers. So this
+  # job is not a MIRROR of a local gate — it is the ONLY place F/G/Q/Z run.
+  # Lane logic still lives in scripts/run-ci.sh (the R65b single source of
+  # truth); this job installs the toolchain and invokes the lanes.
   cross-mcu:
     name: cross-compile + QEMU (Layer G + Q)
     runs-on: ubuntu-22.04
@@ -1070,16 +1115,35 @@ jobs:
   feature-gates:
     name: feature-gate NEG lanes (subsets no other job composes)
     runs-on: ubuntu-22.04
-    # Its OWN runner, deliberately NOT the `ci` job. That job is at BOTH of
-    # its ceilings: 26m22s against `timeout-minutes: 30`, and its own comment
-    # above declares "THIS JOB HAS NO OTHER DISK HEADROOM" — every extra
-    # feature-subset lane is a DISTINCT feature set and so a DISTINCT set of
-    # `crates/target` artifacts. The lanes below add roughly a dozen such
-    # subsets between them. (R311y318: the job name used to enumerate its
+    # Its OWN runner, deliberately NOT the `ci` job. R311y415 — the COST half
+    # of this rationale had gone stale and is corrected here. It used to read
+    # "that job is at BOTH of its ceilings: 26m22s against
+    # `timeout-minutes: 30`". Measured over the 12 `ci`-job runs ENDING at
+    # 30210387310 (2026-07-26): 584-928s, median 630s — ~35% of its
+    # 30-minute budget, so it is not at its TIME ceiling and has not been
+    # for some time. The window is pinned to those run ids on purpose: "the
+    # last 12 runs" is how 26m22s rotted. Note the band predates the Layer 0
+    # step this same commit adds to that job (projected +45-75s).
+    # What survives is the DISK half: that job's own comment above declares
+    # "THIS JOB HAS NO OTHER DISK HEADROOM", and every extra feature-subset
+    # lane is a DISTINCT feature set and so a DISTINCT set of `crates/target`
+    # artifacts — the 15 lanes below add 15 such subsets between them (count
+    # them in the step list; R311y415 replaced "roughly a dozen", which was
+    # an approximation of something exactly countable). That half is NOT
+    # re-measured here and should not be read as
+    # confirmed: the `ci` job brackets only its PRE-build prune with `df -h`
+    # (87G avail before, 104G after, on run 30210387310) and nothing reports
+    # free space once the lanes have run, so end-of-job headroom is UNKNOWN
+    # rather than known-tight. A post-lane `df -h` would settle it.
+    # (R311y318: the job name used to enumerate its
     # lanes as "C1bi + C1bj"; it went stale the moment C1bk landed, so it now
     # names the genre. The step list below is the enumeration.)
-    # Hanging them off `ci` would trade a real gate for a flaky timeout; a
-    # parallel job costs runner minutes but zero critical-path wall clock.
+    # Hanging them off `ci` would still trade a real gate for an ENOSPC risk
+    # on an unmeasured disk budget — the failure mode is a build dying on a
+    # full disk, not a timeout (R311y415: the old wording said "flaky
+    # timeout", correct when the rationale was time, wrong once the surviving
+    # rationale is disk). A parallel job costs runner minutes but zero
+    # critical-path wall clock.
     timeout-minutes: 30
     steps:
       - name: Checkout (with submodules)

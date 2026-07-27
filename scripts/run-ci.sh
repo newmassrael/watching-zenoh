@@ -192,9 +192,13 @@
 #              fmt gate is mandatory because R285–R287 wz-ap-demo
 #              decomposition merged without local fmt enforcement
 #              and the workspace accumulated multi-hundred-KB drift
-#              before R291 caught it; the gate here prevents that
-#              recurrence by failing pre-push if rustfmt would
-#              reformat any tracked file.
+#              before R291 caught it. R311y415 — it prevents that
+#              recurrence by failing the HOSTED ci job (this lane is
+#              wired there now); it used to say "failing pre-push",
+#              which R311y386 had already made false. `.githooks/
+#              pre-commit` Check 2 covers the crates/ half at commit
+#              time; this lane's unique reach is the six deploy/*
+#              workspaces. See the lane's own header for the detail.
 #   Layer F  — codec-footprint catalog truthfulness gate (R311n).
 #              Default gate (R311pt — opt-in axis retired). Runs
 #              scripts/measure-codec-footprint.sh and exits non-zero
@@ -600,14 +604,39 @@ run_qemu_case() {
 # preflight gate. Rationale — R285→R287 wz-ap-demo decomposition
 # pushed multi-hundred-KB of fmt drift onto main without local
 # rejection because the prior Layer 0 only carried optional
-# actionlint and no lane invoked rustfmt at all. The mandatory
-# fmt gate here is exactly the R64.1 single-source-of-truth
-# invariant applied to rustfmt: the same gate fires locally
-# (pre-push hook) and remotely (.github/workflows/ci.yml), so a
-# fmt-dirty commit cannot reach origin/main again.
+# actionlint and no lane invoked rustfmt at all.
+#
+# R311y415 — WHERE the gate fires, corrected. This comment used to
+# claim "the same gate fires locally (pre-push hook) and remotely
+# (.github/workflows/ci.yml), so a fmt-dirty commit cannot reach
+# origin/main again". Both halves were false: R311y386 cut the
+# pre-push hook down to validate-workspace + changed-crate `cargo
+# test -p` (its own header lists fmt among what it no longer
+# covers), and Layer 0 was in NO hosted --layer set.
+#
+# What that did NOT mean — and a first cut of R311y415 got this
+# wrong before review caught it — is that fmt was gated nowhere.
+# `.githooks/pre-commit` Check 2 runs `(cd crates && cargo fmt --all
+# -- --check)` whenever a `crates/**.rs` is staged, so a fmt-dirty
+# commit to the crates workspace was already rejected at commit
+# time. The REAL gap this lane closes is narrower and still real:
+# pre-commit filters on `^crates/.+\.rs$` and runs only in `crates`,
+# so the SIX auto-discovered `deploy/*` workspaces were gated by
+# nothing — and the whole hook path is skipped by `--no-verify` or
+# an uninstalled core.hooksPath. R311y415 wires `--layer 0` into the
+# ci job, so the hosted run is the backstop for all seven. The
+# pre-push hook still does not run it, by the R311y386 design — run
+# `bash scripts/run-ci.sh --layer 0` by hand when you touch a
+# `deploy/*` workspace, which is the half pre-commit cannot see.
 #
 # actionlint stays optional (SKIP if not installed) — yaml workflow
-# lint is a nice-to-have, not a correctness gate.
+# lint is a nice-to-have, not a correctness gate. R311y415: no step
+# in either workflow installs actionlint (grep `.github/` — the only
+# hits are comments), so it is EXPECTED to SKIP hosted too, leaving
+# Layer 0 gating fmt and only fmt. Confirm on the first hosted run.
+# Installing it is a deliberate DEFERRAL, not an oversight: y414
+# disclosed the same gap and this round leaves it open rather than
+# taking a new lint's findings unmeasured. It is a named carry.
 layer_0_preflight_lints() {
     # 0.1 cargo fmt --check across every workspace (mandatory). crates/ is
     # the primary workspace; each deploy/*/ that carries its OWN
@@ -616,9 +645,14 @@ layer_0_preflight_lints() {
     # R311iv `mcu-session-acceptor`). R311iw — these were enumerated one
     # `if`-block per crate, and the enumeration was forgotten for
     # mcu-session-acceptor (it shipped un-gated until R311iv caught a fmt
-    # FAIL on a full run). Auto-discovery replaces the manual list so a NEW
-    # standalone deploy workspace is fmt-gated the moment it exists — no
-    # manual gate edit, no recurrence of the forgotten-enumeration gap.
+    # FAIL on a full run). Auto-discovery replaces the manual list for the
+    # layouts the globs below reach. R311y415 — it does NOT make the
+    # stronger guarantee this comment used to claim ("a NEW standalone
+    # deploy workspace is fmt-gated the moment it exists"): a workspace
+    # nested one level deeper than `deploy/*/*/` is silently not gated,
+    # reproduced at R311y415. The floor below is what converts that class
+    # from a silent green into a red; the globs still need widening by hand
+    # when a deeper layout lands.
     # R311y31 — also scan one level deeper (`deploy/*/*/`): the Zephyr deploy is
     # west/cmake-driven at deploy/zephyr-app/, with its Rust staticlib workspace
     # nested at deploy/zephyr-app/rust/. The extra glob keeps the auto-discovery
@@ -628,16 +662,49 @@ layer_0_preflight_lints() {
     local dpath
     for dpath in deploy/*/ deploy/*/*/; do
         [[ -f "${dpath}Cargo.toml" ]] || continue
-        grep -q '^\[workspace\]' "${dpath}Cargo.toml" || continue
+        grep -qE '^[[:space:]]*\[[[:space:]]*workspace[[:space:]]*\]' \
+            "${dpath}Cargo.toml" || continue
         fmt_dirs+=("${dpath%/}")
     done
-    local fdir
+    # R311y415 — DISCOVERY FLOOR. The loop above had no lower bound, so a
+    # deploy workspace the globs miss (one nested a third level deep, which
+    # R311y31 already had to widen the glob for once) was not reported as
+    # ungated: the lane simply printed `fmt --check OK` over the shorter
+    # list and returned 0. That was moot while Layer 0 ran nowhere; hosting
+    # it (R311y415) makes the hole load-bearing, and it is the same
+    # "success by silence" class y414's _runci_guarded_test closes by
+    # rejecting an expect of 0. The floor turns every future discovery miss
+    # into a red. Bump it in the same commit that adds a workspace.
+    local -r fmt_dirs_min=7   # crates + 6 deploy workspaces @ R311y415
+    if (( ${#fmt_dirs[@]} < fmt_dirs_min )); then
+        echo "  Layer0 FAIL: fmt discovery found ${#fmt_dirs[@]} workspace(s), expected >= ${fmt_dirs_min}" >&2
+        echo "  found: ${fmt_dirs[*]}" >&2
+        return 1
+    fi
+    # R311y415 — accumulate rather than fail-fast. A `return 1` on the first
+    # dirty workspace costs one full hosted round-trip PER dirty workspace;
+    # reporting all of them is one push instead of N.
+    #
+    # READ THE OUTPUT AS FILES, NOT AS A WORKSPACE COUNT. These seven
+    # workspaces OVERLAP: every deploy/* one path-depends on crates/, and
+    # `cargo fmt --all` follows that, so ONE dirty file under crates/ makes
+    # all seven report FAIL (measured at R311y415). That is not seven
+    # problems — the fail-fast form simply hid the redundancy by returning
+    # on the first. The `Diff in <path>` lines cargo prints above each FAIL
+    # are the actual defect list. The unique reach of the six deploy lanes
+    # is their OWN sources, which nothing else in the repo fmt-checks.
+    local fdir fmt_rc=0
     for fdir in "${fmt_dirs[@]}"; do
-        if ! (cd "$fdir" && cargo fmt --all -- --check); then
-            echo "  fmt --check FAIL ${fdir} — run \`(cd ${fdir} && cargo fmt --all)\`" >&2
-            return 1
+        if ! (cd "$fdir" && cargo fmt --all -- --check --color=never); then
+            # R311y415 — ` FAIL: ` exactly, not the older ` FAIL `: that is
+            # the token y414's GitHub `::error` extractor lifts. With the
+            # old spelling every Layer 0 red produced an EMPTY annotation
+            # body, the same defect y414 fixed for the count guards.
+            echo "  Layer0 FAIL: fmt --check ${fdir} — run \`(cd ${fdir} && cargo fmt --all)\`" >&2
+            fmt_rc=1
         fi
     done
+    (( fmt_rc == 0 )) || return 1
     echo "  fmt --check OK (${fmt_dirs[*]})"
 
     # 0.2 actionlint (optional)
@@ -998,12 +1065,28 @@ layer_c1_cargo_test() {
 # wz-runtime-core's default features = [] (the crate must compile clean
 # for MCU bare-metal where no heap exists). The 7 R266/R267
 # panic_payload + Error-trait tests live behind `cfg(feature = "alloc")`
-# because they construct `Box<dyn Any + Send>` payloads. Layer C1's
-# `cargo test --workspace` runs each member crate with that member's
-# OWN default features, so wz-runtime-core's test binary compiles with
-# zero features and the alloc-gated mod is `cfg(false)` — i.e. the
-# tests silently do not run. This lane runs them explicitly so the
-# alloc-mode behaviour is gated in CI.
+# because they construct `Box<dyn Any + Send>` payloads.
+#
+# R311y415 — this block used to justify the lane with "Layer C1's
+# `cargo test --workspace` runs each member crate with that member's OWN
+# default features, so wz-runtime-core's test binary compiles with zero
+# features and the alloc-gated mod is `cfg(false)` — i.e. the tests
+# silently do not run". MEASURED FALSE, twice over. The general claim is
+# false (feature pins unify onto the shared build under `--workspace` —
+# see crates/wz-integration-tests/Cargo.toml for the frag/multicast
+# case), and it is false for THIS crate specifically:
+# wz-runtime-tokio/Cargo.toml:1463 pins `wz-runtime-core` with
+# `features = ["alloc"]` as a NORMAL dependency, so C1 builds it alloc-on
+# and all 7 `error::alloc_error_tests::*` DO run there. Measured: `-p
+# wz-runtime-core` 0 tests, `-p wz-runtime-core --features alloc` 7, C1
+# 7 (all 7 names alloc-gated).
+#
+# The lane still earns its place, for a DIFFERENT reason: it pins the
+# alloc build to an explicit, ISOLATED invocation instead of depending
+# on wz-runtime-tokio continuing to pin alloc. Drop that pin and C1's
+# coverage of these 7 silently goes to 0 while C1 stays green; this lane
+# goes red. That is the failure this lane actually guards, and why the
+# alloc-mode behaviour stays gated in CI regardless of C1's pin graph.
 layer_c1b_cargo_test_alloc() {
     (cd crates && cargo test -p wz-runtime-core --features alloc --quiet)
 }
