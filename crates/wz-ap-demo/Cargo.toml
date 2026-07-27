@@ -229,6 +229,17 @@ quic-datagram = ["quic", "wz/transport-link-quic-datagram"]
 # the wire — the plumbing the routing-namespace cross-impl leg 18 exercises
 # against a zenohd router + a zenoh-pico `<prefix>/**` subscriber.
 namespace = ["wz/routing-namespace"]
+# R311y428 — opt-in ACTIVE multicast scouting (`--scout`), forwarding the wz
+# facade's `scouting-active` (which pulls the wz-runtime-tokio scouting FSM +
+# glue, and with them transport-link-udp + codec-scout + codec-hello). The
+# mirror of `ws`/`tls`/`quic`: NOT in `default` (preset-ap-client carries the
+# scout/hello CODECS but not the active MODE), so the footprint baseline and
+# every other lane build are unchanged; only run-ci Layer M builds wz-ap-demo
+# with it. It enables `--scout` / `--scout-timeout-ms`, which DISCOVER the
+# Initiator's session locator over the 224.0.0.224:7446 group instead of taking
+# it from `--connect` — the plumbing the scouting cross-impl leg needs to prove
+# wz actively scouts a foreign zenohd and dials what its HELLO advertised.
+scouting-active = ["wz/scouting-active"]
 # R311qa — opt-in multi-peer ROUTER mode (`--router <addr>`): the catalog
 # `routing-router` atom's foundation (bind once, hold N concurrent peer faces,
 # no forwarding yet). Forwards the wz facade's `routing-router` marker feature,

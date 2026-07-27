@@ -596,11 +596,24 @@ runtime-zero-copy = []
 # ----- domain: scouting (6 atomic) -----
 # R311ci — audit-only ratify. R311if — scouting-static wired (forwards
 # the wz-session-core `scout_static` synth via the optional tokio
-# runtime). scouting-active gates the multicast FSM in wz-runtime-tokio
-# but is not yet forwarded from the facade (off-by-default opt-in; a
-# future cascade wires the facade forward + preset runtime selection).
-# The remaining four stay declaration-only (no runtime counterpart yet).
-scouting-active = []
+# runtime). The remaining three stay declaration-only (no runtime
+# counterpart yet).
+#
+# R311y428 — scouting-active is now FORWARDED; this is the "future
+# cascade" the R311en note in wz-runtime-tokio anticipated, and until it
+# landed the facade key was declaration-only: a consumer that enabled
+# `wz/scouting-active` got the marker and NONE of the scouting code, so
+# the multicast FSM was unreachable through the facade (the only way in
+# was a direct wz-runtime-tokio dep, which no facade consumer has).
+# AP-only, so a single optional-dep forward mirrors `session-extauth`:
+# wz-runtime-coop's scouting surface is `scouting-static` alone (it has
+# no `scouting-active` key to forward to, and adding one would claim an
+# MCU active-scouting path that does not exist). The runtime key implies
+# transport-link-udp + codec-scout + codec-hello, so enabling this pulls
+# the multicast scouting link and both body codecs with it — which is
+# why `scouting-multicast` (FOUNDATIONAL, "always-on under
+# scouting-active") needs no separate edge here.
+scouting-active = ["wz-runtime-tokio?/scouting-active"]
 scouting-autoconnect = []
 scouting-gossip = ["routing-router"]
 scouting-multicast = ["transport-link-udp"]

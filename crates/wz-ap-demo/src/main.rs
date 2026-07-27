@@ -96,9 +96,11 @@ mod tasks;
 mod teardown;
 mod usage;
 
+#[cfg(feature = "scouting-active")]
+use crate::args::DEMO_ZID;
 use crate::args::{
     parse_pair, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec, PushOperation, QueryRoleSpec,
-    RemoteLogSpec, ReplyConsumerSpec, Role,
+    RemoteLogSpec, ReplyConsumerSpec, Role, DEFAULT_SCOUT_BUDGET_MS,
 };
 use crate::runner::run_demo;
 use crate::usage::{print_usage, ABOUT};
@@ -463,6 +465,114 @@ fn main() -> ExitCode {
     // self-loopback configuration that would justify both.
     let listen_opt = parse_pair(rest, "--listen");
     let connect_opt = parse_pair(rest, "--connect");
+    // R311y428 — `--scout` is a THIRD way to reach the same Initiator role:
+    // the connect locator is DISCOVERED by active multicast scouting instead of
+    // given on argv. It is therefore resolved into `connect_opt` below, before
+    // the role match, rather than modelled as another node kind — scouting is
+    // pre-session locator resolution (docs/scouting-fsm.md), and everything
+    // downstream of the resolved string is the ordinary one-shot Initiator.
+    let scout_requested = rest.iter().any(|a| a == "--scout");
+    let scout_budget_ms: Option<u64> = match parse_pair(rest, "--scout-timeout-ms") {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(0) => {
+                eprintln!(
+                    "wz-ap-demo: --scout-timeout-ms must be > 0 (it is the TOTAL \
+                     discovery budget; 0 would emit no Scout at all)"
+                );
+                return ExitCode::from(2);
+            }
+            Ok(ms) => Some(ms),
+            Err(e) => {
+                eprintln!("wz-ap-demo: --scout-timeout-ms {raw:?} is not a u64: {e}");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    if scout_budget_ms.is_some() && !scout_requested {
+        eprintln!("wz-ap-demo: --scout-timeout-ms requires --scout");
+        return ExitCode::from(2);
+    }
+    if scout_requested && (listen_opt.is_some() || connect_opt.is_some()) {
+        eprintln!(
+            "wz-ap-demo: --scout is mutually exclusive with --listen / --connect \
+             (it DISCOVERS the locator --connect would have named; an acceptor \
+              has nothing to discover)"
+        );
+        return ExitCode::from(2);
+    }
+
+    // env_logger reads RUST_LOG (defaults to off). The integration
+    // test fixture (R121c) sets RUST_LOG=info to surface subscriber-
+    // dispatch / session-FSM transitions in the child stderr capture.
+    //
+    // R311y428 — initialised HERE (was: after the whole argv parse, just before
+    // the banner) because `--scout` LOGS ITS WITNESS — the locator a peer's
+    // Hello advertised — and that happens before the role exists. Measured, not
+    // reasoned: with the init still downstream, a real `--scout` run against
+    // zenohd discovered and dialed the right locator while emitting NO scouting
+    // line at all, so a test asserting on that line would have been asserting on
+    // a line the binary could never print. Still exactly ONE init on this path:
+    // the `--router` / `--peer` / `--router-hat` / `--storage-host` modes return
+    // upstream of this point and keep their own (a second call panics).
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
+    eprintln!("{ABOUT}");
+
+    // Optional `--zid <hex>`: override the single-session node's demo zid. The
+    // mesh routing graph keys nodes by zid, so two session nodes behind routers
+    // sharing the hardcoded 0x01020304 would collide; a distinct --zid per node
+    // lets a query ISSUER + a QUERYABLE coexist in one router mesh (the P4 §5.21
+    // query-plane E2E). No-op for the default direct wz<->wz tests.
+    //
+    // R311y428 — parsed HERE (was: just before the run_demo call) because
+    // `--scout` puts this identity on the wire in its Scout frame, which is
+    // emitted before the session role exists.
+    let zid_override: Option<Vec<u8>> = match parse_pair(rest, "--zid") {
+        Some(h) => match parse_zid_hex(&h) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                eprintln!("wz-ap-demo: --zid {e}");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+
+    // Build the multi-thread runtime explicitly so the spawned
+    // writer task (link_pipeline) + the background publisher / query /
+    // declare tasks run on worker threads alongside the drive_session
+    // poll loop. The outbound `TcpWriteDriver` is a non-blocking channel
+    // enqueue (no `block_on`), so this flavor is for task concurrency,
+    // not a block_on-deadlock workaround.
+    //
+    // R311y428 — built HERE (was: after the argv parse, just before the
+    // `run_demo` block_on) because `--scout` needs an async context BEFORE the
+    // role exists — the locator it discovers IS the Initiator's connect target.
+    // The same runtime drives `run_demo` below, so this is a move, not a second
+    // runtime. The only observable reordering is that a runtime-build failure
+    // now precedes the eager keyexpr validation; both are startup rejections
+    // with distinct messages.
+    let runtime = match build_demo_runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    // R311y428 — `--scout` resolves the Initiator's locator by ACTIVE multicast
+    // scouting; from here on the two paths are indistinguishable, which is the
+    // point (a scouted locator is dialed by the same one-shot Initiator code as
+    // an argv one).
+    let connect_opt = if scout_requested {
+        let budget_ms = scout_budget_ms.unwrap_or(DEFAULT_SCOUT_BUDGET_MS);
+        match resolve_scouted_locator(&runtime, zid_override.clone(), budget_ms) {
+            Ok(locator) => Some(locator),
+            Err(code) => return code,
+        }
+    } else {
+        connect_opt
+    };
     // R311pw — `--reconnect` is a presence flag (no value): it opts the
     // Initiator into the long-lived reconnect-supervised lifecycle. It is
     // meaningful ONLY with `--connect` (pico AUTO_RECONNECT is client-only);
@@ -817,12 +927,10 @@ fn main() -> ExitCode {
     };
     let query_spec: Option<String> = query_opt;
 
-    // env_logger reads RUST_LOG (defaults to off). The integration
-    // test fixture (R121c) sets RUST_LOG=info to surface subscriber-
-    // dispatch / session-FSM transitions in the child stderr capture.
-    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
-
-    eprintln!("{ABOUT}");
+    // R311y428 — the env_logger init + the `{ABOUT}` banner that stood here
+    // moved UP, ahead of the `--scout` locator resolution (see the comment at
+    // that site). The role echo below is unchanged and still reports the
+    // Initiator's `connect` — for a scouted run, that IS the discovered locator.
     match &role {
         Role::Acceptor {
             listen,
@@ -933,20 +1041,6 @@ fn main() -> ExitCode {
         log::info!("on-query-final-log = true");
     }
 
-    // Build the multi-thread runtime explicitly so the spawned
-    // writer task (link_pipeline) + the background publisher / query /
-    // declare tasks run on worker threads alongside the drive_session
-    // poll loop. The outbound `TcpWriteDriver` is a non-blocking channel
-    // enqueue (no `block_on`), so this flavor is for task concurrency,
-    // not a block_on-deadlock workaround.
-    let runtime = match build_demo_runtime() {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
-            return ExitCode::from(1);
-        }
-    };
-
     // R300 — eager argv-level validation of the keyexprs that flow onto the
     // OUTBOUND wire. The same gate fires later at send-time (so library API
     // users are equally protected), but argv-level eager-fail gives the CLI
@@ -1006,21 +1100,6 @@ fn main() -> ExitCode {
             keyexpr,
             after_ms: liveliness_get_after_ms,
         }),
-    };
-    // Optional `--zid <hex>`: override the single-session node's demo zid. The
-    // mesh routing graph keys nodes by zid, so two session nodes behind routers
-    // sharing the hardcoded 0x01020304 would collide; a distinct --zid per node
-    // lets a query ISSUER + a QUERYABLE coexist in one router mesh (the P4 §5.21
-    // query-plane E2E). No-op for the default direct wz<->wz tests.
-    let zid_override: Option<Vec<u8>> = match parse_pair(rest, "--zid") {
-        Some(h) => match parse_zid_hex(&h) {
-            Ok(bytes) => Some(bytes),
-            Err(e) => {
-                eprintln!("wz-ap-demo: --zid {e}");
-                return ExitCode::from(2);
-            }
-        },
-        None => None,
     };
     let outcome = runtime.block_on(async move {
         run_demo(
@@ -1094,6 +1173,48 @@ fn build_demo_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .enable_io()
         .enable_time()
         .build()
+}
+
+/// R311y428 — run one ACTIVE multicast scouting discovery and hand back the
+/// locator a peer's Hello advertised, which the caller uses as the Initiator's
+/// `--connect` target. `zid` is the `--zid <hex>` override when given; the Scout
+/// otherwise announces [`DEMO_ZID`], the same identity the session will open
+/// with.
+///
+/// Blocks on the demo runtime rather than being awaited inside `run_demo`
+/// because the discovered locator is what CONSTRUCTS the role — there is no
+/// Initiator to await it from yet.
+#[cfg(feature = "scouting-active")]
+fn resolve_scouted_locator(
+    runtime: &tokio::runtime::Runtime,
+    zid: Option<Vec<u8>>,
+    budget_ms: u64,
+) -> Result<String, ExitCode> {
+    let zid = zid.unwrap_or_else(|| DEMO_ZID.to_vec());
+    runtime
+        .block_on(crate::runner::scout_for_peer_locator(zid, budget_ms))
+        .map_err(|e| {
+            eprintln!("{e}");
+            ExitCode::from(1)
+        })
+}
+
+/// The `scouting-active`-less build REJECTS `--scout` rather than silently
+/// falling back to some other locator source — the same "the catalog claim and
+/// the binary stay in lockstep" rule the `--router` / `--router-hat` /
+/// `--storage-host` mode flags follow. Nothing about the flag's PARSE is gated;
+/// only its execution is, so argv diagnostics are identical in both builds.
+#[cfg(not(feature = "scouting-active"))]
+fn resolve_scouted_locator(
+    _runtime: &tokio::runtime::Runtime,
+    _zid: Option<Vec<u8>>,
+    _budget_ms: u64,
+) -> Result<String, ExitCode> {
+    eprintln!(
+        "wz-ap-demo: --scout requires the `scouting-active` feature \
+         (build: cargo build -p wz-ap-demo --features scouting-active)"
+    );
+    Err(ExitCode::from(2))
 }
 
 /// R311qa — drive the `--router` multi-peer mode: init logging, build the

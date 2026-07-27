@@ -86,6 +86,8 @@ use wz::runtime_tokio::session_open::{
 };
 use wz::runtime_tokio::sync::Mutex;
 
+#[cfg(feature = "scouting-active")]
+use crate::args::DEMO_PROTO_VERSION;
 use crate::args::{
     demo_session_init_params, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec, QueryRoleSpec,
     RemoteLogSpec, ReplyConsumerSpec, Role,
@@ -361,6 +363,169 @@ fn apply_quic_ca(cfg: DialConfig, quic_ca: &Option<String>) -> io::Result<DialCo
 #[cfg(not(feature = "quic"))]
 fn apply_quic_ca(cfg: DialConfig, _quic_ca: &Option<String>) -> io::Result<DialConfig> {
     Ok(cfg)
+}
+
+/// R311y428 — the default zenoh scouting group. `224.0.0.224:7446` is
+/// `Z_CONFIG_MULTICAST_LOCATOR_DEFAULT` in zenoh-pico
+/// (`include/zenoh-pico/config.h.in`) and the `scouting/multicast/address`
+/// default in zenoh (DEFAULT_CONFIG.json5), so a `--scout` demo reaches BOTH
+/// foreign implementations without being told where to look — which is the
+/// point of a discovery mode. Not a CLI knob: an address the peers do not share
+/// discovers nothing, and zenoh exposes the override in its config, not its
+/// scouting API.
+#[cfg(feature = "scouting-active")]
+const SCOUT_GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 224);
+#[cfg(feature = "scouting-active")]
+const SCOUT_PORT: u16 = 7446;
+
+/// The WhatAmI bitmask the Scout asks for: `ROUTER (0x01) | PEER (0x02)`. The
+/// demo's `--scout` path becomes an Initiator, which announces
+/// [`wz::runtime_tokio::session_glue::WhatAmI::Client`] on its own InitSyn, and
+/// a client looks for routers and peers — zenoh's own
+/// `scouting/multicast/autoconnect.client` default is `"router|peer"`
+/// (DEFAULT_CONFIG.json5). A responder answers only when the mask matches its
+/// own whatami (zenoh orchestrator.rs:1155 `what.matches(self.whatami())`), so
+/// this value is load-bearing: drop the ROUTER bit and a zenohd stays silent.
+#[cfg(feature = "scouting-active")]
+const SCOUT_WHAT: u8 = 0x03;
+
+/// One scouting CYCLE: emit a Scout, then accept a Hello for this long
+/// (`ScoutParams::timeout_ms`, docs/scouting-fsm.md §2.5 default).
+#[cfg(feature = "scouting-active")]
+const SCOUT_CYCLE_MS: u64 = 1000;
+
+/// Scheduler tick for the drive loop's select cadence. The Hello races this via
+/// `poll_event`, so it bounds only how promptly the WINDOW expiry is noticed,
+/// never the discovery latency.
+#[cfg(feature = "scouting-active")]
+const SCOUT_TICK_MS: u64 = 50;
+
+/// R311y428 — resolve an Initiator's session locator by ACTIVE multicast
+/// scouting: join `224.0.0.224:7446`, emit a Scout, and return the first
+/// locator a peer's Hello advertises. The active-mode counterpart of the static
+/// bypass (`scout_static::synth_static_locators`, which returns the configured
+/// `--connect` locators verbatim, docs/scouting-fsm.md §2.4.3) — both are
+/// pre-session locator resolution, and everything downstream of the returned
+/// string is the ordinary Initiator path.
+///
+/// WHY THIS REPEATS THE CYCLE. [`drive_scouting_until_resolved`] is ONE cycle by
+/// construction (one Scout, one `timeout_ms` window, exit on the first Hello) —
+/// the shape of zenoh-pico's `__z_scout_loop`
+/// (`vendor/zenoh-pico/src/session/scout.c:57`, which sends the wbuf once and
+/// then reads for `period`). A single cycle races a responder that has not
+/// finished joining the group: the Scout is a datagram, nothing retransmits it,
+/// and the peer's later readiness cannot recover it. zenoh's own scouting
+/// answers this by REPEATING — `Runtime::scout` loops the send forever with an
+/// exponential backoff while receiving concurrently
+/// (zenoh orchestrator.rs:848-877) — so repetition is the upstream shape, not a
+/// harness workaround. What is deliberately NOT mirrored is the exponential
+/// backoff: zenoh's loop is an unbounded background task where widening the
+/// gap saves chatter over hours, whereas this one is a bounded startup budget
+/// (default [`DEFAULT_SCOUT_BUDGET_MS`]) where a constant cycle just spends the
+/// budget evenly.
+///
+/// The engine is built ONCE and re-driven: `drive_scouting_until_resolved`
+/// calls `Engine::initialize` on entry, so each pass re-enters the FSM at
+/// `Idle` and the trace counters accumulate across cycles (the log below
+/// reports them, so a multi-cycle discovery is visible as such).
+#[cfg(feature = "scouting-active")]
+pub(crate) async fn scout_for_peer_locator(zid: Vec<u8>, budget_ms: u64) -> io::Result<String> {
+    use wz::runtime_tokio::scouting_glue::{
+        drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutParams,
+        ScoutingActions,
+    };
+    use wz::runtime_tokio::UdpDriver;
+
+    let mut driver = UdpDriver::bind_multicast_v4(SCOUT_GROUP, SCOUT_PORT)
+        .await
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "wz-ap-demo: --scout could not join the scouting group \
+                     {SCOUT_GROUP}:{SCOUT_PORT}: {e}"
+                ),
+            )
+        })?;
+    // The Scout announces the identity this node will open its session with, so
+    // a responder logging the scouter sees the same zid the InitSyn then
+    // carries. `--zid` therefore reaches here, not only the session params.
+    let actions = ScoutingActions::new(ScoutParams {
+        version: DEMO_PROTO_VERSION,
+        what: SCOUT_WHAT,
+        zid,
+        timeout_ms: SCOUT_CYCLE_MS,
+    });
+    let mut engine = new_scouting_engine(&actions);
+    let clock = TokioTime::new();
+    let started_ms = clock.now_monotonic_ms();
+
+    log::info!(
+        "wz-ap-demo: active multicast scouting on {SCOUT_GROUP}:{SCOUT_PORT} \
+         (what=0x{SCOUT_WHAT:02x}, {SCOUT_CYCLE_MS}ms window, {budget_ms}ms budget)"
+    );
+    loop {
+        // `max_iters = None` is the production form (the bound exists for
+        // tests): the window itself terminates the cycle, so an unbounded
+        // select cannot hang.
+        let outcome = drive_scouting_until_resolved(
+            &mut driver,
+            &actions,
+            &mut engine,
+            &clock,
+            None,
+            SCOUT_TICK_MS,
+        )
+        .await;
+        let trace = actions.trace_snapshot();
+        match outcome {
+            ScoutOutcome::Discovered(locator) => {
+                // THE WITNESS. This locator was decoded out of a peer's Hello by
+                // `record_hello_and_emit`; there is no other producer of a
+                // `Discovered`, so the line cannot be printed by a build that
+                // merely parsed the flag. Logging the dispatch counters beside
+                // it binds the claim to the FSM's own actions.
+                log::info!(
+                    "wz-ap-demo: scouted peer locator {locator} \
+                     (scout_emit={}, record_hello={})",
+                    trace.scout_emit,
+                    trace.record_hello
+                );
+                return Ok(locator);
+            }
+            ScoutOutcome::TimedOut => {
+                if clock.now_monotonic_ms().saturating_sub(started_ms) >= budget_ms {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "wz-ap-demo: --scout found no peer on {SCOUT_GROUP}:{SCOUT_PORT} \
+                             within {budget_ms}ms ({} Scout(s) emitted, {} Hello(s) recorded)",
+                            trace.scout_emit, trace.record_hello
+                        ),
+                    ));
+                }
+                log::info!(
+                    "wz-ap-demo: scout window elapsed with no Hello; re-scouting \
+                     (scout_emit={})",
+                    trace.scout_emit
+                );
+            }
+            // The scouting LINK died (not the window): retrying on a dead
+            // driver would just spin, so this ends the budget immediately.
+            ScoutOutcome::LinkLost(cause) => {
+                return Err(io::Error::other(format!(
+                    "wz-ap-demo: --scout lost the scouting link: {cause:?}"
+                )));
+            }
+            // Unreachable with `max_iters = None`, and reported rather than
+            // silently retried so a future bound cannot turn into a spin.
+            ScoutOutcome::IterationLimit => {
+                return Err(io::Error::other(
+                    "wz-ap-demo: --scout hit an iteration limit it does not set",
+                ));
+            }
+        }
+    }
 }
 
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {

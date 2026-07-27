@@ -64,7 +64,15 @@ use wz_codecs::scout::Scout;
 use wz_codecs::wire_const;
 use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
 use wz_session_core::reliability::Reliability;
-use wz_session_core::scout_params::ScoutParams;
+// R311y428 — `pub` (was a private `use`): re-exported alongside the
+// `ScoutingActions::new` it parameterises, mirroring `session_glue`'s
+// `SessionInitParams` / `WhatAmI` re-export (session_glue.rs:178) and for the
+// same reason. A consumer reaches this crate through the wz facade
+// (`wz::runtime_tokio::*`), which re-exports no `wz-session-core` path of its
+// own, so without this the module's own public constructor cannot be CALLED
+// from there — its parameter type is unnameable. The in-tree tests never hit
+// it: they carry a direct wz-session-core dev-dep the facade's consumers lack.
+pub use wz_session_core::scout_params::ScoutParams;
 use wz_session_core::scout_trace::ScoutTrace;
 // The generated engine-free action trait. Aliased so the trait name does
 // not shadow the host-side [`ScoutingActions`] state struct below (the

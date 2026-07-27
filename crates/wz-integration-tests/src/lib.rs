@@ -1520,6 +1520,41 @@ pub mod common {
     /// pid+counter-unique file under the temp dir and unlinks it before returning.
     /// Keeping it internal is what lets every sibling dialer delegate without
     /// threading a capture handle through its own signature.
+    /// A private (writer, reader) pair over one unlinked capture file for a
+    /// spawned zenohd's stdout, so a helper can PARSE what the child announced.
+    ///
+    /// R311y428 — lifted out of [`spawn_zenohd_dialer_on_ephemeral_tcp`] when
+    /// [`spawn_zenohd_multicast_scouting_on_ephemeral_tcp`] became a second
+    /// caller (the same second-user trigger that lifted `spawn_subscribed_zsub`
+    /// in R311y138). The security note is the reason it is a function and not a
+    /// copy: `create_new` = O_CREAT|O_EXCL, because the name is predictable and
+    /// a plain create FOLLOWS a symlink someone may have planted at that path in
+    /// a world-writable temp dir, truncating whatever it points at. O_EXCL fails
+    /// on any existing path, symlink included, so the attack becomes a loud
+    /// error rather than a silent write to a victim file. (`tempfile` gets this
+    /// right, but it is a dev-dependency and this is the lib target.)
+    fn zenohd_stdout_capture() -> (File, File) {
+        // Unique per spawn: several zenohds can be live in one test process.
+        static CAPTURE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let capture_path =
+            std::env::temp_dir().join(format!("wz-zenohd-dialer-{}-{seq}.log", std::process::id()));
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&capture_path)
+            .unwrap_or_else(|e| panic!("create zenohd capture file {capture_path:?}: {e}"));
+        let reader = File::open(&capture_path);
+        // Unlink NOW so the file cannot outlive the spawn even if the caller panics —
+        // and BEFORE the reader is unwrapped, so a failed open leaks nothing.
+        let _ = std::fs::remove_file(&capture_path);
+        // The CHILD's stdout fd keeps the inode alive from here on; the parent's own
+        // `writer` is closed right after `spawn`, and `reader` dies with the caller.
+        let reader =
+            reader.unwrap_or_else(|e| panic!("open zenohd capture file {capture_path:?}: {e}"));
+        (writer, reader)
+    }
+
     pub fn spawn_zenohd_dialer_on_ephemeral_tcp(
         zenohd_bin: &std::path::Path,
         label: &'static str,
@@ -1531,30 +1566,7 @@ pub mod common {
         /// port digits follow it directly.
         const LISTEN_LINE: &str = "Zenoh can be reached at: tcp/127.0.0.1:";
 
-        // Unique per spawn: several dialers can be live in one test process.
-        static CAPTURE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let capture_path =
-            std::env::temp_dir().join(format!("wz-zenohd-dialer-{}-{seq}.log", std::process::id()));
-        // create_new = O_CREAT|O_EXCL: the name is predictable, and a plain create
-        // FOLLOWS a symlink someone may have planted at that path in a world-writable
-        // temp dir, truncating whatever it points at. O_EXCL fails on any existing
-        // path, symlink included, so the attack becomes a loud error rather than a
-        // silent write to a victim file. (`tempfile` gets this right, but it is a
-        // dev-dependency and this is the lib target.)
-        let writer = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&capture_path)
-            .unwrap_or_else(|e| panic!("create zenohd capture file {capture_path:?}: {e}"));
-        let reader = File::open(&capture_path);
-        // Unlink NOW so the file cannot outlive the spawn even if the caller panics —
-        // and BEFORE the reader is unwrapped, so a failed open leaks nothing.
-        let _ = std::fs::remove_file(&capture_path);
-        // The CHILD's stdout fd keeps the inode alive from here on; the parent's own
-        // `writer` is closed right after `spawn`, and `reader` dies with this call.
-        let mut reader =
-            reader.unwrap_or_else(|e| panic!("open zenohd capture file {capture_path:?}: {e}"));
+        let (writer, mut reader) = zenohd_stdout_capture();
         let mut command = Command::new(zenohd_bin);
         command
             // PIN the log level. This helper is the only one in the crate that reads
@@ -1604,6 +1616,91 @@ pub mod common {
                  (if the process is alive and the capture looks empty, the announcement \
                  was filtered out of zenohd's log — this helper pins RUST_LOG=z=info for \
                  exactly that reason, so a hit here means the log FORMAT moved)"
+            )
+        });
+        if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET)
+        {
+            panic!("{label}: {e}");
+        }
+        (guard, port)
+    }
+
+    /// R311y428 — spawn a zenohd that ANSWERS multicast SCOUTs, listening on an
+    /// OS-assigned tcp port (RETURNED beside the guard).
+    ///
+    /// Every other zenohd helper in this module passes `--no-multicast-scouting`;
+    /// this one deliberately does not, so the router runs its default
+    /// `scouting/multicast/enabled: true` responder on `224.0.0.224:7446` and a
+    /// wz `--scout` finds it. The locator its HELLO advertises is the tcp
+    /// listener discovered here, which is what lets a caller assert that wz
+    /// dialed something it was NEVER TOLD — the port is chosen by the kernel and
+    /// travels to wz only through zenohd's own Hello.
+    ///
+    /// WHY THIS IS A SEPARATE HELPER rather than a flag on
+    /// [`spawn_zenohd_dialer_on_ephemeral_tcp`]: its READINESS GATE is different,
+    /// and the difference is load-bearing. zenoh binds its unicast listeners
+    /// BEFORE it binds the scouting group (`start_router` calls `bind_listeners`
+    /// at zenoh `net/runtime/orchestrator.rs:255`, then `start_scout` at :260),
+    /// so the tcp-accept gate the sibling helpers use can pass while nothing is
+    /// listening on the group yet. A scout emitted into that window is a lost
+    /// datagram — nothing retransmits it, and the peer's later readiness cannot
+    /// recover it. So this additionally waits for zenohd's OWN
+    /// `listening scout messages on <group>` announcement, printed from inside
+    /// `bind_mcast_port` (orchestrator.rs:701) once the socket is bound and
+    /// joined. Both needles come out of one capture, so the wait costs nothing
+    /// extra.
+    pub fn spawn_zenohd_multicast_scouting_on_ephemeral_tcp(
+        label: &'static str,
+    ) -> (ChildGuard, u16) {
+        const LISTEN_LINE: &str = "Zenoh can be reached at: tcp/127.0.0.1:";
+        /// zenohd's scout-listener announcement. The group is spelled out so a
+        /// zenohd whose `scouting/multicast/address` ever moved would fail the
+        /// gate here rather than silently never answering wz's Scout.
+        const SCOUT_LINE: &str = "listening scout messages on 224.0.0.224:7446";
+
+        let (writer, mut reader) = zenohd_stdout_capture();
+        let mut command = Command::new(zenohd_binary());
+        command
+            // PIN the log level for the same reason the dialer helper does: both
+            // readiness needles are LOG lines, so an inherited `RUST_LOG=warn`
+            // would filter them away and the spawn would burn its full budget on
+            // a perfectly healthy router.
+            .env("RUST_LOG", "z=info")
+            .arg("-l")
+            .arg("tcp/127.0.0.1:0")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null());
+        let mut guard = ChildGuard::wrap(
+            label,
+            command
+                .spawn()
+                .expect("spawn zenohd multicast-scouting router"),
+        );
+        // ONE wait for BOTH needles: the port is only reported once the scout
+        // announcement is also present, so a caller that got a port has a router
+        // whose group socket is bound and joined.
+        let port = wait_for_capture_alive(
+            guard.child_mut(),
+            &mut reader,
+            ZENOHD_TCP_ACCEPT_BUDGET,
+            "announcing its bound tcp listener AND its scout listener",
+            |captured| {
+                if !captured.contains(SCOUT_LINE) {
+                    return None;
+                }
+                parse_announced_tcp_port(captured, LISTEN_LINE)
+            },
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "{label}: {e}\n\
+                 (both needles are zenohd log lines: {LISTEN_LINE:?} and \
+                 {SCOUT_LINE:?}. A live process with a capture holding only the \
+                 first means multicast scouting did not come up — check that no \
+                 --no-multicast-scouting reached this spawn; a capture with \
+                 neither means the log FORMAT moved.)"
             )
         });
         if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET)

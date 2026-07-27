@@ -20,7 +20,7 @@ pub(crate) fn print_usage() {
     eprintln!("{ABOUT}");
     eprintln!();
     eprintln!("USAGE:");
-    eprintln!("    wz-ap-demo (--listen <addr> | --connect <addr> [--reconnect])");
+    eprintln!("    wz-ap-demo (--listen <addr> | --connect <addr> [--reconnect] | --scout)");
     eprintln!("               [--key <keyexpr>]");
     eprintln!("               [--publish <keyexpr> --value <text>]");
     eprintln!("               [--delete <keyexpr>]");
@@ -40,6 +40,13 @@ pub(crate) fn print_usage() {
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
     eprintln!("    --connect <addr>         initiator mode (HOST:PORT or tcp/|ws/HOST:PORT)");
     eprintln!("    --lowlatency             offer the lowlatency transport on --connect");
+    eprintln!("    --scout                  initiator mode with a DISCOVERED locator: emit a");
+    eprintln!("                             multicast Scout on 224.0.0.224:7446 and dial the");
+    eprintln!("                             locator the first peer Hello advertises. Mutually");
+    eprintln!("                             exclusive with --listen / --connect. Requires the");
+    eprintln!("                             `scouting-active` build feature");
+    eprintln!("    --scout-timeout-ms <ms>  total --scout discovery budget, spent across repeated");
+    eprintln!("                             Scout cycles (default 10000; requires --scout)");
     eprintln!("    --router <addr>          multi-peer router mode: bind once, HOLD N concurrent");
     eprintln!(
         "                             peer faces (routing-router foundation, no forwarding)."
@@ -116,7 +123,7 @@ pub(crate) fn print_usage() {
     eprintln!("                             wake-ups. Must be > 0. Default 100");
     eprintln!("    --help, -h               print this help and exit");
     eprintln!();
-    eprintln!("Exactly one of --listen / --connect is required.");
+    eprintln!("Exactly one of --listen / --connect / --scout is required.");
     eprintln!("At least one of --key / --publish / --delete / --queryable / --query / --declare-*");
     eprintln!("/ --on-remote-* must be supplied.");
 }

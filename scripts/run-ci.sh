@@ -2993,7 +2993,7 @@ layer_c1x_cargo_test_routing_routes() {
 #      usrpwd; the accept seam injects pubkey's challenge nonce.
 # The demo-binary mesh e2e is Layer E6 (separate, --features routing-peer).
 #
-# R311y424 — the nine FILTERED / TARGET-SCOPED runs are guarded at their measured
+# R311y428 — the nine FILTERED / TARGET-SCOPED runs are guarded at their measured
 # counts, as the precondition for hosting this lane. `cargo test <filter>` exits 0
 # when the filter selects NOTHING, so a renamed module, a dropped `#[ignore]` or a
 # cfg-gate slip would have kept every one of them green. The whole-crate
@@ -6168,6 +6168,51 @@ PY
         --features transport-multicast,transport-qos \
         --test multicast_pubsub_loopback qos \
         -- --ignored --quiet) || return 1
+    # R311y428 — ACTIVE SCOUTING cross-impl: a wz `--scout` discovers a
+    # multicast-scouting zenohd on 224.0.0.224:7446 and opens a session on the
+    # locator that router's HELLO advertised. The first cross-impl witness for
+    # scouting-active + scouting-multicast (both were unproven at A4 with no
+    # foreign leg at all — the demo had no way to be TOLD to scout until this
+    # round's `--scout` entrypoint).
+    #
+    # PLACED BEFORE THE PICO GUARD, deliberately: this leg needs zenohd and NOT
+    # the pico CLI, so a `--layer M` on a box with zenohd but no pico CLI still
+    # runs it instead of returning at the guard below. Its own prereq is checked
+    # the same way Layer Z checks its externals — SKIP on a developer box that
+    # has not built zenohd, FATAL under WZ_M_REQUIRE, since the hosted interop
+    # job builds zenohd for Layer Z and a SKIP there would be a provisioning
+    # regression wearing a green badge.
+    #
+    # The demo build is SEPARATE from the router-multicast-faces one further
+    # down rather than merged into a single `--features a,b` build. The cost is
+    # real and named here rather than hidden: two feature sets means two demo
+    # builds in this lane. It buys (a) this leg keeping its position above the
+    # pico guard, and (b) the `--scout` path being proven under the MINIMAL
+    # feature set that is supposed to carry it — a merged build would prove only
+    # that it works alongside router-multicast-faces.
+    local m_zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
+    if [[ ! -x "$m_zenohd" ]]; then
+        if (( m_required )); then
+            echo "  Layer M FAIL: zenohd absent ($m_zenohd) but WZ_M_REQUIRE=1 — the" >&2
+            echo "    hosted job builds it for Layer Z, so its absence here is a" >&2
+            echo "    provisioning regression, not a reason to skip the only cross-impl" >&2
+            echo "    witness scouting-active and scouting-multicast have." >&2
+            return 1
+        fi
+        echo "Layer M SKIP wz scout->zenohd interop (zenohd not built; \
+run: bash scripts/build-zenohd.sh)"
+    else
+        (cd crates && cargo build -p wz-ap-demo --features scouting-active --quiet) || return 1
+        # GUARDED (R311y414's helper, and the class R311y428-y427 spent four
+        # rounds closing): `cargo test --test <target> -- --ignored` prints
+        # `0 passed` and EXITS 0 if the case is renamed or cfg'd away, so the one
+        # leg two atoms depend on would report success by silence. The count is
+        # exact at 1 — this target holds one test and a drop to 0 is the failure
+        # mode being guarded.
+        _runci_guarded_test "M scout->zenohd" 1 \
+            cargo test -p wz-integration-tests \
+            --test wz_scout_zenohd_interop -- --ignored || return 1
+    fi
     # R311nm — wz->pico multicast JOIN+Push interop e2e: a wz in-library
     # multicast publisher's JOIN beacon + framed Push are admitted and
     # decoded by an external zenoh-pico `z_sub -m peer` over a real UDP

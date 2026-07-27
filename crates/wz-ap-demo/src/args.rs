@@ -216,6 +216,33 @@ impl Role {
     }
 }
 
+/// The zenoh protocol version byte this demo emits — `Z_PROTO_VERSION`
+/// (zenoh-pico `include/zenoh-pico/config.h.in:190`), the value the interop
+/// rationale above pins the session handshake to.
+///
+/// R311y428 — named rather than repeated: `--scout` emits it a SECOND time, in
+/// the Scout frame's body byte 0 (`ScoutParams::version`), and a Scout that
+/// announced a different version than the InitSyn that follows would be a wire
+/// inconsistency with no single place to correct it.
+pub(crate) const DEMO_PROTO_VERSION: u8 = 0x09;
+
+/// The demo's default zenoh id, overridable with `--zid <hex>`.
+///
+/// R311y428 — named for the same reason as [`DEMO_PROTO_VERSION`]: `--scout`
+/// puts it on the wire a second time (the Scout frame's `I`-flagged id, which
+/// is how a responder identifies the scouter), and the Scout should announce
+/// the identity the session that follows will open with.
+pub(crate) const DEMO_ZID: [u8; 4] = [0x01, 0x02, 0x03, 0x04];
+
+/// `--scout-timeout-ms` default: the TOTAL active-scouting budget in ms, spent
+/// across repeated Scout cycles until a peer's Hello arrives.
+///
+/// Feature-uniform (NOT cfg'd on `scouting-active`), for the reason
+/// [`LivelinessGetSpec::after_ms`] states for its own knob: the argv surface
+/// must parse identically in the OFF build, where `--scout` is rejected with a
+/// feature message rather than a parse error.
+pub(crate) const DEFAULT_SCOUT_BUDGET_MS: u64 = 10_000;
+
 pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
     let whatami = match kind {
         NodeKind::Acceptor => WhatAmI::Peer, // R121b/c/d/e baseline
@@ -240,9 +267,9 @@ pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
         NodeKind::Initiator => WhatAmI::Client, // R121f initiator path
     };
     SessionInitParams {
-        version: 0x09,
+        version: DEMO_PROTO_VERSION,
         whatami,
-        zid: vec![0x01, 0x02, 0x03, 0x04],
+        zid: DEMO_ZID.to_vec(),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 65535,
