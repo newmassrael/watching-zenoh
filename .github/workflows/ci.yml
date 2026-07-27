@@ -950,51 +950,56 @@ jobs:
           test -x target/zenohd-unixpipe/zenohd \
             || { echo "::error::unixpipe zenohd missing after build/restore — the wz<->zenohd unixpipe interop would FAIL under WZ_Z_REQUIRE"; exit 1; }
 
-      - name: Probe AF_VSOCK loopback capability (MEASUREMENT, not a gate — R311y421)
-        # DELIBERATELY NOT A GATE, and this is the whole point of the step: it always
-        # exits 0 and no proof rests on it. `transport-link-vsock` is the last atom
-        # Layer A4 reports in the headline `proven` with no hosted witness, and it is
-        # blocked by TWO things — the `vsock_loopback` kernel module, and a
-        # vsock-enabled zenohd oracle (a separate source build; zenoh's default omits
-        # transport_vsock). The oracle is a known, cached recipe (ZENOHD_VSOCK=1,
-        # exactly like the unixpipe variant above). The KERNEL half is an unknown
-        # about this runner image that no amount of local measurement can settle:
-        # vsock_loopback is an in-kernel transport (Linux 5.6+) needing no hypervisor
-        # vsock device, so it SHOULD load on an Azure VM, but "should" is not a
-        # measurement.
+      - name: Enable AF_VSOCK loopback (R311y422)
+        # MEASURED, not assumed. R311y421 shipped this as a probe because whether the
+        # runner image could do AF_VSOCK was an unknown no local test could settle, and
+        # run 30251723895 answered it: kernel 6.8.0-1062-azure, `modprobe vsock_loopback`
+        # succeeds, /dev/vsock appears, and a bind+listen on VMADDR_CID_LOCAL returns
+        # (1, 3517351901). So the inherited claim that "the hosted runner has neither"
+        # was wrong about the kernel half — it needed one modprobe.
         #
-        # Shipping a required lane on that guess would be shipping a probably-red
-        # gate; shipping a lane that skips green would be the hollow gate this repo
-        # keeps closing. So this round ships the measurement instead, and the NEXT
-        # round spends the oracle build only if the capability is real. Until then
-        # the bookkeeping stays honest on its own: A4 still lists vsock under
-        # HOST_GATED_CI_TARGETS and still counts it as having no hosted witness,
-        # and assert_host_gated_ci_targets() falsifies that declaration both ways.
+        # A HARD step now, not a probe: the vsock leg below is required, so a runner
+        # that cannot load the module must red here with a clear cause rather than
+        # produce a confusing mid-lane bind failure.
         run: |
-          echo "=== AF_VSOCK loopback capability on this runner ==="
-          uname -r
-          sudo modprobe vsock_loopback 2>&1 || echo "modprobe vsock_loopback: FAILED"
-          lsmod | grep -i vsock || echo "(no vsock modules loaded)"
-          ls -l /dev/vsock 2>&1 || echo "(no /dev/vsock)"
-          python3 - <<'PY' || true
-          import socket
-          # VMADDR_PORT_ANY, not 0. Port 0 on AF_VSOCK is a PRIVILEGED-port request
-          # and returns EACCES for an unprivileged process even on a host where
-          # vsock works perfectly -- measured on the author's box, where the real
-          # vsock interop passes. A probe that reported FAILED for that reason would
-          # send the next round chasing a kernel problem that is not there.
+          set -euo pipefail
+          sudo modprobe vsock_loopback
+          lsmod | grep -q '^vsock_loopback' \
+            || { echo "::error::vsock_loopback did not load — the wz vsock acceptor interop cannot run"; exit 1; }
+          python3 - <<'PY'
+          import socket, sys
           VMADDR_CID_LOCAL, VMADDR_PORT_ANY = 1, 0xFFFFFFFF
           try:
               s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-              s.bind((VMADDR_CID_LOCAL, VMADDR_PORT_ANY))
-              s.listen(1)
-              print("AF_VSOCK bind+listen on VMADDR_CID_LOCAL:", s.getsockname(), "OK ->",
-                    "the oracle build is worth provisioning next round")
+              s.bind((VMADDR_CID_LOCAL, VMADDR_PORT_ANY)); s.listen(1)
+              print("AF_VSOCK bind+listen on VMADDR_CID_LOCAL:", s.getsockname(), "OK")
               s.close()
-          except (AttributeError, OSError) as exc:
-              print(f"AF_VSOCK bind+listen on VMADDR_CID_LOCAL: FAILED ({exc}) ->",
-                    "vsock stays legitimately host-gated; record it rather than chase it")
+          except OSError as exc:
+              sys.exit(f"::error::AF_VSOCK unusable after modprobe ({exc})")
           PY
+
+      - name: Cache the vsock-enabled zenohd binary (R311y422)
+        # A THIRD oracle, same rationale as the unixpipe one above: zenoh's `default`
+        # omits transport_vsock, so the wz vsock ACCEPTOR interop needs a source build
+        # with `--features zenoh/transport_vsock`. zenoh-pico has no vsock client, so
+        # zenohd is the only foreign vsock dialer that can witness this atom.
+        id: zenohd-vsock-cache
+        uses: actions/cache@v4
+        with:
+          path: target/zenohd-vsock
+          key: zenohd-vsock-1.5.0-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh') }}
+
+      - name: Build the vsock-enabled zenohd (cache miss only)
+        if: steps.zenohd-vsock-cache.outputs.cache-hit != 'true'
+        env:
+          ZENOHD_VSOCK: "1"
+          ZENOHD_ALLOW_CLONE: "1"
+        run: bash scripts/build-zenohd.sh
+
+      - name: Assert the vsock zenohd is present
+        run: |
+          test -x target/zenohd-vsock/zenohd \
+            || { echo "::error::vsock zenohd missing after build/restore — the wz vsock acceptor interop would FAIL under WZ_Z_REQUIRE"; exit 1; }
 
       - name: Layer Z — zenohd (zenoh-full) interop
         # The ONLY proofs against the canonical Rust implementation. Until this

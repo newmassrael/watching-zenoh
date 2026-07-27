@@ -159,11 +159,21 @@ KIND_CLASS = corpus.KIND_CLASS
 # lanes: a naive "oracle guard without the required-FAIL" scan false-matches the pico
 # E6/E7 legs (their `[[ -x <pico> ]]` guard uses a different required mechanism), which
 # is exactly the fragile-derivation this module warns against elsewhere.
-HOST_GATED_CI_TARGETS = {
-    "wz_vsock_acceptor_zenohd_interop":
-        "AF_VSOCK loopback needs the vsock_loopback kernel module + a vsock-enabled "
-        "zenohd oracle; the hosted runner has neither and ci.yml provisions neither, so "
-        "the Layer Z vsock leg echo-skips even under WZ_Z_REQUIRE (run-ci.sh).",
+HOST_GATED_CI_TARGETS: dict[str, str] = {
+    # R311y422 — EMPTY, and the emptiness is the point. This held exactly one entry,
+    # wz_vsock_acceptor_zenohd_interop, on the reasoning that "AF_VSOCK loopback needs
+    # the vsock_loopback kernel module + a vsock-enabled zenohd oracle; the hosted
+    # runner has neither and ci.yml provisions neither". The second half was true and
+    # fixable; the FIRST half was never measured, and run 30251723895 measured it
+    # false -- `modprobe vsock_loopback` succeeds on the runner image and a bind on
+    # VMADDR_CID_LOCAL returns a port. ci.yml now loads the module and builds the
+    # oracle, and the Layer Z leg is no longer WZ_Z_REQUIRE-exempt, so the target
+    # EXECUTES hosted and an entry here would be the stale-declaration case
+    # assert_host_gated_ci_targets() exists to reject.
+    #
+    # Keep the mechanism: a genuinely host-gated target belongs here WITH its reason,
+    # and the assertion falsifies the declaration in both directions -- it must still
+    # be named by a hosted lane, and the leg running it must still be REQUIRE-exempt.
 }
 
 # ── Execution disclosure ────────────────────────────────────────────────────────

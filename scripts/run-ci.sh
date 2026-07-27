@@ -6619,9 +6619,17 @@ layer_z_zenohd_interop() {
             --test wz_vsock_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
             | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     else
-        echo "  Layer Z SKIP — vsock acceptor interop (host-only): vsock zenohd absent" >&2
-        echo "  ($zenohd_vsock; a vsock-capable host builds it via" >&2
-        echo "   ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" >&2
+        # R311y422 — NO LONGER WZ_Z_REQUIRE-EXEMPT. The exemption existed because the
+        # hosted runner was believed to have neither the vsock_loopback module nor a
+        # vsock zenohd, so requiring the leg would have failed for the environment
+        # rather than for the code. Run 30251723895 MEASURED the first half false:
+        # `modprobe vsock_loopback` succeeds on the runner (6.8.0-1062-azure) and a
+        # bind on VMADDR_CID_LOCAL returns a port. ci.yml now loads the module and
+        # builds the oracle, so on the hosted job an absent oracle is a provisioning
+        # regression — the same rule every other leg here follows, and the reason
+        # transport-link-vsock could sit in `proven` with no hosted witness at all.
+        _z_unavailable "vsock zenohd absent ($zenohd_vsock; build it with \
+ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     fi
     # R311wo (A10) — wz<->zenohd storage-manager REPLICATION interop. Needs the
     # storage-manager plugin cdylib (built + installed by build-zenohd.sh from a

@@ -84,7 +84,14 @@ fn parse_vsock_listen_port(captured: &str) -> Option<u32> {
 /// loopback link to the wz subscriber — the `transport-link-vsock` atom's first
 /// cross-impl proof in the zenohd->wz (acceptor) direction, closing the last
 /// accept-direction cross-impl gap.
+// R311y422 — and the locator atom rides the SAME run: the `--listen
+// vsock/VMADDR_CID_LOCAL:VMADDR_PORT_ANY` string is parsed by wz's own
+// grammar (locator.rs parse_vsock_locator, including the two symbolic
+// names) before any socket exists, so a zenohd that connects proves wz read
+// the foreign-facing form correctly. Claimable hosted only because R311y422
+// provisions the module + oracle; before that this test ran nowhere.
 // wz-proves: transport-link-vsock zenohd->wz
+// wz-proves: locator-vsock zenohd->wz
 // wz-proves: session-unicast-open zenohd->wz
 #[test]
 #[ignore = "binary-dep + host-only e2e: needs vsock zenohd + wz-ap-demo[+vsock] + pico z_pub + AF_VSOCK loopback; runs via --ignored"]
