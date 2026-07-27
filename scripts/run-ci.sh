@@ -2,6 +2,18 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
+# R311y420 — FILE-SCOPED, and only this file. Every lane runs through
+# `run_layer <name> <fn>`, which invokes its argument as `"$@"`, so no layer
+# function is reachable by static analysis and neither is any helper only they
+# call. shellcheck 0.11 (the pin this round introduced; the check did not exist
+# in the 0.8.0 that floated on the runner image before it) therefore reports
+# SC2329 on 119 functions here — including `_runci_guarded_test`, which has 15
+# call sites in this file. The dispatch is the point of the design, so the
+# finding is structural rather than a defect to fix. Scoped to this file
+# deliberately: SC2329 stays live for the other 17 shell files, none of which
+# dispatch indirectly.
+# shellcheck disable=SC2329
+#
 # run-ci.sh — CI-equivalent local check.
 #
 # Single source of truth for the gate-set the GitHub Actions
@@ -857,9 +869,11 @@ layer_0_preflight_lints() {
         echo "  Layer0 FAIL: actionlint reported findings (see above)" >&2
         return 1
     fi
-    # Log BOTH versions: shellcheck rides on the `runs-on` image rather
-    # than a pin (see the ci.yml install step), so the only record of
-    # which one graded a green run is this line.
+    # Log BOTH versions. R311y420 pinned shellcheck too (its own
+    # checksummed ci.yml step), so this is no longer the only record of an
+    # unpinned input — but it stays, because LOCAL runs are still graded by
+    # whatever shellcheck the developer has, and this line is what makes a
+    # local green comparable to a hosted one.
     echo "  actionlint OK (${al_version}; $(shellcheck --version 2>/dev/null | awk '/^version:/{print "shellcheck " $2}' || true))"
 }
 
@@ -1035,7 +1049,7 @@ layer_b_verify_codegen() {
             fi
         fi
     done
-    return $fail
+    return "$fail"
 }
 
 # ─── Layer B2 — committed-codegen regen-diff gate (R311y22) ─────────
@@ -4523,15 +4537,47 @@ _wz_runtime_tokio_coherent_subsets() {
 # lint-clean?" and "does it run correctly?" are distinct questions that
 # must localise distinctly, even though `cargo test` mechanically
 # subsumes the `cargo build` step.
+#
+# ─── the SSOT DISCOVERY FLOOR, shared by C4c / C4d / C1j ─────────────
+#
+# R311y420. All three consumers read the subset list through a process
+# SUBSTITUTION, and a reading `while` loop cannot see that producer's exit
+# status. So if _wz_runtime_tokio_coherent_subsets ever emitted nothing — a
+# renamed feature that drops every row, an early `return`, a typo in the
+# heredoc — the loop would run ZERO times and the lane would return 0. A
+# matrix gate reporting success over an empty matrix is the same
+# success-by-silence shape as Layer 0's fmt-workspace and shellcheck-file
+# discovery, and it is closed the same way. Bump the floor in the same commit
+# that adds a subset.
+#
+# Applied to C1j as well as to the two lanes R311y420 hosts, because C1j has
+# been HOSTED since R311y318 carrying the identical hole; closing it only for
+# the lanes being moved would be knowingly leaving the worse one open.
+WZ_TOKIO_SUBSETS_MIN=10   # @ R311y420
+
+# _wz_subset_floor <lane-label> <seen-count>
+_wz_subset_floor() {
+    local lane="$1" seen="$2"
+    if (( seen < WZ_TOKIO_SUBSETS_MIN )); then
+        echo "  ${lane} FAIL: subset SSOT yielded ${seen} subset(s), expected >= ${WZ_TOKIO_SUBSETS_MIN}" >&2
+        echo "    _wz_runtime_tokio_coherent_subsets emitted too few rows, so this" >&2
+        echo "    matrix would have passed over an empty or truncated matrix." >&2
+        return 1
+    fi
+    return 0
+}
+
 layer_c4c_runtime_tokio_subset_matrix() {
-    local name feats
+    local name feats seen=0
     while IFS=$'\t' read -r name feats; do
+        seen=$((seen + 1))
         if ! (cd crates && cargo build -p wz-runtime-tokio --no-default-features --features "$feats" --quiet); then
             echo "  C4c FAIL: wz-runtime-tokio subset $name did not build"
             return 1
         fi
         echo "  C4c wz-runtime-tokio subset $name OK"
     done < <(_wz_runtime_tokio_coherent_subsets)
+    _wz_subset_floor C4c "$seen" || return 1
 }
 
 # ─── Layer C1j — wz-runtime-tokio arbitrary-subset BEHAVIOUR ─────────
@@ -4598,8 +4644,9 @@ _c1j_required_negs() {
 }
 
 layer_c1j_runtime_tokio_subset_behavior() {
-    local name feats expected got rc out
+    local name feats expected got rc out seen=0
     while IFS=$'\t' read -r name feats; do
+        seen=$((seen + 1))
         expected=$(_c1j_required_negs "$name" | sort)
         if [ -n "$expected" ]; then
             # `--list` in its own invocation: a build break must read as a build
@@ -4629,6 +4676,7 @@ layer_c1j_runtime_tokio_subset_behavior() {
         fi
         echo "  C1j wz-runtime-tokio subset $name tests OK${expected:+ (NEG set pinned)}"
     done < <(_wz_runtime_tokio_coherent_subsets)
+    _wz_subset_floor C1j "$seen" || return 1
 }
 
 # ─── Layer C4d — wz-runtime-tokio arbitrary-subset CLIPPY ────────────
@@ -4650,14 +4698,16 @@ layer_c1j_runtime_tokio_subset_behavior() {
 # is guarded going forward. `cargo clippy` over each SSOT subset with
 # `-D warnings` turns any subset-specific clippy lint into a hard error.
 layer_c4d_runtime_tokio_subset_clippy() {
-    local name feats
+    local name feats seen=0
     while IFS=$'\t' read -r name feats; do
+        seen=$((seen + 1))
         if ! (cd crates && cargo clippy -p wz-runtime-tokio --no-default-features --features "$feats" --quiet -- -D warnings); then
             echo "  C4d FAIL: wz-runtime-tokio subset $name clippy not clean"
             return 1
         fi
         echo "  C4d wz-runtime-tokio subset $name clippy OK"
     done < <(_wz_runtime_tokio_coherent_subsets)
+    _wz_subset_floor C4d "$seen" || return 1
 }
 
 # ─── transport-axis subsets (the multicast transport WITHOUT unicast) ──
@@ -5378,7 +5428,7 @@ layer_g_cross_compile_cortex_m() {
         echo "Layer G SKIP (no Phase W rustup targets installed)"
         return 0
     fi
-    return $fail
+    return "$fail"
 }
 
 # ─── Layer Q — QEMU mps2 multi-machine UDP loopback e2e demo run ───
@@ -5526,7 +5576,7 @@ layer_q_qemu_mcu_e2e() {
     if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
         echo "  Q.1-3 SKIP (arm-none-eabi-gcc not on PATH;" \
              "install gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it)"
-        return $fail
+        return "$fail"
     fi
 
     local lwip_port
@@ -5928,7 +5978,7 @@ layer_q_qemu_mcu_e2e() {
         echo "Layer Q SKIP (no Layer Q rustup targets installed)"
         return 0
     fi
-    return $fail
+    return "$fail"
 }
 
 # ─── Layer M — active-scouting multicast loopback e2e ──────────────
@@ -7259,7 +7309,7 @@ layer_qz_zephyr_boot() {
     fi
     rm -f "$qlog"
     rm -rf "$(dirname "$build_dir")"
-    return $fail
+    return "$fail"
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────

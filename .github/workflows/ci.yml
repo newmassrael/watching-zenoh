@@ -128,32 +128,56 @@ jobs:
         # cmake + libclang-dev are needed by zenoh-pico-sys (cmake
         # crate + bindgen). perl is GA on Ubuntu but listed for
         # documentation completeness — used by verify-codegen.sh
-        # Layer 2 include-block sort step. R311y416 — shellcheck is listed
-        # EXPLICITLY rather than relied on from the runner image: actionlint
-        # runs its shellcheck integration only when shellcheck is on PATH
-        # and silently drops those checks otherwise, and every actionlint
-        # finding this repo's workflows have produced came through shellcheck
-        # (swept across all 83 revisions of .github/workflows/ at R311y417).
-        # R311y417 corrects the follow-on claim that an image change "would
-        # quietly hollow out the Layer 0 lint half": with WZ_LINT_REQUIRE=1
-        # added by the same y416 commit it would red LOUDLY at the
-        # shellcheck check, not go quiet. Listing it here keeps that tripwire
-        # from firing on image drift. Note the ASYMMETRY, disclosed rather
-        # than fixed: actionlint is pinned + checksummed below while
-        # shellcheck floats on apt — its version rides the `runs-on:
-        # ubuntu-22.04` pin, which resolves to 0.8.0-2 today, matching the
-        # author's box. A runner-OS bump IS a shellcheck bump and should
-        # expect new findings. Measured at R311y417: shellcheck 0.8.0 /
-        # 0.9.0 / 0.10.0 all agree on this tree (0 findings) and on its
-        # parent (the same 3), so the exposure is latent, not live.
+        # Layer 2 include-block sort step.
+        # R311y420 — `shellcheck` is NO LONGER in this list. It moved to its
+        # own pinned + checksummed step below, closing the asymmetry R311y416
+        # introduced and R311y417 disclosed: actionlint was pinned while
+        # shellcheck floated on apt, so its version rode the `runs-on:`
+        # image and a runner-OS bump was a silent linter bump.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake \
             libclang-dev \
             clang \
-            perl \
-            shellcheck
+            perl
+
+      - name: Install shellcheck (pinned + checksum-verified)
+        # Same contract as the actionlint step below, and for the same reason:
+        # an unpinned linter turns an upstream release — or here, a runner
+        # IMAGE bump — into a spontaneous red on an unrelated push.
+        #
+        # WHY IT MATTERS MORE NOW than when R311y417 disclosed it as "latent,
+        # not live". That assessment measured 0.8.0 / 0.9.0 / 0.10.0 agreeing
+        # on this tree, but Layer 0 then linted only the `run:` blocks inside
+        # .github/workflows/ via actionlint. R311y419 put scripts/*.sh,
+        # scripts/lib/*.sh and .githooks/* in scope, and on THAT surface the
+        # versions do not agree at all: 0.11.0 finds 5 SC2086 that 0.8.0 misses
+        # (unquoted `return $fail`, all fixed in the same commit) plus SC2329,
+        # a check 0.8.0 does not have. The exposure went live the moment the
+        # lint surface grew, which is why the pin lands with it.
+        #
+        # 0.11.0 rather than the 0.8.0-2 the ubuntu-22.04 image ships: pinning
+        # forward gets the newer checks, and pinning to the floating value
+        # would have frozen a 2021 release to avoid triaging its successors'
+        # findings. Bumping this pin is a deliberate commit — expect new
+        # findings, and expect them in BOTH the Layer 0.2 script lane and
+        # actionlint's SC* integration, which shares this binary.
+        env:
+          SHELLCHECK_VERSION: "0.11.0"
+          SHELLCHECK_SHA256: "b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6"
+        run: |
+          set -euo pipefail
+          tgz="shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz"
+          trap 'rm -rf "$tgz" "shellcheck-v${SHELLCHECK_VERSION}"' EXIT
+          curl -sSLf --retry 3 --retry-all-errors --retry-delay 2 \
+            --connect-timeout 10 --max-time 120 -o "$tgz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/${tgz}"
+          echo "${SHELLCHECK_SHA256}  ${tgz}" | sha256sum -c -
+          tar xzf "$tgz" "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          sudo install -m 0755 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" \
+            /usr/local/bin/shellcheck
+          shellcheck --version
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # `rustup show` materialises the toolchain the repo pins — channel +
@@ -1613,11 +1637,14 @@ jobs:
     #    preset-isolated lint failures. C3 lints the same crates at their own
     #    boundary.
     #
-    # NOT CLOSURE OF THE GENRE, stated plainly because R311y413 recorded
-    # "class closed" being overclaimed twice: C4c / C4d (the wz-runtime-tokio
-    # arbitrary-subset BUILD and CLIPPY matrices, the R311y332 gap) and C1bf
-    # are the same genre and remain LOCAL-ONLY after this job. Hosted lanes go
-    # 73 -> 76 of 107.
+    # R311y419 hosted C3 + C1m + C1n and recorded that C4c / C4d (the
+    # wz-runtime-tokio arbitrary-subset BUILD and CLIPPY matrices, the
+    # R311y332 gap) and C1bf were the same genre and still local-only.
+    # R311y420 hosts those three as well, so the genre this job names is now
+    # covered and hosted lanes go 73 -> 76 -> 79 of 107. That is a claim about
+    # THIS genre only — 28 lanes remain local-only in others (§5.25 ext-pubsub,
+    # adminspace, storage, routing, and the singletons), and R311y413 recorded
+    # "class closed" being overclaimed twice, so enumerate before extending it.
     #
     # Hosting only helps if the lane can go red, so R311y419 hardened C1m and
     # C1n first — 15 `_runci_guarded_test` steps at measured counts. The hazard
@@ -1691,6 +1718,28 @@ jobs:
 
       - name: Layer C1n — wz-mcu-session-acceptor isolated e2e + clippy (R311y419)
         run: bash scripts/run-ci.sh --layer C1n
+
+      # R311y420 — the MATRIX half of this job's genre, and the close of the
+      # R311y332 gap R311y419 explicitly left open rather than papering over.
+      # C4c / C4d build and clippy wz-runtime-tokio under each of the 10
+      # coherent consumer-plane subsets, which `--workspace` unification can
+      # only ever evaluate as their union; C1bf clippies that crate at
+      # --all-features, the combination Layer C2's default-feature run never
+      # composes. Hardened first, same rule as y419: all three matrices read
+      # their subset list through a process substitution whose exit status the
+      # reading loop cannot see, so an empty SSOT would have passed as a green
+      # matrix over zero rows. A discovery floor now reds that, verified by
+      # neutering the producer (0 subsets -> both lanes red). The floor was
+      # applied to C1j too, which has been hosted since R311y318 carrying the
+      # identical hole.
+      - name: Layer C4c — wz-runtime-tokio subset BUILD matrix (R311y420)
+        run: bash scripts/run-ci.sh --layer C4c
+
+      - name: Layer C4d — wz-runtime-tokio subset CLIPPY matrix (R311y420)
+        run: bash scripts/run-ci.sh --layer C4d
+
+      - name: Layer C1bf — wz-runtime-tokio --all-features clippy (R311y420)
+        run: bash scripts/run-ci.sh --layer C1bf
 
   portability:
     name: portability (${{ matrix.os }})
