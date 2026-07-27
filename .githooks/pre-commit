@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-commit gate — three checks in sequence:
+# Pre-commit gate — four checks in sequence:
 #
 #   1. Cargo.toml ↔ Cargo.lock synchronisation. R52.1 retrospect:
 #      R51/R52 staged Cargo.toml changes without their Cargo.lock
@@ -24,7 +24,17 @@
 #      Skipped silently when no crates/**.rs is staged — mnemosyne-only
 #      commits pay zero rustfmt boot cost.
 #
-#   3. Mnemosyne SSOT gate. Blocks the commit if
+#   3. Mnemosyne schema pin (R311y418). Blocks the commit when the atomic
+#      store's schema_version has outrun MNEMOSYNE_MAX_SCHEMA, the pinned
+#      CI reader's ceiling in scripts/install-mnemosyne-cli.sh. Check 4 is
+#      blind to this in the shape that has actually fired: the local
+#      binary that just migrated the store can trivially still read it, so
+#      validate-workspace passes green while hosted Layer A reds with
+#      "schema version mismatch". (It would catch the CONVERSE — a local
+#      CLI older than the store — but neither red happened that way.)
+#      Both reds, R311y406 and R311y416, surfaced only on hosted CI.
+#
+#   4. Mnemosyne SSOT gate. Blocks the commit if
 #      `mnemosyne-cli validate-workspace` finds:
 #        - new T1 cross-ref orphans (not registered in [[orphan_ledger]])
 #        - resolved ledger entries (entry stale, drift catch)
@@ -95,7 +105,106 @@ if [[ -n "$staged_rs" ]]; then
     fi
 fi
 
-# ─── Check 3: Mnemosyne SSOT gate ──────────────────────────────────
+# ─── Check 3: store schema vs the pinned CI reader (R311y418) ──────
+#
+# The two sides are read from DIFFERENT trees, and the asymmetry is the
+# point — each side is taken from wherever it can still fail loud:
+#
+#   pin   -> the INDEX (`git show :<path>`), because hosted CI runs the
+#            COMMITTED script. Reading the working tree would let an
+#            unstaged MNEMOSYNE_MAX_SCHEMA bump buy a green commit while
+#            origin still carries the old ceiling — a gate defeated by
+#            forgetting to `git add`.
+#   store -> the WORKING TREE, matching Check 4. Once the store has
+#            outrun the pin, every later commit reds hosted CI whether or
+#            not it stages the sidecar; a tree left in a known-red state
+#            is the thing worth blocking.
+pin_script="scripts/install-mnemosyne-cli.sh"
+atomic_store="docs/.atomic/workspace.atomic.json"   # mnemosyne.toml declares
+                                                    # no [atomic] sidecar_path,
+                                                    # so this is the default.
+
+if [[ ! -f "$atomic_store" ]]; then
+    echo "pre-commit: $atomic_store missing — cannot read the store schema." >&2
+    echo "  (if mnemosyne.toml gained an [atomic] sidecar_path, update this hook)" >&2
+    exit 1
+fi
+
+if ! pin_src="$(git show ":$pin_script" 2>/dev/null)"; then
+    echo "pre-commit: cannot read $pin_script from the git index —" >&2
+    echo "  it is untracked, or this commit stages its deletion." >&2
+    echo "  The CI schema pin and this gate are one contract." >&2
+    exit 1
+fi
+
+# The constant is EXTRACTED, never sourced. Sourcing was the first cut and it
+# was wrong: the blob comes from the index, so a commit made while the index
+# still held an older revision of that script would EXECUTE it inside a commit
+# hook — which, being an installer, meant `cargo install` firing from a git
+# hook. Reading a shell file must not mean running it.
+#
+# A text contract across two files is the thing R311y417 warned about, so it
+# is made LOUD rather than avoided: the pattern is line-anchored (a mention in
+# prose or a comment cannot match), and anything other than exactly one
+# decimal match below is a hard fail, never a fallback value.
+mapfile -t pin_hits < <(
+    sed -nE 's/^MNEMOSYNE_MAX_SCHEMA="?([0-9]+)"?[[:space:]]*$/\1/p' <<<"$pin_src"
+)
+if [[ ${#pin_hits[@]} -ne 1 ]]; then
+    echo "pre-commit: expected exactly 1 MNEMOSYNE_MAX_SCHEMA assignment in" >&2
+    echo "  $pin_script (index); found ${#pin_hits[@]}." >&2
+    echo "  Expected form: MNEMOSYNE_MAX_SCHEMA=\"<decimal>\"" >&2
+    echo "  The CI schema pin and this gate are one contract; keep both halves." >&2
+    exit 1
+fi
+max_schema="${pin_hits[0]}"
+
+# python3 rather than a grep: the literal 'schema_version' appears in ledger
+# PROSE inside this store, so only a real JSON parse can tell the top-level
+# key from a quotation of it. Absence is a hard FAIL, not a skip — the
+# scripts/run-ci.sh:1061 rule for a dependency whose absence would otherwise
+# leave a gate checking nothing and reporting green.
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "pre-commit: python3 not on PATH (needed to read $atomic_store)" >&2
+    exit 1
+fi
+
+store_schema="$(python3 - "$atomic_store" <<'PY'
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    version = json.load(fh).get("schema_version")
+if isinstance(version, bool) or not isinstance(version, int):
+    sys.exit("schema_version absent or not an integer")
+print(version)
+PY
+)" || {
+    echo "pre-commit: could not read schema_version from $atomic_store" >&2
+    exit 1
+}
+
+if [[ ! "$store_schema" =~ ^[0-9]+$ ]]; then
+    echo "pre-commit: unexpected schema_version '$store_schema' in $atomic_store" >&2
+    exit 1
+fi
+
+if (( store_schema > max_schema )); then
+    echo "pre-commit: atomic store schema OUTRUNS the pinned CI mnemosyne-cli." >&2
+    echo "    store  $atomic_store  schema_version = $store_schema" >&2
+    echo "    CI pin $pin_script  MNEMOSYNE_MAX_SCHEMA = $max_schema" >&2
+    echo "" >&2
+    echo "  A reader whose ceiling is below the store cannot lazy-migrate down," >&2
+    echo "  so hosted Layer A would fail with" >&2
+    echo "    schema version mismatch: store=$store_schema expected <= $max_schema" >&2
+    echo "  and skip A2/A3/A4/B/B2 behind it (the R311y406 + R311y416 reds)." >&2
+    echo "" >&2
+    echo "  fix: in $pin_script, move MNEMOSYNE_REV to a PUSHED mnemosyne rev" >&2
+    echo "       whose CURRENT_SCHEMA_VERSION >= $store_schema and set" >&2
+    echo "       MNEMOSYNE_MAX_SCHEMA to that number, in its own commit." >&2
+    exit 1
+fi
+
+# ─── Check 4: Mnemosyne SSOT gate ──────────────────────────────────
 if ! command -v mnemosyne-cli >/dev/null 2>&1; then
     echo "pre-commit: mnemosyne-cli not on PATH — install with" >&2
     echo "  cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli" >&2

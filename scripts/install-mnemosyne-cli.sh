@@ -21,6 +21,13 @@
 # ~/.cargo/bin binary a CI cache restored (Swatinem/rust-cache caches
 # ~/.cargo/bin by default; without --force a `command -v` guard would run a
 # stale cached CLI — the R408 `missing field docs` failure mode).
+#
+# READ, NOT SOURCED (R311y418): .githooks/pre-commit needs MNEMOSYNE_MAX_SCHEMA
+# below and extracts it textually, from the git INDEX, with a line-anchored
+# pattern. It deliberately does not source this file — that would execute an
+# installer inside a commit hook. So the assignment must stay on one line in
+# the literal form MNEMOSYNE_MAX_SCHEMA="<decimal>", and must appear exactly
+# once; the hook hard-fails on any other count rather than guessing.
 
 set -euo pipefail
 
@@ -58,6 +65,23 @@ set -euo pipefail
 # schema-42 store ("schema version mismatch: store=42 expected <= 41") — the
 # Layer A red on the R311y406 hosted CI run.
 MNEMOSYNE_REV="d7f048b56a734790b4a9875d53b9c7c9a579e4f9"
+
+# The pinned rev's CURRENT_SCHEMA_VERSION: the HIGHEST atomic-store schema this
+# CLI can read. Verified at the pin, not inherited from prose —
+# crates/mnemosyne-atomic/src/lib.rs:1678 at d7f048b5 defines it as 43, and
+# :1924 rejects `on_disk_version > CURRENT_SCHEMA_VERSION` outright. A reader
+# cannot lazy-migrate DOWN to an older store shape, so a local mutate that
+# migrates the store past this number reds hosted Layer A and takes
+# A2/A3/A4/B/B2 with it. That is R311y406 and R311y416, the same trap twice.
+#
+# This constant exists so .githooks/pre-commit can turn that hosted red into a
+# local one: it reads the number below out of the index and refuses any commit
+# whose store schema_version exceeds it. MNEMOSYNE_REV and MNEMOSYNE_MAX_SCHEMA
+# are ONE fact in two forms — never move the rev without re-reading
+# CURRENT_SCHEMA_VERSION at the new rev and moving this with it.
+# shellcheck disable=SC2034  # read by .githooks/pre-commit as text, so it has
+                            # no in-script use; keep the one-line literal form.
+MNEMOSYNE_MAX_SCHEMA="43"
 
 cargo install --git https://github.com/newmassrael/mnemosyne \
   --rev "$MNEMOSYNE_REV" --bin mnemosyne-cli --force mnemosyne-cli

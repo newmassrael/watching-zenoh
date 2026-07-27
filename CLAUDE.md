@@ -127,9 +127,21 @@ The clause is preserved here as historical context only.
 git config core.hooksPath .githooks
 ```
 
-- **pre-commit** — fast `mnemosyne-cli validate-workspace` gate;
-  blocks any commit that introduces a new T1 orphan or a
-  resolved-but-still-ledgered entry (drift catch).
+- **pre-commit** — four checks, all fast (~0.4s on this tree):
+  (1) a staged `crates/**/Cargo.toml` without its `crates/Cargo.lock`
+  (R52.1); (2) `cargo fmt --check` when any `crates/**.rs` is staged
+  (R311au); (3) **schema pin (R311y418)** — refuses the commit when the
+  atomic store's `schema_version` exceeds `MNEMOSYNE_MAX_SCHEMA` in
+  `scripts/install-mnemosyne-cli.sh`, i.e. when a local mutate has
+  migrated the store past what the pinned CI reader can open. Check 4
+  is blind to this in the shape that has fired (the local binary that
+  just migrated the store can still read it, so it passes while hosted
+  Layer A reds); both R311y406 and R311y416 surfaced only on hosted
+  CI. Bump
+  `MNEMOSYNE_REV` and `MNEMOSYNE_MAX_SCHEMA` together, in their own
+  commit. (4) `mnemosyne-cli validate-workspace` — blocks any commit
+  that introduces a new T1 orphan or a resolved-but-still-ledgered
+  entry (drift catch).
 - **commit-msg** — enforces `COMMIT_FORMAT.md` (subject and body
   ≤72 bytes per line, no multi-line bullet wraps, no
   Co-Authored-By / "Generated with Claude Code" / emoji).
@@ -157,6 +169,11 @@ git config core.hooksPath .githooks
 `pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
 (install via
 `cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli`).
+`pre-commit` additionally requires `python3` — it reads the store's
+`schema_version` with a real JSON parse, because the literal
+`schema_version` also occurs in ledger prose inside that file. Its
+absence is a hard FAIL, not a skip: a gate that cannot read its input
+must not report green (`scripts/run-ci.sh` Layer C0 rule).
 `commit-msg` needs only bash + GNU grep with the `-P` flag.
 
 ## License + SPDX header policy
