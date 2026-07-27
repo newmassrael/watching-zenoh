@@ -1818,22 +1818,34 @@ layer_c1ae_cargo_test_compression() {
 #      plus the ON-path and OFF-path (session-multicast WITHOUT routing-namespace)
 #      clippy gates proving the seam composes and the off path is dead-code clean.
 layer_c1ax_cargo_test_routing_namespace() {
+    _runci_guarded_test "C1AX namespace 19" 19 \
+        cargo test -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --lib namespace --quiet || return 1
+    _runci_guarded_test "C1AX namespace_e2e 4" 4 \
+        cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_e2e --quiet || return 1
+    _runci_guarded_test "C1AX namespace_query_e2e 1" 1 \
+        cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_query_e2e --quiet || return 1
+    _runci_guarded_test "C1AX namespace_matching_e2e 2" 2 \
+        cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_matching_e2e --quiet || return 1
+    _runci_guarded_test "C1AX namespace_alias_e2e 1" 1 \
+        cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_alias_e2e --quiet || return 1
+    _runci_guarded_test "C1AX namespace_reassembly_e2e 1" 1 \
+        cargo test -p wz-runtime-tokio --features routing-namespace,transport-fragmentation --test namespace_reassembly_e2e --quiet || return 1
+    _runci_guarded_test "C1AX namespace_reconnect_e2e 2" 2 \
+        cargo test -p wz-runtime-tokio --features routing-namespace,session-reconnect --test namespace_reconnect_e2e --quiet || return 1
+    _runci_guarded_test "C1AX session-multicast 25" 25 \
+        cargo test -p wz-session-core --no-default-features --features routing-namespace,session-multicast,codec-join,codec-frame,codec-close,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,query-queryable,reassembly,pubsub-put --lib namespace --quiet || return 1
+    _runci_guarded_test "C1AX multicast_glue 15" 15 \
+        cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --lib namespace --quiet \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features routing-namespace,session-unicast,codec-push --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,session-reconnect,declare-keyexpr,declare-subscriber,declare-queryable,declare-token,declare-interest --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,declare-keyexpr --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_e2e --test namespace_query_e2e --test namespace_matching_e2e --test namespace_alias_e2e --quiet \
-        && cargo test -p wz-runtime-tokio --features routing-namespace,transport-fragmentation --test namespace_reassembly_e2e --quiet \
-        && cargo test -p wz-runtime-tokio --features routing-namespace,session-reconnect --test namespace_reconnect_e2e --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-namespace --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-namespace,transport-fragmentation --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-namespace,session-reconnect --quiet -- -D warnings \
-        && cargo test -p wz-session-core --no-default-features --features routing-namespace,session-multicast,codec-join,codec-frame,codec-close,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,query-queryable,reassembly,pubsub-put --lib namespace --quiet \
         && cargo clippy -p wz-session-core --no-default-features --features routing-namespace,session-multicast,codec-join,codec-frame,codec-close,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,query-queryable,reassembly,pubsub-put --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features alloc,session-multicast,codec-join,codec-frame,codec-close,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,query-queryable,reassembly,pubsub-put --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-multicast,routing-namespace --quiet -- -D warnings \
         && cargo build -p wz --features routing-namespace --quiet)
 }
@@ -1917,22 +1929,28 @@ layer_c1ax_cargo_test_routing_namespace() {
 #      twin of the peer transit lane (C1bb's routing-peer,transport-qos --lib
 #      linkstate). Without this arm the y224 threading would be unguarded in CI.
 layer_c1ay_cargo_test_router_hat() {
+    _runci_guarded_test "C1AY router_forward 136" 136 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
+    _runci_guarded_test "C1AY router_forward 138" 138 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
+    _runci_guarded_test "C1AY router_forward 139" 139 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
+    _runci_guarded_test "C1AY router_forward 171" 171 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
+    _runci_guarded_test "C1AY router_forward 142" 142 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
+    _runci_guarded_test "C1AY router_forward 136" 136 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     (cd crates \
-        && cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,transport-qos --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,access-acl,access-downsampling,access-quota --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,routing-token-tables --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,transport-multicast --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-token-tables --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,router-connect-reconcile --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features router-connect-reconcile --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,adminspace-router-linkstate --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat,adminspace-router-linkstate --quiet -- -D warnings \
         && cargo build -p wz-ap-demo --features router-multicast-faces --quiet \
@@ -2355,31 +2373,47 @@ layer_c1ba_cargo_clippy_transport_multilink() {
 # two self-sufficiency fixes that the slim build surfaced (the session/mod.rs
 # unused-ResponseSink import + the test-module dead-code re-gating).
 layer_c1am_cargo_test_adminspace() {
+    _runci_guarded_test "C1AM adminspace 18" 18 \
+        cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
+    _runci_guarded_test "C1AM zid_hex 3" 3 \
+        cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1
+    _runci_guarded_test "C1AM zid_to_zenoh_hex 1" 1 \
+        cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet || return 1
+    _runci_guarded_test "C1AM declare_adminspace 3" 3 \
+        cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
+    _runci_guarded_test "C1AM admin_write_permit 1" 1 \
+        cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib admin_write_permit --quiet || return 1
+    _runci_guarded_test "C1AM declare_adminspace 5" 5 \
+        cargo test -p wz-runtime-tokio --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
+    _runci_guarded_test "C1AM declare_adminspace 6" 6 \
+        cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
+    _runci_guarded_test "C1AM admin_write_permit 1" 1 \
+        cargo test -p wz-runtime-tokio --features adminspace-write,query-get --lib admin_write_permit --quiet || return 1
+    _runci_guarded_test "C1AM adminspace 20" 20 \
+        cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
+    _runci_guarded_test "C1AM adminspace 21" 21 \
+        cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet || return 1
+    _runci_guarded_test "C1AM adminspace 25" 25 \
+        cargo test -p wz-session-core --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
+    _runci_guarded_test "C1AM declare_adminspace 3" 3 \
+        cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet || return 1
+    _runci_guarded_test "C1AM compiled_plugins 1" 1 \
+        cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib compiled_plugins --quiet || return 1
+    _runci_guarded_test "C1AM compiled_plugins 1" 1 \
+        cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,storage-backend,query-get --lib compiled_plugins --quiet || return 1
+    _runci_guarded_test "C1AM adminspace 22" 22 \
+        cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
+    _runci_guarded_test "C1AM storage_manager_service 5" 5 \
+        cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet \
-        && cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet \
-        && cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet \
-        && cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib declare_adminspace --quiet \
-        && cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib admin_write_permit --quiet \
-        && cargo test -p wz-runtime-tokio --features adminspace-metrics,query-get --lib declare_adminspace --quiet \
-        && cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet \
-        && cargo test -p wz-runtime-tokio --features adminspace-write,query-get --lib admin_write_permit --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-metrics,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-read,adminspace-metrics,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-write,query-get --quiet -- -D warnings \
-        && cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet \
-        && cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-introspection-handlers --quiet -- -D warnings \
-        && cargo test -p wz-session-core --features adminspace-plugins-handlers --lib adminspace --quiet \
-        && cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet \
-        && cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib compiled_plugins --quiet \
-        && cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,storage-backend,query-get --lib compiled_plugins --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-plugins-handlers --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features router-hat-router,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings \
-        && cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet \
-        && cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-config-hotreload --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,adminspace-write,adminspace-config-hotreload --quiet -- -D warnings)
 }
@@ -2411,14 +2445,19 @@ layer_c1am_cargo_test_adminspace() {
 #      test-module dead-code (R311y38 re-gated them to their codec-response-final
 #      consumers), both of which only surface WITHOUT the full default codec set.
 layer_c1an_cargo_test_adminspace_nodefault() {
+    _runci_guarded_test "C1AN adminspace 16" 16 \
+        cargo test -p wz-session-core --no-default-features --features adminspace-core --lib adminspace --quiet || return 1
+    _runci_guarded_test "C1AN adminspace 21" 21 \
+        cargo test -p wz-session-core --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet || return 1
+    _runci_guarded_test "C1AN declare_adminspace 3" 3 \
+        cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
+    _runci_guarded_test "C1AN declare_adminspace 5" 5 \
+        cargo test -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
+    _runci_guarded_test "C1AN declare_adminspace 6" 6 \
+        cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     (cd crates \
-        && cargo test -p wz-session-core --no-default-features --features adminspace-core --lib adminspace --quiet \
         && cargo clippy -p wz-session-core --no-default-features --features adminspace-core --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-session-core --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet \
         && cargo clippy -p wz-session-core --no-default-features --features adminspace-router-linkstate --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet \
-        && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --lib declare_adminspace --quiet \
-        && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --all-targets --quiet -- -D warnings)
@@ -2456,11 +2495,15 @@ layer_c1an_cargo_test_adminspace_nodefault() {
 # the an_acl_* test fixtures, not config.rs; the default C1 runs the richer access-*
 # set where the spread is needed.
 layer_c1ao_cargo_test_config_mutate_runtime() {
+    _runci_guarded_test "C1AO wzconfig_ 4" 4 \
+        cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib wzconfig_ --quiet || return 1
+    _runci_guarded_test "C1AO to_admin_json 3" 3 \
+        cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib to_admin_json --quiet || return 1
+    _runci_guarded_test "C1AO to_admin_json 4" 4 \
+        cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl,access-downsampling,access-quota --lib to_admin_json --quiet || return 1
+    _runci_guarded_test "C1AO wzconfig_reconfigure_is_inert 1" 1 \
+        cargo test -p wz-runtime-tokio --features access-acl --lib wzconfig_reconfigure_is_inert --quiet || return 1
     (cd crates \
-        && cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib wzconfig_ --quiet \
-        && cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib to_admin_json --quiet \
-        && cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl,access-downsampling,access-quota --lib to_admin_json --quiet \
-        && cargo test -p wz-runtime-tokio --features access-acl --lib wzconfig_reconfigure_is_inert --quiet \
         && cargo clippy -p wz-runtime-tokio --features config-mutate-runtime,access-acl --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast --quiet -- -D warnings)
 }
@@ -2892,11 +2935,13 @@ layer_c1bm_cargo_test_pico_failfast() {
 # switchboard twin of the router/linkstate transit band lanes (RouteTable::forward_push
 # now routes through send_network_message_qos on the received FramePayload.priority).
 layer_c1x_cargo_test_routing_routes() {
+    _runci_guarded_test "C1X routing_forward 24" 24 \
+        cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet || return 1
+    _runci_guarded_test "C1X routing_forward 25" 25 \
+        cargo test -p wz-runtime-tokio --features routing-routes,transport-qos --lib routing_forward --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-routes --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-routes --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features routing-routes,transport-qos --lib routing_forward --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-routes,transport-qos --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-routes --quiet -- -D warnings)
 }

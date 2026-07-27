@@ -1594,6 +1594,48 @@ jobs:
       - name: Layer C1bg — filesystem storage backend + manager restart (R311y426)
         run: bash scripts/run-ci.sh --layer C1bg
 
+      # R311y427 — the ROUTING and ADMINSPACE groups, and they are here rather
+      # than on their own runner because R311y426 said the opposite and the very
+      # next measurement contradicted it. That round projected these at the 4.3x
+      # hosted-to-local-median ratio R311y419 measured, concluded they would push
+      # this job past its ceiling, and wrote "they need their own runner". Then
+      # run 30267052174 timed the eleven lanes R311y425 added: 138s hosted
+      # against a 64s local median, i.e. 2.2x, and the whole job moved only
+      # 14m37s -> 16m43s. A lane APPENDED to a job that has already built the
+      # workspace reuses those artefacts; the 4.3x figure came from lanes that
+      # did not. At 2.2x these eight cost ~5.8 min (routing) + ~4.0 (adminspace),
+      # landing the job near 26 min — inside 45, no new runner, and the ceiling
+      # stays where R311y425 put it.
+      #
+      # The disk half is measured too and unchanged: 68G free after the lanes on
+      # both of the last two runs, so adding these changes nothing there.
+      #
+      # Hardened first: 42 filtered runs across the six pure-cargo lanes, all
+      # bare, now `_runci_guarded_test` at measured counts. C1ax's four namespace
+      # e2e targets were SPLIT into one guarded run each -- the combined
+      # invocation prints four summaries, two of which read `1 passed`, so an
+      # exact count would have matched the wrong line, and the combined run's
+      # summary ORDER is not the target order. Falsified: a perturbed count reds
+      # (C1ay 171->172, C1am 25->26) and a dropped load-bearing `--features`
+      # reds (C1ax namespace_e2e, C1am compiled_plugins).
+      #
+      # E7b and E7c stay out: they are `--ignored` integration tests in the
+      # interop genre, not pure-cargo lanes, so they belong with the jobs that
+      # provision foreign binaries rather than here. They remain the last two
+      # sole-runner lanes.
+      - name: Layer C1x — routing-routes forward tables (R311y427)
+        run: bash scripts/run-ci.sh --layer C1x
+      - name: Layer C1ax — routing-namespace (R311y427)
+        run: bash scripts/run-ci.sh --layer C1ax
+      - name: Layer C1ay — router-hat forward tables (R311y427)
+        run: bash scripts/run-ci.sh --layer C1ay
+      - name: Layer C1am — adminspace handlers (R311y427)
+        run: bash scripts/run-ci.sh --layer C1am
+      - name: Layer C1an — adminspace no-default-features (R311y427)
+        run: bash scripts/run-ci.sh --layer C1an
+      - name: Layer C1ao — config-mutate-runtime + admin json (R311y427)
+        run: bash scripts/run-ci.sh --layer C1ao
+
       # The measurement this job's own header asks for and has never had: it
       # declares "THIS JOB HAS NO OTHER DISK HEADROOM" while recording that
       # end-of-job free space is UNKNOWN rather than known-tight, and that "a
