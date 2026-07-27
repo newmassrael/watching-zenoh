@@ -2944,31 +2944,49 @@ layer_c1x_cargo_test_routing_routes() {
 #      access-extauth-pubkey. Plugs into the SAME dispatch + open seams as
 #      usrpwd; the accept seam injects pubkey's challenge nonce.
 # The demo-binary mesh e2e is Layer E6 (separate, --features routing-peer).
+#
+# R311y424 — the nine FILTERED / TARGET-SCOPED runs are guarded at their measured
+# counts, as the precondition for hosting this lane. `cargo test <filter>` exits 0
+# when the filter selects NOTHING, so a renamed module, a dropped `#[ignore]` or a
+# cfg-gate slip would have kept every one of them green. The whole-crate
+# `-p wz-routing-graph` run stays BARE, per the convention that an unfiltered
+# whole-crate run has no meaningful count to pin.
 layer_c1y_cargo_test_routing_peer() {
     local access="routing-peer,access-acl,access-downsampling,access-quota"
+    _runci_guarded_test "C1y accept_loop" 11 \
+        cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
+    _runci_guarded_test "C1y linkstate" 199 \
+        cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
+    _runci_guarded_test "C1y interceptor" 10 \
+        cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
+    _runci_guarded_test "C1y linkstate+access" 210 \
+        cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
+    _runci_guarded_test "C1y extauth" 10 \
+        cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet || return 1
+    _runci_guarded_test "C1y auth_dispatch" 4 \
+        cargo test -p wz-session-core --features access-extauth-usrpwd --lib auth_dispatch --quiet || return 1
+    _runci_guarded_test "C1y usrpwd e2e" 3 \
+        cargo test -p wz-runtime-tokio --features access-extauth-usrpwd \
+        --test usrpwd_handshake_e2e --quiet || return 1
+    _runci_guarded_test "C1y extauth_pubkey" 7 \
+        cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey --quiet || return 1
+    _runci_guarded_test "C1y pubkey e2e" 1 \
+        cargo test -p wz-runtime-tokio --features access-extauth-pubkey \
+        --test pubkey_handshake_e2e --quiet || return 1
     (cd crates \
-        && cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet \
         && cargo test -p wz-routing-graph --quiet \
-        && cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet \
         && cargo clippy -p wz-routing-graph --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,adminspace-write --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet \
-        && cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features "$access" --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-acl --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-downsampling --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-quota --quiet -- -D warnings \
-        && cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet \
-        && cargo test -p wz-session-core --features access-extauth-usrpwd --lib auth_dispatch --quiet \
         && cargo clippy -p wz-session-core --all-targets --features access-extauth-usrpwd --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features session-extauth --all-targets --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features access-extauth-usrpwd --test usrpwd_handshake_e2e --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features access-extauth-usrpwd --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey --quiet \
-        && cargo test -p wz-runtime-tokio --features access-extauth-pubkey --test pubkey_handshake_e2e --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features access-extauth-pubkey --quiet -- -D warnings)
 }
 

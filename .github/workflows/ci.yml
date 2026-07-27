@@ -1499,6 +1499,36 @@ jobs:
       - name: Layer C1bm — pico unixpipe/quic --listen admit (R311y413)
         run: bash scripts/run-ci.sh --layer C1bm
 
+      # R311y424 — routing-peer / access-* / extauth, and it lands here because
+      # this job's genre line describes it exactly: an off-default feature subset
+      # no other job composes. It matters more than the usual local-only lane:
+      # `routing-peer` is NOT in wz-runtime-tokio's default set and nothing
+      # unifies it in, so Layer C1's `cargo test --workspace` COMPILES OUT every
+      # accept_loop unit test — measured, `cargo test --workspace --lib
+      # accept_loop -- --list` selects none of them. C1y was the only lane running
+      # them and it ran nowhere, which is how R311y423 shipped a freshly-added
+      # assertion pair into a 14/14-green run that never compiled it.
+      #
+      # Hardened first, per the rule R311y419 set: its nine filtered /
+      # target-scoped runs are now `_runci_guarded_test` at measured counts
+      # (11/199/10/210/10/4/3/7/1). Falsified two ways — perturbing a count reds,
+      # and dropping `--features routing-peer` (the real failure shape: the run
+      # then selects ZERO tests and exits 0) reds. Cost: local median 45s / p90
+      # 99s over 66 archived runs, ~194s / ~426s at this repo's measured 4.3x
+      # hosted ratio, inside the 30-minute budget.
+      - name: Layer C1y — routing-peer + access-* + extauth (R311y424)
+        run: bash scripts/run-ci.sh --layer C1y
+
+      # The measurement this job's own header asks for and has never had: it
+      # declares "THIS JOB HAS NO OTHER DISK HEADROOM" while recording that
+      # end-of-job free space is UNKNOWN rather than known-tight, and that "a
+      # post-lane `df -h` would settle it". R311y424 adds a lane, so it settles
+      # it. Never a gate — it reports, and the number informs whether the next
+      # lane belongs here or on a new runner.
+      - name: Disk headroom after the lanes (measurement, not a gate — R311y424)
+        if: always()
+        run: df -h /
+
   transport-modes:
     name: transport-MODE lanes (the §5.1 mode axis)
     runs-on: ubuntu-22.04
