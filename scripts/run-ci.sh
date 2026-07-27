@@ -3849,22 +3849,42 @@ layer_c1q_multicast_glue() {
 # reassembly node), and transport-multicast,transport-fragmentation,codec-push
 # runs the real-lwIP fragment round-trip (an oversize Put split by
 # multicast_tx_emit, reassembled by the Fragment RX arm into one Push).
+#
+# R311y419 — the nine test runs are GUARDED at their measured counts, as the
+# precondition for hosting this lane (R311y414's rule: hosting only helps if
+# the lane can go red). `cargo test` exits 0 when a feature combo selects NO
+# tests, so a cfg-gate change that silently stops compiling the arms these
+# combos exist to reach would have kept every one of them green. The counts are
+# a real discriminator here rather than a formality: they DIFFER per combo
+# (1/1/3/4/5/4/7/3/5), so each guard pins the arms its own features add. The
+# crate has no tests/ dir — all nine runs emit exactly two summaries, the lib
+# one and a 0-count doc-test — which is what makes an exact count meaningful
+# (contrast C1n below, where six summaries make it ambiguous).
 layer_c1m_session_lwip() {
+    _runci_guarded_test "C1m default" 1 \
+        cargo test -p wz-session-lwip --quiet || return 1
+    _runci_guarded_test "C1m reassembly" 1 \
+        cargo test -p wz-session-lwip --features reassembly --quiet || return 1
+    _runci_guarded_test "C1m multicast" 3 \
+        cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
+    _runci_guarded_test "C1m multicast+push" 4 \
+        cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
+    _runci_guarded_test "C1m multicast+liveliness" 5 \
+        cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
+    _runci_guarded_test "C1m multicast+queryable" 4 \
+        cargo test -p wz-session-lwip \
+        --features transport-multicast,query-queryable,codec-response,codec-response-final \
+        --quiet || return 1
+    _runci_guarded_test "C1m multicast maximal" 7 \
+        cargo test -p wz-session-lwip \
+        --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
+        --quiet || return 1
+    _runci_guarded_test "C1m multicast+reassembly" 3 \
+        cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
+    _runci_guarded_test "C1m multicast+fragmentation" 5 \
+        cargo test -p wz-session-lwip \
+        --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     (cd crates \
-        && cargo test -p wz-session-lwip --quiet \
-        && cargo test -p wz-session-lwip --features reassembly --quiet \
-        && cargo test -p wz-session-lwip --features transport-multicast --quiet \
-        && cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet \
-        && cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet \
-        && cargo test -p wz-session-lwip \
-            --features transport-multicast,query-queryable,codec-response,codec-response-final \
-            --quiet \
-        && cargo test -p wz-session-lwip \
-            --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
-            --quiet \
-        && cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet \
-        && cargo test -p wz-session-lwip \
-            --features transport-multicast,transport-fragmentation,codec-push --quiet \
         && cargo clippy -p wz-session-lwip --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast --quiet -- -D warnings \
@@ -3913,10 +3933,40 @@ layer_c1n_mcu_session_acceptor() {
     # the slim pool + clippy on the slim-gated cfg paths in the acceptor AND
     # the wz-link-lwip link tier (rx_sockets const select + the cfg'd pool
     # module), which the default/reassembly clippy passes do not cover.
+    # R311y419 — the three whole-crate runs stay BARE, and the six
+    # TARGET-SCOPED runs below are what makes this lane able to go red, which
+    # is the precondition for hosting it. The split is not arbitrary: this
+    # crate emits SIX libtest summaries (lib + 4 e2e binaries + doc-tests) and
+    # under `reassembly` four of them read `1 passed`, so neither an exact
+    # count nor `>=1` over the whole-crate output asserts which binary ran —
+    # three of the four e2e tests could vanish and an exact-count guard would
+    # still match the survivor. Per TARGET the count is unambiguous (exactly
+    # 1 each, measured), and `cargo test` exiting 0 on a selection of NOTHING
+    # is precisely the hazard: the three reassembly binaries compile to zero
+    # tests without the feature, so a cfg-gate slip silently empties them.
     (cd crates \
         && cargo test -p wz-mcu-session-acceptor --quiet \
         && cargo test -p wz-mcu-session-acceptor --features reassembly --quiet \
-        && cargo test -p wz-mcu-session-acceptor --features buffer-pool-session-rx-slim --quiet \
+        && cargo test -p wz-mcu-session-acceptor --features buffer-pool-session-rx-slim --quiet) \
+        || return 1
+    _runci_guarded_test "C1n default e2e" 1 \
+        cargo test -p wz-mcu-session-acceptor --test host_acceptor_e2e --quiet || return 1
+    _runci_guarded_test "C1n slim e2e" 1 \
+        cargo test -p wz-mcu-session-acceptor --features buffer-pool-session-rx-slim \
+        --test host_acceptor_e2e --quiet || return 1
+    _runci_guarded_test "C1n reassembly completion" 1 \
+        cargo test -p wz-mcu-session-acceptor --features reassembly \
+        --test host_acceptor_reassembly_e2e --quiet || return 1
+    _runci_guarded_test "C1n reassembly timeout" 1 \
+        cargo test -p wz-mcu-session-acceptor --features reassembly \
+        --test host_acceptor_reassembly_timeout_e2e --quiet || return 1
+    _runci_guarded_test "C1n reassembly out-of-order" 1 \
+        cargo test -p wz-mcu-session-acceptor --features reassembly \
+        --test host_acceptor_reassembly_ooo_e2e --quiet || return 1
+    _runci_guarded_test "C1n reassembly whole-frame" 1 \
+        cargo test -p wz-mcu-session-acceptor --features reassembly \
+        --test host_acceptor_e2e --quiet || return 1
+    (cd crates \
         && cargo clippy -p wz-mcu-session-acceptor --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-mcu-session-acceptor --features reassembly \
             --all-targets --quiet -- -D warnings \

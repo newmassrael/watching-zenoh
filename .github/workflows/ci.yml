@@ -1436,11 +1436,15 @@ jobs:
     # LANE-SELECTION RULE, stated because the boundary is not self-evident: a
     # lane belongs here when its SUBJECT is a transport mode (its header names
     # the mode) or when it is a mode-COMPOSITION matrix. Lanes that merely
-    # compose a mode while being about something else stay out and stay
-    # local-only — C1m (the lwIP platform port, seven transport-multicast
-    # arms), C1n (the MCU acceptor, a reassembly arm) and C3 (the per-package
-    # --all-targets matrix, three multicast clippy combos). They are a real
-    # remaining gap, in the isolated-platform-crate genre rather than this one.
+    # compose a mode while being about something else stay out — C1m (the lwIP
+    # platform port, seven transport-multicast arms), C1n (the MCU acceptor, a
+    # reassembly arm) and C3 (the per-package --all-targets matrix, three
+    # multicast clippy combos). R311y414 recorded them here as "a real
+    # remaining gap, in the isolated-platform-crate genre rather than this
+    # one", and R311y419 closed that gap the way the rule implies: they are
+    # hosted, on their OWN `isolated-crates` job, not admitted to this one.
+    # The selection rule is unchanged; only the "and stay local-only" half of
+    # the old sentence is now false and is retracted here.
     #
     # Hosting a lane only helps if the lane can go red, so R311y414 hardened
     # these first, through the `_runci_guarded_test` helper in run-ci.sh: 47
@@ -1579,6 +1583,114 @@ jobs:
         run: bash scripts/run-ci.sh --layer E6c
       - name: Layer E6d — prioritized publish over aggregated multilink (R311y414)
         run: bash scripts/run-ci.sh --layer E6d
+
+  isolated-crates:
+    name: isolated-crate lanes (what --workspace unification cannot express)
+    runs-on: ubuntu-22.04
+    # Its OWN runner, for the reason the two sibling genre jobs state: every
+    # lane here is a DISTINCT feature set and so a distinct set of
+    # `crates/target` artifacts, and the `ci` job declares it has no disk
+    # headroom left. Measured for these three specifically: a fresh
+    # CARGO_TARGET_DIR carrying exactly C3 + C1m + C1n reaches 1.7G.
+    #
+    # THE GENRE, which is what makes this a third job rather than a step bolted
+    # onto an existing one. The transport-modes job states its lane-selection
+    # rule and then names these three as OUT of it — "a real remaining gap, in
+    # the isolated-platform-crate genre rather than this one". That is the gap
+    # this job closes, and the rule here is the complement: a lane belongs when
+    # its subject is a crate that CANNOT participate in the `--workspace`
+    # feature unification, or a matrix that exists because that unification
+    # MASKS what isolation would surface.
+    #  - C1m (wz-session-lwip) and C1n (wz-mcu-session-acceptor) are the first
+    #    kind, and the exclusion is structural, not a preference: both force
+    #    `wz-session-core/no_std` through non-optional deps, which is mutually
+    #    exclusive with the std sce-rust-runtime (`http-send`) wz-runtime-tokio
+    #    pulls. sce-rust-runtime's own `compile_error!` fires if both land in
+    #    one unified graph, so Layers C1 and C2 EXCLUDE these crates by
+    #    construction — `-p` here is the only way they are ever built.
+    #  - C3 is the second kind: `cargo clippy --workspace` (Layer C2) resolves
+    #    features unified, which re-enables sibling features and hides
+    #    preset-isolated lint failures. C3 lints the same crates at their own
+    #    boundary.
+    #
+    # NOT CLOSURE OF THE GENRE, stated plainly because R311y413 recorded
+    # "class closed" being overclaimed twice: C4c / C4d (the wz-runtime-tokio
+    # arbitrary-subset BUILD and CLIPPY matrices, the R311y332 gap) and C1bf
+    # are the same genre and remain LOCAL-ONLY after this job. Hosted lanes go
+    # 73 -> 76 of 107.
+    #
+    # Hosting only helps if the lane can go red, so R311y419 hardened C1m and
+    # C1n first — 15 `_runci_guarded_test` steps at measured counts. The hazard
+    # is not hypothetical here: `cargo test -p wz-mcu-session-acceptor --test
+    # host_acceptor_reassembly_e2e` WITHOUT `--features reassembly` exits 0
+    # reporting `0 passed`, so the three reassembly binaries were one cfg slip
+    # away from silently testing nothing. Every guard shape was falsified
+    # locally by perturbing a count, a feature or a target name (9/9 red).
+    # C3 carries no guard and needs none — it is `clippy -- -D warnings` end to
+    # end, which has no "selected nothing" state to hide in.
+    #
+    # Cost, by the method the transport-modes job established: local MEDIANS
+    # over this repo's ~560 archived run-ci logs (n=64-66 per lane) total 39s
+    # for the three (C3 15s, C1m 19s, C1n 5s), p90 62s. At that job's measured
+    # hosted/local-median ratio of ~3.3x that projects ~2.1 min typical and
+    # ~3.4 min at p90 — and an independent cold measurement (fresh target dir,
+    # the three run sequentially) totals 129s, which lands on the same number
+    # from the other side. 30 minutes is therefore generous, and deliberately
+    # so: the budget is sized for the genre's growth, not for these three.
+    timeout-minutes: 30
+    steps:
+      - name: Free runner disk space (headroom for the isolated feature sets)
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          # `|| true` throughout: a path absent on a future runner image must
+          # not fail the build — this step is headroom, not a gate.
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          echo "=== free space AFTER prune ==="
+          df -h /
+
+      - name: Checkout (with submodules)
+        # `recursive` is load-bearing twice: wz-session-core compiles against
+        # sce_forge_runtime from vendor/sce, and C1m/C1n cc-build lwIP from
+        # vendor/lwip. A narrowed checkout breaks every lane below.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        # The sibling genre jobs' set, carried over verbatim rather than
+        # minimised. Only the clang half is KNOWN to be load-bearing here —
+        # lwip-sys runs bindgen (crates/lwip-sys/Cargo.toml:58) — and this job
+        # cmake-builds nothing. It is kept whole anyway: trimming it trades a
+        # few seconds of apt for a first-run red on a dependency this job has
+        # never been observed to need or not need.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake libclang-dev clang perl
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Layer C3 — per-package isolated --all-targets clippy (R311y419)
+        run: bash scripts/run-ci.sh --layer C3
+
+      - name: Layer C1m — wz-session-lwip isolated test + clippy (R311y419)
+        run: bash scripts/run-ci.sh --layer C1m
+
+      - name: Layer C1n — wz-mcu-session-acceptor isolated e2e + clippy (R311y419)
+        run: bash scripts/run-ci.sh --layer C1n
 
   portability:
     name: portability (${{ matrix.os }})
