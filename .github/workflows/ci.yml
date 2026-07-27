@@ -1338,7 +1338,15 @@ jobs:
     # timeout", correct when the rationale was time, wrong once the surviving
     # rationale is disk). A parallel job costs runner minutes but zero
     # critical-path wall clock.
-    timeout-minutes: 30
+    #
+    # R311y425 — 30 -> 45. The job measured 14m37s with C1y (R311y424), and the
+    # eleven lanes added below carry a 64s local median / 232s p90, i.e. roughly
+    # +4.6 min typical and +16.6 min at p90 against this repo's measured 4.3x
+    # hosted ratio. 30 would have survived the median and not p90. The BUDGET
+    # moves rather than the runner because the post-lane `df -h` R311y424 added
+    # reports 68G free, which removes the disk argument that put every previous
+    # overflow on its own machine.
+    timeout-minutes: 45
     steps:
       - name: Checkout (with submodules)
         # `recursive`: wz-session-core compiles against sce_forge_runtime from
@@ -1518,6 +1526,53 @@ jobs:
       # hosted ratio, inside the 30-minute budget.
       - name: Layer C1y — routing-peer + access-* + extauth (R311y424)
         run: bash scripts/run-ci.sh --layer C1y
+
+      # R311y425 — eleven more local-only lanes, and the reason they are HERE
+      # rather than on a fourth runner is a MEASUREMENT this job produced one
+      # round ago. Its header has declared "THIS JOB HAS NO OTHER DISK HEADROOM"
+      # since R311y318, and that declaration is what sent feature-gates,
+      # transport-modes and isolated-crates onto separate runners. R311y424 added
+      # the post-lane `df -h` the same header asked for, and it reported
+      # `146G total / 78G used / 68G avail (54%)` AFTER the lanes. There is
+      # headroom; the constraint here is TIME, not disk, which is why the budget
+      # above moves instead of the runner.
+      #
+      # WHY THESE ELEVEN: a sweep of all 107 run-ci lanes against ci.yml found 21
+      # local-only lanes that are the SOLE runner of 44 test selectors no hosted
+      # lane names — the general form of the R311y423/y424 defect, where a fresh
+      # assertion shipped green because nothing hosted compiled it. These eleven
+      # are the ext-pubsub §5.25 and singleton groups: 13 of those 44 selectors,
+      # at a local median of 64s. The storage (C1z/C1bg), routing (C1x/C1ax/
+      # C1ay/E7b) and adminspace (C1am/C1an/C1ao/E7c) groups remain local-only
+      # and are named here so the remainder is a list, not a vague "more".
+      #
+      # Hardened first, per R311y419: their 15 filtered runs are now
+      # `_runci_guarded_test` at measured counts, since `cargo test <filter>`
+      # exits 0 on an empty selection. Falsified three ways — a perturbed count,
+      # a dropped `--features` that makes the run select ZERO tests, and a
+      # narrowed feature set that changes the count.
+      - name: Layer C1ap — ext-pubsub serde codec (R311y425)
+        run: bash scripts/run-ci.sh --layer C1ap
+      - name: Layer C1aq — ext-pubsub advanced publisher (R311y425)
+        run: bash scripts/run-ci.sh --layer C1aq
+      - name: Layer C1ar — ext-pubsub advanced subscriber (R311y425)
+        run: bash scripts/run-ci.sh --layer C1ar
+      - name: Layer C1at — ext-pubsub advanced recovery (R311y425)
+        run: bash scripts/run-ci.sh --layer C1at
+      - name: Layer C1au — ext-pubsub sample-miss detection (R311y425)
+        run: bash scripts/run-ci.sh --layer C1au
+      - name: Layer C1av — ext-pubsub advanced history (R311y425)
+        run: bash scripts/run-ci.sh --layer C1av
+      - name: Layer C1aw — ext-pubsub group membership (R311y425)
+        run: bash scripts/run-ci.sh --layer C1aw
+      - name: Layer C1ah — time-hlc timestamp source (R311y425)
+        run: bash scripts/run-ci.sh --layer C1ah
+      - name: Layer C1ai — liveliness effective-history gating (R311y425)
+        run: bash scripts/run-ci.sh --layer C1ai
+      - name: Layer C1k — scouting-static (R311y425)
+        run: bash scripts/run-ci.sh --layer C1k
+      - name: Layer C1o — keyexpr wildcard gating (R311y425)
+        run: bash scripts/run-ci.sh --layer C1o
 
       # The measurement this job's own header asks for and has never had: it
       # declares "THIS JOB HAS NO OTHER DISK HEADROOM" while recording that

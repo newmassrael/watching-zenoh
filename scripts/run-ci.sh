@@ -2048,8 +2048,9 @@ layer_c1ag_cargo_test_transport_compose() {
 #      bare wall_clock_ntp64 fallback is byte-identical + unused-free (the
 #      TimestampHint import goes test-only, the HLC fns elide cleanly).
 layer_c1ah_cargo_test_time_hlc() {
+    _runci_guarded_test "C1ah timestamp_source" 5 \
+        cargo test -p wz-runtime-tokio --features time-hlc --lib timestamp_source --quiet || return 1
     (cd crates \
-        && cargo test -p wz-runtime-tokio --features time-hlc --lib timestamp_source --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features time-hlc --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend --quiet -- -D warnings)
 }
@@ -2079,9 +2080,10 @@ layer_c1ai_cargo_test_liveliness_history() {
         && cargo clippy -p wz-runtime-tokio --no-default-features \
             --features transport-unicast,liveliness-subscriber,liveliness-history --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features \
-            --features transport-unicast,liveliness-subscriber --quiet -- -D warnings \
-        && cargo test -p wz-runtime-tokio --no-default-features \
-            --features transport-unicast,liveliness-subscriber --lib effective_history --quiet)
+            --features transport-unicast,liveliness-subscriber --quiet -- -D warnings)
+    _runci_guarded_test "C1ai effective_history" 1 \
+        cargo test -p wz-runtime-tokio --no-default-features \
+        --features transport-unicast,liveliness-subscriber --lib effective_history --quiet || return 1
 }
 
 # ─── Layer C1aj — QUIC DATAGRAM link: locator parse + datagram backend e2e ─
@@ -2473,8 +2475,9 @@ layer_c1ao_cargo_test_config_mutate_runtime() {
 # (wz-session-core::serde_codec) AND the facade forward (wz-runtime-tokio's
 # re-export at crate::serde_codec), proving the 3-stage feature chain composes.
 layer_c1ap_cargo_test_ext_pubsub_serde() {
+    _runci_guarded_test "C1ap serde_codec" 6 \
+        cargo test -p wz-session-core --features ext-pubsub-serde-codec --lib serde_codec --quiet || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features ext-pubsub-serde-codec --lib serde_codec --quiet \
         && cargo clippy -p wz-session-core --all-targets --features ext-pubsub-serde-codec --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --features ext-pubsub-serde-codec --quiet -- -D warnings \
         && cargo build -p wz --features ext-pubsub-serde-codec --quiet)
@@ -2492,10 +2495,10 @@ layer_c1ap_cargo_test_ext_pubsub_serde() {
 # wz-runtime-tokio). query-get supplies the loopback get; pubsub-allow-loop the
 # loopback dispatch.
 layer_c1aq_cargo_test_ext_pubsub_advanced() {
+    _runci_guarded_test "C1aq advanced_" 11 \
+        cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
+        --lib advanced_ --quiet || return 1
     (cd crates \
-        && cargo test -p wz-runtime-tokio \
-            --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
-            --lib advanced_ --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
             --quiet -- -D warnings \
@@ -2515,10 +2518,10 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
 # dispatch; inbound source_info decode rides pubsub-source-info (pulled by the
 # features). The trailing `cargo build -p wz` validates the facade forward target.
 layer_c1ar_cargo_test_ext_pubsub_advanced_sub() {
+    _runci_guarded_test "C1ar advanced_subscriber" 3 \
+        cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-subscriber,ext-pubsub-advanced-publisher,pubsub-allow-loop \
+        --lib advanced_subscriber --quiet || return 1
     (cd crates \
-        && cargo test -p wz-runtime-tokio \
-            --features ext-pubsub-advanced-subscriber,ext-pubsub-advanced-publisher,pubsub-allow-loop \
-            --lib advanced_subscriber --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features ext-pubsub-advanced-subscriber,ext-pubsub-advanced-publisher,pubsub-allow-loop \
             --quiet -- -D warnings \
@@ -2602,10 +2605,10 @@ layer_c1be_cargo_test_query_value() {
 # header deferred "they need the reorder buffer"; it lands WITH the active flip.
 # Then clippy-gates the recovery surface + validates the facade forward target.
 layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
+    _runci_guarded_test "C1at advanced_subscriber" 14 \
+        cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
+        --lib advanced_subscriber --quiet || return 1
     (cd crates \
-        && cargo test -p wz-runtime-tokio \
-            --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
-            --lib advanced_subscriber --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
             --quiet -- -D warnings \
@@ -2625,10 +2628,10 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
 # faithfulness test (the emitted payload decodes to last_sn on the @adv KE). Then
 # clippy-gates the producer surface + validates the facade forward target.
 layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
+    _runci_guarded_test "C1au advanced_publisher" 7 \
+        cargo test -p wz-runtime-tokio --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
+        --lib advanced_publisher --quiet || return 1
     (cd crates \
-        && cargo test -p wz-runtime-tokio \
-            --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
-            --lib advanced_publisher --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
             --quiet -- -D warnings \
@@ -2652,10 +2655,10 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
 # (--lib advanced_subscriber, which now also pulls liveliness-subscriber); the
 # cache-side _time parser + filter tests run under C1aq (--lib advanced_).
 layer_c1av_cargo_test_ext_pubsub_advanced_history() {
+    _runci_guarded_test "C1av advanced_subscriber" 24 \
+        cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
+        --lib advanced_subscriber --quiet || return 1
     (cd crates \
-        && cargo test -p wz-runtime-tokio \
-            --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
-            --lib advanced_subscriber --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
             --quiet -- -D warnings \
@@ -2676,13 +2679,13 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
 # the keepalive -> unknown-member-GET recovery, needing pubsub-allow-loop); then
 # clippy-gates both crates' surface + validates the wz facade forward target.
 layer_c1aw_cargo_test_ext_pubsub_group_membership() {
+    _runci_guarded_test "C1aw group_membership" 6 \
+        cargo test -p wz-session-core --features ext-pubsub-group-membership \
+        --lib group_membership --quiet || return 1
+    _runci_guarded_test "C1aw group" 6 \
+        cargo test -p wz-runtime-tokio --features ext-pubsub-group-membership,pubsub-allow-loop \
+        --lib group --quiet || return 1
     (cd crates \
-        && cargo test -p wz-session-core \
-            --features ext-pubsub-group-membership \
-            --lib group_membership --quiet \
-        && cargo test -p wz-runtime-tokio \
-            --features ext-pubsub-group-membership,pubsub-allow-loop \
-            --lib group --quiet \
         && cargo clippy -p wz-session-core \
             --features ext-pubsub-group-membership --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets \
@@ -3636,9 +3639,11 @@ layer_c1i_cargo_test_scouting() {
 # (wz-runtime-coop scouting-static = the facade -> runtime -> core funnel,
 # no-alloc + alloc). The thumb cross-compile of the same is Layer G.5.
 layer_c1k_cargo_test_scouting_static() {
+    _runci_guarded_test "C1k scout_static" 7 \
+        cargo test -p wz-session-core --features scouting-static --lib scout_static --quiet || return 1
+    _runci_guarded_test "C1k static_scout_open" 6 \
+        cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open --quiet || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features scouting-static --lib scout_static --quiet \
-        && cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open --quiet \
         && cargo build -p wz-session-core --no-default-features --features scouting-static --quiet \
         && cargo build -p wz-runtime-coop --features scouting-static --quiet \
         && cargo build -p wz-runtime-coop --features alloc,scouting-static --quiet)
@@ -3673,15 +3678,17 @@ layer_c1k_cargo_test_scouting_static() {
 # catching exactly the "implemented-but-not-excludable" drift this
 # round closed. The no_std MCU strip is Layer G's cross-compile job.
 layer_c1o_keyexpr_gating_behavior() {
-    (cd crates \
-        && cargo test -p wz-session-core --no-default-features --features alloc \
-            --lib keyexpr_match --quiet \
-        && cargo test -p wz-session-core --no-default-features \
-            --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
-            --lib keyexpr_match --quiet \
-        && cargo test -p wz-session-core --no-default-features \
-            --features keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
-            --lib keyexpr_match --quiet)
+    _runci_guarded_test "C1o keyexpr alloc" 7 \
+        cargo test -p wz-session-core --no-default-features --features alloc \
+        --lib keyexpr_match --quiet || return 1
+    _runci_guarded_test "C1o keyexpr alloc+wildcards" 17 \
+        cargo test -p wz-session-core --no-default-features \
+        --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
+        --lib keyexpr_match --quiet || return 1
+    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 17 \
+        cargo test -p wz-session-core --no-default-features \
+        --features keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
+        --lib keyexpr_match --quiet || return 1
 }
 
 # ─── Layer C1l — reassembly subsystem (Tier B) build + AP unification ─
