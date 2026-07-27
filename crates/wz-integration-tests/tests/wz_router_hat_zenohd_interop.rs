@@ -212,8 +212,17 @@ fn spawn_router_hat_dialing(
 
 /// Leg 1 — the router-tier topology floor. wz `--router-hat` dials zenohd and
 /// converges its `routers_net` to 2, proving the cross-impl link-state exchange.
+// R311y423 — and this leg is scouting-gossip's cross-impl witness. The atom is
+// the link-state gossip flood (wz-routing-graph + linkstate_forward.rs,
+// FOUNDATIONAL/always-on), and the assertion below is precisely that wz
+// DECODED >=1 of zenohd's LinkStateList OAM floods -- `ingested() > 0`, not the
+// handshake-satisfiable convergence tick. zenohd->wz only: wz's own flood
+// reaching zenohd is not asserted here, so no wz->zenohd claim is made.
+// A4-5 containment is exempt (FOUNDATIONAL names no cfg site), so this rests on
+// that reading -- verified by hand at R311y423.
 // wz-proves: router-hat-router zenohd->wz
 // wz-proves: router-hat-router wz->zenohd partial
+// wz-proves: scouting-gossip zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_federates_with_zenohd_at_router_tier() {
