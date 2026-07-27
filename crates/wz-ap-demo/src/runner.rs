@@ -2665,6 +2665,20 @@ async fn run_peer_until(
             peak_nodes.max(forwarder.node_count())
         );
     }
+    // R311y423 — the GOSSIP-AUTOCONNECT witness (`scouting-autoconnect`), and it
+    // is deliberately NOT `summary.dialed > 0`: that counter is bumped by the
+    // static `--connect` seed and by reconcile too, so it would be green on a node
+    // autoconnect never moved. `gossip_dialed` is incremented in exactly one place
+    // — the `Step::Dial` arm, reached only through a DialIntent the forwarder emits
+    // after the autoconnect policy admits a peer it discovered in a link-state
+    // flood. So this line means: this peer learned a peer it was never configured
+    // with, and dialed it. Latched at shutdown like the witnesses around it.
+    if summary.gossip_dialed > 0 {
+        log::info!(
+            "wz-ap-demo peer: autoconnected to gossip-discovered peer(s) ({} dial(s))",
+            summary.gossip_dialed
+        );
+    }
     // Reciprocal-link witness (the FULL-LINKSTATE discriminator): emitted ONLY
     // when this peer's graph gained a MUTUAL edge — a neighbour's ingested flood
     // advertised a link back to self. A gossip (`peer_to_peer`) neighbour bumps

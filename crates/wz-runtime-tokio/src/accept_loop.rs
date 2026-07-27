@@ -465,6 +465,18 @@ pub struct AcceptLoopSummary {
     /// High-water mark of the live faces table — the "held N peers at once"
     /// witness that distinguishes this from the one-shot accept path.
     pub peak_concurrent: usize,
+    /// R311y423 — of [`dialed`](Self::dialed), the subset dialed because the
+    /// GOSSIP-autoconnect policy admitted a discovered peer (the [`Step::Dial`]
+    /// arm), as opposed to a configured `--connect` target or a reconcile add.
+    ///
+    /// A SEPARATE counter rather than a reading of `dialed`, because `dialed`
+    /// cannot discriminate: it is bumped by the static seed, the gossip arm and
+    /// reconcile alike, so asserting on it would pass on a node that autoconnect
+    /// never moved. That is the hollow-witness shape R311y140 recorded (a
+    /// convergence tick is handshake-satisfiable), and `scouting-autoconnect` is
+    /// exactly the atom a hollow witness would falsely credit — its whole content
+    /// is "a peer learned off the link-state flood got dialed".
+    pub gossip_dialed: usize,
 }
 
 /// The tagged result of one face-open attempt — the `opening`
@@ -1881,6 +1893,13 @@ where
                         let id = FaceId(next_id);
                         next_id += 1;
                         summary.dialed += 1;
+                        // R311y423 — the gossip-only counter. This arm is reached
+                        // ONLY via a DialIntent, which the forwarder emits only
+                        // after the autoconnect policy admits a peer discovered in
+                        // a link-state flood, so incrementing here (and nowhere
+                        // else) makes the counter a true discriminator for
+                        // scouting-autoconnect.
+                        summary.gossip_dialed += 1;
                         // Index the gossip dial so a reconcile does not re-dial the
                         // same address (and vice-versa).
                         #[cfg(feature = "router-connect-reconcile")]
@@ -3598,6 +3617,15 @@ mod tests {
         .expect("peer dial completes within 20s");
 
         assert_eq!(summary.dialed, 1, "dialed the one configured target");
+        // R311y423 — the NEG half of the gossip_dialed discriminator: a CONFIGURED
+        // dial bumps `dialed` and must leave `gossip_dialed` at 0. Without this, a
+        // counter that merely mirrored `dialed` would satisfy the positive
+        // assertion in the autoconnect test and credit scouting-autoconnect to a
+        // node autoconnect never moved.
+        assert_eq!(
+            summary.gossip_dialed, 0,
+            "a configured --connect dial is not a gossip dial"
+        );
         assert_eq!(summary.accepted, 0, "no inbound peer connected");
         assert_eq!(
             summary.established, 1,
@@ -3679,6 +3707,14 @@ mod tests {
         assert_eq!(
             summary.dialed, 1,
             "the dial-intent triggered one outbound dial"
+        );
+        // R311y423 — and it must be counted as a GOSSIP dial. Paired with the
+        // static-dial test (which asserts this stays 0), this is what makes
+        // `gossip_dialed` a discriminator rather than a second name for `dialed`:
+        // only the DialIntent path moves it.
+        assert_eq!(
+            summary.gossip_dialed, 1,
+            "the autoconnect dial must be attributed to gossip"
         );
         assert_eq!(summary.accepted, 0, "no inbound peer connected");
         assert_eq!(
