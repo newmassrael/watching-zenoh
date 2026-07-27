@@ -149,6 +149,82 @@ wz_schema_pin_gate() {
     return 0
 }
 
+# wz_local_cli_pin_gate <hook-label> <spec-prefix>
+# Does the mnemosyne-cli ON PATH read the same schema the pin claims?
+#
+# R311y420. R311y419 built scripts/verify-mnemosyne-pin.sh, which asks the
+# INSTALLED binary its CURRENT_SCHEMA_VERSION — but it runs from the
+# installer's tail, and hooks never install, so the check could not fire
+# locally. It does not need to install: the hooks already REQUIRE
+# mnemosyne-cli on PATH, and `describe-schema` is a pure report of the
+# binary's own constant (no store read — verified at R311y419 against a store
+# hand-set to 999). So the hook can ask directly.
+#
+# WHAT IT CATCHES THAT THE OTHER TWO GATES CANNOT, and it is the important
+# one: both of those grade AFTER a mutation has already happened.
+# wz_schema_pin_gate compares the STORE to the ceiling, so it fires once the
+# store has been migrated; the co-change gate only proves two constants moved
+# together. This one fires BEFORE the next mutate, on the condition that
+# CAUSES the migration — a PATH binary that reads a different schema than the
+# reader CI installs. That is exactly the shape of R311y401 / y406 / y416,
+# each of which was discovered on hosted CI after the store had already been
+# committed and pushed.
+#
+# Both directions are a block, and both are real:
+#   local > ceiling  -> the next mutate migrates the store past the pinned
+#                       reader; hosted Layer A reds.
+#   local < ceiling  -> this binary cannot open a store the pin permits, so
+#                       any local validate is grading something CI is not.
+# The remedy for either is the same: `bash scripts/install-mnemosyne-cli.sh`,
+# which installs the pinned rev AND re-runs the R311y419 check.
+wz_local_cli_pin_gate() {
+    local hook="$1" spec="$2" ceiling actual
+    command -v mnemosyne-cli >/dev/null 2>&1 || return 0   # caller already gates this
+    command -v python3 >/dev/null 2>&1 || {
+        echo "${hook}: python3 not on PATH — cannot read describe-schema." >&2
+        return 1
+    }
+    ceiling="$(wz_pin_ceiling "$spec")" || {
+        echo "${hook}: cannot resolve the CI schema pin." >&2
+        return 1
+    }
+    if ! actual="$(mnemosyne-cli describe-schema --json 2>/dev/null | python3 -c '
+import json, sys
+
+version = json.load(sys.stdin).get("schema_version")
+if isinstance(version, bool) or not isinstance(version, int):
+    sys.exit("schema_version absent or not an integer")
+print(version)
+' 2>/dev/null)"; then
+        echo "${hook}: \`mnemosyne-cli describe-schema --json\` gave no usable" >&2
+        echo "  schema_version. If the subcommand changed upstream, re-point" >&2
+        echo "  this gate and scripts/verify-mnemosyne-pin.sh together." >&2
+        return 1
+    fi
+    if [[ "$actual" != "$ceiling" ]]; then
+        echo "${hook}: the mnemosyne-cli ON PATH is not the reader CI pins." >&2
+        echo "    on PATH   $(command -v mnemosyne-cli)" >&2
+        echo "              reads schema ${actual}" >&2
+        echo "    CI pin    ${WZ_PIN_SCRIPT}  MNEMOSYNE_MAX_SCHEMA = ${ceiling}" >&2
+        echo "" >&2
+        if (( actual > ceiling )); then
+            echo "  This binary is AHEAD of the pin, so the next store mutate" >&2
+            echo "  migrates the schema past the reader hosted CI installs and" >&2
+            echo "  Layer A reds — after the commit is already pushed. That is" >&2
+            echo "  how R311y401, y406 and y416 each got out." >&2
+        else
+            echo "  This binary is BEHIND the pin, so it cannot open every" >&2
+            echo "  store CI would accept; a local validate is grading" >&2
+            echo "  something the hosted gate is not." >&2
+        fi
+        echo "" >&2
+        echo "  fix: bash ${WZ_PIN_SCRIPT}" >&2
+        echo "       (installs the pinned rev and re-runs the y419 check)" >&2
+        return 1
+    fi
+    return 0
+}
+
 # wz_schema_pin_cochange_gate <hook-label>
 # The two constants are one fact in two forms, and the ceiling is the gate's
 # only oracle — so raising it by one character silences the gate entirely while

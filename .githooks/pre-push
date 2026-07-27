@@ -87,6 +87,18 @@ for sha in "${push_shas[@]}"; do
         exit 1
     fi
 done
+# R311y420 — and grade the PATH binary itself against the pin, using the
+# ceiling from the TIP being pushed (that is the pin origin will carry). The
+# per-commit loop above only sees a migration that already happened; a CLI
+# that disagrees with the pin is the condition that produces the next one,
+# and it is the last moment before the push where saying so still helps.
+# Index arithmetic rather than `${push_shas[-1]}`: negative subscripts are
+# bash 4.3+, and this hook is being made bash 3.2-clean in the same commit.
+if ! wz_local_cli_pin_gate 'pre-push' "${push_shas[$((${#push_shas[@]} - 1))]}:"; then
+    echo "" >&2
+    echo "pre-push: bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
 
 # ─── gate 2 — SSOT integrity (validate-workspace, seconds) ──────────
 # Fast and load-bearing: catches a bypassed typed-mutate primitive (raw
@@ -134,7 +146,18 @@ if [[ -z "$diff_base" ]]; then
     exit 0
 fi
 
-mapfile -t changed_dirs < <(
+# R311y420 — a while-read loop rather than `mapfile`. mapfile is a bash 4.0
+# builtin, and stock macOS ships bash 3.2, so this hook could not run there at
+# all; scripts/lib/schema-pin-gate.sh already avoids it for the same reason.
+# This is the last mapfile in .githooks/. NOT a claim of repo-wide bash 3.2
+# support: scripts/verify-codegen.sh still uses six, including `mapfile -d ''`
+# forms that are genuinely awkward to express portably, and rewriting a
+# working script for a platform nobody has asked for would be the wrong trade.
+# The hooks are the part a macOS clone must run before it can commit at all.
+changed_dirs=()
+while IFS= read -r _d; do
+    [[ -n "$_d" ]] && changed_dirs+=("$_d")
+done < <(
     git diff --name-only "$diff_base..$local_sha" -- 'crates/' 2>/dev/null \
         | sed -nE 's#^crates/([^/]+)/.*#\1#p' \
         | sort -u

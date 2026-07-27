@@ -54,16 +54,63 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# ─── _staged_matching <regex> [diff-filter] ────────────────────────
+#
+# The staged paths matching <regex>, or empty. Used by Checks 1 and 2, which
+# both used `git diff --cached --name-only | grep -E ... || true` until
+# R311y420. That form has three problems, and they are not equally real —
+# which is worth stating, because R311y418 disclosed this as a reviewer having
+# reproduced "a lock-desync sailing through on a non-ASCII staged path", and
+# RE-MEASURING that claim did not confirm it:
+#
+#   - MEASURED, and the reason this rewrite exists: `command grep` bypasses an
+#     exported shell FUNCTION or alias named grep. The author's environment
+#     exports one (a ugrep wrapper), and on input carrying invalid UTF-8 it
+#     suppressed a VALID match and returned 1, where GNU grep 3.7 on the same
+#     input returned the match. Hooks inherit exported functions, so WHICH
+#     grep graded a commit depended on the invoking shell.
+#   - NOT reproduced with GNU grep: git escapes non-ASCII paths under the
+#     default core.quotePath, and even with quotePath=false and genuinely
+#     invalid bytes, GNU grep 3.7 still returns the match. `-a` is kept
+#     anyway, so no implementation's binary-detection can suppress one.
+#   - TRUE AS WRITTEN but never observed to fire: `|| true` collapses rc>=2
+#     (grep itself failed) into "nothing staged", i.e. into a pass. That is
+#     now a hard block.
+#
+# A gate that cannot read its input must not report green — the same rule
+# scripts/lib/schema-pin-gate.sh applies to python3.
+_staged_matching() {
+    local re="$1" filter="${2:-}" all out rc=0
+    if [[ -n "$filter" ]]; then
+        if ! all="$(git diff --cached --name-only --diff-filter="$filter")"; then
+            echo "pre-commit: \`git diff --cached --diff-filter=${filter}\` failed;" >&2
+            echo "  cannot determine what this commit stages." >&2
+            return 1
+        fi
+    elif ! all="$(git diff --cached --name-only)"; then
+        echo "pre-commit: \`git diff --cached --name-only\` failed; cannot" >&2
+        echo "  determine what this commit stages." >&2
+        return 1
+    fi
+    out="$(command grep -aE "$re" <<<"$all")" || rc=$?
+    if (( rc >= 2 )); then
+        echo "pre-commit: grep exited ${rc} while filtering staged paths for" >&2
+        echo "  ${re}" >&2
+        echo "  That is grep FAILING, not 'no match'. Refusing to read it as" >&2
+        echo "  'nothing staged' and pass." >&2
+        return 1
+    fi
+    printf '%s' "$out"
+}
+
 # ─── Check 1: Cargo.toml ↔ Cargo.lock sync ─────────────────────────
 #
 # `git diff --cached --name-only` lists every path the current commit
 # stages. We grep for `crates/**/Cargo.toml` and separately for
 # `crates/Cargo.lock`; the absence of the lock when a manifest changed
 # is the R52.1 failure mode.
-staged_manifests=$(git diff --cached --name-only \
-    | grep -E '^crates/.+/Cargo\.toml$' || true)
-staged_lockfile=$(git diff --cached --name-only \
-    | grep -E '^crates/Cargo\.lock$' || true)
+staged_manifests=$(_staged_matching '^crates/.+/Cargo\.toml$') || exit 1
+staged_lockfile=$(_staged_matching '^crates/Cargo\.lock$') || exit 1
 
 if [[ -n "$staged_manifests" && -z "$staged_lockfile" ]]; then
     # Sub-check: does the working-tree Cargo.lock actually differ
@@ -99,8 +146,7 @@ fi
 # scope is intentional: incidental drift accumulated in unstaged
 # files is *also* surfaced, which is the same defense-in-depth shape
 # the CI lane provides remotely.
-staged_rs=$(git diff --cached --name-only --diff-filter=ACM \
-    | grep -E '^crates/.+\.rs$' || true)
+staged_rs=$(_staged_matching '^crates/.+\.rs$' ACM) || exit 1
 
 if [[ -n "$staged_rs" ]]; then
     if ! (cd crates && cargo fmt --all -- --check); then
@@ -142,6 +188,10 @@ fi
 wz_schema_pin_gate ':' 'pre-commit' 'the index (what this commit will contain)' \
     || exit 1
 wz_schema_pin_cochange_gate 'pre-commit' || exit 1
+# R311y420 — grade the PATH binary against the same index ceiling. The two
+# gates above both fire only after a mutation has landed; this one fires on
+# the condition that causes it, before the next mutate.
+wz_local_cli_pin_gate 'pre-commit' ':' || exit 1
 
 # ─── Check 4: Mnemosyne SSOT gate ──────────────────────────────────
 if ! command -v mnemosyne-cli >/dev/null 2>&1; then
