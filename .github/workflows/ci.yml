@@ -201,15 +201,21 @@ jobs:
         # fmt-dirty push is rejected before the expensive lanes, not after.
         # `cargo fmt --check` compiles nothing and rustfmt is already
         # materialised by rust-toolchain.toml's `components`, so the step
-        # needs no extra install — but it is not free. Measured 26-30s on
-        # the author's box (2026-07-27) over `crates` plus the 6
-        # auto-discovered deploy workspaces, at 99% CPU: the lane is
-        # single-threaded, so R311y414's 3.29x hosted ratio does NOT
-        # transfer (most of that ratio is a 32-core to 4-vCPU drop on
-        # parallel cargo-test lanes). Single-thread ratios measured on this
-        # job's other 99%-CPU lanes are 0.9x (D) and 1.56x (C0), which
-        # PROJECTS ~45-75s here. That is a projection: this step has never
-        # run hosted. Replace it with the measured value afterwards.
+        # needs no extra install — but it is not free. MEASURED HOSTED:
+        # 23s on run 30233462393, its first hosted execution, covering
+        # `crates` plus the 6 auto-discovered deploy workspaces (the log
+        # names all seven). The job came in at 599s, inside the 584-928s
+        # band the feature-gates comment records for the runs before this
+        # step existed.
+        # R311y415 projected ~45-75s and was WRONG BY 2-3x, high. The
+        # local number is 26-30s at 99% CPU, so the round reasoned from
+        # single-thread ratios on this job's other 99%-CPU lanes (0.9x for
+        # Layer D, 1.56x for C0) instead of R311y414's 3.29x parallel-lane
+        # ratio. The real ratio for this lane is ~0.8x: the runner beats
+        # the author's box on it. Rejecting the 3.29x borrow was right —
+        # it would have said 80-100s — but a borrowed ratio stayed wrong
+        # even after narrowing to same-CPU-profile lanes, and only the
+        # hosted run settled it.
         #
         # It DOES need the recursive checkout above: `cargo fmt --all`
         # resolves the whole workspace manifest, so a tree without
@@ -1122,8 +1128,10 @@ jobs:
     # 30210387310 (2026-07-26): 584-928s, median 630s — ~35% of its
     # 30-minute budget, so it is not at its TIME ceiling and has not been
     # for some time. The window is pinned to those run ids on purpose: "the
-    # last 12 runs" is how 26m22s rotted. Note the band predates the Layer 0
-    # step this same commit adds to that job (projected +45-75s).
+    # last 12 runs" is how 26m22s rotted. The band predates the Layer 0 step
+    # R311y415 added to that job; that step measured 23s hosted on run
+    # 30233462393, where the job totalled 599s — inside the band, so it does
+    # not move this rationale.
     # What survives is the DISK half: that job's own comment above declares
     # "THIS JOB HAS NO OTHER DISK HEADROOM", and every extra feature-subset
     # lane is a DISTINCT feature set and so a DISTINCT set of `crates/target`
