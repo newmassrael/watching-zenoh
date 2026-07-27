@@ -53,7 +53,14 @@ const PUBLISH_VALUE: &str = "hello-ws-acceptor-via-zenohd";
 /// the wz WebSocket acceptor, and a pico publisher's Put routes across that ws
 /// link to the wz subscriber — the `transport-link-ws` atom's first cross-impl
 /// proof in the zenohd->wz (acceptor) direction.
+// R311y422 — the SAME run is the locator atom's witness: the `--listen
+// ws/...` string above is parsed by wz's OWN grammar (locator.rs Proto::Ws) before
+// any socket exists, so a zenohd that connects proves wz read the foreign-
+// facing locator form correctly. A4-5 containment is exempt for a
+// FOUNDATIONAL atom (it names no cfg site), so this claim rests on that
+// reading, not on the audit -- verified by hand at R311y422.
 // wz-proves: transport-link-ws zenohd->wz
+// wz-proves: locator-ws zenohd->wz
 // wz-proves: session-unicast-open zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features ws + zenohd + zenoh-pico z_put); runs via --ignored"]

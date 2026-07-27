@@ -73,7 +73,14 @@ const PUBLISH_VALUE: &str = "hello-udp-acceptor-via-zenohd";
 /// the wz UDP-demux acceptor, and a pico publisher's Put routes across that udp link
 /// to the wz subscriber — the `transport-link-udp` atom's first cross-impl proof in
 /// the zenohd->wz (acceptor) direction, and the first datagram-acceptor cross-impl.
+// R311y422 — the SAME run is the locator atom's witness: the `--listen
+// udp/...` string above is parsed by wz's OWN grammar (locator.rs Proto::Udp) before
+// any socket exists, so a zenohd that connects proves wz read the foreign-
+// facing locator form correctly. A4-5 containment is exempt for a
+// FOUNDATIONAL atom (it names no cfg site), so this claim rests on that
+// reading, not on the audit -- verified by hand at R311y422.
 // wz-proves: transport-link-udp zenohd->wz
+// wz-proves: locator-udp zenohd->wz
 // wz-proves: session-unicast-open zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e: needs zenohd (stock) + zenoh-pico z_pub; runs via --ignored"]

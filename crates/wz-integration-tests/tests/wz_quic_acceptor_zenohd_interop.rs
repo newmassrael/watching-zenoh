@@ -78,7 +78,14 @@ impl Drop for TempFiles {
 /// link to the wz subscriber — the `transport-link-quic` atom's first cross-impl
 /// proof in the zenohd->wz (acceptor) direction, and the exercise that makes the new
 /// `BoundListener::Quic` accept seam reachable from an independent impl.
+// R311y422 — the SAME run is the locator atom's witness: the `--listen
+// quic/...` string above is parsed by wz's OWN grammar (locator.rs Proto::Quic) before
+// any socket exists, so a zenohd that connects proves wz read the foreign-
+// facing locator form correctly. A4-5 containment is exempt for a
+// FOUNDATIONAL atom (it names no cfg site), so this claim rests on that
+// reading, not on the audit -- verified by hand at R311y422.
 // wz-proves: transport-link-quic zenohd->wz
+// wz-proves: locator-quic zenohd->wz
 // wz-proves: session-unicast-open zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features quic + zenohd + zenoh-pico z_put); runs via --ignored"]
