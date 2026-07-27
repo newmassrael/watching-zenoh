@@ -139,14 +139,20 @@ git config core.hooksPath .githooks
 
 Three hooks are then active.
 
-- **pre-commit** — runs `mnemosyne-cli validate-workspace`
-  (cross-ref orphan + round-trip + atomic ledger drift gates).
+- **pre-commit** — Cargo.lock sync, `cargo fmt --check` on staged
+  `crates/**.rs`, the atomic-store schema pin, and
+  `mnemosyne-cli validate-workspace` (cross-ref orphan + atomic
+  ledger drift gates).
 - **commit-msg** — enforces COMMIT_FORMAT.md (subject + body
   72-byte lines, no emoji, no co-author, no wrapped bullets).
-- **pre-push** — re-validates at push time to catch manual edits,
-  amends, and rebases that pre-commit would not see.
+- **pre-push** — the schema pin against every pushed commit, then
+  re-validates at push time to catch manual edits, amends, and
+  rebases that pre-commit would not see.
 
-`pre-commit` and `pre-push` require `mnemosyne-cli` on PATH.
+`pre-commit` and `pre-push` require `mnemosyne-cli` on PATH, and
+`python3` (the schema pin parses the atomic store as JSON). Both are
+hard requirements: a gate that cannot read its input must not report
+green, so an absent tool blocks rather than skips.
 
 ```sh
 cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli

@@ -22,12 +22,14 @@
 # ~/.cargo/bin by default; without --force a `command -v` guard would run a
 # stale cached CLI — the R408 `missing field docs` failure mode).
 #
-# READ, NOT SOURCED (R311y418): .githooks/pre-commit needs MNEMOSYNE_MAX_SCHEMA
-# below and extracts it textually, from the git INDEX, with a line-anchored
-# pattern. It deliberately does not source this file — that would execute an
-# installer inside a commit hook. So the assignment must stay on one line in
-# the literal form MNEMOSYNE_MAX_SCHEMA="<decimal>", and must appear exactly
-# once; the hook hard-fails on any other count rather than guessing.
+# READ, NOT SOURCED (R311y418): scripts/lib/schema-pin-gate.sh, used by both
+# .githooks/pre-commit and .githooks/pre-push, extracts BOTH constants below
+# textually from a git object, with line-anchored patterns. It deliberately
+# does not source this file — that would execute an installer inside a git
+# hook, which the first cut of R311y418 briefly did. So each assignment must
+# stay on ONE unindented line in the literal form NAME="<value>", appearing
+# exactly once; the gate hard-fails on any other count rather than guessing,
+# and rejects a leading zero (bash `(( ))` reads 043 as octal).
 
 set -euo pipefail
 
@@ -72,13 +74,24 @@ MNEMOSYNE_REV="d7f048b56a734790b4a9875d53b9c7c9a579e4f9"
 # :1924 rejects `on_disk_version > CURRENT_SCHEMA_VERSION` outright. A reader
 # cannot lazy-migrate DOWN to an older store shape, so a local mutate that
 # migrates the store past this number reds hosted Layer A and takes
-# A2/A3/A4/B/B2 with it. That is R311y406 and R311y416, the same trap twice.
+# A2/A3/A4/B/B2 with it. That has now happened FOUR times, every time
+# discovered only on hosted CI — R311y15 (store=23 expected <= 9), R311y401
+# (store=41 expected <= 39, repaired at y403), R311y406 (42 vs 41) and
+# R311y416 (43 vs 42, repaired at y417). R311y417's carry said "twice";
+# enumerating the ledger rather than inheriting that number gives four.
 #
-# This constant exists so .githooks/pre-commit can turn that hosted red into a
-# local one: it reads the number below out of the index and refuses any commit
-# whose store schema_version exceeds it. MNEMOSYNE_REV and MNEMOSYNE_MAX_SCHEMA
-# are ONE fact in two forms — never move the rev without re-reading
-# CURRENT_SCHEMA_VERSION at the new rev and moving this with it.
+# This constant exists so the local hooks can turn that hosted red into a local
+# one: scripts/lib/schema-pin-gate.sh reads the number below out of a git
+# object and refuses any commit (index) or push (pushed commits) whose store
+# schema_version exceeds it. MNEMOSYNE_REV and MNEMOSYNE_MAX_SCHEMA are ONE
+# fact in two forms — never move the rev without re-reading
+# CURRENT_SCHEMA_VERSION at the new rev and moving this with it. That pairing
+# is now gated too: pre-commit refuses a ceiling that moves while the rev
+# stands still, because the ceiling is the gate's ONLY oracle and raising it
+# alone merely silences the gate. What is still NOT gated, and is the honest
+# next step, is that the new rev's CURRENT_SCHEMA_VERSION really equals the new
+# ceiling — that needs the pinned source, so it belongs in ci.yml beside the
+# `cargo install --rev` below.
 # shellcheck disable=SC2034  # read by .githooks/pre-commit as text, so it has
                             # no in-script use; keep the one-line literal form.
 MNEMOSYNE_MAX_SCHEMA="43"

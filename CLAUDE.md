@@ -127,17 +127,20 @@ The clause is preserved here as historical context only.
 git config core.hooksPath .githooks
 ```
 
-- **pre-commit** — four checks, all fast (~0.4s on this tree):
-  (1) a staged `crates/**/Cargo.toml` without its `crates/Cargo.lock`
-  (R52.1); (2) `cargo fmt --check` when any `crates/**.rs` is staged
-  (R311au); (3) **schema pin (R311y418)** — refuses the commit when the
-  atomic store's `schema_version` exceeds `MNEMOSYNE_MAX_SCHEMA` in
-  `scripts/install-mnemosyne-cli.sh`, i.e. when a local mutate has
-  migrated the store past what the pinned CI reader can open. Check 4
-  is blind to this in the shape that has fired (the local binary that
-  just migrated the store can still read it, so it passes while hosted
-  Layer A reds); both R311y406 and R311y416 surfaced only on hosted
-  CI. Bump
+- **pre-commit** — four checks; ~0.35s for a ledger-only commit, plus
+  `cargo fmt` when a `crates/**.rs` is staged. (1) a staged
+  `crates/**/Cargo.toml` without its `crates/Cargo.lock` (R52.1);
+  (2) `cargo fmt --check` when any `crates/**.rs` is staged (R311au);
+  (3) **schema pin (R311y418)**, via `scripts/lib/schema-pin-gate.sh` —
+  refuses the commit when the **index's** store `schema_version` exceeds
+  `MNEMOSYNE_MAX_SCHEMA` in `scripts/install-mnemosyne-cli.sh`, i.e.
+  when a local mutate has migrated the store past what the pinned CI
+  reader can open; and when that ceiling moves without `MNEMOSYNE_REV`
+  moving too, since raising the ceiling alone only silences the gate.
+  Check 4 is blind to the schema case in the shape that has fired (the
+  local binary that just migrated the store can still read it, so it
+  passes while hosted Layer A reds); all four firings — R311y15, y401,
+  y406, y416 — surfaced on hosted CI, never locally. Bump
   `MNEMOSYNE_REV` and `MNEMOSYNE_MAX_SCHEMA` together, in their own
   commit. (4) `mnemosyne-cli validate-workspace` — blocks any commit
   that introduces a new T1 orphan or a resolved-but-still-ledgered
@@ -146,13 +149,17 @@ git config core.hooksPath .githooks
   ≤72 bytes per line, no multi-line bullet wraps, no
   Co-Authored-By / "Generated with Claude Code" / emoji).
 - **pre-push** — FAST local gate (R311y386), NOT a full CI mirror.
-  Runs only (1) `mnemosyne-cli validate-workspace` — the SSOT
+  Runs only (1) the **schema pin against every pushed commit**
+  (R311y418) — `git commit` is not the only route to origin, and
+  cherry-pick / rebase / merge / `--no-verify` all skip pre-commit
+  entirely; (2) `mnemosyne-cli validate-workspace` — the SSOT
   integrity gate (seconds; catches a bypassed typed-mutate / new T1
   orphan / frozen-ledger violation before origin; re-run past
-  pre-commit because amends / rebases change post-commit state) —
-  and (2) `cargo test -p <crate>` for ONLY the crates the push's
-  diff changes (default features; crate DIR → package name via its
-  Cargo.toml). The FULL validation surface — the feature-subset
+  pre-commit because amends / rebases change post-commit state; an
+  absent `mnemosyne-cli` is a hard FAIL since R311y418, not the SKIP
+  it was) — and (3) `cargo test -p <crate>` for ONLY the crates the
+  push's diff changes (default features; crate DIR → package name via
+  its Cargo.toml). The FULL validation surface — the feature-subset
   matrix, C2 clippy, Layers B/B2 codegen, F/G/Q/Z footprint /
   cross-compile / interop, every non-default combo — is the HOSTED
   CI's job: it runs on every push to main and is the single full
@@ -169,11 +176,16 @@ git config core.hooksPath .githooks
 `pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
 (install via
 `cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli`).
-`pre-commit` additionally requires `python3` — it reads the store's
-`schema_version` with a real JSON parse, because the literal
-`schema_version` also occurs in ledger prose inside that file. Its
+`pre-commit` and `pre-push` additionally require `python3` — the schema
+pin reads the store's `schema_version` with a real JSON parse, which is
+indifferent to serialization and type-checks the value (the literal
+`schema_version` also occurs 22× in ledger prose inside that file). Its
 absence is a hard FAIL, not a skip: a gate that cannot read its input
-must not report green (`scripts/run-ci.sh` Layer C0 rule).
+must not report green. `run-ci.sh` is split on this — Layers D (:4603)
+and F (:4873) SKIP-green on python3 — but each sits behind a
+`WZ_*_REQUIRE` arming flag with a hosted hard-fail behind it, which a
+git hook has neither of; Layer C0 (:1061) FAILs, and that is the shape
+here.
 `commit-msg` needs only bash + GNU grep with the `-P` flag.
 
 ## License + SPDX header policy

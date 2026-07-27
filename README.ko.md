@@ -133,15 +133,20 @@ git config core.hooksPath .githooks
 
 세 hook 이 자동 작동한다.
 
-- **pre-commit** — `mnemosyne-cli validate-workspace` (T1
-  cross-ref orphan + round-trip + atomic ledger drift 게이트).
+- **pre-commit** — Cargo.lock 동기화, staged `crates/**.rs` 에 대한
+  `cargo fmt --check`, atomic store schema pin,
+  `mnemosyne-cli validate-workspace` (T1 cross-ref orphan + atomic
+  ledger drift 게이트).
 - **commit-msg** — COMMIT_FORMAT.md 강제 (subject + 본문 72
   byte/line, no emoji, no co-author, no wrapped bullets).
-- **pre-push** — push 시점 재검증으로 manual edit, amend, rebase
-  직후 상태를 잡는다 (pre-commit 미커버 영역).
+- **pre-push** — push 되는 모든 커밋에 schema pin 을 적용한 뒤,
+  push 시점 재검증으로 manual edit, amend, rebase 직후 상태를
+  잡는다 (pre-commit 미커버 영역).
 
-`pre-commit` 과 `pre-push` 는 `mnemosyne-cli` 가 PATH 에 있어야
-한다.
+`pre-commit` 과 `pre-push` 는 `mnemosyne-cli` 와 `python3` 가 PATH 에
+있어야 한다 (schema pin 이 atomic store 를 JSON 으로 파싱한다). 둘 다
+hard requirement 다 — 입력을 읽지 못하는 게이트가 green 을 보고해서는
+안 되므로, 도구가 없으면 skip 이 아니라 block 한다.
 
 ```sh
 cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli

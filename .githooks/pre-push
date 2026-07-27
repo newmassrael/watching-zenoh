@@ -3,8 +3,10 @@
 #
 # POLICY (R311y386): the local push gate is DELIBERATELY NOT a full CI mirror.
 # Local push runs only:
-#   1. mnemosyne-cli validate-workspace   — the SSOT integrity gate (seconds).
-#   2. cargo test -p <crate>              — for ONLY the crates this push
+#   1. schema pin vs the pushed commits   — R311y418; the one failure class
+#                                           gate 2 structurally cannot see.
+#   2. mnemosyne-cli validate-workspace   — the SSOT integrity gate (seconds).
+#   3. cargo test -p <crate>              — for ONLY the crates this push
 #                                           changes (default features).
 # The FULL validation surface — the feature-subset matrix, clippy, codegen
 # (Layers B/B2), footprint (F), cross-compile (G), QEMU (Q), interop (Z),
@@ -47,11 +49,13 @@ zero_sha="0000000000000000000000000000000000000000"
 local_sha=""
 remote_sha=""
 has_work=0
+push_shas=()          # every non-delete local sha, for the per-ref schema gate
 while read -r _local_ref l_sha _remote_ref r_sha; do
     if [[ "$l_sha" != "$zero_sha" ]]; then
         has_work=1
         local_sha="$l_sha"
         remote_sha="$r_sha"
+        push_shas+=("$l_sha")
     fi
 done
 if [[ $has_work -eq 0 ]]; then
@@ -59,25 +63,60 @@ if [[ $has_work -eq 0 ]]; then
     exit 0
 fi
 
-# ─── gate 1 — SSOT integrity (validate-workspace, seconds) ──────────
+# ─── gate 1 — schema pin, on the COMMITS BEING PUSHED (R311y418) ────
+# pre-commit grades the index, which covers `git commit` and nothing else:
+# cherry-pick, rebase, merge and --no-verify all reach origin without ever
+# running it (all three reproduced during the R311y418 review — a store
+# migrated on a side branch landed on main via cherry-pick, unchecked).
+# This is the same argument gate 2 already makes for validate-workspace,
+# and it is STRONGER here, because gate 2 structurally cannot see this
+# failure: it runs the LOCAL binary, which in every firing of this class
+# was the binary that migrated the store, so it reads it fine and exits 0.
+#
+# Graded per pushed ref rather than only the last one — a multi-ref push
+# must not smuggle a migrated store in on the ref that got overwritten.
+# shellcheck disable=SC1091  # constant path, resolved at run time
+if ! source scripts/lib/schema-pin-gate.sh; then
+    echo "pre-push: scripts/lib/schema-pin-gate.sh missing or unreadable." >&2
+    exit 1
+fi
+for sha in "${push_shas[@]}"; do
+    if ! wz_schema_pin_gate "${sha}:" 'pre-push' "pushed commit ${sha:0:12}"; then
+        echo "" >&2
+        echo "pre-push: bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+        exit 1
+    fi
+done
+
+# ─── gate 2 — SSOT integrity (validate-workspace, seconds) ──────────
 # Fast and load-bearing: catches a bypassed typed-mutate primitive (raw
 # Edit on the sidecar JSON, a frozen-ledger violation, a new T1 orphan)
 # BEFORE it reaches origin. pre-commit runs this too, but pre-push re-runs
 # it because amends / rebases / manual atomic.json edits change post-commit
-# state the commit hook never saw. Advisory when the tool is absent.
-if command -v mnemosyne-cli >/dev/null 2>&1; then
-    echo "pre-push: mnemosyne-cli validate-workspace (SSOT gate) ..."
-    if ! mnemosyne-cli validate-workspace; then
-        echo "" >&2
-        echo "pre-push: validate-workspace FAILED — fix before push." >&2
-        echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-        exit 1
-    fi
-else
-    echo "pre-push: mnemosyne-cli not on PATH; skipping SSOT gate (install to enable)."
+# state the commit hook never saw.
+#
+# R311y418: an absent mnemosyne-cli is now a hard FAIL, not the SKIP this
+# was. The SKIP was unreachable in the flow it was written for — pre-commit
+# hard-fails on the same condition, so a developer without the tool cannot
+# produce a commit through the normal path anyway — and reachable only in
+# the flows where the SSOT gate matters most (--no-verify, rebase,
+# cherry-pick, hooks installed after the fact). It bought nothing and cost
+# the gate; a SKIP is green.
+if ! command -v mnemosyne-cli >/dev/null 2>&1; then
+    echo "pre-push: mnemosyne-cli not on PATH — install with" >&2
+    echo "  cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli" >&2
+    echo "  Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+echo "pre-push: mnemosyne-cli validate-workspace (SSOT gate) ..."
+if ! mnemosyne-cli validate-workspace; then
+    echo "" >&2
+    echo "pre-push: validate-workspace FAILED — fix before push." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
 fi
 
-# ─── gate 2 — changed-crate tests (default features, fast) ──────────
+# ─── gate 3 — changed-crate tests (default features, fast) ──────────
 # Diff range: <remote_sha>..<local_sha>. A zero/absent remote_sha (a new
 # ref or first push) has no remote base — fall back to origin/main if it
 # exists, else skip (nothing to diff against). Only crates/<name>/ changes
