@@ -60,17 +60,39 @@ set -euo pipefail
 # actually gates CI. Reinstalling the local CLI from d7f048b5 would restore the
 # stricter invariant; it was left alone to avoid clobbering in-progress work.
 #
+# --- R311y429: d7f048b5 -> b867bfe2 (R786). NOT a schema bump ---
+# The FIRST bump here driven by a new VALIDATOR rather than a schema migration,
+# and the ceiling deliberately does not move: CURRENT_SCHEMA_VERSION is 43 at
+# both revs (read at b867bfe2, not inherited — crates/mnemosyne-atomic/src/lib.rs
+# :1678) and the store is 43. The co-change gate permits this direction; it
+# refuses only a CEILING that moves while the rev stands still.
+#
+# WHY MOVE AT ALL, since nothing was red on CI: mnemosyne Round 783 added the
+# citation-gate coverage check, which FAILS any workspace whose Rust trees are
+# neither scanned nor declared. The author's PATH binary carried it while this
+# pin did not, so `validate-workspace` reded in the pre-commit hook while hosted
+# CI (which installs THIS rev) stayed green — the inverse of the usual failure
+# and just as misleading. R311y429 adopts the gate's config
+# (mnemosyne.toml [plugins.set_equality_validator]) and moves the pin in the
+# SAME round, because a config the pinned reader cannot parse is a red of its
+# own: SetEqualityValidatorConfig is #[serde(deny_unknown_fields)].
+#
+# The doctrine deviation disclosed below is REPAIRED by this bump: b867bfe2 is
+# both origin/main upstream AND the exact rev the local PATH binary reports, so
+# pin, local reader and CI reader are one rev again.
+#
 # --- the R311y406 precedent this bump follows (kept verbatim) ---
 # The R311y406 store mutations (this repo's own commits, with the same
 # b95b45d0 CLI locally) migrated the store 41 -> 42, and the prior pin (R311y403,
 # d9e2beed) defines only schema <= 41, so its validate-workspace rejected the
 # schema-42 store ("schema version mismatch: store=42 expected <= 41") — the
 # Layer A red on the R311y406 hosted CI run.
-MNEMOSYNE_REV="d7f048b56a734790b4a9875d53b9c7c9a579e4f9"
+MNEMOSYNE_REV="b867bfe247c895e84f67c4439760397194e3bca8"
 
 # The pinned rev's CURRENT_SCHEMA_VERSION: the HIGHEST atomic-store schema this
 # CLI can read. Verified at the pin, not inherited from prose —
-# crates/mnemosyne-atomic/src/lib.rs:1678 at d7f048b5 defines it as 43, and
+# crates/mnemosyne-atomic/src/lib.rs:1678 at b867bfe2 defines it as 43 (43 at
+# the prior d7f048b5 too, which is why R311y429 moves the rev alone), and
 # :1924 rejects `on_disk_version > CURRENT_SCHEMA_VERSION` outright. A reader
 # cannot lazy-migrate DOWN to an older store shape, so a local mutate that
 # migrates the store past this number reds hosted Layer A and takes
