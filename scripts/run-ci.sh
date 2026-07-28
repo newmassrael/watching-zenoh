@@ -5053,9 +5053,17 @@ layer_e_ap_demo_round_trip() {
     # pre-push full run-ci surfaced: E6h ran the right binary, but this catch-all also
     # ran it against the default one). The `wz_storage_host` substring keeps it out;
     # it runs only in E6h.
+    # R311y442 — same for `zenoh_ext`: the four wz<->zenoh-ext advanced-pubsub legs
+    # need a wz-ap-demo built `--features advanced` (Layer Z builds it) for the
+    # `--advanced-subscribe` / `--advanced-publish` CLI. On THIS sweep's default
+    # binary those flags are INERT, and the legs assert that explicitly rather
+    # than reading an empty sample set as success — so running them here would be
+    # a red with a correct diagnosis and a wrong lane. Every one of the four names
+    # carries the `zenoh_ext` token FOR this skip; they run only in Z, where
+    # `_runci_guarded_test Z 4` pins that all four executed.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
-        --skip wz_storage_host)
+        --skip wz_storage_host --skip zenoh_ext)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -6473,7 +6481,15 @@ layer_z_zenohd_interop() {
     # leg dials through the unchanged binary. compression is in zenoh's DEFAULT
     # features and zenohd enables `zenoh/default`, so the DEFAULT oracle speaks it
     # once configured -- NO special oracle (unlike vsock/unixpipe).
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock --quiet) || return 1
+    # R311y442 — `advanced` added so the Layer Z binary carries the
+    # `--advanced-subscribe` / `--advanced-publish` CLI for the advanced-pubsub
+    # cross-impl legs below. It forwards BOTH halves of the plane through the wz
+    # facade (`ext-pubsub-advanced-history` for the asking side,
+    # `-advanced-publisher` for the answering side), because the two legs witness
+    # opposite directions and neither alone covers the other. Additive like the
+    # rest of this list: the advanced subscriber / publisher are declared only when
+    # their flags are passed, so every other leg dials through the unchanged binary.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients
@@ -6565,6 +6581,32 @@ layer_z_zenohd_interop() {
     # pins transport-fragmentation.
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_fragment_rx_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+    # R311y442 — wz<->zenoh-ext ADVANCED-PUBSUB cross-impl, the FIRST foreign
+    # witness the `@adv` plane has ever had. Every advanced-pubsub test before
+    # this was wz<->wz, which cannot see a selector-dialect divergence: the same
+    # wrong spelling sits on both ends and they agree. Two such divergences were
+    # live (a `&` list separator where zenoh and pico both use `;`, and a missing
+    # `_anyke` without which zenoh's responder refuses every `@adv` reply), and
+    # they COMPOUND — under `&` the whole selector reads as one `_max` value and
+    # swallows `_anyke` with it.
+    #
+    # The oracle is NOT zenohd: a router holds no AdvancedCache, and zenoh-pico
+    # has no advanced-pubsub plane at all, so the counterparty must be an
+    # application built on zenoh-ext. build-zenohd.sh provisions upstream's own
+    # `z_advanced_pub` / `z_advanced_sub` examples from the same pinned checkout.
+    #
+    # FOUR legs, and the pairing is what makes them evidence: two DISCRIMINATORS
+    # that go red on the pre-fix wire (wz's history GET draining a real cache;
+    # the `_max` cap honoured on a TWO-parameter selector, which is what shows
+    # the parameters after the first are parsed as list elements at all), plus
+    # two CONTROLS that stay green in both arms (a non-`_anyke` GET refused by
+    # the same cache, proving the gate is live rather than the fixture permissive;
+    # and the reverse direction, upstream's own advanced subscriber draining a wz
+    # cache, which exercises wz as RESPONDER and so binds the cache / publisher
+    # atoms rather than the subscriber-side ones). Measured: 2 red / 2 green
+    # pre-fix, 4 green post-fix.
+    _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_advanced_pubsub_zenoh_ext_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):
     # a real zenohd DIALS the wz `--listen ws/...` acceptor over ws (the RFC6455
     # server upgrade wired in bind_locator/accept_locator), and a pico z_put routes

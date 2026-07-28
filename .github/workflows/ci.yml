@@ -837,7 +837,7 @@ jobs:
           ZENOHD_ALLOW_CLONE: "1"
         run: bash scripts/build-zenohd.sh
 
-      - name: Assert zenohd + the storage plugin are actually present
+      - name: Assert zenohd + the storage plugin + the zenoh-ext oracles are present
         # Trusting the cache is how a "restored" build quietly becomes a missing one. Layer
         # Z's guards would SKIP green on either absence, and Layer A4 would keep counting
         # its proofs as executed, so check before the lanes run rather than after.
@@ -846,6 +846,14 @@ jobs:
             || { echo "::error::zenohd missing after build/restore"; exit 1; }
           test -f target/zenohd/libzenoh_plugin_storage_manager.so \
             || { echo "::error::storage-manager plugin missing — the storage-replication proof would SKIP green"; exit 1; }
+          # R311y442 — the advanced-pubsub oracles. They are the ONLY foreign
+          # counterparty that plane can have (zenohd is a router with no
+          # AdvancedCache; zenoh-pico has no advanced-pubsub at all), so their
+          # absence takes the whole `@adv` cross-impl family with it.
+          for ex in z_advanced_pub z_advanced_sub; do
+            test -x "target/zenohd/$ex" \
+              || { echo "::error::$ex missing — the wz<->zenoh-ext advanced-pubsub proofs cannot run"; exit 1; }
+          done
 
       - name: Build zenoh-pico CLI binaries
         run: bash scripts/build-zenoh-pico-cli.sh

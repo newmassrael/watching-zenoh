@@ -240,6 +240,31 @@ namespace = ["wz/routing-namespace"]
 # it from `--connect` — the plumbing the scouting cross-impl leg needs to prove
 # wz actively scouts a foreign zenohd and dials what its HELLO advertised.
 scouting-active = ["wz/scouting-active"]
+# R311y442 — opt-in ADVANCED-PUBSUB history subscriber (`--advanced-subscribe
+# <keyexpr>` / `--history-max <N>`), forwarding the wz facade's
+# `ext-pubsub-advanced-history` (which pulls -recovery -> -subscriber, and with
+# them the `@adv` recovery/history GET plane). The mirror of `ws`/`tls`/`quic`:
+# NOT in `default` (preset-ap-client omits the whole ext-pubsub plane), so the
+# footprint baseline and every other lane build are unchanged; only run-ci Layer
+# Z builds wz-ap-demo with it.
+#
+# Its purpose is a proof vehicle that did not exist before: wz's startup history
+# GET had NO foreign witness at all — every advanced-pubsub test in the tree was
+# wz<->wz, and a wz<->wz pair agrees on a selector dialect even when that dialect
+# is wrong. This feature lets a wz AdvancedSubscriber ask a REAL zenoh-ext
+# AdvancedCache (the `z_advanced_pub` example oracle) for its history, which is
+# the only arrangement that can observe the `_anyke` gate and the `;` list
+# separator at all.
+#
+# It carries BOTH directions on purpose. `-history` (which pulls -recovery ->
+# -subscriber) is the ASKING half; `-publisher` (which pulls -cache) is the
+# ANSWERING half, and without it the demo could only ever be the client of a
+# foreign cache. The two legs together are what let each side of the plane be
+# witnessed by a real zenoh-ext peer rather than by its wz twin.
+advanced = [
+    "wz/ext-pubsub-advanced-history",
+    "wz/ext-pubsub-advanced-publisher",
+]
 # R311qa — opt-in multi-peer ROUTER mode (`--router <addr>`): the catalog
 # `routing-router` atom's foundation (bind once, hold N concurrent peer faces,
 # no forwarding yet). Forwards the wz facade's `routing-router` marker feature,

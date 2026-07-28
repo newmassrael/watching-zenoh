@@ -91,11 +91,26 @@ fi
 # zenohd/Cargo.toml. Skipped entirely when ZENOHD_FORCE_CRATES_IO=1.
 ZH=""
 if [[ "${ZENOHD_FORCE_CRATES_IO:-0}" -ne 1 ]]; then
-    for c in "$HOME"/.cargo/git/checkouts/zenoh-*/*/zenohd/Cargo.toml; do
-        [[ -f "$c" ]] || continue
-        ZH="$(cd "$(dirname "$c")/.." && pwd)"
-        break
-    done
+    # R311y442 — an EXPLICIT checkout override, tried before the cargo-git glob.
+    # A developer who keeps a plain `git clone` of zenoh (rather than a checkout
+    # cargo happened to materialise) otherwise falls silently to source B, and
+    # source B yields neither the storage-manager cdylib nor the zenoh-ext
+    # example oracles — so two interop families go dark on a machine that has
+    # the source right there. An env var, deliberately, not a path in this file:
+    # a committed absolute path is wrong on the next clone (the CLAUDE.md rule).
+    if [[ -n "${ZENOHD_SRC:-}" ]]; then
+        if [[ ! -f "$ZENOHD_SRC/zenohd/Cargo.toml" ]]; then
+            echo "build-zenohd: ZENOHD_SRC=$ZENOHD_SRC has no zenohd/Cargo.toml" >&2
+            exit 1
+        fi
+        ZH="$(cd "$ZENOHD_SRC" && pwd)"
+    else
+        for c in "$HOME"/.cargo/git/checkouts/zenoh-*/*/zenohd/Cargo.toml; do
+            [[ -f "$c" ]] || continue
+            ZH="$(cd "$(dirname "$c")/.." && pwd)"
+            break
+        done
+    fi
 fi
 
 # Source A2 (R311y264) — a SOURCE TREE from a shallow clone of the pinned tag, for a
@@ -152,11 +167,28 @@ if [[ -n "$ZH" ]]; then
     # oracle), so skip the extra cdylib build for it.
     if [[ -n "$VARIANT_FEATURE" ]]; then
         SO_SRC=""
+        EXT_EXAMPLES_SRC=""
     else
         echo "build-zenohd: building zenoh-plugin-storage-manager (release) ..." >&2
         CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
             -p zenoh-plugin-storage-manager --release --manifest-path "$ZH/Cargo.toml"
         SO_SRC="$BUILD_DIR/release/libzenoh_plugin_storage_manager.so"
+        # R311y442 — also build the zenoh-ext ADVANCED-PUBSUB example binaries from
+        # the SAME checkout. They are the only foreign counterparty the `@adv` legs
+        # can have: zenohd is a router and holds no AdvancedCache, and zenoh-pico
+        # has no advanced-pubsub plane at all, so the cache only exists inside an
+        # APPLICATION built on zenoh-ext — which is what these examples are.
+        # `zenoh-ext-examples` depends on zenoh-ext with `unstable`, and that is
+        # load-bearing rather than incidental: `Query::_reply_sample` only honours
+        # `_anyke` under `zenoh/unstable` (`zcondfeat!`), so a build without it
+        # would refuse every `@adv` reply regardless of what the querier sent and
+        # the oracle would "fail" identically for a conformant and a broken wz.
+        # Only source A can produce them, exactly as for the plugin cdylib above.
+        echo "build-zenohd: building zenoh-ext examples (z_advanced_pub/sub) ..." >&2
+        CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
+            -p zenoh-ext-examples --example z_advanced_pub --example z_advanced_sub \
+            --release --manifest-path "$ZH/Cargo.toml"
+        EXT_EXAMPLES_SRC="$BUILD_DIR/release/examples"
     fi
 else
     # A transport variant CANNOT come from source B: `cargo install` builds the
@@ -178,6 +210,8 @@ else
     SRC_BIN="$BUILD_DIR/cargo-install/bin/zenohd"
     # No plugin cdylib from `cargo install`; the A10 interop test SKIPs without it.
     SO_SRC=""
+    # Nor the zenoh-ext examples: `cargo install` publishes zenohd's binaries only.
+    EXT_EXAMPLES_SRC=""
 fi
 
 mkdir -p "$INSTALL_DIR"
@@ -190,4 +224,13 @@ if [[ -n "$SO_SRC" && -f "$SO_SRC" ]]; then
 else
     echo "build-zenohd: storage-manager plugin NOT provisioned (source B / crates.io);" >&2
     echo "  the wz<->zenohd storage replication interop test will SKIP." >&2
+fi
+if [[ -n "$EXT_EXAMPLES_SRC" ]]; then
+    for ex in z_advanced_pub z_advanced_sub; do
+        install -m 0755 "$EXT_EXAMPLES_SRC/$ex" "$INSTALL_DIR/$ex"
+        echo "build-zenohd: installed -> $INSTALL_DIR/$ex" >&2
+    done
+else
+    echo "build-zenohd: zenoh-ext examples NOT provisioned (variant or source B);" >&2
+    echo "  the wz<->zenoh-ext advanced-pubsub interop legs cannot run." >&2
 fi

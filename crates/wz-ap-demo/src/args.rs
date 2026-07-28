@@ -382,6 +382,66 @@ pub(crate) struct DeclareEmitSpec {
     /// the leg-7 interop ordering race (a late-arriving `history = false`
     /// subscriber would miss an already-alive token).
     pub(crate) liveliness_subscriber_history: bool,
+    /// R311y442 — `--advanced-subscribe <keyexpr>`: declare an
+    /// [`wz::runtime_tokio::AdvancedSubscriber`] with a STARTUP HISTORY GET, so a
+    /// subscriber that joins after a publisher has already published recovers the
+    /// cached samples from that publisher's `@adv` cache. Feature-uniform (always
+    /// parsed) on the same terms as `namespace` / `lowlatency`: `None` without the
+    /// flag OR when built without the `advanced` feature, in which case the flag is
+    /// inert and `install_session_handles` says so on stderr rather than declaring
+    /// a plain subscriber that would silently look like a working history.
+    pub(crate) advanced_subscriber_keyexpr: Option<String>,
+    /// R311y442 — `--history-max <N>`: the `_max=N` cap on the startup history GET
+    /// ([`HistoryConfig::max_samples`]). `None` leaves the GET uncapped, which is
+    /// the zenoh default. Only read when `advanced_subscriber_keyexpr` is `Some`.
+    pub(crate) advanced_history_max: Option<usize>,
+    /// R311y442 — `--history-max-age <secs>`: the `_time=[now(-secs)..]` age bound
+    /// on the startup history GET ([`HistoryConfig::max_age`]).
+    ///
+    /// It exists to make the LIST SEPARATOR observable from outside, which no
+    /// other knob can do. `_anyke` is provable with a single-parameter selector,
+    /// but `;`-vs-`&` only shows up once a selector carries TWO parameters: under
+    /// the `&` spelling a real zenoh cache reads `_max=2&_time=[..]` as one
+    /// parameter keyed `_max` whose value fails to parse, drops the cap, and
+    /// replies with its WHOLE ring. So `--history-max 2 --history-max-age N`
+    /// against a 5-sample foreign cache answers 2 when the dialect is right and 5
+    /// when it is wrong — a foreign witness for the separator, not just a unit test.
+    pub(crate) advanced_history_max_age: Option<f64>,
+    /// R311y442 — `--advanced-publish <keyexpr>`'s bundle. The ANSWERING half of
+    /// the advanced-pubsub plane: a wz [`AdvancedPublisher`] with a sample cache,
+    /// which a FOREIGN advanced subscriber then drains. `None` without the flag.
+    pub(crate) advanced_publish: Option<AdvancedPublishSpec>,
+}
+
+/// R311y442 — the `--advanced-publish` parameter bundle. A struct rather than
+/// five more `Option` fields on [`DeclareEmitSpec`] for the reason the rest of
+/// this module already settled: the task takes one spec, not a positional list.
+///
+/// The `advanced`-OFF build reports every field it is ignoring, one by one. That
+/// is not a lint workaround: an operator who passed `--cache-max 8` to a binary
+/// built without the feature needs to see that the depth was dropped too, not
+/// just that the keyexpr was.
+pub(crate) struct AdvancedPublishSpec {
+    /// `--advanced-publish <keyexpr>` — the literal the burst publishes on, and
+    /// the base of the `<keyexpr>/@adv/pub/<zid>/<eid>/_` cache KE derived from it.
+    pub(crate) keyexpr: String,
+    /// `--value <text>` — the burst payload, emitted as `[{idx:4}] {value}` to
+    /// mirror upstream's own `z_advanced_pub` sample shape.
+    pub(crate) value: String,
+    /// `--advanced-publish-count <N>` — how many samples the burst emits.
+    pub(crate) count: usize,
+    /// `--cache-max <N>` — the publisher's cache depth (`CacheConfig::max_samples`).
+    /// `None` keeps the wz default.
+    pub(crate) cache_max: Option<usize>,
+    /// Milliseconds between burst samples. Fixed rather than a flag: its only job
+    /// is to keep the samples distinguishable in time for the `_time` filter, and
+    /// a knob nothing varies is a knob that rots.
+    pub(crate) interval_ms: u64,
+    /// The publisher's source identity, stamped into every sample's `SourceInfo`
+    /// and rendered into the `@adv` KE. Taken from the demo's `--zid`, so a
+    /// multi-publisher fixture gets distinct `@adv` namespaces the same way it
+    /// gets distinct session zids.
+    pub(crate) zid: Vec<u8>,
 }
 
 /// R121k-5 — bool flag bundle for the three Remote* registry log

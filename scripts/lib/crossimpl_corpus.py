@@ -32,7 +32,7 @@ Comments and string literals are stripped before matching. Otherwise a lone
 integrity invariant (a wz<->wz test may not claim foreign proof) would be enforced by
 the very artifact it exists to constrain.
 
-## The three proof classes
+## The four proof classes
 
   codec   the test LINKS the real vendored zenoh-pico C library (crates/zenoh-pico-sys)
           and byte-compares wz's encoder against pico's `_z_*_encode`. Differential
@@ -40,6 +40,10 @@ the very artifact it exists to constrain.
           makes them the only foreign proof hosted CI executes unconditionally.
   pico    the test spawns a real zenoh-pico C CLI binary (live wire).
   zenohd  the test spawns the real zenoh-full router binary (live wire).
+  zenoh-ext  the test spawns a real zenoh-ext EXAMPLE application (live wire).
+             Distinct from `zenohd` because the advanced-pubsub plane lives in
+             the zenoh-ext LIBRARY, not in the router: only an application built
+             on it holds an AdvancedCache, so only this class can witness `@adv`.
 
 Linking the foreign implementation is a stronger proof than spawning it, so `codec` is
 a first-class class, not an afterthought.
@@ -70,6 +74,15 @@ FOREIGN_ROOTS = {
     "zenohd_binary": "zenohd",
     "zenohd_unixpipe_binary": "zenohd",
     "zenohd_vsock_binary": "zenohd",
+    # R311y442 — the zenoh-ext EXAMPLE applications (`z_advanced_pub` /
+    # `z_advanced_sub`), a class of their own rather than more `zenohd` roots.
+    # They are the real zenoh-full Rust stack at the pinned version, but they are
+    # not the router: they carry an `AdvancedCache` and an `AdvancedSubscriber`,
+    # which zenohd does not have and cannot witness. Folding them into `zenohd`
+    # would have been one dict entry and would have made every claim in that
+    # family read `wz->zenohd` against a counterparty that is not zenohd — a
+    # record that is mildly false to whoever reads it next.
+    "zenoh_ext_example_binary": "zenoh-ext",
 }
 # A wz binary is EXTERNAL (needs #[ignore]) but not FOREIGN (cannot witness parity).
 # The package each root resolves to is what Layer A4's containment arm needs: the
@@ -91,14 +104,24 @@ IN_PROCESS_PKG = "wz-integration-tests"
 PICO_FFI_CRATE = "zenoh_pico_sys"
 
 CLAIM_RE = re.compile(
-    r"^\s*//[/!]?\s*wz-proves:\s*(?P<atom>[A-Za-z0-9_-]+)\s+(?P<kind>wz->pico|pico->wz|wz->zenohd|zenohd->wz|codec-parity)\s*(?P<partial>partial)?\s*$"
+    r"^\s*//[/!]?\s*wz-proves:\s*(?P<atom>[A-Za-z0-9_-]+)\s+"
+    r"(?P<kind>wz->pico|pico->wz|wz->zenoh-ext|zenoh-ext->wz|wz->zenohd|zenohd->wz|codec-parity)"
+    r"\s*(?P<partial>partial)?\s*$"
 )
 # A corpus test that witnesses NO atom must say so, with a reason, rather than be
 # left blank -- otherwise invariant A4-4 (every corpus test declares) would force an
 # invented claim, which is the exact fabrication this gate exists to prevent. The
 # roll-up prints the count and the list, so `none` is a REPORTED state, not a hole.
 NONE_RE = re.compile(r"^\s*//[/!]?\s*wz-proves:\s*none\s*--\s*(?P<reason>\S.*?)\s*$")
-KINDS = {"wz->pico", "pico->wz", "wz->zenohd", "zenohd->wz", "codec-parity"}
+KINDS = {
+    "wz->pico",
+    "pico->wz",
+    "wz->zenohd",
+    "zenohd->wz",
+    "wz->zenoh-ext",
+    "zenoh-ext->wz",
+    "codec-parity",
+}
 # Which foreign classes can legitimately produce each proof kind.
 #
 # A directional pico proof does NOT require a spawned CLI: the `codec` class LINKS
@@ -112,6 +135,10 @@ KIND_CLASS = {
     "pico->wz": {"pico", "codec"},
     "wz->zenohd": {"zenohd"},
     "zenohd->wz": {"zenohd"},
+    # Only a zenoh-ext application can witness the advanced-pubsub plane: the
+    # router has no cache to answer from and pico has no such plane at all.
+    "wz->zenoh-ext": {"zenoh-ext"},
+    "zenoh-ext->wz": {"zenoh-ext"},
     "codec-parity": {"codec"},
 }
 

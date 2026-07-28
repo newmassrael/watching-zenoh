@@ -99,8 +99,8 @@ mod usage;
 #[cfg(feature = "scouting-active")]
 use crate::args::DEMO_ZID;
 use crate::args::{
-    parse_pair, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec, PushOperation, QueryRoleSpec,
-    RemoteLogSpec, ReplyConsumerSpec, Role, DEFAULT_SCOUT_BUDGET_MS,
+    parse_pair, AdvancedPublishSpec, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec,
+    PushOperation, QueryRoleSpec, RemoteLogSpec, ReplyConsumerSpec, Role, DEFAULT_SCOUT_BUDGET_MS,
 };
 use crate::runner::run_demo;
 use crate::usage::{print_usage, ABOUT};
@@ -784,6 +784,60 @@ fn main() -> ExitCode {
     // subscriber with `history = true` (replay current alive tokens on
     // subscription), so an observer is order-independent of token declare time.
     let liveliness_subscribe_history = rest.iter().any(|a| a == "--liveliness-subscribe-history");
+    // R311y442 — `--advanced-subscribe <keyexpr>` declares an AdvancedSubscriber
+    // whose STARTUP HISTORY GET asks every matching publisher's `@adv` cache for
+    // the samples it published before this subscriber existed. `--history-max <N>`
+    // caps that GET (`_max=N`). Feature-uniform parse (the `namespace` idiom): the
+    // flags always parse, and `install_session_handles` reports the inert case on a
+    // build without the `advanced` feature.
+    let advanced_subscribe_opt = parse_pair(rest, "--advanced-subscribe");
+    let advanced_history_max: Option<usize> = match parse_pair(rest, "--history-max") {
+        Some(s) => match s.parse::<usize>() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                eprintln!("wz-ap-demo: --history-max must be a usize (got {s:?})");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    let advanced_history_max_age: Option<f64> = match parse_pair(rest, "--history-max-age") {
+        Some(s) => match s.parse::<f64>() {
+            Ok(n) if n.is_finite() && n > 0.0 => Some(n),
+            _ => {
+                eprintln!("wz-ap-demo: --history-max-age must be a positive f64 (got {s:?})");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    // R311y442 — `--advanced-publish <keyexpr>` is the ANSWERING half: a wz
+    // AdvancedPublisher whose `@adv` cache a FOREIGN advanced subscriber drains.
+    // `--cache-max` sets the ring depth, `--advanced-publish-count` the burst size.
+    let advanced_publish_opt = parse_pair(rest, "--advanced-publish");
+    let advanced_cache_max: Option<usize> = match parse_pair(rest, "--cache-max") {
+        Some(s) => match s.parse::<usize>() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                eprintln!("wz-ap-demo: --cache-max must be a usize (got {s:?})");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    // Cloned here because `value_opt` is MOVED into `publisher_spec` further down;
+    // `--value` is shared between the plain and the advanced publisher.
+    let advanced_publish_value = value_opt.clone();
+    let advanced_publish_count: usize = match parse_pair(rest, "--advanced-publish-count") {
+        Some(s) => match s.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("wz-ap-demo: --advanced-publish-count must be a usize (got {s:?})");
+                return ExitCode::from(2);
+            }
+        },
+        None => 5,
+    };
     let on_remote_sub_log = rest.iter().any(|a| a == "--on-remote-subscriber-log");
     let on_remote_q_log = rest.iter().any(|a| a == "--on-remote-queryable-log");
     let on_remote_l_log = rest.iter().any(|a| a == "--on-remote-liveliness-log");
@@ -842,10 +896,16 @@ fn main() -> ExitCode {
         && !on_remote_sub_log
         && !on_remote_q_log
         && !on_remote_l_log
+        // R311y442 — `--advanced-subscribe` is a standalone role like `--key`:
+        // it declares a subscriber and drains the publishers' `@adv` caches, so
+        // a demo carrying only this flag has real work to do.
+        && advanced_subscribe_opt.is_none()
+        && advanced_publish_opt.is_none()
     {
         eprintln!(
             "wz-ap-demo: at least one of --key / --publish / --delete / --queryable / --query / \
-             --declare-token / --liveliness-subscribe / --liveliness-get / --on-remote-* must be supplied",
+             --declare-token / --liveliness-subscribe / --liveliness-get / \
+             --advanced-subscribe / --advanced-publish / --on-remote-* must be supplied",
         );
         eprintln!();
         print_usage();
@@ -857,8 +917,20 @@ fn main() -> ExitCode {
         print_usage();
         return ExitCode::from(2);
     }
-    if publish_opt.is_none() && value_opt.is_some() {
-        eprintln!("wz-ap-demo: --value is only meaningful with --publish (rejected to surface mis-wired argv)");
+    // R311y442 — `--advanced-publish` carries a payload too, so it joins `--publish`
+    // as a legitimate reason for `--value` to be present. The mis-wired-argv reject
+    // stays for the case neither publisher flag is set.
+    if advanced_publish_opt.is_some() && value_opt.is_none() {
+        eprintln!("wz-ap-demo: --advanced-publish requires --value");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if publish_opt.is_none() && advanced_publish_opt.is_none() && value_opt.is_some() {
+        eprintln!(
+            "wz-ap-demo: --value is only meaningful with --publish / --advanced-publish \
+             (rejected to surface mis-wired argv)"
+        );
         eprintln!();
         print_usage();
         return ExitCode::from(2);
@@ -1138,6 +1210,14 @@ fn main() -> ExitCode {
             queryable_spec.as_ref().map(|(p, _)| p.as_str()),
         ),
         ("--declare-token", declare_token_opt.as_deref()),
+        // R311y442 — `--advanced-subscribe` joined for the same reason as `--key`:
+        // an AdvancedSubscriber declares a ROUTED subscriber on the keyexpr AND
+        // derives its startup history GET (`<keyexpr>/@adv/**`) from it, so the
+        // literal reaches the outbound wire on two paths, not one.
+        ("--advanced-subscribe", advanced_subscribe_opt.as_deref()),
+        // The advanced publisher emits Puts on this literal AND declares its cache
+        // queryable + `@adv` liveliness token under it, so it is outbound twice over.
+        ("--advanced-publish", advanced_publish_opt.as_deref()),
     ] {
         if let Some(keyexpr) = keyexpr_opt {
             if let Err(e) = check_outbound_keyexpr_pico_safe(keyexpr) {
@@ -1154,6 +1234,22 @@ fn main() -> ExitCode {
         token_keyexpr: declare_token_opt,
         liveliness_subscriber_keyexpr: liveliness_subscribe_opt,
         liveliness_subscriber_history: liveliness_subscribe_history,
+        advanced_subscriber_keyexpr: advanced_subscribe_opt,
+        advanced_history_max,
+        advanced_history_max_age,
+        advanced_publish: advanced_publish_opt.map(|keyexpr| AdvancedPublishSpec {
+            keyexpr,
+            // Guarded above: `--advanced-publish` without `--value` already exited.
+            value: advanced_publish_value.unwrap_or_default(),
+            count: advanced_publish_count,
+            cache_max: advanced_cache_max,
+            interval_ms: 200,
+            // Full path, not the `use` above: that import is `scouting-active`-gated
+            // and this site is not.
+            zid: zid_override
+                .clone()
+                .unwrap_or_else(|| crate::args::DEMO_ZID.to_vec()),
+        }),
     };
     let remote_log_spec = RemoteLogSpec {
         on_remote_subscriber: on_remote_sub_log,

@@ -28,6 +28,8 @@ pub(crate) fn print_usage() {
     eprintln!("               [--query <keyexpr>]");
     eprintln!("               [--declare-token <keyexpr>]");
     eprintln!("               [--liveliness-subscribe <keyexpr>]");
+    eprintln!("               [--advanced-subscribe <keyexpr> [--history-max <N>]]");
+    eprintln!("               [--advanced-publish <keyexpr> --value <text>]");
     eprintln!("               [--on-remote-subscriber-log]");
     eprintln!("               [--on-remote-queryable-log]");
     eprintln!("               [--on-remote-liveliness-log]");
@@ -116,6 +118,26 @@ pub(crate) fn print_usage() {
     eprintln!("                             declare the liveliness subscriber with history=true");
     eprintln!("                             (replay CURRENT alive tokens on subscription, not");
     eprintln!("                             just future declares); order-independent observer");
+    eprintln!("    --advanced-subscribe <keyexpr>");
+    eprintln!("                             declare an AdvancedSubscriber on <keyexpr> whose");
+    eprintln!("                             STARTUP HISTORY GET drains every matching publisher's");
+    eprintln!("                             @adv cache, so a late joiner recovers what it missed;");
+    eprintln!("                             logs 'ADVANCED SAMPLE' per delivered sample");
+    eprintln!("                             (needs --features advanced; inert otherwise)");
+    eprintln!("    --history-max <N>        cap that history GET at the newest N samples (_max=N)");
+    eprintln!(
+        "    --history-max-age <secs> bound it to the last <secs> seconds (_time=[now(-s)..])"
+    );
+    eprintln!("    --advanced-publish <keyexpr>");
+    eprintln!(
+        "                             declare an AdvancedPublisher on <keyexpr> with a sample"
+    );
+    eprintln!("                             cache and burst --value into it, then hold the cache");
+    eprintln!("                             open so a late subscriber can still drain it");
+    eprintln!("                             (needs --features advanced; inert otherwise)");
+    eprintln!("    --advanced-publish-count <N>");
+    eprintln!("                             samples in that burst (default 5)");
+    eprintln!("    --cache-max <N>          the advanced publisher's cache depth");
     eprintln!("    --liveliness-get <keyexpr>");
     eprintln!("                             one-shot liveliness snapshot get on <keyexpr>;");
     eprintln!("                             emits one CURRENT Interest(KE|TO|R|C) on Established");

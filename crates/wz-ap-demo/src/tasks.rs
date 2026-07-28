@@ -127,6 +127,99 @@ where
     log::info!("wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID}");
 }
 
+/// R311y442 — `--advanced-publish`: declare a wz [`AdvancedPublisher`] with a
+/// sample cache and emit a burst into it, then hold the session open so the
+/// cache keeps answering.
+///
+/// This is the ANSWERING half of the advanced-pubsub plane, and it needs its own
+/// task for a reason the plain `--publish` burst does not have: the `@adv` cache
+/// only has value AFTER the burst, when a late-joining subscriber asks for the
+/// samples it missed. So the task publishes and then deliberately stays alive
+/// rather than completing — the proof is what a foreign subscriber can still
+/// retrieve once the publishing is over.
+///
+/// Declared INSIDE the task rather than pre-drive with the other handles because
+/// [`AdvancedPublisher::declare`] spawns the heartbeat beacon and therefore
+/// requires a live tokio runtime; the Established gate below is the same poll
+/// [`query_task`] uses.
+#[cfg(feature = "advanced")]
+pub(crate) async fn advanced_publisher_task<T>(
+    session: TokioSession,
+    spec: crate::args::AdvancedPublishSpec,
+    clock: T,
+) where
+    T: TimeSource + Send + 'static,
+{
+    use wz::runtime_tokio::advanced_cache::CacheConfig;
+    use wz::runtime_tokio::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions};
+
+    let actions = session.actions();
+    let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
+    loop {
+        if actions.is_established() {
+            break;
+        }
+        if clock.now_monotonic_ms() >= deadline_ms {
+            log::warn!(
+                "wz-ap-demo: advanced_publisher_task gave up waiting for Established \
+                 after {QUERY_HANDSHAKE_TIMEOUT_MS}ms"
+            );
+            return;
+        }
+        clock.sleep(QUERY_HANDSHAKE_POLL_INTERVAL_MS).await;
+    }
+
+    let mut options = AdvancedPublisherOptions::default();
+    if let Some(max_samples) = spec.cache_max {
+        options.cache = Some(CacheConfig { max_samples });
+    }
+    let publisher =
+        match AdvancedPublisher::declare(&session, spec.keyexpr.clone(), options, spec.zid.clone())
+        {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!(
+                    "wz-ap-demo: ADVANCED PUBLISHER declare rejected for keyexpr='{}': {e:?}",
+                    spec.keyexpr
+                );
+                return;
+            }
+        };
+    log::info!(
+        "wz-ap-demo: DECLARED ADVANCED PUBLISHER keyexpr='{}' cache_max={:?} count={}",
+        spec.keyexpr,
+        spec.cache_max,
+        spec.count,
+    );
+
+    for idx in 0..spec.count {
+        // The `[{idx:4}] {value}` shape mirrors upstream's own `z_advanced_pub`
+        // so a mixed-direction fixture reads the two publishers the same way.
+        let payload = format!("[{idx:4}] {}", spec.value);
+        match publisher.put(payload.as_bytes()) {
+            Ok(_) => log::info!(
+                "wz-ap-demo: ADVANCED PUT keyexpr='{}' payload='{payload}'",
+                spec.keyexpr
+            ),
+            Err(e) => log::warn!("wz-ap-demo: ADVANCED PUT failed: {e:?}"),
+        }
+        clock.sleep(spec.interval_ms).await;
+    }
+    log::info!(
+        "wz-ap-demo: ADVANCED BURST COMPLETE keyexpr='{}' count={}; cache now serving",
+        spec.keyexpr,
+        spec.count,
+    );
+
+    // Hold the publisher (and with it the cache queryable + the `@adv` liveliness
+    // token) alive. Dropping it here would undeclare the very cache a late
+    // subscriber is about to query, which is precisely the window under test.
+    // The demo process is terminated by its fixture, as every Layer Z leg is.
+    loop {
+        clock.sleep(1_000).await;
+    }
+}
+
 /// liveliness-get — single-shot snapshot task. Mirrors
 /// [`query_task`]'s Established gate, then issues one
 /// [`Session::liveliness_get`] on `keyexpr`. The peer's

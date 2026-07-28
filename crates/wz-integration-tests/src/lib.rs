@@ -372,6 +372,36 @@ pub mod common {
         path
     }
 
+    /// R311y442 — locate a `zenoh-ext-examples` example binary (`z_advanced_pub`
+    /// / `z_advanced_sub`): the `WZ_ZENOH_EXT_EXAMPLES_DIR` env override, else
+    /// `scripts/build-zenohd.sh`'s `target/zenohd/` install.
+    ///
+    /// These are the ONLY foreign advanced-pubsub counterparties that exist.
+    /// zenohd is a router and carries no `AdvancedCache`; zenoh-pico has no
+    /// advanced-pubsub plane at all. So unlike every other cross-impl leg in this
+    /// tree, the `@adv` legs cannot be witnessed by the two oracles already
+    /// provisioned — the cache lives in an APPLICATION built on `zenoh-ext`, and
+    /// upstream's own examples are exactly that application.
+    ///
+    /// Panics with the build hint if absent, the same prereq discipline as
+    /// [`zenoh_pico_cli_binary`] and [`zenohd_binary`]: a missing oracle must not
+    /// degrade into a green run.
+    pub fn zenoh_ext_example_binary(name: &str) -> PathBuf {
+        let dir = match std::env::var("WZ_ZENOH_EXT_EXAMPLES_DIR") {
+            Ok(d) => PathBuf::from(d),
+            Err(_) => project_root().join("target/zenohd"),
+        };
+        let path = dir.join(name);
+        assert!(
+            path.is_file(),
+            "{name} binary missing at {}; set WZ_ZENOH_EXT_EXAMPLES_DIR or run \
+             scripts/build-zenohd.sh first (it builds the zenoh-ext examples \
+             alongside zenohd from the same pinned checkout)",
+            path.display()
+        );
+        path
+    }
+
     /// Locate the UNIXPIPE-enabled `zenohd` (R311y392): the `WZ_ZENOHD_UNIXPIPE_BIN`
     /// env override, else `scripts/build-zenohd.sh ZENOHD_UNIXPIPE=1`'s
     /// `target/zenohd-unixpipe/zenohd` install. A SEPARATE binary from

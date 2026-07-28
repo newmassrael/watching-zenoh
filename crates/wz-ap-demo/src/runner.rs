@@ -61,6 +61,10 @@ use std::sync::Arc;
 // in lockstep so the typestate handoff stays type-uniform.
 use wz::runtime_core::Runtime;
 use wz::runtime_core::TimeSource;
+#[cfg(feature = "advanced")]
+use wz::runtime_tokio::advanced_subscriber::{
+    AdvancedSubscriber, AdvancedSubscriberOptions, HistoryConfig,
+};
 use wz::runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::reconnect::{
@@ -116,6 +120,11 @@ struct SessionHandles {
     /// alongside it because dropping it would take the listener's keyexpr with it.
     _publisher: Option<Publisher>,
     _matching_listener: Option<MatchingListener>,
+    /// R311y442 — `--advanced-subscribe`'s [`AdvancedSubscriber`]. Held for the
+    /// same RAII reason as the plain `_subscriber`: dropping it undeclares the
+    /// live subscription, and with it the reorder state the history replies feed.
+    #[cfg(feature = "advanced")]
+    _advanced_subscriber: Option<AdvancedSubscriber>,
 }
 
 /// Background-task handles produced by [`spawn_background_tasks`].
@@ -129,6 +138,13 @@ struct SpawnedTasks {
     publisher_handle: Option<TokioJoinHandle<()>>,
     query_handle: Option<TokioJoinHandle<()>>,
     liveliness_get_handle: Option<TokioJoinHandle<()>>,
+    /// R311y442 — `--advanced-publish`'s task. Unlike its three siblings this one
+    /// is DELIBERATELY non-terminating: it holds the AdvancedPublisher (and with
+    /// it the cache queryable + `@adv` token) open past its burst, because the
+    /// window a late subscriber queries is exactly the window after publishing
+    /// stops. The teardown join window therefore times out on it by design.
+    #[cfg(feature = "advanced")]
+    advanced_publisher_handle: Option<TokioJoinHandle<()>>,
 }
 
 /// Step 1 — link setup. Both roles delegate to the library session-open
@@ -741,11 +757,22 @@ fn install_observer_callbacks(
 fn install_session_handles(
     session: &TokioSession,
     key: Option<String>,
-    liveliness_subscriber_keyexpr: Option<&str>,
-    liveliness_subscriber_history: bool,
+    declare_spec: &DeclareEmitSpec,
     queryable_spec: Option<(String, String)>,
     matching_publisher_keyexpr: Option<&str>,
 ) -> SessionHandles {
+    // R311y442 — the four declare-side knobs arrive as the `DeclareEmitSpec`
+    // bundle rather than as four positional arguments. `--advanced-subscribe` +
+    // `--history-max` would have pushed this signature to eight parameters; the
+    // bundle is the shape the rest of the file already uses (`PublisherSpec`,
+    // `QueryRoleSpec`, `RemoteLogSpec`) and it takes the count DOWN, not up.
+    let liveliness_subscriber_keyexpr = declare_spec.liveliness_subscriber_keyexpr.as_deref();
+    let liveliness_subscriber_history = declare_spec.liveliness_subscriber_history;
+    let advanced_subscriber_keyexpr = declare_spec.advanced_subscriber_keyexpr.as_deref();
+    #[cfg_attr(not(feature = "advanced"), allow(unused_variables))]
+    let advanced_history_max = declare_spec.advanced_history_max;
+    #[cfg_attr(not(feature = "advanced"), allow(unused_variables))]
+    let advanced_history_max_age = declare_spec.advanced_history_max_age;
     let subscriber = key.and_then(|filter| {
         let key_for_callback = filter.clone();
         // R311ou — `--key` now declares a ROUTED subscriber: register the local
@@ -913,12 +940,85 @@ fn install_session_handles(
         None => (None, None),
     };
 
+    // R311y442 — `--advanced-subscribe`. Declared PRE-DRIVE for a reason the
+    // plain subscriber does not have: the startup history GET goes out as part of
+    // the declare, so declaring it after drive_session started would race the very
+    // publishers whose cache it exists to drain.
+    #[cfg(feature = "advanced")]
+    let advanced_subscriber = advanced_subscriber_keyexpr.map(|filter| {
+        let owned_filter = filter.to_string();
+        let key_for_sample = owned_filter.clone();
+        let key_for_miss = owned_filter.clone();
+        let mut history = HistoryConfig::new();
+        if let Some(max) = advanced_history_max {
+            history = history.max_samples(max);
+        }
+        if let Some(age) = advanced_history_max_age {
+            history = history.max_age(age);
+        }
+        let options = AdvancedSubscriberOptions::new().with_history(history);
+        let declared = AdvancedSubscriber::declare_with_options(
+            session,
+            owned_filter,
+            options,
+            move |sample| {
+                // The payload is logged as text, not just a length: the history
+                // assertion is a BYTE-EXACTNESS claim about what a foreign
+                // zenoh-ext cache replayed, and a length alone cannot carry it.
+                log::info!(
+                    "wz-ap-demo: ADVANCED SAMPLE filter='{}' keyexpr='{}' payload='{}'",
+                    key_for_sample,
+                    sample.keyexpr,
+                    String::from_utf8_lossy(&sample.payload),
+                );
+            },
+            move |miss| {
+                log::info!(
+                    "wz-ap-demo: ADVANCED MISS filter='{key_for_miss}' missed={}",
+                    miss.nb,
+                );
+            },
+        );
+        match declared {
+            Ok(sub) => {
+                log::info!(
+                    "wz-ap-demo: DECLARED ADVANCED SUBSCRIBER keyexpr='{filter}' \
+                     history_max={advanced_history_max:?} \
+                     history_max_age={advanced_history_max_age:?}"
+                );
+                Some(sub)
+            }
+            Err(e) => {
+                log::warn!(
+                    "wz-ap-demo: ADVANCED SUBSCRIBER declare rejected for keyexpr='{filter}': {e:?}"
+                );
+                None
+            }
+        }
+    });
+
+    // The `advanced`-OFF arm. Loud for the same reason as the matching-listener
+    // twin above: a leg that greps for ADVANCED SAMPLE must be able to tell "the
+    // demo was built without the feature" from "the history replies never came",
+    // and those two are the exact pair this round exists to distinguish.
+    #[cfg(not(feature = "advanced"))]
+    if let Some(filter) = advanced_subscriber_keyexpr {
+        log::warn!(
+            "wz-ap-demo: --advanced-subscribe='{filter}' is INERT (built without \
+             the `advanced` feature); no history GET will be issued \
+             (ignored: history_max={advanced_history_max:?} \
+             history_max_age={advanced_history_max_age:?})"
+        );
+    }
+
     SessionHandles {
         _subscriber: subscriber,
         _liveliness_subscriber: liveliness_subscriber,
         _queryable: queryable,
         _publisher: publisher,
         _matching_listener: matching_listener,
+        #[cfg(feature = "advanced")]
+        _advanced_subscriber: advanced_subscriber.flatten(),
     }
 }
 
@@ -937,15 +1037,30 @@ fn install_session_handles(
 /// the teardown phase guarantees the retraction frame is enqueued
 /// while the writer task is still draining (R277 + R278 + R284
 /// ordering invariant).
+/// R311y442 — the four per-task specs, bundled. `--advanced-publish` would have
+/// been the eighth positional argument to [`spawn_background_tasks`]; grouping
+/// the specs that already travel together takes the signature DOWN to five and
+/// matches how the declare side is already passed (one [`DeclareEmitSpec`]).
+struct BackgroundTaskSpecs {
+    publisher: Option<PublisherSpec>,
+    query: Option<String>,
+    liveliness_get: Option<LivelinessGetSpec>,
+    advanced_publish: Option<crate::args::AdvancedPublishSpec>,
+}
+
 fn spawn_background_tasks(
     session: &TokioSession,
     actions: &Arc<SessionLinkActions>,
-    publisher_spec: Option<PublisherSpec>,
-    query_spec: Option<String>,
-    liveliness_get_spec: Option<LivelinessGetSpec>,
+    specs: BackgroundTaskSpecs,
     session_clock: TokioTime,
     long_lived: bool,
 ) -> SpawnedTasks {
+    let BackgroundTaskSpecs {
+        publisher: publisher_spec,
+        query: query_spec,
+        liveliness_get: liveliness_get_spec,
+        advanced_publish: advanced_publish_spec,
+    } = specs;
     let publisher_handle = publisher_spec.map(|spec| {
         let session_for_publisher = session.clone();
         TokioRuntime.spawn(publisher_task(
@@ -966,6 +1081,34 @@ fn spawn_background_tasks(
         TokioRuntime.spawn(liveliness_get_task(session_for_get, spec, session_clock))
     });
 
+    // R311y442 — the advanced publisher declares INSIDE its task (the heartbeat
+    // beacon needs a live runtime), so unlike the other declares it cannot move
+    // pre-drive into `install_session_handles`.
+    #[cfg(feature = "advanced")]
+    let advanced_publisher_handle = advanced_publish_spec.map(|spec| {
+        let session_for_advanced = session.clone();
+        TokioRuntime.spawn(crate::tasks::advanced_publisher_task(
+            session_for_advanced,
+            spec,
+            session_clock,
+        ))
+    });
+    // The `advanced`-OFF arm, loud for the same reason as the subscriber twin.
+    #[cfg(not(feature = "advanced"))]
+    if let Some(spec) = advanced_publish_spec {
+        log::warn!(
+            "wz-ap-demo: --advanced-publish='{}' is INERT (built without the \
+             `advanced` feature); no cache will be declared. Also ignored: \
+             value='{}' count={} cache_max={:?} interval_ms={} zid={:02x?}",
+            spec.keyexpr,
+            spec.value,
+            spec.count,
+            spec.cache_max,
+            spec.interval_ms,
+            spec.zid,
+        );
+    }
+
     // R311ot — no declare_task: all outbound declares (subscriber / queryable /
     // token) are emitted synchronously pre-drive in `run_demo`, so there is no
     // longer a background declare task to spawn.
@@ -973,6 +1116,8 @@ fn spawn_background_tasks(
         publisher_handle,
         query_handle,
         liveliness_get_handle,
+        #[cfg(feature = "advanced")]
+        advanced_publisher_handle,
     }
 }
 
@@ -1358,8 +1503,7 @@ pub(crate) async fn run_demo(
     let _handles = install_session_handles(
         &session,
         key,
-        declare_spec.liveliness_subscriber_keyexpr.as_deref(),
-        declare_spec.liveliness_subscriber_history,
+        &declare_spec,
         queryable_spec,
         matching_publisher_keyexpr,
     );
@@ -1401,12 +1545,20 @@ pub(crate) async fn run_demo(
         publisher_handle,
         query_handle,
         liveliness_get_handle,
+        // R311y442 — held to the end of `run_demo` scope on purpose: dropping the
+        // handle would abort the task and take the `@adv` cache with it, closing
+        // the very window a foreign subscriber queries.
+        #[cfg(feature = "advanced")]
+            advanced_publisher_handle: _advanced_publisher_handle,
     } = spawn_background_tasks(
         &session,
         &actions,
-        publisher_spec,
-        query_spec,
-        liveliness_get_spec,
+        BackgroundTaskSpecs {
+            publisher: publisher_spec,
+            query: query_spec,
+            liveliness_get: liveliness_get_spec,
+            advanced_publish: declare_spec.advanced_publish,
+        },
         session_clock,
         long_lived,
     );

@@ -908,11 +908,18 @@ fn issue_recovery_query<R, T>(
     let recovery_ke = crate::advanced_ke::recovery_get_ke(base_keyexpr, &zid_hex, req.eid);
     // Open `_sn=from..` (sample-driven / periodic) or bounded `_sn=from..to`
     // (heartbeat, which knows the publisher's last sn) — zenoh `seq_num_range`.
-    let params = match req.to_sn {
+    // R311y442 — `_anyke` rides the recovery GET for the same reason it rides the
+    // history GET: the `@adv` cache answers under the CACHED SAMPLE's keyexpr,
+    // which never intersects the `<base>/@adv/*/<zid>/<eid>/**` this is addressed
+    // to, and zenoh's responder refuses such a reply unless the querier said it
+    // accepts any key. The `_sn` range is separator-independent on its own (it is
+    // the only knob here), but it goes through the shared builder so the dialect
+    // has ONE spelling rather than two that can drift apart again.
+    let sn_part = match req.to_sn {
         Some(to) => format!("_sn={}..{}", req.from_sn, to),
         None => format!("_sn={}..", req.from_sn),
-    }
-    .into_bytes();
+    };
+    let params = crate::advanced_selector::adv_get_params(&[sn_part]).into_bytes();
     // R311y89 (review C3) — bound the GET with a timeout so the deadline sweep can
     // fire `finish_recovery` if no `@adv` cache answers. R311y326 — the explicit
     // `recovery_query_timeout_ms` (>= 1 ms) is what arms the deadline; a raw 0 would
@@ -969,14 +976,22 @@ fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<((Vec<u8>, u32),
 }
 
 /// Build the startup history GET selector from the `_max` cap (`sample_depth`)
-/// and the `_time` age bound (`max_age`). `None` (neither set) means no
-/// parameters; otherwise the `&`-joined selectors ride the one GET. The
-/// `_time` form `[now(-{age}s)..]` is byte-identical to zenoh's
-/// `TimeRange<TimeExpr>` Display of `[Inclusive(Now{offset_secs:-age})..]`
-/// (zenoh-util time_range.rs:128-141/327-339), so a wz cache and a zenoh cache
-/// both filter it exactly.
+/// and the `_time` age bound (`max_age`). The `_time` form `[now(-{age}s)..]`
+/// is byte-identical to zenoh's `TimeRange<TimeExpr>` Display of
+/// `[Inclusive(Now{offset_secs:-age})..]` (zenoh-util time_range.rs:128-141/
+/// 327-339), so a wz cache and a zenoh cache both filter it exactly.
+///
+/// R311y442 — two changes, and both are what makes the GET legible to a real
+/// zenoh cache. The parts are `;`-joined, not `&`-joined (upstream's separator;
+/// see [`crate::advanced_selector`]), and the list ALWAYS carries the bare
+/// `_anyke` flag. The return is therefore no longer `Option`: even with neither
+/// knob set the GET must announce that it accepts replies keyed outside the
+/// `@adv` namespace it is addressed to, because that is how every cached sample
+/// comes back. Without it zenoh's responder refuses each reply and the
+/// subscriber recovers nothing at all — measured as 5 refusals against 5 cached
+/// samples on a `z_advanced_pub` oracle.
 #[cfg(feature = "ext-pubsub-advanced-history")]
-fn history_selector(sample_depth: Option<usize>, max_age: Option<f64>) -> Option<String> {
+fn history_selector(sample_depth: Option<usize>, max_age: Option<f64>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(max) = sample_depth {
         parts.push(format!("_max={max}"));
@@ -984,7 +999,7 @@ fn history_selector(sample_depth: Option<usize>, max_age: Option<f64>) -> Option
     if let Some(age) = max_age {
         parts.push(format!("_time=[now(-{age}s)..]"));
     }
-    (!parts.is_empty()).then(|| parts.join("&"))
+    crate::advanced_selector::adv_get_params(&parts)
 }
 
 /// R311y86 — issue the startup history GET over `<base>/@adv/**` (capped by
@@ -1019,10 +1034,9 @@ fn issue_history_query<R, T>(
     // R311y86 `_max=N` (sample_depth) + R311y98 `_time=[now(-age)..]` (max_age)
     // ride the one GET; the cache filters on whichever it sees. zenoh emits
     // `now({offset_secs}s)` with offset_secs = -age, i.e. `now(-{age}s)`.
-    let opts = match history_selector(sample_depth, max_age) {
-        Some(params) => opts.with_parameters(params.into_bytes()),
-        None => opts,
-    };
+    // R311y442 — the selector is now unconditional (it carries `_anyke` even when
+    // neither knob is set), so there is no longer a no-parameters arm.
+    let opts = opts.with_parameters(history_selector(sample_depth, max_age).into_bytes());
 
     // `finish_history` clears `history_pending` + flushes the buffer oldest-first
     // (the shared [`issue_recovery_get`] also runs it on the C3 failed-to-issue
@@ -1060,12 +1074,15 @@ fn issue_late_publisher_query<R, T>(
 {
     let zid_hex = zid_to_zenoh_hex(&zid);
     let recovery_ke = crate::advanced_ke::recovery_get_ke(base_keyexpr, &zid_hex, eid);
-    let mut opts = QueryOptions::get()
+    // R311y442 — the late-publisher GET shares the history selector, so it picks
+    // up the `;` separator and the mandatory `_anyke` with it. This is the site
+    // where the omission bit hardest: a publisher detected AFTER the subscriber
+    // joined is reachable ONLY through this GET, so without `_anyke` a late
+    // publisher's whole cache was unreachable rather than merely stale.
+    let opts = QueryOptions::get()
         .with_allowed_destination(dest)
-        .with_timeout_ms(timeout_ms);
-    if let Some(params) = history_selector(sample_depth, max_age) {
-        opts = opts.with_parameters(params.into_bytes());
-    }
+        .with_timeout_ms(timeout_ms)
+        .with_parameters(history_selector(sample_depth, max_age).into_bytes());
     let key = (zid, eid);
     issue_recovery_get(session, statesref, &recovery_ke, opts, move |state| {
         state.finish_recovery(&key)
@@ -2733,18 +2750,31 @@ mod tests {
     /// R311y98 — the history GET selector: `_max` (sample_depth) + `_time`
     /// (max_age) ride one selector; the `_time` form is byte-identical to
     /// zenoh's `[now(-{age}s)..]` Display.
+    ///
+    /// R311y442 REWROTE the expectations, and what they used to say is the
+    /// point. This test PINNED `_max=2&_time=[now(-30s)..]` and a `None` for the
+    /// no-knobs case — that is, it certified the two defects as the contract. A
+    /// wz cache reads the `&` form back (it split on `&` too), so the assertion
+    /// held on both sides of a wz<->wz round trip while being unreadable to
+    /// every real zenoh and zenoh-pico peer, and the absent `_anyke` meant a
+    /// conformant responder would refuse every reply. Neither is observable
+    /// without a foreign counterparty, which is why the leg in
+    /// `wz_advanced_history_zenoh_ext_interop.rs` is what closes this, not a
+    /// stricter unit test.
     #[cfg(feature = "ext-pubsub-advanced-history")]
     #[test]
     fn history_selector_emits_max_and_time() {
-        assert_eq!(history_selector(None, None), None);
-        assert_eq!(history_selector(Some(2), None), Some("_max=2".to_string()));
+        // No knobs is no longer "no parameters": `_anyke` is not optional, it is
+        // what makes an `@adv` reply legal at all.
+        assert_eq!(history_selector(None, None), "_anyke".to_string());
+        assert_eq!(history_selector(Some(2), None), "_max=2;_anyke".to_string());
         assert_eq!(
             history_selector(None, Some(30.0)),
-            Some("_time=[now(-30s)..]".to_string())
+            "_time=[now(-30s)..];_anyke".to_string()
         );
         assert_eq!(
             history_selector(Some(2), Some(30.0)),
-            Some("_max=2&_time=[now(-30s)..]".to_string())
+            "_max=2;_time=[now(-30s)..];_anyke".to_string()
         );
     }
 

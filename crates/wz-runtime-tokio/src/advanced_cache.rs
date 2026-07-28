@@ -241,14 +241,17 @@ fn answer_from_ring(
     }
 }
 
-/// Extract a `key=value` selector value from the raw URL-style query
-/// parameter bytes (`_sn=10..20&_max=5`). `None` when absent or non-UTF-8.
+/// Extract a `key=value` selector value from the raw query parameter bytes
+/// (`_sn=10..20;_max=5;_anyke`). `None` when absent or non-UTF-8.
+///
+/// R311y442 — the split lives in [`crate::advanced_selector`] now, and the
+/// separator it uses is `;` rather than the `&` this function hand-wrote. The
+/// old spelling read a real zenoh subscriber's multi-parameter selector as ONE
+/// parameter with a corrupted value, so `_max` failed to parse and `_time` was
+/// invisible: both filters dropped, silently, in the over-return direction.
 fn param_value<'a>(params: Option<&'a [u8]>, key: &str) -> Option<&'a str> {
     let s = core::str::from_utf8(params?).ok()?;
-    s.split('&').find_map(|kv| {
-        let (k, v) = kv.split_once('=')?;
-        (k == key).then_some(v)
-    })
+    crate::advanced_selector::param_value(s, key)
 }
 
 /// Parse an `_sn` range string into inclusive `(lo, hi)` bounds, mirroring
@@ -445,13 +448,17 @@ mod tests {
         }
     }
 
+    /// R311y442 REWROTE this test, and the old expectation is the diagnosis: it
+    /// fed `_sn=10..20&_max=5` and asserted BOTH keys came back, certifying the
+    /// `&` dialect as the cache's contract. The querier side joined on `&` too,
+    /// so wz agreed with wz and neither agreed with upstream. The fixture here is
+    /// now the byte string a real zenoh advanced subscriber sends — `;`-separated
+    /// and terminated by the bare `_anyke` flag.
     #[test]
     fn param_value_extracts_selectors() {
-        assert_eq!(
-            param_value(Some(b"_sn=10..20&_max=5"), "_sn"),
-            Some("10..20")
-        );
-        assert_eq!(param_value(Some(b"_sn=10..20&_max=5"), "_max"), Some("5"));
+        let zenoh_shaped = b"_sn=10..20;_max=5;_anyke";
+        assert_eq!(param_value(Some(zenoh_shaped), "_sn"), Some("10..20"));
+        assert_eq!(param_value(Some(zenoh_shaped), "_max"), Some("5"));
         assert_eq!(param_value(Some(b"_sn=10..20"), "_max"), None);
         assert_eq!(param_value(None, "_sn"), None);
     }
