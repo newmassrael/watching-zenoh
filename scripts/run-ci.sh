@@ -6631,6 +6631,22 @@ layer_z_zenohd_interop() {
     # routing-peer for --peer). Same --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_peer_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y430 — `scouting-autoconnect`, the last unproven scouting atom, on a
+    # THREE-node topology the peer-tier leg above cannot host: a zenohd ROUTER, a
+    # THIRD-PARTY zenohd PEER listening beside it, and a wz `--peer --autoconnect`
+    # whose argv names ONLY the router. wz learns the third party's listen port
+    # from the router's LinkStateList and DIALS it, so the face-UP assertion names
+    # a port the demo was never given. R311y423 recorded this as blocked on a
+    # topology fact; the fact was a NON-UNIFORM subsystem (zenoh's
+    # routing.peer.mode "needs to be set to the same value in all peers and routers"
+    # — DEFAULT_CONFIG.json5), so the fixture, not wz, was what had to change.
+    # Three legs: positive; the option-atom PAIR with --autoconnect removed (same
+    # flood, same mesh — the foreign peer dials wz instead, so `accepted 1` — but
+    # wz initiates nothing); and a no-third-party control that separates "the flag
+    # dials" from "a DISCOVERED PEER dials". Spawns 2 zenohd per leg, hence the
+    # shared --test-threads=1. Same `router-hat-router` binary (pulls routing-peer).
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_gossip_autoconnect_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y353 — liveliness-get's cross-impl witness rides THIS lane and could not
     # ride Layer E, for a reason measured rather than assumed: zenoh-pico NEVER
     # answers an Interest on a unicast transport (interest.c:533-535, "Nothing to
