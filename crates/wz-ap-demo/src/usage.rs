@@ -40,6 +40,8 @@ pub(crate) fn print_usage() {
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
     eprintln!("    --connect <addr>         initiator mode (HOST:PORT or tcp/|ws/HOST:PORT)");
     eprintln!("    --lowlatency             offer the lowlatency transport on --connect");
+    eprintln!("    --compression            offer per-batch lz4 compression on --connect");
+    eprintln!("                             (Z_EXT_COMPRESSION 0x6; exclusive with --lowlatency)");
     eprintln!("    --scout                  initiator mode with a DISCOVERED locator: emit a");
     eprintln!("                             multicast Scout on 224.0.0.224:7446 and dial the");
     eprintln!("                             locator the first peer Hello advertises. Mutually");

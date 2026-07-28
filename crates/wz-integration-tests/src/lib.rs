@@ -1376,6 +1376,38 @@ pub mod common {
         (guard, port)
     }
 
+    /// R311y433 — [`spawn_zenohd_on_ephemeral_tcp`] with per-batch lz4
+    /// COMPRESSION enabled on the unicast transport, the foreign oracle for the
+    /// `transport-compression` / `session-extcompression` cross-impl leg.
+    ///
+    /// `transport/unicast/compression/enabled` defaults to FALSE
+    /// (`zenoh-config-1.5.0` `src/defaults.rs:241-245`), so this override is what
+    /// makes zenohd offer Z_EXT_COMPRESSION (0x6) back on its InitAck and then
+    /// lz4-wrap / un-wrap every post-establishment batch on the link. No cargo
+    /// feature is needed on the router: `transport_compression` rides zenoh's
+    /// DEFAULT feature set (`zenoh-1.5.0/Cargo.toml`), so the STOCK
+    /// `target/zenohd/zenohd` speaks it — unlike the unixpipe / vsock oracles,
+    /// this leg needs no variant build.
+    ///
+    /// The un-configured [`spawn_zenohd_on_ephemeral_tcp`] is this helper's TWIN:
+    /// the same wz `--compression` dial against it negotiates `false`, which is
+    /// what makes the negotiation assertion a discriminator rather than a
+    /// tautology.
+    pub fn spawn_zenohd_compression_on_ephemeral_tcp(
+        mut mk_probe_stderr: impl FnMut() -> File,
+    ) -> (ChildGuard, u16) {
+        let (guard, port) = spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs(
+            &zenohd_binary(),
+            "zenohd (reference router, compression)",
+            None,
+            &[],
+            None,
+            &["transport/unicast/compression/enabled:true"],
+        );
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
+        (guard, port)
+    }
+
     /// R311y374 — spawn a zenohd that DIALS a wz `ws/...` acceptor
     /// (`-e ws/<wz_ws_endpoint>`) while also listening on an OS-assigned tcp port (RETURNED beside the guard) for a
     /// pico client. This is the FOREIGN WebSocket DIALER that verifies wz's new ws
@@ -1562,6 +1594,34 @@ pub mod common {
         extra_listens: &[String],
         config_path: Option<&str>,
     ) -> (ChildGuard, u16) {
+        spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs(
+            zenohd_bin,
+            label,
+            dial_locator,
+            extra_listens,
+            config_path,
+            &[],
+        )
+    }
+
+    /// R311y433 — [`spawn_zenohd_dialer_on_ephemeral_tcp`] plus per-key
+    /// `--cfg <path>:<json5>` overrides, for a leg whose subject is a zenohd
+    /// CONFIG toggle rather than a listener shape (compression, lowlatency, …).
+    ///
+    /// Added as a widened sibling rather than a sixth parameter on the existing
+    /// entrypoint: that one has callers across several feature-gated legs, and a
+    /// local `cargo test` does not compile all of them, so a signature change
+    /// there is a break this crate cannot see. The five-argument form now
+    /// delegates here with no overrides, so both spellings share ONE body and the
+    /// port-discovery / liveness reasoning below is not duplicated.
+    pub fn spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs(
+        zenohd_bin: &std::path::Path,
+        label: &'static str,
+        dial_locator: Option<&str>,
+        extra_listens: &[String],
+        config_path: Option<&str>,
+        extra_cfgs: &[&str],
+    ) -> (ChildGuard, u16) {
         /// zenohd's orchestrator announces each bound listener with this prefix; the
         /// port digits follow it directly.
         const LISTEN_LINE: &str = "Zenoh can be reached at: tcp/127.0.0.1:";
@@ -1595,6 +1655,15 @@ pub mod common {
         }
         if let Some(cfg) = config_path {
             command.arg("--config").arg(cfg);
+        }
+        // R311y433 — per-key `--cfg KEY:VALUE` overrides. argv ORDER relative to
+        // `--config` is irrelevant: zenohd loads the config file first and only
+        // then applies every `--cfg` pair via `insert_json5` (`zenohd-1.5.0`
+        // `src/main.rs:111-114` then `:251-266`), so a key override always wins
+        // over the file. Appended last purely so the spawn command reads in that
+        // same precedence order.
+        for cfg in extra_cfgs {
+            command.arg("--cfg").arg(cfg);
         }
         let mut guard = ChildGuard::wrap(
             label,

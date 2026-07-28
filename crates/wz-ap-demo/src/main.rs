@@ -629,6 +629,16 @@ fn main() -> ExitCode {
     // meaningful ONLY with `--connect` (pico AUTO_RECONNECT is client-only);
     // pairing it with `--listen` is a usage error, rejected below.
     let reconnect = rest.iter().any(|a| a == "--reconnect");
+    // R311y372 / R311y433 — the two transport-MODE presence flags an Initiator
+    // may offer on its InitSyn. Hoisted out of the role construction because
+    // their COMBINATION is a usage error the match below rejects: wz wraps
+    // compression OUTSIDE the lean encode (session_actions.rs `emit_on_link`),
+    // but zenoh's lowlatency transport writes `[len:4][msg]` straight to the link
+    // and never consults the batch compression path (`zenoh-transport-1.5.0`
+    // `unicast/lowlatency/link.rs:33-73`), so a wz peer offering both would
+    // compress a wire no zenohd lean link decompresses.
+    let lowlatency = rest.iter().any(|a| a == "--lowlatency");
+    let compression = rest.iter().any(|a| a == "--compression");
     let role: Role = match (listen_opt, connect_opt) {
         (Some(_), None) if reconnect => {
             eprintln!(
@@ -655,6 +665,17 @@ fn main() -> ExitCode {
             quic_cert: parse_pair(rest, "--quic-cert"),
             quic_key: parse_pair(rest, "--quic-key"),
         },
+        (None, Some(_)) if lowlatency && compression => {
+            eprintln!(
+                "wz-ap-demo: --lowlatency and --compression are mutually exclusive \
+                 (zenoh's lean transport serializes straight to the link and never \
+                 consults the batch compression path, so the pair has no cross-impl \
+                 wire meaning)"
+            );
+            eprintln!();
+            print_usage();
+            return ExitCode::from(2);
+        }
         (None, Some(addr)) => Role::Initiator {
             connect: addr,
             reconnect,
@@ -669,7 +690,11 @@ fn main() -> ExitCode {
             namespace: parse_pair(rest, "--namespace"),
             // R311y372 — `--lowlatency` presence flag: offer the lowlatency
             // transport on the InitSyn (mirror of `--reconnect` presence parsing).
-            lowlatency: rest.iter().any(|a| a == "--lowlatency"),
+            lowlatency,
+            // R311y433 — `--compression` presence flag: offer Z_EXT_COMPRESSION
+            // (0x6) on the InitSyn, so a peer that also offers it negotiates the
+            // per-batch lz4 wrap. Exclusive with `--lowlatency` (guard arm above).
+            compression,
         },
         (Some(_), Some(_)) => {
             eprintln!("wz-ap-demo: --listen and --connect are mutually exclusive");
@@ -1007,6 +1032,7 @@ fn main() -> ExitCode {
             quic_ca,
             namespace,
             lowlatency,
+            compression,
         } => {
             log::info!("connect = {connect}");
             if *reconnect {
@@ -1023,6 +1049,9 @@ fn main() -> ExitCode {
             }
             if *lowlatency {
                 log::info!("lowlatency = on (offers Z_EXT_LOWLATENCY on the InitSyn)");
+            }
+            if *compression {
+                log::info!("compression = on (offers Z_EXT_COMPRESSION on the InitSyn)");
             }
         }
     }

@@ -97,6 +97,21 @@ pub(crate) enum Role {
         /// and one-shot-only, like `namespace`: the reconnect path is out of demo
         /// scope, and an acceptor's lowlatency offer is not exercised by the demo.
         lowlatency: bool,
+        /// R311y433 — `--compression` offers the Z_EXT_COMPRESSION unit ext (id
+        /// 0x6) on the InitSyn (`initiate_and_open_session_with_compression` ->
+        /// `set_compression_offer(true)`), so a peer that also offers it
+        /// negotiates the per-batch lz4 wrap on every post-establishment batch.
+        /// Feature-uniform (always parsed + banner-logged); `false` without
+        /// `--compression` OR when the demo was built without the
+        /// `session-extcompression` feature, in which case the flag is inert (the
+        /// one-shot open takes the bare initiate path, runner.rs). Initiator-only
+        /// and one-shot-only, exactly like `lowlatency`. Rejected in combination
+        /// with `--lowlatency` (main.rs): zenoh's lean transport serializes
+        /// straight to the link with a 4-byte length prefix and NEVER consults the
+        /// batch compression path (`zenoh-transport-1.5.0`
+        /// `unicast/lowlatency/link.rs:33-73` `send_with_link` — no `WBatch`, no
+        /// `BatchHeader`), so the pair has no coherent cross-impl wire meaning.
+        compression: bool,
     },
 }
 

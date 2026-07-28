@@ -76,13 +76,16 @@ use wz::runtime_tokio::session::{
     Subscriber, TokioSession,
 };
 use wz::runtime_tokio::session_glue::{
-    drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
+    drive_session_until_terminal, IterationEvent, SessionInitParams, SessionLinkActions,
+    SessionTimeouts,
 };
+#[cfg(feature = "session-extcompression")]
+use wz::runtime_tokio::session_open::initiate_and_open_session_with_compression;
 #[cfg(feature = "transport-lowlatency")]
 use wz::runtime_tokio::session_open::initiate_and_open_session_with_lowlatency;
 use wz::runtime_tokio::session_open::{
     accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session,
-    AcceptConfig, DialConfig, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    AcceptConfig, DialConfig, DialedLink, OpenError, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 
@@ -1057,6 +1060,74 @@ async fn race_against_shutdown<O>(
 /// `wz_liveliness_subscriber_round_trip_against_wz_acceptor` (peer
 /// terminates on Close before processing the trailing UndeclToken);
 /// the typestate signature makes that reorder a type error.
+/// R311y433 — the transport MODE a one-shot Initiator OFFERS on its InitSyn.
+///
+/// Each variant names an establishment extension the peer must mirror for the
+/// mode to negotiate (`&=`), and each has its own
+/// `initiate_and_open_session_with_*` entrypoint that stages the offer on the
+/// session actions BEFORE the handshake drives. `main.rs` rejects `--lowlatency
+/// --compression`, so the demo offers at most one — hence an enum rather than a
+/// set: "two modes at once" stays unrepresentable here.
+enum InitiatorOffer {
+    /// No mode ext staged — the bare open.
+    None,
+    /// R311y372 `--lowlatency`: Z_EXT_LOWLATENCY (0x5), the lean data path.
+    Lowlatency,
+    /// R311y433 `--compression`: Z_EXT_COMPRESSION (0x6), the per-batch lz4 wrap.
+    Compression,
+}
+
+/// Open a one-shot Initiator session with `offer` staged.
+///
+/// This is the ONE seam that owns the "a flag whose atom was not built is
+/// INERT" contract the `args.rs` field docs state: a mode whose feature is off
+/// falls back to the bare [`initiate_and_open_session`], so the flag parses and
+/// banner-logs but changes no wire. Keeping the fallback here (rather than at the
+/// call site) is what keeps the caller cfg-free — the alternative multiplies cfg
+/// combinations by the number of modes.
+async fn open_initiator_with_offer(
+    offer: InitiatorOffer,
+    dialed: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+) -> Result<OpenedSession, OpenError> {
+    match offer {
+        InitiatorOffer::None => {
+            initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await
+        }
+        #[cfg(feature = "transport-lowlatency")]
+        InitiatorOffer::Lowlatency => {
+            initiate_and_open_session_with_lowlatency(
+                dialed,
+                params,
+                clock,
+                None,
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+        }
+        #[cfg(not(feature = "transport-lowlatency"))]
+        InitiatorOffer::Lowlatency => {
+            initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await
+        }
+        #[cfg(feature = "session-extcompression")]
+        InitiatorOffer::Compression => {
+            initiate_and_open_session_with_compression(
+                dialed,
+                params,
+                clock,
+                None,
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+        }
+        #[cfg(not(feature = "session-extcompression"))]
+        InitiatorOffer::Compression => {
+            initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_demo(
     role: Role,
@@ -1166,49 +1237,25 @@ pub(crate) async fn run_demo(
                     .await
                 }
                 Role::Initiator { .. } => {
-                    // R311y372 — an Initiator with `--lowlatency` OFFERS the
-                    // Z_EXT_LOWLATENCY unit ext on the InitSyn (via
-                    // `initiate_and_open_session_with_lowlatency` ->
-                    // `set_lowlatency_offer(true)`), so a peer that also offers it
-                    // negotiates the lean transport that drops the Frame(sn)
-                    // wrapper. Gated on the atom; a non-lowlatency build always
-                    // takes the bare initiate path.
-                    #[cfg(feature = "transport-lowlatency")]
-                    let opened_res = if matches!(
-                        &role,
+                    // R311y372 / R311y433 — an Initiator with `--lowlatency` or
+                    // `--compression` OFFERS that mode's establishment ext on the
+                    // InitSyn (`initiate_and_open_session_with_*` ->
+                    // `set_*_offer(true)`), so a peer that also offers it negotiates
+                    // it: lowlatency drops the Frame(sn) wrapper, compression lz4-
+                    // wraps every post-establishment batch. `main.rs` rejects the
+                    // pair, so the classification below is total. The per-mode
+                    // atom gating (and the inert-flag fallback for a build without
+                    // the atom) lives in `open_initiator_with_offer`.
+                    let offer = match &role {
                         Role::Initiator {
-                            lowlatency: true,
-                            ..
-                        }
-                    ) {
-                        initiate_and_open_session_with_lowlatency(
-                            dialed,
-                            params,
-                            session_clock,
-                            None,
-                            DEFAULT_OPEN_TICK_MS,
-                        )
-                        .await
-                    } else {
-                        initiate_and_open_session(
-                            dialed,
-                            params,
-                            session_clock,
-                            None,
-                            DEFAULT_OPEN_TICK_MS,
-                        )
-                        .await
+                            lowlatency: true, ..
+                        } => InitiatorOffer::Lowlatency,
+                        Role::Initiator {
+                            compression: true, ..
+                        } => InitiatorOffer::Compression,
+                        _ => InitiatorOffer::None,
                     };
-                    #[cfg(not(feature = "transport-lowlatency"))]
-                    let opened_res = initiate_and_open_session(
-                        dialed,
-                        params,
-                        session_clock,
-                        None,
-                        DEFAULT_OPEN_TICK_MS,
-                    )
-                    .await;
-                    opened_res
+                    open_initiator_with_offer(offer, dialed, params, session_clock).await
                 }
             }
             .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))?;
@@ -1247,6 +1294,25 @@ pub(crate) async fn run_demo(
                 log::info!(
                     "wz-ap-demo: lowlatency negotiated = {}",
                     opened.actions.is_lowlatency()
+                );
+            }
+            // R311y433 — WITNESS the negotiated compression capability: `&=`-merged
+            // against the peer's InitAck ext, so `true` here means the peer (a
+            // zenohd with `transport/unicast/compression/enabled` on, or a wz peer)
+            // offered Z_EXT_COMPRESSION back and every post-establishment batch on
+            // this session goes out lz4-wrapped `[BatchHeader][payload]`. The
+            // Layer Z cross-impl leg greps this line, in both polarities.
+            #[cfg(feature = "session-extcompression")]
+            if matches!(
+                &role,
+                Role::Initiator {
+                    compression: true,
+                    ..
+                }
+            ) {
+                log::info!(
+                    "wz-ap-demo: compression negotiated = {}",
+                    opened.actions.is_compression()
                 );
             }
             log::info!("wz-ap-demo: session Established; entering steady state");

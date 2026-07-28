@@ -305,6 +305,18 @@ transport-multilink = ["routing-peer", "wz/transport-multilink"]
 # `transport/unicast/lowlatency` is enabled. The atom is active <=> its cfg site
 # in runner.rs (the `--lowlatency` open branch).
 transport-lowlatency = ["wz/transport-lowlatency"]
+# R311y433 (session-extcompression) — opt-in per-batch lz4 COMPRESSION, forwarding
+# the wz facade's `session-extcompression` (which itself pulls
+# `transport-compression`, so ONE demo feature carries both atoms: the
+# Z_EXT_COMPRESSION 0x6 unit ext on InitSyn and the lz4 `[BatchHeader][payload]`
+# wrap the negotiated session then applies to every post-establishment batch).
+# The exact mirror of `transport-lowlatency` above: NOT in `default`
+# (preset-ap-client does not carry compression), so every other lane build is
+# unchanged; only run-ci Layer Z builds wz-ap-demo with it so the compression
+# cross-impl leg can dial `--connect ... --compression` against a zenohd whose
+# `transport/unicast/compression/enabled` is on. The atom is active <=> its cfg
+# site in runner.rs (the `--compression` open branch).
+session-extcompression = ["wz/session-extcompression"]
 # R311y218 (transport-qos) — opt-in QoS transport on the `--peer` mesh mode: `--qos`
 # offers it, routed through `WzConfig.qos` into `FaceSources.qos` and staged by the
 # `_with_multilink` entrypoints. Pulls `routing-peer` (the run-mode that hosts the

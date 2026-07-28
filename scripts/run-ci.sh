@@ -1555,6 +1555,12 @@ layer_c1ac_cargo_test_quic() {
 #      ext codec + lean rx + per-session state) composes standalone WITHOUT the
 #      handshake codecs (the Init offer/merge is additively gated on
 #      codec-init-body, so a bare build carries no dead send_wire seam).
+#   5. R311y433 — clippy-gates wz-ap-demo under --features transport-lowlatency,
+#      the demo's `--lowlatency` cfg site, for the reason spelled out on C1ae step 5
+#      (C2 is default-features and compiles the arm out). Added in the compression
+#      round because R311y433 moved BOTH modes' open arms into one
+#      `open_initiator_with_offer` seam, and gating one mode's arm while leaving its
+#      sibling's ungated would be an asymmetry with no rationale behind it.
 #
 # R311y414 — the two test steps were BARE, so an `extlowlatency` rename or a
 # cfg-out of the e2e cases would have gone green by silence. Both now carry
@@ -1566,7 +1572,8 @@ layer_c1ad_cargo_test_lowlatency() {
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,transport-unicast,transport-link-tcp --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features transport-lowlatency --quiet -- -D warnings)
+        && cargo clippy -p wz-session-core --no-default-features --features transport-lowlatency --quiet -- -D warnings \
+        && cargo clippy -p wz-ap-demo --all-targets --features transport-lowlatency --quiet -- -D warnings)
 }
 
 # ─── Layer C1bb — transport-qos: ext_qos wire + per-priority SN conduits ─
@@ -1768,6 +1775,13 @@ layer_c1bd_locator_iface() {
 #      transport-compression to prove the bare lz4 wrap primitive (no handshake
 #      codecs) composes standalone (is_compression never flips, so the wrap is
 #      inert-but-present, dead-code-free).
+#   5. R311y433 — clippy-gates wz-ap-demo under --features session-extcompression,
+#      the demo's `--compression` cfg site (the `InitiatorOffer::Compression` open
+#      arm + the `compression negotiated = {}` witness the Layer Z cross-impl leg
+#      greps). Layer C2 is `clippy --workspace` at DEFAULT features, which compiles
+#      that arm OUT and exits 0, so without this step the atom's demo-side code is
+#      lint-gated by nothing. Layer Z `cargo build`s the same feature, which catches
+#      a compile error but no lint.
 #
 # R311y414 — both test steps were BARE; they now carry anchored count guards
 # with the MEASURED counts (6 unit / 2 e2e).
@@ -1778,7 +1792,8 @@ layer_c1ae_cargo_test_compression() {
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features session-extcompression,transport-unicast,transport-link-tcp --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features transport-compression --quiet -- -D warnings)
+        && cargo clippy -p wz-session-core --no-default-features --features transport-compression --quiet -- -D warnings \
+        && cargo clippy -p wz-ap-demo --all-targets --features session-extcompression --quiet -- -D warnings)
 }
 
 # ─── Layer C1ax — §5.21 routing-namespace (R311y106 unicast + R311y107 multicast) ─
@@ -6423,7 +6438,16 @@ layer_z_zenohd_interop() {
     # for every other leg); it IMPLIES `quic` (shared cert plumbing), already present.
     # quic-datagram is in zenoh's DEFAULT features and zenohd enables `zenoh/default`,
     # so the DEFAULT oracle dials it -- NO special oracle (unlike vsock/unixpipe).
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,transport-link-unixpipe,vsock --quiet) || return 1
+    # R311y433 — `session-extcompression` added so the Layer Z binary carries the
+    # `--compression` CLI for the per-batch lz4 cross-impl leg below. It pulls
+    # `transport-compression` through the wz facade, so ONE feature brings both the
+    # 0x6 handshake and the lz4 wrap. Additive in the same sense as
+    # transport-lowlatency: the wrap is behind `is_compression() &&
+    # is_established()`, and no other leg passes `--compression`, so every other
+    # leg dials through the unchanged binary. compression is in zenoh's DEFAULT
+    # features and zenohd enables `zenoh/default`, so the DEFAULT oracle speaks it
+    # once configured -- NO special oracle (unlike vsock/unixpipe).
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients
@@ -6444,6 +6468,19 @@ layer_z_zenohd_interop() {
     # per-zenohd isolation as the client legs above.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_lowlatency_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y433 — wz per-batch lz4 COMPRESSION cross-impl: wz dials zenohd with
+    # `--compression`, negotiates Z_EXT_COMPRESSION 0x6 (asserted true via the demo
+    # log), and a COMPRESSIBLE Put — sized so `compress_batch` provably keeps the
+    # compressed form rather than shipping raw with the bit clear — routes through a
+    # compression-configured zenohd to a pico z_sub. zenoh-pico has NO compression,
+    # so zenohd is the only foreign witness. TWO legs in the one target: the proof
+    # plus its calibration twin against a STOCK zenohd (negotiated = false, delivery
+    # still works over the un-wrapped wire), which is what forbids reading the
+    # proof's `negotiated = true` as a hardcoded constant. No `--features` on this
+    # invocation: the interop target drives EXTERNAL binaries, so the atom is
+    # compiled into the wz-ap-demo build above, not into the test.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_compression_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):
     # a real zenohd DIALS the wz `--listen ws/...` acceptor over ws (the RFC6455
     # server upgrade wired in bind_locator/accept_locator), and a pico z_put routes
