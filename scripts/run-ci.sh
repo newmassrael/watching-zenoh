@@ -6541,6 +6541,25 @@ layer_z_zenohd_interop() {
     # and this crate's dev-dep already pins transport-fragmentation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_fragment_tx_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y439 — wz RX FRAGMENTATION cross-impl (transport-fragmentation
+    # zenohd->wz), the direction R311y438 explicitly left open ("the tiny MTU
+    # binds BOTH ways ... but nothing asserts it, so no claim is made"). wz
+    # dials IN-PROCESS with batch_size 64 and declares a ROUTED subscriber; a
+    # pico z_pub publishes a 200-byte value into zenohd, which must SPLIT the
+    # routed Put to reach wz, and wz reassembles it into one byte-exact Sample.
+    # The pico->wz leg (wz_reassembles_pico_fragment_tx) proves a different
+    # fragmenter: pico splits at a compiled constant with no router in the path,
+    # zenohd's is the full Rust pipeline splitting a message it is ROUTING. TWO
+    # legs: the proof plus its option-atom TWIN at the default batch (same
+    # route, MTU far above the payload, ZERO fragments on the wire AND zero RX
+    # reassembly, still delivered). Two independent halves: the shared counting
+    # relay observes ZENOHD's chain on the wire (here the tag is produced by the
+    # FOREIGN side, not merely recognised by wz), and wz's own drive loop
+    # reports the reassembly branch plus a chain terminator. No `--features`:
+    # the test opens the session in-process, and this crate's dev-dep already
+    # pins transport-fragmentation.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_fragment_rx_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):
     # a real zenohd DIALS the wz `--listen ws/...` acceptor over ws (the RFC6455
     # server upgrade wired in bind_locator/accept_locator), and a pico z_put routes

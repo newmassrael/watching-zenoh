@@ -19,10 +19,11 @@ pub mod common {
     //! the flake background.
 
     use std::fs::File;
-    use std::net::{Ipv4Addr, TcpListener};
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -962,6 +963,159 @@ pub mod common {
             .map(|i| ALPHABET[(i * 7) % ALPHABET.len()])
             .collect();
         String::from_utf8(bytes).expect("alphanumeric is valid UTF-8")
+    }
+
+    /// The 5-bit transport-message-id field of a zenoh transport header
+    /// (`wz-session-core/src/inbound.rs:236` — `header & 0x1F`). Both peers of
+    /// every link this harness relays speak it: wz writes it through
+    /// `wz_codecs::wire_const`, zenohd through `zenoh-protocol`'s `id` module
+    /// (`commons/zenoh-protocol/src/transport/mod.rs:59-60` at zenoh 1.5.0,
+    /// where `FRAME = 0x05` / `FRAGMENT = 0x06` match wz's constants exactly).
+    const TRANSPORT_MID_MASK: u8 = 0x1F;
+
+    /// A live [`spawn_fragment_counting_relay`] — the listening port a dialer
+    /// aims at, plus the per-direction counters the relay accumulates.
+    ///
+    /// The two directions are named for the ROLES either side plays against the
+    /// relay, not for wz and zenohd: the same relay serves a leg where wz is the
+    /// dialer (R311y438, counting wz's own TX chain) and one where wz is the
+    /// dialer but the counted chain flows the other way (R311y439, counting
+    /// ZENOHD's TX chain). "Which direction is the foreign sender" is the
+    /// caller's claim to make, so it is the caller that picks the accessor.
+    pub struct FragmentCountingRelay {
+        port: u16,
+        dialer_to_acceptor: Arc<AtomicUsize>,
+        acceptor_to_dialer: Arc<AtomicUsize>,
+    }
+
+    impl FragmentCountingRelay {
+        /// The relay's own listening port. The dialer under test connects here
+        /// instead of to the acceptor.
+        pub fn port(&self) -> u16 {
+            self.port
+        }
+
+        /// Counted batches flowing DIALER -> ACCEPTOR (for a wz dialer: wz's own
+        /// transmit path).
+        pub fn dialer_to_acceptor_count(&self) -> usize {
+            self.dialer_to_acceptor.load(Ordering::Relaxed)
+        }
+
+        /// Counted batches flowing ACCEPTOR -> DIALER (for a wz dialer against a
+        /// zenohd acceptor: the FOREIGN router's transmit path).
+        pub fn acceptor_to_dialer_count(&self) -> usize {
+            self.acceptor_to_dialer.load(Ordering::Relaxed)
+        }
+    }
+
+    /// Bind a TCP relay that a dialer under test connects to in place of
+    /// `upstream_port`. It forwards both directions VERBATIM and counts, per
+    /// direction, the streamed-link batches whose FIRST transport message
+    /// carries `counted_mid`.
+    ///
+    /// ## Why a relay at all
+    ///
+    /// A cross-impl leg with a foreign peer on one end cannot normally observe
+    /// what actually crossed the wire — it can only assert what arrived, and
+    /// attribute the shape of the transmission "by construction". The relay
+    /// converts that inference into a measurement, on either side, for about
+    /// sixty lines. R311y438 introduced it for wz's own TX chain; R311y439
+    /// pointed it at zenohd's.
+    ///
+    /// ## The envelope
+    ///
+    /// Both peers frame a streamed link as `[u16 LE len][batch]` — wz at
+    /// `wz-runtime-tokio/src/stream_link.rs:159-170`, zenoh at
+    /// `io/zenoh-transport/src/common/batch.rs:318` with `BatchSize = u16`
+    /// (`commons/zenoh-protocol/src/transport/mod.rs:41`) and `L_LEN = 2`
+    /// (`batch.rs:34`), both little-endian. The 4-byte prefix is the lowlatency
+    /// framing, which no fragmentation leg negotiates.
+    ///
+    /// ## What the count is, exactly
+    ///
+    /// It is the number of batches whose FIRST transport message carries
+    /// `counted_mid` — NOT the number of such messages. The two coincide when
+    /// the sender hands the link one transport message per batch (wz's
+    /// `send_blocking`, `stream_link.rs:141-170`). They do not always coincide
+    /// for zenohd: its pipeline reinserts the in-flight batch before fragmenting
+    /// (`io/zenoh-transport/src/common/pipeline.rs:372-383`), so the FIRST
+    /// fragment of a chain can share a partially-filled batch with a preceding
+    /// message and go uncounted; every subsequent fragment fills its own batch.
+    /// The error is therefore an UNDERCOUNT bounded by one per chain, which is
+    /// the safe direction for a `>=` assertion and irrelevant to an `== 0` one
+    /// (an arm that asserts zero pairs it with an MTU above the payload, which
+    /// makes fragmentation impossible by construction rather than merely
+    /// unobserved).
+    ///
+    /// Blocking std sockets on their own threads, deliberately: this module is
+    /// the harness SSOT for tests that are not all async, and it has no
+    /// dev-dependencies available to it (tokio is one).
+    pub fn spawn_fragment_counting_relay(
+        upstream_port: u16,
+        counted_mid: u8,
+    ) -> FragmentCountingRelay {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind counting relay");
+        let port = listener.local_addr().expect("relay local_addr").port();
+        let dialer_to_acceptor = Arc::new(AtomicUsize::new(0));
+        let acceptor_to_dialer = Arc::new(AtomicUsize::new(0));
+        let up = Arc::clone(&dialer_to_acceptor);
+        let down = Arc::clone(&acceptor_to_dialer);
+
+        thread::spawn(move || {
+            let Ok((dialer_side, _peer)) = listener.accept() else {
+                return;
+            };
+            let Ok(acceptor_side) = TcpStream::connect((Ipv4Addr::LOCALHOST, upstream_port)) else {
+                return;
+            };
+            let (Ok(dialer_tx), Ok(acceptor_tx)) =
+                (dialer_side.try_clone(), acceptor_side.try_clone())
+            else {
+                return;
+            };
+
+            thread::spawn(move || pump_counting(acceptor_side, dialer_tx, &down, counted_mid));
+            pump_counting(dialer_side, acceptor_tx, &up, counted_mid);
+        });
+
+        FragmentCountingRelay {
+            port,
+            dialer_to_acceptor,
+            acceptor_to_dialer,
+        }
+    }
+
+    /// Forward every `[u16 LE len][batch]` from `src` to `dst` byte-for-byte,
+    /// bumping `counter` for each batch whose first transport message carries
+    /// `counted_mid`. Returns when either side closes or errors — the relayed
+    /// session is over at that point, so there is nothing left to forward.
+    fn pump_counting(
+        mut src: TcpStream,
+        mut dst: TcpStream,
+        counter: &AtomicUsize,
+        counted_mid: u8,
+    ) {
+        use std::io::{Read, Write};
+
+        let mut prefix = [0u8; 2];
+        loop {
+            if src.read_exact(&mut prefix).is_err() {
+                return;
+            }
+            let mut batch = vec![0u8; u16::from_le_bytes(prefix) as usize];
+            if src.read_exact(&mut batch).is_err() {
+                return;
+            }
+            if batch
+                .first()
+                .is_some_and(|header| header & TRANSPORT_MID_MASK == counted_mid)
+            {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            if dst.write_all(&prefix).is_err() || dst.write_all(&batch).is_err() {
+                return;
+            }
+        }
     }
 
     /// R311y138 — lifted from the ~95%-identical

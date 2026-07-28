@@ -74,12 +74,16 @@
 //!      calibration that forbids reading the relay's count as a constant: the
 //!      same counter reads 2+ in one arm and 0 in the other.
 //!
-//! The relay counts only the FIRST transport message of each streamed batch.
-//! That is exact for this topology (wz's `send_blocking` is handed one encoded
-//! transport message per call — `wz-runtime-tokio/src/stream_link.rs:141-170`)
-//! and, where it is not, it UNDERCOUNTS — which is the safe direction for leg
-//! 1's `>= 2`. Leg 2's `== 0` does not rest on the count alone: its MTU
-//! assertion makes fragmentation impossible by construction.
+//! R311y439 — the relay itself now lives in
+//! [`wz_integration_tests::common::spawn_fragment_counting_relay`], lifted on
+//! its second consumer (the zenohd -> wz leg,
+//! `wz_fragment_rx_zenohd_interop.rs`, which points the SAME relay at the
+//! opposite direction). Its docs carry the exactness argument for what the
+//! count is — in short, it counts BATCHES whose first transport message is
+//! tagged, which for a wz sender is one-to-one with messages and elsewhere
+//! UNDERCOUNTS, the safe direction for leg 1's `>= 2`. Leg 2's `== 0` does not
+//! rest on the count alone: its MTU assertion makes fragmentation impossible by
+//! construction.
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z): zenohd + the pico z_sub CLI are
 //! external binaries. The test NAME carries `zenohd` because Layer E's skip
@@ -87,17 +91,15 @@
 //! the token gets pulled into the default sweep alone and reddens there
 //! (R311y437).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 use wz_codecs::wire_const::T_MID_FRAGMENT;
 use wz_integration_tests::common::{
-    frag_payload, read_captured, spawn_subscribed_zsub, spawn_zenohd_on_ephemeral_tcp,
-    zenoh_pico_cli_binary,
+    frag_payload, read_captured, spawn_fragment_counting_relay, spawn_subscribed_zsub,
+    spawn_zenohd_on_ephemeral_tcp, zenoh_pico_cli_binary,
 };
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -116,78 +118,13 @@ const SUB_KEYEXPR: &str = "demo/**";
 const TINY_BATCH: u16 = 64;
 /// 200 B > 64 B MTU and within the alloc (AP) MsgPut owned-bytes bound.
 const PAYLOAD_LEN: usize = 200;
-/// The transport-header MID mask (`wz-session-core/src/inbound.rs:236`).
-const MID_MASK: u8 = 0x1F;
 
 /// What one arm of the pair observed.
 struct ArmOutcome {
     negotiated_mtu: usize,
-    /// `T_MID_FRAGMENT`-tagged messages the relay saw going wz -> zenohd.
+    /// `T_MID_FRAGMENT`-tagged batches the relay saw going wz -> zenohd.
     fragments_on_wire: usize,
     delivery: Result<(), String>,
-}
-
-/// Bind a TCP relay that wz dials in place of zenohd. It forwards both
-/// directions verbatim and counts, in the wz -> zenohd direction only, the
-/// streamed batches whose first transport message is a `T_MID_FRAGMENT`.
-///
-/// The streamed-link envelope is a 2-byte LE length prefix followed by the
-/// batch (`wz-runtime-tokio/src/stream_link.rs:159-170`; the 4-byte prefix is
-/// the lowlatency framing, which this leg does not negotiate). Returns the
-/// relay's port and the live counter.
-async fn spawn_fragment_counting_relay(upstream_port: u16) -> (u16, Arc<AtomicUsize>) {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind fragment-counting relay");
-    let port = listener.local_addr().expect("relay local_addr").port();
-    let fragments = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&fragments);
-
-    tokio::spawn(async move {
-        let Ok((downstream, _peer)) = listener.accept().await else {
-            return;
-        };
-        let Ok(upstream) = TcpStream::connect(("127.0.0.1", upstream_port)).await else {
-            return;
-        };
-        let (mut wz_rx, wz_tx) = downstream.into_split();
-        let (zenohd_rx, mut zenohd_tx) = upstream.into_split();
-
-        // zenohd -> wz: verbatim, uninspected. This direction carries zenohd's
-        // own fragments (the tiny MTU binds both ways), so wz's RX reassembly
-        // is exercised here too — but this leg does not CLAIM that direction,
-        // so nothing counts it.
-        tokio::spawn(async move {
-            let mut zenohd_rx = zenohd_rx;
-            let mut wz_tx = wz_tx;
-            let _ = tokio::io::copy(&mut zenohd_rx, &mut wz_tx).await;
-        });
-
-        let mut prefix = [0u8; 2];
-        loop {
-            if wz_rx.read_exact(&mut prefix).await.is_err() {
-                break;
-            }
-            let len = u16::from_le_bytes(prefix) as usize;
-            let mut batch = vec![0u8; len];
-            if wz_rx.read_exact(&mut batch).await.is_err() {
-                break;
-            }
-            if batch
-                .first()
-                .is_some_and(|header| header & MID_MASK == T_MID_FRAGMENT)
-            {
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
-            if zenohd_tx.write_all(&prefix).await.is_err()
-                || zenohd_tx.write_all(&batch).await.is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    (port, fragments)
 }
 
 /// Drive one arm of the pair: stock zenohd, a pico `z_sub` client of it, and a
@@ -203,7 +140,7 @@ async fn publish_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutcom
     let (mut zenohd, zenohd_port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    let (relay_port, fragments) = spawn_fragment_counting_relay(zenohd_port).await;
+    let relay = spawn_fragment_counting_relay(zenohd_port, T_MID_FRAGMENT);
 
     // pico subscribes to zenohd DIRECTLY (not through the relay): it is the
     // far-side witness, and routing it through the relay would count nothing
@@ -224,7 +161,7 @@ async fn publish_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutcom
     if let Some(batch) = batch_size {
         params.batch_size = batch;
     }
-    let stream = TcpStream::connect(("127.0.0.1", relay_port))
+    let stream = TcpStream::connect(("127.0.0.1", relay.port()))
         .await
         .expect("wz dials the fragment-counting relay");
     let opened = initiate_and_open_session(
@@ -287,7 +224,7 @@ async fn publish_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutcom
                     "pico z_sub did not print the {PAYLOAD_LEN}B Put within 12s \
                      (negotiated MTU {negotiated_mtu}, {} fragment(s) seen on the wire).\n\
                      --- captured z_sub stdout ---\n{captured}",
-                    fragments.load(Ordering::Relaxed)
+                    relay.dialer_to_acceptor_count()
                 ));
             }
         }
@@ -307,7 +244,7 @@ async fn publish_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutcom
 
     ArmOutcome {
         negotiated_mtu,
-        fragments_on_wire: fragments.load(Ordering::Relaxed),
+        fragments_on_wire: relay.dialer_to_acceptor_count(),
         delivery,
     }
 }
