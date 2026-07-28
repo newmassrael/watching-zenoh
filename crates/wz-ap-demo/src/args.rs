@@ -106,11 +106,12 @@ pub(crate) enum Role {
         /// `session-extcompression` feature, in which case the flag is inert (the
         /// one-shot open takes the bare initiate path, runner.rs). Initiator-only
         /// and one-shot-only, exactly like `lowlatency`. Rejected in combination
-        /// with `--lowlatency` (main.rs): zenoh's lean transport serializes
-        /// straight to the link with a 4-byte length prefix and NEVER consults the
-        /// batch compression path (`zenoh-transport-1.5.0`
-        /// `unicast/lowlatency/link.rs:33-73` `send_with_link` — no `WBatch`, no
-        /// `BatchHeader`), so the pair has no coherent cross-impl wire meaning.
+        /// with `--lowlatency` (main.rs) because no `session_open` entrypoint
+        /// stages both offers — NOT because the pair is ill-formed. R311y434: on a
+        /// lean link the negotiated wrap is INERT in wz exactly as in zenoh, whose
+        /// lean transport serializes straight to the link behind a 4-byte length
+        /// prefix and never touches `WBatch` / `BatchHeader`
+        /// (`zenoh-transport-1.5.0` `unicast/lowlatency/link.rs:33-73`).
         compression: bool,
     },
 }

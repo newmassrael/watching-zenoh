@@ -1414,18 +1414,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn emit_on_link(&self, link: &LinkState<R>, bytes: &[u8], reliability: Reliability) {
         let now = self.clock.now_monotonic_ms();
         R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
-        // transport-compression — once compression is negotiated, every
+        // transport-compression — once compression is ACTIVE, every
         // post-establishment batch is lz4-wrapped here (the wz analogue of
-        // zenoh's finalize-then-write-to-link). The is_established() gate keeps
-        // the handshake messages uncompressed: zenoh sets the link's
-        // is_compression only after the handshake AND explicitly ships OpenAck
-        // raw (link.rs:285) -- both fall out for free, since the acceptor is not
-        // yet established when it emits OpenAck. This wraps OUTSIDE the lowlatency
-        // lean encode (compression is the outermost wire layer); the link layer
-        // then length-frames the [BatchHeader][payload] (zenoh's
-        // [length][header][payload]).
+        // zenoh's finalize-then-write-to-link), and the link layer then
+        // length-frames the [BatchHeader][payload] (zenoh's
+        // [length][header][payload]). Every condition — negotiated,
+        // post-establishment, and NOT on a lean lowlatency link — lives in
+        // `compresses_batches`, which the RX un-wrap consults too so the two
+        // directions cannot disagree. R311y434 added the lowlatency conjunct: wz
+        // used to wrap OUTSIDE the lean encode, which no zenoh peer can read.
         #[cfg(feature = "transport-compression")]
-        if self.is_compression() && self.is_established() {
+        if self.compresses_batches() {
             let wrapped = crate::compression::compress_batch(bytes);
             // transport-stats — count the ACTUAL wire bytes (post-compression).
             #[cfg(feature = "transport-stats")]
@@ -2336,6 +2335,46 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "transport-compression")]
     pub fn is_compression(&self) -> bool {
         R::with_mutex_mut(&self.is_compression, |s| *s)
+    }
+
+    /// transport-compression (R311y434) — SSOT for "is the lz4 batch wrap ACTIVE
+    /// on this session right now?". The single predicate BOTH the TX wrap
+    /// ([`Self::emit_on_link`]) and the RX un-wrap
+    /// ([`crate::drive::dispatch_link_event`]) consult, so the two cannot drift
+    /// apart and leave one side wrapping what the other does not un-wrap — a
+    /// hand-maintained pair of conditions is exactly how that breaks.
+    ///
+    /// Distinct from [`Self::is_compression`], which reports the NEGOTIATED
+    /// capability. Three conjuncts, each mirroring zenoh:
+    ///
+    /// 1. the 0x6 ext negotiated on both sides (the `&=` merge);
+    /// 2. post-establishment only. zenoh drives Init/Open on a link whose
+    ///    `is_compression` is false (`establishment/open.rs:572`) and then
+    ///    explicitly ships the OpenAck raw through a named workaround
+    ///    (`unicast/link.rs:288-296`);
+    /// 3. NOT lowlatency. This one is a CORRECTION, not a mirror of structure:
+    ///    zenoh sets `is_compression` on a lowlatency link's `BatchConfig` too
+    ///    (`open.rs:701` is independent of `:689`), but its lean tx serializes
+    ///    straight to the link behind a 4-byte length prefix and never touches
+    ///    `WBatch` / `BatchHeader` (`unicast/lowlatency/link.rs:33-73`), and its
+    ///    lean rx never decompresses either. So upstream the negotiated capability
+    ///    is INERT on a lean link. wz previously wrapped there anyway, which
+    ///    emitted a wire no zenoh peer can read — self-consistent wz<->wz and
+    ///    wire-incompatible with the reference impl.
+    #[cfg(feature = "transport-compression")]
+    pub fn compresses_batches(&self) -> bool {
+        if !self.is_compression() || !self.is_established() {
+            return false;
+        }
+        #[cfg(feature = "transport-lowlatency")]
+        {
+            !self.is_lowlatency()
+        }
+        #[cfg(not(feature = "transport-lowlatency"))]
+        {
+            // No lean transport exists in this build, so conjunct 3 holds trivially.
+            true
+        }
     }
 
     /// transport-shm — the negotiated SHM capability for this session (zenoh

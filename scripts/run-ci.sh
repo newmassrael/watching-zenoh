@@ -2039,22 +2039,32 @@ layer_c1af_cargo_test_shm() {
 #   2. runs the SHM unresolved-drop observability test (a marker Put with no
 #      resolver drops AND increments the observable counter -- fail-observable,
 #      not fail-silent) under the heavily-gated pubsub dispatch test module;
-#   3. runs transport_compose_e2e (all three negotiated on one session; an SHM Put
-#      shows the wire LAYERING compression(lean(shm-descriptor)) -- the 3-way
-#      composition the single-mode e2e could not prove);
+#   3. runs transport_compose_e2e -- the 3-way composition the single-mode e2e
+#      could not prove. R311y434 REWROTE what it asserts: the stack is NOT
+#      compression(lean(shm-descriptor)). zenoh negotiates the 0x6 ext on a lean
+#      link but its lean tx never touches WBatch/BatchHeader
+#      (unicast/lowlatency/link.rs:33-73), so a negotiated wrap is INERT there and
+#      wz wrapping anyway emitted a wire no zenoh peer can read. The lane now runs
+#      an option-atom PAIR (2 tests, hence the pin below): with lowlatency the wire
+#      is the bare lean Push and `compresses_batches()` is false while
+#      `is_compression()` stays true; WITHOUT it the BatchHeader is present, which
+#      is what catches an over-broad suppression;
 #   4. clippy-gates the combined three-feature cfg --all-targets (the only build
 #      where all three data paths + the shared establish_capability_pair helper
 #      compile together).
 #
 # R311y414 — all three test steps were BARE and each is a SINGLE-test target
 # (1/1/1), the shape where a rename or a cfg-out is invisible; anchored count
-# guards now pin them.
+# guards now pin them. R311y434 — the compose target became a PAIR, so its pin is
+# 2. MEASURED, and the other two pins were re-checked rather than assumed
+# unaffected: neither shares the compose target's filter, so this pin did not
+# invalidate in a cluster (the R311y432 failure mode).
 layer_c1ag_cargo_test_transport_compose() {
     _runci_guarded_test C1ag 1 cargo test -p wz-session-core --features transport-lowlatency,session-extcompression,session-extshm --lib unit_ext --quiet \
         || return 1
     _runci_guarded_test C1ag 1 cargo test -p wz-session-core --features transport-shm,codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --lib shm_put_with_no_resolver --quiet \
         || return 1
-    _runci_guarded_test C1ag 1 cargo test -p wz-runtime-tokio --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --test transport_compose_e2e --quiet \
+    _runci_guarded_test C1ag 2 cargo test -p wz-runtime-tokio --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --test transport_compose_e2e --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --quiet -- -D warnings)

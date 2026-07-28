@@ -76,31 +76,32 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
             actions.stats.inc_rx(rx.bytes.len());
             // transport-compression — un-wrap the OUTERMOST wire layer FIRST
             // (zenoh decompresses the batch before any transport-message
-            // dispatch). Once compression is negotiated AND established, the
-            // datagram is [BatchHeader][payload]; decompress it into `bytes`
-            // (which the lowlatency / universal dispatch below then reads). A
-            // malformed blob — or one that would expand past the negotiated mtu
-            // bound (the decompression-bomb guard) — is a framing error.
-            // Pre-establishment handshake frames are never compressed (the
-            // is_established gate), so they pass through verbatim.
+            // dispatch). While compression is ACTIVE the datagram is
+            // [BatchHeader][payload]; decompress it into `bytes` (which the
+            // universal dispatch below then reads). A malformed blob — or one that
+            // would expand past the negotiated mtu bound (the decompression-bomb
+            // guard) — is a framing error. `compresses_batches` is the SAME
+            // predicate the TX wrap uses, so this side un-wraps exactly what the
+            // other side wraps: pre-establishment handshake frames pass through
+            // verbatim, and so does every frame on a lean lowlatency link, where
+            // zenoh's rx does not decompress either (R311y434).
             #[cfg(feature = "transport-compression")]
-            let decompressed: Option<Vec<u8>> =
-                if actions.is_compression() && actions.is_established() {
-                    match crate::compression::decompress_batch(
-                        &rx.bytes,
-                        actions.negotiated_batch_mtu(),
-                    ) {
-                        Some(b) => Some(b),
-                        None => {
-                            engine.process_event(E::FramingError);
-                            return DriverLoopOutcome::ParseError(
-                                crate::parse_error::InboundParseError::CompressionFailed,
-                            );
-                        }
+            let decompressed: Option<Vec<u8>> = if actions.compresses_batches() {
+                match crate::compression::decompress_batch(
+                    &rx.bytes,
+                    actions.negotiated_batch_mtu(),
+                ) {
+                    Some(b) => Some(b),
+                    None => {
+                        engine.process_event(E::FramingError);
+                        return DriverLoopOutcome::ParseError(
+                            crate::parse_error::InboundParseError::CompressionFailed,
+                        );
                     }
-                } else {
-                    None
-                };
+                }
+            } else {
+                None
+            };
             #[cfg(feature = "transport-compression")]
             let bytes: &[u8] = decompressed.as_deref().unwrap_or(&rx.bytes);
             #[cfg(not(feature = "transport-compression"))]
