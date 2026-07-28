@@ -129,7 +129,40 @@ measure() {
     if ! (cd "$CRATES_DIR" && cargo build --release -p "$BIN_NAME" \
         --no-default-features --features "$features" \
         --target-dir "$subdir") >/tmp/measure-build-$$.log 2>&1; then
-        echo "  $label: SKIP (binary does not compile under this exclusion;" \
+        # R311y435 — SEPARATE THE TWO FAILURE MODES. Until this round both landed
+        # as one SKIP, and a SKIP is green, so a genuine catalog defect was
+        # indistinguishable from an honest measurement limit for as long as the
+        # lane existed:
+        #
+        #   * the measurement BINARY does not compile — `wz-ap-demo` references
+        #     consumer features unconditionally, so an exclusion set that removes
+        #     them takes its source with it. Nothing is wrong with the catalog;
+        #     this binary just cannot express the profile. Honest SKIP.
+        #   * a LIBRARY crate does not compile — the profile itself is broken:
+        #     some feature is used without being selected. That IS the
+        #     catalog-truthfulness defect this gate exists to catch, and swallowing
+        #     it as a SKIP is the gate reporting green on its own subject matter.
+        #
+        # Both R311y435 fixes were the second kind and had been hiding here:
+        # `pubsub-put` used `wz_codecs::push` without selecting `codec-push`, and
+        # `prune_declaration` outlived its callers into a `never used` build
+        # failure. The minus-codec-push lane went from SKIP to a measured
+        # 10072-byte delta once the first was written down.
+        local culprit
+        # The backticks below are literal cargo output being matched, not command
+        # substitution, so the pattern stays single-quoted.
+        # shellcheck disable=SC2016
+        culprit=$(grep -oE 'could not compile `[^`]+`' /tmp/measure-build-$$.log \
+            | head -1 | sed -e 's/could not compile `//' -e 's/`$//')
+        if [[ -n "$culprit" && "$culprit" != "$BIN_NAME" ]]; then
+            echo "  $label: CATALOG DEFECT — library crate \`$culprit\` does not" \
+                 "compile under this exclusion. A feature is USED without being" \
+                 "SELECTED; declare the edge in that crate's Cargo.toml (or gate" \
+                 "the code to match its callers). See /tmp/measure-build-$$.log" >&2
+            echo "DEFECT" > "$TARGET_DIR_BASE/.${label}.size"
+            return 0
+        fi
+        echo "  $label: SKIP ($BIN_NAME does not compile under this exclusion;" \
              "consumer features still referenced — see /tmp/measure-build-$$.log)"
         echo "SKIP" > "$TARGET_DIR_BASE/.${label}.size"
         return 0
@@ -316,12 +349,25 @@ if [[ "$SKIP_THRESHOLD" -ne 1 ]]; then
     fail=0
     for codec in "${CODEC_FEATURES[@]}"; do
         size=$(cat "$TARGET_DIR_BASE/.minus-$codec.size")
+        if [[ "$size" == "DEFECT" ]]; then
+            # R311y435 — a LIBRARY crate failed to compile under this exclusion:
+            # a feature is used without being selected. This is the very defect
+            # the gate exists to catch, so it FAILS rather than skipping. It is
+            # not a threshold question (there is no binary to measure), which is
+            # why it is judged here rather than by the delta comparison below.
+            echo "  CATALOG DEFECT $codec (library does not compile; see above)" >&2
+            fail=1
+            continue
+        fi
         if [[ "$size" == "SKIP" ]]; then
-            # Lane skipped due to compile-fail under the puller-aware
-            # exclusion set (wz-ap-demo references the consumer
-            # features unconditionally). Honest semantics: the lane is
-            # unmeasurable for THIS binary; the threshold gate cannot
-            # judge. A future smaller test binary will close the gap.
+            # Lane skipped because the MEASUREMENT BINARY (wz-ap-demo) references
+            # consumer features unconditionally, so this exclusion set removes its
+            # source. Honest semantics: unmeasurable for THIS binary, and the
+            # threshold gate cannot judge. Distinct from DEFECT above, which is a
+            # broken profile rather than an unexpressible one. A future smaller
+            # test binary — cfg-gated against the consumer features — closes the
+            # remaining lanes (codec-frame / codec-declare / minus-all-codecs /
+            # handshake-only as of R311y435).
             continue
         fi
         delta=$((baseline - size))

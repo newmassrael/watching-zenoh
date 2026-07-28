@@ -5171,7 +5171,42 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `_z_network_message_slist_drop_first_filter` in
     /// `_z_prune_declaration`: one undeclare retracts one declare, so
     /// re-declared ids keep their later entries.
-    #[cfg(feature = "session-reconnect")]
+    /// R311y435 — the gate is the UNION OF THE CALL SITES, not just
+    /// `session-reconnect`. With `codec-declare` excluded its pullers go too,
+    /// every caller compiles out, and this method became `never used` — which
+    /// `-D warnings` turns into a build failure, not a warning. run-ci Layer F's
+    /// minus-codec-declare lane hit exactly that and reported
+    /// `SKIP (binary does not compile ...)`; a SKIP is green, so the lane
+    /// measured nothing for as long as it existed.
+    ///
+    /// The union has TWO shapes and both are load-bearing. Four callers are
+    /// undeclare paths gated on `declare-undeclare` AND their own `declare-*`
+    /// (`send_undeclare_kexpr` / `_subscriber` / `_queryable`,
+    /// `prune_token_declaration`). Two more — `prune_interest` and
+    /// `prune_liveliness_get_interest` — are gated on `declare-interest` and
+    /// `liveliness-get` ALONE, with no `declare-undeclare` conjunct. Writing the
+    /// gate as one flat `all(declare-undeclare, any(...))` therefore deletes the
+    /// method out from under those two, which is exactly what an earlier
+    /// R311y435 revision did: it compiled everywhere the author checked and
+    /// reddened Layer C1ax, a lane whose feature set reaches `prune_interest`
+    /// without `declare-undeclare`. Enumerate the call sites mechanically before
+    /// touching this.
+    #[cfg(all(
+        feature = "session-reconnect",
+        any(
+            all(
+                feature = "declare-undeclare",
+                any(
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token"
+                )
+            ),
+            feature = "declare-interest",
+            feature = "liveliness-get"
+        )
+    ))]
     fn prune_declaration(&self, pred: impl Fn(&CachedDeclaration) -> bool) {
         R::with_mutex_mut(&self.declaration_cache, |cache| {
             if let Some(pos) = cache.iter().position(pred) {

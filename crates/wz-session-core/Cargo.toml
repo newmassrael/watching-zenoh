@@ -355,14 +355,32 @@ attachment-bytes = []
 
 # R311du — pub/sub data-plane gates for the migrated SubscriberRegistry
 # dispatch arms (Put / Del payload handling + attachment / timestamp ext
-# extraction). Standalone (no wz-codecs forward — the gating is at the
-# wz-session-core dispatch level, not the codec level); the
-# wz-runtime-tokio side forwards its same-named features here so the
-# gated production arms compile consistently across the workspace.
+# extraction). The wz-runtime-tokio side forwards its same-named features here
+# so the gated production arms compile consistently across the workspace.
 # pubsub-attachment selects attachment-bytes (the attachment ext codec it
 # consumes on both the Push encode and decode side).
-pubsub-put = []
-pubsub-delete = []
+#
+# R311y435 — pubsub-put / pubsub-delete now SELECT codec-push, correcting a
+# catalog omission rather than adding a new coupling. Both were declared
+# standalone (`= []`) on the reasoning that "the gating is at the dispatch
+# level, not the codec level", but `pubsub.rs:131` imports
+# `wz_codecs::push::{PushOwned, PushOwnedVariant}` under
+# `alloc AND (pubsub-put OR pubsub-delete)` with NO codec-push conjunct, and
+# `wz_codecs::push` is itself codec-push-gated. So the dependency was real and
+# merely unwritten: a `pubsub-put` build without `codec-push` does not compile
+# (`unresolved import wz_codecs::push`), which is not a gating choice but a
+# broken profile.
+#
+# This was invisible because nothing exercised the combination. run-ci Layer F
+# builds `preset-ap-client` minus each codec and its puller set; the
+# minus-codec-push and minus-codec-frame lanes hit exactly this and reported
+# `SKIP (binary does not compile ...)`. A SKIP is green, so the catalog defect
+# read as a measurement limitation for as long as the lane existed. Writing the
+# edge is what makes those lanes measurable — the alternative (adding
+# `codec-push` to the cfg in pubsub.rs) would have made `pubsub-put` silently
+# stop emitting Puts, which is the degradation this project rejects.
+pubsub-put = ["codec-push"]
+pubsub-delete = ["codec-push"]
 pubsub-attachment = ["attachment-bytes"]
 pubsub-timestamp = []
 pubsub-encoding = []
