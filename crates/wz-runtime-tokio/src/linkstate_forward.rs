@@ -780,6 +780,21 @@ impl LinkstateForwarder {
         self.gossip_target.set(target);
     }
 
+    /// Select the PEER ROUTING MODE this node participates in — zenoh
+    /// `routing.peer.mode`, which is a SUBSYSTEM-wide setting ("needs to be set
+    /// to the same value in all peers and routers of the subsystem",
+    /// `DEFAULT_CONFIG.json5`). `true` (the [`new`](Self::new) default) is
+    /// `"linkstate"`; `false` is zenoh's own default, `"peer_to_peer"` gossip.
+    ///
+    /// R311y431 — it governs BOTH halves at once, deliberately: the graph's
+    /// ingest ([`LinkstateNetwork::set_full_linkstate`](wz_routing_graph::LinkstateNetwork::set_full_linkstate))
+    /// and the re-flood shape [`propagate`](Self::propagate) builds. Setting one
+    /// without the other would produce a node that learns like a gossip peer and
+    /// advertises like a linkstate one, so there is one seam and it moves both.
+    pub fn set_full_linkstate(&self, enabled: bool) {
+        self.net.borrow_mut().set_full_linkstate(enabled);
+    }
+
     /// Enable gossip autoconnect: install `policy` and return the receiving end
     /// of the dial-intent channel. From now on each peer the topology ingest
     /// DISCOVERS (a `changes.new` node that advertised locators) whose role + zid
@@ -1016,15 +1031,25 @@ impl LinkstateForwarder {
     /// they arrive atomically (zenoh `network.rs:643-644`: send all states at
     /// once to avoid premature node deletion on the other side).
     ///
-    /// Source-face exclusion — a DELIBERATE divergence: wz skips the SOURCE FACE
-    /// ENTIRELY (sends it nothing). zenoh is finer — it withholds only the
-    /// `updated` nodes from the source (`network.rs:661` `link.zid != src`) but
-    /// still sends `new` nodes back on the source link. wz drops the whole
-    /// source face because every node it would echo back was advertised BY that
-    /// source (so the echo is redundant and sn-staleness would drop it anyway);
-    /// the coarser rule trades a negligible convergence-latency corner (a source
-    /// that learned a node via a different path learns ours one flood later) for
-    /// a simpler, less chatty re-flood.
+    /// Source-face handling is zenoh's, and it is ASYMMETRIC between the two
+    /// halves (`network.rs:659-666`): `new` nodes ride back out on the SOURCE
+    /// link too, and only the `updated` half is withheld from it
+    /// (`:661` `link.zid != src`).
+    ///
+    /// R311y431 — wz used to drop the source face ENTIRELY, on the rationale that
+    /// "every node it would echo back was advertised BY that source, so the echo
+    /// is redundant". That rationale is wrong, and a real zenohd said so: PSID
+    /// SPACE IS PER-SENDER. The source advertised the node under ITS OWN psid
+    /// numbering, which tells it nothing about the psid THIS node will use for
+    /// that same node in its own later floods. Suppressing the echo means the
+    /// source never learns our psid for it, so the next self-advertisement
+    /// referencing that psid in `links` is unresolvable — zenohd rejects the edge
+    /// with `Received LinkState from <zid> with unknown link mapping <psid>`
+    /// (zenoh `network.rs:527-539`), which is exactly what a three-node
+    /// wz/zenohd/zenohd linkstate mesh produced. Nor does sn-staleness make it
+    /// moot: the psid->zid mapping is installed in `convert_to_local_link_states`
+    /// BEFORE the sn gate can drop the entry, so the echo does its job even when
+    /// the state itself is stale.
     pub fn propagate(&self, source: FaceId, changes: &Changes) -> Result<usize, CodecError> {
         if changes.new.is_empty() && changes.updated.is_empty() {
             return Ok(0);
@@ -1032,16 +1057,44 @@ impl LinkstateForwarder {
         // A clone of the graph handle so the per-face builder can borrow it
         // (the `Rc` is the cell; `fan_out` only holds the `faces` borrow).
         let net = self.net.clone();
+        // GOSSIP (`peer_to_peer`) re-flood — zenoh `network.rs:594-602`. A
+        // different SHAPE, not a narrowed one: one `NodeOnly` entry (zid +
+        // locators, no links) per changed node, admitted only when
+        // `gossip_reflood_admits` says so (without multihop a gossip node relays
+        // its DIRECT neighbours only). The source face is NOT excluded here
+        // either — zenoh's filter is `|link| link.zid != ls.zid`, the per-node
+        // exclusion alone.
+        if !net.borrow().full_linkstate() {
+            return self.fan_out(true, Some(self.gossip_target.get()), |_id, zid| {
+                let net_ref = net.borrow();
+                let nodes: Vec<Zid> = changes
+                    .new
+                    .iter()
+                    .chain(changes.updated.iter())
+                    .filter(|z| zid != Some(**z))
+                    .filter(|z| net_ref.gossip_reflood_admits(z))
+                    .cloned()
+                    .collect();
+                if nodes.is_empty() {
+                    return Ok(None);
+                }
+                let oam = build_linkstate_oam_owned(&net_ref.build_linkstate_gossip(&nodes))?;
+                Ok(Some(NetworkMessage::Oam(oam)))
+            });
+        }
         self.fan_out(true, Some(self.gossip_target.get()), |id, zid| {
-            if id == source {
-                return Ok(None);
-            }
             // Drop the node whose own state this is from the list sent to ITS
             // face (zenoh `network.rs:663`) — the per-face payload differs, so
             // each face gets its own built carrier.
             let keep = |z: &&Zid| zid != Some(**z);
             let new: Vec<Zid> = changes.new.iter().filter(keep).cloned().collect();
-            let updated: Vec<Zid> = changes.updated.iter().filter(keep).cloned().collect();
+            // The source face gets the `new` half (above) but NOT the `updated`
+            // half — zenoh `network.rs:661`.
+            let updated: Vec<Zid> = if id == source {
+                Vec::new()
+            } else {
+                changes.updated.iter().filter(keep).cloned().collect()
+            };
             if new.is_empty() && updated.is_empty() {
                 return Ok(None);
             }
@@ -1282,7 +1335,18 @@ impl LinkstateForwarder {
         let full = self.build_self_oam()?;
         let delta = {
             let net = self.net.borrow();
-            let list = if neighbour_was_new {
+            // zenoh's condition is `new || (!full_linkstate && !gossip_multihop)`
+            // (`network.rs:867`, and the gossip twin at `p2p_peer/gossip.rs:519`
+            // where the `full_linkstate` term is absent because that Network is
+            // always gossip). So in GOSSIP mode the 2-entry form is unconditional:
+            // a gossip receiver has no other way to learn our psid for this
+            // neighbour, since the gossip re-flood only relays DIRECT neighbours
+            // and this one was not ours yet when its announcement arrived. Sending
+            // the 1-entry form there leaves the psid in self's `links` dangling
+            // and the peer rejects that edge (`unknown link mapping`), which is
+            // what a stock zenohd router did until R311y431.
+            let introduce_neighbour = neighbour_was_new || !net.full_linkstate();
+            let list = if introduce_neighbour {
                 net.build_link_added_delta(neighbour)
             } else {
                 net.build_self_links_delta()
@@ -5771,8 +5835,10 @@ mod tests {
 
     #[test]
     fn propagate_re_floods_changed_nodes_to_other_faces() {
-        // a change that arrived on face 0 is re-flooded to face 1, never
-        // back to its source (transitive propagation; zenoh excludes src).
+        // an UPDATED node that arrived on face 0 is re-flooded to face 1, never
+        // back to its source (transitive propagation; zenoh `network.rs:661`
+        // excludes src for the `updated` half). The `new` half is NOT excluded
+        // there — see `propagate_sends_new_nodes_back_to_the_source_face`.
         let fwd = LinkstateForwarder::new(zid(0x0B), WhatAmI::Peer);
         let (source, source_sink) = recording_actions();
         let (other, other_sink) = recording_actions();
@@ -5835,6 +5901,59 @@ mod tests {
             "A's own state is not echoed back to A's face"
         );
         assert_eq!(sink_c.frame_count(), 1, "C receives A's changed state");
+    }
+
+    #[test]
+    fn propagate_sends_new_nodes_back_to_the_source_face() {
+        // R311y431 — zenoh `network.rs:659-666` withholds ONLY the `updated`
+        // half from the source link (`:661` `link.zid != src`); `new` nodes ride
+        // back out on it. The reason is not politeness, it is addressing: PSID
+        // SPACE IS PER-SENDER, so the source advertised that node under ITS
+        // numbering and still has no idea which psid WE will use for it. Without
+        // this echo, our next self-entry that lists the node in `links` is
+        // unresolvable on the source, and a real zenohd rejects that edge with
+        // `unknown link mapping` (zenoh `network.rs:527-539`).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (source, source_sink) = peer_face(zid(0x0A));
+        let (other, other_sink) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &source); // graph gains 0x0A
+        fwd.register(FaceId(1), &other); // graph gains 0x0C
+        source_sink.reset();
+        other_sink.reset();
+
+        // 0x0C is NEW and self (0x05) is UPDATED, both arriving on face 0.
+        let changes = Changes {
+            new: vec![zid(0x0C)],
+            updated: vec![zid(0x05)],
+            ..Default::default()
+        };
+        fwd.propagate(FaceId(0), &changes).expect("propagate");
+
+        assert_eq!(
+            source_sink.frame_count(),
+            1,
+            "the NEW node must ride back out on the source face"
+        );
+        let to_source = propagated_link_states(&source_sink.frame_bytes(0));
+        assert_eq!(
+            to_source.len(),
+            1,
+            "the source gets the new half ALONE — the updated half is withheld"
+        );
+        assert!(
+            to_source[0].zid.is_some(),
+            "the echoed new node must carry its zid; a links-only echo would \
+             teach the source nothing about our psid numbering"
+        );
+
+        // The per-node exclusion still holds on the other face: C never receives
+        // its own state, so it gets the updated half only.
+        let to_other = propagated_link_states(&other_sink.frame_bytes(0));
+        assert_eq!(to_other.len(), 1, "C gets the updated half only");
+        assert!(
+            to_other[0].zid.is_none(),
+            "an updated node re-floods links-only"
+        );
     }
 
     #[test]

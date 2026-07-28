@@ -1863,12 +1863,29 @@ impl PublishBand {
     }
 }
 
+/// The gossip-autoconnect tie-break, named at module scope so [`PeerOpts`] can
+/// carry it (the rest of the facade surface is imported inside `run_peer_mode`).
+#[cfg(feature = "routing-peer")]
+pub(crate) use wz::runtime_tokio::linkstate_forward::AutoConnectStrategy;
+
 #[cfg(feature = "routing-peer")]
 pub(crate) struct PeerOpts {
     pub publish_key: Option<String>,
     pub subscribe_key: Option<String>,
     pub unsubscribe_after_data: bool,
-    pub autoconnect: bool,
+    /// Gossip-autoconnect opt-in AND its tie-break, in one field so the two
+    /// cannot disagree: `None` = the peer dials only its static `--connect`
+    /// targets; `Some(strategy)` = `--autoconnect` with the
+    /// `--autoconnect-strategy` the caller chose (default
+    /// [`AutoConnectStrategy::Always`], which is zenoh's default too). A
+    /// separate `bool` + strategy pair would let "off, but with a strategy"
+    /// be constructed; this shape makes that unrepresentable.
+    pub autoconnect: Option<AutoConnectStrategy>,
+    /// zenoh `routing.peer.mode` as zenoh itself represents it internally: `true`
+    /// = `"linkstate"`, `false` = zenoh's default `"peer_to_peer"` gossip. Set
+    /// from `--peer-mode`. It is a SUBSYSTEM-wide setting — every peer AND router
+    /// of the mesh must agree — so it is a deploy decision, not a per-run tweak.
+    pub full_linkstate: bool,
     pub config_queryable: bool,
     /// R311y48 (§5.23 Phase 3b) — host a config-WRITE subscriber on
     /// `@/<zid>/peer/config/**` so a remote PUT reconfigures this peer's live
@@ -1979,8 +1996,8 @@ async fn run_peer_until(
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::{
         default_autoconnect_matcher, AclConfig, AclFlow, AclMessage, AclPolicy, AclRule,
-        AutoConnect, AutoConnectStrategy, DownsamplingRule, InterceptorConfig, LinkstateForwarder,
-        LowPassRule, Permission, SubjectSelector, WhatAmI, Zid,
+        AutoConnect, DownsamplingRule, InterceptorConfig, LinkstateForwarder, LowPassRule,
+        Permission, SubjectSelector, WhatAmI, Zid,
     };
     use wz::runtime_tokio::session_open::bind_endpoint_with_config;
 
@@ -2104,6 +2121,12 @@ async fn run_peer_until(
     // use the validating `Zid::try_from`). Borrows `params.zid`, leaving it owned
     // by `params` to pass on to peer_loop below.
     let forwarder = LinkstateForwarder::new(Zid::from_slice(&params.zid), WhatAmI::Peer);
+    // `--peer-mode` (zenoh `routing.peer.mode`). Set BEFORE any face registers,
+    // because the mode governs how the very first inbound flood is ingested; a
+    // node that learned one flood in the wrong mode has already mis-shaped its
+    // graph. Default `linkstate` — see the flag's doc for why wz does not adopt
+    // zenoh's `peer_to_peer` default here.
+    forwarder.set_full_linkstate(opts.full_linkstate);
     // Advertise this peer's listen address as its dial locator BEFORE the first
     // face registers, so self's first FULL flood already carries it. A neighbour
     // then learns where to reach this peer (the discovery data — what a future
@@ -2478,18 +2501,28 @@ async fn run_peer_until(
 
     // `--autoconnect`: opt this peer into gossip-autoconnect. The role matcher is
     // the per-local-whatami SSOT default (a Peer dials discovered routers/peers);
-    // `GreaterZid` is the double-dial tie-break (of a mutually-discovering pair,
-    // only the greater-zid end dials — and the establishment dedup drops any
-    // redundant link that still races through). The forwarder then emits a
-    // dial-intent for each admitted discovered peer, and the loop dials it. Absent
-    // the flag, `dial_intents` is `None` and the peer dials only its static
-    // `--connect` targets (the prior behaviour exactly).
-    let dial_intents = autoconnect.then(|| {
-        log::info!("wz-ap-demo peer: gossip-autoconnect enabled (--autoconnect)");
+    // the TIE-BREAK now comes from `--autoconnect-strategy` and defaults to
+    // `Always`, which is what zenoh defaults to (`DEFAULT_CONFIG.json5`
+    // `autoconnect_strategy: { peer: { to_router: "always", to_peer: "always" } }`).
+    // R311y431 — it used to be hardcoded to `GreaterZid`, so a deploy could not
+    // express zenoh's own default at all; `GreaterZid` is still reachable, and is
+    // the double-dial tie-break (of a mutually-discovering pair, only the
+    // greater-zid end dials). The forwarder then emits a dial-intent for each
+    // admitted discovered peer, and the loop dials it. Absent the flag,
+    // `dial_intents` is `None` and the peer dials only its static `--connect`
+    // targets (the prior behaviour exactly).
+    let dial_intents = autoconnect.map(|strategy| {
+        log::info!(
+            "wz-ap-demo peer: gossip-autoconnect enabled (--autoconnect, strategy {})",
+            match strategy {
+                AutoConnectStrategy::Always => "always",
+                AutoConnectStrategy::GreaterZid => "greater-zid",
+            }
+        );
         let policy = AutoConnect::new(
             Zid::from_slice(&params.zid),
             default_autoconnect_matcher(WhatAmI::Peer),
-            AutoConnectStrategy::GreaterZid,
+            strategy,
         );
         forwarder.enable_autoconnect(policy)
     });
@@ -4369,7 +4402,8 @@ mod peer_quic_cert_tests {
             publish_key: None,
             subscribe_key: None,
             unsubscribe_after_data: false,
-            autoconnect: false,
+            autoconnect: None,
+            full_linkstate: true,
             config_queryable: false,
             config_writable: false,
             config_write_permit: false,
@@ -4451,7 +4485,8 @@ mod peer_failfast_tests {
             publish_key: None,
             subscribe_key: None,
             unsubscribe_after_data: false,
-            autoconnect: false,
+            autoconnect: None,
+            full_linkstate: true,
             config_queryable: false,
             config_writable: false,
             config_write_permit: false,

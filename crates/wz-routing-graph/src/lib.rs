@@ -543,6 +543,14 @@ enum Details {
     Full,
     LinksOnly,
     ZidOnly,
+    /// zid + locators, NO links — the shape zenoh's GOSSIP (`peer_to_peer`)
+    /// re-flood uses (`network.rs:594-602` passes `Details { zid: true, links:
+    /// false, .. }` and `send_on_links` then fills `locators` from
+    /// [`propagate_locators`](LinkstateNetwork::propagate_locators)). A gossip
+    /// mesh advertises WHERE a node is, never how it is wired: the receiver in
+    /// that mode builds no edges, so links would be bytes nobody reads.
+    /// Distinct from [`ZidOnly`](Self::ZidOnly), which carries neither.
+    NodeOnly,
 }
 
 impl Details {
@@ -554,6 +562,7 @@ impl Details {
             Details::Full => (true, true, true),
             Details::LinksOnly => (false, true, false),
             Details::ZidOnly => (true, false, false),
+            Details::NodeOnly => (true, false, true),
         }
     }
 }
@@ -634,6 +643,23 @@ pub struct LinkstateNetwork {
     /// non-multihop default gives), flipped via
     /// [`set_gossip_multihop`](Self::set_gossip_multihop).
     gossip_multihop: bool,
+    /// zenoh `full_linkstate` (`Network::new`'s parameter, sourced from
+    /// `routing.peer.mode`): `true` = the LINKSTATE peer mode this graph was
+    /// written for (`hat/linkstate_peer`), where an ingest rebuilds edges and
+    /// GCs whatever the update detached; `false` = zenoh's DEFAULT
+    /// `peer_to_peer` GOSSIP mode (`hat/p2p_peer`), where an ingest only learns
+    /// nodes and their locators — no edges, no prune.
+    ///
+    /// R311y431 — the flag exists because the two ingests are not
+    /// interchangeable and the difference is observable: a gossip flood carries
+    /// links-less entries, and running them through the linkstate ingest makes
+    /// every one of them unreachable, so the trailing
+    /// [`remove_detached_nodes`](Self::remove_detached_nodes) deletes the node
+    /// the flood just introduced. That is why a wz peer in a default-configured
+    /// zenoh subsystem saw its sibling appear and vanish rather than becoming a
+    /// dial candidate. Defaults to `true` (wz's own mode); flipped via
+    /// [`set_full_linkstate`](Self::set_full_linkstate).
+    full_linkstate: bool,
 }
 
 impl LinkstateNetwork {
@@ -667,6 +693,10 @@ impl LinkstateNetwork {
             // non-multihop by default: a node's locators travel one hop (zenoh
             // `scouting.gossip.multihop` default false).
             gossip_multihop: false,
+            // wz's own peer mode is zenoh's `routing.peer.mode = "linkstate"`
+            // (this graph mirrors `hat/linkstate_peer`), so the linkstate ingest
+            // is the default; a deploy joining a gossip subsystem flips it.
+            full_linkstate: true,
         }
     }
 
@@ -699,6 +729,54 @@ impl LinkstateNetwork {
     /// calls it, so the non-multihop one-hop behaviour is unchanged.
     pub fn set_gossip_multihop(&mut self, enabled: bool) {
         self.gossip_multihop = enabled;
+    }
+
+    /// Select the peer routing mode this graph ingests for — zenoh
+    /// `routing.peer.mode`. `true` (the default) = `"linkstate"`; `false` =
+    /// zenoh's default `"peer_to_peer"` gossip mode.
+    ///
+    /// zenoh takes this at `Network::new` because the mode is a subsystem-wide
+    /// config decided before anything connects ("needs to be set to the same
+    /// value in all peers and routers of the subsystem",
+    /// `DEFAULT_CONFIG.json5`); wz exposes it as a setter for the same reason
+    /// [`set_gossip_multihop`](Self::set_gossip_multihop) is one — the driver
+    /// threads deploy settings in after construction, and a constructor
+    /// parameter would churn every `LinkstateNetwork::new` call site for a value
+    /// almost all of them leave alone.
+    pub fn set_full_linkstate(&mut self, enabled: bool) {
+        self.full_linkstate = enabled;
+    }
+
+    /// Whether this graph ingests in the LINKSTATE peer mode (see
+    /// [`set_full_linkstate`](Self::set_full_linkstate)). The driver reads it to
+    /// pick the matching RE-FLOOD shape, so the two halves of the mode cannot
+    /// drift apart.
+    pub fn full_linkstate(&self) -> bool {
+        self.full_linkstate
+    }
+
+    /// Whether a gossip re-flood may carry `zid`'s announcement onward — zenoh
+    /// `network.rs:595` (`self.gossip_multihop || self.links.values().any(|link|
+    /// link.zid == ls.zid)`). Without multihop a gossip node relays only its
+    /// DIRECT neighbours' announcements, which is what keeps a gossip mesh's
+    /// locator knowledge one hop deep.
+    pub fn gossip_reflood_admits(&self, zid: &Zid) -> bool {
+        self.gossip_multihop || self.links.values().any(|link| link.zid == *zid)
+    }
+
+    /// Build the gossip (`peer_to_peer`) re-flood list: one
+    /// [`Details::NodeOnly`] entry per node — zid + locators, no links. The
+    /// gossip-mode counterpart of
+    /// [`build_linkstate_split`](Self::build_linkstate_split), which is the
+    /// linkstate-mode shape.
+    pub fn build_linkstate_gossip(&self, nodes: &[Zid]) -> LinkstateListOwned {
+        into_list(
+            nodes
+                .iter()
+                .filter_map(|zid| self.get_idx(zid))
+                .map(|idx| self.make_link_state(idx, Details::NodeOnly))
+                .collect(),
+        )
     }
 
     /// The dial locators a node has advertised, or `None` if it is unknown or
@@ -1310,6 +1388,12 @@ impl LinkstateNetwork {
     /// a node the prune removed is dropped from `updated` (zenoh
     /// `network.rs:787-788` `new_nodes.retain` / `updated_nodes.retain`).
     fn process_linkstates(&mut self, states: Vec<LocalLinkState>) -> Changes {
+        // zenoh `link_states` (`network.rs:699-700`) dispatches on the same flag
+        // before doing anything else: the GOSSIP mode has a different ingest, not
+        // a narrowed one.
+        if !self.full_linkstate {
+            return self.process_linkstates_peer_to_peer(states);
+        }
         let mut changes = Changes::default();
         for ls in states {
             // `is_new` = the receiver does not yet have this node's full state,
@@ -1398,6 +1482,71 @@ impl LinkstateNetwork {
             changes.updated.retain(|z| !removed.contains(z));
         }
         changes.removed = removed;
+        changes
+    }
+
+    /// The GOSSIP (`peer_to_peer`) ingest — zenoh
+    /// `process_linkstates_peer_to_peer` (`network.rs:559-614`). Three things it
+    /// deliberately does NOT do, and each absence is the point:
+    ///
+    /// - **no edge rebuild.** A gossip entry carries no links, so there is
+    ///   nothing to rebuild from; a gossip mesh's graph is a set of known nodes
+    ///   and where to reach them, not a topology.
+    /// - **no reachability prune.** With no edges, EVERY learned node is
+    ///   detached, so running [`remove_detached_nodes`](Self::remove_detached_nodes)
+    ///   here would delete each node the moment the flood introduced it. That is
+    ///   precisely what a wz peer in a default-configured zenoh subsystem used to
+    ///   do, and why its sibling never became a dial candidate.
+    /// - **no `removed` reporting.** Nothing is pruned, so `Changes::removed`
+    ///   stays empty and the driver's subscription-purge pass is a no-op.
+    ///
+    /// What it DOES mirror exactly: the sn-staleness gate, the preserve-on-None
+    /// locator rule, and the "a node whose entry carried no locators is recorded
+    /// but is not a gossip/autoconnect candidate" behaviour — zenoh expresses the
+    /// last one by `continue`-ing past its gossip block, wz by leaving the node's
+    /// `locators` at `None` so the driver's own locator gate declines it.
+    fn process_linkstates_peer_to_peer(&mut self, states: Vec<LocalLinkState>) -> Changes {
+        let mut changes = Changes::default();
+        for ls in states {
+            match self.get_idx(&ls.zid) {
+                None => {
+                    self.insert_node(Node {
+                        zid: ls.zid,
+                        whatami: Some(ls.whatami),
+                        locators: ls.locators,
+                        sn: ls.sn,
+                        links: ls.links,
+                    });
+                    changes.new.push(ls.zid);
+                }
+                Some(idx) => {
+                    let node = &mut self.graph[idx];
+                    // sn-staleness gate (zenoh `network.rs:577-579`).
+                    if node.sn >= ls.sn {
+                        continue;
+                    }
+                    // A node the graph holds only because a face registered it
+                    // (`add_link`, sn = 0) has never carried a real link-state,
+                    // so its FIRST announcement is NEW — the `oldsn == 0` rule
+                    // the linkstate ingest applies too. Read before the write.
+                    let was_placeholder = node.sn == 0;
+                    node.sn = ls.sn;
+                    node.links = ls.links;
+                    if node.whatami.is_none() {
+                        node.whatami = Some(ls.whatami);
+                    }
+                    // preserve-on-None (zenoh `network.rs:588-591`).
+                    if ls.locators.is_some() {
+                        node.locators = ls.locators;
+                    }
+                    if was_placeholder {
+                        changes.new.push(ls.zid);
+                    } else {
+                        changes.updated.push(ls.zid);
+                    }
+                }
+            }
+        }
         changes
     }
 
@@ -2887,6 +3036,109 @@ mod tests {
                 .links
                 .contains_key(&zid(0x0C)),
             "A's links-only entry resolved its A->C link via the same-list mapping"
+        );
+    }
+
+    /// A gossip-shaped announcement about a third party: zid + locators, NO
+    /// links — what a `peer_to_peer` subsystem actually puts on the wire. Built
+    /// from real graphs rather than hand-rolled bytes so the entry SHAPE is the
+    /// builder's output, not the test's opinion of it.
+    fn gossip_announcement_about_a_third_party() -> (LinkstateListOwned, Zid) {
+        let third = zid(0x0C);
+        let mut t = LinkstateNetwork::new(third, WhatAmI::Peer);
+        t.set_self_locators(vec!["tcp/127.0.0.1:7447".to_string()]);
+        t.add_link(zid(0x0A), WhatAmI::Peer);
+        let mut s = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
+        let st = s.add_link(third, WhatAmI::Peer);
+        s.ingest_linkstate_list(st, t.build_linkstate_list());
+        s.set_full_linkstate(false);
+        (s.build_linkstate_gossip(&[third]), third)
+    }
+
+    #[test]
+    fn gossip_ingest_keeps_a_links_less_node_the_linkstate_ingest_prunes() {
+        // R311y431 — the whole difference between zenoh's two peer modes, on the
+        // entry shape a gossip mesh actually sends. Under the LINKSTATE ingest
+        // that node is reachable from nobody, so the trailing reachability GC
+        // deletes the node the flood just introduced and the discovery is lost;
+        // under the GOSSIP ingest there is no GC and it stands. Same list, same
+        // receiver, one flag apart — which is what made a wz peer in a
+        // default-configured zenoh subsystem see its sibling and forget it.
+        let (list, third) = gossip_announcement_about_a_third_party();
+        assert_eq!(list.link_states.len(), 1, "one NodeOnly entry");
+        assert!(
+            list.link_states[0].zid.is_some(),
+            "NodeOnly carries the zid"
+        );
+        assert!(
+            list.link_states[0].locators.is_some(),
+            "NodeOnly carries the locators — without them it is not a dial candidate"
+        );
+        assert!(
+            list.link_states[0].links.is_empty(),
+            "NodeOnly carries NO links; a gossip mesh advertises WHERE, not how-wired"
+        );
+
+        // GOSSIP receiver: the node stands and is reported for discovery.
+        let mut gossip = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        gossip.set_full_linkstate(false);
+        let g_link = gossip.add_link(zid(0x0A), WhatAmI::Peer);
+        let (g_list, _) = gossip_announcement_about_a_third_party();
+        let changes = gossip.ingest_linkstate_list(g_link, g_list);
+        assert!(
+            changes.new.contains(&third),
+            "the gossip ingest must report the third party as NEW — that is what the \
+             driver turns into a dial intent"
+        );
+        assert_eq!(
+            gossip.node_locators(&third).map(<[String]>::len),
+            Some(1),
+            "...carrying the locators a dial needs"
+        );
+        assert!(
+            changes.removed.is_empty(),
+            "the gossip ingest prunes nothing; there are no edges to detach from"
+        );
+
+        // LINKSTATE receiver, the SAME announcement: the reachability GC eats it.
+        let mut linkstate = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        let l_link = linkstate.add_link(zid(0x0A), WhatAmI::Peer);
+        let (l_list, _) = gossip_announcement_about_a_third_party();
+        let changes = linkstate.ingest_linkstate_list(l_link, l_list);
+        assert!(
+            !changes.new.contains(&third),
+            "the linkstate ingest must NOT report it — the prune drops it from `new`"
+        );
+        assert!(
+            linkstate.get_node(&third).is_none(),
+            "...and the node itself is gone from the graph"
+        );
+    }
+
+    #[test]
+    fn gossip_reflood_relays_direct_neighbours_only_unless_multihop() {
+        // zenoh `network.rs:595` — without multihop a gossip node relays only its
+        // OWN neighbours' announcements, which is what keeps gossip locator
+        // knowledge one hop deep. The third party learned from a flood is NOT a
+        // neighbour, so it is not relayed; flipping multihop admits it.
+        let mut net = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        net.set_full_linkstate(false);
+        let link = net.add_link(zid(0x0A), WhatAmI::Peer);
+        let (list, third) = gossip_announcement_about_a_third_party();
+        net.ingest_linkstate_list(link, list);
+
+        assert!(
+            net.gossip_reflood_admits(&zid(0x0A)),
+            "a DIRECT neighbour's announcement is relayed"
+        );
+        assert!(
+            !net.gossip_reflood_admits(&third),
+            "a node learned from a flood is not relayed without multihop"
+        );
+        net.set_gossip_multihop(true);
+        assert!(
+            net.gossip_reflood_admits(&third),
+            "multihop relays every node's announcement"
         );
     }
 

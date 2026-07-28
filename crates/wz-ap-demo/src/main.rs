@@ -175,7 +175,57 @@ fn main() -> ExitCode {
             // Gossip-autoconnect opt-in: discover peers off the link-state flood
             // and DIAL the policy-admitted ones (a mesh that grows past the static
             // `--connect` set). Off by default — a peer dials only `--connect`.
-            let autoconnect = rest.iter().any(|a| a == "--autoconnect");
+            //
+            // R311y431 — `--autoconnect-strategy <always|greater-zid>` picks the
+            // tie-break, and the DEFAULT is `always` because that is zenoh's
+            // default (`DEFAULT_CONFIG.json5` `autoconnect_strategy: { peer: {
+            // to_router: "always", to_peer: "always" } }`). Before this the demo
+            // hardcoded `greater-zid`, so no deploy could express zenoh's own
+            // default. The strategy rides INSIDE the opt-in (`Option<_>`), so
+            // "off, but with a strategy" cannot be constructed; a strategy given
+            // without the opt-in is a hard error rather than a silent no-op.
+            let autoconnect = if rest.iter().any(|a| a == "--autoconnect") {
+                match parse_pair(rest, "--autoconnect-strategy").as_deref() {
+                    None | Some("always") => Some(crate::runner::AutoConnectStrategy::Always),
+                    Some("greater-zid") => Some(crate::runner::AutoConnectStrategy::GreaterZid),
+                    Some(other) => {
+                        eprintln!(
+                            "wz-ap-demo: --autoconnect-strategy {other}: expected \
+                             `always` or `greater-zid`"
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
+            } else if let Some(v) = parse_pair(rest, "--autoconnect-strategy") {
+                eprintln!("wz-ap-demo: --autoconnect-strategy {v} requires --autoconnect");
+                return ExitCode::from(2);
+            } else {
+                None
+            };
+            // R311y431 — `--peer-mode <linkstate|peer-to-peer>`: zenoh's
+            // `routing.peer.mode`, which selects the whole routing hat
+            // (`hat/mod.rs` -> `linkstate_peer` vs `p2p_peer`) and, per zenoh's
+            // own config, "needs to be set to the same value in all peers and
+            // routers of the subsystem".
+            //
+            // wz DEFAULTS TO `linkstate` even though zenoh defaults to
+            // `peer_to_peer`, and the divergence is deliberate: wz's data plane
+            // routes along the linkstate spanning tree, so `linkstate` is the
+            // mode its whole stack implements. `peer-to-peer` here switches the
+            // DISCOVERY plane (ingest + re-flood) so a wz peer can learn and
+            // gossip-autoconnect inside a default-configured zenoh subsystem;
+            // its data plane in that mode is NOT claimed.
+            let full_linkstate = match parse_pair(rest, "--peer-mode").as_deref() {
+                None | Some("linkstate") => true,
+                Some("peer-to-peer") => false,
+                Some(other) => {
+                    eprintln!(
+                        "wz-ap-demo: --peer-mode {other}: expected `linkstate` or \
+                         `peer-to-peer`"
+                    );
+                    return ExitCode::from(2);
+                }
+            };
             // R311tt (§5.16 access control) — `--acl-deny <keyexpr>` opts this
             // peer into ACL enforcement: an allow-default policy with one ingress
             // Put deny rule on the keyexpr (every peer subject). A Put a neighbour
@@ -300,6 +350,7 @@ fn main() -> ExitCode {
                     subscribe_key,
                     unsubscribe_after_data,
                     autoconnect,
+                    full_linkstate,
                     config_queryable,
                     config_writable,
                     config_write_permit,

@@ -6640,11 +6640,20 @@ layer_z_zenohd_interop() {
     # topology fact; the fact was a NON-UNIFORM subsystem (zenoh's
     # routing.peer.mode "needs to be set to the same value in all peers and routers"
     # — DEFAULT_CONFIG.json5), so the fixture, not wz, was what had to change.
-    # Three legs: positive; the option-atom PAIR with --autoconnect removed (same
-    # flood, same mesh — the foreign peer dials wz instead, so `accepted 1` — but
-    # wz initiates nothing); and a no-third-party control that separates "the flag
-    # dials" from "a DISCOVERED PEER dials". Spawns 2 zenohd per leg, hence the
-    # shared --test-threads=1. Same `router-hat-router` binary (pulls routing-peer).
+    # SEVEN legs in three pairs plus a control. (1) positive + the option-atom
+    # pair with --autoconnect removed (same flood, same mesh — the foreign peer
+    # dials wz instead, so `accepted 1` — but wz initiates nothing), plus a
+    # no-third-party control separating "the flag dials" from "a DISCOVERED PEER
+    # dials". (2) R311y431's --autoconnect-strategy pair: on a fixture where wz's
+    # zid is the LOWER, `always` (zenoh's default, and newly reachable) dials what
+    # `greater-zid` declines. (3) R311y431's --peer-mode pair against a STOCK
+    # subsystem — no routing/peer/mode anywhere, so both zenohd run zenoh's own
+    # peer_to_peer default: `peer-to-peer` autoconnects, `linkstate` discovers
+    # nothing because the reachability GC eats the links-less announcement. Leg 1
+    # and the stock-subsystem leg also assert the ROUTER logged no
+    # `unknown link mapping`, the two halves of R311y431's psid-introduction fix.
+    # Spawns 2 zenohd per leg, hence the shared --test-threads=1. Same
+    # `router-hat-router` binary (pulls routing-peer).
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_gossip_autoconnect_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y353 — liveliness-get's cross-impl witness rides THIS lane and could not

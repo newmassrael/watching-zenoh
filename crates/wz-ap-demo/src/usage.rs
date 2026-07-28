@@ -52,6 +52,35 @@ pub(crate) fn print_usage() {
         "                             peer faces (routing-router foundation, no forwarding)."
     );
     eprintln!("                             Requires the `routing-router` build feature.");
+    eprintln!("    --peer <addr>            peer-MESH mode: bind <addr> AND dial every --connect");
+    eprintln!("                             target, holding both directions and forwarding along");
+    eprintln!("                             the linkstate spanning tree. --connect takes a");
+    eprintln!(
+        "                             comma-separated list here. Requires the `routing-peer`"
+    );
+    eprintln!("                             build feature.");
+    eprintln!("    --peer-mode <linkstate|peer-to-peer>");
+    eprintln!("                             zenoh routing.peer.mode — the SUBSYSTEM-wide peer");
+    eprintln!("                             routing strategy; every peer AND router of the mesh");
+    eprintln!("                             must agree. Default `linkstate` (what wz's data plane");
+    eprintln!(
+        "                             implements); `peer-to-peer` is zenoh's own default and"
+    );
+    eprintln!("                             switches the DISCOVERY plane so wz can learn and");
+    eprintln!("                             gossip-autoconnect in a stock zenoh mesh. Requires");
+    eprintln!("                             --peer.");
+    eprintln!("    --zid <hex>              PIN this node's routing zid (else it is derived from");
+    eprintln!("                             the listen port). REQUIRED for a non-IP listen, which");
+    eprintln!("                             has no port to derive a distinct mesh id from.");
+    eprintln!("    --autoconnect            gossip-autoconnect: DIAL peers discovered in the");
+    eprintln!("                             link-state flood, growing the mesh past the static");
+    eprintln!("                             --connect set (requires --peer). Off by default.");
+    eprintln!("    --autoconnect-strategy <always|greater-zid>");
+    eprintln!("                             tie-break for the above (requires --autoconnect).");
+    eprintln!("                             `always` (default, and zenoh's default) dials every");
+    eprintln!("                             admitted peer; `greater-zid` dials only when this");
+    eprintln!("                             node's zid is the greater, so of a mutually-");
+    eprintln!("                             discovering pair exactly one end dials.");
     eprintln!("    --reconnect              long-lived reconnect-supervised lifecycle for the");
     eprintln!("                             initiator (requires --connect): on link loss, re-dial");
     eprintln!("                             (re-resolving a hostname) + replay the declaration");
