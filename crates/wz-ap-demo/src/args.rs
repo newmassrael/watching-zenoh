@@ -407,6 +407,21 @@ pub(crate) struct DeclareEmitSpec {
     /// against a 5-sample foreign cache answers 2 when the dialect is right and 5
     /// when it is wrong — a foreign witness for the separator, not just a unit test.
     pub(crate) advanced_history_max_age: Option<f64>,
+    /// R311y443 — `--advanced-recovery`: arm SAMPLE-DRIVEN retransmission on the
+    /// advanced subscriber ([`RecoveryConfig::sample_driven`]). Off by default,
+    /// which is zenoh's default too — `.recovery()` is opt-in there as well.
+    ///
+    /// The flag is what makes the recovery path's RED/GREEN twin a one-argument
+    /// difference. With it, a forward gap is buffered and back-filled by an
+    /// `_sn=last+1..` GET; without it the same gap reports a `Miss` and delivers
+    /// past the hole. Two runs of one binary over one fixture therefore separate
+    /// "the sample came back because it was recovered" from "the sample was never
+    /// lost" — which no single run can.
+    ///
+    /// Sample-driven only: neither `periodic_queries` nor `heartbeat` is armed,
+    /// so a recovered sample is attributable to the gap that triggered the GET
+    /// rather than to a timer or to a foreign publisher's beacon.
+    pub(crate) advanced_recovery: bool,
     /// R311y442 — `--advanced-publish <keyexpr>`'s bundle. The ANSWERING half of
     /// the advanced-pubsub plane: a wz [`AdvancedPublisher`] with a sample cache,
     /// which a FOREIGN advanced subscriber then drains. `None` without the flag.

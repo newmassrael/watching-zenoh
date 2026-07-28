@@ -75,7 +75,7 @@
 //!      same counter reads 2+ in one arm and 0 in the other.
 //!
 //! R311y439 — the relay itself now lives in
-//! [`wz_integration_tests::common::spawn_fragment_counting_relay`], lifted on
+//! [`wz_integration_tests::common::spawn_counting_relay`], lifted on
 //! its second consumer (the zenohd -> wz leg,
 //! `wz_fragment_rx_zenohd_interop.rs`, which points the SAME relay at the
 //! opposite direction). Its docs carry the exactness argument for what the
@@ -98,8 +98,8 @@ use tokio::net::TcpStream;
 
 use wz_codecs::wire_const::T_MID_FRAGMENT;
 use wz_integration_tests::common::{
-    frag_payload, read_captured, spawn_fragment_counting_relay, spawn_subscribed_zsub,
-    spawn_zenohd_on_ephemeral_tcp, zenoh_pico_cli_binary,
+    frag_payload, read_captured, spawn_counting_relay, spawn_subscribed_zsub,
+    spawn_zenohd_on_ephemeral_tcp, zenoh_pico_cli_binary, RelayFault,
 };
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -140,7 +140,7 @@ async fn publish_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutcom
     let (mut zenohd, zenohd_port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    let relay = spawn_fragment_counting_relay(zenohd_port, T_MID_FRAGMENT);
+    let relay = spawn_counting_relay(zenohd_port, T_MID_FRAGMENT, RelayFault::None);
 
     // pico subscribes to zenohd DIRECTLY (not through the relay): it is the
     // far-side witness, and routing it through the relay would count nothing

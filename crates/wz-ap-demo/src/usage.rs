@@ -28,7 +28,9 @@ pub(crate) fn print_usage() {
     eprintln!("               [--query <keyexpr>]");
     eprintln!("               [--declare-token <keyexpr>]");
     eprintln!("               [--liveliness-subscribe <keyexpr>]");
-    eprintln!("               [--advanced-subscribe <keyexpr> [--history-max <N>]]");
+    eprintln!(
+        "               [--advanced-subscribe <keyexpr> [--history-max <N>] [--advanced-recovery]]"
+    );
     eprintln!("               [--advanced-publish <keyexpr> --value <text>]");
     eprintln!("               [--on-remote-subscriber-log]");
     eprintln!("               [--on-remote-queryable-log]");
@@ -128,6 +130,10 @@ pub(crate) fn print_usage() {
     eprintln!(
         "    --history-max-age <secs> bound it to the last <secs> seconds (_time=[now(-s)..])"
     );
+    eprintln!("    --advanced-recovery      arm SAMPLE-DRIVEN retransmission: a forward gap in a");
+    eprintln!("                             source's sequence numbers is buffered and back-filled");
+    eprintln!("                             by an _sn=last+1.. GET, instead of reporting a MISS");
+    eprintln!("                             and delivering past the hole");
     eprintln!("    --advanced-publish <keyexpr>");
     eprintln!(
         "                             declare an AdvancedPublisher on <keyexpr> with a sample"

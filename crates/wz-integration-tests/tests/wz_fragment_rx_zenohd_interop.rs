@@ -117,8 +117,8 @@ use tokio::net::TcpStream;
 
 use wz_codecs::wire_const::T_MID_FRAGMENT;
 use wz_integration_tests::common::{
-    frag_payload, spawn_fragment_counting_relay, spawn_publishing_zpub,
-    spawn_zenohd_on_ephemeral_tcp, zenoh_pico_cli_binary,
+    frag_payload, spawn_counting_relay, spawn_publishing_zpub, spawn_zenohd_on_ephemeral_tcp,
+    zenoh_pico_cli_binary, RelayFault,
 };
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -185,7 +185,7 @@ async fn subscribe_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutc
     let (mut zenohd, zenohd_port) = spawn_zenohd_on_ephemeral_tcp(|| {
         tempfile::tempfile().expect("tempfile for readiness probe stderr")
     });
-    let relay = spawn_fragment_counting_relay(zenohd_port, T_MID_FRAGMENT);
+    let relay = spawn_counting_relay(zenohd_port, T_MID_FRAGMENT, RelayFault::None);
 
     // The zenohd-STRICT open shape (version 0x09 / real batch_size / res 2).
     // The wz<->wz `fixture_session_init_params` shape (version 0x05 /

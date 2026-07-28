@@ -90,6 +90,26 @@
 //!    passes on the pre-fix wire too. The cache half of the separator fix has no
 //!    foreign witness and cannot get one from this oracle.
 //!
+//! 5. **RECOVERY (R311y443).** The retransmission path, which none of the four
+//!    legs above can reach: it engages only on LOSS, and two healthy peers on a
+//!    loopback link never lose anything. A relay between zenohd and wz DELETES
+//!    one of the oracle's samples from the wire; wz sees the hole in the next
+//!    sample's sequence number and refills it with an `_sn=last+1..` GET against
+//!    the foreign publisher's own `@adv` cache, delivering it in order.
+//! 6. **RECOVERY CONTROL.** Leg 5 with `--advanced-recovery` omitted and nothing
+//!    else changed: the sample stays missing and wz reports a `Miss` of exactly
+//!    one. This is what makes leg 5 a statement about wz rather than about the
+//!    fixture — "the sample arrived" is otherwise equally consistent with a
+//!    needle that stopped matching or a link that re-sent the batch.
+//!
+//! ## The naming obligation (R311y443)
+//!
+//! Every test fn in this file MUST carry the `zenoh_ext` token. run-ci's Layer E
+//! catch-all sweep skips by that substring, because it runs a wz-ap-demo built
+//! WITHOUT `--features advanced`, where every `--advanced-*` flag is inert. A
+//! leg named for what it does rather than for its oracle silently rejoins that
+//! sweep and fails there with a correct diagnosis in the wrong lane.
+//!
 //! Opt-in (`#[ignore]`, run-ci Layer Z): zenohd, the zenoh-ext examples and the
 //! pico CLI are all external binaries. wz-ap-demo must be built `--features
 //! advanced`; without it the demo logs `INERT` and declares nothing, which the
@@ -98,9 +118,10 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_codecs::wire_const::T_MID_FRAME;
 use wz_integration_tests::common::{
-    read_captured, spawn_zenohd_on_ephemeral_tcp, wait_for_substring, wz_ap_demo_binary,
-    zenoh_ext_example_binary, zenoh_pico_cli_binary, ChildGuard,
+    read_captured, spawn_counting_relay, spawn_zenohd_on_ephemeral_tcp, wait_for_substring,
+    wz_ap_demo_binary, zenoh_ext_example_binary, zenoh_pico_cli_binary, ChildGuard, RelayFault,
 };
 
 /// How long a leg waits for a marker line before declaring the fixture dead.
@@ -160,15 +181,24 @@ fn spawn_zenoh_advanced_pub(port: u16, keyexpr: &str, value: &str) -> (ChildGuar
     (child, output)
 }
 
-/// Run a wz advanced SUBSCRIBER against `port` and return its captured stderr.
-/// `history_max` / `history_max_age` map to `_max` / `_time` on the startup GET.
-fn run_wz_advanced_subscriber(
+/// Spawn a wz advanced SUBSCRIBER against `port` and return once its declare
+/// marker is on the log — the child, its still-open capture, and the snapshot
+/// taken at declare time.
+///
+/// Split out of [`run_wz_advanced_subscriber`] by R311y443, which needs the
+/// moment of declaration as an OBSERVABLE rather than just a barrier: the
+/// recovery legs read the oracle's own publish count right here, to bound what
+/// the startup history GET could possibly have carried.
+///
+/// `history_max` / `history_max_age` map to `_max` / `_time` on that startup
+/// GET; `recovery` arms sample-driven retransmission.
+fn spawn_wz_advanced_subscriber(
     port: u16,
     keyexpr: &str,
     history_max: Option<usize>,
     history_max_age: Option<u32>,
-    run_for: Duration,
-) -> String {
+    recovery: bool,
+) -> (ChildGuard, std::fs::File, String) {
     let demo = wz_ap_demo_binary();
     let stderr = tempfile();
     let writer = stderr.try_clone().expect("dup wz-ap-demo stderr");
@@ -184,7 +214,10 @@ fn run_wz_advanced_subscriber(
     if let Some(age) = history_max_age {
         cmd.arg("--history-max-age").arg(age.to_string());
     }
-    let _child = ChildGuard::wrap(
+    if recovery {
+        cmd.arg("--advanced-recovery");
+    }
+    let child = ChildGuard::wrap(
         "wz-ap-demo (--advanced-subscribe)",
         cmd.env("RUST_LOG", "info")
             .stdout(Stdio::null())
@@ -209,7 +242,29 @@ fn run_wz_advanced_subscriber(
         "wz-ap-demo reports --advanced-subscribe INERT; build it with \
          `--features advanced`.\n--- captured ---\n{captured}"
     );
+    // The declare line reports the options it was built with, so a flag that
+    // silently failed to parse is caught here rather than being read downstream
+    // as the behaviour under test being absent.
+    assert!(
+        captured.contains(&format!("recovery={recovery}")),
+        "wz-ap-demo declared with recovery != {recovery}; the --advanced-recovery \
+         flag did not take\n--- captured ---\n{captured}"
+    );
+    (child, reader, captured)
+}
 
+/// Run a wz advanced SUBSCRIBER against `port` for `run_for` and return its
+/// captured stderr. `history_max` / `history_max_age` map to `_max` / `_time` on
+/// the startup GET.
+fn run_wz_advanced_subscriber(
+    port: u16,
+    keyexpr: &str,
+    history_max: Option<usize>,
+    history_max_age: Option<u32>,
+    run_for: Duration,
+) -> String {
+    let (_child, mut reader, _at_declare) =
+        spawn_wz_advanced_subscriber(port, keyexpr, history_max, history_max_age, false);
     std::thread::sleep(run_for);
     read_captured(&mut reader)
 }
@@ -296,6 +351,241 @@ fn refusal_count(captured: &str) -> usize {
         .lines()
         .filter(|l| l.contains("does not intersect with query"))
         .count()
+}
+
+/// The `nb` of every `ADVANCED MISS` the subscriber reported, in order.
+///
+/// A `Miss` is what wz emits for a forward gap it did NOT fill, so this is the
+/// recovery legs' negative observable: present in the control, absent in the
+/// proof.
+fn miss_counts(captured: &str) -> Vec<usize> {
+    captured
+        .lines()
+        .filter(|l| l.contains("ADVANCED MISS"))
+        .filter_map(|l| {
+            let start = l.find("missed=")? + "missed=".len();
+            l[start..].trim().parse::<usize>().ok()
+        })
+        .collect()
+}
+
+/// The burst index the recovery legs remove from the wire.
+///
+/// Late enough that wz is certainly established and has a `last_delivered`
+/// baseline before the oracle reaches it (the oracle publishes at 1 Hz, so this
+/// is ~8 s of slack, and the leg MEASURES that rather than assuming it), and
+/// early enough that the run outlasts it with room for the recovery round trip.
+const GAP_INDEX: usize = 8;
+
+/// How long the recovery legs let the subscriber run after it declares. Must
+/// outlast the oracle reaching `GAP_INDEX + 1` — the successor whose arrival is
+/// what makes the gap visible — plus the recovery GET's round trip.
+const RECOVERY_RUN: Duration = Duration::from_secs(15);
+
+/// The shared fixture for legs 5 and 6: an oracle publishing through a healthy
+/// link into zenohd, and a wz subscriber reaching zenohd through a relay that
+/// removes exactly one sample on the way IN.
+///
+/// Returns the subscriber's captured log, how many samples the oracle had
+/// published when wz DECLARED, and how many batches the relay dropped.
+fn run_gap_fixture(recovery: bool, value: &str) -> (String, usize, usize) {
+    let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
+    // The ORACLE dials zenohd directly: its own link must stay lossless, or the
+    // `@adv` cache it answers recovery GETs from would be missing the very
+    // sample under test. Only wz's link carries the fault.
+    let (_oracle, mut oracle_out) = spawn_zenoh_advanced_pub(port, "demo/example/adv", value);
+    let needle = format!("[{GAP_INDEX:4}] {value}");
+    let relay = spawn_counting_relay(
+        port,
+        T_MID_FRAME,
+        RelayFault::DropFirstAcceptorToDialer {
+            needle: needle.clone().into_bytes(),
+        },
+    );
+
+    let (_demo, mut reader, _at_declare) =
+        spawn_wz_advanced_subscriber(relay.port(), "demo/example/**", None, None, recovery);
+    // READ AT DECLARE, and this reading is load-bearing rather than diagnostic.
+    // It is what excludes the startup history GET as the path by which
+    // `GAP_INDEX` could reach wz: that GET goes out with the declare, so it can
+    // only carry samples the oracle had already published by this instant.
+    let published_at_declare = published_so_far(&read_captured(&mut oracle_out));
+
+    std::thread::sleep(RECOVERY_RUN);
+    (
+        read_captured(&mut reader),
+        published_at_declare,
+        relay.dropped_count(),
+    )
+}
+
+/// The preconditions both recovery legs share, asserted rather than assumed.
+///
+/// Each one turns a fixture that drifted into a NAMED failure. Without them a
+/// slow runner, a stale oracle or a needle that stopped matching would all
+/// surface as "the sample is missing", which reads as a recovery regression —
+/// the exact mis-diagnosis R311y442's review caught in the first version of
+/// legs 1 and 2.
+fn assert_gap_fixture_held(
+    delivered: &[usize],
+    published_at_declare: usize,
+    dropped: usize,
+    ctx: &str,
+) {
+    assert_eq!(
+        dropped, 1,
+        "the relay removed {dropped} batches, not 1; with 0 the leg proves nothing \
+         (nothing was ever lost, so an intact stream is not evidence of recovery) \
+         and with more than 1 the induced fault is not the one described\n{ctx}"
+    );
+    assert!(
+        published_at_declare <= GAP_INDEX,
+        "the oracle had already published {published_at_declare} samples (up to index \
+         {}) when wz declared, so its startup history GET could have carried index \
+         {GAP_INDEX} itself and the recovery path would not be the only way back. \
+         wz joined too late — the fixture, not the code under test\n{ctx}",
+        published_at_declare.saturating_sub(1)
+    );
+    assert!(
+        delivered.contains(&(GAP_INDEX - 1)),
+        "index {} never arrived, so wz had no in-order baseline before the gap and \
+         no forward gap could be detected at all\n{ctx}",
+        GAP_INDEX - 1
+    );
+    assert!(
+        delivered.contains(&(GAP_INDEX + 1)),
+        "index {} never arrived, so the run ended before the successor that makes \
+         the gap observable — extend RECOVERY_RUN\n{ctx}",
+        GAP_INDEX + 1
+    );
+}
+
+/// Leg 5 — the PROOF for `ext-pubsub-advanced-recovery`. A relay deletes one of
+/// the oracle's samples from the wire; wz notices the hole from the NEXT
+/// sample's sequence number and refills it out of the foreign publisher's own
+/// `@adv` cache.
+///
+/// ## Why a fault had to be injected at all
+///
+/// Every other leg in this file witnesses a path both peers exercise by simply
+/// running. Retransmission is different: it engages only on LOSS, and two
+/// healthy peers on a loopback TCP link never lose anything. Before this leg,
+/// wz's recovery path was covered only wz<->wz, where the same reorder buffer
+/// sits on both ends of the claim — and the `@adv` selector defects R311y441
+/// found are exactly what that arrangement cannot see. The relay is what makes
+/// the gap real, and it is the same one R311y438 built to COUNT the wire,
+/// taught to remove one batch from it.
+///
+/// ## What makes this attributable to recovery
+///
+/// There are three ways index `GAP_INDEX` could reach wz, and the leg closes
+/// two of them by construction and the third by measurement:
+///
+///   * the LIVE push — removed by the relay, which reports `dropped == 1`;
+///   * the STARTUP HISTORY GET — issued at declare time, and the leg reads the
+///     oracle's publish count at that instant to prove the sample did not yet
+///     exist to be carried;
+///   * the PERIODIC / HEARTBEAT triggers — not armed. `--advanced-recovery` is
+///     sample-driven only, which matters here because upstream's oracle DOES
+///     beacon (`MissDetectionConfig::default().heartbeat(500ms)`,
+///     `zenoh-ext/examples/examples/z_advanced_pub.rs:35`), so a subscriber with
+///     the heartbeat trigger armed would recover the gap without the gap ever
+///     having been the reason.
+///
+/// What is left is the sample-driven `_sn=last+1..` GET, answered by a real
+/// zenoh-ext `AdvancedCache`. Leg 6 is its twin: same fixture, same drop, flag
+/// omitted, and the sample stays missing.
+// wz issues the recovery GET and consumes the replies, so the recovering half is
+// wz->; the sequence numbers it detects the gap in are the foreign publisher's
+// SourceInfo, which is the zenoh-ext-> direction.
+// wz-proves: ext-pubsub-advanced-recovery wz->zenoh-ext
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
+fn wz_advanced_recovery_refills_a_gap_from_the_zenoh_ext_cache() {
+    let (captured, published_at_declare, dropped) = run_gap_fixture(true, "GAPVAL");
+    let delivered = delivered_indices(&captured);
+    let ctx = format!(
+        "gap_index={GAP_INDEX} published_at_declare={published_at_declare} \
+         dropped={dropped} delivered={delivered:?}\n--- captured ---\n{captured}"
+    );
+    assert_gap_fixture_held(&delivered, published_at_declare, dropped, &ctx);
+
+    assert!(
+        delivered.contains(&GAP_INDEX),
+        "index {GAP_INDEX} was removed from the wire and never came back; the \
+         sample-driven `_sn={}..` recovery GET did not refill it from the \
+         zenoh-ext cache\n{ctx}",
+        GAP_INDEX
+    );
+    // Byte-exact, not merely present: a recovered sample is the publisher's own
+    // bytes replayed out of its cache, and an index alone cannot carry that.
+    let needle = format!("payload='[{GAP_INDEX:4}] GAPVAL'");
+    assert!(
+        captured.contains(&needle),
+        "index {GAP_INDEX} was recovered but not byte-exact (looking for \
+         {needle})\n{ctx}"
+    );
+    // Ordering, not just arrival. The recovered sample is delivered from the
+    // reorder buffer in sn order, so the whole run is contiguous — which is the
+    // difference between refilling a hole and appending a late duplicate.
+    for w in delivered.windows(2) {
+        assert_eq!(
+            w[1],
+            w[0] + 1,
+            "delivered indices are not contiguous ({delivered:?}); the recovered \
+             sample was not reinserted in sequence\n{ctx}"
+        );
+    }
+    assert!(
+        miss_counts(&captured).is_empty(),
+        "the subscriber reported {:?} misses; a gap the recovery filled must not \
+         also surface as a Miss at flush\n{ctx}",
+        miss_counts(&captured)
+    );
+}
+
+/// Leg 6 — the CONTROL twin of leg 5. Same oracle, same relay, same removed
+/// sample, `--advanced-recovery` omitted: the hole stays a hole.
+///
+/// This is what stops leg 5 from being a statement about the fixture instead of
+/// about wz. Without it, "index 8 arrived" is equally consistent with a relay
+/// whose needle silently stopped matching, a zenohd that re-sent the batch, or
+/// any other path that quietly repairs the stream — none of which involve wz's
+/// recovery code. Here the ONLY difference is one flag on one binary, and the
+/// sample does not arrive.
+///
+/// It also pins the no-recovery behaviour itself, which is a real branch rather
+/// than an absence: wz reports a `Miss` carrying the number of skipped samples
+/// and delivers PAST the hole (`advanced_subscriber.rs:587-596`), rather than
+/// stalling on it.
+// wz-proves: none -- the CONTROL for leg 5. It is wz's no-retransmission branch
+// that runs here, and asserting a sample does NOT arrive credits no atom; its
+// job is to bind leg 5's positive result to the recovery path specifically.
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
+fn wz_without_recovery_keeps_a_gap_the_zenoh_ext_cache_could_fill() {
+    let (captured, published_at_declare, dropped) = run_gap_fixture(false, "NOGAPVAL");
+    let delivered = delivered_indices(&captured);
+    let ctx = format!(
+        "gap_index={GAP_INDEX} published_at_declare={published_at_declare} \
+         dropped={dropped} delivered={delivered:?}\n--- captured ---\n{captured}"
+    );
+    assert_gap_fixture_held(&delivered, published_at_declare, dropped, &ctx);
+
+    assert!(
+        !delivered.contains(&GAP_INDEX),
+        "index {GAP_INDEX} arrived at a subscriber with NO recovery armed. The \
+         relay removed it from the wire, so something other than wz's \
+         retransmission path is repairing the stream — and leg 5's positive \
+         result cannot be attributed to recovery until that is explained\n{ctx}"
+    );
+    assert_eq!(
+        miss_counts(&captured),
+        vec![1],
+        "expected exactly one Miss of exactly one sample — the hole the relay \
+         made. A different count means the drop did not remove the sample this \
+         leg thinks it did\n{ctx}"
+    );
 }
 
 /// Leg 1 — the PROOF. wz's startup history GET drains a real zenoh-ext

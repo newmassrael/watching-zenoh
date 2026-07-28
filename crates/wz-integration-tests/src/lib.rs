@@ -988,8 +988,8 @@ pub mod common {
     /// where `FRAME = 0x05` / `FRAGMENT = 0x06` match wz's constants exactly).
     const TRANSPORT_MID_MASK: u8 = 0x1F;
 
-    /// A live [`spawn_fragment_counting_relay`] — the listening port a dialer
-    /// aims at, plus the per-direction counters the relay accumulates.
+    /// A live [`spawn_counting_relay`] — the listening port a dialer aims at,
+    /// plus the per-direction counters the relay accumulates.
     ///
     /// The two directions are named for the ROLES either side plays against the
     /// relay, not for wz and zenohd: the same relay serves a leg where wz is the
@@ -997,13 +997,14 @@ pub mod common {
     /// dialer but the counted chain flows the other way (R311y439, counting
     /// ZENOHD's TX chain). "Which direction is the foreign sender" is the
     /// caller's claim to make, so it is the caller that picks the accessor.
-    pub struct FragmentCountingRelay {
+    pub struct CountingRelay {
         port: u16,
         dialer_to_acceptor: Arc<AtomicUsize>,
         acceptor_to_dialer: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
     }
 
-    impl FragmentCountingRelay {
+    impl CountingRelay {
         /// The relay's own listening port. The dialer under test connects here
         /// instead of to the acceptor.
         pub fn port(&self) -> u16 {
@@ -1021,6 +1022,59 @@ pub mod common {
         pub fn acceptor_to_dialer_count(&self) -> usize {
             self.acceptor_to_dialer.load(Ordering::Relaxed)
         }
+
+        /// Batches the [`RelayFault`] REMOVED from the stream. Zero under
+        /// [`RelayFault::None`].
+        ///
+        /// A fault leg must assert on this. "The gap was recovered" is only a
+        /// claim about recovery if a gap was actually induced; without this
+        /// reading, a needle that never matched leaves the leg asserting an
+        /// unbroken stream was unbroken, which passes for the wrong reason
+        /// (the `== 0` calibration hazard `spawn_counting_relay` already
+        /// guards for `counted_mid`).
+        pub fn dropped_count(&self) -> usize {
+            self.dropped.load(Ordering::Relaxed)
+        }
+    }
+
+    /// What the relay does to the stream BESIDES forwarding and counting it.
+    ///
+    /// R311y443 — the counting relay converted "what crossed the wire" from an
+    /// inference into a measurement. A fault does the converse: it makes the
+    /// wire do something the peers cannot arrange between themselves, which is
+    /// what a loss-recovery path needs before it can be witnessed at all. wz's
+    /// advanced-pubsub retransmission only engages on a gap, and neither wz nor
+    /// a foreign publisher will produce one on a healthy loopback TCP link.
+    pub enum RelayFault {
+        /// Forward every batch (the R311y438 / R311y439 behaviour).
+        None,
+        /// Drop the FIRST batch flowing ACCEPTOR -> DIALER whose bytes contain
+        /// `needle`, then forward everything else verbatim.
+        ///
+        /// ## Why by CONTENT rather than by position
+        ///
+        /// The obvious fault is "drop the Nth batch carrying application data",
+        /// and it cannot be written: there is no transport MID for a data push.
+        /// Application messages ride INSIDE a `T_MID_FRAME` (`wz-codecs/src/
+        /// lib.rs:496`), together with every Declare, Request and Response, so
+        /// an Nth-frame rule drops whichever of those happened to be Nth —
+        /// a different message on every run, and usually not a sample at all.
+        ///
+        /// Matching the payload instead makes the fault DETERMINISTIC and, more
+        /// importantly, NAMED: the caller knows exactly which sample it removed,
+        /// so both the recovery assertion ("that one came back") and its
+        /// control twin ("that one is missing, and the miss count is 1") can be
+        /// exact rather than statistical. It costs the caller one obligation —
+        /// the needle must be unique to the batch it means, which for a burst
+        /// payload like `[   8] GAPVAL` it is.
+        ///
+        /// FIRST match only, deliberately: the retransmitted copy carries the
+        /// same bytes, so a drop-every-match rule would swallow the recovery
+        /// reply too and no amount of retrying could ever succeed.
+        DropFirstAcceptorToDialer {
+            /// The byte sequence identifying the batch to remove.
+            needle: Vec<u8>,
+        },
     }
 
     /// Bind a TCP relay that a dialer under test connects to in place of
@@ -1097,10 +1151,11 @@ pub mod common {
     /// Blocking std sockets on their own threads, deliberately: this module is
     /// the harness SSOT for tests that are not all async, and it has no
     /// dev-dependencies available to it (tokio is one).
-    pub fn spawn_fragment_counting_relay(
+    pub fn spawn_counting_relay(
         upstream_port: u16,
         counted_mid: u8,
-    ) -> FragmentCountingRelay {
+        fault: RelayFault,
+    ) -> CountingRelay {
         assert_eq!(
             counted_mid & !TRANSPORT_MID_MASK,
             0,
@@ -1108,12 +1163,26 @@ pub mod common {
              not a header byte with its Z/M/R flags set — a flagged value never matches \
              and would leave a `== 0` calibration arm passing vacuously"
         );
+        let needle = match fault {
+            RelayFault::None => None,
+            RelayFault::DropFirstAcceptorToDialer { needle } => {
+                assert!(
+                    !needle.is_empty(),
+                    "an empty needle is contained in every batch, so the fault would \
+                     remove the first batch of the session — the handshake — rather \
+                     than the message the caller meant"
+                );
+                Some(needle)
+            }
+        };
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind counting relay");
         let port = listener.local_addr().expect("relay local_addr").port();
         let dialer_to_acceptor = Arc::new(AtomicUsize::new(0));
         let acceptor_to_dialer = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
         let up = Arc::clone(&dialer_to_acceptor);
         let down = Arc::clone(&acceptor_to_dialer);
+        let down_dropped = Arc::clone(&dropped);
 
         thread::spawn(move || {
             // An accept that never comes means the test finished without
@@ -1135,20 +1204,59 @@ pub mod common {
                 .try_clone()
                 .expect("dup relay acceptor-side handle");
 
-            thread::spawn(move || pump_counting(acceptor_side, dialer_tx, &down, counted_mid));
-            pump_counting(dialer_side, acceptor_tx, &up, counted_mid);
+            // The fault rides the ACCEPTOR -> DIALER pump only: the dialer under
+            // test is the receiver whose recovery path a leg wants to exercise,
+            // so the loss has to happen on what reaches it.
+            thread::spawn(move || {
+                pump_counting(
+                    acceptor_side,
+                    dialer_tx,
+                    &down,
+                    counted_mid,
+                    needle.as_deref(),
+                    &down_dropped,
+                )
+            });
+            pump_counting(
+                dialer_side,
+                acceptor_tx,
+                &up,
+                counted_mid,
+                None,
+                &AtomicUsize::new(0),
+            );
         });
 
-        FragmentCountingRelay {
+        CountingRelay {
             port,
             dialer_to_acceptor,
             acceptor_to_dialer,
+            dropped,
         }
     }
 
     /// Forward every `[u16 LE len][batch]` from `src` to `dst` byte-for-byte,
     /// bumping `counter` for each batch whose first transport message carries
     /// `counted_mid`. Returns when either side closes or errors.
+    ///
+    /// With `needle` set, the FIRST batch containing it is removed instead of
+    /// forwarded and `dropped` is bumped once (see
+    /// [`RelayFault::DropFirstAcceptorToDialer`]). A removed batch is NOT
+    /// counted: the counters answer "what crossed", and a batch this pump
+    /// swallowed did not. Under [`RelayFault::None`] nothing is removed, so
+    /// both existing consumers read exactly the counts they did before.
+    ///
+    /// Removing a whole batch is safe for both peers' TRANSPORT state, which is
+    /// why the fault can be this blunt. A zenoh receiver admits any forward SN
+    /// jump — `SeqNum::roll` advances on any gap inside the half-ring and only
+    /// rejects a non-advancing one (`io/zenoh-transport/src/common/
+    /// seq_num.rs:145-155`), with the lost frame reported at `trace` and never
+    /// retransmitted (`gap()` next to it is still `#[cfg(test)]`, "once
+    /// reliability is implemented"). wz's own `sn::precedes` is wired to the
+    /// MULTICAST plane only (`wz-runtime-tokio/src/multicast_glue.rs:128`), so
+    /// its unicast RX does not track transport SNs at all. The loss therefore
+    /// surfaces where the leg wants it — as a missing SAMPLE, in the
+    /// application's own sequencing — and not as a dead session.
     ///
     /// The counter is bumped BEFORE the forward, so any batch that reached the
     /// far side is already in the counter's modification order by the time the
@@ -1168,6 +1276,8 @@ pub mod common {
         mut dst: TcpStream,
         counter: &AtomicUsize,
         counted_mid: u8,
+        needle: Option<&[u8]>,
+        dropped: &AtomicUsize,
     ) {
         use std::io::{Read, Write};
         use std::net::Shutdown;
@@ -1180,6 +1290,15 @@ pub mod common {
             let mut batch = vec![0u8; u16::from_le_bytes(prefix) as usize];
             if src.read_exact(&mut batch).is_err() {
                 break;
+            }
+            // FIRST match only — the retransmitted copy carries the same bytes,
+            // so a rule that kept matching would swallow the recovery reply and
+            // make the induced loss unrecoverable by construction.
+            if let Some(needle) = needle.filter(|_| dropped.load(Ordering::Relaxed) == 0) {
+                if batch.windows(needle.len()).any(|w| w == needle) {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
             }
             if batch
                 .first()

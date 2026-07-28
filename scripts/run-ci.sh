@@ -5058,9 +5058,14 @@ layer_e_ap_demo_round_trip() {
     # `--advanced-subscribe` / `--advanced-publish` CLI. On THIS sweep's default
     # binary those flags are INERT, and the legs assert that explicitly rather
     # than reading an empty sample set as success — so running them here would be
-    # a red with a correct diagnosis and a wrong lane. Every one of the four names
+    # a red with a correct diagnosis and a wrong lane. Every one of the names
     # carries the `zenoh_ext` token FOR this skip; they run only in Z, where
-    # `_runci_guarded_test Z 4` pins that all four executed.
+    # `_runci_guarded_test Z 6` pins that all of them executed.
+    # R311y443 — the token is a NAMING OBLIGATION on every future leg in that
+    # file, not a property of the four it started with. The two recovery legs
+    # added here were first named for what they do (`..._relay_induced_gap`),
+    # which reads better and would have put them on this sweep's default binary,
+    # where they fail with a correct INERT diagnosis in the wrong lane.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext)
@@ -6611,6 +6616,15 @@ layer_z_zenohd_interop() {
     # advanced subscriber draining a wz cache, which exercises wz as RESPONDER and
     # so binds the cache / publisher atoms rather than the subscriber-side ones).
     #
+    # R311y443 adds a FIFTH and SIXTH: the retransmission path, which unlike
+    # every leg above cannot be witnessed by two healthy peers because it engages
+    # only on LOSS. A relay between zenohd and wz deletes one of the oracle's
+    # samples from the wire; leg 5 (recovery armed) shows wz refilling it from the
+    # foreign publisher's `@adv` cache via an `_sn=` GET, and leg 6 — same
+    # fixture, same removed sample, flag omitted — shows the hole persisting.
+    # Leg 6 is what binds leg 5's result to the recovery path rather than to a
+    # fixture that quietly repaired itself.
+    #
     # The two REDs are not independent, and the first version of this comment said
     # they were. Measured across all three revert arms (separator only, `_anyke`
     # only, both): the failure shape is the SAME empty recovery in both legs,
@@ -6636,7 +6650,7 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenoh-ext example oracle not built \
 ($ext_examples_dir/$missing_ext_example; run: bash scripts/build-zenohd.sh)" || return 1
     else
-        _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" \
+        _runci_guarded_test Z 6 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
             --test wz_advanced_pubsub_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \
             || return 1

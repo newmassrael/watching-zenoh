@@ -811,6 +811,18 @@ fn main() -> ExitCode {
         },
         None => None,
     };
+    // R311y443 — `--advanced-recovery` arms the SAMPLE-DRIVEN retransmission
+    // trigger on that subscriber: a forward gap in a source's sequence numbers
+    // is buffered and back-filled by an `_sn=last+1..` GET against that source's
+    // `@adv` cache, instead of being reported as a Miss and delivered past.
+    //
+    // Sample-driven ONLY — no periodic re-ask, no heartbeat listener — and that
+    // is what makes it a usable proof vehicle rather than just a feature switch.
+    // wz has three recovery triggers and upstream's `z_advanced_pub` oracle emits
+    // a 500 ms heartbeat beacon, so a subscriber with all three armed recovers a
+    // gap without telling you WHICH trigger did it. With only the gap trigger
+    // live, a recovered sample is attributable to the gap that preceded it.
+    let advanced_recovery = rest.iter().any(|a| a == "--advanced-recovery");
     // R311y442 — `--advanced-publish <keyexpr>` is the ANSWERING half: a wz
     // AdvancedPublisher whose `@adv` cache a FOREIGN advanced subscriber drains.
     // `--cache-max` sets the ring depth, `--advanced-publish-count` the burst size.
@@ -1237,6 +1249,7 @@ fn main() -> ExitCode {
         advanced_subscriber_keyexpr: advanced_subscribe_opt,
         advanced_history_max,
         advanced_history_max_age,
+        advanced_recovery,
         advanced_publish: advanced_publish_opt.map(|keyexpr| AdvancedPublishSpec {
             keyexpr,
             // Guarded above: `--advanced-publish` without `--value` already exited.

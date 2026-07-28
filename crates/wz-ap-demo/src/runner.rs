@@ -63,7 +63,7 @@ use wz::runtime_core::Runtime;
 use wz::runtime_core::TimeSource;
 #[cfg(feature = "advanced")]
 use wz::runtime_tokio::advanced_subscriber::{
-    AdvancedSubscriber, AdvancedSubscriberOptions, HistoryConfig,
+    AdvancedSubscriber, AdvancedSubscriberOptions, HistoryConfig, RecoveryConfig,
 };
 use wz::runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
@@ -783,6 +783,8 @@ fn install_session_handles(
     let advanced_history_max = declare_spec.advanced_history_max;
     #[cfg_attr(not(feature = "advanced"), allow(unused_variables))]
     let advanced_history_max_age = declare_spec.advanced_history_max_age;
+    #[cfg_attr(not(feature = "advanced"), allow(unused_variables))]
+    let advanced_recovery = declare_spec.advanced_recovery;
     let subscriber = key.and_then(|filter| {
         let key_for_callback = filter.clone();
         // R311ou — `--key` now declares a ROUTED subscriber: register the local
@@ -966,7 +968,14 @@ fn install_session_handles(
         if let Some(age) = advanced_history_max_age {
             history = history.max_age(age);
         }
-        let options = AdvancedSubscriberOptions::new().with_history(history);
+        // R311y443 — history is applied unconditionally (an unset `--history-max`
+        // / `--history-max-age` pair leaves `HistoryConfig` at its defaults), but
+        // recovery is a separate opt-in, exactly as upstream keeps `.history()`
+        // and `.recovery()` separate builder methods.
+        let mut options = AdvancedSubscriberOptions::new().with_history(history);
+        if advanced_recovery {
+            options = options.with_recovery(RecoveryConfig::new());
+        }
         let declared = AdvancedSubscriber::declare_with_options(
             session,
             owned_filter,
@@ -994,7 +1003,8 @@ fn install_session_handles(
                 log::info!(
                     "wz-ap-demo: DECLARED ADVANCED SUBSCRIBER keyexpr='{filter}' \
                      history_max={advanced_history_max:?} \
-                     history_max_age={advanced_history_max_age:?}"
+                     history_max_age={advanced_history_max_age:?} \
+                     recovery={advanced_recovery}"
                 );
                 Some(sub)
             }
@@ -1017,7 +1027,8 @@ fn install_session_handles(
             "wz-ap-demo: --advanced-subscribe='{filter}' is INERT (built without \
              the `advanced` feature); no history GET will be issued \
              (ignored: history_max={advanced_history_max:?} \
-             history_max_age={advanced_history_max_age:?})"
+             history_max_age={advanced_history_max_age:?} \
+             recovery={advanced_recovery})"
         );
     }
 
