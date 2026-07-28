@@ -67,8 +67,20 @@
 //!      The option-atom pair: the ONLY difference is the flag.
 //!   3. control (`--autoconnect` kept, P absent) — nothing to discover, no dial.
 //!      Separates "the flag dials" from "a DISCOVERED PEER dials".
-//!   4/5. the `--autoconnect-strategy` pair, on a fixture where wz's zid is the
-//!      LOWER: `always` dials, `greater-zid` declines the very same peer.
+//!   4. `--autoconnect-strategy always`, on a fixture where wz's zid is the
+//!      LOWER — wz dials the greater-zid peer anyway.
+//!   5. `--autoconnect-strategy greater-zid`, same fixture — the very same peer
+//!      is declined. The strategy pair: legs 4 and 5 differ in that value alone.
+//!   6. `--peer-mode peer-to-peer` in a STOCK subsystem (neither zenohd carries
+//!      `routing/peer/mode`) — wz still decodes the gossip flood and dials, and
+//!      the router logs no `unknown link mapping`: the `add_link` twin of the
+//!      leg-1 regression, since the gossip re-flood relays direct neighbours
+//!      only and never taught the router our psid for the new one.
+//!   7. `--peer-mode linkstate`, same stock subsystem — the linkstate ingest
+//!      rebuilds edges and GCs what the update left unreachable, and a gossip
+//!      entry carries no links, so the third party is deleted on arrival and
+//!      only the static `--connect` dial happens. The mode pair: without leg 7
+//!      `--peer-mode` would be a flag with no demonstrated effect.
 //!
 //! ## The R311y431 propagate regression, asserted in leg 1
 //!

@@ -3003,11 +3003,11 @@ layer_c1y_cargo_test_routing_peer() {
     local access="routing-peer,access-acl,access-downsampling,access-quota"
     _runci_guarded_test "C1y accept_loop" 11 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
-    _runci_guarded_test "C1y linkstate" 199 \
+    _runci_guarded_test "C1y linkstate" 200 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
     _runci_guarded_test "C1y interceptor" 10 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
-    _runci_guarded_test "C1y linkstate+access" 210 \
+    _runci_guarded_test "C1y linkstate+access" 211 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     _runci_guarded_test "C1y extauth" 10 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet || return 1

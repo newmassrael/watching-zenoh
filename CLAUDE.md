@@ -42,6 +42,19 @@ surface and may drift from the store. To read the SSOT, use
    - `mnemosyne://concepts/frozen-ledger`
    - `mnemosyne://concepts/tier-rules`
    - `mnemosyne://concepts/workflow`
+
+   **If these resources are unreachable, the MCP server is STALE, not
+   absent.** `mnemosyne-mcp` is pinned to the same `MNEMOSYNE_REV` as the
+   CLI but nothing in the CI installer installs it, so a pin bump moves
+   the CLI and leaves the server behind; it then dies at startup parsing
+   a `mnemosyne.toml` field it does not know, and the client reports only
+   `Connection closed` — which reads exactly like "no server configured".
+   R311y429 bumped the rev for `scan_exclusions` and this went undiagnosed
+   for two rounds. Run `bash scripts/install-mnemosyne-mcp.sh` (reads the
+   rev from the pin, verifies with a real `initialize` handshake) and
+   restart the session. Do NOT proceed treating the concepts as
+   unavailable, and do NOT edit `mnemosyne.toml` to make the old server
+   start.
 2. Run `validate_workspace` to surface the current baseline (T1 orphan
    count, atomic ledger entries/sections, style violations). Snapshot
    the numbers — you will compare against this after your mutation.
@@ -176,6 +189,11 @@ git config core.hooksPath .githooks
 `pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
 (install via
 `cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli`).
+The agent-session MCP server is a SEPARATE binary at the same pin —
+`bash scripts/install-mnemosyne-mcp.sh`, which reads `MNEMOSYNE_REV`
+through the same parser the hooks use. It is deliberately not part of
+the CI installer (CI never speaks MCP), which is exactly why it can
+drift; see step 1 of "Before any action on a registered doc".
 `pre-commit` and `pre-push` additionally require `python3` — the schema
 pin reads the store's `schema_version` with a real JSON parse, which is
 indifferent to serialization and type-checks the value (the literal
