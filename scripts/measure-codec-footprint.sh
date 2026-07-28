@@ -330,20 +330,52 @@ if [[ "$FOOTPRINT_SHARD" -eq 0 ]]; then
     printf "  handshake-only delta:         %s\n" "$(format_delta "$handshake_only")"
 fi
 
-# R311n — threshold-based regression gate. Each codec-* feature is
-# expected to produce a minimum elision delta when its puller-aware
-# minus-<codec> lane runs; if cargo resolver silently re-enables the
-# codec (e.g. a new high-level feature was added without listing it
-# in the implies graph) the delta drops below the threshold and the
-# script exits non-zero. The threshold is intentionally conservative
-# (1 KB) so a real but small codec elision is not flagged; the gate
-# catches the "near-zero delta" pathology that masked R311a4..R311k
-# catalog-truthfulness regressions before R311n.
+# R311n — elision regression gate: each codec-* feature must remove a minimum
+# amount of code when its puller-aware minus-<codec> lane runs, or the catalog
+# is claiming an optionality the build does not have.
 #
-# Opt out via WZ_FOOTPRINT_NO_THRESHOLD=1 (for one-off measurements
-# where a near-zero delta is expected, e.g. a wz-codecs-only codec
-# with no wz-runtime-tokio session_glue surface).
-THRESHOLD_BYTES=${WZ_FOOTPRINT_THRESHOLD_BYTES:-1024}
+# R311y436 — the ONE GLOBAL THRESHOLD (1024B) IS GONE, replaced by a pinned
+# floor PER CODEC. The global number could not be right for thirteen codecs
+# whose real deltas span 0 to 74KB, and it failed in both directions at once:
+#
+#   * TOO LOW to catch a regression in a large codec. codec-response elides
+#     74472B; it could lose 98% of that and still clear 1024.
+#   * TOO HIGH for small ones, which forced a hand-maintained SOFT-SKIP list
+#     (codec-scout / codec-hello / codec-join / codec-fragment /
+#     codec-keep-alive). Five of thirteen lanes were exempt, judging nothing,
+#     and the list only ever grew. R311y435 established where that ends: a gate
+#     whose exemptions absorb its own subject matter reports green forever.
+#
+# A per-codec floor fixes both. Every lane is judged, the exemption list is
+# deleted outright, and a near-zero codec is pinned AT near-zero -- which is
+# strictly more informative than exempting it, because a jump upward is then
+# visible too. The floors below are MEASURED (R311y436, at 49f2ea9), each
+# carried with a margin well above the LTO/inline noise floor observed across
+# runs (+-32B: keep-alive read 208 and 224, scout/hello -144 and -128).
+#
+# WHEN A FLOOR MUST MOVE: re-pin it in the same commit as the change that moved
+# it, with the before/after numbers in the ledger entry. A floor lowered on its
+# own is the gate being silenced, exactly as MNEMOSYNE_MAX_SCHEMA raised alone
+# would be (scripts/lib/schema-pin-gate.sh). Legitimate causes exist -- a
+# refactor that consolidates paths reduces what any one codec can still remove
+# -- and they are recorded, not waved through.
+#
+# Opt out via WZ_FOOTPRINT_NO_THRESHOLD=1 (one-off measurements only).
+declare -A CODEC_DELTA_FLOOR=(
+    [codec-frame]=0            # lane SKIPs on this binary; floor unused until it is measurable
+    [codec-fragment]=-256      # measured 0: no session_glue surface, wz-codecs level only
+    [codec-keep-alive]=128     # measured 208: BODYLESS message, trivial codec
+    [codec-init-body]=12000    # measured 14608
+    [codec-open-body]=8000     # measured 10192
+    [codec-close]=1500         # measured 1944
+    [codec-push]=8000          # measured 10072 (R311y435 revived this lane from SKIP)
+    [codec-declare]=0          # lane SKIPs on this binary; floor unused until it is measurable
+    [codec-request]=55000      # measured 66456
+    [codec-response]=60000     # measured 74472
+    [codec-response-final]=8000 # measured 9712
+    [codec-scout]=-256         # measured -144: wz-codecs level only; negative is inline noise
+    [codec-hello]=-256         # measured -144: same
+)
 SKIP_THRESHOLD=${WZ_FOOTPRINT_NO_THRESHOLD:-0}
 if [[ "$SKIP_THRESHOLD" -ne 1 ]]; then
     fail=0
@@ -371,31 +403,29 @@ if [[ "$SKIP_THRESHOLD" -ne 1 ]]; then
             continue
         fi
         delta=$((baseline - size))
-        if [[ $delta -lt $THRESHOLD_BYTES ]]; then
-            # codec-scout / codec-hello / codec-join / codec-fragment
-            # currently sit at wz-codecs level only (no session_glue
-            # surface); near-zero delta is honest semantics, not a
-            # regression. R311m consumer-module cascade is expected to
-            # promote them above threshold; until then, allow these
-            # specific codecs to soft-skip.
-            #
-            # R311pr — codec-keep-alive joins the soft-skip set. KeepAlive is a
-            # BODYLESS transport message, so its codec is trivial (near-zero
-            # bytes). Its session consumer `transport-keepalive` is a SEPARATE
-            # feature that does NOT pull codec-keep-alive (verified:
-            # transport-keepalive = [wz-session-core/transport-keepalive], no
-            # codec edge), so eliding the codec alone is an HONEST sub-1KB delta
-            # — not the silent re-pull pathology this gate guards. (The -144B
-            # negative delta is LTO/inline noise around a ~0 real saving.)
-            case "$codec" in
-                codec-scout|codec-hello|codec-join|codec-fragment|codec-keep-alive)
-                    echo "  THRESHOLD SOFT-SKIP $codec ($delta < $THRESHOLD_BYTES; small-codec)" >&2
-                    ;;
-                *)
-                    echo "  THRESHOLD FAIL $codec ($delta < $THRESHOLD_BYTES)" >&2
-                    fail=1
-                    ;;
-            esac
+        floor="${CODEC_DELTA_FLOOR[$codec]-}"
+        if [[ -z "$floor" ]]; then
+            # An UNPINNED codec is a failure, not a pass. A new atomic codec
+            # feature lands in preset-ap-client and is auto-enumerated into
+            # CODEC_FEATURES, so without this it would be measured and then
+            # silently ignored — the same "absence reads as success" shape that
+            # let the R311y435 defects hide behind SKIP.
+            echo "  FLOOR MISSING $codec (measured ${delta}B, no pinned floor)" >&2
+            echo "    Add it to CODEC_DELTA_FLOOR above with the measured value" >&2
+            echo "    minus a margin, and cite the measurement in the ledger." >&2
+            fail=1
+            continue
+        fi
+        if (( delta < floor )); then
+            echo "  FLOOR FAIL $codec (${delta}B < pinned ${floor}B)" >&2
+            echo "    This codec now elides LESS code than the pin records." >&2
+            echo "    Either a consumer re-pulls it (the catalog-truthfulness" >&2
+            echo "    defect this gate exists to catch), or a refactor" >&2
+            echo "    consolidated the paths it used to own. The second is" >&2
+            echo "    legitimate but MUST be re-pinned deliberately, with the" >&2
+            echo "    before/after numbers in the ledger entry -- never by" >&2
+            echo "    lowering this constant on its own." >&2
+            fail=1
         fi
     done
     if [[ $fail -ne 0 ]]; then
