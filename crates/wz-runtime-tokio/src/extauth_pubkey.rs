@@ -176,8 +176,14 @@ impl PubKeyMethod {
     /// An INITIATOR-side method authenticating with `private_key`. It offers its
     /// public key on InitSyn and proves possession by decrypting + relaying the
     /// responder's challenge. It does no responder-side key gating (`lookup` =
-    /// `None`); zenoh's initiator likewise does not gate the responder's key
-    /// beyond the challenge round-trip.
+    /// `None`), and that is a RESIDUAL, not parity: zenoh's initiator DOES gate
+    /// the responder's key when it carries a lookup — `recv_init_ack` bails
+    /// `Unauthorized PubKey` on a `bob_pubkey` outside a non-empty set
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs:413-418`
+    /// at zenoh 1.5.0), the mirror of the responder-side check at `:567-570`.
+    /// This doc previously asserted the opposite from memory; R311y440 read the
+    /// source. Closing it needs a lookup on this side plus the PEM/key-file
+    /// loading (`pubkey.rs:82-124`) that would populate it.
     pub fn initiator(private_key: RsaPrivateKey) -> Self {
         let public_key = RsaPublicKey::from(&private_key);
         Self {
