@@ -87,7 +87,16 @@ set -euo pipefail
 # d9e2beed) defines only schema <= 41, so its validate-workspace rejected the
 # schema-42 store ("schema version mismatch: store=42 expected <= 41") — the
 # Layer A red on the R311y406 hosted CI run.
-MNEMOSYNE_REV="b867bfe247c895e84f67c4439760397194e3bca8"
+# R311y436 — moved b867bfe2 -> 25d30d16 because a locally-installed CLI at
+# 25d30d16 migrated the store 43 -> 44 during a routine ledger append, which the
+# b867bfe2 reader cannot open ("schema version mismatch: store=44 expected <=
+# 43"). That is the FIFTH occurrence of the shape enumerated below, and the
+# first caught locally rather than on hosted CI — the schema-pin gate fired at
+# validate-workspace instead of in Layer A. The rev is taken from cargo's own
+# install ledger (~/.cargo/.crates.toml records the full SHA), not from
+# `--version`; see the new pin-vs-installed gate for why that distinction is
+# load-bearing.
+MNEMOSYNE_REV="25d30d161c2c54c3bbcfde9f2a0156724b5f6471"
 
 # The pinned rev's CURRENT_SCHEMA_VERSION: the HIGHEST atomic-store schema this
 # CLI can read. Verified at the pin, not inherited from prose —
@@ -113,7 +122,13 @@ MNEMOSYNE_REV="b867bfe247c895e84f67c4439760397194e3bca8"
 # merely silences it), and R311y419 closed the hole that pairing could not
 # reach — that the ceiling is the pinned reader's REAL CURRENT_SCHEMA_VERSION
 # and not a mis-read of upstream source. See the tail of this script.
-MNEMOSYNE_MAX_SCHEMA="43"
+# R311y436 — 43 -> 44, READ AT THE NEW REV rather than inferred from the store
+# that forced the bump: crates/mnemosyne-atomic/src/lib.rs:1687 at 25d30d16
+# defines `pub const CURRENT_SCHEMA_VERSION: u32 = 44`, and :1971 still rejects
+# `on_disk_version > CURRENT_SCHEMA_VERSION`. Reading the constant matters even
+# when the store already says 44, because the store proves only what some
+# writer produced, never what the pinned READER accepts.
+MNEMOSYNE_MAX_SCHEMA="44"
 
 cargo install --git https://github.com/newmassrael/mnemosyne \
   --rev "$MNEMOSYNE_REV" --bin mnemosyne-cli --force mnemosyne-cli
