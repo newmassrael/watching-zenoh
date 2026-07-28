@@ -87,31 +87,38 @@ pub(crate) enum Role {
         /// the one-shot open (runner.rs; reconnect is out of demo scope).
         namespace: Option<String>,
         /// R311y372 — `--lowlatency` offers the Z_EXT_LOWLATENCY transport ext on
-        /// the InitSyn (`initiate_and_open_session_with_lowlatency` ->
-        /// `set_lowlatency_offer(true)`), so a peer that also offers it negotiates
-        /// the lean transport that drops the Frame(sn) wrapper on the data path.
+        /// the InitSyn, so a peer that also offers it negotiates the lean
+        /// transport that drops the Frame(sn) wrapper on the data path.
         /// Feature-uniform (always parsed + banner-logged); `false` without
         /// `--lowlatency` OR when the demo was built without the
-        /// `transport-lowlatency` feature, in which case the flag is inert (the
-        /// one-shot open takes the bare initiate path, runner.rs). Initiator-only
-        /// and one-shot-only, like `namespace`: the reconnect path is out of demo
-        /// scope, and an acceptor's lowlatency offer is not exercised by the demo.
+        /// `transport-lowlatency` feature, in which case the flag is inert.
+        /// R311y435 moved WHERE that inertness is decided: the flag now feeds
+        /// `runner::initiator_offer`, which drops an unbuildable capability from
+        /// the `SessionOffer` before the library sees it, because the library
+        /// seam (`SessionLinkActions::apply_offer`) deliberately ERRORS on one
+        /// instead of downgrading. Initiator-only and one-shot-only, like
+        /// `namespace`: the reconnect path is out of demo scope, and an
+        /// acceptor's lowlatency offer is not exercised by the demo.
         lowlatency: bool,
         /// R311y433 — `--compression` offers the Z_EXT_COMPRESSION unit ext (id
-        /// 0x6) on the InitSyn (`initiate_and_open_session_with_compression` ->
-        /// `set_compression_offer(true)`), so a peer that also offers it
-        /// negotiates the per-batch lz4 wrap on every post-establishment batch.
-        /// Feature-uniform (always parsed + banner-logged); `false` without
-        /// `--compression` OR when the demo was built without the
-        /// `session-extcompression` feature, in which case the flag is inert (the
-        /// one-shot open takes the bare initiate path, runner.rs). Initiator-only
-        /// and one-shot-only, exactly like `lowlatency`. Rejected in combination
-        /// with `--lowlatency` (main.rs) because no `session_open` entrypoint
-        /// stages both offers — NOT because the pair is ill-formed. R311y434: on a
-        /// lean link the negotiated wrap is INERT in wz exactly as in zenoh, whose
-        /// lean transport serializes straight to the link behind a 4-byte length
-        /// prefix and never touches `WBatch` / `BatchHeader`
-        /// (`zenoh-transport-1.5.0` `unicast/lowlatency/link.rs:33-73`).
+        /// 0x6) on the InitSyn, so a peer that also offers it negotiates the
+        /// per-batch lz4 wrap on every post-establishment batch. Feature-uniform
+        /// and inert-when-unbuilt on the same `initiator_offer` seam as
+        /// `lowlatency`; initiator-only and one-shot-only.
+        ///
+        /// COMBINABLE with `--lowlatency` since R311y435, and the history is
+        /// worth keeping because the guard outlived its reason by a round.
+        /// R311y433 rejected the pair as having no coherent cross-impl wire
+        /// meaning; R311y434 showed that was true only of a wz defect (wz wrapped
+        /// compression OUTSIDE the lean encode, while zenoh's lean transport
+        /// serializes straight to the link behind a 4-byte length prefix and
+        /// never touches `WBatch` / `BatchHeader` —
+        /// `zenoh-transport-1.5.0` `unicast/lowlatency/link.rs:33-73`), fixed it,
+        /// and kept the rejection for a narrower LOCAL reason: `session_open` had
+        /// one entrypoint per MODE and none staged both offers. R311y435's
+        /// `initiate_and_open_session_with_offer` takes the SET, so that reason
+        /// is gone and the guard went with it. On a lean link the negotiated wrap
+        /// is INERT in wz exactly as in zenoh.
         compression: bool,
     },
 }

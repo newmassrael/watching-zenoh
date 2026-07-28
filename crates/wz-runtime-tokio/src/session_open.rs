@@ -49,6 +49,9 @@ use wz_session_core::auth_dispatch::AuthDispatch;
 #[cfg(feature = "transport-multilink")]
 use wz_session_core::qos::Priority;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
+// R311y435 — re-exported so a caller of the `*_with_offer` entrypoints imports
+// the offer type from the same module as the function that consumes it.
+pub use wz_session_core::transport_mode::{SessionOffer, TransportMode};
 
 use crate::link_pipeline::{
     accept_tcp_on, bind_tcp, bind_tcp_host, dial_tcp, dial_tcp_host,
@@ -2522,6 +2525,17 @@ pub enum OpenError {
     /// carried through rather than flattened to a string so the caller can
     /// distinguish it from a malformed-locator [`Self::BadLocator`].
     NotReconnectable(wz_session_core::reconnect::NotReconnectable),
+    /// R311y435 — the [`SessionOffer`](wz_session_core::transport_mode::SessionOffer)
+    /// asked for a capability whose cargo feature this build does not carry
+    /// (e.g. [`TransportMode::LowLatency`](wz_session_core::transport_mode::TransportMode::LowLatency)
+    /// without `transport-lowlatency`). Surfaced BEFORE the handshake drives, so
+    /// no wire byte is emitted for a session that could not honour its own
+    /// offer. Deliberately not a silent downgrade to the universal transport: a
+    /// caller that configured the lean path and got the Frame-wrapped one would
+    /// discover it only by packet capture. zenoh has no counterpart because its
+    /// capabilities are always compiled in; this is the honest half of wz's
+    /// compile-time feature elision.
+    UnsupportedCapability(wz_session_core::transport_mode::UnsupportedCapability),
 }
 
 /// Build the session action layer + SCE engine for an open path, ready for
@@ -2767,8 +2781,41 @@ pub async fn connect_and_open_session_with_lowlatency(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    connect_and_open_session_with_offer(
+        locator,
+        params,
+        SessionOffer::universal().with_mode(TransportMode::LowLatency),
+        cfg,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// R311y435 — the COMPOSING connect: dial the locator, then open with the whole
+/// negotiated capability set. The deploy-facing seam; the
+/// `connect_and_open_session_with_*` wrappers are each this call with one field
+/// set.
+///
+/// This is what makes a composed session reachable from a real deployment rather
+/// than only from a hand-built wz<->wz fixture, which is the gap R311y434 named
+/// as its largest deliberate omission: it proved the composed lowlatency +
+/// compression wire byte-for-byte between two wz peers, and it proved the lean
+/// wire interoperates with zenohd (R311y372), but nothing dialled a zenohd with
+/// BOTH offers staged, so the composition of those two proofs was an argument.
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_and_open_session_with_offer(
+    locator: AnyLocator,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    cfg: &DialConfig,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
     let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
-    initiate_and_open_session_with_lowlatency(dialed, params, clock, max_iters, tick_interval_ms)
+    initiate_and_open_session_with_offer(dialed, params, offer, clock, max_iters, tick_interval_ms)
         .await
 }
 
@@ -2789,8 +2836,16 @@ pub async fn connect_and_open_session_with_qos(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
-    initiate_and_open_session_with_qos(dialed, params, clock, max_iters, tick_interval_ms).await
+    connect_and_open_session_with_offer(
+        locator,
+        params,
+        SessionOffer::universal().with_mode(TransportMode::Qos),
+        cfg,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
 }
 
 /// session-extcompression — [`connect_and_open_session`] that OFFERS compression:
@@ -2807,9 +2862,16 @@ pub async fn connect_and_open_session_with_compression(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
-    initiate_and_open_session_with_compression(dialed, params, clock, max_iters, tick_interval_ms)
-        .await
+    connect_and_open_session_with_offer(
+        locator,
+        params,
+        SessionOffer::universal().with_compression(true),
+        cfg,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
 }
 
 /// session-extshm — [`connect_and_open_session`] that OFFERS SHM: dials the
@@ -2826,8 +2888,16 @@ pub async fn connect_and_open_session_with_shm(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
-    initiate_and_open_session_with_shm(dialed, params, clock, max_iters, tick_interval_ms).await
+    connect_and_open_session_with_offer(
+        locator,
+        params,
+        SessionOffer::universal().with_shm(true),
+        cfg,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
 }
 
 /// §5.21 routing-namespace — [`connect_and_open_session`] that installs a
@@ -2991,11 +3061,78 @@ pub async fn initiate_and_open_session_with_lowlatency(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    initiate_and_open_session_with_offer(
+        connected,
+        params,
+        SessionOffer::universal().with_mode(TransportMode::LowLatency),
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// R311y435 — the COMPOSING initiator open: one entrypoint taking the whole
+/// negotiated capability set, replacing the one-wrapper-per-capability shape
+/// that made every combination unreachable.
+///
+/// The wrappers above are not deprecated — they stay as the named one-capability
+/// spellings, and each is now literally a `SessionOffer` with one field set, so
+/// the two surfaces cannot drift. What they could never do is compose: with one
+/// `initiate_and_open_session_with_*` per capability, offering lowlatency AND
+/// compression on one session needed a `_with_lowlatency_compression` wrapper,
+/// and four capabilities would have needed sixteen. R311y434 hit exactly that
+/// wall — it could prove the composed wire wz<->wz but could not dial a real
+/// zenohd with both offers staged, so its cross-impl claim stayed an argument
+/// rather than a measurement. This is the entrypoint that closes it.
+///
+/// The exclusive qos/lowlatency pair cannot be mis-staged here because
+/// [`SessionOffer`] carries ONE
+/// [`TransportMode`](wz_session_core::transport_mode::TransportMode); see that
+/// type for why wz encodes upstream's `manager.rs:264` runtime bail as a
+/// compile-time impossibility instead.
+///
+/// The link is wired with the 4-byte u32 lowlatency prefix ONLY for
+/// [`TransportMode::LowLatency`](wz_session_core::transport_mode::TransportMode::LowLatency),
+/// and even then the flag flips at Established, so the handshake goes out u16 in
+/// every mode — zenoh likewise reconfigures the link only after `recv_open_ack`
+/// (`io/zenoh-transport/src/unicast/establishment/open.rs:706`).
+pub async fn initiate_and_open_session_with_offer(
+    connected: DialedLink,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    // R311y435 — the lean wiring is chosen at RUNTIME from the offer, but ONLY in
+    // a build that has the lean transport at all. Without `transport-lowlatency`,
+    // `apply_offer` rejects `TransportMode::LowLatency` below, so the branch is
+    // unreachable — and compiling it anyway drags
+    // `wire_dialed_link_with_lowlatency` into builds that can never take it. That
+    // is not hypothetical: this entrypoint is unconditional where the
+    // `*_with_lowlatency` wrapper it replaced was `#[cfg(transport-lowlatency)]`,
+    // and Layer F measured the loss — the codec-close footprint delta fell from
+    // 1944 to 600 bytes on `preset-ap-client`, which carries no lowlatency
+    // feature. The cfg split restores the elision the wrapper's gate used to give
+    // for free.
+    #[cfg(feature = "transport-lowlatency")]
     let lowlatency_wire = Arc::new(AtomicBool::new(false));
-    let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_lowlatency(connected, lowlatency_wire.clone());
+    #[cfg(feature = "transport-lowlatency")]
+    let (inbound, outbound, writer_handle) = if offer.mode == TransportMode::LowLatency {
+        wire_dialed_link_with_lowlatency(connected, lowlatency_wire.clone())
+    } else {
+        wire_dialed_link(connected)
+    };
+    #[cfg(not(feature = "transport-lowlatency"))]
+    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
     let actions = new_session_actions(outbound, params, clock);
-    actions.set_lowlatency_offer(true);
+    // Staged BEFORE the handshake drives, and BEFORE any wire byte: an offer
+    // this build cannot honour fails here rather than opening a session whose
+    // wire form silently differs from the configuration.
+    actions
+        .apply_offer(&offer)
+        .map_err(OpenError::UnsupportedCapability)?;
     let opened = initiator_open(
         inbound,
         actions,
@@ -3008,6 +3145,7 @@ pub async fn initiate_and_open_session_with_lowlatency(
     // At Established: if the peer mirrored the ext (`is_lowlatency()`), switch the
     // link wire to the 4-byte u32 lowlatency prefix for all post-Established
     // (data / keepalive) frames. The handshake above already went out u16.
+    #[cfg(feature = "transport-lowlatency")]
     if opened.actions.is_lowlatency() {
         lowlatency_wire.store(true, std::sync::atomic::Ordering::Release);
     }
@@ -3030,16 +3168,10 @@ pub async fn initiate_and_open_session_with_qos(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
-    let actions = new_session_actions(outbound, params, clock);
-    // Fresh actions stage only qos, so the lowlatency-exclusivity guard cannot
-    // fire — the bool return is always true here (bare-discarded, as with the
-    // lowlatency twin).
-    actions.set_qos_offer(true);
-    initiator_open(
-        inbound,
-        actions,
-        writer_handle,
+    initiate_and_open_session_with_offer(
+        connected,
+        params,
+        SessionOffer::universal().with_mode(TransportMode::Qos),
         clock,
         max_iters,
         tick_interval_ms,
@@ -3059,13 +3191,10 @@ pub async fn initiate_and_open_session_with_compression(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
-    let actions = new_session_actions(outbound, params, clock);
-    actions.set_compression_offer(true);
-    initiator_open(
-        inbound,
-        actions,
-        writer_handle,
+    initiate_and_open_session_with_offer(
+        connected,
+        params,
+        SessionOffer::universal().with_compression(true),
         clock,
         max_iters,
         tick_interval_ms,
@@ -3085,13 +3214,10 @@ pub async fn initiate_and_open_session_with_shm(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
-    let actions = new_session_actions(outbound, params, clock);
-    actions.set_shm_offer(true);
-    initiator_open(
-        inbound,
-        actions,
-        writer_handle,
+    initiate_and_open_session_with_offer(
+        connected,
+        params,
+        SessionOffer::universal().with_shm(true),
         clock,
         max_iters,
         tick_interval_ms,
@@ -3333,11 +3459,55 @@ pub async fn accept_and_open_session_with_lowlatency(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    accept_and_open_session_with_offer(
+        accepted,
+        params,
+        SessionOffer::universal().with_mode(TransportMode::LowLatency),
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// R311y435 — the COMPOSING acceptor open: the accept-side mirror of
+/// [`initiate_and_open_session_with_offer`], taking the whole negotiated
+/// capability set instead of one capability per wrapper.
+///
+/// An acceptor OFFERS in order to reflect: each ext is echoed in the InitAck
+/// only when the peer's InitSyn carried it (the `&=` merge runs on the inbound
+/// InitSyn before the InitAck is emitted), so this stages what the acceptor is
+/// WILLING to negotiate and the peer decides. That is why the composed
+/// cross-impl leg needs both ends to be able to stage a SET: an acceptor that
+/// can only offer one capability at a time cannot reflect a peer that offered
+/// two, and the composed session degrades to whichever single capability the
+/// wrapper happened to name.
+pub async fn accept_and_open_session_with_offer(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    // R311y435 — same compile-time elision as the initiator twin: without
+    // `transport-lowlatency` the lean branch is unreachable (`apply_offer` rejects
+    // the mode) and must not be compiled, or the lean wiring stops being dead code
+    // in builds that cannot use it. See that function for the Layer F measurement.
+    #[cfg(feature = "transport-lowlatency")]
     let lowlatency_wire = Arc::new(AtomicBool::new(false));
-    let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_lowlatency(accepted, lowlatency_wire.clone());
+    #[cfg(feature = "transport-lowlatency")]
+    let (inbound, outbound, writer_handle) = if offer.mode == TransportMode::LowLatency {
+        wire_dialed_link_with_lowlatency(accepted, lowlatency_wire.clone())
+    } else {
+        wire_dialed_link(accepted)
+    };
+    #[cfg(not(feature = "transport-lowlatency"))]
+    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
-    actions.set_lowlatency_offer(true);
+    actions
+        .apply_offer(&offer)
+        .map_err(OpenError::UnsupportedCapability)?;
 
     engine.process_event(E::InboundStart);
     let opened = drive_open_loop(
@@ -3352,6 +3522,7 @@ pub async fn accept_and_open_session_with_lowlatency(
     .await?;
     // At Established: switch to the 4-byte u32 lowlatency wire iff the peer's
     // InitSyn offered the ext (`is_lowlatency()`); the handshake went out u16.
+    #[cfg(feature = "transport-lowlatency")]
     if opened.actions.is_lowlatency() {
         lowlatency_wire.store(true, std::sync::atomic::Ordering::Release);
     }
@@ -3372,18 +3543,10 @@ pub async fn accept_and_open_session_with_qos(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
-    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
-    // Fresh actions stage only qos, so the lowlatency-exclusivity guard cannot
-    // fire — the bool return is always true here (bare-discarded).
-    actions.set_qos_offer(true);
-
-    engine.process_event(E::InboundStart);
-    drive_open_loop(
-        inbound,
-        actions,
-        engine,
-        writer_handle,
+    accept_and_open_session_with_offer(
+        accepted,
+        params,
+        SessionOffer::universal().with_mode(TransportMode::Qos),
         clock,
         max_iters,
         tick_interval_ms,
@@ -3404,16 +3567,10 @@ pub async fn accept_and_open_session_with_compression(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
-    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
-    actions.set_compression_offer(true);
-
-    engine.process_event(E::InboundStart);
-    drive_open_loop(
-        inbound,
-        actions,
-        engine,
-        writer_handle,
+    accept_and_open_session_with_offer(
+        accepted,
+        params,
+        SessionOffer::universal().with_compression(true),
         clock,
         max_iters,
         tick_interval_ms,
@@ -3463,16 +3620,10 @@ pub async fn accept_and_open_session_with_shm(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
-    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
-    actions.set_shm_offer(true);
-
-    engine.process_event(E::InboundStart);
-    drive_open_loop(
-        inbound,
-        actions,
-        engine,
-        writer_handle,
+    accept_and_open_session_with_offer(
+        accepted,
+        params,
+        SessionOffer::universal().with_shm(true),
         clock,
         max_iters,
         tick_interval_ms,

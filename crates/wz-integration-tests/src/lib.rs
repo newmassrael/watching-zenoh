@@ -1408,6 +1408,43 @@ pub mod common {
         (guard, port)
     }
 
+    /// R311y435 — a zenohd with BOTH the lean transport and per-batch lz4
+    /// compression enabled: the foreign oracle for the COMPOSED
+    /// lowlatency x compression cross-impl leg.
+    ///
+    /// The pair is configurable upstream, which is what makes this leg possible
+    /// rather than theoretical. zenoh sets `is_lowlatency` on the transport
+    /// config and `is_compression` on the link `BatchConfig` independently
+    /// (`zenoh-transport-1.5.0` `unicast/establishment/open.rs:689` and `:701`),
+    /// and the exclusivity check at `unicast/manager.rs:264` names QOS, not
+    /// compression — hence the third override here, which is the same one
+    /// [`spawn_zenohd_lowlatency`] passes and for the same reason: qos is ON by
+    /// default, so a lowlatency router that does not disable it fails to build.
+    ///
+    /// What this router will NOT do is decompress a lean link. Its lean rx path
+    /// reads only `config.batch.mtu` (`unicast/lowlatency/link.rs:161`), so a
+    /// peer that lz4-wraps a lean wire is unreadable to it — which is precisely
+    /// the defect R311y434 fixed and the reason this oracle exists. It accepts
+    /// the 0x6 ext on the handshake and then ignores it on the data path.
+    pub fn spawn_zenohd_lowlatency_compression_on_ephemeral_tcp(
+        mut mk_probe_stderr: impl FnMut() -> File,
+    ) -> (ChildGuard, u16) {
+        let (guard, port) = spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs(
+            &zenohd_binary(),
+            "zenohd (reference router, lowlatency + compression)",
+            None,
+            &[],
+            None,
+            &[
+                "transport/unicast/lowlatency:true",
+                "transport/unicast/qos/enabled:false",
+                "transport/unicast/compression/enabled:true",
+            ],
+        );
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
+        (guard, port)
+    }
+
     /// R311y374 — spawn a zenohd that DIALS a wz `ws/...` acceptor
     /// (`-e ws/<wz_ws_endpoint>`) while also listening on an OS-assigned tcp port (RETURNED beside the guard) for a
     /// pico client. This is the FOREIGN WebSocket DIALER that verifies wz's new ws

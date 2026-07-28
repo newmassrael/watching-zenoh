@@ -630,19 +630,17 @@ fn main() -> ExitCode {
     // pairing it with `--listen` is a usage error, rejected below.
     let reconnect = rest.iter().any(|a| a == "--reconnect");
     // R311y372 / R311y433 — the two transport-MODE presence flags an Initiator
-    // may offer on its InitSyn. Hoisted out of the role construction because
-    // their COMBINATION is a usage error the match below rejects.
-    //
-    // R311y434 CORRECTION: the original reason for that rejection is GONE. It
-    // read "the pair has no coherent cross-impl wire meaning", which was true
-    // only of a wz defect: wz wrapped compression outside the lean encode while
-    // zenoh's lean transport ignores the negotiated wrap entirely. wz now
-    // suppresses it too (`SessionLinkActions::compresses_batches`), so the pair is
-    // as legal here as it is upstream. What still forbids it is narrower and
-    // purely local: staging BOTH offers needs an `initiate_and_open_session_with_*`
-    // entrypoint that carries both, and the session_open API has one wrapper per
-    // MODE. Rejecting loudly beats silently honouring one flag; widening that API
-    // to an offer SET is a design round, not a side effect of this fix.
+    // may offer on its InitSyn. R311y435 REMOVED the rejection of their
+    // combination. The chain of reasons is worth keeping straight: y433 rejected
+    // the pair as having "no coherent cross-impl wire meaning", which y434 showed
+    // was true only of a wz defect (wz wrapped compression outside the lean
+    // encode; zenoh's lean transport ignores the negotiated wrap). y434 fixed the
+    // defect and kept the rejection for a NARROWER, purely local reason —
+    // session_open had one entrypoint per MODE and none staged both offers — and
+    // named widening it as the next slice. That slice is y435:
+    // `initiate_and_open_session_with_offer` takes the SET, so both flags now
+    // compose here exactly as they do upstream, and `runner::initiator_offer`
+    // builds the offer.
     let lowlatency = rest.iter().any(|a| a == "--lowlatency");
     let compression = rest.iter().any(|a| a == "--compression");
     let role: Role = match (listen_opt, connect_opt) {
@@ -671,18 +669,6 @@ fn main() -> ExitCode {
             quic_cert: parse_pair(rest, "--quic-cert"),
             quic_key: parse_pair(rest, "--quic-key"),
         },
-        (None, Some(_)) if lowlatency && compression => {
-            eprintln!(
-                "wz-ap-demo: --lowlatency and --compression cannot be combined by \
-                 this demo (session_open has one initiate_and_open_session_with_* \
-                 entrypoint per MODE, and none stages both offers). The COMBINATION \
-                 itself is legal: on a lean link the negotiated wrap is inert, in wz \
-                 as in zenoh."
-            );
-            eprintln!();
-            print_usage();
-            return ExitCode::from(2);
-        }
         (None, Some(addr)) => Role::Initiator {
             connect: addr,
             reconnect,

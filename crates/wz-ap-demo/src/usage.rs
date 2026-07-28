@@ -41,8 +41,9 @@ pub(crate) fn print_usage() {
     eprintln!("    --connect <addr>         initiator mode (HOST:PORT or tcp/|ws/HOST:PORT)");
     eprintln!("    --lowlatency             offer the lowlatency transport on --connect");
     eprintln!("    --compression            offer per-batch lz4 compression on --connect");
-    eprintln!("                             (Z_EXT_COMPRESSION 0x6; not combinable");
-    eprintln!("                             with --lowlatency in this demo)");
+    eprintln!("                             (Z_EXT_COMPRESSION 0x6; combinable with");
+    eprintln!("                             --lowlatency, where the negotiated wrap");
+    eprintln!("                             is inert on the lean wire, as upstream)");
     eprintln!("    --scout                  initiator mode with a DISCOVERED locator: emit a");
     eprintln!("                             multicast Scout on 224.0.0.224:7446 and dial the");
     eprintln!("                             locator the first peer Hello advertises. Mutually");

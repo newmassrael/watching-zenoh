@@ -360,6 +360,17 @@ fi
 # refactor that consolidates paths reduces what any one codec can still remove
 # -- and they are recorded, not waved through.
 #
+# R311y437 IS THE FIRST DELIBERATE RE-PIN, and it is what the paragraph above
+# describes rather than an exception to it. Consolidating the eight
+# per-capability `*_with_{lowlatency,qos,compression,shm}` open wrappers into one
+# `*_with_offer` entrypoint dropped codec-close's elision 1944B -> 600B. That is
+# the legitimate cause, not a re-pull: 600B is still real elision, an order of
+# magnitude above the near-zero band, and it was BISECTED -- routing the demo
+# back to the bare entrypoint restores 1944B exactly, so the delta is
+# attributable to the consolidation and to nothing else. The gate caught it
+# (`FLOOR FAIL codec-close (600B < pinned 1500B)`) before the refactor could
+# land, which is the whole design.
+#
 # Opt out via WZ_FOOTPRINT_NO_THRESHOLD=1 (one-off measurements only).
 declare -A CODEC_DELTA_FLOOR=(
     [codec-frame]=0            # lane SKIPs on this binary; floor unused until it is measurable
@@ -367,7 +378,7 @@ declare -A CODEC_DELTA_FLOOR=(
     [codec-keep-alive]=128     # measured 208: BODYLESS message, trivial codec
     [codec-init-body]=12000    # measured 14608
     [codec-open-body]=8000     # measured 10192
-    [codec-close]=1500         # measured 1944
+    [codec-close]=500          # measured 600 (R311y437, was 1944 -> floor 1500)
     [codec-push]=8000          # measured 10072 (R311y435 revived this lane from SKIP)
     [codec-declare]=0          # lane SKIPs on this binary; floor unused until it is measurable
     [codec-request]=55000      # measured 66456

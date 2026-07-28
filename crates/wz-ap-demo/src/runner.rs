@@ -79,13 +79,10 @@ use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionInitParams, SessionLinkActions,
     SessionTimeouts,
 };
-#[cfg(feature = "session-extcompression")]
-use wz::runtime_tokio::session_open::initiate_and_open_session_with_compression;
-#[cfg(feature = "transport-lowlatency")]
-use wz::runtime_tokio::session_open::initiate_and_open_session_with_lowlatency;
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session,
-    AcceptConfig, DialConfig, DialedLink, OpenError, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session_with_offer,
+    AcceptConfig, DialConfig, DialedLink, OpenError, OpenedSession, SessionOffer,
+    DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 
@@ -1035,6 +1032,55 @@ async fn race_against_shutdown<O>(
     }
 }
 
+/// R311y435 — build the Initiator's [`SessionOffer`] from the presence flags.
+///
+/// This function is where the demo's "a flag whose atom was not built is INERT"
+/// contract lives, and it is the ONLY place it lives. `args.rs` keeps the CLI
+/// surface feature-uniform on purpose — the same flags parse in every build — so
+/// a capability this binary cannot provide must be dropped from the offer HERE,
+/// before the library sees it. The library layer is deliberately strict about
+/// the same input (`SessionLinkActions::apply_offer` returns
+/// `UnsupportedCapability` rather than downgrading), because a library caller who
+/// asked for a wire form and did not get it has no CLI banner to warn them.
+///
+/// R311y435 also DELETED the `--lowlatency --compression` rejection this
+/// replaced. R311y434 had already established the pair is legal upstream — on a
+/// lean link the negotiated wrap is inert, in wz as in zenoh — and left the
+/// rejection standing only because `session_open` had one entrypoint per MODE
+/// and none staged both offers. `initiate_and_open_session_with_offer` takes the
+/// SET, so that reason is gone and the guard went with it.
+fn initiator_offer(
+    #[allow(unused)] lowlatency: bool,
+    #[allow(unused)] compression: bool,
+) -> SessionOffer {
+    #[allow(unused_mut)]
+    let mut offer = SessionOffer::universal();
+    #[cfg(feature = "transport-lowlatency")]
+    if lowlatency {
+        offer = offer.with_mode(wz::runtime_tokio::session_open::TransportMode::LowLatency);
+    }
+    #[cfg(feature = "session-extcompression")]
+    if compression {
+        offer = offer.with_compression(true);
+    }
+    offer
+}
+
+/// Open a one-shot Initiator session with `offer` staged.
+///
+/// One call for every combination: the per-mode match this replaced could not
+/// express two offers at once, which is exactly why the demo used to reject
+/// `--lowlatency --compression`.
+async fn open_initiator_with_offer(
+    offer: SessionOffer,
+    dialed: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+) -> Result<OpenedSession, OpenError> {
+    initiate_and_open_session_with_offer(dialed, params, offer, clock, None, DEFAULT_OPEN_TICK_MS)
+        .await
+}
+
 /// Demo orchestration entry point. Invoked by `fn main` after argv
 /// parsing has been validated and the spec bundles
 /// ([`DeclareEmitSpec`], [`RemoteLogSpec`], [`ReplyConsumerSpec`],
@@ -1060,74 +1106,12 @@ async fn race_against_shutdown<O>(
 /// `wz_liveliness_subscriber_round_trip_against_wz_acceptor` (peer
 /// terminates on Close before processing the trailing UndeclToken);
 /// the typestate signature makes that reorder a type error.
-/// R311y433 — the transport MODE a one-shot Initiator OFFERS on its InitSyn.
 ///
-/// Each variant names an establishment extension the peer must mirror for the
-/// mode to negotiate (`&=`), and each has its own
-/// `initiate_and_open_session_with_*` entrypoint that stages the offer on the
-/// session actions BEFORE the handshake drives. `main.rs` rejects `--lowlatency
-/// --compression`, so the demo offers at most one — hence an enum rather than a
-/// set: "two modes at once" stays unrepresentable here.
-enum InitiatorOffer {
-    /// No mode ext staged — the bare open.
-    None,
-    /// R311y372 `--lowlatency`: Z_EXT_LOWLATENCY (0x5), the lean data path.
-    Lowlatency,
-    /// R311y433 `--compression`: Z_EXT_COMPRESSION (0x6), the per-batch lz4 wrap.
-    Compression,
-}
-
-/// Open a one-shot Initiator session with `offer` staged.
-///
-/// This is the ONE seam that owns the "a flag whose atom was not built is
-/// INERT" contract the `args.rs` field docs state: a mode whose feature is off
-/// falls back to the bare [`initiate_and_open_session`], so the flag parses and
-/// banner-logs but changes no wire. Keeping the fallback here (rather than at the
-/// call site) is what keeps the caller cfg-free — the alternative multiplies cfg
-/// combinations by the number of modes.
-async fn open_initiator_with_offer(
-    offer: InitiatorOffer,
-    dialed: DialedLink,
-    params: SessionInitParams,
-    clock: TokioTime,
-) -> Result<OpenedSession, OpenError> {
-    match offer {
-        InitiatorOffer::None => {
-            initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await
-        }
-        #[cfg(feature = "transport-lowlatency")]
-        InitiatorOffer::Lowlatency => {
-            initiate_and_open_session_with_lowlatency(
-                dialed,
-                params,
-                clock,
-                None,
-                DEFAULT_OPEN_TICK_MS,
-            )
-            .await
-        }
-        #[cfg(not(feature = "transport-lowlatency"))]
-        InitiatorOffer::Lowlatency => {
-            initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await
-        }
-        #[cfg(feature = "session-extcompression")]
-        InitiatorOffer::Compression => {
-            initiate_and_open_session_with_compression(
-                dialed,
-                params,
-                clock,
-                None,
-                DEFAULT_OPEN_TICK_MS,
-            )
-            .await
-        }
-        #[cfg(not(feature = "session-extcompression"))]
-        InitiatorOffer::Compression => {
-            initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await
-        }
-    }
-}
-
+/// R311y435 — this doc block is RE-BOUND, not new. R311y433 inserted
+/// `enum InitiatorOffer` between it and `run_demo`, silently making it the
+/// enum's doc; removing that enum here would have deleted the teardown
+/// invariant along with it. The insertion-strands-attributes hazard is only
+/// visible in the rendered docs, never at the diff.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_demo(
     role: Role,
@@ -1248,12 +1232,11 @@ pub(crate) async fn run_demo(
                     // the atom) lives in `open_initiator_with_offer`.
                     let offer = match &role {
                         Role::Initiator {
-                            lowlatency: true, ..
-                        } => InitiatorOffer::Lowlatency,
-                        Role::Initiator {
-                            compression: true, ..
-                        } => InitiatorOffer::Compression,
-                        _ => InitiatorOffer::None,
+                            lowlatency,
+                            compression,
+                            ..
+                        } => initiator_offer(*lowlatency, *compression),
+                        _ => SessionOffer::universal(),
                     };
                     open_initiator_with_offer(offer, dialed, params, session_clock).await
                 }
@@ -1313,6 +1296,21 @@ pub(crate) async fn run_demo(
                 log::info!(
                     "wz-ap-demo: compression negotiated = {}",
                     opened.actions.is_compression()
+                );
+                // R311y435 — WITNESS the SECOND half of the R311y434 split, which
+                // the line above cannot express. `is_compression()` reports what
+                // the handshake NEGOTIATED; `compresses_batches()` reports whether
+                // the lz4 wrap is APPLIED, and on a lean link those disagree by
+                // design (upstream's lean tx never touches `WBatch`, so the
+                // negotiated ext is inert there). Without this line a composed
+                // `--lowlatency --compression` session is indistinguishable, from
+                // the outside, from the pre-y434 build that wrapped a wire no
+                // zenoh peer can read: both log `negotiated = true`. This is the
+                // line the composed Layer Z leg reads, and its `false` against the
+                // twin's `true` is the whole cross-impl claim.
+                log::info!(
+                    "wz-ap-demo: batch compression active = {}",
+                    opened.actions.compresses_batches()
                 );
             }
             log::info!("wz-ap-demo: session Established; entering steady state");

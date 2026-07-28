@@ -2049,9 +2049,20 @@ layer_c1af_cargo_test_shm() {
 #      is the bare lean Push and `compresses_batches()` is false while
 #      `is_compression()` stays true; WITHOUT it the BatchHeader is present, which
 #      is what catches an over-broad suppression;
-#   4. clippy-gates the combined three-feature cfg --all-targets (the only build
-#      where all three data paths + the shared establish_capability_pair helper
-#      compile together).
+#   4. runs transport_mode_pairs_e2e -- R311y435's two option-atom PAIRS for the
+#      mode pairs R311y434's carry named as unread and untested: qos x
+#      compression (the wrap is OUTSIDE the ext_qos-bearing Frame, as upstream,
+#      where every per-priority queue shares one BatchConfig --
+#      common/pipeline.rs:719) and batching x lowlatency (an ACTIVE batching
+#      window accumulates NOTHING on a lean session, because upstream's lean
+#      transport has no pipeline at all -- lowlatency/tx.rs:30-51 -- and wz
+#      reproduces that by ORDERING the lean early-return ahead of the batching
+#      arm). 4 tests, hence the pin; all four REDs were measured separately,
+#      including provoking each byte assertion on its own because the invariant
+#      assertion panics first (the R311y434 discipline);
+#   5. clippy-gates the combined cfg --all-targets (the only build where all the
+#      composed data paths + the shared establish_capability_pair helper compile
+#      together).
 #
 # R311y414 — all three test steps were BARE and each is a SINGLE-test target
 # (1/1/1), the shape where a rename or a cfg-out is invisible; anchored count
@@ -2066,8 +2077,13 @@ layer_c1ag_cargo_test_transport_compose() {
         || return 1
     _runci_guarded_test C1ag 2 cargo test -p wz-runtime-tokio --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --test transport_compose_e2e --quiet \
         || return 1
+    _runci_guarded_test C1ag 4 cargo test -p wz-runtime-tokio --features transport-qos,transport-lowlatency,session-extcompression,transport-batching,transport-unicast,transport-link-tcp --test transport_mode_pairs_e2e --quiet \
+        || return 1
     (cd crates \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --quiet -- -D warnings) \
+        || return 1
+    (cd crates \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos,transport-lowlatency,session-extcompression,transport-batching,transport-unicast,transport-link-tcp --quiet -- -D warnings)
 }
 
 # ─── Layer C1ah — time-hlc: §5.18 HLC timestamp source + storage seam ─
@@ -6491,6 +6507,23 @@ layer_z_zenohd_interop() {
     # compiled into the wz-ap-demo build above, not into the test.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_compression_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
+    # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
+    # because the demo cannot stage both offers"). The offer-SET widening of
+    # session_open removes that blocker, so wz now dials `--lowlatency
+    # --compression` against a zenohd configured for BOTH (a configuration
+    # upstream permits: the exclusivity at unicast/manager.rs:264 names qos, not
+    # compression). TWO legs: the proof asserts both exts negotiate, that the lz4
+    # wrap is nonetheless reported INACTIVE (`batch compression active = false`,
+    # the R311y434 negotiated-vs-applied split made externally observable), and
+    # that the lean Put routes through to a pico z_sub; the option-atom TWIN drops
+    # ONLY the --lowlatency offer against the SAME router and reads `active =
+    # true`, which is what attributes the suppression to that offer. This is the
+    # first FOREIGN witness for the R311y434 fix — until now it had a wz<->wz byte
+    # assertion only. No `--features` here: the interop target drives EXTERNAL
+    # binaries, so both atoms are compiled into the wz-ap-demo build above.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_compose_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):
     # a real zenohd DIALS the wz `--listen ws/...` acceptor over ws (the RFC6455
     # server upgrade wired in bind_locator/accept_locator), and a pico z_put routes

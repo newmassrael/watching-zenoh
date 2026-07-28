@@ -2199,6 +2199,100 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.is_qos, |s| *s)
     }
 
+    /// R311y435 — stage a whole [`SessionOffer`] on FRESH actions: the single
+    /// composition seam every deploy-facing open routes through.
+    ///
+    /// This exists because the granular `set_*_offer` setters compose only by
+    /// convention. `set_qos_offer` and [`Self::set_lowlatency_offer`] each
+    /// refuse when the other is already staged, so the both-on input resolves to
+    /// "first-staged wins" — ORDER-DEPENDENT, where zenoh's check
+    /// (`io/zenoh-transport/src/unicast/manager.rs:264-265`,
+    /// `'qos' and 'lowlatency' options are incompatible`) is symmetric and
+    /// total. Taking the exclusive choice as ONE
+    /// [`TransportMode`](crate::transport_mode::TransportMode) removes the
+    /// order: there is no input to this function that means "both", so the
+    /// refusal branch is unreachable from here and the divergence cannot be
+    /// observed by any caller that uses this seam.
+    ///
+    /// The orthogonal capabilities are staged unconditionally alongside the
+    /// mode, because upstream composes them with every mode — R311y435 read all
+    /// four pairs against zenoh's composed data path and only qos x lowlatency
+    /// diverged. Forbidding `LowLatency + compression` or `LowLatency + shm`
+    /// here would be a wz-only restriction on wires zenoh accepts.
+    ///
+    /// Errors only when this BUILD lacks a requested capability's cargo feature
+    /// — never because of the offer's shape. Silently dropping the capability
+    /// instead would ship a wire form the caller did not configure, and the
+    /// same reasoning covers `compression` / `shm`, not just the mode.
+    ///
+    /// Must be called BEFORE the handshake drives (the `set_lowlatency_offer`
+    /// config-at-bringup discipline): the peer's offers are ANDed in by the
+    /// `negotiate_*_against_peer` merges on the inbound Init frames.
+    pub fn apply_offer(
+        &self,
+        offer: &crate::transport_mode::SessionOffer,
+    ) -> Result<(), crate::transport_mode::UnsupportedCapability> {
+        use crate::transport_mode::TransportMode;
+
+        match offer.mode {
+            TransportMode::Universal => {}
+            TransportMode::Qos => {
+                #[cfg(feature = "transport-qos")]
+                // Fresh actions carry no lowlatency offer, and `SessionOffer`
+                // cannot express one alongside Qos, so the exclusivity guard is
+                // unreachable here. Asserted rather than discarded: if it ever
+                // fires, a caller reached this seam with pre-staged actions and
+                // the "unrepresentable" claim above is false for that path.
+                assert!(
+                    self.set_qos_offer(true),
+                    "apply_offer staged Qos on actions that already carry a \
+                     lowlatency offer: SessionOffer cannot express both, so \
+                     these actions were mutated before the offer was applied"
+                );
+                #[cfg(not(feature = "transport-qos"))]
+                return Err(crate::transport_mode::UnsupportedCapability {
+                    capability: "TransportMode::Qos",
+                    feature: "transport-qos",
+                });
+            }
+            TransportMode::LowLatency => {
+                #[cfg(feature = "transport-lowlatency")]
+                assert!(
+                    self.set_lowlatency_offer(true),
+                    "apply_offer staged LowLatency on actions that already carry \
+                     a qos offer: SessionOffer cannot express both, so these \
+                     actions were mutated before the offer was applied"
+                );
+                #[cfg(not(feature = "transport-lowlatency"))]
+                return Err(crate::transport_mode::UnsupportedCapability {
+                    capability: "TransportMode::LowLatency",
+                    feature: "transport-lowlatency",
+                });
+            }
+        }
+
+        if offer.compression {
+            #[cfg(feature = "session-extcompression")]
+            self.set_compression_offer(true);
+            #[cfg(not(feature = "session-extcompression"))]
+            return Err(crate::transport_mode::UnsupportedCapability {
+                capability: "compression",
+                feature: "session-extcompression",
+            });
+        }
+        if offer.shm {
+            #[cfg(feature = "session-extshm")]
+            self.set_shm_offer(true);
+            #[cfg(not(feature = "session-extshm"))]
+            return Err(crate::transport_mode::UnsupportedCapability {
+                capability: "shm",
+                feature: "session-extshm",
+            });
+        }
+
+        Ok(())
+    }
+
     /// §5.21 routing-namespace — install the per-participant namespace on this
     /// session bundle at AP bring-up, BEFORE the drive loop spins or any send
     /// fires (the `set_lowlatency_offer` config-at-bringup discipline). Seeds

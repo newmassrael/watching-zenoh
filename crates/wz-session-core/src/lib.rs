@@ -253,6 +253,15 @@ pub mod sample_kind;
 /// Session/actions split.
 pub mod qos;
 
+/// R311y435 — the handshake-negotiated capability SET (`SessionOffer`) plus the
+/// EXCLUSIVE `TransportMode` choice. zenoh keeps qos and lowlatency as two
+/// independent bools and bails at manager build when both are set
+/// (`unicast/manager.rs:264`); wz encodes the same rule as one three-state field
+/// so the conflict is unrepresentable rather than merely rejected. Pure no_std +
+/// no_alloc value types; unconditional (the per-mode cargo features gate what
+/// `SessionLinkActions::apply_offer` can STAGE, not what the caller can NAME).
+pub mod transport_mode;
+
 /// R311ed — session `CloseReason` discriminator (byte-valued enum
 /// mirroring the session FSM's four close-reason mutators). Pure no_std
 /// + no_alloc; unconditional. Second DP3 leaf lifted from
