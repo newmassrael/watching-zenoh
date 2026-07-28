@@ -40,8 +40,20 @@
 //! anything: upstream pairs it with a local `key_expr.intersects(reply.key_expr())`
 //! in every one of its GET callbacks. A caller that emits the token owes that
 //! filter — see `wz-runtime-tokio::advanced_subscriber::issue_recovery_get`.
-
-use alloc::string::String;
+//!
+//! ## `alloc`
+//!
+//! The READ half — the consts, [`param_value`], [`has_param`] — is pure `&str`
+//! and compiles on a no-alloc MCU build, which is where it is actually needed:
+//! an `@adv` cache answering a selector PARSES, it does not build. Only the two
+//! BUILDERS return `String`, and they are `alloc`-gated accordingly.
+//!
+//! The first version declared `use alloc::string::String` at module top, which
+//! every `wz-session-core` build reached. `extern crate alloc` in this crate is
+//! `#[cfg(feature = "alloc")]` (lib.rs:19-20), so the no-alloc lanes went red
+//! across three hosted jobs while every local gate was green — those lanes run
+//! ONLY on hosted CI. Adding a module to this crate means checking
+//! `--no-default-features` (and an MCU target) by hand.
 
 /// The parameter-list separator (zenoh `LIST_SEPARATOR`; pico
 /// `_Z_QUERY_PARAMS_LIST_SEPARATOR`).
@@ -109,7 +121,9 @@ fn split_kv(kv: &str) -> (&str, &str) {
 }
 
 /// Join `parts` (each already `key=value`) into a parameter list.
-pub fn join_params(parts: &[String]) -> String {
+#[cfg(feature = "alloc")]
+pub fn join_params(parts: &[alloc::string::String]) -> alloc::string::String {
+    use alloc::string::String;
     let mut out = String::new();
     for part in parts {
         if !out.is_empty() {
@@ -123,7 +137,8 @@ pub fn join_params(parts: &[String]) -> String {
 /// [`join_params`] plus the bare [`ANYKE_PARAM`] flag: the selector shape every
 /// GET into the `@adv` namespace needs, since all of them are answered under a
 /// cached sample's own keyexpr. An empty `parts` yields the bare flag.
-pub fn anyke_params(parts: &[String]) -> String {
+#[cfg(feature = "alloc")]
+pub fn anyke_params(parts: &[alloc::string::String]) -> alloc::string::String {
     let mut out = join_params(parts);
     if !out.is_empty() {
         out.push(PARAM_LIST_SEPARATOR);
@@ -135,6 +150,7 @@ pub fn anyke_params(parts: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "alloc")]
     use alloc::string::ToString;
 
     /// The multi-parameter case the `&` dialect got wrong: under `&` the FIRST
@@ -194,6 +210,7 @@ mod tests {
         assert_eq!(param_value("_max=1;_max=2", "_max"), Some("1"));
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn builds_the_upstream_shapes() {
         assert_eq!(join_params(&[]), "");
@@ -207,6 +224,7 @@ mod tests {
 
     /// Round-trip: what a querier BUILDS is what a responder READS. The two sides
     /// drifted apart precisely because nothing tied them together.
+    #[cfg(feature = "alloc")]
     #[test]
     fn built_params_parse_back() {
         let built = anyke_params(&["_max=5".to_string(), "_time=[now(-3s)..]".to_string()]);
