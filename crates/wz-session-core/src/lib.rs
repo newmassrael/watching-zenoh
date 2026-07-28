@@ -223,6 +223,14 @@ pub mod reply_sink;
 /// generic-over-sink rewrites land in the apply sub-rounds.
 pub mod decl_sink;
 
+/// R311y442 — the zenoh SELECTOR-PARAMETER dialect (`;` list separator, `=`
+/// field separator, the bare `_anyke` reply-keyexpr flag) as ONE definition for
+/// every wz crate that reads or writes a selector. It lives here rather than
+/// beside a consumer because a per-consumer copy is what let the `@adv` cache and
+/// the `@adv` subscriber drift to `&` together while agreeing with each other,
+/// and what left the same bug live in the REST bridge one crate away.
+pub mod selector_params;
+
 /// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
 /// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
 /// Available unconditionally because the type carries no allocations.

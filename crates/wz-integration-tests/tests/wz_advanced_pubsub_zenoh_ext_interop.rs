@@ -56,11 +56,20 @@
 //!    history GET recovers exactly those 5, byte-exact, ahead of any live
 //!    sample — and the oracle logs ZERO reply refusals.
 //! 2. **SEPARATOR witness.** The same fixture with `--history-max 2
-//!    --history-max-age N`, i.e. a TWO-parameter selector, answers exactly 2 —
-//!    the newest 2. This is what shows the parameters after the first are
-//!    genuinely parsed as list elements by the foreign cache; leg 1 alone cannot
-//!    say that, because a one-parameter selector reads the same under either
-//!    separator.
+//!    --history-max-age N`, i.e. a TWO-parameter selector, is capped to 2 by the
+//!    foreign cache. What this adds over leg 1 is a POSITIVE CONFORMANCE
+//!    observation — the parameters after the first are genuinely parsed as list
+//!    elements — which a one-parameter selector cannot show, since it reads the
+//!    same under either separator.
+//!
+//!    It is NOT a second independent RED, and the first draft of this file said it
+//!    was. Measured (REVIEWER 2): reverting the separator alone, the `_anyke`
+//!    alone, or both, produces the SAME failure shape in this leg as in leg 1 —
+//!    an empty recovery. The over-return shape the cap is supposed to discriminate
+//!    against is unreachable on the pre-fix wire, because `&` swallows `_anyke`
+//!    before the cap ever matters. The cap assertion still guards a real
+//!    regression (a future change that drops the second parameter while keeping
+//!    `_anyke`), just not one the pre-fix tree could exhibit.
 //! 3. **DISCRIMINATOR.** A GET on the SAME cache KE carrying no `_anyke` at all
 //!    gets zero replies while the oracle logs refusals. This is what makes leg
 //!    1's zero-refusal assertion a discriminator instead of a tautology: same
@@ -73,6 +82,13 @@
 //!    all of it. This is the only leg that exercises wz's cache as a RESPONDER
 //!    to a real zenoh querier, so it is what binds `ext-pubsub-advanced-cache`
 //!    and `-advanced-publisher` rather than the subscriber-side atoms.
+//!
+//!    It is SEPARATOR-BLIND, and that bound is worth stating. `z_advanced_sub`
+//!    hardcodes `HistoryConfig::default()`, so its selector carries no
+//!    `key=value` parameter at all — only the bare `_anyke` — and wz's cache-side
+//!    read returns `None` under either separator. Confirmed by measurement: leg 4
+//!    passes on the pre-fix wire too. The cache half of the separator fix has no
+//!    foreign witness and cannot get one from this oracle.
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z): zenohd, the zenoh-ext examples and the
 //! pico CLI are all external binaries. wz-ap-demo must be built `--features
@@ -218,13 +234,60 @@ fn delivered_indices(captured: &str) -> Vec<usize> {
 
 /// How many samples the oracle has published so far, read off its own log.
 ///
-/// This is what makes the legs timing-robust. `z_advanced_pub` publishes forever
-/// at 1 Hz, so "the pre-join cached set" is not a fixed range — but any sample
-/// whose index is below the count taken JUST BEFORE wz starts was on the wire
-/// before wz's process existed, and therefore cannot have been delivered live.
-/// The boundary is read, not assumed.
+/// R311y442 review (REVIEWER 2, finding 1) — the FIRST version of these legs read
+/// this once, before wz started, and then asserted the recovered set was exactly
+/// `[pb-N .. pb)`. That is a claim about the cache at GET time made from a
+/// PRE-JOIN reading, and the oracle keeps publishing at 1 Hz throughout: one more
+/// sample landing before the GET slides the `_max=N` window by one and the
+/// assertion fails with a message that reads like a dialect regression. The
+/// budget was measured at ~513 ms on an idle 32-core box and is a sawtooth in the
+/// oracle's own session-open delay, so on a slower runner it can approach zero —
+/// a PERSISTENT red on that machine, which is worse than a flake.
+///
+/// The legs now BRACKET the run: `pb` before wz starts, `pa` after it ends, and
+/// the assertion is the invariant that holds for every cache state in between
+/// (see [`assert_capped_recovery`]).
 fn published_so_far(captured: &str) -> usize {
     captured.lines().filter(|l| l.contains("Put Data")).count()
+}
+
+/// Assert that `delivered` is a contiguous ascending run whose head is the newest
+/// `cap` samples the foreign cache held when it answered — without needing to know
+/// WHICH state that was.
+///
+/// The cache replies its newest `cap` samples, so `delivered[0] == k - cap + 1`
+/// where `k` is the newest cached index at GET time. `k` is not observable, but it
+/// is BOUNDED: it cannot be older than the last sample published before wz existed
+/// (`pb - 1`) nor newer than the last one published by the time wz stopped
+/// (`pa - 1`). So `pb - cap <= delivered[0] <= pa - cap`, and that bracket is
+/// exactly as discriminating as the identity form was:
+///
+///   - cap DROPPED (the separator failure's over-return shape) → the cache replies
+///     its whole ring, `delivered[0]` collapses toward 0, below `pb - cap`.
+///   - NOTHING recovered (the `_anyke` failure's shape) → `delivered[0]` is the
+///     live cursor, at or above `pb`, which exceeds `pa - cap` for any real run.
+fn assert_capped_recovery(delivered: &[usize], cap: usize, pb: usize, pa: usize, ctx: &str) {
+    assert!(!delivered.is_empty(), "no samples delivered at all\n{ctx}");
+    for w in delivered.windows(2) {
+        assert_eq!(
+            w[1],
+            w[0] + 1,
+            "delivered indices are not contiguous ({:?}) — the subscriber dropped or \
+             reordered a sample\n{ctx}",
+            delivered
+        );
+    }
+    let first = delivered[0];
+    let lo = pb.saturating_sub(cap);
+    let hi = pa.saturating_sub(cap);
+    assert!(
+        first >= lo && first <= hi,
+        "recovery window starts at {first}, outside the bracket [{lo}, {hi}] implied by \
+         a `_max={cap}` reply against a cache that held between {pb} and {pa} samples. \
+         Below the bracket means the cap never reached the cache as its own list \
+         element; above it means nothing was recovered and only live samples arrived.\
+         \ndelivered={delivered:?}\n{ctx}"
+    );
 }
 
 /// Count the oracle's own reply-refusal lines.
@@ -237,8 +300,12 @@ fn refusal_count(captured: &str) -> usize {
 
 /// Leg 1 — the PROOF. wz's startup history GET drains a real zenoh-ext
 /// `AdvancedCache` of samples published before wz existed.
+// The direction names who PRODUCES the artifact under test, per the convention at
+// wz_zenohd_storage_replication.rs:582-588 and wz_fragment_rx_zenohd_interop.rs:371.
+// wz builds the selector, so history is wz->; the ORDERING atom consumes the
+// foreign publisher's SourceInfo, so it is zenoh-ext->.
 // wz-proves: ext-pubsub-advanced-history wz->zenoh-ext
-// wz-proves: ext-pubsub-advanced-subscriber wz->zenoh-ext
+// wz-proves: ext-pubsub-advanced-subscriber zenoh-ext->wz
 #[test]
 #[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
 fn wz_advanced_history_recovers_a_real_zenoh_ext_cache() {
@@ -246,8 +313,9 @@ fn wz_advanced_history_recovers_a_real_zenoh_ext_cache() {
     let (_oracle, mut oracle_out) = spawn_zenoh_advanced_pub(port, "demo/example/adv", "ORACLEVAL");
     std::thread::sleep(BURST_SETTLE);
 
-    // The boundary between "cached before wz existed" and "delivered live",
-    // measured rather than assumed.
+    // Bracket the run: `pb` is what the oracle had published before wz existed,
+    // `pa` what it had published by the time wz stopped. Neither is the cache
+    // state at GET time; together they BOUND it.
     let published_before = published_so_far(&read_captured(&mut oracle_out));
     assert!(
         published_before >= CACHED_SAMPLES,
@@ -262,33 +330,32 @@ fn wz_advanced_history_recovers_a_real_zenoh_ext_cache() {
         None,
         Duration::from_secs(4),
     );
+    let published_after = published_so_far(&read_captured(&mut oracle_out));
     let indices = delivered_indices(&captured);
-    let recovered: Vec<usize> = indices
-        .iter()
-        .copied()
-        .take_while(|i| *i < published_before)
-        .collect();
-
-    // `_max=CACHED_SAMPLES` selects the NEWEST that many, so the recovered run
-    // ends immediately below the live boundary.
-    let expected: Vec<usize> = (published_before - CACHED_SAMPLES..published_before).collect();
-    assert_eq!(
-        recovered, expected,
-        "wz recovered {recovered:?} rather than {expected:?} from the foreign cache \
-         (published_before={published_before}, delivered={indices:?})\n\
-         --- captured ---\n{captured}"
+    let ctx = format!("pb={published_before} pa={published_after}\n--- captured ---\n{captured}");
+    assert_capped_recovery(
+        &indices,
+        CACHED_SAMPLES,
+        published_before,
+        published_after,
+        &ctx,
     );
 
-    // Byte-exactness, not just arrival: the payloads are the oracle's own strings.
-    for idx in &expected {
+    // Byte-exactness, not just arrival: the recovered payloads are the oracle's
+    // own strings, at whichever indices the bracket admitted.
+    for idx in indices.iter().take(CACHED_SAMPLES) {
         let needle = format!("payload='[{idx:4}] ORACLEVAL'");
         assert!(
             captured.contains(&needle),
-            "recovered sample {idx} did not arrive byte-exact (looking for \
-             {needle})\n--- captured ---\n{captured}"
+            "recovered sample {idx} did not arrive byte-exact (looking for {needle})\n{ctx}"
         );
     }
 
+    // Read AFTER the 4s run, so the oracle's rx thread has long since written any
+    // refusal it was going to. Unlike leg 3's polled positive assertion, a late
+    // write here would bias toward PASSING — but this assertion can never be the
+    // first to fire: a refused reply means nothing was recovered, and
+    // `assert_capped_recovery` above fails on that first.
     let oracle_log = read_captured(&mut oracle_out);
     assert_eq!(
         refusal_count(&oracle_log),
@@ -333,29 +400,12 @@ fn wz_advanced_history_max_is_honoured_by_the_zenoh_ext_cache() {
         Some(3_600),
         Duration::from_secs(4),
     );
+    let published_after = published_so_far(&read_captured(&mut oracle_out));
     let indices = delivered_indices(&captured);
-    let recovered: Vec<usize> = indices
-        .iter()
-        .copied()
-        .take_while(|i| *i < published_before)
-        .collect();
-
-    assert!(
-        !recovered.is_empty(),
-        "no pre-join samples recovered at all. Under the `&` separator the cache \
-         reads the whole selector as one `_max` value and `_anyke` disappears with \
-         it, which is exactly this shape.\n--- captured ---\n{captured}"
+    let ctx = format!(
+        "pb={published_before} pa={published_after} cap={CAP}\n--- captured ---\n{captured}"
     );
-    // zenoh's cache keeps the NEWEST `_max` samples (advanced_cache.rs truncates a
-    // push_front'd deque), so the cap selects the tail. A recovered run LONGER
-    // than the cap means the second parameter never reached the cache as its own
-    // list element — the separator failure in its non-fatal shape.
-    let expected: Vec<usize> = (published_before - CAP..published_before).collect();
-    assert_eq!(
-        recovered, expected,
-        "`_max={CAP}` was not honoured: recovered {recovered:?}, expected {expected:?} \
-         (published_before={published_before})\n--- captured ---\n{captured}"
-    );
+    assert_capped_recovery(&indices, CAP, published_before, published_after, &ctx);
 
     let oracle_log = read_captured(&mut oracle_out);
     assert_eq!(
@@ -463,8 +513,11 @@ fn zenoh_ext_cache_refuses_a_get_without_anyke() {
 // The REVERSE direction: wz is the responder, so this is the only leg that
 // exercises wz's `@adv` queryable against a real zenoh selector and wz's
 // SourceInfo sequencing against a real zenoh reorder buffer.
-// wz-proves: ext-pubsub-advanced-cache zenoh-ext->wz
-// wz-proves: ext-pubsub-advanced-publisher zenoh-ext->wz
+// wz is the RESPONDER here, so wz produces both artifacts: the cache's replies and
+// the SourceInfo-sequenced samples. Same shape as the storage-replication leg,
+// where wz declares the queryable and the claims read wz->zenohd.
+// wz-proves: ext-pubsub-advanced-cache wz->zenoh-ext
+// wz-proves: ext-pubsub-advanced-publisher wz->zenoh-ext
 #[test]
 #[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
 fn zenoh_ext_advanced_sub_recovers_a_wz_cache() {

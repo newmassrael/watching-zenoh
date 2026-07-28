@@ -842,10 +842,23 @@ fn recovery_query_timeout_ms(query_timeout: Duration) -> u32 {
 /// called with the [`State`] lock RELEASED — `Session::query` re-enters the session
 /// (and re-locks the state from the reply callback).
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
+/// R311y442 review (REVIEWER 1, finding 2) — `sub_keyexpr` is the subscriber's
+/// OWN declared keyexpr, and the filter it drives is the other half of `_anyke`.
+///
+/// `_anyke` is an opt-OUT of the responder's reply-keyexpr guard, not a licence to
+/// take anything: upstream pairs `.accept_replies(ReplyKeyExpr::Any)` with a local
+/// `if key_expr.intersects(s.key_expr())` in EVERY one of its seven GET callbacks
+/// (zenoh-ext/src/advanced_subscriber.rs:633/637, 735/744, 792/807, 1128/1138).
+/// The round that added `_anyke` to wz's GETs took the opt-out at all three sites
+/// and added none of the narrowing, which made the RX path strictly more permissive
+/// than before the fix: a reply keyed outside the subscription — previously refused
+/// by a conformant responder, now explicitly invited — was delivered into the
+/// subscriber's callback as though it were a sample on the subscribed keyexpr.
 fn issue_recovery_get<R, T>(
     session: &Session<R, T, Unicast>,
     statesref: &Arc<Mutex<State>>,
     keyexpr: &str,
+    sub_keyexpr: &str,
     opts: QueryOptions,
     finish: impl Fn(&mut State) + Clone + Send + 'static,
 ) where
@@ -857,10 +870,21 @@ fn issue_recovery_get<R, T>(
     let reply_states = Arc::clone(statesref);
     let final_states = Arc::clone(statesref);
     let final_finish = finish.clone();
+    let sub_chunks: Vec<String> = sub_keyexpr.split('/').map(str::to_string).collect();
     let issued = session.query(
         keyexpr,
         opts,
         move |reply: &dyn ReplyView| {
+            // The `_anyke` counterpart (see this fn's docs): a reply keyed outside
+            // the subscription is dropped here rather than delivered as if it were
+            // a sample on it. Split per reply rather than cached as `&str` slices
+            // because the callback is `'static`; recovery replies are rare enough
+            // that the allocation is not on any hot path.
+            let sub: Vec<&str> = sub_chunks.iter().map(String::as_str).collect();
+            let reply_ke: Vec<&str> = reply.keyexpr().split('/').collect();
+            if !wz_session_core::pubsub::keyexpr_intersect_patterns(&sub, &reply_ke) {
+                return;
+            }
             if let Some((rkey, rsn, sample)) = recovered_sample_from_reply(reply) {
                 reply_states
                     .lock()
@@ -919,7 +943,7 @@ fn issue_recovery_query<R, T>(
         Some(to) => format!("_sn={}..{}", req.from_sn, to),
         None => format!("_sn={}..", req.from_sn),
     };
-    let params = crate::advanced_selector::adv_get_params(&[sn_part]).into_bytes();
+    let params = wz_session_core::selector_params::anyke_params(&[sn_part]).into_bytes();
     // R311y89 (review C3) — bound the GET with a timeout so the deadline sweep can
     // fire `finish_recovery` if no `@adv` cache answers. R311y326 — the explicit
     // `recovery_query_timeout_ms` (>= 1 ms) is what arms the deadline; a raw 0 would
@@ -935,9 +959,14 @@ fn issue_recovery_query<R, T>(
     // (`finish_recovery` also handles the C3 failed-to-issue rollback via the
     // shared [`issue_recovery_get`]).
     let key = (req.zid, req.eid);
-    issue_recovery_get(session, statesref, &recovery_ke, opts, move |state| {
-        state.finish_recovery(&key)
-    });
+    issue_recovery_get(
+        session,
+        statesref,
+        &recovery_ke,
+        base_keyexpr,
+        opts,
+        move |state| state.finish_recovery(&key),
+    );
 }
 
 /// Re-key a recovery / history reply into a `(source-key, sn, Sample)` for the
@@ -983,7 +1012,7 @@ fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<((Vec<u8>, u32),
 ///
 /// R311y442 — two changes, and both are what makes the GET legible to a real
 /// zenoh cache. The parts are `;`-joined, not `&`-joined (upstream's separator;
-/// see [`crate::advanced_selector`]), and the list ALWAYS carries the bare
+/// see [`wz_session_core::selector_params`]), and the list ALWAYS carries the bare
 /// `_anyke` flag. The return is therefore no longer `Option`: even with neither
 /// knob set the GET must announce that it accepts replies keyed outside the
 /// `@adv` namespace it is addressed to, because that is how every cached sample
@@ -997,9 +1026,19 @@ fn history_selector(sample_depth: Option<usize>, max_age: Option<f64>) -> String
         parts.push(format!("_max={max}"));
     }
     if let Some(age) = max_age {
-        parts.push(format!("_time=[now(-{age}s)..]"));
+        // R311y442 review (REVIEWER 1, finding 6) — upstream's `TimeExpr` Display
+        // special-cases a zero offset to `now()` rather than `now(-0s)`
+        // (zenoh-util/src/time_range.rs:333-339), and IEEE `-0.0 == 0.0` so a
+        // `max_age(0.0)` lands there. The two forms parse to the same instant, so
+        // this is byte-parity rather than a behaviour change — but the emitted
+        // selector is the thing a foreign peer logs and a future diff compares.
+        if age == 0.0 {
+            parts.push("_time=[now()..]".to_string());
+        } else {
+            parts.push(format!("_time=[now(-{age}s)..]"));
+        }
     }
-    crate::advanced_selector::adv_get_params(&parts)
+    wz_session_core::selector_params::anyke_params(&parts)
 }
 
 /// R311y86 — issue the startup history GET over `<base>/@adv/**` (capped by
@@ -1041,9 +1080,14 @@ fn issue_history_query<R, T>(
     // `finish_history` clears `history_pending` + flushes the buffer oldest-first
     // (the shared [`issue_recovery_get`] also runs it on the C3 failed-to-issue
     // path so the subscriber does not buffer live samples forever).
-    issue_recovery_get(session, statesref, &history_ke, opts, |state| {
-        state.finish_history()
-    });
+    issue_recovery_get(
+        session,
+        statesref,
+        &history_ke,
+        base_keyexpr,
+        opts,
+        |state| state.finish_history(),
+    );
 }
 
 /// R311y100 — issue a per-publisher HISTORY GET against a single detected late
@@ -1084,9 +1128,14 @@ fn issue_late_publisher_query<R, T>(
         .with_timeout_ms(timeout_ms)
         .with_parameters(history_selector(sample_depth, max_age).into_bytes());
     let key = (zid, eid);
-    issue_recovery_get(session, statesref, &recovery_ke, opts, move |state| {
-        state.finish_recovery(&key)
-    });
+    issue_recovery_get(
+        session,
+        statesref,
+        &recovery_ke,
+        base_keyexpr,
+        opts,
+        move |state| state.finish_recovery(&key),
+    );
 }
 
 /// R311y100 — the late-publisher liveliness callback body, factored out as a
@@ -2759,7 +2808,7 @@ mod tests {
     /// every real zenoh and zenoh-pico peer, and the absent `_anyke` meant a
     /// conformant responder would refuse every reply. Neither is observable
     /// without a foreign counterparty, which is why the leg in
-    /// `wz_advanced_history_zenoh_ext_interop.rs` is what closes this, not a
+    /// `wz_advanced_pubsub_zenoh_ext_interop.rs` is what closes this, not a
     /// stricter unit test.
     #[cfg(feature = "ext-pubsub-advanced-history")]
     #[test]

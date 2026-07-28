@@ -6490,6 +6490,15 @@ layer_z_zenohd_interop() {
     # rest of this list: the advanced subscriber / publisher are declared only when
     # their flags are passed, so every other leg dials through the unchanged binary.
     (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced --quiet) || return 1
+    # R311y442 review (REVIEWER 3, finding 3) — CLIPPY the `advanced` arm, not just
+    # build it. The line above is a `cargo build`, and every other
+    # `clippy -p wz-ap-demo` in this file omits `advanced`, so the demo's
+    # `#[cfg(feature = "advanced")]` code was `-D warnings`-ungated — the exact
+    # hole R311y433 closed for transport-lowlatency and session-extcompression and
+    # that this round reopened one feature over. `--all-targets` so the OFF-arm
+    # warn path compiles too.
+    (cd crates && cargo clippy -p wz-ap-demo --all-targets --features advanced \
+        -- -D warnings) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients
@@ -6595,18 +6604,43 @@ layer_z_zenohd_interop() {
     # application built on zenoh-ext. build-zenohd.sh provisions upstream's own
     # `z_advanced_pub` / `z_advanced_sub` examples from the same pinned checkout.
     #
-    # FOUR legs, and the pairing is what makes them evidence: two DISCRIMINATORS
-    # that go red on the pre-fix wire (wz's history GET draining a real cache;
-    # the `_max` cap honoured on a TWO-parameter selector, which is what shows
-    # the parameters after the first are parsed as list elements at all), plus
-    # two CONTROLS that stay green in both arms (a non-`_anyke` GET refused by
-    # the same cache, proving the gate is live rather than the fixture permissive;
-    # and the reverse direction, upstream's own advanced subscriber draining a wz
-    # cache, which exercises wz as RESPONDER and so binds the cache / publisher
-    # atoms rather than the subscriber-side ones). Measured: 2 red / 2 green
-    # pre-fix, 4 green post-fix.
-    _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_advanced_pubsub_zenoh_ext_interop -- --ignored --quiet --test-threads=1 || return 1
+    # FOUR legs. Two go RED on the pre-fix wire (wz's history GET draining a real
+    # cache, and the same with a `_max` cap) and two stay green in both arms (a
+    # non-`_anyke` GET refused by the same cache, proving the gate is live rather
+    # than the fixture permissive; and the reverse direction, upstream's own
+    # advanced subscriber draining a wz cache, which exercises wz as RESPONDER and
+    # so binds the cache / publisher atoms rather than the subscriber-side ones).
+    #
+    # The two REDs are not independent, and the first version of this comment said
+    # they were. Measured across all three revert arms (separator only, `_anyke`
+    # only, both): the failure shape is the SAME empty recovery in both legs,
+    # because `&` swallows `_anyke` before the cap can matter. What the capped leg
+    # adds is a positive conformance observation — a foreign cache honouring the
+    # SECOND parameter of a list — not a second discriminator.
+    #
+    # R311y442 review (REVIEWER 3, finding 2) — GUARDED on the oracles' presence,
+    # like the storage-manager plugin leg below and unlike the first draft. Both
+    # binaries come from the SAME build-zenohd.sh run as zenohd itself, so a
+    # missing one means a stale `target/zenohd/` (a developer who has not re-run
+    # the script since this round), not a broken build. That is the lane's
+    # documented SKIP case; hard-failing it made an out-of-date checkout look like
+    # a regression, 20s into the lane and after the other legs had already run.
+    # WZ_Z_REQUIRE still turns the SKIP into a FAIL on hosted CI, where ci.yml
+    # asserts both binaries exist before any lane starts.
+    local ext_examples_dir="${WZ_ZENOH_EXT_EXAMPLES_DIR:-$PWD/target/zenohd}"
+    local missing_ext_example=""
+    for ex in z_advanced_pub z_advanced_sub; do
+        [[ -x "$ext_examples_dir/$ex" ]] || missing_ext_example="$ex"
+    done
+    if [[ -n "$missing_ext_example" ]]; then
+        _z_unavailable "zenoh-ext example oracle not built \
+($ext_examples_dir/$missing_ext_example; run: bash scripts/build-zenohd.sh)" || return 1
+    else
+        _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" \
+            WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
+            --test wz_advanced_pubsub_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \
+            || return 1
+    fi
     # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):
     # a real zenohd DIALS the wz `--listen ws/...` acceptor over ws (the RFC6455
     # server upgrade wired in bind_locator/accept_locator), and a pico z_put routes

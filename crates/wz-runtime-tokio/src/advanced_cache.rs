@@ -244,14 +244,24 @@ fn answer_from_ring(
 /// Extract a `key=value` selector value from the raw query parameter bytes
 /// (`_sn=10..20;_max=5;_anyke`). `None` when absent or non-UTF-8.
 ///
-/// R311y442 — the split lives in [`crate::advanced_selector`] now, and the
-/// separator it uses is `;` rather than the `&` this function hand-wrote. The
+/// R311y442 — the split lives in [`wz_session_core::selector_params`] now, and
+/// the separator it uses is `;` rather than the `&` this function hand-wrote. The
 /// old spelling read a real zenoh subscriber's multi-parameter selector as ONE
 /// parameter with a corrupted value, so `_max` failed to parse and `_time` was
 /// invisible: both filters dropped, silently, in the over-return direction.
+///
+/// That consequence is REASONED, not witnessed: the only foreign advanced
+/// subscriber available (`z_advanced_sub`) hardcodes `HistoryConfig::default()`
+/// and therefore sends no `key=value` parameter at all, so no leg in the tree
+/// exercises this side of the dialect. See the module docs of
+/// `wz_advanced_pubsub_zenoh_ext_interop.rs`.
+///
+/// Review follow-up: the dialect moved OUT of this crate, because a copy that
+/// lives next to one consumer is not a single source of truth — the same `&` bug
+/// was still live in `wz-rest/src/bridge.rs` one crate away.
 fn param_value<'a>(params: Option<&'a [u8]>, key: &str) -> Option<&'a str> {
     let s = core::str::from_utf8(params?).ok()?;
-    crate::advanced_selector::param_value(s, key)
+    wz_session_core::selector_params::param_value(s, key)
 }
 
 /// Parse an `_sn` range string into inclusive `(lo, hi)` bounds, mirroring

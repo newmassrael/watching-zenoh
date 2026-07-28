@@ -1061,19 +1061,6 @@ pub mod advanced_cache;
 ))]
 pub(crate) mod advanced_ke;
 
-/// R311y442 — the advanced-pubsub SELECTOR-PARAMETER dialect SSOT: the `;` list
-/// separator and the `_anyke` reply-keyexpr token shared by the `@adv` cache
-/// (which parses `_sn` / `_max` / `_time`) and the advanced subscriber (which
-/// builds the recovery / history GET selectors). The sibling of
-/// [`advanced_ke`], for the same reason: before it, the two sides hand-wrote a
-/// `&`-separated dialect no zenoh or zenoh-pico peer reads.
-#[cfg(any(
-    feature = "ext-pubsub-advanced-cache",
-    feature = "ext-pubsub-advanced-recovery",
-    feature = "ext-pubsub-advanced-history"
-))]
-pub(crate) mod advanced_selector;
-
 /// R311y69 — `ext-pubsub-advanced-publisher` (§5.25): a publisher that
 /// stamps a per-sample `SourceInfo` sequence number, retains samples in an
 /// [`advanced_cache::AdvancedCache`], and announces itself with an `@adv`

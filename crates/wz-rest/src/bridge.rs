@@ -20,9 +20,17 @@ use wz_runtime_tokio::session::{PublishOptions, QueryOptions, TokioSession};
 use wz_runtime_tokio::session_glue::ConsolidationMode;
 use wz_session_core::encoding::{encoding_from_mime, mime_for_id};
 use wz_session_core::keyexpr_canon::canonize_keyexpr;
+use wz_session_core::selector_params::has_param;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 use crate::http::{Method, Request, Response};
+
+/// The raw-response selector flag (zenoh REST plugin `RAW_KEY`,
+/// zenoh-plugin-rest/src/lib.rs:62).
+const RAW_KEY: &str = "_raw";
+/// The time-range selector key (zenoh `ZenohParameters::TIME_RANGE_KEY`,
+/// zenoh/src/api/selector.rs:145).
+const TIME_KEY: &str = "_time";
 use crate::{json, QUERY_TIMEOUT_MS};
 
 /// One collected reply, copied out of the borrowed `&dyn ReplyView` inside the
@@ -103,7 +111,17 @@ async fn handle_query(session: &TokioSession, zid: &[u8], req: &Request) -> Resp
         Ok(k) => k,
         Err(()) => return Response::text(400, "Bad Request", "invalid keyexpr"),
     };
-    let raw = query.split('&').any(|p| p == "_raw");
+    // R311y442 review (REVIEWER 1, finding 1) — the selector parameter list is
+    // `;`-separated, not `&`-separated. Upstream's REST plugin reads it as
+    // `Parameters::from(url.query())` then `contains_key(RAW_KEY)`
+    // (zenoh-plugin-rest/src/lib.rs:435-442), i.e. the same dialect every other
+    // zenoh selector uses; `;` is a legal RFC 3986 query sub-delim, so a
+    // conformant `?_raw;_time=[now(-10s)..]` arrives here intact and the `&`
+    // reading saw ONE parameter named `_raw;_time=[now(-10s)..]` — both knobs
+    // silently wrong. Worse, :148 forwards the query string VERBATIM as the
+    // outgoing zenoh parameters, so wz's local reading and the downstream
+    // queryable's reading disagreed about the very same bytes.
+    let raw = has_param(query, RAW_KEY);
 
     let rows: Arc<Mutex<Vec<ReplyRow>>> = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = oneshot::channel::<()>();
@@ -133,9 +151,10 @@ async fn handle_query(session: &TokioSession, zid: &[u8], req: &Request) -> Resp
     // Consolidation mirrors zenoh's REST plugin: a time-range selector
     // (`_time=...`) disables consolidation (each historical sample is kept),
     // otherwise Latest.
-    let has_time = query
-        .split('&')
-        .any(|p| p == "_time" || p.starts_with("_time="));
+    // Presence, not a prefix match: upstream asks `parameters.time_range().is_some()`
+    // (lib.rs:437), and a valueless `_time` is a key with an empty value rather
+    // than an absent key.
+    let has_time = has_param(query, TIME_KEY);
     let consolidation = if has_time {
         ConsolidationMode::None
     } else {

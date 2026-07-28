@@ -142,7 +142,17 @@ struct SpawnedTasks {
     /// is DELIBERATELY non-terminating: it holds the AdvancedPublisher (and with
     /// it the cache queryable + `@adv` token) open past its burst, because the
     /// window a late subscriber queries is exactly the window after publishing
-    /// stops. The teardown join window therefore times out on it by design.
+    /// stops.
+    ///
+    /// Review follow-up (R311y442, REVIEWER 3): it is kept OUT of the teardown
+    /// join set on purpose — a task that never returns would burn the 200ms
+    /// window for nothing — but it must still be ABORTED before teardown emits
+    /// Close. Dropping the handle does NOT cancel the task
+    /// ([`TokioJoinHandle`] mirrors tokio, where `abort` is opt-in), so the
+    /// publisher would otherwise outlive `drop_actions()` and enqueue its
+    /// cache-queryable + token undeclares onto a closed writer channel, where
+    /// they are dropped with a WARN. A foreign advanced subscriber would then
+    /// never see the token DELETE, only the link drop.
     #[cfg(feature = "advanced")]
     advanced_publisher_handle: Option<TokioJoinHandle<()>>,
 }
@@ -1802,6 +1812,17 @@ pub(crate) async fn run_demo(
     // LivelinessToken Drop -> UndeclToken on writer channel, Close
     // frame after UndeclToken, Arc-drop drains writer-task sender
     // clones, 50ms tail drain) lives in `crate::teardown`.
+    // R311y442 review (REVIEWER 3, finding 5) — abort the non-terminating
+    // advanced-publisher task FIRST, so dropping its `AdvancedPublisher` emits the
+    // `@adv` cache-queryable + liveliness-token undeclares while the writer is
+    // still draining. This is the same R284 step-4 ordering the LivelinessToken
+    // already relies on; without it the frames are enqueued after `drop_actions()`
+    // and discarded ("dropping frame" WARN, measured 2 per run).
+    #[cfg(feature = "advanced")]
+    if let Some(handle) = _advanced_publisher_handle {
+        handle.abort();
+    }
+
     let _: teardown::WriterDrained = teardown::TeardownInitial {
         sweep_task,
         publisher_handle,
