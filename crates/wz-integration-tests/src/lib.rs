@@ -921,42 +921,27 @@ pub mod common {
         (guard, reader, port)
     }
 
-    /// Spawn a zenoh-pico `z_sub` as a CLIENT of a router
-    /// (`-e <endpoint> -m client`), returned once its session is OPEN and the
-    /// subscriber DECLARED (`"Declaring Subscriber on"`). `stdbuf -oL -eL`
-    /// forces line buffering (pico's CLI block-buffers non-TTY stdout, else its
-    /// `Received` line never reaches the file); the 6-attempt retry absorbs
-    /// pico's non-self-retrying one-shot open transient
-    /// (`"Unable to open session!"`) — robustness for a FOREIGN binary, not a
-    /// wz workaround. `router_label` names the dial target in the give-up panic;
-    /// `mk_stderr` is the per-attempt stdout tempfile factory (the caller owns
-    /// the dev-dependency `tempfile::tempfile()` call, once per attempt).
-    ///
-    /// Why the retry, honestly (R311pf / R311pi): the pico open transient was NOT
-    /// reproduced synthetically (~200+ opens under 5x CPU oversubscription produced
-    /// zero failures), so the mechanism is a HYPOTHESIS — scheduler starvation of the
-    /// handshake window under full-run-ci load — not a verified fact; a router-side
-    /// handshake stall is not excludable (the symptom `z_open() < 0` is reported on
-    /// the pico side and would look identical either way). Callers should gate their
-    /// router's cold-start where they can (the zenohd caller drives a wz handshake to
-    /// Established first); this retry is the residual client-side safety net for a
-    /// foreign one-shot that cannot self-retry.
-    ///
     /// A printable (alphanumeric) payload of `len` bytes for the fragmentation
     /// interop legs. It must be valid UTF-8 and free of shell/format specials
     /// because the pico CLIs print it via `printf("%.*s")` and the callers
     /// byte-match it in the child's stdout. The 62-char alphabet stepped by a
     /// coprime stride (7) has period 62, which is coprime to the 64-byte
     /// negotiated MTU those legs use — so a chunk-boundary reorder, duplicate
-    /// or drop in reassembly could not survive byte-equality the way a short
-    /// repeated pattern could.
+    /// or drop misaligns against the chunk grid instead of landing on a
+    /// repeat, the way a short repeated pattern would. R311y439 narrowed this
+    /// claim: the sequence is PERIODIC with period 62, not aperiodic, so a
+    /// damage pattern that is an exact multiple of 62 long is invisible to it.
+    /// What actually forbids that is the callers' pairing of full-value
+    /// equality with an exact-LENGTH assertion — the stride only removes the
+    /// short-period coincidences.
     ///
     /// R311y438 — lifted from `wz_fragment_tx_to_pico_zsub::frag_payload` into
     /// this SSOT when `wz_fragment_tx_zenohd_interop` became its second
     /// consumer, the same second-user trigger that lifted
-    /// [`spawn_subscribed_zsub`] in R311y138. Both legs depend on the SAME
-    /// stride rationale, so a change to one must not silently leave the other
-    /// on a weaker payload.
+    /// [`spawn_subscribed_zsub`] in R311y138. R311y439 added the third,
+    /// `wz_fragment_rx_zenohd_interop`. All three depend on the SAME stride
+    /// rationale, so a change for one must not silently leave the others on a
+    /// weaker payload.
     pub fn frag_payload(len: usize) -> String {
         const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
         let bytes: Vec<u8> = (0..len)
@@ -1025,27 +1010,59 @@ pub mod common {
     /// ## The envelope
     ///
     /// Both peers frame a streamed link as `[u16 LE len][batch]` — wz at
-    /// `wz-runtime-tokio/src/stream_link.rs:159-170`, zenoh at
+    /// `wz-runtime-tokio/src/stream_link.rs:161-169`, zenoh at
     /// `io/zenoh-transport/src/common/batch.rs:318` with `BatchSize = u16`
     /// (`commons/zenoh-protocol/src/transport/mod.rs:41`) and `L_LEN = 2`
-    /// (`batch.rs:34`), both little-endian. The 4-byte prefix is the lowlatency
-    /// framing, which no fragmentation leg negotiates.
+    /// (`batch.rs:34`), both little-endian. Two shapes this parse would NOT
+    /// survive, neither of which a fragmentation leg negotiates: the 4-byte
+    /// lowlatency prefix (`stream_link.rs:154-160`), and the extra
+    /// `BatchHeader` byte zenoh prepends under compression only
+    /// (`batch.rs:101-110`, `H_LEN = BatchHeader::SIZE`) — which would shift
+    /// the byte this counter reads as a transport header.
     ///
     /// ## What the count is, exactly
     ///
     /// It is the number of batches whose FIRST transport message carries
-    /// `counted_mid` — NOT the number of such messages. The two coincide when
-    /// the sender hands the link one transport message per batch (wz's
-    /// `send_blocking`, `stream_link.rs:141-170`). They do not always coincide
-    /// for zenohd: its pipeline reinserts the in-flight batch before fragmenting
-    /// (`io/zenoh-transport/src/common/pipeline.rs:372-383`), so the FIRST
-    /// fragment of a chain can share a partially-filled batch with a preceding
-    /// message and go uncounted; every subsequent fragment fills its own batch.
-    /// The error is therefore an UNDERCOUNT bounded by one per chain, which is
-    /// the safe direction for a `>=` assertion and irrelevant to an `== 0` one
-    /// (an arm that asserts zero pairs it with an MTU above the payload, which
-    /// makes fragmentation impossible by construction rather than merely
-    /// unobserved).
+    /// `counted_mid` — NOT the number of such messages. For a fragment chain
+    /// from either peer the two coincide, and neither coincidence is luck:
+    ///
+    ///   * wz hands the link exactly one encoded transport message per
+    ///     `send_blocking` call (`stream_link.rs:142-173`).
+    ///   * zenoh FLUSHES any partially-filled batch before it fragments — an
+    ///     in-flight batch is moved out and a fresh one pulled
+    ///     (`io/zenoh-transport/src/common/pipeline.rs:359-363`), the retry is
+    ///     on what its own comment calls a "fully empty batch" (`:365`), and it
+    ///     is that empty batch which `:373` reinserts for fragment #1. Every
+    ///     later fragment is `move_batch`'d the moment it is encoded (`:416`),
+    ///     so no other message joins it either. The whole path holds one mutex
+    ///     (`:281`), so nothing interleaves.
+    ///
+    /// R311y439 measured this: 5 counted batches against 5
+    /// `DriverLoopOutcome::Fragment` events wz's own parser reported for the
+    /// same chain. An earlier draft of this doc hedged that the first fragment
+    /// could share a batch and be UNDERCOUNTED; `pipeline.rs:359-365` refutes
+    /// it, four lines above the range that draft cited.
+    ///
+    /// ## Preconditions the caller owns
+    ///
+    /// Two of these the relay cannot check, so they are stated rather than
+    /// enforced — a caller that breaks one gets a HANG or a silently wrong
+    /// count, not an error:
+    ///
+    ///   * ONE dial. The relay accepts exactly once; a second connection sits
+    ///     unserved in the backlog. A redial leg needs an accept loop first.
+    ///   * NOT a lowlatency link. That framing is a 4-byte prefix
+    ///     (`stream_link.rs:154-160`), chosen at RUNTIME by an `AtomicBool`, so
+    ///     no compile-time gate rules it out — and Layer Z already runs
+    ///     lowlatency legs beside the fragmentation ones. Forwarding would stay
+    ///     byte-exact (bytes are re-emitted in order), but the counts become
+    ///     noise and a misparsed length stalls `read_exact`.
+    ///
+    /// The third — `counted_mid` must be a bare 5-bit MID, not a whole header
+    /// byte — IS enforced below, because getting it wrong reads as zero
+    /// forever, which reds a `>= N` arm loudly but passes a `== 0` calibration
+    /// twin SILENTLY, disarming the one assertion whose entire job is to prove
+    /// the counter discriminates.
     ///
     /// Blocking std sockets on their own threads, deliberately: this module is
     /// the harness SSOT for tests that are not all async, and it has no
@@ -1054,6 +1071,13 @@ pub mod common {
         upstream_port: u16,
         counted_mid: u8,
     ) -> FragmentCountingRelay {
+        assert_eq!(
+            counted_mid & !TRANSPORT_MID_MASK,
+            0,
+            "counted_mid must be a bare 5-bit transport MID (e.g. T_MID_FRAGMENT 0x06), \
+             not a header byte with its Z/M/R flags set — a flagged value never matches \
+             and would leave a `== 0` calibration arm passing vacuously"
+        );
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind counting relay");
         let port = listener.local_addr().expect("relay local_addr").port();
         let dialer_to_acceptor = Arc::new(AtomicUsize::new(0));
@@ -1062,17 +1086,24 @@ pub mod common {
         let down = Arc::clone(&acceptor_to_dialer);
 
         thread::spawn(move || {
+            // An accept that never comes means the test finished without
+            // dialing — the only silent return here, and a legitimate one.
             let Ok((dialer_side, _peer)) = listener.accept() else {
                 return;
             };
-            let Ok(acceptor_side) = TcpStream::connect((Ipv4Addr::LOCALHOST, upstream_port)) else {
-                return;
-            };
-            let (Ok(dialer_tx), Ok(acceptor_tx)) =
-                (dialer_side.try_clone(), acceptor_side.try_clone())
-            else {
-                return;
-            };
+            // Everything past this point is LOUD. A relay that dies quietly
+            // reads downstream as "no fragments crossed the wire", which points
+            // the investigation at the fragmenter instead of at the harness —
+            // the failure mode every sibling spawn helper in this module
+            // deliberately panics to avoid.
+            let acceptor_side = TcpStream::connect((Ipv4Addr::LOCALHOST, upstream_port))
+                .expect("counting relay dials its upstream");
+            let dialer_tx = dialer_side
+                .try_clone()
+                .expect("dup relay dialer-side handle");
+            let acceptor_tx = acceptor_side
+                .try_clone()
+                .expect("dup relay acceptor-side handle");
 
             thread::spawn(move || pump_counting(acceptor_side, dialer_tx, &down, counted_mid));
             pump_counting(dialer_side, acceptor_tx, &up, counted_mid);
@@ -1087,8 +1118,21 @@ pub mod common {
 
     /// Forward every `[u16 LE len][batch]` from `src` to `dst` byte-for-byte,
     /// bumping `counter` for each batch whose first transport message carries
-    /// `counted_mid`. Returns when either side closes or errors — the relayed
-    /// session is over at that point, so there is nothing left to forward.
+    /// `counted_mid`. Returns when either side closes or errors.
+    ///
+    /// The counter is bumped BEFORE the forward, so any batch that reached the
+    /// far side is already in the counter's modification order by the time the
+    /// far side can act on it. That is what makes `Relaxed` sound here: a
+    /// caller that observed a delivery cannot then read a count that excludes
+    /// the chain which produced it.
+    ///
+    /// On exit it shuts the relayed halves down explicitly. `try_clone`
+    /// duplicates the descriptor rather than the socket, so dropping one handle
+    /// sends no FIN — without this, one side closing would leave the opposite
+    /// pump blocked in `read_exact` and the far peer believing the connection
+    /// is live. Today both consumers kill their zenohd immediately afterwards,
+    /// which hides it; a leg that reuses a router, or one that needs the router
+    /// to OBSERVE the disconnect, would hang.
     fn pump_counting(
         mut src: TcpStream,
         mut dst: TcpStream,
@@ -1096,15 +1140,16 @@ pub mod common {
         counted_mid: u8,
     ) {
         use std::io::{Read, Write};
+        use std::net::Shutdown;
 
         let mut prefix = [0u8; 2];
         loop {
             if src.read_exact(&mut prefix).is_err() {
-                return;
+                break;
             }
             let mut batch = vec![0u8; u16::from_le_bytes(prefix) as usize];
             if src.read_exact(&mut batch).is_err() {
-                return;
+                break;
             }
             if batch
                 .first()
@@ -1113,14 +1158,39 @@ pub mod common {
                 counter.fetch_add(1, Ordering::Relaxed);
             }
             if dst.write_all(&prefix).is_err() || dst.write_all(&batch).is_err() {
-                return;
+                break;
             }
         }
+        let _ = src.shutdown(Shutdown::Read);
+        let _ = dst.shutdown(Shutdown::Write);
     }
 
+    /// Spawn a zenoh-pico `z_sub` as a CLIENT of a router
+    /// (`-e <endpoint> -m client`), returned once its session is OPEN and the
+    /// subscriber DECLARED (`"Declaring Subscriber on"`). `stdbuf -oL -eL`
+    /// forces line buffering (pico's CLI block-buffers non-TTY stdout, else its
+    /// `Received` line never reaches the file); the 6-attempt retry absorbs
+    /// pico's non-self-retrying one-shot open transient
+    /// (`"Unable to open session!"`) — robustness for a FOREIGN binary, not a
+    /// wz workaround. `router_label` names the dial target in the give-up panic;
+    /// `mk_stderr` is the per-attempt stdout tempfile factory (the caller owns
+    /// the dev-dependency `tempfile::tempfile()` call, once per attempt).
+    ///
+    /// Why the retry, honestly (R311pf / R311pi): the pico open transient was NOT
+    /// reproduced synthetically (~200+ opens under 5x CPU oversubscription produced
+    /// zero failures), so the mechanism is a HYPOTHESIS — scheduler starvation of the
+    /// handshake window under full-run-ci load — not a verified fact; a router-side
+    /// handshake stall is not excludable (the symptom `z_open() < 0` is reported on
+    /// the pico side and would look identical either way). Callers should gate their
+    /// router's cold-start where they can (the zenohd caller drives a wz handshake to
+    /// Established first); this retry is the residual client-side safety net for a
+    /// foreign one-shot that cannot self-retry.
+    ///
     /// R311y138 — lifted from the ~95%-identical
     /// `wz_to_zenohd_router::spawn_subscribed_zsub` +
     /// `wz_router_hat_pico_interop::spawn_subscribed_pico_zsub` into one SSOT.
+    /// (R311y439 re-attached the prose above, which R311y438 had stranded on
+    /// `frag_payload` by inserting that helper mid-doc-comment.)
     pub fn spawn_subscribed_zsub(
         z_sub: &Path,
         sub_key: &str,

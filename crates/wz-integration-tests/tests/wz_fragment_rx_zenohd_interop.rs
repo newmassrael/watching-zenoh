@@ -16,13 +16,17 @@
 //! This leg makes the claim and asserts it.
 //!
 //! What was already proven is the pico sender: `wz_reassembles_pico_fragment_tx`
-//! has a zenoh-pico `z_put` fragmenting into a wz ACCEPTOR. That is a different
-//! fragmenter and a different topology. pico's TX splits at a compiled batch
-//! constant with no router in the path; zenohd's is the full Rust pipeline
-//! (`io/zenoh-transport/src/common/pipeline.rs:372-430` at zenoh 1.5.0), which
-//! fragments a message that it is ROUTING — reassembled from one peer, split
-//! again for another whose link negotiated a smaller MTU. The north star is the
-//! superset of both senders, so both need a witness.
+//! has a zenoh-pico `z_put` fragmenting into a wz ACCEPTOR. Both senders split
+//! at the NEGOTIATED batch — pico sizes its tx wbuf to
+//! `min(link_mtu, negotiated_batch)`
+//! (`vendor/zenoh-pico/src/transport/unicast/transport.c:47`), zenohd min-
+//! negotiates the same way — so the difference is the IMPLEMENTATION and the
+//! TOPOLOGY, not the trigger. pico's is a fixed-capacity C wbuf on a direct
+//! peer link; zenohd's is the full Rust pipeline
+//! (`io/zenoh-transport/src/common/pipeline.rs:383-433` at zenoh 1.5.0)
+//! splitting a message it is ROUTING onward, for a link whose MTU is smaller
+//! than the one the message came in on. The north star is the superset of both
+//! senders, so both need a witness.
 //!
 //! ## Topology
 //!
@@ -43,22 +47,30 @@
 //!
 //! ## Two independent halves, and why the pair is the proof
 //!
-//!   * the RELAY says ZENOHD put >= 2 FRAGMENT-tagged batches on the wire. Note
-//!     which way this cuts compared to R311y438: there the tag was PRODUCED by
-//!     wz and merely recognised by wz's own `wire_const`, so the relay alone
-//!     proved only self-consistency. Here the tag is produced by zenohd — a
-//!     foreign implementation that owes wz nothing — and wz's constant only
-//!     recognises it. The wire observation is strictly stronger in this
-//!     direction.
+//!   * the RELAY, which is OUTSIDE wz, says zenohd put >= 2 FRAGMENT-tagged
+//!     batches on the wire. Note the authorship compared to R311y438: there the
+//!     tag was produced by wz and merely recognised by wz's own `wire_const`,
+//!     so the relay alone proved self-consistency. Here it is authored by
+//!     zenohd — a foreign implementation that owes wz nothing — and wz's
+//!     constant only recognises it. That is a stronger statement about the TAG;
+//!     it is a weaker one about wz, because in this direction the chain is a
+//!     PRECONDITION for the behaviour under test rather than the behaviour
+//!     itself.
 //!   * WZ's own driver loop reports `DriverLoopOutcome::Fragment` at least
-//!     twice and at least one chain terminator (`more == false`), and the
-//!     subscriber receives the whole 200-byte payload byte-exact. That is the
-//!     half the relay cannot make: a relay sees bytes, not whether the receiver
-//!     rebuilt a message from them.
+//!     twice, and the subscriber receives the whole 200-byte payload
+//!     byte-exact. The byte-exact delivery is the completion witness: it is the
+//!     only assertion here that cannot hold unless reassembly actually
+//!     finished and re-parsed.
 //!
-//! Neither half is the proof. A wz that counted fragments but mis-assembled
-//! them would pass the first and fail the second; a wz that received one
-//! oversize frame and delivered it would pass the second and fail the first.
+//! Neither half is the proof. Drop the first and a wz that received one
+//! oversize frame and delivered it would pass what remains — nothing would
+//! attribute the delivery to a chain. Drop the second and a wz that logged the
+//! chain but mis-assembled it (truncated, reordered, or never completing)
+//! would pass, because a relay sees bytes, not whether the receiver rebuilt a
+//! message from them. R311y439 measured that dependency rather than arguing
+//! it: suppressing the reassembly-completion dispatch in
+//! `wz-session-core/src/drive.rs` leaves both fragment counts intact and takes
+//! deliveries to zero, while the twin below stays green.
 //!
 //! ## The option-atom PAIR
 //!
@@ -87,8 +99,9 @@
 //! `ends_with` alone would not catch if reassembly duplicated a leading chunk.
 //! pico is VENDORED in-repo, so that format cannot drift under this test
 //! without a deliberate vendor bump. The same buffer is the ceiling on any
-//! future enlargement of `PAYLOAD_LEN`: 248 bytes of value is where the foreign
-//! example's stack buffer overflows.
+//! future enlargement of `PAYLOAD_LEN`: with the 7-byte prefix and the NUL,
+//! 248 bytes of value is the largest that still FITS `buf[256]`, and 249
+//! overflows it.
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z): zenohd + the pico z_pub CLI are
 //! external binaries. The test NAME carries `zenohd` because Layer E's skip
@@ -139,9 +152,18 @@ struct ArmOutcome {
     fragments_on_wire: usize,
     /// `DriverLoopOutcome::Fragment` events wz's own RX drive loop reported.
     rx_fragments: usize,
-    /// Of those, the ones carrying `more == false` — a chain that TERMINATED
-    /// rather than stalling mid-reassembly.
+    /// Of those, the ones carrying `more == false`: a terminating fragment was
+    /// decoded and SN-admitted, so zenohd sent a COMPLETE chain rather than
+    /// trailing off. It does NOT witness that reassembly completed — the event
+    /// is emitted before `ingest` runs (`wz-session-core/src/drive.rs:712` vs
+    /// `:786`), so an ingest that then aborts on capacity, quota or pool
+    /// exhaustion still increments this. Completion is witnessed by the
+    /// byte-exact delivery, and only by it.
     rx_chain_finals: usize,
+    /// `IterationEvent::ReassemblyDropped` events — an ingest that aborted or
+    /// was refused. The negative witness for the step `rx_chain_finals` is
+    /// emitted too early to see; must be zero.
+    rx_reassembly_drops: usize,
     deliveries: usize,
     /// Every delivered Sample ended with the whole published value and carried
     /// exactly prefix + value bytes.
@@ -215,7 +237,17 @@ async fn subscribe_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutc
                 let payload = sample.payload();
                 let whole_value_in_order = payload.ends_with(&expected[..]);
                 let nothing_extra = payload.len() == PICO_ZPUB_PREFIX_LEN + expected.len();
-                if !(whole_value_in_order && nothing_extra) {
+                // The prefix bytes are checked too, or the leading
+                // PICO_ZPUB_PREFIX_LEN bytes of every reassembled Sample would
+                // go uninspected — damage confined to the first chunk would
+                // pass the tail equality and the length pin together.
+                let prefix_intact = payload.first() == Some(&b'[')
+                    && payload.get(PICO_ZPUB_PREFIX_LEN - 1) == Some(&b' ');
+                // The wildcard the subscriber declared has to resolve to the
+                // key pico published on; a Sample routed under some other
+                // keyexpr is not this leg's evidence.
+                let keyexpr_ok = sample.keyexpr() == PUBLISH_KEYEXPR;
+                if !(whole_value_in_order && nothing_extra && prefix_intact && keyexpr_ok) {
                     byte_exact.store(false, Ordering::SeqCst);
                 }
                 deliveries.fetch_add(1, Ordering::SeqCst);
@@ -223,16 +255,27 @@ async fn subscribe_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutc
             .expect("wz declares the routed subscriber (emits Declare(DeclSubscriber))")
     };
 
-    // RX-side fragment observation on wz's OWN drive loop — the half the relay
-    // structurally cannot make. `more == false` marks a chain terminator, so a
-    // reassembly that accumulated chunks but never completed reads as
-    // rx_fragments > 0 with rx_chain_finals == 0 rather than passing.
+    // RX-side observation on wz's OWN drive loop — the half the relay
+    // structurally cannot make. Three separate signals, because the obvious one
+    // is not the one that means completion:
+    //   - rx_fragments: the reassembly branch was entered at all.
+    //   - rx_chain_finals: a `more == false` fragment was decoded and
+    //     SN-admitted, i.e. zenohd sent a COMPLETE chain. It is emitted before
+    //     `ingest` runs (`drive.rs:712` vs `:786`), so it does NOT witness that
+    //     wz finished reassembling.
+    //   - rx_reassembly_drops: `IterationEvent::ReassemblyDropped`
+    //     (`drive.rs:794`) — the abort/refusal surface an ingest takes when a
+    //     chain is out of order, over capacity, or past a pool quota. THIS is
+    //     the honest negative witness for the step the terminator count cannot
+    //     see, and it must stay at zero.
     let rx_fragments = Arc::new(AtomicUsize::new(0));
     let rx_chain_finals = Arc::new(AtomicUsize::new(0));
+    let rx_reassembly_drops = Arc::new(AtomicUsize::new(0));
     let timeouts = SessionTimeouts::spec_defaults();
     let drive = {
         let rx_fragments = Arc::clone(&rx_fragments);
         let rx_chain_finals = Arc::clone(&rx_chain_finals);
+        let rx_reassembly_drops = Arc::clone(&rx_reassembly_drops);
         let session_drive = session.clone();
         drive_session_until_terminal(
             &mut opened.inbound,
@@ -242,11 +285,17 @@ async fn subscribe_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutc
             &opened.clock,
             &timeouts,
             move |event| {
-                if let IterationEvent::Poll(DriverLoopOutcome::Fragment { more, .. }) = &event {
-                    rx_fragments.fetch_add(1, Ordering::SeqCst);
-                    if !more {
-                        rx_chain_finals.fetch_add(1, Ordering::SeqCst);
+                match &event {
+                    IterationEvent::Poll(DriverLoopOutcome::Fragment { more, .. }) => {
+                        rx_fragments.fetch_add(1, Ordering::SeqCst);
+                        if !more {
+                            rx_chain_finals.fetch_add(1, Ordering::SeqCst);
+                        }
                     }
+                    IterationEvent::ReassemblyDropped(_) => {
+                        rx_reassembly_drops.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {}
                 }
                 session_drive.dispatch_iteration_event(event)
             },
@@ -312,6 +361,7 @@ async fn subscribe_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutc
         fragments_on_wire: relay.acceptor_to_dialer_count(),
         rx_fragments: rx_fragments.load(Ordering::SeqCst),
         rx_chain_finals: rx_chain_finals.load(Ordering::SeqCst),
+        rx_reassembly_drops: rx_reassembly_drops.load(Ordering::SeqCst),
         deliveries: deliveries.load(Ordering::SeqCst),
         byte_exact: byte_exact.load(Ordering::SeqCst),
         delivery,
@@ -326,37 +376,56 @@ async fn subscribe_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutc
 async fn zenohd_fragmented_route_to_wz_is_reassembled_into_a_byte_exact_sample() {
     let arm = subscribe_through_zenohd_with_batch(Some(TINY_BATCH)).await;
 
-    // Precondition — the split is FORCED on ZENOHD's side. A negotiation
-    // regression to the 65535 default would trip here rather than silently
-    // deliver one un-fragmented frame and read as a reassembly proof.
+    // Precondition — the arm really is the small-MTU one. This is a WZ-LOCAL
+    // self-check and nothing more: `negotiated_batch_mtu()` is
+    // `min(own, peer, link)` over a locally-read `own`
+    // (`wz-session-core/src/session_actions.rs:1552-1577`), so 64 dominates
+    // whatever zenohd answers. It would still read 64 if wz's InitSyn dropped
+    // `batch_size` outright or zenohd ignored it. What actually catches that is
+    // Assertion 1, which is measured on the wire.
     assert_eq!(
         arm.negotiated_mtu, TINY_BATCH as usize,
-        "wz advertised batch=64 and zenohd min-negotiates to it, so the routed Put must fragment"
+        "this arm must run at the tiny batch; a change to TINY_BATCH or to the local \
+         batch_size plumbing lands here"
     );
 
-    // Assertion 1 — ZENOHD really fragmented, observed on the wire. The tag is
-    // produced by the foreign router here and only recognised by wz's constant,
-    // and the twin below reads 0 through the same counter.
+    // Assertion 1 — ZENOHD really fragmented, observed on the wire OUTSIDE wz.
+    // The tag is authored by the foreign router and only recognised by wz's
+    // constant, and the twin below reads 0 through the same counter.
+    //
+    // The bound is 4, not 2. A 207-byte Push at MTU 64 costs roughly 42 bytes
+    // of payload per chunk once the length prefix, fragment header and SN are
+    // paid, so the real chain is 5 (measured, R311y439) and 4 leaves margin for
+    // a header-size change. A bound of 2 would also be satisfied by any two
+    // oversize Declares zenohd happens to send on this link, which is not the
+    // chain this leg claims.
     assert!(
-        arm.fragments_on_wire >= 2,
+        arm.fragments_on_wire >= 4,
         "expected zenohd to route the Put as a multi-chunk T_MID_FRAGMENT chain at MTU 64; \
          the relay counted {}",
         arm.fragments_on_wire
     );
 
-    // Assertion 2 — wz's RX path really took the reassembly branch, and a chain
-    // COMPLETED. This is what the relay cannot see: it observes bytes, not
-    // whether a message was rebuilt from them.
+    // Assertion 2 — wz's RX path really took the reassembly branch, zenohd sent
+    // a chain that TERMINATED, and no ingest was aborted or refused along the
+    // way. Note what this does NOT say: the terminator event is emitted before
+    // `ingest` runs, so none of these three witnesses reassembly COMPLETING.
+    // Assertion 3 is the only one that does.
     assert!(
-        arm.rx_fragments >= 2,
-        "wz's drive loop must report a multi-chunk chain on the RX side (saw {})",
+        arm.rx_fragments >= 4,
+        "wz's drive loop must report the whole multi-chunk chain on the RX side (saw {})",
         arm.rx_fragments
     );
     assert!(
         arm.rx_chain_finals >= 1,
-        "at least one chain must TERMINATE (a Fragment with more == false); \
-         {} fragment(s) with no terminator is a stalled reassembly, not a completed one",
+        "zenohd must send a COMPLETE chain — a Fragment with more == false; \
+         {} fragment(s) with no terminator means the chain trailed off",
         arm.rx_fragments
+    );
+    assert_eq!(
+        arm.rx_reassembly_drops, 0,
+        "no chain may be aborted or refused by the reassembly dispatcher \
+         (out-of-order, capacity, or pool quota)"
     );
 
     // Assertion 3 — cross-impl REASSEMBLY: the rebuilt message re-parsed into a

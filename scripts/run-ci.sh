@@ -6539,8 +6539,13 @@ layer_z_zenohd_interop() {
     # "wz actually fragmented" is measured here rather than deferred to the
     # wz<->wz host lane. No `--features`: the test opens the session in-process,
     # and this crate's dev-dep already pins transport-fragmentation.
-    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_fragment_tx_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y439 — GUARDED (`_runci_guarded_test`, 2 = proof + calibration twin).
+    # The bare form this leg used until now is the "success by silence" class
+    # documented at the helper: `--ignored` selecting ZERO tests still exits 0,
+    # and because both names carry the `zenohd` token that Layer E skips by
+    # substring, an elided test would then run in NO lane with every lane green.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_fragment_tx_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y439 — wz RX FRAGMENTATION cross-impl (transport-fragmentation
     # zenohd->wz), the direction R311y438 explicitly left open ("the tiny MTU
     # binds BOTH ways ... but nothing asserts it, so no claim is made"). wz
@@ -6558,8 +6563,8 @@ layer_z_zenohd_interop() {
     # reports the reassembly branch plus a chain terminator. No `--features`:
     # the test opens the session in-process, and this crate's dev-dep already
     # pins transport-fragmentation.
-    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_fragment_rx_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_fragment_rx_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):
     # a real zenohd DIALS the wz `--listen ws/...` acceptor over ws (the RFC6455
     # server upgrade wired in bind_locator/accept_locator), and a pico z_put routes
