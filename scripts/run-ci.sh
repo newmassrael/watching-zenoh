@@ -6524,6 +6524,23 @@ layer_z_zenohd_interop() {
     # binaries, so both atoms are compiled into the wz-ap-demo build above.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_compose_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y438 — wz TX FRAGMENTATION cross-impl (transport-fragmentation
+    # wz->zenohd). `transport-fragmentation` had witnesses in both PICO
+    # directions and none against zenohd, because wz negotiates batch_size 65535
+    # with a router by default and nothing in the corpus lowered it. This leg
+    # dials IN-PROCESS with batch_size 64, so zenohd min-negotiates to 64 and a
+    # 200-byte Put is forced through the split; zenohd reassembles the chain and
+    # a pico z_sub on the far side prints it byte-exact. TWO legs: the proof plus
+    # its option-atom TWIN at the default batch (same publish, MTU far above the
+    # payload, ZERO fragments on the wire, still delivered), which is what makes
+    # the fragment count a discriminator rather than a constant. Unlike the pico
+    # frag leg this one is `full`, not `partial`: wz dials through an in-test
+    # counting relay that observes the T_MID_FRAGMENT chain on the wire, so
+    # "wz actually fragmented" is measured here rather than deferred to the
+    # wz<->wz host lane. No `--features`: the test opens the session in-process,
+    # and this crate's dev-dep already pins transport-fragmentation.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_fragment_tx_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):
     # a real zenohd DIALS the wz `--listen ws/...` acceptor over ws (the RFC6455
     # server upgrade wired in bind_locator/accept_locator), and a pico z_put routes

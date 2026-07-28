@@ -941,6 +941,29 @@ pub mod common {
     /// Established first); this retry is the residual client-side safety net for a
     /// foreign one-shot that cannot self-retry.
     ///
+    /// A printable (alphanumeric) payload of `len` bytes for the fragmentation
+    /// interop legs. It must be valid UTF-8 and free of shell/format specials
+    /// because the pico CLIs print it via `printf("%.*s")` and the callers
+    /// byte-match it in the child's stdout. The 62-char alphabet stepped by a
+    /// coprime stride (7) has period 62, which is coprime to the 64-byte
+    /// negotiated MTU those legs use — so a chunk-boundary reorder, duplicate
+    /// or drop in reassembly could not survive byte-equality the way a short
+    /// repeated pattern could.
+    ///
+    /// R311y438 — lifted from `wz_fragment_tx_to_pico_zsub::frag_payload` into
+    /// this SSOT when `wz_fragment_tx_zenohd_interop` became its second
+    /// consumer, the same second-user trigger that lifted
+    /// [`spawn_subscribed_zsub`] in R311y138. Both legs depend on the SAME
+    /// stride rationale, so a change to one must not silently leave the other
+    /// on a weaker payload.
+    pub fn frag_payload(len: usize) -> String {
+        const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let bytes: Vec<u8> = (0..len)
+            .map(|i| ALPHABET[(i * 7) % ALPHABET.len()])
+            .collect();
+        String::from_utf8(bytes).expect("alphanumeric is valid UTF-8")
+    }
+
     /// R311y138 — lifted from the ~95%-identical
     /// `wz_to_zenohd_router::spawn_subscribed_zsub` +
     /// `wz_router_hat_pico_interop::spawn_subscribed_pico_zsub` into one SSOT.

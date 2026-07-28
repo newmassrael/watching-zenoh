@@ -75,7 +75,9 @@ use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
 
-use wz_integration_tests::common::{read_captured, zenoh_pico_cli_binary, ChildGuard};
+use wz_integration_tests::common::{
+    frag_payload, read_captured, zenoh_pico_cli_binary, ChildGuard,
+};
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
@@ -94,21 +96,6 @@ const SUB_KEYEXPR: &str = "demo/**";
 const BATCH_SIZE: u16 = 64;
 // 200 B > 64 B MTU and within the alloc (AP) MsgPut owned-bytes bound.
 const PAYLOAD_LEN: usize = 200;
-
-/// A printable (alphanumeric) payload of `len` bytes. It must be valid
-/// UTF-8 and free of shell/format specials because pico `z_sub` prints it
-/// via `printf("%.*s")` and this test byte-matches it in pico's stdout. The
-/// 62-char alphabet stepped by a coprime stride (7) has period 62, coprime
-/// to the 64-byte MTU, so a chunk-boundary reorder/duplicate/drop in
-/// reassembly could not survive byte-equality the way a short repeated
-/// pattern could (same rationale as `wz_reassembles_pico_fragment_tx.rs`).
-fn frag_payload(len: usize) -> String {
-    const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let bytes: Vec<u8> = (0..len)
-        .map(|i| ALPHABET[(i * 7) % ALPHABET.len()])
-        .collect();
-    String::from_utf8(bytes).expect("alphanumeric is valid UTF-8")
-}
 
 // wz-proves: transport-fragmentation wz->pico partial
 // wz-proves: pubsub-put wz->pico

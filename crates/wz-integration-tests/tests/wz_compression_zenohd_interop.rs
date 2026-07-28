@@ -40,13 +40,33 @@
 //! `compression::tests::compressible_payload_round_trips_with_the_bit_set` pins
 //! that property), and delivery therefore requires zenohd's lz4 DECOMPRESS path.
 //!
-//! It is also deliberately far below the fixture's large-payload ceiling. A
-//! 4121-byte value does NOT reach the pico subscriber through this
-//! wz -> zenohd -> pico chain — but the control run (same value, same zenohd, no
-//! `--compression`) does not reach it either, so that ceiling is independent of
-//! compression and is NOT this slice's subject. Sizing the value at ~536 bytes
-//! keeps the leg inside the routable range with margin, so a future failure here
-//! reads as a compression regression rather than as that unrelated limit.
+//! It is also deliberately far below the fixture's large-payload ceiling, and
+//! R311y438 measured what that ceiling actually is rather than leaving it as
+//! the open observation R311y433 recorded here.
+//!
+//! The ceiling is zenoh-pico's COMPILED reassembly bound, and nothing on the wz
+//! side. pico advertises `Z_BATCH_UNICAST_SIZE` (2048) on its InitSyn/InitAck
+//! (`vendor/zenoh-pico/src/protocol/definitions/transport.c:144`, `:175`), so
+//! the zenohd<->pico link negotiates 2048 and zenohd fragments anything larger;
+//! pico then reassembles into a `Z_FRAG_MAX_SIZE` wbuf
+//! (`src/transport/unicast/rx.c:208`, vendor default 4096 — `CMakeLists.txt:306`,
+//! which `scripts/build-zenoh-pico-cli.sh` does not override), and a chain that
+//! overruns it is SILENTLY dropped at the final fragment (`rx.c:218` sets
+//! `_Z_DBUF_STATE_OVERFLOW`, `:229-232` discards and returns `_Z_RES_OK`). The
+//! discard logs at `_Z_INFO`, which the Release CLI compiles out — `strings
+//! z_sub | grep -c "defragmentation buffer has overflown"` is 0 — so the drop
+//! has no symptom at all, which is why it read as unexplained for three rounds.
+//!
+//! Measured on this chain: 4059 bytes delivers, 4060 does not; rebuilt with
+//! `-DFRAG_MAX_SIZE=16384` the boundary moves to 16347 / 16348 — the same
+//! 37-byte serialization overhead at both, so the ceiling tracks the constant.
+//! The independence from compression that R311y433 observed is therefore
+//! structural, not coincidental: compression rides the wz<->zenohd link only,
+//! and the drop happens one hop further on.
+//!
+//! Sizing the value at ~536 bytes keeps the leg inside the routable range with
+//! margin, so a future failure here reads as a compression regression rather
+//! than as that unrelated limit.
 //!
 //! ## The two legs
 //!
