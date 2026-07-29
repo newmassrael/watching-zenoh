@@ -438,6 +438,26 @@ pub(crate) struct DeclareEmitSpec {
     /// fired, so a flag that armed both at once would make the distinction
     /// unobservable.
     pub(crate) advanced_recovery_heartbeat: bool,
+    /// R311y447 — `--advanced-recovery-periodic <ms>`: additionally arm the
+    /// PERIODIC retransmission trigger ([`RecoveryConfig::with_periodic_queries`]),
+    /// a background loop that re-asks every known source `_sn=last+1..` on a
+    /// cadence. `None` (default) leaves it unarmed.
+    ///
+    /// Requires `--advanced-recovery`, and kept separate from it for the same
+    /// reason as the heartbeat twin: the three triggers must stay individually
+    /// attributable.
+    ///
+    /// It carries a PERIOD rather than being a bare switch because the period is
+    /// the observable. The periodic trigger emits the same OPEN `_sn=last+1..`
+    /// selector the sample-driven one does, so selector shape cannot separate
+    /// them — what separates them is that `periodic_requests`
+    /// (`advanced_subscriber.rs:685-702`, mirroring zenoh's `PeriodicQuery::run`,
+    /// `advanced_subscriber.rs:588-620`) asks on EVERY tick for every known
+    /// source with no GET in flight, checking for no gap at all, while
+    /// sample-driven fires only out of `handle_live`'s gap branch. On a stream
+    /// with no loss the two therefore differ in PRESENCE, not in shape — and a
+    /// fixture asserting that needs to know the cadence to expect.
+    pub(crate) advanced_recovery_periodic_ms: Option<u64>,
     /// R311y445 — `--group-join <group>`'s bundle: join a zenoh-ext GROUP as a
     /// member and hold the session open so a foreign group peer sees this member
     /// in its view. `None` without the flag.

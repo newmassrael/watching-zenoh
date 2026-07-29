@@ -793,6 +793,7 @@ fn install_session_handles(
     #[cfg_attr(not(feature = "advanced"), allow(unused_variables))]
     let advanced_recovery = declare_spec.advanced_recovery;
     let advanced_recovery_heartbeat = declare_spec.advanced_recovery_heartbeat;
+    let advanced_recovery_periodic_ms = declare_spec.advanced_recovery_periodic_ms;
     let subscriber = key.and_then(|filter| {
         let key_for_callback = filter.clone();
         // R311ou — `--key` now declares a ROUTED subscriber: register the local
@@ -985,11 +986,25 @@ fn install_session_handles(
             // R311y444 — the heartbeat trigger is ADDITIVE: sample-driven cannot be
             // switched off (it is implied by recovering at all), so this arms a
             // second way for the same GET to be issued, not a different one.
-            let recovery = if advanced_recovery_heartbeat {
+            let mut recovery = if advanced_recovery_heartbeat {
                 RecoveryConfig::new().with_heartbeat()
             } else {
                 RecoveryConfig::new()
             };
+            // R311y447 — the PERIODIC trigger is additive in the same way, and
+            // upstream keeps the two mutually exclusive at the TYPE level
+            // (`RecoveryConfig<false>::heartbeat()` and `::periodic_queries()` each
+            // consume self, and the heartbeat callback's own comment says "API does
+            // not allow both", advanced_subscriber.rs:1087). wz's builder does not
+            // encode that exclusion, so a caller CAN arm both; the demo leaves them
+            // independent flags and the legs arm exactly one, which is what keeps a
+            // recovery GET attributable to the trigger under test.
+            if let Some(ms) = advanced_recovery_periodic_ms {
+                // Fully qualified rather than a file-level `use`: this call sits
+                // behind `#[cfg(feature = "advanced")]`, so an import would be
+                // unused on the feature-off build and trip -D warnings there.
+                recovery = recovery.with_periodic_queries(std::time::Duration::from_millis(ms));
+            }
             options = options.with_recovery(recovery);
         }
         let declared = AdvancedSubscriber::declare_with_options(
@@ -1021,7 +1036,8 @@ fn install_session_handles(
                      history_max={advanced_history_max:?} \
                      history_max_age={advanced_history_max_age:?} \
                      recovery={advanced_recovery} \
-                     recovery_heartbeat={advanced_recovery_heartbeat}"
+                     recovery_heartbeat={advanced_recovery_heartbeat} \
+                     recovery_periodic_ms={advanced_recovery_periodic_ms:?}"
                 );
                 Some(sub)
             }
@@ -1046,7 +1062,8 @@ fn install_session_handles(
              (ignored: history_max={advanced_history_max:?} \
              history_max_age={advanced_history_max_age:?} \
              recovery={advanced_recovery} \
-             recovery_heartbeat={advanced_recovery_heartbeat})"
+             recovery_heartbeat={advanced_recovery_heartbeat} \
+             recovery_periodic_ms={advanced_recovery_periodic_ms:?})"
         );
     }
 

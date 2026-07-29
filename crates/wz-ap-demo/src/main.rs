@@ -834,6 +834,40 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // R311y447 — the PERIODIC trigger, armed separately for the same reason as the
+    // heartbeat one. It takes a PERIOD rather than being a bare switch because the
+    // period is the observable: periodic emits the same OPEN `_sn=last+1..`
+    // selector sample-driven does, so what distinguishes it is that it asks on a
+    // cadence with no gap to explain the ask, and a fixture must know the cadence.
+    let advanced_recovery_periodic_ms: Option<u64> =
+        match parse_pair(rest, "--advanced-recovery-periodic") {
+            Some(s) => match s.parse::<u64>() {
+                Ok(0) => {
+                    eprintln!(
+                        "wz-ap-demo: --advanced-recovery-periodic must be > 0 \
+                         (the runtime clamps a 0 ms period to 1 ms, i.e. a GET storm)"
+                    );
+                    return ExitCode::from(2);
+                }
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!(
+                        "wz-ap-demo: --advanced-recovery-periodic must be a u64 \
+                         millisecond period (got {s:?})"
+                    );
+                    return ExitCode::from(2);
+                }
+            },
+            None => None,
+        };
+    if advanced_recovery_periodic_ms.is_some() && !advanced_recovery {
+        eprintln!(
+            "wz-ap-demo: --advanced-recovery-periodic requires --advanced-recovery \
+             (the periodic trigger lives inside RecoveryConfig; without recovery it \
+             would arm nothing)"
+        );
+        return ExitCode::from(2);
+    }
     // R311y442 — `--advanced-publish <keyexpr>` is the ANSWERING half: a wz
     // AdvancedPublisher whose `@adv` cache a FOREIGN advanced subscriber drains.
     // `--cache-max` sets the ring depth, `--advanced-publish-count` the burst size.
@@ -1347,6 +1381,7 @@ fn main() -> ExitCode {
         advanced_history_max_age,
         advanced_recovery,
         advanced_recovery_heartbeat,
+        advanced_recovery_periodic_ms,
         group_join: group_join_opt.map(|group| crate::args::GroupJoinSpec {
             group,
             // Defaulted rather than required: the id only has to be STABLE for a

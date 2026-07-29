@@ -159,6 +159,7 @@
 //! advanced`; without it the demo logs `INERT` and declares nothing, which the
 //! legs assert against explicitly rather than reading as an empty result.
 
+use std::collections::BTreeSet;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -258,6 +259,7 @@ fn spawn_wz_advanced_subscriber(
     history_max_age: Option<u32>,
     recovery: bool,
     recovery_heartbeat: bool,
+    recovery_periodic_ms: Option<u64>,
 ) -> (ChildGuard, std::fs::File, String) {
     let demo = wz_ap_demo_binary();
     let stderr = tempfile();
@@ -279,6 +281,9 @@ fn spawn_wz_advanced_subscriber(
     }
     if recovery_heartbeat {
         cmd.arg("--advanced-recovery-heartbeat");
+    }
+    if let Some(ms) = recovery_periodic_ms {
+        cmd.arg("--advanced-recovery-periodic").arg(ms.to_string());
     }
     let child = ChildGuard::wrap(
         "wz-ap-demo (--advanced-subscribe)",
@@ -318,6 +323,15 @@ fn spawn_wz_advanced_subscriber(
         "wz-ap-demo declared with recovery_heartbeat != {recovery_heartbeat}; the \
          --advanced-recovery-heartbeat flag did not take\n--- captured ---\n{captured}"
     );
+    // R311y447 — same reason as the two above, and it matters MORE here: the
+    // periodic trigger's signature is a GET arriving with nothing to explain it,
+    // so a flag that silently failed to parse would present as the control's
+    // result and read as a clean negative rather than as a broken run.
+    assert!(
+        captured.contains(&format!("recovery_periodic_ms={recovery_periodic_ms:?}")),
+        "wz-ap-demo declared with recovery_periodic_ms != {recovery_periodic_ms:?}; \
+         the --advanced-recovery-periodic flag did not take\n--- captured ---\n{captured}"
+    );
     (child, reader, captured)
 }
 
@@ -331,8 +345,15 @@ fn run_wz_advanced_subscriber(
     history_max_age: Option<u32>,
     run_for: Duration,
 ) -> String {
-    let (_child, mut reader, _at_declare) =
-        spawn_wz_advanced_subscriber(port, keyexpr, history_max, history_max_age, false, false);
+    let (_child, mut reader, _at_declare) = spawn_wz_advanced_subscriber(
+        port,
+        keyexpr,
+        history_max,
+        history_max_age,
+        false,
+        false,
+        None,
+    );
     std::thread::sleep(run_for);
     read_captured(&mut reader)
 }
@@ -478,8 +499,15 @@ fn run_gap_fixture(recovery: bool, value: &str) -> (String, usize, usize, usize)
         },
     );
 
-    let (_demo, mut reader, _at_declare) =
-        spawn_wz_advanced_subscriber(relay.port(), "demo/example/**", None, None, recovery, false);
+    let (_demo, mut reader, _at_declare) = spawn_wz_advanced_subscriber(
+        relay.port(),
+        "demo/example/**",
+        None,
+        None,
+        recovery,
+        false,
+        None,
+    );
     // READ AT DECLARE, and this reading is load-bearing rather than diagnostic.
     // It is what excludes the startup history GET as the path by which
     // `GAP_INDEX` could reach wz: that GET goes out with the declare, so it can
@@ -1128,6 +1156,7 @@ fn run_heartbeat_trigger_fixture(heartbeat: bool, value: &str) -> (String, Strin
         None,
         true,
         heartbeat,
+        None,
     );
     std::thread::sleep(RECOVERY_RUN);
     (
@@ -1593,5 +1622,228 @@ fn zenoh_ext_wz_recovery_get_stays_unbounded_without_the_heartbeat_trigger() {
         "wz issued a BOUNDED recovery GET {bounded:?} with the heartbeat trigger \
          unarmed. Only the heartbeat path sets `to_sn`, so leg 9's bounded range \
          is not attributable to the beacon\n{ctx}"
+    );
+}
+
+// ── Legs 11-12: the PERIODIC recovery trigger ───────────────────────────────
+//
+// R311y447. The third and last of `ext-pubsub-advanced-recovery`'s triggers to
+// get a foreign counterparty. It was carried as open from R311y444 onward with
+// the note that it is HARDER than heartbeat was, because the discriminator that
+// settled heartbeat does not transfer: heartbeat is the only trigger that sets
+// `to_sn`, so a BOUNDED `_sn=a..b` in the oracle's trace is its signature and
+// nothing else emits one — while periodic emits the same OPEN `_sn=last+1..`
+// that sample-driven does (`advanced_subscriber.rs:696-697` vs `:605-613`).
+//
+// The way out is that the two never needed to be told apart by SHAPE. They
+// differ in WHEN they fire, and that difference is total rather than statistical:
+//
+//   - sample-driven fires only out of `handle_live`'s gap branch — a source's
+//     sn arriving past `last_delivered + 1`.
+//   - periodic (`State::periodic_requests`, `advanced_subscriber.rs:685-702`)
+//     asks on EVERY tick for every known source with no GET in flight, and
+//     consults no gap at all. Upstream's `PeriodicQuery::run` is the same
+//     unconditional shape (`zenoh-ext/src/advanced_subscriber.rs:588-620`): it
+//     looks the source up in `sequenced_states` and queries, full stop.
+//
+// So on a clean stream sample-driven has nothing that can fire it and periodic
+// still asks on its cadence. The observable is then the PRESENCE and CADENCE of
+// a recovery GET rather than its shape. The fixture accordingly has no relay in
+// it: legs 5/7/9 need one to induce their gap, and here a relay would be the one
+// component able to introduce the loss these legs must rule out.
+
+/// The period the periodic legs arm wz with.
+///
+/// Deliberately SHORTER than the oracle's 1 Hz publish interval, which is what
+/// makes the trigger's independence visible: several ticks fall between two
+/// consecutive samples, so the GETs cannot be read as a reaction to arrivals.
+const PERIODIC_PERIOD_MS: u64 = 500;
+
+/// How long the periodic legs let the fixture run after wz's declare marker.
+const PERIODIC_RUN: Duration = Duration::from_secs(8);
+
+/// The floor on recovery GETs the ON arm must show in the oracle's trace.
+///
+/// MEASURED at 15 over the 8 s window (~16 ticks). The floor sits at roughly half
+/// of that so scheduling pressure cannot red it; R311y447 confirmed 3/3 green
+/// under 3x CPU oversubscription (96 hogs on 32 cores).
+///
+/// A floor rather than an equality: `periodic_requests` skips any source with a
+/// GET still in flight, so the realised count is at most the tick count and the
+/// exact value depends on round-trip timing that is not this leg's claim.
+const PERIODIC_MIN_GETS: usize = 8;
+
+/// The floor on DISTINCT `_sn` lower bounds the ON arm must show.
+///
+/// This is the assertion that makes leg 11 stand on its own, and it exists
+/// because damage-testing the first version of these legs showed the count and
+/// the delivery-contiguity check together were NOT enough. Inducing a real loss
+/// with periodic OFF produced 3 recovery GETs that were all `_sn=4..` — the same
+/// lower bound, repeated, pinned at the gap until it was repaired — while a
+/// periodic run produced `from` values 1,1,1,2,3,3,4,4,5,5,6,6,7,7,8, climbing
+/// with `last_delivered`.
+///
+/// That is the timer's real signature: sample-driven asks about ONE sn until it
+/// gets it, periodic re-asks about wherever delivery has reached. A stuck gap can
+/// therefore never satisfy this floor no matter how many times it retries.
+/// MEASURED at 8 distinct; the floor is half.
+const PERIODIC_MIN_DISTINCT_FROM: usize = 4;
+
+/// The shared fixture for legs 11 and 12: upstream's `z_advanced_pub` publishing
+/// cleanly at 1 Hz, wz subscribed with recovery armed, and the periodic trigger
+/// either armed or not. Returns wz's log and the oracle's trace.
+///
+/// wz connects DIRECTLY to zenohd — no `spawn_counting_relay`, because the relay
+/// is the component that exists to create the loss these legs must rule out.
+///
+/// The concrete `demo/example/adv` is inherited from the heartbeat fixture. It is
+/// not forced here (the periodic trigger declares no second subscriber, so the
+/// `**`-tailed-base limit that constrains the heartbeat legs does not apply), but
+/// one keyexpr across the trace-reading legs keeps the parser's input uniform.
+fn run_periodic_trigger_fixture(periodic: bool, value: &str) -> (String, String) {
+    let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
+    let (_oracle, mut oracle_out) =
+        spawn_zenoh_advanced_pub_with_log(port, "demo/example/adv", value, "warn,zenoh_ext=trace");
+    let (_demo, mut reader, _at_declare) = spawn_wz_advanced_subscriber(
+        port,
+        "demo/example/adv",
+        None,
+        None,
+        true,
+        false,
+        periodic.then_some(PERIODIC_PERIOD_MS),
+    );
+    std::thread::sleep(PERIODIC_RUN);
+    (read_captured(&mut reader), read_captured(&mut oracle_out))
+}
+
+/// Assert wz delivered an unbroken run of samples.
+///
+/// READ WHAT THIS DOES AND DOES NOT ESTABLISH. It establishes that no loss
+/// reached the application. It does NOT establish that no loss occurred, and the
+/// difference is not academic: recovery is armed in both arms, so a lost sample
+/// that the sample-driven trigger refilled leaves a CONTIGUOUS delivered run.
+/// R311y447 measured exactly that — dropping index 4 with periodic OFF still
+/// delivered [0..7], and this check passed while three sample-driven GETs had
+/// gone out.
+///
+/// What rules the loss out is leg 12: the same fixture with the trigger unarmed
+/// shows ZERO recovery GETs, which is an observable rather than an inference.
+/// This check is the cheaper companion that catches an unrepaired loss, and it
+/// runs in both arms so neither can quietly rest on a broken stream.
+///
+/// The indices are the oracle's own publication counter, so wz joining late is
+/// expected and only the STEP between consecutive deliveries is checked.
+fn assert_delivery_was_contiguous(delivered: &[usize], ctx: &str) {
+    assert!(
+        delivered.len() >= 2,
+        "wz delivered {} samples; with fewer than 2 there is no step to check and \
+         no run for the periodic trigger to track\n{ctx}",
+        delivered.len()
+    );
+    if let Some(w) = delivered.windows(2).find(|w| w[1] != w[0] + 1) {
+        panic!(
+            "wz's delivered indices jump {} -> {}, so a loss reached the application \
+             and the stream these legs reason about is not the clean one they \
+             assume\n{ctx}",
+            w[0], w[1]
+        );
+    }
+}
+
+/// Leg 11 — the periodic trigger polls the FOREIGN cache on its own cadence, with
+/// no loss in the fixture to have provoked it, and its ask ADVANCES with delivery
+/// rather than sitting on one sn.
+///
+/// This closes `ext-pubsub-advanced-recovery`'s third trigger against a foreign
+/// counterparty. It does NOT move the atom's A4 status: legs 5 and 9 already
+/// proved it in both directions, so this deepens a proven atom rather than
+/// flipping an unproven one.
+///
+/// Falsified by damaging the trigger's own code rather than the flag: inverting
+/// the in-flight gate in `State::periodic_requests`
+/// (`advanced_subscriber.rs:691`) so it never collects a request took this leg
+/// from 15 GETs to 0, and reds it ALONE — R311y447 ran the whole file under that
+/// damage and the other 11 legs stayed green.
+// wz-proves: ext-pubsub-advanced-recovery wz->zenoh-ext
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
+fn zenoh_ext_cache_is_polled_by_the_wz_periodic_trigger_without_any_loss() {
+    let value = "PERTRIG";
+    let (captured, oracle_trace) = run_periodic_trigger_fixture(true, value);
+    let delivered = delivered_indices(&captured);
+    let ranges = requested_sn_ranges(&oracle_trace);
+    let ctx = format!(
+        "delivered={delivered:?} sn_ranges={ranges:?}\n--- wz ---\n{captured}\n\
+         --- oracle trace ---\n{oracle_trace}"
+    );
+    assert_delivery_was_contiguous(&delivered, &ctx);
+
+    assert!(
+        ranges.len() >= PERIODIC_MIN_GETS,
+        "the oracle's trace shows {} recovery GET(s), fewer than the \
+         {PERIODIC_MIN_GETS} a {PERIODIC_PERIOD_MS} ms timer must produce over \
+         {PERIODIC_RUN:?}. The trigger is not firing on its cadence\n{ctx}",
+        ranges.len()
+    );
+    // THE ASK MUST ADVANCE. This is what separates the timer from a sample-driven
+    // retry storm, which repeats ONE lower bound until the hole is filled; see
+    // `PERIODIC_MIN_DISTINCT_FROM` for the measurement that forced this assertion
+    // into the leg.
+    let distinct: BTreeSet<u32> = ranges.iter().map(|(from, _)| *from).collect();
+    assert!(
+        distinct.len() >= PERIODIC_MIN_DISTINCT_FROM,
+        "wz asked for {} distinct `_sn` lower bound(s) {distinct:?}, fewer than the \
+         {PERIODIC_MIN_DISTINCT_FROM} a timer tracking `last_delivered` produces. A \
+         single repeated bound is the sample-driven trigger retrying one gap, which \
+         is not what this leg claims to witness\n{ctx}",
+        distinct.len()
+    );
+    // A bounded range appearing here would mean the heartbeat trigger armed
+    // itself despite its flag being off — the third trigger leaking into the leg
+    // that exists to isolate the second.
+    let bounded: Vec<_> = ranges.iter().filter(|(_, to)| to.is_some()).collect();
+    assert!(
+        bounded.is_empty(),
+        "the periodic arm shows BOUNDED range(s) {bounded:?}, but only the heartbeat \
+         path sets `to_sn` and it is unarmed here\n{ctx}"
+    );
+}
+
+/// Leg 12 — the CONTROL twin of leg 11, and the leg that actually establishes the
+/// fixture is loss-free. Same stream, `--advanced-recovery` still set, periodic
+/// trigger unarmed: wz asks the foreign cache for nothing at all.
+///
+/// Two things rest on it. It makes leg 11's GETs attributable to the timer rather
+/// than to recovery being armed at all — the one-argument difference between the
+/// arms is the trigger itself. And it is what rules out a repaired loss, which
+/// delivery contiguity cannot: R311y447 measured a dropped sample being refilled
+/// into a contiguous run, and it was THIS assertion that went red for it.
+///
+/// The pair is also mutually calibrating. This leg asserts an ABSENCE with the
+/// same parser leg 11 reads a presence with, so a reader that matched nothing
+/// would satisfy this leg vacuously — and would red leg 11, which asserts a floor
+/// with it. Neither arm can be silently satisfied by a broken parser.
+// wz-proves: none -- the CONTROL for leg 11.
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
+fn zenoh_ext_cache_is_never_polled_without_the_wz_periodic_trigger() {
+    let value = "PERCTRL";
+    let (captured, oracle_trace) = run_periodic_trigger_fixture(false, value);
+    let delivered = delivered_indices(&captured);
+    let ranges = requested_sn_ranges(&oracle_trace);
+    let ctx = format!(
+        "delivered={delivered:?} sn_ranges={ranges:?}\n--- wz ---\n{captured}\n\
+         --- oracle trace ---\n{oracle_trace}"
+    );
+    assert_delivery_was_contiguous(&delivered, &ctx);
+
+    assert!(
+        ranges.is_empty(),
+        "wz issued {} recovery GET(s) {ranges:?} with the periodic trigger unarmed. \
+         Sample-driven fires only out of `handle_live`'s gap branch, so this is a \
+         loss in a fixture that must not have one — and leg 11's cadence would not \
+         be attributable to the periodic timer\n{ctx}",
+        ranges.len()
     );
 }

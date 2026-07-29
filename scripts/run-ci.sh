@@ -5081,7 +5081,7 @@ layer_e_ap_demo_round_trip() {
     # than reading an empty sample set as success — so running them here would be
     # a red with a correct diagnosis and a wrong lane. Every one of the names
     # carries the `zenoh_ext` token FOR this skip; they run only in Z, where
-    # `_runci_guarded_test Z 10` pins that all of them executed. (R311y444-review,
+    # `_runci_guarded_test Z 12` pins that all of them executed. (R311y444-review,
     # REVIEWER 3 — this documentation pin was left at 6 when the executable one
     # moved to 10; y443 had moved both together, so the convention was one round
     # old when this round broke it. Move BOTH or the skip block misinforms.)
@@ -6679,6 +6679,20 @@ layer_z_zenohd_interop() {
     # parser: it asserts the open range PRESENT, so a parser matching nothing
     # fails there instead of satisfying leg 9's negative vacuously.
     #
+    # R311y447 adds an ELEVENTH and TWELFTH for the recovery atom's LAST trigger,
+    # periodic. The selector trick above does not transfer: periodic emits the
+    # same OPEN `_sn=last+1..` sample-driven does, so shape cannot separate them.
+    # What does is that `periodic_requests` consults no gap — it asks on every
+    # tick for every known source — while sample-driven fires only from the gap
+    # branch. So this fixture has NO relay: on a clean stream the periodic arm
+    # keeps asking (measured 15 GETs over 8 s at a 500 ms period) and the control
+    # asks nothing at all. The control is load-bearing beyond attribution: it is
+    # what rules out a REPAIRED loss, which delivery contiguity cannot see, since
+    # recovery refills a dropped sample into a contiguous run. Leg 11 also pins
+    # that the ask ADVANCES (distinct `_sn` lower bounds), which is what a timer
+    # tracking `last_delivered` produces and a sample-driven retry on one stuck
+    # gap never can.
+    #
     # The two REDs are not independent, and the first version of this comment said
     # they were. Measured across all three revert arms (separator only, `_anyke`
     # only, both): the failure shape is the SAME empty recovery in both legs,
@@ -6707,7 +6721,7 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenoh-ext example oracle not built \
 ($ext_examples_dir/$missing_ext_example; run: bash scripts/build-zenohd.sh)" || return 1
     else
-        _runci_guarded_test Z 10 env WZ_ZENOHD_BIN="$zenohd" \
+        _runci_guarded_test Z 12 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
             --test wz_advanced_pubsub_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \
             || return 1

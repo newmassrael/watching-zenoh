@@ -134,6 +134,16 @@ pub(crate) fn print_usage() {
     eprintln!("                             source's sequence numbers is buffered and back-filled");
     eprintln!("                             by an _sn=last+1.. GET, instead of reporting a MISS");
     eprintln!("                             and delivering past the hole");
+    eprintln!("    --advanced-recovery-heartbeat");
+    eprintln!("                             additionally arm the HEARTBEAT trigger: subscribe to");
+    eprintln!("                             publishers' <ke>/@adv/pub/** beacons and issue a");
+    eprintln!("                             BOUNDED _sn=last+1..hb GET when one reports ahead");
+    eprintln!("                             (requires --advanced-recovery)");
+    eprintln!("    --advanced-recovery-periodic <ms>");
+    eprintln!("                             additionally arm the PERIODIC trigger: re-ask every");
+    eprintln!("                             known source _sn=last+1.. every <ms>, whether or not");
+    eprintln!("                             a gap was seen, so a lost LAST sample is recovered");
+    eprintln!("                             (requires --advanced-recovery)");
     eprintln!("    --advanced-publish <keyexpr>");
     eprintln!(
         "                             declare an AdvancedPublisher on <keyexpr> with a sample"
