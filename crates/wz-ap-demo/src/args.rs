@@ -422,6 +422,22 @@ pub(crate) struct DeclareEmitSpec {
     /// so a recovered sample is attributable to the gap that triggered the GET
     /// rather than to a timer or to a foreign publisher's beacon.
     pub(crate) advanced_recovery: bool,
+    /// R311y444 — `--advanced-recovery-heartbeat`: additionally arm the HEARTBEAT
+    /// retransmission trigger ([`RecoveryConfig::with_heartbeat`]), which declares
+    /// a second subscriber on `<ke>/@adv/pub/**` and issues a recovery GET when a
+    /// publisher's beacon reports samples past `last_delivered`.
+    ///
+    /// Requires `--advanced-recovery` (the trigger lives inside `RecoveryConfig`,
+    /// so without recovery there is nothing to add it to); the parser rejects the
+    /// pair rather than silently arming nothing.
+    ///
+    /// Kept separate from `--advanced-recovery` deliberately. The two triggers
+    /// issue DIFFERENT selectors — sample-driven sends an OPEN `_sn=last+1..`
+    /// while heartbeat sends a BOUNDED `_sn=last+1..hb` — and that difference is
+    /// the only thing that distinguishes them on the wire when both could have
+    /// fired, so a flag that armed both at once would make the distinction
+    /// unobservable.
+    pub(crate) advanced_recovery_heartbeat: bool,
     /// R311y442 — `--advanced-publish <keyexpr>`'s bundle. The ANSWERING half of
     /// the advanced-pubsub plane: a wz [`AdvancedPublisher`] with a sample cache,
     /// which a FOREIGN advanced subscriber then drains. `None` without the flag.
@@ -452,6 +468,17 @@ pub(crate) struct AdvancedPublishSpec {
     /// is to keep the samples distinguishable in time for the `_time` filter, and
     /// a knob nothing varies is a knob that rots.
     pub(crate) interval_ms: u64,
+    /// R311y444 — `--advanced-publish-heartbeat <ms>`: arm the publisher's
+    /// last-sn heartbeat BEACON at this period
+    /// (`MissDetectionConfig::heartbeat`). `None` (default) = no beacon, which
+    /// is what makes the control twin of the beacon leg possible.
+    ///
+    /// This is the ANSWERING half's counterpart to `--advanced-recovery`: the
+    /// beacon is what tells a subscriber that a sample it never saw exists at
+    /// all. It matters most for the LAST sample of a burst, which no later live
+    /// sample can reveal a gap before — so with the beacon off, a lost last
+    /// sample is unrecoverable BY CONSTRUCTION rather than by timing.
+    pub(crate) heartbeat_ms: Option<u64>,
     /// The publisher's source identity, stamped into every sample's `SourceInfo`
     /// and rendered into the `@adv` KE. Taken from the demo's `--zid`, so a
     /// multi-publisher fixture gets distinct `@adv` namespaces the same way it

@@ -264,6 +264,14 @@ scouting-active = ["wz/scouting-active"]
 advanced = [
     "wz/ext-pubsub-advanced-history",
     "wz/ext-pubsub-advanced-publisher",
+    # R311y444 — the publisher-side heartbeat BEACON (`--advanced-publish-heartbeat`).
+    # It is its own atom because it is its own direction: `-advanced-publisher`
+    # answers a subscriber's GET, while this EMITS the last-sn beacon that tells a
+    # subscriber there is something to GET at all. Without it in the closure the
+    # flag would compile to a no-op and the leg that needs it would pass for the
+    # wrong reason -- the shape `advanced`-OFF already guards against by logging
+    # INERT.
+    "wz/ext-pubsub-sample-miss-detection",
 ]
 # R311qa — opt-in multi-peer ROUTER mode (`--router <addr>`): the catalog
 # `routing-router` atom's foundation (bind once, hold N concurrent peer faces,

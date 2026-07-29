@@ -6646,6 +6646,26 @@ layer_z_zenohd_interop() {
     # Leg 6 is what binds leg 5's result to the recovery path rather than to a
     # fixture that quietly repaired itself.
     #
+    # R311y444 adds a SEVENTH and EIGHTH, in the OTHER direction. Legs 5/6 witness
+    # the subscriber-side recovery trigger; the publisher-side heartbeat BEACON is
+    # a separate atom (`ext-pubsub-sample-miss-detection`, whose 19 cfg sites are
+    # all in advanced_publisher.rs), so a leg where wz CONSUMES a foreign beacon
+    # would compile none of it. Here wz PRODUCES the beacon: the relay removes the
+    # burst's LAST sample, wz then stops publishing, and no later sequence number
+    # can ever expose the hole — leaving the beacon as the only path by which
+    # upstream's `z_advanced_sub` can learn the sample exists. Leg 8 is the same
+    # fixture with the beacon unarmed, where it stays missing.
+    #
+    # A NINTH and TENTH close the recovery atom's third trigger. They cannot be
+    # judged the way legs 5/6 are: wz's sample-driven trigger is implied by
+    # recovering at all and cannot be switched off, and the oracle publishes at
+    # 1 Hz forever, so BOTH arms end with the gap filled. The observable is the
+    # SELECTOR instead — heartbeat asks for a BOUNDED `_sn=a..b`, sample-driven
+    # for an OPEN `_sn=a..` — read out of the oracle's own `zenoh_ext=trace` log,
+    # i.e. reported by the peer that received it. Leg 10 also calibrates the
+    # parser: it asserts the open range PRESENT, so a parser matching nothing
+    # fails there instead of satisfying leg 9's negative vacuously.
+    #
     # The two REDs are not independent, and the first version of this comment said
     # they were. Measured across all three revert arms (separator only, `_anyke`
     # only, both): the failure shape is the SAME empty recovery in both legs,
@@ -6671,7 +6691,7 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenoh-ext example oracle not built \
 ($ext_examples_dir/$missing_ext_example; run: bash scripts/build-zenohd.sh)" || return 1
     else
-        _runci_guarded_test Z 6 env WZ_ZENOHD_BIN="$zenohd" \
+        _runci_guarded_test Z 10 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
             --test wz_advanced_pubsub_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \
             || return 1

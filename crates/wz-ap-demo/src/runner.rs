@@ -785,6 +785,7 @@ fn install_session_handles(
     let advanced_history_max_age = declare_spec.advanced_history_max_age;
     #[cfg_attr(not(feature = "advanced"), allow(unused_variables))]
     let advanced_recovery = declare_spec.advanced_recovery;
+    let advanced_recovery_heartbeat = declare_spec.advanced_recovery_heartbeat;
     let subscriber = key.and_then(|filter| {
         let key_for_callback = filter.clone();
         // R311ou — `--key` now declares a ROUTED subscriber: register the local
@@ -974,7 +975,15 @@ fn install_session_handles(
         // and `.recovery()` separate builder methods.
         let mut options = AdvancedSubscriberOptions::new().with_history(history);
         if advanced_recovery {
-            options = options.with_recovery(RecoveryConfig::new());
+            // R311y444 — the heartbeat trigger is ADDITIVE: sample-driven cannot be
+            // switched off (it is implied by recovering at all), so this arms a
+            // second way for the same GET to be issued, not a different one.
+            let recovery = if advanced_recovery_heartbeat {
+                RecoveryConfig::new().with_heartbeat()
+            } else {
+                RecoveryConfig::new()
+            };
+            options = options.with_recovery(recovery);
         }
         let declared = AdvancedSubscriber::declare_with_options(
             session,
@@ -1004,7 +1013,8 @@ fn install_session_handles(
                     "wz-ap-demo: DECLARED ADVANCED SUBSCRIBER keyexpr='{filter}' \
                      history_max={advanced_history_max:?} \
                      history_max_age={advanced_history_max_age:?} \
-                     recovery={advanced_recovery}"
+                     recovery={advanced_recovery} \
+                     recovery_heartbeat={advanced_recovery_heartbeat}"
                 );
                 Some(sub)
             }
@@ -1028,7 +1038,8 @@ fn install_session_handles(
              the `advanced` feature); no history GET will be issued \
              (ignored: history_max={advanced_history_max:?} \
              history_max_age={advanced_history_max_age:?} \
-             recovery={advanced_recovery})"
+             recovery={advanced_recovery} \
+             recovery_heartbeat={advanced_recovery_heartbeat})"
         );
     }
 
@@ -1120,12 +1131,14 @@ fn spawn_background_tasks(
         log::warn!(
             "wz-ap-demo: --advanced-publish='{}' is INERT (built without the \
              `advanced` feature); no cache will be declared. Also ignored: \
-             value='{}' count={} cache_max={:?} interval_ms={} zid={:02x?}",
+             value='{}' count={} cache_max={:?} interval_ms={} heartbeat_ms={:?} \
+             zid={:02x?}",
             spec.keyexpr,
             spec.value,
             spec.count,
             spec.cache_max,
             spec.interval_ms,
+            spec.heartbeat_ms,
             spec.zid,
         );
     }

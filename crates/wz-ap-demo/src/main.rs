@@ -823,6 +823,17 @@ fn main() -> ExitCode {
     // gap without telling you WHICH trigger did it. With only the gap trigger
     // live, a recovered sample is attributable to the gap that preceded it.
     let advanced_recovery = rest.iter().any(|a| a == "--advanced-recovery");
+    // R311y444 — the HEARTBEAT trigger, armed separately so the two triggers stay
+    // distinguishable (they issue different selectors; see the field doc).
+    let advanced_recovery_heartbeat = rest.iter().any(|a| a == "--advanced-recovery-heartbeat");
+    if advanced_recovery_heartbeat && !advanced_recovery {
+        eprintln!(
+            "wz-ap-demo: --advanced-recovery-heartbeat requires --advanced-recovery \
+             (the heartbeat trigger lives inside RecoveryConfig; without recovery it \
+             would arm nothing)"
+        );
+        return ExitCode::from(2);
+    }
     // R311y442 — `--advanced-publish <keyexpr>` is the ANSWERING half: a wz
     // AdvancedPublisher whose `@adv` cache a FOREIGN advanced subscriber drains.
     // `--cache-max` sets the ring depth, `--advanced-publish-count` the burst size.
@@ -850,6 +861,32 @@ fn main() -> ExitCode {
         },
         None => 5,
     };
+    // R311y444 — `--advanced-publish-heartbeat <ms>` arms the publisher's last-sn
+    // BEACON. Parsed as its own flag rather than folded into `--advanced-publish`
+    // because its ABSENCE is load-bearing: the control twin of the beacon leg is
+    // the same argv minus this flag, so a default that armed it would make the
+    // two legs indistinguishable.
+    let advanced_publish_heartbeat_ms: Option<u64> =
+        match parse_pair(rest, "--advanced-publish-heartbeat") {
+            Some(s) => match s.parse::<u64>() {
+                Ok(0) => {
+                    eprintln!(
+                        "wz-ap-demo: --advanced-publish-heartbeat must be > 0 ms \
+                         (0 would spin the beacon loop)"
+                    );
+                    return ExitCode::from(2);
+                }
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!(
+                        "wz-ap-demo: --advanced-publish-heartbeat must be a u64 \
+                         millisecond period (got {s:?})"
+                    );
+                    return ExitCode::from(2);
+                }
+            },
+            None => None,
+        };
     let on_remote_sub_log = rest.iter().any(|a| a == "--on-remote-subscriber-log");
     let on_remote_q_log = rest.iter().any(|a| a == "--on-remote-queryable-log");
     let on_remote_l_log = rest.iter().any(|a| a == "--on-remote-liveliness-log");
@@ -1250,6 +1287,7 @@ fn main() -> ExitCode {
         advanced_history_max,
         advanced_history_max_age,
         advanced_recovery,
+        advanced_recovery_heartbeat,
         advanced_publish: advanced_publish_opt.map(|keyexpr| AdvancedPublishSpec {
             keyexpr,
             // Guarded above: `--advanced-publish` without `--value` already exited.
@@ -1257,6 +1295,7 @@ fn main() -> ExitCode {
             count: advanced_publish_count,
             cache_max: advanced_cache_max,
             interval_ms: 200,
+            heartbeat_ms: advanced_publish_heartbeat_ms,
             // Full path, not the `use` above: that import is `scouting-active`-gated
             // and this site is not.
             zid: zid_override

@@ -173,6 +173,17 @@ pub(crate) async fn advanced_publisher_task<T>(
     if let Some(max_samples) = spec.cache_max {
         options.cache = Some(CacheConfig { max_samples });
     }
+    // R311y444 — arm the last-sn heartbeat BEACON. `AdvancedPublisherOptions`
+    // defaults to `Sequencing::SequenceNumber`, which the beacon REQUIRES (there
+    // is no last-sn to publish without a seqnum), so no extra wiring is needed
+    // here -- but that coupling is upstream's `Sequencing::SequenceNumber` force,
+    // not a wz invariant, so it is asserted at declare time by the log line below
+    // rather than assumed.
+    if let Some(period_ms) = spec.heartbeat_ms {
+        options.sample_miss_detection =
+            wz::runtime_tokio::advanced_publisher::MissDetectionConfig::default()
+                .heartbeat(core::time::Duration::from_millis(period_ms));
+    }
     let publisher =
         match AdvancedPublisher::declare(&session, spec.keyexpr.clone(), options, spec.zid.clone())
         {
@@ -186,10 +197,12 @@ pub(crate) async fn advanced_publisher_task<T>(
             }
         };
     log::info!(
-        "wz-ap-demo: DECLARED ADVANCED PUBLISHER keyexpr='{}' cache_max={:?} count={}",
+        "wz-ap-demo: DECLARED ADVANCED PUBLISHER keyexpr='{}' cache_max={:?} count={} \
+         heartbeat_ms={:?}",
         spec.keyexpr,
         spec.cache_max,
         spec.count,
+        spec.heartbeat_ms,
     );
 
     for idx in 0..spec.count {

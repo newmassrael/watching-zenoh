@@ -101,6 +101,50 @@
 //!    one. This is what makes leg 5 a statement about wz rather than about the
 //!    fixture — "the sample arrived" is otherwise equally consistent with a
 //!    needle that stopped matching or a link that re-sent the batch.
+//! 7. **BEACON (R311y444).** The publisher-side half of miss detection, which is
+//!    a DIFFERENT ATOM from legs 5/6 and in the opposite direction. Every one of
+//!    `ext-pubsub-sample-miss-detection`'s 19 cfg sites is in
+//!    `advanced_publisher.rs` — the beacon EMIT — while the subscriber-side
+//!    heartbeat TRIGGER belongs to `ext-pubsub-advanced-recovery`
+//!    (`advanced_subscriber.rs:220` says so outright). So a leg where wz consumes
+//!    a foreign beacon would compile none of this atom and prove something else.
+//!
+//!    Here the relay removes the LAST sample of a wz burst. wz then stops
+//!    publishing, so no later sequence number can ever expose the hole and the
+//!    oracle's sample-driven trigger has nothing to fire on — by construction,
+//!    not by timing. What remains is wz's beacon, and upstream's `z_advanced_sub`
+//!    recovers the sample from wz's own `@adv` cache through it.
+//! 8. **BEACON CONTROL.** Leg 7 with the beacon unarmed and nothing else changed:
+//!    the sample stays gone. The oracle arms its heartbeat trigger and both its
+//!    history GETs identically in both legs, so every other path that could refill
+//!    the hole is present here too.
+//!
+//!    Falsified further by DAMAGING THE ATOM'S OWN WIRE ARTIFACT rather than the
+//!    flag that gates it (the R311y443-review standard): with `emit_heartbeat`
+//!    publishing `z_serialize::<u32>(&0)` instead of the last sn
+//!    (`advanced_publisher.rs:440`), leg 7 goes RED and leg 8 stays GREEN. A
+//!    beacon that arrives but lies is indistinguishable from no beacon to the
+//!    oracle, which is the property the leg actually depends on.
+//! 9. **HEARTBEAT TRIGGER (R311y444).** The third of `-advanced-recovery`'s three
+//!    triggers, which legs 5/6 left unarmed on purpose. It cannot be judged by
+//!    whether the gap was refilled: wz's sample-driven trigger is implied by
+//!    recovering at all and cannot be switched off, and the oracle publishes at
+//!    1 Hz forever, so both arms end with the hole filled. The observable is the
+//!    SELECTOR — heartbeat asks for a BOUNDED `_sn=a..b`
+//!    (`advanced_subscriber.rs:709-726`), sample-driven for an OPEN `_sn=a..`
+//!    (`:605-613`) — read out of the ORACLE's `zenoh_ext=trace`, so it is the
+//!    receiving peer that reports what wz put on the wire.
+//! 10. **HEARTBEAT TRIGGER CONTROL.** Same fixture, trigger unarmed: no bounded
+//!     range, and the open one still present. That second half is the parser's
+//!     calibration — without it, a parser that matched nothing would satisfy the
+//!     negative vacuously.
+//!
+//!    These two subscribe on a CONCRETE keyexpr rather than `demo/example/**`.
+//!    The heartbeat trigger declares a second subscriber on `<ke>/@adv/pub/**`,
+//!    which under a `**`-tailed base composes to the `**`+literal+`*` shape wz's
+//!    R300 gate refuses for SIGABRTing zenoh-pico (`keyexpr_canon.rs:383-394`).
+//!    Upstream emits it regardless, so wz is the safer side here — but in wz the
+//!    heartbeat trigger and a `**`-tailed base are not composable.
 //!
 //! ## The naming obligation (R311y443)
 //!
@@ -148,6 +192,21 @@ fn tempfile() -> std::fs::File {
 /// implementation itself, which is far stronger evidence than counting an
 /// absence of deliveries on the wz side.
 fn spawn_zenoh_advanced_pub(port: u16, keyexpr: &str, value: &str) -> (ChildGuard, std::fs::File) {
+    spawn_zenoh_advanced_pub_with_log(port, keyexpr, value, "warn")
+}
+
+/// [`spawn_zenoh_advanced_pub`] with the oracle's `RUST_LOG` chosen by the caller.
+///
+/// R311y444 — the heartbeat-trigger legs need `zenoh_ext=trace`, because what
+/// distinguishes the trigger they test is not WHETHER the gap was refilled but
+/// which SELECTOR asked for it, and the only implementation that logs the
+/// selector wz actually put on the wire is the foreign one receiving it.
+fn spawn_zenoh_advanced_pub_with_log(
+    port: u16,
+    keyexpr: &str,
+    value: &str,
+    rust_log: &str,
+) -> (ChildGuard, std::fs::File) {
     let bin = zenoh_ext_example_binary("z_advanced_pub");
     // ONE capture for both streams, deliberately. The example prints its `Put
     // Data` progress with `println!` while `tracing` writes the reply-refusal
@@ -172,7 +231,7 @@ fn spawn_zenoh_advanced_pub(port: u16, keyexpr: &str, value: &str) -> (ChildGuar
             .arg("16")
             .arg("-v")
             .arg(value)
-            .env("RUST_LOG", "warn")
+            .env("RUST_LOG", rust_log)
             .stdout(Stdio::from(stdout_writer))
             .stderr(Stdio::from(writer))
             .spawn()
@@ -198,6 +257,7 @@ fn spawn_wz_advanced_subscriber(
     history_max: Option<usize>,
     history_max_age: Option<u32>,
     recovery: bool,
+    recovery_heartbeat: bool,
 ) -> (ChildGuard, std::fs::File, String) {
     let demo = wz_ap_demo_binary();
     let stderr = tempfile();
@@ -216,6 +276,9 @@ fn spawn_wz_advanced_subscriber(
     }
     if recovery {
         cmd.arg("--advanced-recovery");
+    }
+    if recovery_heartbeat {
+        cmd.arg("--advanced-recovery-heartbeat");
     }
     let child = ChildGuard::wrap(
         "wz-ap-demo (--advanced-subscribe)",
@@ -250,6 +313,11 @@ fn spawn_wz_advanced_subscriber(
         "wz-ap-demo declared with recovery != {recovery}; the --advanced-recovery \
          flag did not take\n--- captured ---\n{captured}"
     );
+    assert!(
+        captured.contains(&format!("recovery_heartbeat={recovery_heartbeat}")),
+        "wz-ap-demo declared with recovery_heartbeat != {recovery_heartbeat}; the \
+         --advanced-recovery-heartbeat flag did not take\n--- captured ---\n{captured}"
+    );
     (child, reader, captured)
 }
 
@@ -264,7 +332,7 @@ fn run_wz_advanced_subscriber(
     run_for: Duration,
 ) -> String {
     let (_child, mut reader, _at_declare) =
-        spawn_wz_advanced_subscriber(port, keyexpr, history_max, history_max_age, false);
+        spawn_wz_advanced_subscriber(port, keyexpr, history_max, history_max_age, false, false);
     std::thread::sleep(run_for);
     read_captured(&mut reader)
 }
@@ -411,7 +479,7 @@ fn run_gap_fixture(recovery: bool, value: &str) -> (String, usize, usize, usize)
     );
 
     let (_demo, mut reader, _at_declare) =
-        spawn_wz_advanced_subscriber(relay.port(), "demo/example/**", None, None, recovery);
+        spawn_wz_advanced_subscriber(relay.port(), "demo/example/**", None, None, recovery, false);
     // READ AT DECLARE, and this reading is load-bearing rather than diagnostic.
     // It is what excludes the startup history GET as the path by which
     // `GAP_INDEX` could reach wz: that GET goes out with the declare, so it can
@@ -972,4 +1040,477 @@ fn zenoh_ext_advanced_sub_recovers_a_wz_cache() {
              {idx} byte-exact (looking for {expected})\n--- z_advanced_sub ---\n{sub_out}"
         );
     }
+}
+
+/// The `_sn=` ranges the oracle's own trace shows wz asking for, as
+/// `(from, to)` with `to == None` for an OPEN range.
+///
+/// R311y444 — this is the heartbeat-trigger legs' whole observable, because
+/// recovery SUCCESS cannot separate the two triggers. wz's sample-driven trigger
+/// cannot be switched off (it is implied by recovering at all,
+/// `advanced_subscriber.rs:195-197`) and the oracle publishes at 1 Hz forever, so
+/// the successor that fires it always arrives. What differs is the SELECTOR:
+/// sample-driven sends `to_sn: None` (`:605-613`) and heartbeat sends
+/// `to_sn: Some(hb_sn)` (`:709-726`), so a bounded range is the beacon path's
+/// signature and nothing else in wz emits one.
+///
+/// Parsed from the FOREIGN implementation's log rather than wz's, deliberately:
+/// wz does not log its own selector, and a claim about what crossed the wire is
+/// worth more when the peer that received it is the one reporting.
+fn requested_sn_ranges(oracle_trace: &str) -> Vec<(u32, Option<u32>)> {
+    let mut out = Vec::new();
+    for line in oracle_trace.lines() {
+        let mut rest = line;
+        while let Some(pos) = rest.find("_sn=") {
+            rest = &rest[pos + "_sn=".len()..];
+            let end = rest
+                .find(|c: char| c == ';' || c == '"' || c == '\'' || c.is_whitespace())
+                .unwrap_or(rest.len());
+            let (val, tail) = rest.split_at(end);
+            if let Some((from, to)) = val.split_once("..") {
+                if let Ok(from) = from.trim().parse::<u32>() {
+                    let to = to.trim();
+                    out.push((from, if to.is_empty() { None } else { to.parse().ok() }));
+                }
+            }
+            rest = tail;
+        }
+    }
+    out
+}
+
+/// The shared fixture for legs 9 and 10: leg 5's gap fixture with the oracle
+/// tracing, and wz's heartbeat trigger armed or not.
+///
+/// Returns wz's log, the oracle's trace, and the relay's drop count.
+///
+/// wz subscribes on the CONCRETE `demo/example/adv`, not the `demo/example/**`
+/// every other leg here uses, and that is forced rather than stylistic. The
+/// heartbeat trigger declares a SECOND subscriber on `<ke>/@adv/pub/**`, which
+/// with a `**`-tailed base composes to `demo/example/**/@adv/pub/**` — a `**`
+/// chunk, then literal chunks, then a `*`-shape chunk, which is exactly what
+/// wz's R300 outbound gate refuses because it SIGABRTs zenoh-pico's canon
+/// (`keyexpr_canon.rs:383-394`, R299 bug #3). Upstream emits that keyexpr anyway
+/// (the oracle runs `-k demo/example/**` with its own heartbeat armed), so this
+/// is wz declining to put a pico-crashing keyexpr on the wire rather than a
+/// defect — but the composition limit is real: in wz the heartbeat trigger and a
+/// `**`-tailed base cannot be used together, and a fixture that ignored it would
+/// fail at declare with the trigger never armed at all.
+fn run_heartbeat_trigger_fixture(heartbeat: bool, value: &str) -> (String, String, usize) {
+    let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
+    let (_oracle, mut oracle_out) =
+        spawn_zenoh_advanced_pub_with_log(port, "demo/example/adv", value, "warn,zenoh_ext=trace");
+    let needle = format!("[{GAP_INDEX:4}] {value}");
+    let relay = spawn_counting_relay(
+        port,
+        T_MID_FRAME,
+        RelayFault::DropFirstAcceptorToDialer {
+            needle: needle.into_bytes(),
+        },
+    );
+    let (_demo, mut reader, _at_declare) = spawn_wz_advanced_subscriber(
+        relay.port(),
+        "demo/example/adv",
+        None,
+        None,
+        true,
+        heartbeat,
+    );
+    std::thread::sleep(RECOVERY_RUN);
+    (
+        read_captured(&mut reader),
+        read_captured(&mut oracle_out),
+        relay.dropped_count(),
+    )
+}
+
+/// The burst the beacon legs publish. Its LAST index is the one the relay
+/// removes, so the burst has to be long enough that the oracle is certainly
+/// established with an in-order baseline well before the fixture reaches it.
+const BEACON_BURST: usize = 20;
+
+/// The beacon period wz is armed with. Matches upstream's own default in
+/// `z_advanced_pub` (`MissDetectionConfig::default().heartbeat(500ms)`,
+/// `zenoh-ext/examples/examples/z_advanced_pub.rs:36`), so the leg witnesses the
+/// cadence a real deployment would run rather than one tuned to pass.
+const BEACON_PERIOD_MS: u64 = 500;
+
+/// How long the beacon legs let the oracle run AFTER wz's burst has completed.
+///
+/// This window is the whole point of the fixture: publishing has STOPPED, so
+/// nothing but the beacon can still tell the oracle that a sample it never saw
+/// exists. At [`BEACON_PERIOD_MS`] it is ~16 beacons, and the recovery GET round
+/// trip was measured under 100 ms in R311y443-review.
+const BEACON_RUN: Duration = Duration::from_secs(8);
+
+/// Spawn upstream's `z_advanced_sub` against `port` and return once it has
+/// DECLARED — the child and its still-open capture.
+///
+/// Waiting for the declare marker is what makes the beacon legs' ordering real
+/// rather than hoped for: the oracle must be subscribed BEFORE wz publishes
+/// anything, or its startup history GET could carry the very sample the relay is
+/// about to remove.
+///
+/// The oracle needs no flags to arm what these legs test. `z_advanced_sub`
+/// hard-codes `.recovery(RecoveryConfig::default().heartbeat())` (`:33`) and
+/// declares a `sample_miss_listener` (`:38`), so the heartbeat trigger and the
+/// miss report are always live — there is no arming knob to get wrong.
+fn spawn_zenoh_advanced_sub(port: u16, keyexpr: &str) -> (ChildGuard, std::fs::File) {
+    let bin = zenoh_ext_example_binary("z_advanced_sub");
+    let output = tempfile();
+    let writer = output.try_clone().expect("dup z_advanced_sub stdout");
+    let mut reader = output;
+    let child = ChildGuard::wrap(
+        "z_advanced_sub (zenoh-ext oracle)",
+        Command::new(&bin)
+            .arg("--mode")
+            .arg("client")
+            .arg("-e")
+            .arg(format!("tcp/127.0.0.1:{port}"))
+            .arg("--no-multicast-scouting")
+            .arg("-k")
+            .arg(keyexpr)
+            .env("RUST_LOG", "error")
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn z_advanced_sub"),
+    );
+    wait_for_substring(&mut reader, "Declaring AdvancedSubscriber", MARKER_TIMEOUT).unwrap_or_else(
+        |snapshot| {
+            panic!(
+                "z_advanced_sub never declared its subscriber; the oracle never \
+                 reached the fixture\n--- z_advanced_sub ---\n{snapshot}"
+            )
+        },
+    );
+    (child, reader)
+}
+
+/// Spawn a wz advanced PUBLISHER against `port`, optionally with its heartbeat
+/// beacon armed, and return once its burst has COMPLETED.
+///
+/// Returns the child, its still-open capture, and the log at burst completion.
+fn spawn_wz_advanced_publisher(
+    port: u16,
+    keyexpr: &str,
+    value: &str,
+    heartbeat: bool,
+) -> (ChildGuard, std::fs::File, String) {
+    let demo = wz_ap_demo_binary();
+    let stderr = tempfile();
+    let writer = stderr.try_clone().expect("dup wz-ap-demo stderr");
+    let mut reader = stderr;
+    let mut cmd = Command::new(&demo);
+    cmd.arg("--connect")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--advanced-publish")
+        .arg(keyexpr)
+        .arg("--value")
+        .arg(value)
+        .arg("--advanced-publish-count")
+        .arg(BEACON_BURST.to_string())
+        .arg("--cache-max")
+        .arg("32");
+    if heartbeat {
+        cmd.arg("--advanced-publish-heartbeat")
+            .arg(BEACON_PERIOD_MS.to_string());
+    }
+    let child = ChildGuard::wrap(
+        "wz-ap-demo (--advanced-publish)",
+        cmd.env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(writer))
+            .spawn()
+            .expect("spawn wz-ap-demo advanced publisher"),
+    );
+
+    let captured = wait_for_substring(&mut reader, "ADVANCED BURST COMPLETE", MARKER_TIMEOUT)
+        .unwrap_or_else(|snapshot| {
+            panic!(
+                "wz-ap-demo never completed its advanced burst. If this says INERT, \
+                 the demo was built without `--features advanced`.\n--- captured ---\n{snapshot}"
+            )
+        });
+    assert!(
+        !captured.contains("is INERT"),
+        "wz-ap-demo reports --advanced-publish INERT; build it with \
+         `--features advanced`.\n--- captured ---\n{captured}"
+    );
+    // The declare line reports the option it was built with, so a flag that
+    // silently failed to parse is caught HERE rather than downstream, where a
+    // beacon that was never armed reads exactly like a beacon that was armed and
+    // did not work — the same guard the recovery legs put on `recovery=`.
+    let expected = if heartbeat {
+        format!("heartbeat_ms=Some({BEACON_PERIOD_MS})")
+    } else {
+        "heartbeat_ms=None".to_string()
+    };
+    assert!(
+        captured.contains(&expected),
+        "wz-ap-demo did not declare with {expected}; the \
+         --advanced-publish-heartbeat flag did not take\n--- captured ---\n{captured}"
+    );
+    // wz emitting fewer samples than asked would ALSO leave the last index
+    // missing, which is the control leg's expected observation and the proof
+    // leg's failure — so the two would be indistinguishable without this.
+    let puts = captured
+        .lines()
+        .filter(|l| l.contains("ADVANCED PUT"))
+        .count();
+    assert_eq!(
+        puts, BEACON_BURST,
+        "wz published {puts} samples, not {BEACON_BURST}; the burst itself is \
+         short, so nothing downstream is a statement about the beacon\n--- captured ---\n{captured}"
+    );
+    (child, reader, captured)
+}
+
+/// The shared fixture for legs 7 and 8: a wz advanced publisher bursting into
+/// zenohd over a healthy link, and upstream's `z_advanced_sub` reaching zenohd
+/// through a relay that removes the burst's LAST sample on the way in.
+///
+/// Returns the oracle's captured output, wz's log, and the relay's drop count.
+fn run_beacon_fixture(heartbeat: bool, value: &str) -> (String, String, usize) {
+    let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
+    // The fault rides the ORACLE's link, which is the reverse of the recovery
+    // legs and follows from which side is the receiver here. wz dials zenohd
+    // DIRECTLY: its own link must stay lossless, or the `@adv` cache that answers
+    // the recovery GET would be missing the very sample under test.
+    let needle = format!("[{:4}] {value}", BEACON_BURST - 1);
+    let relay = spawn_counting_relay(
+        port,
+        T_MID_FRAME,
+        RelayFault::DropFirstAcceptorToDialer {
+            needle: needle.into_bytes(),
+        },
+    );
+
+    // ORDER IS LOAD-BEARING, and it is what makes this fixture attributable
+    // without the measurement the recovery legs needed. The oracle subscribes
+    // BEFORE wz exists, so:
+    //
+    //   * its STARTUP history GET (`<ke>/@adv/**`, issued at declare) goes out
+    //     when there is no wz cache to answer it at all;
+    //   * its LATE-PUBLISHER GET — armed, since `z_advanced_sub` sets
+    //     `HistoryConfig::default().detect_late_publishers()` (`:32`) — fires on
+    //     wz's `@adv` liveliness token, which wz declares BEFORE its first put.
+    //
+    // Neither can carry the last index, because that index does not exist yet at
+    // the instant either GET is issued. The recovery legs had to MEASURE this
+    // (`published_at_declare`); here it is structural.
+    let (_sub, mut sub_out) = spawn_zenoh_advanced_sub(relay.port(), "demo/wzadv/**");
+    let (_demo, _demo_reader, demo_log) =
+        spawn_wz_advanced_publisher(port, "demo/wzadv/x", value, heartbeat);
+
+    // Publishing has stopped. Everything that arrives from here on is the beacon
+    // path or nothing.
+    std::thread::sleep(BEACON_RUN);
+    (read_captured(&mut sub_out), demo_log, relay.dropped_count())
+}
+
+/// The precondition both beacon legs share: the fault actually landed, and the
+/// stream was otherwise intact.
+fn assert_beacon_fixture_held(sub_out: &str, dropped: usize, value: &str, ctx: &str) {
+    assert_eq!(
+        dropped, 1,
+        "the relay removed {dropped} batches, not 1; with 0 nothing was ever lost, \
+         so neither leg is a statement about the beacon\n{ctx}"
+    );
+    // Everything BEFORE the removed sample must have arrived live. Without this,
+    // a fixture that lost the whole tail would satisfy the control leg's
+    // assertion for entirely the wrong reason.
+    for idx in 0..BEACON_BURST - 1 {
+        let expected = format!("('demo/wzadv/x': '[{idx:4}] {value}')");
+        assert!(
+            sub_out.contains(&expected),
+            "the oracle never received sample {idx}, which the relay did NOT \
+             remove — the fixture lost more than the one batch it meant to\n{ctx}"
+        );
+    }
+}
+
+/// Leg 7 — the PROOF for `ext-pubsub-sample-miss-detection`. wz's heartbeat
+/// beacon is what tells a real zenoh-ext subscriber that a sample it never saw
+/// exists, and the subscriber then recovers it from wz's own `@adv` cache.
+///
+/// ## Why the LAST sample, specifically
+///
+/// The recovery legs (5 and 6) remove a sample from the MIDDLE of a stream, and
+/// there the successor's sequence number is what reveals the hole. That is a
+/// different atom: it witnesses the subscriber's sample-driven trigger, and
+/// upstream's oracle would have recovered the gap with or without a beacon.
+///
+/// Removing the burst's LAST sample closes that path BY CONSTRUCTION rather than
+/// by timing. wz stops publishing when the burst completes, so no later sample
+/// can ever carry the sequence number that would expose the gap, and
+/// `z_advanced_sub`'s sample-driven trigger has nothing to fire on. What remains
+/// is the beacon — a `z_serialize::<u32>` of wz's last sn, republished every
+/// [`BEACON_PERIOD_MS`] on the publisher's own `@adv` KE
+/// (`advanced_publisher.rs:440`), which is byte-identical to what upstream emits
+/// from `advanced_publisher.rs:390-395`.
+///
+/// ## What binds this to the atom's own code
+///
+/// `ext-pubsub-sample-miss-detection` has 19 cfg sites and every one of them is
+/// in `advanced_publisher.rs` — the beacon EMIT. The subscriber-side heartbeat
+/// trigger is a different atom (`ext-pubsub-advanced-recovery`, and
+/// `advanced_subscriber.rs:220` says so). So the direction matters: a leg where
+/// wz CONSUMES a foreign beacon would compile none of this atom's code. Here wz
+/// produces the beacon and the foreign implementation consumes it, which is what
+/// makes leg 8 — the same fixture with the beacon off — a discriminator on the
+/// atom rather than on the flag that gates it.
+// wz-proves: ext-pubsub-sample-miss-detection wz->zenoh-ext
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
+fn zenoh_ext_advanced_sub_recovers_a_lost_last_sample_from_the_wz_heartbeat() {
+    let value = "WZBEAT";
+    let (sub_out, demo_log, dropped) = run_beacon_fixture(true, value);
+    let ctx = format!("--- z_advanced_sub ---\n{sub_out}\n--- wz ---\n{demo_log}");
+    assert_beacon_fixture_held(&sub_out, dropped, value, &ctx);
+
+    let last = format!("('demo/wzadv/x': '[{:4}] {value}')", BEACON_BURST - 1);
+    assert!(
+        sub_out.contains(&last),
+        "the relay removed the burst's LAST sample and it never came back. \
+         Publishing had stopped, so no live sample could reveal the gap: the \
+         beacon was the only path, and a real zenoh-ext subscriber did not \
+         recover through it (looking for {last})\n{ctx}"
+    );
+}
+
+/// Leg 8 — the CONTROL twin of leg 7. Same fixture, same removed sample, beacon
+/// NOT armed, and the sample stays gone.
+///
+/// This is the half that makes leg 7 a statement about the beacon rather than
+/// about the oracle's recovery machinery: `z_advanced_sub` arms its heartbeat
+/// trigger and its history GETs identically in both legs, so everything that
+/// could refill the hole for another reason is present here too. The only
+/// difference on the wire is whether wz emits the beacon at all.
+// wz-proves: none -- the CONTROL for leg 7. It is the beacon-off branch, and it
+// is what binds leg 7's positive result to the beacon specifically.
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
+fn zenoh_ext_advanced_sub_cannot_recover_a_lost_last_sample_without_the_wz_heartbeat() {
+    let value = "NOBEAT";
+    let (sub_out, demo_log, dropped) = run_beacon_fixture(false, value);
+    let ctx = format!("--- z_advanced_sub ---\n{sub_out}\n--- wz ---\n{demo_log}");
+    assert_beacon_fixture_held(&sub_out, dropped, value, &ctx);
+
+    let last = format!("('demo/wzadv/x': '[{:4}] {value}')", BEACON_BURST - 1);
+    assert!(
+        !sub_out.contains(&last),
+        "without the beacon the oracle recovered the removed last sample anyway, \
+         so leg 7's positive result is NOT attributable to the beacon — some \
+         other path (a history GET, a late-publisher GET) is refilling the \
+         hole\n{ctx}"
+    );
+}
+
+/// Leg 9 — the PROOF for `ext-pubsub-advanced-recovery`'s HEARTBEAT trigger, the
+/// third of its three and the one legs 5/6 deliberately left unarmed.
+///
+/// ## Why this leg cannot be judged by whether the gap was refilled
+///
+/// Legs 5 and 6 separate "recovered" from "not recovered" by toggling recovery
+/// itself. That is unavailable here: wz's sample-driven trigger is implied by
+/// recovering at all (`advanced_subscriber.rs:195-197`) and cannot be switched
+/// off, and upstream's `z_advanced_pub` publishes at 1 Hz forever — so the
+/// successor that fires the sample-driven GET always arrives, and BOTH arms of a
+/// heartbeat-on/heartbeat-off pair end with the hole filled. Judging by delivery
+/// would make the two legs indistinguishable, which is the trap this leg is
+/// built around rather than into.
+///
+/// What separates them is the SELECTOR the two triggers put on the wire:
+///
+///   * sample-driven issues `to_sn: None` → an OPEN `_sn=last+1..`
+///     (`advanced_subscriber.rs:605-613`);
+///   * heartbeat issues `to_sn: Some(hb_sn)` → a BOUNDED `_sn=last+1..hb`
+///     (`:709-726`), because the beacon states exactly how far the publisher has
+///     got and there is no reason to ask past it.
+///
+/// A bounded `_sn` range is emitted by nothing else in wz, so its presence in
+/// the FOREIGN implementation's own trace is the beacon path having fired. Leg 10
+/// is the control: same fixture, trigger unarmed, and the bounded range is absent
+/// while the open one is still there — which is also what keeps the parser
+/// honest, since a parser that matched nothing would satisfy leg 10 vacuously.
+// wz-proves: ext-pubsub-advanced-recovery zenoh-ext->wz
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
+fn zenoh_ext_heartbeat_beacon_drives_a_bounded_wz_recovery_get() {
+    let value = "HBTRIG";
+    let (captured, oracle_trace, dropped) = run_heartbeat_trigger_fixture(true, value);
+    let delivered = delivered_indices(&captured);
+    let ranges = requested_sn_ranges(&oracle_trace);
+    let ctx = format!(
+        "delivered={delivered:?} sn_ranges={ranges:?}\n--- wz ---\n{captured}\n\
+         --- oracle trace ---\n{oracle_trace}"
+    );
+    assert_eq!(
+        dropped, 1,
+        "the relay removed {dropped} batches, not 1; with 0 no gap was induced and \
+         no trigger of any kind had a reason to fire\n{ctx}"
+    );
+
+    let bounded: Vec<_> = ranges.iter().filter(|(_, to)| to.is_some()).collect();
+    assert!(
+        !bounded.is_empty(),
+        "the oracle's trace shows no BOUNDED `_sn=a..b` selector, so wz never \
+         issued the heartbeat trigger's GET. Every range it did ask for is open, \
+         which is the sample-driven trigger — the beacon path did not fire\n{ctx}"
+    );
+    // The bound must be the beacon's report, not a coincidence: a bounded range
+    // whose end is at or below its start would be a degenerate selector that
+    // happens to parse.
+    for (from, to) in &bounded {
+        let to = to.expect("filtered on is_some");
+        assert!(
+            to >= *from,
+            "wz asked for the empty range _sn={from}..{to}\n{ctx}"
+        );
+    }
+}
+
+/// Leg 10 — the CONTROL twin of leg 9. Same fixture, same induced gap, heartbeat
+/// trigger unarmed: wz still recovers (the sample-driven trigger fires on the
+/// successor) but every `_sn` range it asks for is OPEN.
+///
+/// This is what makes leg 9's bounded range attributable to the beacon rather
+/// than to wz's recovery machinery in general — and it doubles as the parser's
+/// calibration, since the open range it asserts PRESENT is read by the same
+/// function that reads the bounded one. Without that arm, a parser that silently
+/// matched nothing would satisfy the "no bounded range" assertion vacuously.
+// wz-proves: none -- the CONTROL for leg 9.
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
+fn zenoh_ext_wz_recovery_get_stays_unbounded_without_the_heartbeat_trigger() {
+    let value = "HBCTRL";
+    let (captured, oracle_trace, dropped) = run_heartbeat_trigger_fixture(false, value);
+    let delivered = delivered_indices(&captured);
+    let ranges = requested_sn_ranges(&oracle_trace);
+    let ctx = format!(
+        "delivered={delivered:?} sn_ranges={ranges:?}\n--- wz ---\n{captured}\n\
+         --- oracle trace ---\n{oracle_trace}"
+    );
+    assert_eq!(
+        dropped, 1,
+        "the relay removed {dropped} batches, not 1\n{ctx}"
+    );
+
+    // CALIBRATION, and it has to come first: this is the same parser leg 9 leans
+    // on, so a run where it matched nothing at all must fail HERE rather than
+    // pass the negative below.
+    assert!(
+        ranges.iter().any(|(_, to)| to.is_none()),
+        "the oracle's trace shows no OPEN `_sn=a..` selector either, so wz issued \
+         no recovery GET the parser could see — the negative asserted below would \
+         hold vacuously and leg 9's bounded-range assertion is uncalibrated\n{ctx}"
+    );
+    let bounded: Vec<_> = ranges.iter().filter(|(_, to)| to.is_some()).collect();
+    assert!(
+        bounded.is_empty(),
+        "wz issued a BOUNDED recovery GET {bounded:?} with the heartbeat trigger \
+         unarmed. Only the heartbeat path sets `to_sn`, so leg 9's bounded range \
+         is not attributable to the beacon\n{ctx}"
+    );
 }
