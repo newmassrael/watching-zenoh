@@ -786,11 +786,19 @@ fn install_session_handles(
     let liveliness_subscriber_keyexpr = declare_spec.liveliness_subscriber_keyexpr.as_deref();
     let liveliness_subscriber_history = declare_spec.liveliness_subscriber_history;
     let advanced_subscriber_keyexpr = declare_spec.advanced_subscriber_keyexpr.as_deref();
-    #[cfg_attr(not(feature = "advanced"), allow(unused_variables))]
+    // R311y449 — the three `#[cfg_attr(not(feature = "advanced"),
+    // allow(unused_variables))]` attributes that sat on the next three bindings
+    // are GONE. The `advanced`-OFF INERT report below consumes all five under
+    // that cfg, so they suppressed nothing — while disarming the very compiler
+    // gate R311y448's rationale leaned on. Measured then: dropping `history_max=`,
+    // `history_max_age=` or `recovery=` from that line still BUILT, and only the
+    // test caught it; y448 had measured `recovery_periodic_ms` alone (unattributed,
+    // so a hard error) and generalized from one field to five. Without the
+    // attributes, deleting ANY of the five is an `unused_variables` error under
+    // `[workspace.lints.rust] warnings = "deny"` — the claim is now true as
+    // stated rather than true of two fifths of its subject.
     let advanced_history_max = declare_spec.advanced_history_max;
-    #[cfg_attr(not(feature = "advanced"), allow(unused_variables))]
     let advanced_history_max_age = declare_spec.advanced_history_max_age;
-    #[cfg_attr(not(feature = "advanced"), allow(unused_variables))]
     let advanced_recovery = declare_spec.advanced_recovery;
     let advanced_recovery_heartbeat = declare_spec.advanced_recovery_heartbeat;
     let advanced_recovery_periodic_ms = declare_spec.advanced_recovery_periodic_ms;

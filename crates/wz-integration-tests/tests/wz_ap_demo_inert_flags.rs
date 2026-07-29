@@ -12,21 +12,41 @@
 //! do nothing, while these three are additive roles a demo can legitimately be
 //! built without.
 //!
-//! UNTIL THIS FILE, NOTHING EXERCISED THE INERT BRANCH. Every advanced/group leg
-//! builds `--features advanced` (or `group`) and asserts the NEGATIVE
-//! `!captured.contains("is INERT")`, and the Layer E catch-all skips that whole
-//! family by fn-name substring. So the `#[cfg(not(feature = ...))]` arms in
-//! `runner.rs` compiled everywhere and RAN nowhere, while three fixtures' failure
-//! messages ("If this says INERT, the demo was built without `--features
-//! advanced`") depended on their wording. R311y447-review named the gap after the
-//! round widened it by a field; this closes it.
+//! UNTIL THIS FILE, NOTHING EXERCISED THE INERT BRANCH. The advanced/group legs
+//! build `--features advanced` (or `group`) and assert the NEGATIVE
+//! `!captured.contains("is INERT")` — 14 of the 15. The exception is
+//! `zenoh_ext_cache_refuses_a_get_without_anyke`
+//! (`wz_advanced_pubsub_zenoh_ext_interop.rs:900`), the pure-foreign
+//! discriminator: it spawns zenohd + the zenoh-ext example + a pico `z_get` and
+//! NO wz binary at all, so it neither builds the feature nor asserts the
+//! negative. The Layer E catch-all skips that whole family by fn-name substring.
+//! So the `#[cfg(not(feature = ...))]` arms in `runner.rs` compiled everywhere
+//! and RAN nowhere, while FOUR fixtures' failure messages ("If this says INERT,
+//! the demo was built without `--features advanced`") depended on their wording:
+//! `wz_advanced_pubsub_zenoh_ext_interop.rs:304`, `:1023`, `:1297` and
+//! `wz_group_membership_zenoh_ext_interop.rs:164` — the last squarely inside this
+//! round's own advanced/GROUP scope. R311y447-review named the gap after the
+//! round widened it by a field; this closes it. (R311y449 corrected both counts:
+//! R311y448 wrote "every leg" and "three fixtures".)
 //!
 //! Like `wz_peer_reject_without_feature`, this needs the DEFAULT binary, so it
 //! rides a dedicated run-ci lane that builds that binary immediately before
-//! running it. Every fn name here carries the `inert` token so the Layer E
-//! catch-all — whose binary is whichever variant a prior lane last built — skips
-//! it; on an `advanced` build these assertions would fail with a correct
-//! diagnosis in the wrong lane, the same trap the `zenoh_ext` token exists for.
+//! running it. Every TEST fn name here carries the `inert` token so the Layer E
+//! catch-all skips it (the helpers `tempfile` and `run_default_demo_with` do not,
+//! and need not — only test-fn names reach libtest's `--skip`; R311y448 wrote
+//! "every fn name", which its own file did not satisfy).
+//!
+//! R311y449 — WHY THE SKIP IS THERE, corrected. R311y448 recorded it as
+//! necessity: "the Layer E catch-all, whose binary is whichever variant a prior
+//! lane last built". That premise is FALSE and has been since R311y265:
+//! `layer_e_ap_demo_round_trip` builds the DEFAULT demo ITSELF
+//! (`scripts/run-ci.sh:4985`) before its sweep, so these three legs would have
+//! PASSED there, not failed. The measurement y448 cited (`--features
+//! advanced,group` reds all three) is real but describes a build that lane
+//! cannot present. The skip is kept on the honest grounds: it avoids a duplicate
+//! run, and keeps three process-spawning legs out of a ~49-test fully-parallel
+//! sweep. Contrast `--skip zenoh_ext`, which IS necessary — those legs need
+//! `--features advanced` against the sweep's default binary.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -47,8 +67,16 @@ fn tempfile() -> std::fs::File {
 ///
 /// The peer is a second `wz-ap-demo --listen`, so the fixture needs no foreign
 /// binary and cannot SKIP. It has to be a real session: the INERT warnings are
-/// emitted by `install_session_handles`, which runs only after Established, so a
-/// run that never connected would produce no line and read as a broken contract.
+/// emitted only after Established, so a run that never connected would produce no
+/// line and read as a broken contract.
+///
+/// TWO emitters, not one (R311y449 — R311y448 named only the first): the
+/// `--advanced-subscribe` warning comes from `install_session_handles`
+/// (`runner.rs:1057-1068`), while `--group-join` (`:1168-1178`) and
+/// `--advanced-publish` (`:1180-1195`) come from `spawn_background_tasks`
+/// (`runner.rs:1108-1209`). The barrier below is valid for all three because both
+/// functions return before the `"driving session FSM"` line, but this is exactly
+/// the doc a future reader would use to reason about that validity.
 fn run_default_demo_with(extra_args: &[&str]) -> String {
     let demo = wz_ap_demo_binary();
     let (_acceptor, mut acc_out) = spawn_listen_acceptor(
@@ -116,12 +144,26 @@ fn assert_inert(captured: &str, flag: &str, feature: &str, activation_marker: &s
          --- captured ---\n{captured}"
     );
     // INERT must mean INERT: the flag parsed, and nothing acted on it. The three
-    // markers are real and do appear on a feature-ON build — `DECLARED ADVANCED
-    // SUBSCRIBER` in `runner.rs`, `DECLARED ADVANCED PUBLISHER` and `JOINED GROUP`
-    // in `tasks.rs` — so this is not a negative against a string that never
-    // exists. It is DEFENCE IN DEPTH rather than a proven-necessary guard: on the
-    // feature-ON build all three tests do go red (measured), but the `is INERT`
-    // assertion above fires first, so this one has never been the sole failure.
+    // marker strings exist verbatim — `DECLARED ADVANCED SUBSCRIBER`
+    // (`runner.rs:1035`), `DECLARED ADVANCED PUBLISHER` (`tasks.rs:281`) and
+    // `JOINED GROUP` (`tasks.rs:191`) — so this is not a negative against a string
+    // that never exists.
+    //
+    // R311y449 — IT IS DECORATIVE, and the honest statement is stronger than
+    // R311y448's. Two independent reasons, both verified:
+    //   (1) STRUCTURAL. The marker emits sit under `#[cfg(feature = "advanced")]`
+    //       / `#[cfg(feature = "group")]` and the INERT emits under the exact
+    //       complement, so exactly one arm compiles per binary. No build exists in
+    //       which the three assertions above pass AND a marker can appear.
+    //   (2) TIMING, for 2 of the 3. `DECLARED ADVANCED PUBLISHER` and `JOINED
+    //       GROUP` are logged from spawned tokio tasks, unordered against the
+    //       `"driving session FSM"` barrier this fixture reads at; only `DECLARED
+    //       ADVANCED SUBSCRIBER` shares the synchronous pass.
+    // R311y448 said instead that the `is INERT` assertion "fires first, so this
+    // one has never been the sole failure". The conclusion holds but names the
+    // wrong assertion: on a feature-ON build the line reads `DECLARED ADVANCED
+    // SUBSCRIBER keyexpr=...`, which contains neither needle, so the FIRST
+    // assertion (`{flag}=`) is what trips.
     assert!(
         !captured.contains(activation_marker),
         "the demo logged {activation_marker:?} on a build without `{feature}`, so \

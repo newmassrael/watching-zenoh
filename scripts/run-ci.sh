@@ -7,7 +7,10 @@
 # function is reachable by static analysis and neither is any helper only they
 # call. shellcheck 0.11 (the pin this round introduced; the check did not exist
 # in the 0.8.0 that floated on the runner image before it) therefore reports
-# SC2329 on 119 functions here — including `_runci_guarded_test`, which has 15
+# SC2329 on 124 functions here (R311y449 — it read 119, drifted since R311y420
+# and widened by y448; it is a MOVING count, so recompute with
+# `grep -cE '^[A-Za-z_][A-Za-z0-9_]*\(\) \{' scripts/run-ci.sh` rather than
+# trusting this number) — including `_runci_guarded_test`, which has 15
 # call sites in this file. The dispatch is the point of the design, so the
 # finding is structural rather than a defect to fix. Scoped to this file
 # deliberately: SC2329 stays live for the other 17 shell files, none of which
@@ -5060,6 +5063,16 @@ layer_e_ap_demo_round_trip() {
     # Each owns its variant in its dedicated lane, so all stay out of this sweep
     # (whose binary is whichever variant a prior lane last built — not assertable
     # here). The `wz_router` substring covers all three with one pattern.
+    # R311y449 — THAT PARENTHETICAL IS STALE, and it is the source R311y448
+    # copied its own false rationale from. Since R311y265 this lane builds the
+    # DEFAULT demo itself at :4985, so the sweep's binary IS assertable: it is the
+    # default one. The EXCLUSIONS above remain correct for the reason that
+    # actually holds — wz_router_multi_peer needs `--features routing-router` and
+    # wz_router_forward needs `--features routing-routes`, neither of which a
+    # default build has — not because the variant is unknown. Same for the
+    # `wz_peer` paragraph's "indeterminate binary" below. Do not propagate the
+    # indeterminacy premise into a new skip; R311y442's zenoh_ext block has the
+    # correct phrasing ("On THIS sweep's default binary").
     # R311qk — same for `wz_peer`: wz_peer_mesh needs `--features routing-peer`
     # (Layer E6 builds it), wz_peer_reject_without_feature needs the DEFAULT build
     # for its exit-2 assertion (Layer E4 rebuilds it). On THIS sweep's
@@ -5087,9 +5100,19 @@ layer_e_ap_demo_round_trip() {
     # old when this round broke it. Move BOTH or the skip block misinforms.)
     # R311y448 — same for `inert`: wz_ap_demo_inert_flags asserts the DEFAULT
     # build reports --advanced-* / --group-join as INERT, which is the exact
-    # inverse of what the zenoh_ext legs assert. On a binary this sweep inherited
-    # with `--features advanced` all three fail (measured), so it runs only in
-    # E4i, which rebuilds the default binary first and pins the count at 3.
+    # inverse of what the zenoh_ext legs assert. It runs only in E4i, which
+    # rebuilds the default binary first and pins the count at 3.
+    # R311y449 CORRECTS THE REASON y448 recorded here. y448 wrote "on a binary
+    # this sweep inherited with `--features advanced` all three fail (measured)"
+    # — a NECESSITY claim, and it is false. This sweep inherits nothing: the lane
+    # builds the DEFAULT demo itself at :4985 (R311y265) before reaching here, so
+    # the three legs would have PASSED in this sweep. y448's measurement was real
+    # but describes a build this lane cannot present; it copied the stale
+    # pre-R311y265 premise from the wz_router/wz_peer paragraphs above instead of
+    # the correct adjacent one at the zenoh_ext block ("On THIS sweep's default
+    # binary"). The skip STAYS, on honest grounds: it avoids a duplicate run and
+    # keeps three process-spawning legs out of this ~49-test fully-parallel sweep.
+    # Contrast `--skip zenoh_ext`, whose necessity IS real.
     # R311y443 — the token is a NAMING OBLIGATION on every future leg in that
     # file, not a property of the four it started with. The two recovery legs
     # added here were first named for what they do (`..._relay_induced_gap`),
@@ -7140,19 +7163,34 @@ layer_e4_router_reject() {
 # The demo keeps that CLI feature-uniform on purpose, so the INERT report is the
 # whole of what a caller gets.
 #
-# Nothing exercised those `#[cfg(not(feature = ...))]` arms until now. Every
-# advanced/group leg builds the feature ON and asserts the NEGATIVE
-# `!contains("is INERT")`, and the Layer E catch-all skips that whole family by
-# fn-name substring -- so the arms compiled everywhere and ran nowhere, while
-# three fixtures' failure messages depended on their exact wording. R311y447-review
-# named the gap after R311y447 widened it by a field (`recovery_periodic_ms`,
-# which reached no gate at all).
+# Nothing exercised those `#[cfg(not(feature = ...))]` arms until now. 14 of the
+# 15 advanced/group legs build the feature ON and assert the NEGATIVE
+# `!contains("is INERT")` (the 15th, zenoh_ext_cache_refuses_a_get_without_anyke,
+# spawns no wz binary at all), and the Layer E catch-all skips that whole family
+# by fn-name substring -- so the arms compiled everywhere and ran nowhere, while
+# FOUR fixtures' failure messages depended on their exact wording.
+# R311y447-review named the gap after R311y447 widened it by a field
+# (`recovery_periodic_ms`, which reached no gate at all).
+#
+# R311y449 corrected three claims R311y448 made in this block: "every leg" (14 of
+# 15), "three fixtures" (four -- the group one is in this round's own scope), and
+# the `--skip inert` NECESSITY rationale (corrected in the skip block inside
+# `layer_e_ap_demo_round_trip`; see also the note below on what the count pin
+# does and does not enforce).
 #
 # Needs the DEFAULT binary, hence its own lane immediately after E4's rebuild --
-# on an `advanced` build all three tests fail (measured), which is also why every
-# fn name carries the `inert` token for the catch-all's --skip. Self-contained
-# wz<->wz (a second wz-ap-demo --listen is the peer), so there is no external
-# prereq to SKIP on and this is a hard gate.
+# on an `advanced` build all three tests fail (measured). Self-contained wz<->wz
+# (a second wz-ap-demo --listen is the peer), so there is no external prereq to
+# SKIP on and this is a hard gate.
+#
+# WHAT THE `3` PIN DOES NOT ENFORCE (R311y449). Adding a 4th leg without updating
+# the pin reds this lane. RENAMING one of the three test fns to drop its `inert`
+# token does NOT: E4i still sees `3 passed` and stays green, while Layer E's
+# `--skip inert` silently stops covering it. The token is a NAMING OBLIGATION
+# that no gate enforces -- the same structural hole the `zenoh_ext` family
+# carries, and an instance of this project's "pin SETS, not counts". Layer E
+# itself has no count guard at all, so an over-matching `--skip` there would
+# delete coverage with nothing going red.
 layer_e4i_demo_inert_flags() {
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
     _runci_guarded_test E4i 3 cargo test -p wz-integration-tests \
