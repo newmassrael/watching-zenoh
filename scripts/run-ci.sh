@@ -2586,7 +2586,18 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
             --quiet -- -D warnings \
-        && cargo build -p wz --features ext-pubsub-advanced-publisher --quiet)
+        && cargo build -p wz --features ext-pubsub-advanced-publisher --quiet \
+        `# R311y443-review (REVIEWER 3, NIT 1) — the demo's advanced arm is` \
+        `# clippy-gated HERE, not in Layer Z where R311y442 put it. That line` \
+        `# sat AFTER Z's zenohd / pico presence guards, each of which returns` \
+        `# 0, so on any box without the foreign binaries the only -D warnings` \
+        `# gate on the demo's #[cfg(feature = "advanced")] code SKIPped green` \
+        `# -- and R311y443 adds new code behind exactly that cfg. Hosted CI` \
+        `# was covered (WZ_Z_REQUIRE arms the skip into a fail), so this was a` \
+        `# LOCAL false green, which is the shape that reaches a push. Clippy` \
+        `# needs no external binary, so it belongs in a lane that never skips.` \
+        && cargo clippy -p wz-ap-demo --all-targets --features advanced \
+            --quiet -- -D warnings)
 }
 
 # ─── Layer C1ar — ext-pubsub advanced-subscriber §5.25: per-source order/dedup ─
@@ -6424,6 +6435,18 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenoh-pico z_sub_liveliness not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
+    # R311y443-review (REVIEWER 3, NIT 2) — the R311y442 advanced-pubsub
+    # DISCRIMINATOR leg (zenoh_ext_cache_refuses_a_get_without_anyke) spawns the
+    # pico z_get, which `zenoh_pico_cli_binary` PANICS on if absent while the
+    # four guards above SKIP. So a partial pico build reddened this lane as a
+    # test failure instead of skipping it cleanly — the reviewer hit exactly
+    # that on a fresh worktree. Same near-impossible symmetry guard as the rest:
+    # build-zenoh-pico-cli.sh emits every CLI together, so a missing z_get means
+    # a stale build -> SKIP, not FAIL.
+    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+        _z_unavailable "zenoh-pico z_get not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
+        return 0
+    fi
     # wz-ap-demo is the wz client (--connect zenohd) for the client-tier legs
     # AND the `--router-hat` node for the R311y140 router-tier federation leg
     # (wz_router_hat_zenohd_interop). Build it with BOTH the `ws` feature
@@ -6495,15 +6518,13 @@ layer_z_zenohd_interop() {
     # rest of this list: the advanced subscriber / publisher are declared only when
     # their flags are passed, so every other leg dials through the unchanged binary.
     (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced --quiet) || return 1
-    # R311y442 review (REVIEWER 3, finding 3) — CLIPPY the `advanced` arm, not just
-    # build it. The line above is a `cargo build`, and every other
-    # `clippy -p wz-ap-demo` in this file omits `advanced`, so the demo's
-    # `#[cfg(feature = "advanced")]` code was `-D warnings`-ungated — the exact
-    # hole R311y433 closed for transport-lowlatency and session-extcompression and
-    # that this round reopened one feature over. `--all-targets` so the OFF-arm
-    # warn path compiles too.
-    (cd crates && cargo clippy -p wz-ap-demo --all-targets --features advanced \
-        -- -D warnings) || return 1
+    # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
+    # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
+    # for transport-lowlatency and session-extcompression. R311y443-review
+    # (REVIEWER 3, NIT 1) MOVED it to Layer C1aq: this point is past Z's zenohd
+    # and pico presence guards, each of which `return 0`, so on a box without the
+    # foreign binaries the gate SKIPped green — measured. C1aq needs no external
+    # binary and cannot skip.
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients

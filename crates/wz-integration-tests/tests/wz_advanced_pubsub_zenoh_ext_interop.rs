@@ -387,8 +387,15 @@ const RECOVERY_RUN: Duration = Duration::from_secs(15);
 /// removes exactly one sample on the way IN.
 ///
 /// Returns the subscriber's captured log, how many samples the oracle had
-/// published when wz DECLARED, and how many batches the relay dropped.
-fn run_gap_fixture(recovery: bool, value: &str) -> (String, usize, usize) {
+/// published when wz DECLARED, how many it had published by the END of the run,
+/// and how many batches the relay dropped.
+///
+/// R311y443-review (REVIEWER 2, finding 7) — the closing count is not
+/// diagnostic decoration. It is what separates the two causes of a missing
+/// `GAP_INDEX + 1`: an oracle that never got there (fixture) from a recovery GET
+/// that never completed, leaving the successor stuck in the reorder buffer
+/// (a genuine failure of the path under test). See [`assert_gap_fixture_held`].
+fn run_gap_fixture(recovery: bool, value: &str) -> (String, usize, usize, usize) {
     let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
     // The ORACLE dials zenohd directly: its own link must stay lossless, or the
     // `@adv` cache it answers recovery GETs from would be missing the very
@@ -412,9 +419,12 @@ fn run_gap_fixture(recovery: bool, value: &str) -> (String, usize, usize) {
     let published_at_declare = published_so_far(&read_captured(&mut oracle_out));
 
     std::thread::sleep(RECOVERY_RUN);
+    let captured = read_captured(&mut reader);
+    let published_after = published_so_far(&read_captured(&mut oracle_out));
     (
-        read_captured(&mut reader),
+        captured,
         published_at_declare,
+        published_after,
         relay.dropped_count(),
     )
 }
@@ -429,6 +439,7 @@ fn run_gap_fixture(recovery: bool, value: &str) -> (String, usize, usize) {
 fn assert_gap_fixture_held(
     delivered: &[usize],
     published_at_declare: usize,
+    published_after: usize,
     dropped: usize,
     ctx: &str,
 ) {
@@ -438,6 +449,17 @@ fn assert_gap_fixture_held(
          (nothing was ever lost, so an intact stream is not evidence of recovery) \
          and with more than 1 the induced fault is not the one described\n{ctx}"
     );
+    // R311y443-review (REVIEWER 2, finding 6) — this bounds the GET's ISSUE
+    // instant, and the reply's content is fixed when the CACHE PROCESSES the
+    // query, a moment later. So the exclusion rests on one further premise: the
+    // cache answers before the oracle's next publish. Measured at the boundary
+    // this assertion permits (a joined-8-samples-late variant): the reply landed
+    // 1.2 s ahead of index 8 being published. Deliberately NOT tightened to
+    // `== 0` — that would cut late-join tolerance from ~8 s to ~1 s and rebuild
+    // the persistent-red shape R311y442's review removed. The needle is what
+    // makes the leg sound even if this premise ever fails: a history reply
+    // carrying index 8 also carries index 7, so removing it reds the baseline
+    // assertion below instead of passing.
     assert!(
         published_at_declare <= GAP_INDEX,
         "the oracle had already published {published_at_declare} samples (up to index \
@@ -452,11 +474,33 @@ fn assert_gap_fixture_held(
          no forward gap could be detected at all\n{ctx}",
         GAP_INDEX - 1
     );
+    // R311y443-review (REVIEWER 2, finding 7) — a missing successor has TWO
+    // causes and the first version of this message named only the fixture one.
+    // With recovery armed the successor is BUFFERED on arrival
+    // (`advanced_subscriber.rs:586`) and released only by `finish_recovery` ->
+    // `flush_sequenced`, so a recovery GET that never completes leaves it
+    // undelivered for a reason that has nothing to do with the run being short —
+    // and "extend RECOVERY_RUN" would send the next reader at the wrong thing.
+    // The oracle's own closing count separates them.
     assert!(
         delivered.contains(&(GAP_INDEX + 1)),
-        "index {} never arrived, so the run ended before the successor that makes \
-         the gap observable — extend RECOVERY_RUN\n{ctx}",
-        GAP_INDEX + 1
+        "index {} never arrived. {}\n{ctx}",
+        GAP_INDEX + 1,
+        if published_after < GAP_INDEX + 2 {
+            format!(
+                "The oracle published only {published_after} samples in the whole run, \
+                 so it never reached that index and the run ended before the successor \
+                 that makes the gap observable — extend RECOVERY_RUN. This is the \
+                 fixture, not the code under test."
+            )
+        } else {
+            format!(
+                "The oracle DID publish it ({published_after} samples in the run), so \
+                 this is not a short run: the successor arrived and is stuck in the \
+                 reorder buffer, which means the recovery GET never completed. That is \
+                 a failure of the path under test."
+            )
+        }
     );
 }
 
@@ -478,23 +522,38 @@ fn assert_gap_fixture_held(
 ///
 /// ## What makes this attributable to recovery
 ///
-/// There are three ways index `GAP_INDEX` could reach wz, and the leg closes
-/// two of them by construction and the third by measurement:
+/// There are FOUR ways index `GAP_INDEX` could reach wz — R311y443 first wrote
+/// three and R311y443-review (REVIEWER 2) found the fourth. A count is a
+/// citation here, so they are enumerated rather than summarised:
 ///
 ///   * the LIVE push — removed by the relay, which reports `dropped == 1`;
 ///   * the STARTUP HISTORY GET — issued at declare time, and the leg reads the
 ///     oracle's publish count at that instant to prove the sample did not yet
-///     exist to be carried;
+///     exist to be carried (see the premise noted at
+///     [`assert_gap_fixture_held`]);
+///   * the LATE-PUBLISHER GET (`issue_late_publisher_query`,
+///     `advanced_subscriber.rs:1103-1139`) — an UNBOUNDED per-publisher history
+///     GET fired from the `<ke>/@adv/pub/**` liveliness callback, whose replies
+///     feed the same `ingest_sequenced`. Absent by construction:
+///     `HistoryConfig::detect_late_publishers` defaults to `false`
+///     (`advanced_subscriber.rs:385`), the trigger is gated on it
+///     (`:1609`), and wz-ap-demo never calls the setter — so the liveliness
+///     subscriber is never declared. A future flag exposing it reopens this;
 ///   * the PERIODIC / HEARTBEAT triggers — not armed. `--advanced-recovery` is
 ///     sample-driven only, which matters here because upstream's oracle DOES
 ///     beacon (`MissDetectionConfig::default().heartbeat(500ms)`,
-///     `zenoh-ext/examples/examples/z_advanced_pub.rs:35`), so a subscriber with
+///     `zenoh-ext/examples/examples/z_advanced_pub.rs:36`), so a subscriber with
 ///     the heartbeat trigger armed would recover the gap without the gap ever
 ///     having been the reason.
 ///
 /// What is left is the sample-driven `_sn=last+1..` GET, answered by a real
 /// zenoh-ext `AdvancedCache`. Leg 6 is its twin: same fixture, same drop, flag
-/// omitted, and the sample stays missing.
+/// omitted, and the sample stays missing — and it is the STRONGER half of the
+/// argument, because every non-recovery-gated path above is present identically
+/// in both legs, so leg 6 closes them empirically whether or not this list is
+/// complete. The enumeration that must be exhaustive is the small one: the three
+/// recovery triggers (`advanced_subscriber.rs:605`, `:696`, `:724`), of which
+/// `RecoveryConfig::new()` arms only the first.
 // wz issues the recovery GET and consumes the replies, so the recovering half is
 // wz->; the sequence numbers it detects the gap in are the foreign publisher's
 // SourceInfo, which is the zenoh-ext-> direction.
@@ -502,13 +561,21 @@ fn assert_gap_fixture_held(
 #[test]
 #[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
 fn wz_advanced_recovery_refills_a_gap_from_the_zenoh_ext_cache() {
-    let (captured, published_at_declare, dropped) = run_gap_fixture(true, "GAPVAL");
+    let (captured, published_at_declare, published_after, dropped) =
+        run_gap_fixture(true, "GAPVAL");
     let delivered = delivered_indices(&captured);
     let ctx = format!(
         "gap_index={GAP_INDEX} published_at_declare={published_at_declare} \
-         dropped={dropped} delivered={delivered:?}\n--- captured ---\n{captured}"
+         published_after={published_after} dropped={dropped} delivered={delivered:?}\n\
+         --- captured ---\n{captured}"
     );
-    assert_gap_fixture_held(&delivered, published_at_declare, dropped, &ctx);
+    assert_gap_fixture_held(
+        &delivered,
+        published_at_declare,
+        published_after,
+        dropped,
+        &ctx,
+    );
 
     assert!(
         delivered.contains(&GAP_INDEX),
@@ -536,6 +603,12 @@ fn wz_advanced_recovery_refills_a_gap_from_the_zenoh_ext_cache() {
              sample was not reinserted in sequence\n{ctx}"
         );
     }
+    // CALIBRATED BY LEG 6, which asserts `vec![1]` through this same parser on
+    // this same fixture (R311y443-review, REVIEWER 2). That matters because this
+    // is a `== 0` over a hand-rolled `missed=` reader whose `filter_map` drops
+    // anything it cannot parse: on its own, a log-format drift would make it
+    // pass vacuously. If leg 6 is ever deleted or weakened, this assertion
+    // becomes a tautology and needs its own calibration.
     assert!(
         miss_counts(&captured).is_empty(),
         "the subscriber reported {:?} misses; a gap the recovery filled must not \
@@ -564,13 +637,21 @@ fn wz_advanced_recovery_refills_a_gap_from_the_zenoh_ext_cache() {
 #[test]
 #[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
 fn wz_without_recovery_keeps_a_gap_the_zenoh_ext_cache_could_fill() {
-    let (captured, published_at_declare, dropped) = run_gap_fixture(false, "NOGAPVAL");
+    let (captured, published_at_declare, published_after, dropped) =
+        run_gap_fixture(false, "NOGAPVAL");
     let delivered = delivered_indices(&captured);
     let ctx = format!(
         "gap_index={GAP_INDEX} published_at_declare={published_at_declare} \
-         dropped={dropped} delivered={delivered:?}\n--- captured ---\n{captured}"
+         published_after={published_after} dropped={dropped} delivered={delivered:?}\n\
+         --- captured ---\n{captured}"
     );
-    assert_gap_fixture_held(&delivered, published_at_declare, dropped, &ctx);
+    assert_gap_fixture_held(
+        &delivered,
+        published_at_declare,
+        published_after,
+        dropped,
+        &ctx,
+    );
 
     assert!(
         !delivered.contains(&GAP_INDEX),

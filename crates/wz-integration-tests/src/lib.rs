@@ -1246,17 +1246,43 @@ pub mod common {
     /// swallowed did not. Under [`RelayFault::None`] nothing is removed, so
     /// both existing consumers read exactly the counts they did before.
     ///
-    /// Removing a whole batch is safe for both peers' TRANSPORT state, which is
-    /// why the fault can be this blunt. A zenoh receiver admits any forward SN
-    /// jump — `SeqNum::roll` advances on any gap inside the half-ring and only
-    /// rejects a non-advancing one (`io/zenoh-transport/src/common/
-    /// seq_num.rs:145-155`), with the lost frame reported at `trace` and never
-    /// retransmitted (`gap()` next to it is still `#[cfg(test)]`, "once
-    /// reliability is implemented"). wz's own `sn::precedes` is wired to the
-    /// MULTICAST plane only (`wz-runtime-tokio/src/multicast_glue.rs:128`), so
-    /// its unicast RX does not track transport SNs at all. The loss therefore
-    /// surfaces where the leg wants it — as a missing SAMPLE, in the
-    /// application's own sequencing — and not as a dead session.
+    /// Removing a whole batch leaves both peers' TRANSPORT state healthy,
+    /// which is why the fault can be this blunt — but the reason is that BOTH
+    /// SIDES APPLY THE SAME HALF-WINDOW RULE, not that either side ignores
+    /// sequence numbers. R311y443 first wrote it the second way and was wrong
+    /// (R311y443-review, REVIEWER 1):
+    ///
+    ///   * a zenoh receiver runs every Frame / Fragment through `SeqNum::roll`
+    ///     (`io/zenoh-transport/src/common/seq_num.rs:145-155`, called from
+    ///     `unicast/universal/rx.rs:199-218`), which advances on ANY forward gap
+    ///     inside the half-ring and rejects only a non-advancing SN. The lost
+    ///     frame is a `trace` line and is never retransmitted — `gap()` beside
+    ///     `roll` is still `#[cfg(test)]`, "once reliability is implemented".
+    ///   * WZ GATES ITS UNICAST RX TOO, on the same predicate: `drive.rs:418`
+    ///     (Frame) and `:481` (Fragment) call `admit_rx_frame_sn`
+    ///     (`wz-session-core/src/session_actions.rs:2728`), which reaches
+    ///     `RxSn::admit` -> `sn::precedes` (`wz-session-core/src/sn.rs:51-54`,
+    ///     `:163-176`) — whose own doc calls it the per-channel UNICAST RX gate,
+    ///     seeded from the OpenSyn/OpenAck `initial_sn`. `precedes` is
+    ///     `distance != 0 && distance <= half(mask)`, i.e. `roll`'s rule, so a
+    ///     forward gap is admitted and becomes the new baseline here as well.
+    ///
+    /// So the loss surfaces where the leg wants it — as a missing SAMPLE in the
+    /// application's own sequencing — rather than as a dead session.
+    ///
+    /// TWO LIMITS ON THAT, both of which a future caller owns. Neither bites the
+    /// R311y443 legs (an ~11-byte payload at 1 Hz from a single publisher), and
+    /// both would be silent if they did:
+    ///
+    ///   * a batch inside a FRAGMENT chain is NOT one lost sample. It passes the
+    ///     SN gate and then aborts the chain in the `ReassemblyDispatcher`
+    ///     (`sn::consecutive`; `drive.rs:472-480` documents the two-stage check
+    ///     in terms), so the WHOLE message is lost. A needle must name a payload
+    ///     small enough not to fragment, or the leg must expect message loss.
+    ///   * a batch may carry MORE than the message the needle named. Nothing
+    ///     here stops a sender co-batching a Declare or a Response Final with
+    ///     the matched sample, and removing those is a different failure mode
+    ///     than the documented one.
     ///
     /// The counter is bumped BEFORE the forward, so any batch that reached the
     /// far side is already in the counter's modification order by the time the
