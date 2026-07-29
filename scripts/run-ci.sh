@@ -2786,7 +2786,17 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features ext-pubsub-group-membership,pubsub-allow-loop \
             --quiet -- -D warnings \
-        && cargo build -p wz --features ext-pubsub-group-membership --quiet)
+        && cargo build -p wz --features ext-pubsub-group-membership --quiet \
+        `# R311y445-review (REVIEWER 3, DEFECT 1) — the demo's` \
+        `# --features group arm had NO -D warnings gate anywhere: Layer C2 is` \
+        `# clippy --workspace at DEFAULT features, and the only place group` \
+        `# reached wz-ap-demo was the Layer Z build, which sits past that lane's` \
+        `# zenohd / pico presence guards and so does not even COMPILE it on a box` \
+        `# without the foreign binaries. This is the same hole R311y443-review` \
+        `# closed for --features advanced by moving its clippy into C1aq. Clippy` \
+        `# needs no external binary, so it belongs in a lane that never skips.` \
+        && cargo clippy -p wz-ap-demo --all-targets --features group \
+            --quiet -- -D warnings)
 }
 
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
@@ -6703,11 +6713,14 @@ layer_z_zenohd_interop() {
             || return 1
         # R311y445 — the GROUP-MEMBERSHIP family, a separate file because it is a
         # separate atom on a separate wire (bincode under
-        # `zenoh/ext/net/group/...`, independent of `@adv`). Three legs: the
-        # per-member queryable answering a foreign view query, the Join broadcast
-        # a foreign peer decodes, and a wrong-group control. Their oracle is
-        # z_view_size, which prints its own verdict, so the pass/fail judgement is
-        # the FOREIGN implementation's rather than an inference from wz's logs.
+        # `zenoh/ext/net/group/...`, independent of `@adv`). Three legs: wz's
+        # KEEP-ALIVE plus the per-member queryable that answers the unknown-member
+        # GET it provokes (R311y445-review corrected this — upstream issues no
+        # "view query" on join; its only client-side get is the one at
+        # zenoh-ext/src/group.rs:307), the Join BROADCAST a foreign peer decodes,
+        # and a wrong-group control. Oracle = z_view_size, which prints its own
+        # verdict, so the pass/fail judgement is the FOREIGN implementation's
+        # rather than an inference from wz's logs.
         _runci_guarded_test Zgroup 3 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
             --test wz_group_membership_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \

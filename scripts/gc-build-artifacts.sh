@@ -40,23 +40,42 @@
 # the two halves to one invocation makes that unrepresentable rather than
 # documented.
 #
-# ## A FAILED build does not get swept
+# ## A build that TOUCHED NOTHING does not get swept
 #
-# The sweep is skipped unless the build exits 0, and this is load-bearing rather
-# than cautious. The stamp defines "keep what this build touched", so a build
-# that touched NOTHING makes the whole target sweepable. Measured while writing
-# this script: invoking it with a cargo command from the wrong directory made
-# the build die instantly with "could not find Cargo.toml", and the sweep then
-# reported 65.40 GiB — the entire target — as removable. A wrapper whose
-# argv typo wipes the build cache is worse than no wrapper. Only a build that
-# ran to completion has a trustworthy touch set.
+# The stamp defines "keep what this build touched", so a build that touched
+# nothing makes the whole target sweepable. That is the hazard, and exit status
+# is NOT a sufficient test for it — a first cut of this script guarded only on
+# `build_rc != 0` and R311y445-review refuted it by measurement:
+#
+#     $ gc-build-artifacts.sh --dry-run -- true
+#     gc-build-artifacts: build exited 0
+#     [INFO] Would clean: 65.43 GiB from ".../crates/target"
+#
+# `true` completes successfully and compiles nothing. So do `cargo build --help`,
+# and — the realistic one — any run-ci lane that SKIPs for a missing external
+# binary (Layer Z without zenohd, Layer F without python3, Layer E without the
+# pico CLI) while still exiting 0. The reviewer reproduced the real deletion in
+# an isolated fixture, not just the dry-run number.
+#
+# The guard is therefore on the ARTIFACTS, not on the exit code: after the build,
+# at least one file under the target must be newer than the stamp. A wrapped
+# command that produced nothing is refused, whatever it returned. A failing build
+# is refused too, for the same underlying reason plus the weaker touch set.
 #
 # The build's exit status is always preserved.
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# `readlink -f` so an invocation through a symlink resolves to the real script
+# rather than to the link's parent (R311y445-review, REVIEWER 3): the unresolved
+# form fails safe — cargo errors out and the sweep is skipped — but only by luck.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# The cargo workspace lives in crates/, and so does its target dir.
+# The cargo workspace lives in crates/. NOTE this is the MANIFEST directory, not
+# necessarily where the artifacts land: cargo-sweep resolves the real target via
+# `cargo metadata`, so `CARGO_TARGET_DIR` or a repo-root `.cargo/config.toml`
+# `[build] target-dir` redirects it elsewhere and the sweep follows. Neither is
+# set in this repo today (verified R311y445-review), but a developer with a
+# machine-wide shared target dir would have this GC reach beyond this project.
 PROJECT_DIR="$REPO_ROOT/crates"
 
 usage() {
@@ -151,9 +170,31 @@ echo "gc-build-artifacts: build exited $build_rc" >&2
 
 if [[ $build_rc -ne 0 ]]; then
     echo "gc-build-artifacts: build FAILED — skipping the sweep." >&2
-    echo "  A build that did not complete has no trustworthy touch set: sweeping" >&2
-    echo "  on it can mark the whole target removable (measured: a wrong-directory" >&2
-    echo "  cargo invocation made 65.40 GiB sweepable). Fix the build, re-run." >&2
+    echo "  A build that did not complete has no trustworthy touch set." >&2
+    exit "$build_rc"
+fi
+
+# THE REAL GUARD (R311y445-review BLOCKER): did the build produce anything at
+# all? cargo-sweep decides by mtime against the stamp, so "nothing newer than the
+# stamp" means "everything is older than the stamp" means the ENTIRE target is
+# sweepable. Exit status does not detect this -- `true` exits 0 and compiles
+# nothing, and so does any run-ci lane that SKIPs on a missing external binary.
+#
+# `-newer` compares against the stamp FILE, which cargo-sweep writes at the same
+# instant it records the timestamp it will later compare against, so this asks
+# exactly the question the sweep is about to answer.
+stamp_file="$PROJECT_DIR/sweep.timestamp"
+if [[ ! -f "$stamp_file" ]]; then
+    echo "gc-build-artifacts: no stamp file at $stamp_file; refusing to sweep" >&2
+    exit "$build_rc"
+fi
+if [[ -z "$(find "$PROJECT_DIR/target" -newer "$stamp_file" -type f -print -quit 2>/dev/null)" ]]; then
+    echo "gc-build-artifacts: the wrapped command produced NO new artifacts —" >&2
+    echo "  refusing to sweep. Every artifact is older than the stamp, so the" >&2
+    echo "  sweep would mark the WHOLE target removable. This is what a command" >&2
+    echo "  that is not a build of this workspace looks like (\`true\`, \`--help\`)," >&2
+    echo "  and what a run-ci lane looks like when it SKIPs for a missing" >&2
+    echo "  external binary while still exiting 0." >&2
     exit "$build_rc"
 fi
 

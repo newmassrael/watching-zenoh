@@ -30,17 +30,27 @@
 //!
 //! ## What the legs prove
 //!
-//! 1. **PROOF.** wz joins group `zgroup`; a real zenoh-ext `Group` joins the same
-//!    group and establishes a view of size 2 that NAMES wz's member id. For that
-//!    to happen upstream must have decoded wz's `Join` off the bincode wire under
-//!    `zenoh/ext/net/group/<gid>/evt`, kept it under its lease, and rendered the
-//!    member record — i.e. the wire, the keyexpr layout and the lease semantics
-//!    all agree.
+//! 1. **PROOF (keep-alive + queryable).** wz joins FIRST, so the oracle arrives
+//!    to a member it never heard announce itself. wz's periodic `KeepAlive`
+//!    reveals the id; upstream does not know it, so it GETs the per-member
+//!    keyexpr (`zenoh-ext/src/group.rs:307`, the ONLY client-side get in its
+//!    group protocol) and wz's queryable answers with the `Member` record. Both
+//!    encoders are load-bearing here — damaging either reds this leg.
 //! 2. **CONTROL.** The same fixture with wz joining a DIFFERENT group. wz is
 //!    still running, still connected, still publishing group traffic — only the
 //!    group id differs, and the oracle now fails to reach size 2. That is what
 //!    separates "upstream decoded our membership" from "upstream counted a peer
 //!    that happened to be there": a process-absence control could not.
+//!
+//!    Its reach is narrower than that wording alone suggests. R311y445-review
+//!    measured it: making only the EVENT keyexpr group-blind leaves all three
+//!    legs green, so a wz that leaked group events into another group's
+//!    namespace would not be caught here. It reds when both keyexprs go blind.
+//! 3. **PROOF (Join broadcast).** The oracle joins FIRST into an empty group, so
+//!    the queryable path of leg 1 is closed by construction and wz's `Join`
+//!    announcement is the only way in. Isolated with a 60s lease so wz's first
+//!    keep-alive (lease * 0.75 = 45s) lands long after the leg ends — measured at
+//!    exactly +45.0s against a 0.2s leg.
 //!
 //! Every test fn carries the `zenoh_ext` token, per the naming obligation
 //! R311y443 recorded: run-ci's Layer E catch-all skips by that substring and runs
@@ -71,10 +81,23 @@ const WZ_MEMBER: &str = "wz-member";
 /// wz's and which is upstream's own.
 const ORACLE_MEMBER: &str = "oracle";
 
-/// The member lease for the legs that WANT wz's keep-alive beacon running.
-/// Matched to the oracle's own hard-coded `Duration::from_secs(3)`
-/// (`zenoh-ext/examples/examples/z_view_size.rs`), so wz refreshes on the scale
-/// upstream expects before it evicts a member.
+/// The member lease for the legs that need wz's keep-alive beacon running.
+///
+/// THIS IS A LATENCY BUDGET, NOT AN EVICTION SETTING, and the first version of
+/// this comment said the opposite ("matched to the oracle's 3s so wz refreshes
+/// before it evicts a member"). Upstream evicts a member on the lease THAT
+/// MEMBER ADVERTISED, not on its own (`zenoh-ext/src/group.rs:257`, `:295`,
+/// `:317` all take `m.lease` from the received record), which is exactly why leg
+/// 3 can advertise 60s with no ill effect. Matching the oracle's own 3s is
+/// therefore irrelevant to eviction.
+///
+/// What it actually sets is the beacon period, `lease * refresh_ratio` (0.75) =
+/// 2.25s — and that beacon is leg 1's DISCOVERY TRIGGER, so this value is what
+/// decides whether leg 1 finishes inside [`VIEW_TIMEOUT_SECS`]. Measured margin:
+/// 8 - 2.25 = 5.75s. R311y445-review measured the cliff too: at ~9s this leg goes
+/// flaky, at 11s it fails permanently. Do not raise it to match
+/// [`JOIN_ISOLATION_LEASE_SECS`] "for consistency" — that silently reds leg 1 and
+/// leaves the control green for the wrong reason.
 const LEASE_SECS: u64 = 3;
 
 /// The member lease for the leg that must ISOLATE the `Join` broadcast.
@@ -205,9 +228,15 @@ fn spawn_zenoh_ext_view_size(port: u16, group: &str, size: usize) -> (ChildGuard
             .spawn()
             .expect("spawn z_view_size"),
     );
-    // BARRIER, not decoration. The example prints this line only after
-    // `Group::join` has returned — i.e. after its event subscriber is declared
-    // and its own Join has gone out. The broadcast leg spawns wz next, and wz
+    // BARRIER, not decoration — but a WEAKER one than the first version claimed.
+    // The example prints this line after `Group::join` returns, and that
+    // guarantees its own Join has gone out (`zenoh-ext/src/group.rs:393` awaits
+    // the put) but NOT that its event subscriber exists: `join` only
+    // `spawn_abortable`s `net_event_handler` (`:400`), and the
+    // `declare_subscriber` runs inside that task (`:248-251`). The residual race
+    // is small in practice — wz still has to fork, dial zenohd and join — and
+    // R311y445-review measured leg 3 green 3/3 including under 3x CPU
+    // oversubscription. The broadcast leg spawns wz next, and wz
     // announces itself ONCE; without this wait that announcement can precede the
     // oracle's subscriber and be missed, which reads downstream as "wz's Join was
     // not decoded" when nothing was ever listening. Measured: the first draft had
@@ -236,21 +265,34 @@ fn wait_view_verdict(reader: &mut std::fs::File) -> String {
     })
 }
 
-/// Leg 1 — the PROOF for wz's per-member QUERYABLE. wz joins first, so the
-/// oracle's own view query is what discovers it, and wz's queryable answers with
-/// its `Member` record on the bincode wire.
+/// Leg 1 — the PROOF for wz's KEEP-ALIVE plus its per-member QUERYABLE. wz joins
+/// first, so by the time the oracle arrives wz is already a member it has never
+/// heard announce itself; wz's periodic keep-alive is what reveals it, and wz's
+/// queryable then serves the `Member` record on the bincode wire.
 ///
-/// The original version of this leg claimed it proved wz's `Join` broadcast, and
-/// that was FALSE — measured, not reasoned: damaging the Join variant index in
-/// `encode_net_event` (0 -> 7) left BOTH this leg and its control green, because
-/// with wz already in the group when the oracle joins, the `Join` event is never
-/// on the path. The encoder this leg actually exercises is `push_member`
-/// (`group_membership.rs:222`) via the per-member queryable. Leg 3 is the one
-/// that binds the broadcast.
+/// ## This leg's trigger has been misattributed TWICE, so it is spelled out
+///
+/// The first version claimed the `Join` broadcast — refuted by damage (Join
+/// variant 0 -> 7 leaves this leg green; `Join` is not on its path once wz is
+/// already in the group). R311y445 then replaced that with "the oracle's own view
+/// query", which does not exist: `Group::join` issues NO query
+/// (`zenoh-ext/src/group.rs:363-407` declares a publisher, puts its Join and
+/// spawns four tasks), and the only client-side `z.get()` in the whole of
+/// upstream's group protocol is at `group.rs:307`, inside the KeepAlive handler's
+/// unknown-member arm (`group.rs:279-307`).
+///
+/// The real chain, confirmed by R311y445-review's damage matrix: wz emits a
+/// `KeepAlive` (`group_membership.rs:258-261`, variant index 2) every
+/// `lease * refresh_ratio`; the oracle does not know that member id, so it GETs
+/// `zenoh/ext/net/group/<gid>/<mid>`; wz's per-member queryable answers with
+/// `push_member` (`group_membership.rs:222`). BOTH encoders are on this leg:
+/// damaging the KeepAlive variant (2 -> 8) reds it ALONE, and damaging
+/// `push_member` reds it too. The timing corroborates — this leg costs ~2.36s,
+/// which is the 2.25s beacon period, while leg 3 (no beacon needed) costs 0.2s.
 // wz-proves: ext-pubsub-group-membership wz->zenoh-ext
 #[test]
 #[ignore = "external binaries: zenohd + zenoh-ext z_view_size; run-ci Layer Z"]
-fn zenoh_ext_group_view_query_recovers_the_wz_member() {
+fn zenoh_ext_group_view_recovers_the_wz_member_after_its_keepalive() {
     let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
     let (_wz, wz_log) = spawn_wz_group_member(port, GROUP, LEASE_SECS);
     let view = run_zenoh_ext_view_size(port, GROUP, 2);
@@ -259,7 +301,9 @@ fn zenoh_ext_group_view_query_recovers_the_wz_member() {
     assert!(
         view.contains("Established view size of 2"),
         "a real zenoh-ext group peer never reached a view of 2 with wz in the \
-         group. wz DID join (asserted above), so its Join was not decoded\n{ctx}"
+         group. wz DID join (asserted above), so either its KeepAlive was not \
+         decoded or its per-member queryable did not answer the resulting GET — \
+         those two encoders are this leg's path, NOT Join\n{ctx}"
     );
     // The size alone would be satisfied by any second member; the ID is what
     // makes this a statement about wz's member record surviving the round trip.
