@@ -1393,6 +1393,16 @@ fn assert_beacon_fixture_held(sub_out: &str, dropped: usize, value: &str, ctx: &
 /// makes leg 8 — the same fixture with the beacon off — a discriminator on the
 /// atom rather than on the flag that gates it.
 // wz-proves: ext-pubsub-sample-miss-detection wz->zenoh-ext
+// R311y446 — this leg does NOT claim `ext-pubsub-serde-codec`, and the reason is
+// worth keeping. The beacon payload is `z_serialize::<u32>`
+// (advanced_publisher.rs:440), so the encoder is on the path — but the leg cannot
+// witness it. Measured: flipping `impl_num!`'s serialize to `to_be_bytes`
+// (serde_codec.rs:224) and rebuilding leaves this leg GREEN, because upstream
+// then reads the beacon as a much LARGER sn, widens its recovery GET, and still
+// recovers the sample. Only an UNDERSTATED sn fails (y444 damaged the value to 0
+// and this leg reddened). An assertion that is blind to the encoding being wrong
+// in one direction is not a witness for the codec. The read direction IS
+// witnessed — see the heartbeat-trigger leg below.
 #[test]
 #[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
 fn zenoh_ext_advanced_sub_recovers_a_lost_last_sample_from_the_wz_heartbeat() {
@@ -1477,6 +1487,15 @@ fn zenoh_ext_advanced_sub_cannot_recover_a_lost_last_sample_without_the_wz_heart
 /// relied on. Measured healthy: the GET fires between the oracle's `Put Data [8]`
 /// and `Put Data [9]`.
 // wz-proves: ext-pubsub-advanced-recovery zenoh-ext->wz
+// R311y446 — this leg IS a witness for the Zenoh Serialization Format, in the
+// READ direction only. The bound wz asks for is whatever `z_deserialize::<u32>`
+// made of the FOREIGN beacon's bytes (advanced_subscriber.rs:1549), and the
+// assertion pins that bound to GAP_INDEX — so a decode that misreads those bytes
+// cannot satisfy it. Verified rather than argued: flipping `impl_num!`'s
+// deserialize to `from_be_bytes` (serde_codec.rs:235) reds THIS leg alone.
+// PARTIAL, and honestly so: the wire carries one u32 scalar, while the codec's
+// strings, collections and VarInt never reach a foreign peer anywhere in wz.
+// wz-proves: ext-pubsub-serde-codec zenoh-ext->wz partial
 #[test]
 #[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
 fn zenoh_ext_heartbeat_beacon_drives_a_bounded_wz_recovery_get() {
