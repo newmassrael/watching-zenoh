@@ -5085,6 +5085,11 @@ layer_e_ap_demo_round_trip() {
     # REVIEWER 3 — this documentation pin was left at 6 when the executable one
     # moved to 10; y443 had moved both together, so the convention was one round
     # old when this round broke it. Move BOTH or the skip block misinforms.)
+    # R311y448 — same for `inert`: wz_ap_demo_inert_flags asserts the DEFAULT
+    # build reports --advanced-* / --group-join as INERT, which is the exact
+    # inverse of what the zenoh_ext legs assert. On a binary this sweep inherited
+    # with `--features advanced` all three fail (measured), so it runs only in
+    # E4i, which rebuilds the default binary first and pins the count at 3.
     # R311y443 — the token is a NAMING OBLIGATION on every future leg in that
     # file, not a property of the four it started with. The two recovery legs
     # added here were first named for what they do (`..._relay_induced_gap`),
@@ -5092,7 +5097,7 @@ layer_e_ap_demo_round_trip() {
     # where they fail with a correct INERT diagnosis in the wrong lane.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
-        --skip wz_storage_host --skip zenoh_ext)
+        --skip wz_storage_host --skip zenoh_ext --skip inert)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -7126,6 +7131,35 @@ layer_e4_router_reject() {
         --test wz_peer_reject_without_feature -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E4i — the INERT-reporting gate for the advanced / group flags ──
+#
+# R311y448. The sibling of E4 and its opposite contract. E4 asserts that a
+# DEFAULT build REJECTS `--router` / `--peer` with exit 2; this lane asserts that
+# the same build accepts `--advanced-subscribe` / `--advanced-publish` /
+# `--group-join`, drops the capability, and SAYS SO naming the missing feature.
+# The demo keeps that CLI feature-uniform on purpose, so the INERT report is the
+# whole of what a caller gets.
+#
+# Nothing exercised those `#[cfg(not(feature = ...))]` arms until now. Every
+# advanced/group leg builds the feature ON and asserts the NEGATIVE
+# `!contains("is INERT")`, and the Layer E catch-all skips that whole family by
+# fn-name substring -- so the arms compiled everywhere and ran nowhere, while
+# three fixtures' failure messages depended on their exact wording. R311y447-review
+# named the gap after R311y447 widened it by a field (`recovery_periodic_ms`,
+# which reached no gate at all).
+#
+# Needs the DEFAULT binary, hence its own lane immediately after E4's rebuild --
+# on an `advanced` build all three tests fail (measured), which is also why every
+# fn name carries the `inert` token for the catch-all's --skip. Self-contained
+# wz<->wz (a second wz-ap-demo --listen is the peer), so there is no external
+# prereq to SKIP on and this is a hard gate.
+layer_e4i_demo_inert_flags() {
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    _runci_guarded_test E4i 3 cargo test -p wz-integration-tests \
+        --test wz_ap_demo_inert_flags -- --ignored --quiet --test-threads=1 \
+        || return 1
+}
+
 # ─── Layer E5 — router data-plane FORWARDING e2e (R311qc) ───────────
 #
 # The data-plane counterpart to Layer E3's accept-and-hold: a `wz-ap-demo
@@ -7916,6 +7950,7 @@ run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1
 run_layer E4 layer_e4_router_reject || overall=1
+run_layer E4i layer_e4i_demo_inert_flags || overall=1
 run_layer E5 layer_e5_router_forward || overall=1
 run_layer E5u layer_e5u_router_unixpipe_forward || overall=1
 run_layer E6u layer_e6u_peer_unixpipe_forward || overall=1

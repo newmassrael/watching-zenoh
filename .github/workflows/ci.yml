@@ -478,6 +478,14 @@ jobs:
         # binary at the shared path matches the variant each lane asserts.
         run: bash scripts/run-ci.sh --layer E4
 
+      - name: Layer E4i — INERT-reporting gate (default build reports advanced/group flags inert)
+        # R311y448 — E4's opposite contract on the same DEFAULT binary: the
+        # advanced/group CLI is feature-uniform, so instead of rejecting these
+        # flags the demo drops the capability and reports it naming the missing
+        # feature. Until this lane the `#[cfg(not(feature = ...))]` arms compiled
+        # everywhere and ran nowhere. Self-contained wz<->wz, no external runner.
+        run: bash scripts/run-ci.sh --layer E4i
+
       - name: Layer E5 — router data-plane forwarding e2e (routing-routes)
         # R311qc — the data-plane counterpart to E3: builds wz-ap-demo with
         # --features routing-routes and asserts the router forwards a Put across
