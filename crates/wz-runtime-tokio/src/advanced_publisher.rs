@@ -302,7 +302,11 @@ where
             zid: local_zid.clone(),
             eid,
             seqnum,
-            stamp: FallbackStamp::new(local_zid),
+            // R311y450 — the §5.18 clock is BORROWED from the session (an Arc
+            // bump), not constructed here. Building one from `local_zid` is what
+            // made this site and `storage_service`'s the two same-`uhlc::ID`
+            // clocks the round removed.
+            stamp: FallbackStamp::new(local_zid, session.node_hlc().clone()),
             cache,
             _token: token,
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]

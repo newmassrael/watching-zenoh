@@ -420,6 +420,14 @@ adminspace-config-hotreload = ["wz/adminspace-config-hotreload"]
 # `storage-backend` (which reaches wz-runtime-tokio's cfg site `compiled_plugins`
 # checks). NOT in `default`; Layer E6e builds the demo with it for the plugins E2E.
 storage-backend = ["wz/storage-backend"]
+# R311y450 (§5.18 time-hlc) — forwards the facade `time-hlc` so the demo binary
+# carries the node-scoped Hybrid Logical Clock. It is opt-in and it CHANGES THE
+# WIRE on one run-mode: with it on, `--router-hat` (a `WhatAmI::Router`, the one
+# role zenoh's shipped `timestamping.enabled` map enables) adds a timestamp to an
+# un-timestamped Put it relays, which a foreign subscriber can see. Every other
+# run-mode is a peer or a client and stays gated OFF, so the demo's default wire
+# is unchanged. Layer E8t builds the router with it for the cross-impl proof.
+time-hlc = ["wz/time-hlc"]
 # R311y282 — the storage-host's DURABLE backing: forwards the facade
 # `storage-backend-filesystem` so `--storage-host-dir <dir>` registers a
 # FilesystemVolume and maps hosted storages onto it (durable across a host

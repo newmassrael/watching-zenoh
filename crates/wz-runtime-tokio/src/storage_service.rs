@@ -188,12 +188,21 @@ where
         // carries none (the §5.18 seam) — comparable to a real publisher
         // timestamp, so newer-wins competes fairly (see the module note).
         let sub_state = Arc::clone(&state);
-        // The §5.18 timestamp-source seam: with `time-hlc` on, an
-        // un-timestamped sample is stamped by the HLC (a logical counter +
-        // monotonicity over the wall clock); off, by the bare
-        // `wall_clock_ntp64` SSOT. Built once over the storage identity and
-        // shared by the (possibly multi-threaded) capture callback.
-        let stamper = crate::timestamp_source::FallbackStamp::new(local_zid);
+        // The §5.18 timestamp-source seam: with `time-hlc` on AND this node's
+        // role timestamping, an un-timestamped sample is stamped by the NODE's
+        // HLC (a logical counter + monotonicity over the wall clock); otherwise
+        // by the bare `wall_clock_ntp64` SSOT. Built once over the storage
+        // identity and shared by the (possibly multi-threaded) capture callback.
+        //
+        // R311y450 — the clock is BORROWED from the session, not built here.
+        // This site and `advanced_publisher`'s each used to construct one from
+        // the same node zid, which put two HLCs with one `uhlc::ID` and separate
+        // `last_time` on any `time-hlc,ext-pubsub-advanced-publisher` build.
+        // Matches how zenoh's own storage plugin reaches the clock — through the
+        // session (`Session::new_timestamp()`, `zenoh/src/api/session.rs:833`,
+        // used at `plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs:182`).
+        let stamper =
+            crate::timestamp_source::FallbackStamp::new(local_zid, session.node_hlc().clone());
         let subscriber = session.declare_subscriber(
             keyexpr.clone(),
             SubscribeOptions::default(),

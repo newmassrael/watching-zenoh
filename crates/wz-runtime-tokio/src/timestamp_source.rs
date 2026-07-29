@@ -54,22 +54,30 @@
 //! TIME word is upgraded; the stamp's `zid` stays the storage identity (so a
 //! source switch never changes the tie-breaker, only the ordering word).
 //!
-//! ## Scope: the HLC is per-storage, not yet node-wide (R311xw disclosure)
+//! ## Scope: the HLC is node-wide (R311y450 — the R311xw disclosure, CLOSED)
 //!
-//! [`FallbackStamp::new`] builds a fresh HLC per storage. zenoh keeps ONE
-//! `Arc<HLC>` on the Runtime, shared by every publish / router / storage on
-//! the node, so its "unique across the system" guarantee is node-wide. wz's
-//! per-storage HLC delivers that guarantee WITHIN one storage (the common
-//! single-storage-per-node deployment), but two storages on the SAME node
-//! could stamp two simultaneous un-timestamped samples with the same
-//! `(time, zid)`. This is acceptable while storage is the only auto-stamp
-//! consumer; the textbook resolution is NOT to grow node-wide HLC
-//! infrastructure for a single consumer (premature abstraction) but to
-//! promote the HLC to a single session/runtime-scoped `Option<Arc<HLC>>`
-//! (zenoh's shape) WHEN the second consumer — publish auto-stamp
-//! (`zenoh api/session.rs:2129`) — lands, at which point the storage stamper
-//! borrows the shared node HLC instead of building its own. Until then, a
-//! single node HLC would have exactly one consumer.
+//! Until R311y450 [`FallbackStamp::new`] built a FRESH HLC per consumer, and the
+//! disclosure that stood here recorded the resulting collision window as
+//! hypothetical ("two storages on the SAME node could…") while deferring the fix
+//! until a second auto-stamp consumer landed. It had already landed: R311y69 gave
+//! `ext-pubsub-advanced-publisher` its own `FallbackStamp`, so a build with
+//! `time-hlc,ext-pubsub-advanced-publisher` really did hold TWO independent
+//! [`uhlc::HLC`]s deriving the SAME `uhlc::ID` from the same node zid with
+//! SEPARATE `last_time` — the reachable form of that hazard, and uhlc's
+//! "unique across the system" premise does not survive it.
+//!
+//! The promotion the disclosure prescribed is now done, in zenoh's shape: ONE
+//! [`NodeHlc`](crate::node_clock::NodeHlc) per node (`Option<Arc<HLC>>`,
+//! role-gated — `zenoh/src/net/runtime/mod.rs:147`), and this stamper BORROWS it
+//! rather than constructing anything. `None` — a node whose role does not
+//! timestamp, or a build without `time-hlc` — resolves to [`wall_clock_ntp64`],
+//! which is precisely zenoh's own `None` arm for the same decision
+//! (`Session::new_timestamp`, `zenoh/src/api/session.rs:833-843`).
+//!
+//! Still OUT of scope, and still for the R311xw reason: a publish auto-stamp on
+//! the plain [`Session::publish`](crate::session::Session::publish) path
+//! (`zenoh api/session.rs:2129`). wz publishers carry a timestamp only when the
+//! caller sets one, so there is no un-timestamped publish to feed.
 
 use wz_session_core::ntp64::Ntp64;
 // `TimestampHint` is used only by the gated `FallbackStamp` stamp seam (the
@@ -123,86 +131,48 @@ pub fn wall_clock_ntp64() -> u64 {
 /// HLC variant + helpers below are always live when compiled.)
 #[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
 pub(crate) struct FallbackStamp {
-    /// The storage's identity, attached to every fallback stamp as the `zid`
+    /// The consumer's identity, attached to every fallback stamp as the `zid`
     /// tie-breaker — identical across both source variants, so the source
     /// choice only upgrades the TIME word, never the identity.
     zid: Vec<u8>,
-    /// The Hybrid Logical Clock source. Present only with `time-hlc`; wraps
-    /// the [`wall_clock_ntp64`] physical clock (injected at construction).
-    #[cfg(feature = "time-hlc")]
-    hlc: uhlc::HLC,
+    /// The BORROWED node clock (R311y450). Not owned and not constructed here:
+    /// one clock per node, `Arc`-shared with every other consumer, so two
+    /// consumers on one node cannot mint colliding `(time, zid)` pairs. `None`
+    /// inside — a role that does not timestamp, or a build without `time-hlc` —
+    /// falls this stamper back to [`wall_clock_ntp64`]. Zero-sized without
+    /// `time-hlc`, which is why the field carries no cfg.
+    node_hlc: crate::node_clock::NodeHlc,
 }
 
 #[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
 impl FallbackStamp {
-    /// Build the fallback source for a storage whose identity is `zid`. With
-    /// `time-hlc` on this also constructs the HLC (id derived from `zid`,
-    /// physical clock = [`wall_clock_ntp64`]).
-    pub(crate) fn new(zid: Vec<u8>) -> Self {
-        #[cfg(feature = "time-hlc")]
-        {
-            let hlc = build_hlc(&zid);
-            Self { zid, hlc }
-        }
-        #[cfg(not(feature = "time-hlc"))]
-        {
-            Self { zid }
-        }
+    /// Build the fallback source for a consumer whose identity is `zid`,
+    /// borrowing this node's clock.
+    ///
+    /// R311y450 — `node_hlc` is a parameter rather than something this
+    /// constructor derives, and that is the whole fix: the previous signature
+    /// took only `zid` and built an HLC from it, so every call site silently
+    /// minted another clock with the same `uhlc::ID`. Pass a clone of the ONE
+    /// [`NodeHlc`](crate::node_clock::NodeHlc) the node built.
+    pub(crate) fn new(zid: Vec<u8>, node_hlc: crate::node_clock::NodeHlc) -> Self {
+        Self { zid, node_hlc }
     }
 
     /// Produce a fallback [`TimestampHint`] for an un-timestamped sample: the
-    /// source-selected NTP64 time word paired with the storage `zid`.
+    /// source-selected NTP64 time word paired with THIS consumer's `zid`.
+    ///
+    /// The node clock's own stamp carries the NODE zid; only its time word is
+    /// taken here, so a source switch never moves the newer-wins tie-breaker
+    /// (the contract stated in the module note).
     pub(crate) fn stamp(&self) -> TimestampHint {
         TimestampHint {
-            time: self.now_word(),
+            time: self
+                .node_hlc
+                .stamp()
+                .map_or_else(wall_clock_ntp64, |stamp| stamp.time),
             zid: self.zid.clone(),
         }
     }
-
-    /// HLC source: a logical-counter + monotonic NTP64 over the wall clock.
-    #[cfg(feature = "time-hlc")]
-    fn now_word(&self) -> u64 {
-        self.hlc.new_timestamp().get_time().as_u64()
-    }
-
-    /// Bare wall-clock source: the [`wall_clock_ntp64`] SSOT (byte-identical
-    /// to the pre-HLC behavior).
-    #[cfg(not(feature = "time-hlc"))]
-    fn now_word(&self) -> u64 {
-        wall_clock_ntp64()
-    }
-}
-
-/// Construct an HLC whose physical clock is [`wall_clock_ntp64`] (so the HLC
-/// wraps the same source the digest / aligner read) and whose id is derived
-/// from the storage `zid`. The default 500ms drift bound and the `CSIZE`-bit
-/// logical counter come from `uhlc`.
-#[cfg(feature = "time-hlc")]
-fn build_hlc(zid: &[u8]) -> uhlc::HLC {
-    uhlc::HLCBuilder::new()
-        .with_clock(wz_physical_clock)
-        .with_id(hlc_id_from_zid(zid))
-        .build()
-}
-
-/// The HLC's physical clock: wz's wall-clock NTP64 SSOT lifted into a
-/// `uhlc::NTP64` (byte-identical to uhlc's own `system_time_clock`, but
-/// routed through wz's single recipe). A plain `fn` so it satisfies
-/// `HLCBuilder::with_clock(fn() -> NTP64)`.
-#[cfg(feature = "time-hlc")]
-fn wz_physical_clock() -> uhlc::NTP64 {
-    uhlc::NTP64(wall_clock_ntp64())
-}
-
-/// Derive a non-zero `uhlc::ID` from the storage `zid`. `uhlc::ID` is 1..=16
-/// little-endian bytes and must be non-zero; the storage `zid` is a real,
-/// non-empty zid, but clamp to `MAX_SIZE` and guard the all-zero edge so HLC
-/// construction never panics.
-#[cfg(feature = "time-hlc")]
-fn hlc_id_from_zid(zid: &[u8]) -> uhlc::ID {
-    let len = zid.len().min(uhlc::ID::MAX_SIZE);
-    uhlc::ID::try_from(&zid[..len])
-        .unwrap_or_else(|_| uhlc::ID::try_from(&[1u8][..]).expect("constant non-zero id is valid"))
 }
 
 #[cfg(test)]
@@ -210,10 +180,24 @@ mod tests {
     use super::*;
 
     #[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
+    use crate::node_clock::{NodeHlc, TimestampingEnabled};
+    #[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
+    use wz_codecs::whatami::WhatAmI;
+
+    /// A node clock that DOES stamp, whatever the feature set — the fixture for
+    /// the HLC-path tests. On a build without `time-hlc` this is still a
+    /// non-stamping ZST, which is why every test that asserts HLC behaviour
+    /// carries the feature gate.
+    #[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
+    fn stamping_node(zid: &[u8]) -> NodeHlc {
+        NodeHlc::for_node(zid, WhatAmI::Router, TimestampingEnabled::default())
+    }
+
+    #[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-publisher"))]
     #[test]
     fn fallback_stamp_carries_zid_and_real_wall_clock_magnitude() {
         let zid = vec![0xAB, 0xCD];
-        let stamper = FallbackStamp::new(zid.clone());
+        let stamper = FallbackStamp::new(zid.clone(), stamping_node(&zid));
         let ts = stamper.stamp();
         assert_eq!(ts.zid, zid, "the fallback stamp keeps the storage identity");
         // A real NTP64 wall clock has its seconds in the high 32 bits, so the
@@ -239,9 +223,9 @@ mod tests {
         // The observable FallbackStamp contract under `time-hlc`: successive
         // stamps strictly increase. Guaranteed by the HLC algorithm, so this
         // is zero-flake regardless of host timing. (This tests the contract,
-        // not which branch provides it — see the frozen-clock test below for
-        // the logical-counter isolation.)
-        let stamper = FallbackStamp::new(vec![0x01]);
+        // not which branch provides it — `node_clock`'s frozen-clock test
+        // isolates the logical counter, which a real clock cannot.)
+        let stamper = FallbackStamp::new(vec![0x01], stamping_node(&[0x01]));
         let mut prev = stamper.stamp().time;
         for _ in 0..1000 {
             let next = stamper.stamp().time;
@@ -255,37 +239,39 @@ mod tests {
 
     #[cfg(feature = "time-hlc")]
     #[test]
-    fn hlc_logical_counter_advances_when_physical_clock_is_frozen() {
-        // Isolate the logical counter: with a FROZEN physical clock, the only
-        // way successive timestamps can strictly increase is the low-CSIZE-bit
-        // counter (the `else { last_time += 1 }` branch). This proves the
-        // counter specifically, which the observable-contract test above
-        // cannot (its real clock may always advance).
-        fn frozen_clock() -> uhlc::NTP64 {
-            uhlc::NTP64(0x0000_1234_0000_0000)
-        }
-        let hlc = uhlc::HLCBuilder::new()
-            .with_clock(frozen_clock)
-            .with_id(hlc_id_from_zid(&[0x01]))
-            .build();
-        let mut prev = hlc.new_timestamp().get_time().as_u64();
-        for _ in 0..16 {
-            let next = hlc.new_timestamp().get_time().as_u64();
-            assert!(
-                next > prev,
-                "with the physical clock frozen, the logical counter must still advance: {next} !> {prev}"
-            );
-            prev = next;
-        }
+    fn the_stamp_zid_is_the_consumers_not_the_node_clocks() {
+        // R311y450 — this now DISCRIMINATES rather than restating the obvious.
+        // Before the node clock the stamper derived its HLC id from the very
+        // zid it stamped with, so the two could not disagree and the assertion
+        // held for free. The clock's identity is now a SEPARATE input, so
+        // handing it a DIFFERENT zid makes the test fail if the stamp ever
+        // starts carrying the clock's id instead of the consumer's — which
+        // would silently move the newer-wins tie-breaker.
+        let consumer_zid = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let node_zid = [0x11, 0x22];
+        assert_ne!(
+            consumer_zid.as_slice(),
+            node_zid.as_slice(),
+            "the fixture only discriminates while the two identities differ"
+        );
+        let stamper = FallbackStamp::new(consumer_zid.clone(), stamping_node(&node_zid));
+        assert_eq!(stamper.stamp().zid, consumer_zid);
     }
 
     #[cfg(feature = "time-hlc")]
     #[test]
-    fn hlc_stamp_keeps_storage_zid_not_hlc_internal_id() {
-        // The stamp's zid is the storage identity (unchanged from the
-        // wall-clock path); the HLC only upgrades the TIME word.
-        let zid = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let stamper = FallbackStamp::new(zid.clone());
-        assert_eq!(stamper.stamp().zid, zid);
+    fn a_non_stamping_node_falls_the_stamper_back_to_the_wall_clock() {
+        // The role gate reaching this stamper: with `time-hlc` COMPILED but the
+        // node's role not timestamping (zenoh's peer/client default), the stamp
+        // must still be a real post-epoch NTP64 — zenoh's
+        // `Session::new_timestamp()` `None` arm, not a zero or a bare counter
+        // that every real timestamp would dominate under newer-wins.
+        let zid = vec![0x0F];
+        let off = NodeHlc::for_node(&zid, WhatAmI::Peer, TimestampingEnabled::default());
+        assert!(!off.is_stamping(), "the zenoh default gates a peer off");
+        let stamper = FallbackStamp::new(zid.clone(), off);
+        let ts = stamper.stamp();
+        assert_eq!(ts.zid, zid);
+        assert!(ts.time >= Ntp64::FRAC_PER_SEC);
     }
 }

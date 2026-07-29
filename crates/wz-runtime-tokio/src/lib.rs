@@ -1028,8 +1028,26 @@ pub mod session_open;
 // `now(-age)`. The gate keys on `ext-pubsub-advanced-cache` (which
 // `ext-pubsub-advanced-publisher` implies), so the module compiles for any
 // of the three consumers (storage-backend OR the advanced cache/publisher).
-#[cfg(any(feature = "storage-backend", feature = "ext-pubsub-advanced-cache"))]
+// R311y450 — a fourth consumer arrived from the OTHER direction: `node_clock`
+// reads `wall_clock_ntp64` as the node HLC's physical clock. `time-hlc` already
+// implies `storage-backend`, so the gate below covered it transitively; naming
+// `time-hlc` explicitly makes the module's availability independent of a feature
+// implication a later Cargo.toml edit could drop (the C1ah lane's split into two
+// legs exists for exactly that fragility).
+#[cfg(any(
+    feature = "storage-backend",
+    feature = "ext-pubsub-advanced-cache",
+    feature = "time-hlc"
+))]
 pub mod timestamp_source;
+
+/// R311y450 — §5.18 time: the NODE-scoped HLC ([`node_clock::NodeHlc`]) and its
+/// per-role enablement map, wz's mirror of zenoh's `Option<Arc<HLC>>` on the
+/// Runtime (`zenoh/src/net/runtime/mod.rs:147`). UNCONDITIONAL: `NodeHlc` is
+/// zero-sized without `time-hlc`, so the storage stamper and both forwarders hold
+/// one with no cfg at the field or at any constructor — the alternative pushes the
+/// feature split into six call sites.
+pub mod node_clock;
 
 #[cfg(feature = "storage-backend")]
 pub mod storage_service;

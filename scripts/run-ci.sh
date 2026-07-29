@@ -2109,11 +2109,43 @@ layer_c1ag_cargo_test_transport_compose() {
 #   3. clippy-gates the OFF path (storage-backend WITHOUT time-hlc) to prove the
 #      bare wall_clock_ntp64 fallback is byte-identical + unused-free (the
 #      TimestampHint import goes test-only, the HLC fns elide cleanly).
+# R311y450 restructures this lane in three ways, each closing a measured gap:
+#
+#   (a) TWO test legs instead of one. `time-hlc = ["storage-backend", "dep:uhlc"]`
+#       but the timestamp_source MODULE gate is
+#       any(storage-backend, ext-pubsub-advanced-cache, time-hlc), so the two are
+#       not the same axis. Driving `time-hlc,storage-backend` AND
+#       `time-hlc,ext-pubsub-advanced-cache` clippy-covers the cache consumer's
+#       compiled surface as well as the storage one. MEASURED: both legs select
+#       the same counts today (5 / 12) because time-hlc pulls storage-backend
+#       either way — the legs differ in COMPILED FEATURE SET, not in selection.
+#   (b) node_clock coverage. The node-scoped HLC + the forward-path stamp landed
+#       in a NEW module, so the pre-existing `--lib timestamp_source` filter did
+#       not select a single one of its tests. Twelve tests, filter `node_clock::`
+#       — with the `::` deliberately, because the bare substring `node_clock`
+#       ALSO matches timestamp_source's `..._not_the_node_clocks` test and would
+#       report 13 (pin SETS, not counts).
+#   (c) a ROUTING leg. The forward-path stamp lives in `route_push`
+#       (router_forward.rs) and `forward_push` (linkstate_forward.rs), which are
+#       compiled only under the routing features. No lane composed
+#       `time-hlc` WITH routing before this round, so the seam could have failed
+#       to compile — or been cfg'd out entirely — with every lane still green.
+#       C4 builds preset-ap-full (which carries both) but is build-only and
+#       clippy-free.
 layer_c1ah_cargo_test_time_hlc() {
     _runci_guarded_test "C1ah timestamp_source" 5 \
-        cargo test -p wz-runtime-tokio --features time-hlc --lib timestamp_source --quiet || return 1
+        cargo test -p wz-runtime-tokio --features time-hlc --lib timestamp_source:: --quiet || return 1
+    _runci_guarded_test "C1ah node_clock" 12 \
+        cargo test -p wz-runtime-tokio --features time-hlc --lib node_clock:: --quiet || return 1
+    _runci_guarded_test "C1ah node_clock (advanced-cache leg)" 12 \
+        cargo test -p wz-runtime-tokio --features time-hlc,ext-pubsub-advanced-cache \
+        --lib node_clock:: --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features time-hlc --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets \
+            --features time-hlc,ext-pubsub-advanced-cache --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets \
+            --features time-hlc,routing-router-hat,routing-peer,routing-accept --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend --quiet -- -D warnings)
 }
 
@@ -7779,6 +7811,55 @@ layer_e8_router_hat_pico() {
         --test wz_router_hat_pico_interop -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E8t — time-hlc FORWARD-PATH STAMP cross-impl vs zenoh-pico ───
+#
+# R311y450. The §5.18 forward-path stamp proven against a FOREIGN client: a wz
+# --connect --publish emits a Put with NO timestamp, the wz --router-hat relays it
+# and its node HLC ADDS one, and a real zenoh-pico z_sub_attachment decodes it
+# (`with timestamp: <ntp64>`). zenoh's counterpart is the `treat_timestamp!` macro
+# at zenoh/src/net/routing/dispatcher/pubsub.rs:328.
+#
+# TWO BUILDS, one test each, and the second build is the point. A contract about a
+# build VARIANT needs a lane that OWNS that build:
+#   leg 1 (router-hat-router,time-hlc) — the positive: pico MUST print the line.
+#   leg 2 (router-hat-router, NO time-hlc) — the negative twin: the Put must still
+#          ROUTE and pico must print NO timestamp line. Without leg 2, leg 1's
+#          `with timestamp:` is not attributable to the HLC — anything in the path
+#          could in principle be stamping. MEASURED at authoring time: leg 1's
+#          assertion FAILS against leg 2's binary ("relayed the sample WITHOUT
+#          adding a node-HLC timestamp"), which is the RED that makes the pair a
+#          discriminator rather than two independent greens.
+# They cannot share a build, so they cannot share a `cargo test` invocation — that
+# is why this is its own lane rather than two more legs bolted onto E8.
+#
+# The `--features ...,time-hlc` build line here is ALSO what makes the A4 claim
+# legal: A4-5 containment derives wz-ap-demo's feature closure by unioning every
+# `cargo build -p wz-ap-demo --features` set in THIS file
+# (scripts/lib/feature_closure.py::ap_demo_lane_features), so a `time-hlc` claim is
+# rejected until a lane really builds the demo with it. Deleting this lane
+# therefore reds A4 rather than silently orphaning the proof.
+#
+# Needs the zenoh-pico CLI; SKIPs if absent (like Layer E8), FAILs on a real break.
+# Count-guarded and ANCHORED (`^test result: ok. 1 passed`) so a dropped `#[ignore]`
+# (0 selected -> exit 0) and a FAILED result line both redden.
+layer_e8t_router_hat_hlc_stamp_pico() {
+    if [[ ! -x target/zenoh-pico-cli/z_sub_attachment ]]; then
+        _pico_cli_unavailable "Layer E8t" || return 1
+        return 0
+    fi
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,time-hlc --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
+        --exact wz_router_hat_hlc_stamps_a_bare_put_for_pico_zsub_attachment 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    # The negative twin, on its OWN build (no time-hlc).
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
+        --exact wz_router_hat_without_time_hlc_relays_a_bare_put_unstamped 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -8005,6 +8086,7 @@ run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1
 run_layer E7u layer_e7u_router_hat_unixpipe_forward || overall=1
 run_layer E8 layer_e8_router_hat_pico || overall=1
+run_layer E8t layer_e8t_router_hat_hlc_stamp_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

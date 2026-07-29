@@ -487,6 +487,74 @@ fn gated_encoding_field(
     }
 }
 
+/// R311y450 — whether a Push carries a `Put` body, the guard zenoh's
+/// `treat_timestamp!` opens with (`if let PushBody::Put(data)`,
+/// `zenoh/src/net/routing/dispatcher/pubsub.rs:181`).
+///
+/// Separate from [`read_push_timestamp`] because the two `None`s it would
+/// otherwise conflate are different decisions: a `Del` must be left alone, while
+/// a `Put` with no timestamp is exactly the message to stamp. Collapsing them
+/// would make a forwarder mint a stamp for every Del it relays — invisible on
+/// the wire, but it advances the node clock's logical counter for a message that
+/// can never carry the result.
+pub fn push_is_put(push: &PushOwned) -> bool {
+    matches!(&push.body, PushOwnedVariant::CodecZenohMsgPut(_))
+}
+
+/// R311y450 — READ the inline `MsgPut` timestamp off a Push, or `None` when the
+/// Push carries none. The node-clock forward stamp (`treat_timestamp`) reads
+/// this to pick between its ABSORB branch (a timestamp is present — feed it to
+/// the HLC) and its STAMP branch (absent — mint one), the same
+/// `if let Some(ref ts) = data.timestamp` split zenoh's `treat_timestamp!` macro
+/// makes at `zenoh/src/net/routing/dispatcher/pubsub.rs:182`.
+///
+/// PUT ONLY, faithfully: zenoh guards the whole macro body on
+/// `if let PushBody::Put(data)` (`pubsub.rs:181`), so a `Del` is never stamped
+/// and never absorbed. `PushOwnedVariant::Default` is an unknown body tag, which
+/// [`crate::pubsub`]'s dispatch already treats as neither a confirmed Put nor a
+/// confirmed Del; it is not a Put here either.
+pub fn read_push_timestamp(push: &PushOwned) -> Option<crate::sample::TimestampHint> {
+    match &push.body {
+        PushOwnedVariant::CodecZenohMsgPut(put) => put
+            .timestamp
+            .as_ref()
+            .map(crate::sample::TimestampHint::from_codec),
+        _ => None,
+    }
+}
+
+/// R311y450 — STAMP a Push's inline `MsgPut` timestamp in place, keeping the
+/// `_Z_FLAG_Z_P_T` (0x20) header bit in sync with the field it signals. Returns
+/// whether the Push now carries the timestamp (`false` = not a Put body, or the
+/// `pubsub-timestamp` gate is off).
+///
+/// The wire-shaped half of the node-clock forward stamp. The clock that decides
+/// WHETHER to stamp is std-side — `uhlc` cannot enter this `no_std` crate (it
+/// carries an unconditional `extern crate alloc` and a non-optional
+/// `rand`/`getrandom`) — so this crate owns only the codec edit and
+/// `wz-runtime-tokio` owns the policy.
+///
+/// Field-and-header sync is the same contract [`set_push_keyexpr_literal`]
+/// carries for the `N` bit: a set field with its flag bit clear drops the peer's
+/// decoder into an offset-shifted read of the rest of the body. Routing through
+/// [`gated_timestamp_field`] — the `pubsub-timestamp` send-side SSOT — is what
+/// keeps a forward stamp from appearing on a build whose own builders would
+/// refuse to emit one.
+pub fn set_push_timestamp(
+    push: &mut PushOwned,
+    timestamp: &crate::sample::TimestampHint,
+) -> Result<bool, CodecError> {
+    let PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body else {
+        return Ok(false);
+    };
+    let Some(field) = gated_timestamp_field(Some(timestamp))? else {
+        return Ok(false);
+    };
+    put.timestamp = Some(field);
+    put.header |= 0x20;
+    Ok(true)
+}
+
 /// R233 — build a `MsgPut` body carrying caller-set metadata
 /// (timestamp, encoding, source_info, attachment). Sets the
 /// `_Z_FLAG_Z_P_T` (0x20) and `_Z_FLAG_Z_P_E` (0x40) header bits to

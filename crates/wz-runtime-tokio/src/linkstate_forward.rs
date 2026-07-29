@@ -560,6 +560,21 @@ pub struct LinkstateForwarder {
     /// opaque, so a fake clock returns `base + offset`; the base cancels in every
     /// deadline comparison, leaving the offset as the controllable virtual time.)
     clock: Box<dyn Fn() -> Instant>,
+    /// R311y450 — THIS node's §5.18 wall-clock HLC, the source of the forward-path
+    /// timestamp [`forward_push`](Self::forward_push) applies. A DIFFERENT axis
+    /// from `clock` above, which is the opaque MONOTONIC clock for query
+    /// deadlines: this one is a wall-clock NTP64 that goes on the wire, and the
+    /// two are deliberately not the same value (`wz-runtime-core`'s `TimeSource`
+    /// excludes the wall clock for exactly that reason).
+    ///
+    /// Built once from this peer's `self_zid` + `self_whatami` against zenoh's
+    /// shipped `timestamping.enabled` map, so on a `WhatAmI::Peer` — the only role
+    /// this forwarder is constructed with today — it holds NO clock and the
+    /// forward path is byte-identical to the pre-R311y450 wire. That is parity,
+    /// not an omission: zenoh ships `enabled: { router: true, peer: false,
+    /// client: false }`, so a peer that stamped would diverge from upstream in the
+    /// direction a foreign subscriber can see.
+    node_hlc: crate::node_clock::NodeHlc,
 }
 
 /// R311y44 (§5.23 Phase 2a) — the heap handler backing a [`LocalQueryable`]: the
@@ -698,6 +713,14 @@ impl LinkstateForwarder {
     ) -> Self {
         Self {
             net: Rc::new(RefCell::new(LinkstateNetwork::new(self_zid, self_whatami))),
+            // R311y450 — this node's §5.18 clock, derived from the SAME identity
+            // and role the net above is seeded with, so the timestamping gate can
+            // never disagree with the role this forwarder actually plays.
+            node_hlc: crate::node_clock::NodeHlc::for_node(
+                self_zid.as_slice(),
+                self_whatami,
+                crate::node_clock::TimestampingEnabled::default(),
+            ),
             faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
@@ -1461,6 +1484,31 @@ impl LinkstateForwarder {
     /// needs no hop-limit — it is bounded by the [`LinkstatepeerInterest`] register
     /// change-gate (re-flood only on a NEW interest), the state-convergent bound.
     fn forward_push(&self, inbound: FaceId, reliable: bool, priority: Priority, push: &PushOwned) {
+        // R311y450 — the §5.18 forward-path stamp, applied ONCE here, at the head,
+        // before anything fans out. zenoh does the same at ONE point
+        // (`treat_timestamp!` at `dispatcher/pubsub.rs:328`) and then fans the one
+        // stamped `msg` to every leg of `route`.
+        //
+        // NOT inside `compute_push_forward` below, even though that is where the
+        // carrier is already cloned and mutated (`set_push_source` /
+        // `set_push_hoplimit`) and where the `interested.is_empty()` early-out
+        // mirrors zenoh's `if !route.is_empty()`. That core is called PER TIER-NET
+        // by `RouterForwarder` (`router_forward.rs`'s `forward_push_tier`), so a
+        // stamp there would mint a DIFFERENT timestamp for each mesh leg of one
+        // Put — the opposite of what zenoh's single stamp point guarantees.
+        //
+        // No-op on this forwarder's production role: `WhatAmI::Peer` does not
+        // timestamp under zenoh's shipped map, so `node_hlc` holds no clock and
+        // the borrow below is skipped entirely.
+        let stamped;
+        let push = if self.node_hlc.is_stamping() {
+            let mut carrier = push.clone();
+            self.node_hlc.treat_timestamp(&mut carrier);
+            stamped = carrier;
+            &stamped
+        } else {
+            push
+        };
         // The inbound face's zid + graph link (source resolution) AND the Push's
         // keyexpr resolved against THIS face's link-local alias table (c3c-3 B1) —
         // taken in one SCOPED borrow so the `fan_out` below holds the only live

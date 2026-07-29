@@ -535,6 +535,25 @@ where
     /// `wz_runtime_coop::CoopTime<C>` once Session moves to a
     /// runtime-agnostic crate (post-R311cw architectural step).
     clock: Arc<T>,
+    /// R311y450 — THIS node's §5.18 Hybrid Logical Clock, or a non-stamping
+    /// handle. wz's counterpart of the `Option<Arc<HLC>>` zenoh hangs on the
+    /// Runtime (`zenoh/src/net/runtime/mod.rs:147`) and exposes to its own
+    /// auto-stamp consumers through `Session::new_timestamp()`
+    /// (`zenoh/src/api/session.rs:833`).
+    ///
+    /// Built ONCE per Session, in [`Self::new`], from the handshake identity and
+    /// role (`actions.params.zid` / `.whatami`) against
+    /// [`TimestampingEnabled::default`](crate::node_clock::TimestampingEnabled::default)
+    /// — zenoh's shipped `{ router: true, peer: false, client: false }`. Every
+    /// auto-stamp consumer on this session BORROWS it via [`Self::node_hlc`]
+    /// instead of constructing its own; that is the R311y450 fix, because two
+    /// clocks derived from one zid share a `uhlc::ID` while keeping separate
+    /// `last_time`, and uhlc's uniqueness guarantee does not survive that.
+    ///
+    /// Zero-sized without `time-hlc`, and `Clone` is an `Arc` bump — so every
+    /// `Session` clone (each helper propagates one) hands out the SAME clock
+    /// rather than forking it.
+    node_hlc: crate::node_clock::NodeHlc,
 }
 
 // R267 cascade — manual Clone impl avoids the derive(Clone) auto-added
@@ -559,6 +578,9 @@ where
             observer: self.observer.clone(),
             fires: self.fires.clone(),
             clock: self.clock.clone(),
+            // An Arc bump, deliberately: a clone must SHARE the node clock, not
+            // fork it (see the field doc).
+            node_hlc: self.node_hlc.clone(),
         }
     }
 }
@@ -1186,6 +1208,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             observer,
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
+            // R311y450 — a multicast session is handshake-free, so it has
+            // neither of the two inputs the node clock is gated on: no
+            // `SessionInitParams` means no zid to derive a `uhlc::ID` from and no
+            // role to resolve `timestamping.enabled` against. Non-stamping is
+            // therefore the only honest state, and it matches upstream in
+            // substance — zenoh's clock lives on the Runtime, never on the
+            // multicast transport, and no auto-stamp consumer takes a multicast
+            // session (both take `Session<R, T, Unicast>`).
+            node_hlc: crate::node_clock::NodeHlc::disabled(),
         }
     }
 
@@ -1318,6 +1349,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // by construction (R311ne — drops the defensive `if let Ok` that
         // re-asked a known-`Ok` question).
         let zid = actions.params.zid.clone();
+        // R311y450 — build THIS node's HLC once, here, from the same handshake
+        // identity and role the dedup install below reads. Derived rather than
+        // passed so the 100-plus existing `Session::new` call sites keep working
+        // unchanged; the inputs are exactly zenoh's
+        // (`enabled().get(whatami).then(|| ..)`, runtime/mod.rs:147), so a
+        // peer / client session gets the non-stamping handle and only a
+        // router-role one gets a clock.
+        let node_hlc = crate::node_clock::NodeHlc::for_node(
+            &zid,
+            actions.params.whatami,
+            crate::node_clock::TimestampingEnabled::default(),
+        );
         let session = Self {
             // R311nf — on `Session<R, T, Unicast>` the `transport` field IS the
             // `Arc<SessionLinkActions<R, T>>` payload (`<Unicast as
@@ -1330,6 +1373,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // R311lh — unconditional, see the field doc.
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
+            node_hlc,
         };
         // Forward the zid into the subscriber registry so wire-arrived
         // self-echo Pushes are dedup'd from session creation onward. The
@@ -1356,6 +1400,20 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// transport mismatch is a compile error rather than a runtime reject.
     pub fn actions(&self) -> &Arc<SessionLinkActions<R, T>> {
         &self.transport
+    }
+
+    /// R311y450 — borrow THIS node's §5.18 clock, wz's counterpart of zenoh's
+    /// `Runtime::hlc()` (`zenoh/src/net/runtime/mod.rs:336`).
+    ///
+    /// Every auto-stamp consumer on this session takes its clock from here and
+    /// clones the handle (an `Arc` bump — the clone SHARES). Constructing a
+    /// second [`NodeHlc`](crate::node_clock::NodeHlc) from this session's zid
+    /// instead is the defect R311y450 removed: the two would derive the same
+    /// `uhlc::ID` and keep separate `last_time`, so simultaneous stamps from two
+    /// consumers could collide on `(time, zid)` while each stamp still looked
+    /// well-formed.
+    pub fn node_hlc(&self) -> &crate::node_clock::NodeHlc {
+        &self.node_hlc
     }
 
     /// transport-shm — publish a SHM-backed payload. When this session has

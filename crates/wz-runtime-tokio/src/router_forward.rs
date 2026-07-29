@@ -914,6 +914,20 @@ pub struct RouterForwarder {
     /// exactly as the single-net [`LinkstateForwarder`](crate::linkstate_forward)
     /// does. Production is `Instant::now`.
     clock: Box<dyn Fn() -> Instant>,
+    /// R311y450 — THIS router's §5.18 wall-clock HLC, the source of the
+    /// forward-path timestamp [`route_push`](Self::route_push) applies. A distinct
+    /// axis from `clock` above (that one is the opaque MONOTONIC clock for query
+    /// deadlines; this one is a wall-clock NTP64 that reaches the wire).
+    ///
+    /// This is the role that STAMPS. zenoh ships `timestamping.enabled:
+    /// { router: true, peer: false, client: false }`
+    /// (`DEFAULT_CONFIG.json5:206`) and this forwarder is a `WhatAmI::Router` in
+    /// both meshes by construction, so — unlike the linkstate-peer forwarder,
+    /// whose clock is `None` under the same default — a `time-hlc` build of this
+    /// forwarder really does add timestamps to un-timestamped Puts it relays.
+    /// That makes the forward stamp FOREIGN-OBSERVABLE here: a pico subscriber
+    /// prints `with timestamp:` for a Put that entered this router bare.
+    node_hlc: crate::node_clock::NodeHlc,
 }
 
 impl RouterForwarder {
@@ -953,6 +967,15 @@ impl RouterForwarder {
                 self_zid,
                 WhatAmI::Router,
             ))),
+            // R311y450 — this router's §5.18 clock, over the SAME `WhatAmI::Router`
+            // both nets above are seeded with, so the timestamping gate cannot
+            // disagree with the role. Router is the one role zenoh's shipped map
+            // enables, which is why the stamp is live on this forwarder.
+            node_hlc: crate::node_clock::NodeHlc::for_node(
+                self_zid.as_slice(),
+                WhatAmI::Router,
+                crate::node_clock::TimestampingEnabled::default(),
+            ),
             faces: RefCell::new(HashMap::new()),
             #[cfg(feature = "transport-multicast")]
             mcast_groups: RefCell::new(Vec::new()),
@@ -2538,6 +2561,33 @@ impl RouterForwarder {
     ) {
         let Some(keyexpr) = self.resolve_inbound_keyexpr(inbound, push) else {
             return;
+        };
+        // R311y450 — the §5.18 forward-path stamp, applied ONCE here, before ANY
+        // of the four blocks below fans out. zenoh stamps at a single point
+        // (`treat_timestamp!` at `dispatcher/pubsub.rs:328`) and hands the one
+        // stamped `msg` to every out-face in `route`, so a Put that fans to two
+        // meshes plus three client faces carries ONE timestamp, not five. Every
+        // block below therefore takes the stamped `push`.
+        //
+        // Deliberately NOT inside `compute_push_forward`: `forward_push_tier`
+        // calls that core once PER TIER-NET, so a stamp there would give the
+        // router-mesh leg and the peer-mesh leg of one Put different timestamps.
+        //
+        // One divergence, stated: zenoh stamps INSIDE `if !route.is_empty()`,
+        // after computing the route, whereas this is before the blocks that
+        // compute theirs. So a Put with no interested route still advances this
+        // node's logical counter. That is HLC-internal — a counter advance is not
+        // wire-visible, and the counter is monotonic either way — and hoisting the
+        // stamp is what buys the single-timestamp guarantee across four
+        // independently-routed blocks.
+        let stamped;
+        let push = if self.node_hlc.is_stamping() {
+            let mut carrier = push.clone();
+            self.node_hlc.treat_timestamp(&mut carrier);
+            stamped = carrier;
+            &stamped
+        } else {
+            push
         };
         let master = self.is_master(&keyexpr);
         // Blocks 1 & 2 — within-tier transit (ungated, the resolved-source route).
