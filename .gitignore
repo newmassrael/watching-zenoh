@@ -85,3 +85,8 @@ claudedocs/
 
 # Python bytecode from the scripts/lib gate modules
 __pycache__/
+
+# cargo-sweep's build-mode timestamp (scripts/gc-build-artifacts.sh). Written
+# next to the workspace manifest before a wrapped build and consumed by the
+# sweep after it; purely local scratch, never a committed artifact.
+crates/sweep.timestamp

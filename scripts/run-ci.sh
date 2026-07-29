@@ -6520,7 +6520,7 @@ layer_z_zenohd_interop() {
     # opposite directions and neither alone covers the other. Additive like the
     # rest of this list: the advanced subscriber / publisher are declared only when
     # their flags are passed, so every other leg dials through the unchanged binary.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced --quiet) || return 1
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -6687,7 +6687,10 @@ layer_z_zenohd_interop() {
     # asserts both binaries exist before any lane starts.
     local ext_examples_dir="${WZ_ZENOH_EXT_EXAMPLES_DIR:-$PWD/target/zenohd}"
     local missing_ext_example=""
-    for ex in z_advanced_pub z_advanced_sub; do
+    # R311y445 — z_view_size joins the guard for the GROUP-MEMBERSHIP legs. Same
+    # provisioning run, same SKIP semantics: a stale target/zenohd/ means a
+    # developer has not re-run build-zenohd.sh since this round, not a regression.
+    for ex in z_advanced_pub z_advanced_sub z_view_size; do
         [[ -x "$ext_examples_dir/$ex" ]] || missing_ext_example="$ex"
     done
     if [[ -n "$missing_ext_example" ]]; then
@@ -6697,6 +6700,17 @@ layer_z_zenohd_interop() {
         _runci_guarded_test Z 10 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
             --test wz_advanced_pubsub_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \
+            || return 1
+        # R311y445 — the GROUP-MEMBERSHIP family, a separate file because it is a
+        # separate atom on a separate wire (bincode under
+        # `zenoh/ext/net/group/...`, independent of `@adv`). Three legs: the
+        # per-member queryable answering a foreign view query, the Join broadcast
+        # a foreign peer decodes, and a wrong-group control. Their oracle is
+        # z_view_size, which prints its own verdict, so the pass/fail judgement is
+        # the FOREIGN implementation's rather than an inference from wz's logs.
+        _runci_guarded_test Zgroup 3 env WZ_ZENOHD_BIN="$zenohd" \
+            WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
+            --test wz_group_membership_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \
             || return 1
     fi
     # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):

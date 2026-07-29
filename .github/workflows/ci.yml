@@ -850,9 +850,12 @@ jobs:
           # counterparty that plane can have (zenohd is a router with no
           # AdvancedCache; zenoh-pico has no advanced-pubsub at all), so their
           # absence takes the whole `@adv` cross-impl family with it.
-          for ex in z_advanced_pub z_advanced_sub; do
+          # R311y445 — z_view_size joins them, as the ONLY usable foreign group
+          # peer: its sibling z_member builds Config::default() with no
+          # CommonArgs, so it cannot be pointed at this zenohd at all.
+          for ex in z_advanced_pub z_advanced_sub z_view_size; do
             test -x "target/zenohd/$ex" \
-              || { echo "::error::$ex missing — the wz<->zenoh-ext advanced-pubsub proofs cannot run"; exit 1; }
+              || { echo "::error::$ex missing — the wz<->zenoh-ext proofs cannot run"; exit 1; }
           done
 
       - name: Build zenoh-pico CLI binaries

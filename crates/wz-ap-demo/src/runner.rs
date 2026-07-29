@@ -155,6 +155,13 @@ struct SpawnedTasks {
     /// never see the token DELETE, only the link drop.
     #[cfg(feature = "advanced")]
     advanced_publisher_handle: Option<TokioJoinHandle<()>>,
+    /// R311y445 — `--group-join`'s task. Non-terminating and abort-on-teardown
+    /// for exactly the reasons the advanced-publisher handle above documents:
+    /// it HOLDS the group membership (event subscriber, per-member queryable,
+    /// keep-alive beacon), and a foreign peer's view is a statement about that
+    /// membership still being held.
+    #[cfg(feature = "group")]
+    group_join_handle: Option<TokioJoinHandle<()>>,
 }
 
 /// Step 1 — link setup. Both roles delegate to the library session-open
@@ -1078,6 +1085,7 @@ struct BackgroundTaskSpecs {
     query: Option<String>,
     liveliness_get: Option<LivelinessGetSpec>,
     advanced_publish: Option<crate::args::AdvancedPublishSpec>,
+    group_join: Option<crate::args::GroupJoinSpec>,
 }
 
 fn spawn_background_tasks(
@@ -1092,6 +1100,7 @@ fn spawn_background_tasks(
         query: query_spec,
         liveliness_get: liveliness_get_spec,
         advanced_publish: advanced_publish_spec,
+        group_join: group_join_spec,
     } = specs;
     let publisher_handle = publisher_spec.map(|spec| {
         let session_for_publisher = session.clone();
@@ -1125,6 +1134,31 @@ fn spawn_background_tasks(
             session_clock,
         ))
     });
+    // R311y445 — the group-join task. Same shape as the advanced publisher: it
+    // declares inside the task because `Group::join` spawns the lease watchdog.
+    #[cfg(feature = "group")]
+    let group_join_handle = group_join_spec.map(|spec| {
+        let session_for_group = session.clone();
+        TokioRuntime.spawn(crate::tasks::group_join_task(
+            session_for_group,
+            spec,
+            session_clock,
+        ))
+    });
+    // The `group`-OFF arm, loud for the same reason as the advanced twins: a leg
+    // that greps for the join marker must be able to tell "built without the
+    // feature" from "the foreign peer never saw the member".
+    #[cfg(not(feature = "group"))]
+    if let Some(spec) = group_join_spec {
+        log::warn!(
+            "wz-ap-demo: --group-join='{}' is INERT (built without the `group` \
+             feature); no group will be joined. Also ignored: member_id='{}' \
+             lease_secs={:?}",
+            spec.group,
+            spec.member_id,
+            spec.lease_secs,
+        );
+    }
     // The `advanced`-OFF arm, loud for the same reason as the subscriber twin.
     #[cfg(not(feature = "advanced"))]
     if let Some(spec) = advanced_publish_spec {
@@ -1152,6 +1186,8 @@ fn spawn_background_tasks(
         liveliness_get_handle,
         #[cfg(feature = "advanced")]
         advanced_publisher_handle,
+        #[cfg(feature = "group")]
+        group_join_handle,
     }
 }
 
@@ -1584,6 +1620,8 @@ pub(crate) async fn run_demo(
         // the very window a foreign subscriber queries.
         #[cfg(feature = "advanced")]
             advanced_publisher_handle: _advanced_publisher_handle,
+        #[cfg(feature = "group")]
+            group_join_handle: _group_join_handle,
     } = spawn_background_tasks(
         &session,
         &actions,
@@ -1592,6 +1630,7 @@ pub(crate) async fn run_demo(
             query: query_spec,
             liveliness_get: liveliness_get_spec,
             advanced_publish: declare_spec.advanced_publish,
+            group_join: declare_spec.group_join,
         },
         session_clock,
         long_lived,
@@ -1844,6 +1883,13 @@ pub(crate) async fn run_demo(
     // and discarded ("dropping frame" WARN, measured 2 per run).
     #[cfg(feature = "advanced")]
     if let Some(handle) = _advanced_publisher_handle {
+        handle.abort();
+    }
+    // R311y445 — same abort obligation: the group task holds a subscriber, a
+    // queryable and a keep-alive beacon, and their undeclares must be enqueued
+    // before the writer channel closes.
+    #[cfg(feature = "group")]
+    if let Some(handle) = _group_join_handle {
         handle.abort();
     }
 

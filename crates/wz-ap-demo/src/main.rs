@@ -903,6 +903,44 @@ fn main() -> ExitCode {
         print_usage();
         return ExitCode::from(2);
     }
+    // R311y445 — `--group-join <group>`: join a zenoh-ext GROUP. The member id is
+    // its own flag because it is the literal a FOREIGN peer prints in its view
+    // listing, so a fixture must be able to pin it rather than grep for whatever
+    // zid the demo happened to get.
+    let group_join_opt = parse_pair(rest, "--group-join");
+    let group_member_id_opt = parse_pair(rest, "--group-member-id");
+    let group_lease_secs: Option<u64> = match parse_pair(rest, "--group-lease-secs") {
+        Some(s) => match s.parse::<u64>() {
+            Ok(0) => {
+                eprintln!(
+                    "wz-ap-demo: --group-lease-secs must be > 0 (a 0 lease expires instantly)"
+                );
+                return ExitCode::from(2);
+            }
+            Ok(n) => Some(n),
+            Err(_) => {
+                eprintln!("wz-ap-demo: --group-lease-secs must be a u64 (got {s:?})");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    // The sibling guard, per R311y444-review: a flag that configures a mode is
+    // rejected without that mode rather than silently ignored.
+    for (flag, present) in [
+        ("--group-member-id", group_member_id_opt.is_some()),
+        ("--group-lease-secs", group_lease_secs.is_some()),
+    ] {
+        if present && group_join_opt.is_none() {
+            eprintln!(
+                "wz-ap-demo: {flag} requires --group-join (without a group there is \
+                 no member to configure)"
+            );
+            eprintln!();
+            print_usage();
+            return ExitCode::from(2);
+        }
+    }
     let on_remote_sub_log = rest.iter().any(|a| a == "--on-remote-subscriber-log");
     let on_remote_q_log = rest.iter().any(|a| a == "--on-remote-queryable-log");
     let on_remote_l_log = rest.iter().any(|a| a == "--on-remote-liveliness-log");
@@ -966,11 +1004,16 @@ fn main() -> ExitCode {
         // a demo carrying only this flag has real work to do.
         && advanced_subscribe_opt.is_none()
         && advanced_publish_opt.is_none()
+        // R311y445 — `--group-join` is a standalone role too: joining a group
+        // declares an event subscriber, a per-member queryable and a keep-alive
+        // beacon, which is exactly the work a foreign group peer observes.
+        && group_join_opt.is_none()
     {
         eprintln!(
             "wz-ap-demo: at least one of --key / --publish / --delete / --queryable / --query / \
              --declare-token / --liveliness-subscribe / --liveliness-get / \
-             --advanced-subscribe / --advanced-publish / --on-remote-* must be supplied",
+             --advanced-subscribe / --advanced-publish / --group-join / \
+             --on-remote-* must be supplied",
         );
         eprintln!();
         print_usage();
@@ -1304,6 +1347,13 @@ fn main() -> ExitCode {
         advanced_history_max_age,
         advanced_recovery,
         advanced_recovery_heartbeat,
+        group_join: group_join_opt.map(|group| crate::args::GroupJoinSpec {
+            group,
+            // Defaulted rather than required: the id only has to be STABLE for a
+            // fixture to grep, and a literal default keeps the common case short.
+            member_id: group_member_id_opt.unwrap_or_else(|| "wz-member".to_string()),
+            lease_secs: group_lease_secs,
+        }),
         advanced_publish: advanced_publish_opt.map(|keyexpr| AdvancedPublishSpec {
             keyexpr,
             // Guarded above: `--advanced-publish` without `--value` already exited.

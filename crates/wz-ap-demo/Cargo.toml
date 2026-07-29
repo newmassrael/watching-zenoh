@@ -275,6 +275,16 @@ advanced = [
     # backwards, naming the proof leg as the one that would pass wrongly.
     "wz/ext-pubsub-sample-miss-detection",
 ]
+# R311y445 — opt-in GROUP MEMBERSHIP (`--group-join <group>`): join a zenoh-ext
+# group as a member so a FOREIGN group peer can see this member in its view.
+#
+# Its OWN feature, not part of `advanced`, because it is its own atom on its own
+# wire: the group plane is a self-contained bincode protocol under
+# `zenoh/ext/net/group/...`, independent of the `@adv` namespace the advanced
+# feature covers. Folding it into `advanced` would make a build that wanted one
+# compile the other, and would blur which leg proves which atom -- the exact
+# confusion R311y444 had to correct when a carry named the wrong atom.
+group = ["wz/ext-pubsub-group-membership"]
 # R311qa — opt-in multi-peer ROUTER mode (`--router <addr>`): the catalog
 # `routing-router` atom's foundation (bind once, hold N concurrent peer faces,
 # no forwarding yet). Forwards the wz facade's `routing-router` marker feature,

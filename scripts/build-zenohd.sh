@@ -184,9 +184,17 @@ if [[ -n "$ZH" ]]; then
         # would refuse every `@adv` reply regardless of what the querier sent and
         # the oracle would "fail" identically for a conformant and a broken wz.
         # Only source A can produce them, exactly as for the plugin cdylib above.
-        echo "build-zenohd: building zenoh-ext examples (z_advanced_pub/sub) ..." >&2
+        # R311y445 — z_view_size joins them, for the GROUP-MEMBERSHIP family. Its
+        # sibling z_member is unusable as an oracle: it builds `Config::default()`
+        # with no CommonArgs, so it cannot be pointed at a zenohd with `-e` and
+        # would depend on multicast scouting. z_view_size takes the full CommonArgs
+        # AND prints a decisive verdict ("Established view size of N with members:"
+        # vs "Failed to establish view size of N"), which is what lets a leg assert
+        # that a FOREIGN implementation actually decoded wz's Join/KeepAlive.
+        echo "build-zenohd: building zenoh-ext examples (z_advanced_pub/sub, z_view_size) ..." >&2
         CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
             -p zenoh-ext-examples --example z_advanced_pub --example z_advanced_sub \
+            --example z_view_size \
             --release --manifest-path "$ZH/Cargo.toml"
         EXT_EXAMPLES_SRC="$BUILD_DIR/release/examples"
     fi
@@ -226,7 +234,7 @@ else
     echo "  the wz<->zenohd storage replication interop test will SKIP." >&2
 fi
 if [[ -n "$EXT_EXAMPLES_SRC" ]]; then
-    for ex in z_advanced_pub z_advanced_sub; do
+    for ex in z_advanced_pub z_advanced_sub z_view_size; do
         install -m 0755 "$EXT_EXAMPLES_SRC/$ex" "$INSTALL_DIR/$ex"
         echo "build-zenohd: installed -> $INSTALL_DIR/$ex" >&2
     done

@@ -127,6 +127,81 @@ where
     log::info!("wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID}");
 }
 
+/// R311y445 — `--group-join`: join a zenoh-ext GROUP as a member and hold the
+/// membership open so a foreign group peer can observe it.
+///
+/// Declared INSIDE a task, like [`advanced_publisher_task`] and for the same
+/// reason: `Group::join` spawns the lease watchdog (and the keep-alive beacon
+/// for `Auto` liveliness), so it requires a live tokio runtime.
+///
+/// The group is HELD rather than returned. Dropping it undeclares the member's
+/// event subscriber and per-member queryable and stops the keep-alive, which is
+/// precisely the state a foreign peer's view is supposed to reflect -- so the
+/// task parks instead of completing, and the fixture terminates the process.
+#[cfg(feature = "group")]
+pub(crate) async fn group_join_task<T>(
+    session: TokioSession,
+    spec: crate::args::GroupJoinSpec,
+    clock: T,
+) where
+    T: TimeSource + Send + 'static,
+{
+    use wz::runtime_tokio::group::{Group, GroupOptions, Member};
+
+    let actions = session.actions();
+    let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
+    loop {
+        if actions.is_established() {
+            break;
+        }
+        if clock.now_monotonic_ms() >= deadline_ms {
+            log::warn!(
+                "wz-ap-demo: group_join_task gave up waiting for Established \
+                 after {QUERY_HANDSHAKE_TIMEOUT_MS}ms"
+            );
+            return;
+        }
+        clock.sleep(QUERY_HANDSHAKE_POLL_INTERVAL_MS).await;
+    }
+
+    let mut member = Member::new(spec.member_id.clone());
+    if let Some(secs) = spec.lease_secs {
+        member = member.lease(core::time::Duration::from_secs(secs));
+    }
+    let group = match Group::join(
+        &session,
+        spec.group.clone(),
+        member,
+        GroupOptions::default(),
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            // A wildcard group or member id lands here. Logged rather than
+            // swallowed: "the foreign peer never saw us" and "we never joined"
+            // are the two readings a fixture has to tell apart.
+            log::warn!(
+                "wz-ap-demo: GROUP JOIN rejected group='{}' member_id='{}': {e:?}",
+                spec.group,
+                spec.member_id
+            );
+            return;
+        }
+    };
+    log::info!(
+        "wz-ap-demo: JOINED GROUP group='{}' member_id='{}' lease_secs={:?} view_size={}",
+        spec.group,
+        spec.member_id,
+        spec.lease_secs,
+        group.size(),
+    );
+
+    // Hold the membership. See the doc comment: dropping `group` would retract
+    // exactly what the foreign peer is being asked to observe.
+    loop {
+        clock.sleep(1_000).await;
+    }
+}
+
 /// R311y442 — `--advanced-publish`: declare a wz [`AdvancedPublisher`] with a
 /// sample cache and emit a burst into it, then hold the session open so the
 /// cache keeps answering.

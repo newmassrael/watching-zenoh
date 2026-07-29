@@ -438,6 +438,14 @@ pub(crate) struct DeclareEmitSpec {
     /// fired, so a flag that armed both at once would make the distinction
     /// unobservable.
     pub(crate) advanced_recovery_heartbeat: bool,
+    /// R311y445 — `--group-join <group>`'s bundle: join a zenoh-ext GROUP as a
+    /// member and hold the session open so a foreign group peer sees this member
+    /// in its view. `None` without the flag.
+    ///
+    /// A separate surface from the advanced-pubsub flags rather than an extension
+    /// of them: the group plane is self-contained (its own bincode wire on its own
+    /// keyexpr namespace, independent of `@adv`).
+    pub(crate) group_join: Option<GroupJoinSpec>,
     /// R311y442 — `--advanced-publish <keyexpr>`'s bundle. The ANSWERING half of
     /// the advanced-pubsub plane: a wz [`AdvancedPublisher`] with a sample cache,
     /// which a FOREIGN advanced subscriber then drains. `None` without the flag.
@@ -484,6 +492,25 @@ pub(crate) struct AdvancedPublishSpec {
     /// multi-publisher fixture gets distinct `@adv` namespaces the same way it
     /// gets distinct session zids.
     pub(crate) zid: Vec<u8>,
+}
+
+/// R311y445 — the `--group-join` parameter bundle.
+///
+/// The `advanced`-OFF build reports every field it is ignoring, one by one, for
+/// the same reason [`AdvancedPublishSpec`] does: an operator who passed a member
+/// id needs to see that it was dropped too, not just that the group was.
+pub(crate) struct GroupJoinSpec {
+    /// `--group-join <group>` — the group name. Must be non-wild; `Group::join`
+    /// rejects a wildcard and the demo surfaces that rejection rather than
+    /// silently joining nothing.
+    pub(crate) group: String,
+    /// `--group-member-id <id>` — this member's id, which is the literal a
+    /// foreign peer prints in its view listing, so a fixture greps for it.
+    pub(crate) member_id: String,
+    /// `--group-lease-secs <n>` — the member lease. A fixture matches it to the
+    /// oracle's own `Duration::from_secs(3)` so both sides expire on one scale;
+    /// wz's default (zenoh-ext's 18s) otherwise.
+    pub(crate) lease_secs: Option<u64>,
 }
 
 /// R121k-5 — bool flag bundle for the three Remote* registry log
