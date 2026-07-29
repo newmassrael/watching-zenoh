@@ -128,6 +128,31 @@ if ! mnemosyne-cli validate-workspace; then
     exit 1
 fi
 
+# ─── housekeeping (NOT a gate) — toolchain-scoped target GC ─────────
+#
+# R311y445. Deliberately NOT a gate: it never fails the push, and an absent
+# cargo-sweep is a silent skip. The `a skip is green` rule this repo enforces
+# is about VERIFICATION — a check that cannot read its input must not report
+# success — and garbage collection verifies nothing, so blocking a push on it
+# would be the wrong trade.
+#
+# `--installed` is the only sweep form cheap and safe enough to run on every
+# push: it keeps every artifact of every still-installed rustup toolchain, so
+# the next build is a full cache hit. Measured 2026-07-29 on this repo's 63G
+# target: 3.8s for the real sweep (1.1s for --dry-run — quote the real one).
+# What it collects is the residue of a toolchain
+# that has been REMOVED — which is nothing until you remove one, also measured
+# the same day (six toolchains installed, "Would clean: nothing").
+#
+# It does NOT address feature-combination accumulation, which is what actually
+# grows this target (debug/deps alone was 58G). That needs the BUILD mode of
+# scripts/gc-build-artifacts.sh wrapped around a FULL run-ci, which is far too
+# destructive to run from a hook: it keeps only what the wrapped build touched.
+if command -v cargo-sweep >/dev/null 2>&1; then
+    bash scripts/gc-build-artifacts.sh --installed || \
+        echo "pre-push: target GC skipped (non-fatal)" >&2
+fi
+
 # ─── gate 3 — changed-crate tests (default features, fast) ──────────
 # Diff range: <remote_sha>..<local_sha>. A zero/absent remote_sha (a new
 # ref or first push) has no remote base — fall back to origin/main if it
