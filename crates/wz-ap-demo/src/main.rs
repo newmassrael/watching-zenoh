@@ -834,6 +834,10 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // The ceiling on `--advanced-recovery-periodic`, one hour. Far above any
+    // plausible re-ask cadence and far below the u64::MAX that reads as armed
+    // while never firing (R311y447-review).
+    const PERIODIC_MAX_MS: u64 = 3_600_000;
     // R311y447 — the PERIODIC trigger, armed separately for the same reason as the
     // heartbeat one. It takes a PERIOD rather than being a bare switch because the
     // period is the observable: periodic emits the same OPEN `_sn=last+1..`
@@ -846,6 +850,23 @@ fn main() -> ExitCode {
                     eprintln!(
                         "wz-ap-demo: --advanced-recovery-periodic must be > 0 \
                          (the runtime clamps a 0 ms period to 1 ms, i.e. a GET storm)"
+                    );
+                    return ExitCode::from(2);
+                }
+                // R311y447-review (REVIEWER 3) — the SYMMETRIC guard. The 0 case
+                // is rejected because a degenerate period misrepresents the armed
+                // state, and the top end does exactly the same thing from the
+                // other side: `Duration::from_millis(u64::MAX)` survives the
+                // runtime's `.max(1)` clamp (advanced_subscriber.rs:1516) as a
+                // ~584-million-year sleep, so the declare marker reports the
+                // trigger ARMED while its behaviour is identical to unarmed. The
+                // ceiling is the run window a fixture could plausibly use; past
+                // it, "armed" is a claim the process will never honour.
+                Ok(n) if n > PERIODIC_MAX_MS => {
+                    eprintln!(
+                        "wz-ap-demo: --advanced-recovery-periodic {n} ms exceeds the \
+                         {PERIODIC_MAX_MS} ms ceiling; a period no run will reach \
+                         reports the trigger as armed while it never fires"
                     );
                     return ExitCode::from(2);
                 }
@@ -925,7 +946,7 @@ fn main() -> ExitCode {
     // arms a beacon ON the advanced publisher, so without `--advanced-publish` it
     // has nothing to arm. Rejected rather than ignored, matching this file's own
     // convention for `--value` without a publisher flag ("rejected to surface
-    // mis-wired argv") and its twin `--advanced-recovery-heartbeat` below. The
+    // mis-wired argv") and its twin `--advanced-recovery-heartbeat` above. The
     // first version of this round guarded one of the two new flags and not the
     // other, in a single commit.
     if advanced_publish_heartbeat_ms.is_some() && advanced_publish_opt.is_none() {

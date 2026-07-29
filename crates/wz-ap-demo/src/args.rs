@@ -451,12 +451,18 @@ pub(crate) struct DeclareEmitSpec {
     /// the observable. The periodic trigger emits the same OPEN `_sn=last+1..`
     /// selector the sample-driven one does, so selector shape cannot separate
     /// them — what separates them is that `periodic_requests`
-    /// (`advanced_subscriber.rs:685-702`, mirroring zenoh's `PeriodicQuery::run`,
-    /// `advanced_subscriber.rs:588-620`) asks on EVERY tick for every known
-    /// source with no GET in flight, checking for no gap at all, while
-    /// sample-driven fires only out of `handle_live`'s gap branch. On a stream
-    /// with no loss the two therefore differ in PRESENCE, not in shape — and a
-    /// fixture asserting that needs to know the cadence to expect.
+    /// (`advanced_subscriber.rs:685-702`) asks on EVERY tick for every known
+    /// source with no GET in flight, consulting nothing, while sample-driven
+    /// needs a non-empty reorder buffer (`:605`). On a stream with no loss the
+    /// two therefore differ in PRESENCE, not in shape — and a fixture asserting
+    /// that needs to know the cadence to expect.
+    ///
+    /// R311y447-review — an earlier version of this doc said sample-driven fires
+    /// "out of `handle_live`'s gap branch" and that `periodic_requests` mirrors
+    /// zenoh's `PeriodicQuery::run`. Both were overstated: the sample-driven
+    /// request is issued after the match on `!pending_samples.is_empty()`, which
+    /// history buffering can also satisfy, and wz's periodic carries an in-flight
+    /// gate upstream does not. See `periodic_requests`' own doc for the second.
     pub(crate) advanced_recovery_periodic_ms: Option<u64>,
     /// R311y445 — `--group-join <group>`'s bundle: join a zenoh-ext GROUP as a
     /// member and hold the session open so a foreign group peer sees this member

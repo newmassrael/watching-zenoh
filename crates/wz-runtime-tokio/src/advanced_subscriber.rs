@@ -680,8 +680,19 @@ impl State {
     /// `last_delivered` catches a lost LAST sample that no later live sample
     /// would trigger sample-driven recovery for (zenoh `PeriodicQuery::run`,
     /// advanced_subscriber.rs:587-643). wz drives ONE shared task that iterates
-    /// all sources here (vs zenoh's per-source `TimedEvent`) — observable-
-    /// equivalent, the GET shape is identical. No-op when retransmission is off.
+    /// all sources here (vs zenoh's per-source `TimedEvent`); the GET shape is
+    /// identical. No-op when retransmission is off.
+    ///
+    /// R311y447-review — TWO reviewers independently flagged that the previous
+    /// "observable-equivalent" claim glossed a real divergence, so it is named
+    /// here rather than asserted away. The `pending_queries == 0` gate below has
+    /// NO upstream counterpart: zenoh's `PeriodicQuery::run` increments
+    /// unconditionally (`:592`), and that is deliberate — it gates its other two
+    /// triggers (sample-driven `:706`, heartbeat `:1104`) and leaves only periodic
+    /// ungated. Observable difference: when a GET round trip exceeds the period,
+    /// upstream issues overlapping GETs while wz issues at most one. wz is the
+    /// more conservative of the two and no leg in the cross-impl corpus witnesses
+    /// the difference; removing this gate reds nothing today.
     fn periodic_requests(&mut self) -> Vec<RecoveryRequest> {
         if !self.retransmission {
             return Vec::new();
