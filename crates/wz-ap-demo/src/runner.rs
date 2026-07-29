@@ -2328,8 +2328,8 @@ async fn run_peer_until(
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::{
         default_autoconnect_matcher, AclConfig, AclFlow, AclMessage, AclPolicy, AclRule,
-        AutoConnect, DownsamplingRule, InterceptorConfig, LinkstateForwarder, LowPassRule,
-        Permission, SubjectSelector, WhatAmI, Zid,
+        AutoConnect, DownsamplingRule, InterceptorConfig, InterceptorFlow, LinkstateForwarder,
+        LowPassMessage, LowPassRule, Permission, SubjectSelector, WhatAmI, Zid,
     };
     use wz::runtime_tokio::session_open::bind_endpoint_with_config;
 
@@ -2553,10 +2553,15 @@ async fn run_peer_until(
         }];
     }
 
-    // `--max-payload <bytes>`: opt into §5.16 access-quota (a per-key payload-size
-    // cap, zenoh low_pass) on EVERY keyexpr — a Put larger than the limit is
-    // dropped. The third interceptor kind on the chain. Off by default; a
-    // non-numeric value is ignored with a warning.
+    // `--max-payload <bytes>`: opt into §5.16 access-quota (a per-key message-size
+    // cap, zenoh low_pass) on EVERY keyexpr — a message whose payload PLUS
+    // attachment exceeds the limit is dropped. The third interceptor kind on the
+    // chain. Off by default; a non-numeric value is ignored with a warning.
+    //
+    // R311y451 — the rule spells out every message KIND and both FLOWS. zenoh's
+    // `messages` is a required non-empty list with no "all" default, so a knob
+    // meaning "cap this node's whole message surface" has to enumerate the four
+    // kinds; `flows` defaults to both upstream and does so here.
     if let Some(max_payload) = interceptors.max_payload.as_deref() {
         match max_payload.parse::<usize>() {
             Ok(max_payload_size) => {
@@ -2564,6 +2569,8 @@ async fn run_peer_until(
                 interceptor_config.low_pass = vec![LowPassRule {
                     key_exprs: vec!["**".to_owned()],
                     max_payload_size,
+                    messages: LowPassMessage::ALL.to_vec(),
+                    flows: InterceptorFlow::ALL.to_vec(),
                 }];
             }
             Err(_) => log::warn!(

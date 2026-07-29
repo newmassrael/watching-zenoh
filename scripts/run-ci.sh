@@ -3102,7 +3102,13 @@ layer_c1y_cargo_test_routing_peer() {
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     _runci_guarded_test "C1y linkstate" 200 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
-    _runci_guarded_test "C1y interceptor" 10 \
+    # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
+    # budget, checked-add overflow, minimum-across-overlapping-rules, the
+    # `messages` selector, the `flows` selector + no-interceptor-on-an-ungoverned-
+    # flow, and the per-kind classification bound to real built messages). Like
+    # C1ah's `node_clock::` pin this is a COUNT, not a SET: it catches a test that
+    # stops being selected, not a test that is renamed into still-16.
+    _runci_guarded_test "C1y interceptor" 16 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     _runci_guarded_test "C1y linkstate+access" 211 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
@@ -7365,6 +7371,22 @@ layer_e6_peer_mesh() {
             --test wz_peer_acl_pico_interop -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_acl_pico_interop" || return 1
+    fi
+    # R311y451 — pico LOW-PASS cross-impl (§5.16 access-quota), the size-budget
+    # sibling of the ACL leg above and on the SAME E6 binary (routing-peer pulls
+    # access-quota). A pico z_pub_attachment Put whose PAYLOAD ALONE exactly fills
+    # the peer's --max-payload budget is dropped anyway, because zenoh budgets
+    # payload + attachment (low_pass.rs:358-361); a plain under-budget z_put in the
+    # same leg is admitted (the positive control — proves the budget, not a dead
+    # session). The calibration is what makes it discriminate: an over-sized
+    # payload would have been dropped by the pre-y451 code too. Needs BOTH foreign
+    # binaries, so both are guarded (RED: payload-only accounting admits the
+    # attachment put as a 2nd data push and the drop barrier times out).
+    if [[ -x target/zenoh-pico-cli/z_put && -x target/zenoh-pico-cli/z_pub_attachment ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_low_pass_attachment_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    else
+        _pico_cli_unavailable "E6 leg wz_peer_low_pass_attachment_pico_interop" || return 1
     fi
     # R311y165 — the STRONG peer-mode future-push CROSS-IMPL e2e (the leg-5 peer analog,
     # now that D4 gave the peer a client data plane): a pico z_pub CLIENT of peer-A

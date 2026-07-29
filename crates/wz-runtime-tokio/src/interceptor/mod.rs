@@ -140,6 +140,14 @@ pub enum InterceptorFlow {
     Egress,
 }
 
+impl InterceptorFlow {
+    /// Both flows — the default a per-rule `flows` selector inherits when a
+    /// deploy does not narrow it, mirroring zenoh's
+    /// `flows.get_or_insert(nev![Ingress, Egress])`
+    /// (`net/routing/interceptor/low_pass.rs:83-85`). R311y451.
+    pub const ALL: [InterceptorFlow; 2] = [InterceptorFlow::Ingress, InterceptorFlow::Egress];
+}
+
 #[cfg(feature = "access-acl")]
 impl From<InterceptorFlow> for AclFlow {
     fn from(flow: InterceptorFlow) -> Self {
@@ -193,9 +201,10 @@ impl InterceptorConfig {
     /// interceptors are all feature-elided — yields an empty chain (access
     /// control disabled, every message admitted).
     pub fn build_chain(&self, flow: InterceptorFlow) -> InterceptorChain {
-        // `flow` is consumed only by the access-acl ACL push (mapped to
-        // `AclFlow`); with access-acl elided the chain is flow-agnostic.
-        #[cfg(not(feature = "access-acl"))]
+        // `flow` is consumed by the access-acl ACL push (mapped to `AclFlow`)
+        // and, since R311y451, by the low-pass per-rule `flows` selector. With
+        // BOTH elided the chain is flow-agnostic.
+        #[cfg(not(any(feature = "access-acl", feature = "access-quota")))]
         let _ = flow;
         // `mut` is exercised by whichever interceptor pushes compile in; a
         // routing-peer build with no access knob leaves the chain empty.
@@ -211,9 +220,13 @@ impl InterceptorConfig {
         if let Some(policy) = &self.acl {
             chain.push(Box::new(AclInterceptor::new(policy.clone(), flow.into())));
         }
+        // R311y451 — the low-pass rules are FLOW-SCOPED: only the subset whose
+        // `flows` names this flow is installed, and a flow no rule governs gets
+        // no interceptor at all (zenoh's `interface_enabled.<flow>.then(...)`,
+        // `low_pass.rs:188-205`).
         #[cfg(feature = "access-quota")]
-        if !self.low_pass.is_empty() {
-            chain.push(Box::new(LowPassInterceptor::new(self.low_pass.clone())));
+        if let Some(low_pass) = LowPassInterceptor::for_flow(&self.low_pass, flow) {
+            chain.push(Box::new(low_pass));
         }
         chain
     }

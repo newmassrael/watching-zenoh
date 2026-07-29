@@ -975,7 +975,19 @@ router-multicast-faces = [
 # exactly the admission filters it needs (Layer F footprint).
 access-acl = ["routing-peer", "dep:wz-access-control"]
 access-downsampling = ["routing-peer"]
-access-quota = ["routing-peer"]
+# R311y451 — the two session-core reads the low-pass SIZE budget needs, named
+# by the gate rather than inherited by luck. zenoh budgets payload PLUS
+# attachment (`net/routing/interceptor/low_pass.rs:358-361`), and wz carries the
+# attachment on the generic ext chain, so the count comes from the
+# `attachment-bytes` decode SSOT (Push id 0x03 / Query id 0x05). Sizing a Query
+# additionally needs the `query-value` ext read, since zenoh budgets
+# `query.ext_body.payload.len()` (`:265-269`) and wz carries that value as the
+# 0x03 ENC_ZBUF `encoding || payload` ext. Neither rides `routing-peer`.
+access-quota = [
+    "routing-peer",
+    "wz-session-core/attachment-bytes",
+    "wz-session-core/query-value",
+]
 # R311y39 — §5.23 config-mutate-runtime: the LIVE leg of the typed WzConfig.
 # Gates the re-apply in `WzConfig::reconfigure_interceptors` so a config
 # mutation RE-DRIVES the live forwarder (config-driven), vs OFF where the

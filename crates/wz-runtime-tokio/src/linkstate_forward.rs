@@ -142,7 +142,7 @@ use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
 use crate::future_interest::{FutureQablStore, FutureSubStore};
-use crate::interceptor::{InterceptorChain, InterceptorContext, InterceptorFlow};
+use crate::interceptor::{InterceptorChain, InterceptorContext};
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{ExpiredQuery, PendingQueries, QueryFan};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -167,15 +167,22 @@ pub use wz_access_control::{
 // so a deploy builds it from the same facade path as the ACL types above.
 #[cfg(feature = "access-downsampling")]
 pub use crate::interceptor::downsampling::DownsamplingRule;
-// R311tx — the low-pass (per-key payload-size limit) rule type, re-exported
-// beside the other rule types (the §5.16 access-quota realization).
+// R311tx — the low-pass (per-key message-size limit) rule type, re-exported
+// beside the other rule types (the §5.16 access-quota realization). R311y451
+// adds `LowPassMessage`: a rule now names the message KINDS it sizes, so a
+// deploy needs the kind vocabulary from the same facade path as the rule.
 #[cfg(feature = "access-quota")]
-pub use crate::interceptor::low_pass::LowPassRule;
+pub use crate::interceptor::low_pass::{LowPassMessage, LowPassRule};
 // R311ty — the combined interceptor configuration, the single funnel a deploy
 // fills and installs via `set_interceptors` (the wz mirror of zenoh's
 // interceptor_factories(config)). Re-exported beside the rule types above so a
 // deploy builds the whole pipeline from one facade path.
 pub use crate::interceptor::InterceptorConfig;
+// R311y451 — the flow descriptor, re-exported beside the config it is now part
+// OF: a low-pass rule names the flows it applies to, so a deploy that builds a
+// rule needs the flow vocabulary from the same facade path. Unconditional (the
+// seam lives under `routing-peer`, not under an `access-*` knob).
+pub use crate::interceptor::InterceptorFlow;
 // The gossip-target role set lives in the codec layer beside `WhatAmI`; the
 // forwarder consumes it to gate which faces a link-state flood reaches.
 use wz_codecs::whatami::WhatAmIMatcher;
@@ -9803,6 +9810,8 @@ mod tests {
             low_pass: vec![LowPassRule {
                 key_exprs: vec!["demo/**".to_owned()],
                 max_payload_size: 8,
+                messages: LowPassMessage::ALL.to_vec(),
+                flows: InterceptorFlow::ALL.to_vec(),
             }],
             ..Default::default()
         });
