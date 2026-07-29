@@ -268,9 +268,11 @@ advanced = [
     # It is its own atom because it is its own direction: `-advanced-publisher`
     # answers a subscriber's GET, while this EMITS the last-sn beacon that tells a
     # subscriber there is something to GET at all. Without it in the closure the
-    # flag would compile to a no-op and the leg that needs it would pass for the
-    # wrong reason -- the shape `advanced`-OFF already guards against by logging
-    # INERT.
+    # flag parses but arms nothing (the option field is not cfg-gated, only the
+    # spawn is), so the BEACON leg would fail and its CONTROL twin would pass for
+    # the wrong reason -- an unarmed beacon is exactly what the control asserts.
+    # R311y444-review (REVIEWER 3) corrected this: the earlier wording had it
+    # backwards, naming the proof leg as the one that would pass wrongly.
     "wz/ext-pubsub-sample-miss-detection",
 ]
 # R311qa — opt-in multi-peer ROUTER mode (`--router <addr>`): the catalog

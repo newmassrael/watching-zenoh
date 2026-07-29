@@ -174,11 +174,17 @@ pub(crate) async fn advanced_publisher_task<T>(
         options.cache = Some(CacheConfig { max_samples });
     }
     // R311y444 — arm the last-sn heartbeat BEACON. `AdvancedPublisherOptions`
-    // defaults to `Sequencing::SequenceNumber`, which the beacon REQUIRES (there
-    // is no last-sn to publish without a seqnum), so no extra wiring is needed
-    // here -- but that coupling is upstream's `Sequencing::SequenceNumber` force,
-    // not a wz invariant, so it is asserted at declare time by the log line below
-    // rather than assumed.
+    // defaults to `Sequencing::SequenceNumber` (`advanced_publisher.rs:116`),
+    // which the beacon REQUIRES: `heartbeat_spawn_params` returns `None` for any
+    // other sequencing (`:397-404`) and the beacon task is simply never spawned.
+    //
+    // R311y444-review (REVIEWERS 1 and 3, independently) — an earlier version of
+    // this comment claimed that coupling was "asserted at declare time by the log
+    // line below". IT IS NOT: the log reports `heartbeat_ms`, never `sequencing`,
+    // so if the default ever flipped, both the log and the fixture's
+    // `heartbeat_ms=Some(..)` guard would still pass while no beacon was emitted.
+    // The thing that would catch it is leg 7 going red, which is a real gate but
+    // not the one the comment named.
     if let Some(period_ms) = spec.heartbeat_ms {
         options.sample_miss_detection =
             wz::runtime_tokio::advanced_publisher::MissDetectionConfig::default()

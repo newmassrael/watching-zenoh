@@ -887,6 +887,22 @@ fn main() -> ExitCode {
             },
             None => None,
         };
+    // R311y444-review (REVIEWER 3) — the sibling guard. `--advanced-publish-heartbeat`
+    // arms a beacon ON the advanced publisher, so without `--advanced-publish` it
+    // has nothing to arm. Rejected rather than ignored, matching this file's own
+    // convention for `--value` without a publisher flag ("rejected to surface
+    // mis-wired argv") and its twin `--advanced-recovery-heartbeat` below. The
+    // first version of this round guarded one of the two new flags and not the
+    // other, in a single commit.
+    if advanced_publish_heartbeat_ms.is_some() && advanced_publish_opt.is_none() {
+        eprintln!(
+            "wz-ap-demo: --advanced-publish-heartbeat requires --advanced-publish \
+             (the beacon rides the advanced publisher; without one it arms nothing)"
+        );
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
     let on_remote_sub_log = rest.iter().any(|a| a == "--on-remote-subscriber-log");
     let on_remote_q_log = rest.iter().any(|a| a == "--on-remote-queryable-log");
     let on_remote_l_log = rest.iter().any(|a| a == "--on-remote-liveliness-log");

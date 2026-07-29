@@ -1070,7 +1070,20 @@ fn requested_sn_ranges(oracle_trace: &str) -> Vec<(u32, Option<u32>)> {
             if let Some((from, to)) = val.split_once("..") {
                 if let Ok(from) = from.trim().parse::<u32>() {
                     let to = to.trim();
-                    out.push((from, if to.is_empty() { None } else { to.parse().ok() }));
+                    // R311y444-review (REVIEWER 2, NIT) — an UNPARSABLE upper
+                    // bound must not silently become `None`, which is the shape
+                    // leg 10 calibrates on as healthy AND leg 9 reads as "no
+                    // bounded range". Unreachable today (the bound is a u32
+                    // rendered by wz), but a corruption must not disguise itself
+                    // as the good case, so it panics instead.
+                    let to = if to.is_empty() {
+                        None
+                    } else {
+                        Some(to.parse::<u32>().unwrap_or_else(|_| {
+                            panic!("unparsable `_sn` upper bound {to:?} in the oracle trace")
+                        }))
+                    };
+                    out.push((from, to));
                 }
             }
             rest = tail;
@@ -1254,9 +1267,20 @@ fn spawn_wz_advanced_publisher(
     // wz emitting fewer samples than asked would ALSO leave the last index
     // missing, which is the control leg's expected observation and the proof
     // leg's failure — so the two would be indistinguishable without this.
+    //
+    // R311y444-review (REVIEWER 2, DEFECT) — filtered on `ADVANCED PUT keyexpr=`,
+    // not on `ADVANCED PUT`. The demo logs BOTH outcomes with that shorter
+    // substring (`tasks.rs:213` on Ok, `:217` "ADVANCED PUT failed:" on Err), so
+    // the loose filter counted a FAILED put of the last index as a success —
+    // defeating the exact vacuity this guard exists to close.
+    assert!(
+        !captured.contains("ADVANCED PUT failed"),
+        "a wz put FAILED during the burst, so a missing sample downstream is the \
+         publisher's error and not the wire fault under test\n--- captured ---\n{captured}"
+    );
     let puts = captured
         .lines()
-        .filter(|l| l.contains("ADVANCED PUT"))
+        .filter(|l| l.contains("ADVANCED PUT keyexpr="))
         .count();
     assert_eq!(
         puts, BEACON_BURST,
@@ -1286,19 +1310,27 @@ fn run_beacon_fixture(heartbeat: bool, value: &str) -> (String, String, usize) {
         },
     );
 
-    // ORDER IS LOAD-BEARING, and it is what makes this fixture attributable
-    // without the measurement the recovery legs needed. The oracle subscribes
-    // BEFORE wz exists, so:
+    // ORDER IS LOAD-BEARING. The oracle subscribes BEFORE wz exists, which closes
+    // its two history paths — but they are closed in DIFFERENT ways, and the
+    // first version of this comment claimed both were structural:
     //
-    //   * its STARTUP history GET (`<ke>/@adv/**`, issued at declare) goes out
-    //     when there is no wz cache to answer it at all;
+    //   * its STARTUP history GET (`<ke>/@adv/**`, issued at declare) is closed
+    //     STRUCTURALLY — it goes out while there is no wz process, so no cache
+    //     exists to answer it;
     //   * its LATE-PUBLISHER GET — armed, since `z_advanced_sub` sets
-    //     `HistoryConfig::default().detect_late_publishers()` (`:32`) — fires on
-    //     wz's `@adv` liveliness token, which wz declares BEFORE its first put.
+    //     `HistoryConfig::default().detect_late_publishers()` (`:32`) — is closed
+    //     by a MARGIN, not by construction. It fires when the oracle OBSERVES
+    //     wz's `@adv` liveliness token, and a networked GET is answered from the
+    //     cache state at ARRIVAL, not at issue. Nothing structurally bounds that
+    //     instant.
     //
-    // Neither can carry the last index, because that index does not exist yet at
-    // the instant either GET is issued. The recovery legs had to MEASURE this
-    // (`published_at_declare`); here it is structural.
+    // R311y444-review (REVIEWERS 1 and 2, independently) — the margin was then
+    // measured rather than argued: the late-publisher GET lands ~90ms after the
+    // token while the burst runs BEACON_BURST * 200ms ~= 3.8s, and it was
+    // observed carrying source_sn 0. That is ~42x, and it is a WALL-CLOCK burst
+    // so a faster machine does not shrink it. It is also fail-loud: if that GET
+    // ever carried the last index, LEG 8 REDS — which is to say leg 8, not this
+    // ordering, is what ultimately closes the path.
     let (_sub, mut sub_out) = spawn_zenoh_advanced_sub(relay.port(), "demo/wzadv/**");
     let (_demo, _demo_reader, demo_log) =
         spawn_wz_advanced_publisher(port, "demo/wzadv/x", value, heartbeat);
@@ -1434,6 +1466,16 @@ fn zenoh_ext_advanced_sub_cannot_recover_a_lost_last_sample_without_the_wz_heart
 /// is the control: same fixture, trigger unarmed, and the bounded range is absent
 /// while the open one is still there — which is also what keeps the parser
 /// honest, since a parser that matched nothing would satisfy leg 10 vacuously.
+///
+/// ## The one undocumented margin (R311y444-review, REVIEWER 2)
+///
+/// The beacon's 500ms period must beat the oracle's next 1 Hz sample. If a live
+/// sample arrived first, the sample-driven trigger would take the
+/// `pending_queries` slot (`advanced_subscriber.rs:605`, `:719` both gate on
+/// `pending_queries == 0`) and no bounded GET would ever be issued. That is a 2x
+/// margin — the tightest in this file, and the only one not stated where it is
+/// relied on. Measured healthy: the GET fires between the oracle's `Put Data [8]`
+/// and `Put Data [9]`.
 // wz-proves: ext-pubsub-advanced-recovery zenoh-ext->wz
 #[test]
 #[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
@@ -1446,10 +1488,16 @@ fn zenoh_ext_heartbeat_beacon_drives_a_bounded_wz_recovery_get() {
         "delivered={delivered:?} sn_ranges={ranges:?}\n--- wz ---\n{captured}\n\
          --- oracle trace ---\n{oracle_trace}"
     );
+    // R311y444-review (REVIEWER 1, NIT) — the first version said "no trigger of
+    // any kind had a reason to fire", which is false: `handle_heartbeat` fires
+    // whenever a beacon reports past `last_delivered`, which ordinary in-flight
+    // latency produces with no induced gap at all. What the drop is load-bearing
+    // for is the BOUND asserted below being the gap's index.
     assert_eq!(
         dropped, 1,
-        "the relay removed {dropped} batches, not 1; with 0 no gap was induced and \
-         no trigger of any kind had a reason to fire\n{ctx}"
+        "the relay removed {dropped} batches, not 1; with 0 there is no gap at \
+         index {GAP_INDEX}, so the bound asserted below is not the beacon's \
+         report about a real loss\n{ctx}"
     );
 
     let bounded: Vec<_> = ranges.iter().filter(|(_, to)| to.is_some()).collect();
@@ -1459,16 +1507,30 @@ fn zenoh_ext_heartbeat_beacon_drives_a_bounded_wz_recovery_get() {
          issued the heartbeat trigger's GET. Every range it did ask for is open, \
          which is the sample-driven trigger — the beacon path did not fire\n{ctx}"
     );
-    // The bound must be the beacon's report, not a coincidence: a bounded range
-    // whose end is at or below its start would be a degenerate selector that
-    // happens to parse.
-    for (from, to) in &bounded {
-        let to = to.expect("filtered on is_some");
-        assert!(
-            to >= *from,
-            "wz asked for the empty range _sn={from}..{to}\n{ctx}"
-        );
-    }
+    // THE BOUND MUST BE THE BEACON'S REPORTED SN, and this assertion is what
+    // makes the leg a statement about the zenoh-ext -> wz direction at all.
+    //
+    // R311y444-review (REVIEWER 2, BLOCKER; REVIEWER 1 reached the same place
+    // from the other side) — the first version asserted only `to >= from`, which
+    // is a TAUTOLOGY: `handle_heartbeat` requests only when `!caught_up`, i.e.
+    // `hb_sn > last_delivered` (`advanced_subscriber.rs:715-726`), and
+    // `from = last_delivered + 1`, so `to >= from` holds by construction and
+    // asserts nothing about the beacon. Falsified by damaging the atom's own
+    // wire artifact rather than the flag: byte-swapping the beacon decode at
+    // `advanced_subscriber.rs:1549` made wz emit `_sn=8..134217728` at 2 Hz and
+    // ALL FOUR legs stayed green. Pinning the VALUE is what closes it — wz must
+    // have decoded the foreign beacon correctly to ask for exactly this range.
+    let expected = GAP_INDEX as u32;
+    assert!(
+        bounded
+            .iter()
+            .any(|(from, to)| *from == expected && *to == Some(expected)),
+        "wz issued a bounded recovery GET, but none asked for exactly \
+         _sn={expected}..{expected} — the range the publisher's beacon reports \
+         after the relay removed index {expected}. A bounded range with any \
+         other bound means wz did not decode the foreign beacon correctly, \
+         which is the zenoh-ext -> wz half this leg exists to witness\n{ctx}"
+    );
 }
 
 /// Leg 10 — the CONTROL twin of leg 9. Same fixture, same induced gap, heartbeat

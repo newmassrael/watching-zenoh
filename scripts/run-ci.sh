@@ -5064,14 +5064,17 @@ layer_e_ap_demo_round_trip() {
     # pre-push full run-ci surfaced: E6h ran the right binary, but this catch-all also
     # ran it against the default one). The `wz_storage_host` substring keeps it out;
     # it runs only in E6h.
-    # R311y442 — same for `zenoh_ext`: the four wz<->zenoh-ext advanced-pubsub legs
+    # R311y442 — same for `zenoh_ext`: the wz<->zenoh-ext advanced-pubsub legs
     # need a wz-ap-demo built `--features advanced` (Layer Z builds it) for the
     # `--advanced-subscribe` / `--advanced-publish` CLI. On THIS sweep's default
     # binary those flags are INERT, and the legs assert that explicitly rather
     # than reading an empty sample set as success — so running them here would be
     # a red with a correct diagnosis and a wrong lane. Every one of the names
     # carries the `zenoh_ext` token FOR this skip; they run only in Z, where
-    # `_runci_guarded_test Z 6` pins that all of them executed.
+    # `_runci_guarded_test Z 10` pins that all of them executed. (R311y444-review,
+    # REVIEWER 3 — this documentation pin was left at 6 when the executable one
+    # moved to 10; y443 had moved both together, so the convention was one round
+    # old when this round broke it. Move BOTH or the skip block misinforms.)
     # R311y443 — the token is a NAMING OBLIGATION on every future leg in that
     # file, not a property of the four it started with. The two recovery legs
     # added here were first named for what they do (`..._relay_induced_gap`),
