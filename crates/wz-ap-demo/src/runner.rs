@@ -2327,9 +2327,10 @@ async fn run_peer_until(
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::{
-        default_autoconnect_matcher, AclConfig, AclFlow, AclMessage, AclPolicy, AclRule,
-        AutoConnect, DownsamplingRule, InterceptorConfig, InterceptorFlow, LinkstateForwarder,
-        LowPassMessage, LowPassRule, Permission, SubjectSelector, WhatAmI, Zid,
+        default_autoconnect_matcher, interval_from_freq, AclConfig, AclFlow, AclMessage, AclPolicy,
+        AclRule, AutoConnect, DownsamplingMessage, DownsamplingRule, InterceptorConfig,
+        InterceptorFlow, LinkstateForwarder, LowPassMessage, LowPassRule, Permission,
+        SubjectSelector, WhatAmI, Zid,
     };
     use wz::runtime_tokio::session_open::bind_endpoint_with_config;
 
@@ -2540,16 +2541,45 @@ async fn run_peer_until(
     }
 
     // `--downsample <keyexpr>`: opt this peer into §5.16 downsampling (QoS) — the
-    // rate-limit sibling of the ACL on the SAME interceptor chain. Data on the
-    // keyexpr is admitted at most once per 500 ms; faster ones are dropped. Off
+    // rate-limit sibling of the ACL on the SAME interceptor chain. A governed
+    // message is admitted at most once per interval; faster ones are dropped. Off
     // by default. Composes with `--acl-deny` (both run on the chain, both flows).
+    //
+    // R311y452 — the rate comes from `--downsample-freq <hz>` in zenoh's own
+    // config unit (`DownsamplingRuleConf.freq`, a maximum frequency in Hertz),
+    // defaulting to the 2 Hz that IS the 500 ms this flag has always meant, and
+    // routed through the `interval_from_freq` SSOT so the demo cannot drift from
+    // upstream's mapping. `0` is upstream's DROP-ALL rule. As with the low-pass
+    // knob, the rule spells out every message KIND and both FLOWS: zenoh's
+    // `messages` is a required non-empty list with no all-kinds default, so a knob
+    // meaning "rate-limit this keyexpr" has to enumerate them.
     if let Some(downsample_keyexpr) = interceptors.downsample.as_deref() {
+        /// The `--downsample` rate when `--downsample-freq` is absent — 2 Hz,
+        /// i.e. the 500 ms interval the flag alone meant before R311y452.
+        const DEFAULT_DOWNSAMPLE_FREQ_HZ: f64 = 2.0;
+        let freq = match interceptors.downsample_freq.as_deref() {
+            None => DEFAULT_DOWNSAMPLE_FREQ_HZ,
+            Some(raw) => match raw.parse::<f64>() {
+                Ok(hz) => hz,
+                Err(_) => {
+                    log::warn!(
+                        "wz-ap-demo peer: --downsample-freq '{raw}' is not a frequency in Hz; \
+                         falling back to {DEFAULT_DOWNSAMPLE_FREQ_HZ}"
+                    );
+                    DEFAULT_DOWNSAMPLE_FREQ_HZ
+                }
+            },
+        };
+        let min_interval = interval_from_freq(freq);
         log::info!(
-            "wz-ap-demo peer: downsampling enabled (--downsample {downsample_keyexpr} @ 500ms)"
+            "wz-ap-demo peer: downsampling enabled (--downsample {downsample_keyexpr} \
+             @ {freq}Hz -> {min_interval:?})"
         );
         interceptor_config.downsampling = vec![DownsamplingRule {
             key_exprs: vec![downsample_keyexpr.to_owned()],
-            min_interval: Duration::from_millis(500),
+            min_interval,
+            messages: DownsamplingMessage::ALL.to_vec(),
+            flows: InterceptorFlow::ALL.to_vec(),
         }];
     }
 
@@ -4764,6 +4794,7 @@ mod peer_quic_cert_tests {
         let interceptors = InterceptorOpts {
             acl_deny: None,
             downsample: None,
+            downsample_freq: None,
             max_payload: None,
         };
 
@@ -4847,6 +4878,7 @@ mod peer_failfast_tests {
         let interceptors = InterceptorOpts {
             acl_deny: None,
             downsample: None,
+            downsample_freq: None,
             max_payload: None,
         };
 

@@ -880,7 +880,7 @@ jobs:
       # guarded FIVE pico legs (adminspace-write / acl / future-push / qabl /
       # transit-push). The low-pass leg added this round makes six. A count in a
       # label has no gate, so it is a citation to re-read, not to increment.
-      - name: Layer E6 — peer mesh (incl. 6 zenoh-pico interop legs)
+      - name: Layer E6 — peer mesh (incl. 7 zenoh-pico interop legs)
         run: bash scripts/run-ci.sh --layer E6
 
       - name: Layer E6b — adminspace introspection over the peer mesh

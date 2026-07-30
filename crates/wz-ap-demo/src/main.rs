@@ -233,9 +233,15 @@ fn main() -> ExitCode {
             // Off by default — without the flag the peer enforces nothing.
             let acl_deny = parse_pair(rest, "--acl-deny");
             // R311tw (§5.16 downsampling) — `--downsample <keyexpr>` rate-limits
-            // egress data on the keyexpr to at most one per 500 ms, the QoS
-            // sibling of the ACL on the same interceptor chain. Off by default.
+            // data on the keyexpr, the QoS sibling of the ACL on the same
+            // interceptor chain. Off by default.
             let downsample = parse_pair(rest, "--downsample");
+            // R311y452 — `--downsample-freq <hz>` sets that rate in zenoh's own
+            // config unit, a maximum FREQUENCY in Hertz (`DownsamplingRuleConf.freq`),
+            // rather than in an interval wz invented. Defaults to 2 Hz, which is the
+            // 500 ms the flag alone has always meant. `0` is upstream's DROP-ALL
+            // rule. Inert without `--downsample`.
+            let downsample_freq = parse_pair(rest, "--downsample-freq");
             // R311tx (§5.16 access-quota) — `--max-payload <bytes>` caps every
             // keyexpr's Put payload size (zenoh low_pass); a larger Put is dropped
             // on egress. Off by default.
@@ -375,6 +381,7 @@ fn main() -> ExitCode {
                 InterceptorOpts {
                     acl_deny,
                     downsample,
+                    downsample_freq,
                     max_payload,
                 },
             );
@@ -1599,6 +1606,9 @@ fn run_router_mode(
 pub(crate) struct InterceptorOpts {
     pub(crate) acl_deny: Option<String>,
     pub(crate) downsample: Option<String>,
+    /// R311y452 — the `--downsample` rate as zenoh's maximum frequency in Hertz;
+    /// `None` keeps the 2 Hz (500 ms) the flag alone has always meant.
+    pub(crate) downsample_freq: Option<String>,
     pub(crate) max_payload: Option<String>,
 }
 

@@ -201,20 +201,27 @@ impl InterceptorConfig {
     /// interceptors are all feature-elided — yields an empty chain (access
     /// control disabled, every message admitted).
     pub fn build_chain(&self, flow: InterceptorFlow) -> InterceptorChain {
-        // `flow` is consumed by the access-acl ACL push (mapped to `AclFlow`)
-        // and, since R311y451, by the low-pass per-rule `flows` selector. With
-        // BOTH elided the chain is flow-agnostic.
-        #[cfg(not(any(feature = "access-acl", feature = "access-quota")))]
+        // `flow` is consumed by the access-acl ACL push (mapped to `AclFlow`),
+        // by the low-pass per-rule `flows` selector (R311y451) and by the
+        // downsampler's (R311y452). With ALL THREE elided the chain is
+        // flow-agnostic.
+        #[cfg(not(any(
+            feature = "access-acl",
+            feature = "access-downsampling",
+            feature = "access-quota"
+        )))]
         let _ = flow;
         // `mut` is exercised by whichever interceptor pushes compile in; a
         // routing-peer build with no access knob leaves the chain empty.
         #[allow(unused_mut)]
         let mut chain = InterceptorChain::new();
+        // R311y452 — the downsampling rules are FLOW-SCOPED, and each flow gets
+        // its OWN rule timers: only the subset whose `flows` names this flow is
+        // installed, and a flow no rule governs gets no interceptor at all
+        // (zenoh's `self.flows.<flow>.then(...)`, `downsampling.rs:133-152`).
         #[cfg(feature = "access-downsampling")]
-        if !self.downsampling.is_empty() {
-            chain.push(Box::new(DownsamplingInterceptor::new(
-                self.downsampling.clone(),
-            )));
+        if let Some(downsampling) = DownsamplingInterceptor::for_flow(&self.downsampling, flow) {
+            chain.push(Box::new(downsampling));
         }
         #[cfg(feature = "access-acl")]
         if let Some(policy) = &self.acl {

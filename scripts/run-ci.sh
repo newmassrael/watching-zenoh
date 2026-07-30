@@ -3105,10 +3105,14 @@ layer_c1y_cargo_test_routing_peer() {
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
     # budget, checked-add overflow, minimum-across-overlapping-rules, the
     # `messages` selector, the `flows` selector + no-interceptor-on-an-ungoverned-
-    # flow, and the per-kind classification bound to real built messages). Like
-    # C1ah's `node_clock::` pin this is a COUNT, not a SET: it catches a test that
-    # stops being selected, not a test that is renamed into still-16.
-    _runci_guarded_test "C1y interceptor" 16 \
+    # flow, and the per-kind classification bound to real built messages).
+    # R311y452 — 16 -> 21: the five DOWNSAMPLING fidelity tests (its own `messages`
+    # selector, its own `flows` selector + the no-interceptor-on-an-ungoverned-flow
+    # twin, the Hz->interval mapping, the `freq == 0.0` drop-all that drops even the
+    # FIRST message, and the body-level kind classification bound to real built
+    # messages). Like C1ah's `node_clock::` pin this is a COUNT, not a SET: it
+    # catches a test that stops being selected, not a test renamed into still-21.
+    _runci_guarded_test "C1y interceptor" 21 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     _runci_guarded_test "C1y linkstate+access" 211 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
@@ -7387,6 +7391,24 @@ layer_e6_peer_mesh() {
             --test wz_peer_low_pass_attachment_pico_interop -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_low_pass_attachment_pico_interop" || return 1
+    fi
+    # R311y452 — pico DOWNSAMPLING cross-impl (§5.16 access-downsampling), the
+    # rate-limit sibling of the two legs above and on the SAME E6 binary
+    # (routing-peer pulls access-downsampling). A pico z_pub BURST of 3 Puts at its
+    # own 1 Hz cadence on a governed keyexpr is admitted exactly ONCE, because the
+    # rule's interval (derived from that cadence, via --downsample-freq in zenoh's
+    # Hertz unit) spans the whole burst; an ungoverned z_put in the same leg is
+    # admitted (the positive control). The COUNT is the discriminator: 0 admitted
+    # is a dead session, 3 is no throttling, 1 is the rule timer. Needs BOTH
+    # foreign binaries, so both are guarded (RED, measured: with the interval back
+    # at the pre-y452 500ms hardcode — FASTER than pico's cadence — all 4 pushes
+    # are admitted, 0 dropped, and the drop barrier times out while the control
+    # leg still passes).
+    if [[ -x target/zenoh-pico-cli/z_put && -x target/zenoh-pico-cli/z_pub ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_downsampling_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    else
+        _pico_cli_unavailable "E6 leg wz_peer_downsampling_pico_interop" || return 1
     fi
     # R311y165 — the STRONG peer-mode future-push CROSS-IMPL e2e (the leg-5 peer analog,
     # now that D4 gave the peer a client data plane): a pico z_pub CLIENT of peer-A

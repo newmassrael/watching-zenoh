@@ -165,8 +165,14 @@ pub use wz_access_control::{
 };
 // R311tw — the downsampling rule type, re-exported beside the other rule types
 // so a deploy builds it from the same facade path as the ACL types above.
+// R311y452 adds `DownsamplingMessage` (a rule now names the message KINDS it
+// throttles) and `interval_from_freq` (zenoh configures the rate as a FREQUENCY
+// in Hertz, so a deploy speaking upstream's unit needs the mapping from the same
+// facade path rather than re-deriving `1/freq` at the call site).
 #[cfg(feature = "access-downsampling")]
-pub use crate::interceptor::downsampling::DownsamplingRule;
+pub use crate::interceptor::downsampling::{
+    interval_from_freq, DownsamplingMessage, DownsamplingRule,
+};
 // R311tx — the low-pass (per-key message-size limit) rule type, re-exported
 // beside the other rule types (the §5.16 access-quota realization). R311y451
 // adds `LowPassMessage`: a rule now names the message KINDS it sizes, so a
@@ -9664,6 +9670,8 @@ mod tests {
             downsampling: vec![DownsamplingRule {
                 key_exprs: vec!["demo/**".to_owned()],
                 min_interval: std::time::Duration::from_secs(1),
+                messages: DownsamplingMessage::ALL.to_vec(),
+                flows: InterceptorFlow::ALL.to_vec(),
             }],
             ..Default::default()
         });
@@ -9742,6 +9750,8 @@ mod tests {
             downsampling: vec![DownsamplingRule {
                 key_exprs: vec!["demo/**".to_owned()],
                 min_interval: std::time::Duration::from_secs(1),
+                messages: DownsamplingMessage::ALL.to_vec(),
+                flows: InterceptorFlow::ALL.to_vec(),
             }],
             ..Default::default()
         });
