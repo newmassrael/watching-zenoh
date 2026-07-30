@@ -4775,6 +4775,10 @@ mod router_hat_quic_cert_tests {
             false,
             None,
             &cert_paths,
+            // R311y456 — no `--multicast-locator`: this test asserts the quic
+            // listen ADMIT, and the historical hardcoded group is the right
+            // default for it.
+            None,
             std::future::ready(()),
         )
         .await;
@@ -4827,6 +4831,7 @@ mod router_hat_failfast_tests {
             false,
             None,
             &super::AcceptCertPaths::default(),
+            None,
         )
         .await
         .expect_err("a non-IP unixpipe --router-hat without --zid must fail fast");
