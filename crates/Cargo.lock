@@ -2524,6 +2524,7 @@ dependencies = [
  "socket2",
  "tempfile",
  "tokio",
+ "tokio-serial",
  "wz-codecs",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",

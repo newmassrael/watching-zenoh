@@ -25,6 +25,19 @@
 //!
 //! ## Why FFI (not a live pico process)
 //!
+//! CORRECTION — the paragraph below is FALSE at the current vendor pin, and
+//! is kept because its conclusion ("a live pico serial process is
+//! impossible") was quoted and believed. zenoh-pico DOES have a host serial
+//! backend: `src/link/transport/serial/tty_posix.c` (Copyright 2026), added
+//! to the Linux build by `cmake/platforms/linux.cmake:9`. The link moved
+//! OUT of `src/system/<plat>/` — the directory the paragraph checks — into
+//! `src/link/transport/serial/`, so looking where it says to look still
+//! finds nothing. `tests/pico_serial_link_to_wz_acceptor.rs` now runs the
+//! live shape this text calls impossible. What remains true is the
+//! sentence AFTER it: the codec functions are platform-independent, which
+//! is why this byte-compare needs no link at all and stays the right
+//! vehicle for FORMAT parity.
+//!
 //! zenoh-pico has NO unix serial LINK backend — `_z_open_serial_*` exists
 //! only for MCU targets (RPi Pico / esp-idf / zephyr; `src/system/unix/`
 //! has no serial). So a live external pico unix process cannot open a

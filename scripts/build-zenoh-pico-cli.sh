@@ -308,10 +308,34 @@ mkdir -p "$BUILD_DIR" "$INSTALL_DIR"
 # it is off), and it changes no wire behaviour, so the stable-API
 # witnesses (priority/congestion/express/timestamp/encoding/attachment)
 # are unaffected. Needed for tests/wz_source_info_to_pico_zsub.rs.
+#
+# Z_FEATURE_LINK_SERIAL=ON compiles pico's SERIAL link backend in. The
+# vendor default is 0 (CMakeLists.txt:333) and the platform file
+# cmake/platforms/linux.cmake:9 supplies the POSIX tty driver
+# (src/link/transport/serial/tty_posix.c, guarded
+# `Z_FEATURE_LINK_SERIAL == 1 && defined(ZENOH_LINUX)`), so a host pico
+# CAN open a serial link over a tty/PTY device path. Needed for
+# tests/pico_serial_link_to_wz_acceptor.rs. It ADDS a link type to the
+# dispatch (link.c:68-70) and touches no existing transport, so the
+# tcp/udp witnesses are unaffected.
+#
+# THE VALUE MUST BE `1`, NOT `ON`, and the difference is silent. The cache
+# entry is a CMake STRING that is substituted VERBATIM into the generated
+# `zenoh-pico/config.h`, while every consumer guards on
+# `#if Z_FEATURE_LINK_SERIAL == 1` (link.c:68, serial_protocol.c:14,
+# tty_posix.c:17, config/serial.h:29). `ON` is an undefined identifier in
+# preprocessor arithmetic, so it evaluates to 0 and the whole serial link
+# vanishes from the binary WHILE THE BUILD LOG STILL SHOWS tty_posix.c
+# being compiled — the file is in the source list, its contents are inside
+# the guard. Measured: with `ON`, `z_pub -e serial/...` prints "Unable to
+# open session!" and strace shows it never `openat`s the device at all.
+# `Z_FEATURE_UNSTABLE_API=ON` above is safe only because its consumers use
+# `#ifdef`, which any non-empty value satisfies.
 cmake -B "$BUILD_DIR" -S "$EXAMPLES_DIR" \
     -DCMAKE_C_STANDARD=11 \
     -DCMAKE_BUILD_TYPE=Release \
-    -DZ_FEATURE_UNSTABLE_API=ON >&2
+    -DZ_FEATURE_UNSTABLE_API=ON \
+    -DZ_FEATURE_LINK_SERIAL=1 >&2
 
 # Build only the curated CLI targets (avoids the full examples target
 # set; faster + smaller install surface).
