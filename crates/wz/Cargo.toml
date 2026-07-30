@@ -1686,6 +1686,20 @@ preset-ap-full = [
     "routing-routes",
     "routing-static-routes",
     "routing-failover",
+    # R311y461 — the router-scope liveliness-TOKEN plane, the ONE §5.21
+    # routing atom this preset omitted, with no rationale recorded in the
+    # ledger or in the atom's inventory reason. The preset already carries
+    # the whole liveliness family (liveliness-token / -subscriber /
+    # -history), so the omission left an incoherent artifact: every
+    # router-side token site — `ingest_client_token`,
+    # `dump_interest_tokens`, `push_future_token` — is
+    # `cfg(feature = "routing-token-tables")`, so an AP-full peer ingested
+    # a client's DeclareToken into no table and answered a token Interest
+    # with a bare DeclareFinal. `routing-peer` does NOT pull it (:857 vs
+    # :473), which is the same reason a Layer-E6 demo binary cannot
+    # exercise the plane at all. Transitively adds `routing-router-hat`,
+    # whose only facade dep (`routing-peer`) is already a member.
+    "routing-token-tables",
     "scouting-static",
     "scouting-active",
     "scouting-multicast",
