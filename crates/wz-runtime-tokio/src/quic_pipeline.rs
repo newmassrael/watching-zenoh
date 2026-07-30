@@ -53,6 +53,7 @@ use wz_runtime_core::Runtime;
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::{LinkDriver, LinkEvent, Reliability, TxFrame};
+use wz_session_core::link::InterceptorLink;
 
 /// A dialed / accepted QUIC link: the endpoint + connection (kept alive for the
 /// link) and the single bidirectional stream's split halves. Produced by
@@ -323,6 +324,7 @@ pub fn wire_quic_stream(
     let outbound = Arc::new(StreamWriteDriver::new(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        InterceptorLink::Quic,
     ));
     let inbound = QuicReadDriver {
         inner: StreamReadDriver::new(recv, Arc::new(std::sync::atomic::AtomicBool::new(false))),

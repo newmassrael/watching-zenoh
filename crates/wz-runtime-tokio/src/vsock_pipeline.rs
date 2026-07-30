@@ -46,6 +46,7 @@ use wz_runtime_core::Runtime;
 
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
+use wz_session_core::link::InterceptorLink;
 
 /// Inbound read driver of a split [`VsockStream`] — the vsock instantiation of
 /// the shared [`StreamReadDriver`]. The framing / [`crate::LinkDriver`] impl
@@ -118,6 +119,7 @@ pub fn wire_vsock_stream(
     let outbound = Arc::new(StreamWriteDriver::new(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        InterceptorLink::Vsock,
     ));
     (inbound, outbound, writer_handle)
 }

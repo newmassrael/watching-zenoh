@@ -67,6 +67,7 @@ use wz_runtime_core::Runtime;
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::InterceptorLink;
 use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::{
     encode_frame, DecodedFrame, HandshakeStep, SerialFrameReader, SerialHandshake, SerialRole,
@@ -347,6 +348,13 @@ impl SerialWriteDriver {
 }
 
 impl BoxedLinkDriver for SerialWriteDriver {
+    // R311y453 -- the `link_protocols` subject axis. This driver serves
+    // exactly a serial (tty) link, so the scheme is fixed by the module rather than
+    // threaded through its constructor.
+    fn link_protocol(&self) -> Option<InterceptorLink> {
+        Some(InterceptorLink::Serial)
+    }
+
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
         // A single serial frame carries at most SERIAL_MTU payload bytes
         // (encode_frame rejects past it). The transport TX path now caps

@@ -65,6 +65,7 @@ use crate::quic_pipeline::{accept_quic_connection, connect_quic_client, quic_ser
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::InterceptorLink;
 
 /// Conservative per-datagram MTU floor used when the connection has not yet
 /// reported a negotiated `max_datagram_size` (the QUIC initial datagram budget
@@ -153,6 +154,13 @@ pub struct QuicDatagramWriteDriver {
 }
 
 impl BoxedLinkDriver for QuicDatagramWriteDriver {
+    // R311y453 -- the `link_protocols` subject axis. This driver serves
+    // exactly a QUIC unreliable-datagram link (RFC9221), so the scheme is fixed by the module rather than
+    // threaded through its constructor.
+    fn link_protocol(&self) -> Option<InterceptorLink> {
+        Some(InterceptorLink::QuicDatagram)
+    }
+
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
         // QUIC datagrams are best-effort by definition; the Reliability hint is
         // the session FSM's concern. The transport TX path caps its fragment

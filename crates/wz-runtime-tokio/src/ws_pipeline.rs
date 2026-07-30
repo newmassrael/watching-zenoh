@@ -52,6 +52,7 @@ use wz_runtime_core::Runtime;
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::InterceptorLink;
 
 /// Dial a WebSocket-over-TCP connection — TCP-connect to `addr`, then run the
 /// RFC6455 client handshake ([`client_async`]) over it, returning the
@@ -179,6 +180,13 @@ impl WsWriteDriver {
 }
 
 impl BoxedLinkDriver for WsWriteDriver {
+    // R311y453 -- the `link_protocols` subject axis. This driver serves
+    // exactly a WebSocket-over-TCP datagram link, so the scheme is fixed by the module rather than
+    // threaded through its constructor.
+    fn link_protocol(&self) -> Option<InterceptorLink> {
+        Some(InterceptorLink::Ws)
+    }
+
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
         if bytes.len() > u16::MAX as usize {
             // Oversize: drop with a warn. zenoh's batch ceiling is 65535

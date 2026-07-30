@@ -12,7 +12,6 @@
 //! Layer: §5.C link-tier value-type surface.
 
 use alloc::vec::Vec;
-
 use wz_runtime_core::Runtime;
 
 use crate::reliability::Reliability;
@@ -50,6 +49,46 @@ use wz_runtime_core::TimeSource;
 /// Sync` onto the trait would force that `unsafe` hack onto the MCU
 /// impl; keeping the trait pure lets each profile's `LinkSink` carry
 /// the auto-traits its concurrency model actually needs.
+/// R311y453 — which LINK PROTOCOL a transport speaks: the wz mirror of zenoh's
+/// `InterceptorLink` (`zenoh-config/src/lib.rs:317-327`), and the vocabulary of
+/// the §5.16 `link_protocols` subject axis.
+///
+/// Deliberately NOT [`crate::locator::Proto`], which was the first thing tried
+/// and does not fit: `Proto` is the IP-locator scheme set (Tcp / Udp / Tls / Ws /
+/// Quic / QuicDatagram), because serial, unixsock, unixpipe and vsock locators
+/// are not `SocketAddr`-based and carry their own parsed types. The subject axis
+/// has to name every link a face can arrive on, so it needs the wider set.
+///
+/// SUPERSET of upstream, in one place and on purpose: zenoh has no
+/// [`QuicDatagram`](Self::QuicDatagram) because it has no such transport; wz does
+/// (`transport-link-quic-datagram`), and a subject axis that could not name a
+/// link wz can actually accept would be a hole, not fidelity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterceptorLink {
+    /// `tcp/...` — the TCP stream link.
+    Tcp,
+    /// `udp/...` — the UDP datagram link.
+    Udp,
+    /// `tls/...` — TLS over TCP.
+    Tls,
+    /// `quic/...` — QUIC, batch over one bidirectional stream.
+    Quic,
+    /// `quic-datagram/...` — QUIC unreliable datagrams (RFC9221). wz-only; zenoh's
+    /// `InterceptorLink` has no counterpart.
+    QuicDatagram,
+    /// `serial/...` — the COBS-framed tty link.
+    Serial,
+    /// `unixpipe/...` — the named-FIFO link.
+    Unixpipe,
+    /// `unixsock-stream/...` — the Unix-domain stream socket link. Named as zenoh
+    /// names it (`UnixsockStream`), not as wz's shorter locator scheme spells it.
+    UnixsockStream,
+    /// `vsock/...` — the AF_VSOCK host/guest link.
+    Vsock,
+    /// `ws/...` — WebSocket over TCP, one batch per BINARY message.
+    Ws,
+}
+
 /// The link MTU a [`BoxedLinkDriver`] reports when it has no fixed
 /// frame-size bound of its own — zenoh-pico's `_z_get_link_mtu_tcp`
 /// (`src/link/unicast/tcp.c:86`) returns the identical `65535`, the
@@ -80,6 +119,27 @@ pub trait BoxedLinkDriver {
     /// `min` term is then inert for every unbounded link.
     fn link_mtu(&self) -> usize {
         DEFAULT_LINK_MTU
+    }
+
+    /// R311y453 — which link PROTOCOL this driver speaks, the wz analogue of
+    /// zenoh's `InterceptorLink` (`zenoh-config`), or `None` for a driver whose
+    /// protocol is not a locator scheme (the test doubles).
+    ///
+    /// This is the `link_protocols` SUBJECT axis the §5.16 interceptors scope
+    /// their rules by: zenoh narrows a rule to transports whose link type is in
+    /// the rule's list (`net/routing/interceptor/downsampling.rs:99-116`, and the
+    /// identical block in `access_control.rs` / `low_pass.rs`). Reading it here —
+    /// on the link driver, which is the only object that KNOWS its scheme —
+    /// rather than re-deriving it from a locator string keeps the axis correct
+    /// for an ACCEPTED link, which never had a dial locator.
+    ///
+    /// Defaults to `None`, i.e. "unknown protocol", which every rule carrying a
+    /// `link_protocols` list must treat as NOT matching — a rule that narrows to
+    /// `tcp` must not silently govern a link that cannot say what it is. A
+    /// production driver overrides this with its real scheme; the default exists
+    /// so the six test doubles that impl this trait need no change.
+    fn link_protocol(&self) -> Option<InterceptorLink> {
+        None
     }
 }
 

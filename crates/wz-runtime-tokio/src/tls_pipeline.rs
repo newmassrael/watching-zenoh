@@ -48,6 +48,7 @@ use wz_runtime_core::Runtime;
 
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
+use wz_session_core::link::InterceptorLink;
 
 /// Inbound read driver of a split [`TlsStream`] — the TLS instantiation of the
 /// shared [`StreamReadDriver`]. The framing / [`crate::LinkDriver`] impl lives
@@ -115,6 +116,7 @@ pub fn wire_tls_stream(
     let outbound = Arc::new(StreamWriteDriver::new(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        InterceptorLink::Tls,
     ));
     (inbound, outbound, writer_handle)
 }

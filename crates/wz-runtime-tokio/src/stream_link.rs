@@ -36,6 +36,7 @@ use wz_codecs::stream_envelope::StreamEnvelope;
 
 use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::InterceptorLink;
 
 /// Inbound read half of a split byte-stream link — owns the read half `R`
 /// (any `AsyncRead`) and impls [`LinkDriver`] with `poll_event` reading one
@@ -130,15 +131,36 @@ pub struct StreamWriteDriver {
     /// false is framed u16 even if the writer drains it after the flip, closing
     /// the enqueue-vs-dequeue race a dequeue-time flag read would open.
     lowlatency: Arc<AtomicBool>,
+    /// R311y453 — which locator scheme this stream actually is, for the §5.16
+    /// `link_protocols` subject axis. The type is deliberately transport-NEUTRAL
+    /// (see above), so it cannot infer its own scheme: six pipelines build it —
+    /// tcp, tls, quic, unixsock, unixpipe and vsock — and each is the only place
+    /// that knows which. Threaded through the constructor rather than guessed, so
+    /// a new stream pipeline must state its scheme to compile.
+    proto: InterceptorLink,
 }
 
 impl StreamWriteDriver {
-    pub(crate) fn new(tx: mpsc::UnboundedSender<Vec<u8>>, lowlatency: Arc<AtomicBool>) -> Self {
-        Self { tx, lowlatency }
+    pub(crate) fn new(
+        tx: mpsc::UnboundedSender<Vec<u8>>,
+        lowlatency: Arc<AtomicBool>,
+        proto: InterceptorLink,
+    ) -> Self {
+        Self {
+            tx,
+            lowlatency,
+            proto,
+        }
     }
 }
 
 impl BoxedLinkDriver for StreamWriteDriver {
+    // R311y453 — the `link_protocols` subject axis: the scheme the constructing
+    // pipeline declared, since this driver is shared across six of them.
+    fn link_protocol(&self) -> Option<InterceptorLink> {
+        Some(self.proto)
+    }
+
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
         if bytes.len() > u16::MAX as usize {
             // Oversize: drop with a warn rather than overflow the length prefix.
@@ -222,7 +244,8 @@ mod tests {
     #[tokio::test]
     async fn write_driver_drops_oversize_frame() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let driver = StreamWriteDriver::new(tx, Arc::new(AtomicBool::new(false)));
+        let driver =
+            StreamWriteDriver::new(tx, Arc::new(AtomicBool::new(false)), InterceptorLink::Tcp);
         driver.send_blocking(&vec![0u8; 65_536], Reliability::Reliable);
         driver.send_blocking(b"ok", Reliability::Reliable);
         // Only the in-range frame reached the channel, u16-framed at enqueue

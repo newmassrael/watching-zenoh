@@ -47,6 +47,11 @@ use wz_codecs::stream_envelope::StreamEnvelope;
 // multicast transport drive loop (`multicast_glue`) is independent of this
 // module (it dispatches into the shared `ApplicationLayerObserver` directly,
 // not through the unicast `SessionLinkActions`).
+/// R311y453 — live NIC-name resolution for the §5.16 `interfaces` subject axis.
+/// Gated on `link-interfaces`, which owns the `libc` dependency the `getifaddrs`
+/// call needs; all three `access-*` knobs pull it.
+#[cfg(feature = "link-interfaces")]
+pub mod link_interfaces;
 #[cfg(feature = "transport-unicast")]
 pub mod session_glue;
 

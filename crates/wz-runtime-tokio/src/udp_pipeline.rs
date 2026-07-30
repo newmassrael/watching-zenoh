@@ -91,6 +91,7 @@ use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 // `transport-unicast`-gated `session_glue`.
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::InterceptorLink;
 
 /// Maximum UDP payload (65535 IP datagram - 20 IPv4 header - 8 UDP header).
 /// A larger frame is a wz-side encoder bug; the driver drops it loud rather
@@ -542,6 +543,13 @@ impl UdpWriteDriver {
 }
 
 impl BoxedLinkDriver for UdpWriteDriver {
+    // R311y453 -- the `link_protocols` subject axis. This driver serves
+    // exactly a UDP datagram link, so the scheme is fixed by the module rather than
+    // threaded through its constructor.
+    fn link_protocol(&self) -> Option<InterceptorLink> {
+        Some(InterceptorLink::Udp)
+    }
+
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
         // UDP link layer is best-effort by definition; the Reliability hint
         // is the session FSM's concern. The transport TX path now caps its

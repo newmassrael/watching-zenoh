@@ -19,7 +19,7 @@
 //! - [`dial_tcp`] / [`dial_tcp_host`] — the TCP raw-dial primitives: a NUMERIC
 //!   `SocketAddr` and a DNS-capable `host:port` STRING respectively, both ->
 //!   connected [`TcpStream`]. The mode-agnostic `dial_locator(AnyLocator)`
-//!   dispatcher (R311eu) routes a numeric `Proto::Tcp` endpoint to `dial_tcp`
+//!   dispatcher (R311eu) routes a numeric `InterceptorLink::Tcp` endpoint to `dial_tcp`
 //!   and an `AnyLocator::Named` tcp endpoint to `dial_tcp_host` (R311ps).
 //! - [`wire_tcp_stream`] — splits a connected stream into the cooperating
 //!   `(TcpReadDriver, Arc<`[`StreamWriteDriver`]`>, writer-task handle)`
@@ -41,6 +41,7 @@ use wz_runtime_core::Runtime;
 
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
+use wz_session_core::link::InterceptorLink;
 
 /// Inbound read driver of a split `TcpStream` — the TCP instantiation of the
 /// shared [`StreamReadDriver`]. The framing / [`crate::LinkDriver`] impl lives
@@ -50,7 +51,7 @@ use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 pub type TcpReadDriver = StreamReadDriver<OwnedReadHalf>;
 
 /// Dial an outbound TCP connection to a NUMERIC endpoint — the raw-dial
-/// primitive the mode-agnostic `dial_locator(Proto::Tcp)` dispatcher (R311eu)
+/// primitive the mode-agnostic `dial_locator(InterceptorLink::Tcp)` dispatcher (R311eu)
 /// routes a parsed [`SocketAddr`] to. Returns the connected [`TcpStream`]
 /// unwrapped so the caller can choose its consumption shape: the session-open
 /// path splits it via [`wire_tcp_stream`], while [`crate::TcpDriver::connect`]
@@ -294,7 +295,7 @@ pub fn wire_tcp_stream_with_lowlatency(
     let inbound = StreamReadDriver::new(reader, lowlatency.clone());
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(writer_task(writer, rx));
-    let outbound = Arc::new(StreamWriteDriver::new(tx, lowlatency));
+    let outbound = Arc::new(StreamWriteDriver::new(tx, lowlatency, InterceptorLink::Tcp));
     (inbound, outbound, writer_handle)
 }
 

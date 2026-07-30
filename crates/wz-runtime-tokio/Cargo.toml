@@ -973,8 +973,17 @@ router-multicast-faces = [
 # (wz-access-control); the enforcer adapter consumes it. Promoted from
 # always-on-under-routing-peer to real cfg knobs so a routing peer composes
 # exactly the admission filters it needs (Layer F footprint).
-access-acl = ["routing-peer", "dep:wz-access-control"]
-access-downsampling = ["routing-peer"]
+# R311y453 — the §5.16 SUBJECT axis data source: live `getifaddrs` resolution of
+# the NIC names a link's local address sits on (`link_interfaces` module). Named
+# by its own gate rather than inherited, exactly as R311y451 named the low-pass's
+# two session-core reads: it is the ONE place wz makes a libc syscall for §5.16,
+# and all three access knobs pull it because all three carry the `interfaces`
+# rule field. `libc` is already in the tree (unixpipe's `mkfifo`), so this adds
+# no third-party surface — unlike zenoh, which reaches the same data through
+# `pnet_datalink`.
+link-interfaces = ["dep:libc"]
+access-acl = ["routing-peer", "link-interfaces", "dep:wz-access-control"]
+access-downsampling = ["routing-peer", "link-interfaces"]
 # R311y451 — the two session-core reads the low-pass SIZE budget needs, named
 # by the gate rather than inherited by luck. zenoh budgets payload PLUS
 # attachment (`net/routing/interceptor/low_pass.rs:358-361`), and wz carries the
@@ -985,6 +994,7 @@ access-downsampling = ["routing-peer"]
 # 0x03 ENC_ZBUF `encoding || payload` ext. Neither rides `routing-peer`.
 access-quota = [
     "routing-peer",
+    "link-interfaces",
     "wz-session-core/attachment-bytes",
     "wz-session-core/query-value",
 ]
@@ -1558,12 +1568,19 @@ socket2 = { version = "0.6", features = ["all"], optional = true }
 # to 0.5 to match zenoh-link-vsock 1.5.0.
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = { version = "0.5", optional = true }
+
+[target.'cfg(unix)'.dependencies]
 # R311y10 — `libc` for the one `mkfifo` FFI call the unixpipe backend needs to
 # create the named-FIFO-pair rendezvous nodes (tokio's `pipe` module opens
-# existing FIFOs but does not create them). Optional, pulled only by
-# `transport-link-unixpipe`; Linux-only (this target table), matching the
-# backend's `target_os="linux"` gate. Already in the tree transitively (tokio /
-# socket2), so it unifies to one version.
+# existing FIFOs but does not create them). Optional, pulled by
+# `transport-link-unixpipe`. Already in the tree transitively (tokio / socket2),
+# so it unifies to one version.
+#
+# R311y453 — MOVED from the `target_os = "linux"` table to `cfg(unix)`, and now
+# pulled by `link-interfaces` as well. `getifaddrs`/`freeifaddrs` are POSIX, not
+# Linux-only, so the §5.16 NIC subject axis works on macOS and the BSDs too;
+# Linux is a subset of unix, so the unixpipe consumer is unaffected (its own code
+# keeps its `target_os = "linux"` gate).
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
