@@ -8849,6 +8849,8 @@ mod tests {
                 messages: vec![AclMessage::Put],
                 flow: AclFlow::Ingress,
                 permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
             }],
         })
     }
@@ -9316,6 +9318,8 @@ mod tests {
                     messages: vec![AclMessage::DeclareSubscriber],
                     flow: AclFlow::Ingress,
                     permission: Permission::Deny,
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
                 }],
             })),
         );
@@ -9385,6 +9389,8 @@ mod tests {
                     messages: vec![AclMessage::DeclareQueryable],
                     flow: AclFlow::Ingress,
                     permission: Permission::Deny,
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
                 }],
             })),
         );
@@ -9460,6 +9466,8 @@ mod tests {
                     messages: vec![AclMessage::Query],
                     flow: AclFlow::Ingress,
                     permission: Permission::Deny,
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
                 }],
             })),
         );
@@ -9553,6 +9561,8 @@ mod tests {
                     messages: vec![AclMessage::Reply],
                     flow: AclFlow::Egress,
                     permission: Permission::Deny,
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
                 }],
             })),
         );
@@ -9606,6 +9616,8 @@ mod tests {
                     messages: vec![AclMessage::Put],
                     flow: AclFlow::Egress, // egress only — ingress is allowed
                     permission: Permission::Deny,
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
                 }],
             })),
         );
@@ -9658,6 +9670,8 @@ mod tests {
                     min_interval: std::time::Duration::from_secs(1),
                     messages: DownsamplingMessage::ALL.to_vec(),
                     flows: InterceptorFlow::ALL.to_vec(),
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
                 }]),
         );
 
@@ -9731,6 +9745,8 @@ mod tests {
                         messages: vec![AclMessage::Put],
                         flow: AclFlow::Ingress,
                         permission: Permission::Deny,
+                        link_protocols: Vec::new(),
+                        interfaces: Vec::new(),
                     }],
                 }))
                 .with_downsampling(vec![DownsamplingRule {
@@ -9738,6 +9754,8 @@ mod tests {
                     min_interval: std::time::Duration::from_secs(1),
                     messages: DownsamplingMessage::ALL.to_vec(),
                     flows: InterceptorFlow::ALL.to_vec(),
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
                 }]),
         );
 
@@ -9807,6 +9825,8 @@ mod tests {
                 max_payload_size: 8,
                 messages: LowPassMessage::ALL.to_vec(),
                 flows: InterceptorFlow::ALL.to_vec(),
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
             }]),
         );
 

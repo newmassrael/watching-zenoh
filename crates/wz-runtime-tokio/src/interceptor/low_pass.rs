@@ -39,14 +39,22 @@
 //!    per-subject trees), so wz could admit what zenoh drops whenever a looser
 //!    rule was listed before a tighter one.
 //!
+//! # The SUBJECT axes (R311y453) — built, and stricter than upstream
+//!
+//! `interfaces` / `link_protocols` (zenoh `:102-112`, `:164-184`) were this
+//! atom's last recorded residual and are now real
+//! ([`link_protocols`](LowPassRule::link_protocols) /
+//! [`interfaces`](LowPassRule::interfaces)), resolved once at link open by
+//! [`crate::link_interfaces`] and matched through the shared
+//! [`LinkSubject`](wz_session_core::link::LinkSubject) predicates the downsampler
+//! and the ACL rule use — one policy, three interceptors, so they cannot drift.
+//! The three ways this is deliberately better than upstream (no process-lifetime
+//! interface cache; "could not determine" kept distinct from "no NIC";
+//! one consistent quantifier and error policy across both axes) are set out in
+//! the sibling downsampler's module note.
+//!
 //! # Deliberate omissions, with their reasons
 //!
-//! - **`interfaces` / `link_protocols` subject scoping** (zenoh `:102-112`,
-//!   `:164-184`). zenoh narrows a rule to the NIC name and link protocol of the
-//!   face the message arrived on; wz's `FaceState` carries neither, and the
-//!   resolution is shared with the ACL enforcer's subject axis and the
-//!   downsampler. It is one seam serving three interceptors, so it belongs to a
-//!   round that builds that seam — not to a half-port inside one atom's module.
 //! - **Rule `id` uniqueness validation** (zenoh `:60-70`). In zenoh's low-pass
 //!   the `id` has NO other consumer — direct read of the module shows `lpf.id`
 //!   read at `:63` and nowhere else (`:452-454` is `SubjectStore`'s unrelated
@@ -70,6 +78,8 @@ use wz_session_core::attachment::{
 use wz_session_core::keyexpr_match::keyexpr_includes_target;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::query_value_ext::decode_query_value_ext;
+
+use wz_session_core::link::{InterceptorLink, LinkSubject};
 
 use super::{Interceptor, InterceptorContext, InterceptorFlow};
 
@@ -126,6 +136,26 @@ pub struct LowPassRule {
     /// defaults to BOTH (`low_pass.rs:83-85`); wz makes the resolved set
     /// explicit on the rule so the per-flow interceptor can filter on it.
     pub flows: Vec<InterceptorFlow>,
+    /// R311y453 — the LINK-PROTOCOL subject axis: the rule governs only a face
+    /// whose transport speaks one of these. EMPTY does not narrow, which is
+    /// zenoh's `link_protocols: None`. FAIL-CLOSED on an indeterminate subject.
+    pub link_protocols: Vec<InterceptorLink>,
+    /// R311y453 — the NIC-NAME subject axis: the rule governs only a face whose
+    /// link sits on one of these interfaces. EMPTY does not narrow (zenoh's
+    /// `interfaces: None`). FAIL-CLOSED on an indeterminate subject; a link
+    /// RESOLVED to no NIC is a definite non-match.
+    pub interfaces: Vec<String>,
+}
+
+impl LowPassRule {
+    /// R311y453 — whether this rule's LINK subject axes admit `subject`. Both
+    /// must pass; an axis left EMPTY does not narrow. Delegates to the same two
+    /// [`LinkSubject`] matchers the ACL rule and the sibling interceptor use, so
+    /// the three §5.16 filters cannot drift on the policy.
+    pub fn governs_link(&self, subject: Option<&LinkSubject>) -> bool {
+        LinkSubject::opt_matches_protocols(subject, &self.link_protocols)
+            && LinkSubject::opt_matches_interfaces(subject, &self.interfaces)
+    }
 }
 
 /// The low-pass interceptor for ONE flow — holds the rules that apply to that
@@ -156,11 +186,18 @@ impl LowPassInterceptor {
     /// node, within and across its per-subject trees (`low_pass.rs:364-391`),
     /// and maps "no match" to `usize::MAX`; the `Option` says the same thing
     /// without a magic ceiling.
-    fn max_allowed_size(&self, message: LowPassMessage, keyexpr: &str) -> Option<usize> {
+    fn max_allowed_size(
+        &self,
+        message: LowPassMessage,
+        keyexpr: &str,
+        link: Option<&LinkSubject>,
+    ) -> Option<usize> {
         let target_chunks: Vec<&str> = keyexpr.split('/').collect();
         self.rules
             .iter()
             .filter(|rule| rule.messages.contains(&message))
+            // R311y453 — the LINK subject axes narrow which rules govern this face.
+            .filter(|rule| rule.governs_link(link))
             .filter(|rule| {
                 rule.key_exprs
                     .iter()
@@ -182,8 +219,9 @@ impl LowPassInterceptor {
         payload: usize,
         attachment: usize,
         keyexpr: &str,
+        link: Option<&LinkSubject>,
     ) -> bool {
-        let Some(limit) = self.max_allowed_size(message, keyexpr) else {
+        let Some(limit) = self.max_allowed_size(message, keyexpr, link) else {
             return true; // ungoverned (kind, keyexpr) — never size-limited
         };
         match payload.checked_add(attachment) {
@@ -299,7 +337,7 @@ impl Interceptor for LowPassInterceptor {
         };
         // Measure the ACTUAL buffer bytes (zenoh reads `put.payload.len()`), not
         // the producer-supplied `payload_len` wire field.
-        self.admit_message(message, payload, attachment, &keyexpr)
+        self.admit_message(message, payload, attachment, &keyexpr, ctx.link_subject())
     }
 }
 
@@ -314,6 +352,8 @@ mod tests {
             max_payload_size,
             messages: LowPassMessage::ALL.to_vec(),
             flows: vec![InterceptorFlow::Ingress, InterceptorFlow::Egress],
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         }
     }
 
@@ -325,14 +365,14 @@ mod tests {
     #[test]
     fn drops_a_put_whose_payload_exceeds_the_limit() {
         let lp = ingress(vec![rule(&["demo/**"], 16)]);
-        let put = |size| lp.admit_message(LowPassMessage::Put, size, 0, "demo/data");
+        let put = |size| lp.admit_message(LowPassMessage::Put, size, 0, "demo/data", None);
         assert!(put(0), "empty fits");
         assert!(put(16), "exactly the limit fits");
         assert!(!put(17), "one over the limit is dropped");
         assert!(!put(1024), "well over is dropped");
         // An ungoverned keyexpr is never size-limited.
         assert!(
-            lp.admit_message(LowPassMessage::Put, 1 << 20, 0, "other/x"),
+            lp.admit_message(LowPassMessage::Put, 1 << 20, 0, "other/x", None),
             "no rule -> admitted"
         );
     }
@@ -347,15 +387,15 @@ mod tests {
     fn the_attachment_counts_toward_the_budget() {
         let lp = ingress(vec![rule(&["demo/**"], 16)]);
         assert!(
-            lp.admit_message(LowPassMessage::Put, 8, 8, "demo/data"),
+            lp.admit_message(LowPassMessage::Put, 8, 8, "demo/data", None),
             "8 payload + 8 attachment == the 16 limit -> admitted"
         );
         assert!(
-            !lp.admit_message(LowPassMessage::Put, 8, 9, "demo/data"),
+            !lp.admit_message(LowPassMessage::Put, 8, 9, "demo/data", None),
             "the PAYLOAD alone fits (8 <= 16) — only the attachment pushes it over"
         );
         assert!(
-            !lp.admit_message(LowPassMessage::Delete, 0, 17, "demo/data"),
+            !lp.admit_message(LowPassMessage::Delete, 0, 17, "demo/data", None),
             "a Del carries no payload, so its attachment is the whole budget"
         );
     }
@@ -367,7 +407,7 @@ mod tests {
     fn an_overflowing_size_is_dropped() {
         let lp = ingress(vec![rule(&["demo/**"], usize::MAX)]);
         assert!(
-            !lp.admit_message(LowPassMessage::Put, usize::MAX, 1, "demo/data"),
+            !lp.admit_message(LowPassMessage::Put, usize::MAX, 1, "demo/data", None),
             "payload + attachment overflow -> dropped even at the MAX limit"
         );
     }
@@ -382,22 +422,22 @@ mod tests {
         // would have honoured.
         let loose_first = ingress(vec![rule(&["demo/**"], 64), rule(&["demo/small/**"], 4)]);
         assert!(
-            !loose_first.admit_message(LowPassMessage::Put, 8, 0, "demo/small/x"),
+            !loose_first.admit_message(LowPassMessage::Put, 8, 0, "demo/small/x", None),
             "the tighter demo/small/** limit of 4 wins over the demo/** 64"
         );
         // Reversing the list must not change the verdict.
         let tight_first = ingress(vec![rule(&["demo/small/**"], 4), rule(&["demo/**"], 64)]);
         assert!(
-            !tight_first.admit_message(LowPassMessage::Put, 8, 0, "demo/small/x"),
+            !tight_first.admit_message(LowPassMessage::Put, 8, 0, "demo/small/x", None),
             "order-independent: the minimum limit decides either way"
         );
         // A keyexpr only the looser rule governs keeps the looser limit.
         assert!(
-            loose_first.admit_message(LowPassMessage::Put, 8, 0, "demo/big"),
+            loose_first.admit_message(LowPassMessage::Put, 8, 0, "demo/big", None),
             "demo/big matches only demo/** -> its 64 limit admits 8 bytes"
         );
         assert!(
-            !loose_first.admit_message(LowPassMessage::Put, 65, 0, "demo/big"),
+            !loose_first.admit_message(LowPassMessage::Put, 65, 0, "demo/big", None),
             "but not over that 64 limit"
         );
     }
@@ -412,9 +452,11 @@ mod tests {
             max_payload_size: 4,
             messages: vec![LowPassMessage::Put],
             flows: vec![InterceptorFlow::Ingress, InterceptorFlow::Egress],
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         }]);
         assert!(
-            !put_only.admit_message(LowPassMessage::Put, 8, 0, "demo/x"),
+            !put_only.admit_message(LowPassMessage::Put, 8, 0, "demo/x", None),
             "Put is governed -> 8 over the 4 limit is dropped"
         );
         for ungoverned in [
@@ -423,7 +465,7 @@ mod tests {
             LowPassMessage::Reply,
         ] {
             assert!(
-                put_only.admit_message(ungoverned, 1 << 20, 0, "demo/x"),
+                put_only.admit_message(ungoverned, 1 << 20, 0, "demo/x", None),
                 "{ungoverned:?} is not in the rule's messages set -> unlimited"
             );
         }
@@ -439,11 +481,13 @@ mod tests {
             max_payload_size: 4,
             messages: LowPassMessage::ALL.to_vec(),
             flows: vec![InterceptorFlow::Ingress],
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         }];
         let on_ingress = LowPassInterceptor::for_flow(&ingress_only, InterceptorFlow::Ingress)
             .expect("the ingress-scoped rule applies to ingress");
         assert!(
-            !on_ingress.admit_message(LowPassMessage::Put, 8, 0, "demo/x"),
+            !on_ingress.admit_message(LowPassMessage::Put, 8, 0, "demo/x", None),
             "the ingress rule sizes an ingress Put"
         );
         assert!(

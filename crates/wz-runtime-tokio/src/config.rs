@@ -605,12 +605,16 @@ mod tests {
             min_interval: Duration::from_millis(250),
             messages: DownsamplingMessage::ALL.to_vec(),
             flows: InterceptorFlow::ALL.to_vec(),
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         }];
         c.interceptors.low_pass = vec![LowPassRule {
             key_exprs: vec!["mesh/bulk".to_string()],
             max_payload_size: 1024,
             messages: LowPassMessage::ALL.to_vec(),
             flows: InterceptorFlow::ALL.to_vec(),
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         }];
         let json = c.to_admin_json();
         assert!(
@@ -641,6 +645,8 @@ mod tests {
                 messages: vec![AclMessage::Put, AclMessage::Delete],
                 flow: AclFlow::Ingress,
                 permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
             }],
         }));
         let json = c.to_admin_json();

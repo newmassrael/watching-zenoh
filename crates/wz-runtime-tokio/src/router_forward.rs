@@ -6280,6 +6280,8 @@ mod tests {
                 messages: vec![AclMessage::Put],
                 flow,
                 permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
             }],
         })
     }

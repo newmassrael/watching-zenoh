@@ -46,17 +46,32 @@
 //!    interval always admitted the first. [`interval_from_freq`] closes both
 //!    halves: the Hz→interval mapping and the drop-all sentinel.
 //!
+//! # The SUBJECT axes (R311y453) — built, and stricter than upstream
+//!
+//! `interfaces` / `link_protocols` (zenoh `:90-116`) were this atom's last
+//! recorded residual and are now real: a rule narrows to the NIC names and the
+//! link protocol of the face a message arrived on
+//! ([`link_protocols`](DownsamplingRule::link_protocols) /
+//! [`interfaces`](DownsamplingRule::interfaces)), resolved once at link open by
+//! [`crate::link_interfaces`]. Three things are deliberately BETTER than upstream,
+//! and each is a divergence rather than a port:
+//!
+//! 1. zenoh caches the host's interface table in a process-lifetime
+//!    `lazy_static` (`zenoh-util/src/net/mod.rs:31-33`), so a NIC that appears
+//!    later is invisible for the life of the process; wz resolves live.
+//! 2. zenoh maps a FAILED interface lookup to the same `vec![]` it uses for "this
+//!    link has no NIC" (`zenoh-link-commons/src/unicast.rs:112-118`); wz keeps the
+//!    two apart, and only the second is a definite non-match.
+//! 3. zenoh's two axes disagree with each other — `interfaces` needs EVERY link of
+//!    the transport to match and SKIPS the check when `get_links()` errs
+//!    (restrictive), while `link_protocols` needs ANY and installs NOTHING when
+//!    `get_auth_ids()` errs (permissive). wz applies ONE policy to both: ANY, and
+//!    fail-CLOSED on an indeterminate subject, which is the conservative direction
+//!    for all three §5.16 interceptors because all three are restrictive when they
+//!    apply.
+//!
 //! # Deliberate omissions, with their reasons
 //!
-//! - **`interfaces` / `link_protocols` subject scoping** (zenoh `:90-116`). zenoh
-//!   narrows an item to the NIC name and link protocol of the transport the
-//!   message arrived on; wz's `FaceState` carries neither, and
-//!   `BoxedLinkDriver` (`wz-session-core/src/link.rs:63-81`) exposes no locator
-//!   or protocol accessor to derive them from. It is ONE seam serving all three
-//!   interceptors — the ACL subject axis, this downsampler and the low-pass — so
-//!   it belongs to a round that builds that seam, not to a third of a port inside
-//!   one atom's module. Same disposition, same reason, as R311y451 recorded for
-//!   `access-quota`.
 //! - **Rule `id` uniqueness validation** (zenoh `:48-54`). As in the low-pass, the
 //!   `id` has NO other consumer — a grep of `.id` across zenoh's `downsampling.rs`
 //!   shows the single read at `:50`, inside the uniqueness check itself. Porting
@@ -82,6 +97,8 @@ use std::time::{Duration, Instant};
 
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::network_message::NetworkMessage;
+
+use wz_session_core::link::{InterceptorLink, LinkSubject};
 
 use super::{Interceptor, InterceptorContext, InterceptorFlow};
 
@@ -147,6 +164,26 @@ pub struct DownsamplingRule {
     /// to BOTH (`downsampling.rs:76-79`); wz makes the resolved set explicit on
     /// the rule so the per-flow interceptor can filter on it.
     pub flows: Vec<InterceptorFlow>,
+    /// R311y453 — the LINK-PROTOCOL subject axis: the rule governs only a face
+    /// whose transport speaks one of these. EMPTY does not narrow, which is
+    /// zenoh's `link_protocols: None`. FAIL-CLOSED on an indeterminate subject.
+    pub link_protocols: Vec<InterceptorLink>,
+    /// R311y453 — the NIC-NAME subject axis: the rule governs only a face whose
+    /// link sits on one of these interfaces. EMPTY does not narrow (zenoh's
+    /// `interfaces: None`). FAIL-CLOSED on an indeterminate subject; a link
+    /// RESOLVED to no NIC is a definite non-match.
+    pub interfaces: Vec<String>,
+}
+
+impl DownsamplingRule {
+    /// R311y453 — whether this rule's LINK subject axes admit `subject`. Both
+    /// must pass; an axis left EMPTY does not narrow. Delegates to the same two
+    /// [`LinkSubject`] matchers the ACL rule and the sibling interceptor use, so
+    /// the three §5.16 filters cannot drift on the policy.
+    pub fn governs_link(&self, subject: Option<&LinkSubject>) -> bool {
+        LinkSubject::opt_matches_protocols(subject, &self.link_protocols)
+            && LinkSubject::opt_matches_interfaces(subject, &self.interfaces)
+    }
 }
 
 /// The minimum interval for a maximum frequency in Hertz — zenoh's
@@ -226,12 +263,20 @@ impl DownsamplingInterceptor {
     /// message decides (zenoh takes `intersecting_keys(ke).next()`,
     /// `downsampling.rs:224` — the first match, NOT the low-pass's minimum across
     /// matches).
-    fn admit_at(&self, now: Instant, message: DownsamplingMessage, keyexpr: &str) -> bool {
+    fn admit_at(
+        &self,
+        now: Instant,
+        message: DownsamplingMessage,
+        keyexpr: &str,
+        link: Option<&LinkSubject>,
+    ) -> bool {
         let target_chunks: Vec<&str> = keyexpr.split('/').collect();
         let Some(state) = self
             .rules
             .iter()
             .filter(|s| s.rule.messages.contains(&message))
+            // R311y453 — the LINK subject axes narrow which rules govern this face.
+            .filter(|s| s.rule.governs_link(link))
             .find(|s| {
                 s.rule
                     .key_exprs
@@ -285,7 +330,7 @@ impl Interceptor for DownsamplingInterceptor {
         let Some(keyexpr) = ctx.full_keyexpr(msg) else {
             return true;
         };
-        self.admit_at(Instant::now(), message, &keyexpr)
+        self.admit_at(Instant::now(), message, &keyexpr, ctx.link_subject())
     }
 }
 
@@ -300,6 +345,8 @@ mod tests {
             min_interval,
             messages: DownsamplingMessage::ALL.to_vec(),
             flows: InterceptorFlow::ALL.to_vec(),
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         }
     }
 
@@ -312,7 +359,7 @@ mod tests {
     fn rate_limits_a_governed_keyexpr_by_the_minimum_interval() {
         let ds = ingress(vec![rule(&["demo/**"], Duration::from_millis(100))]);
         let t0 = Instant::now();
-        let push = |at: Duration, ke| ds.admit_at(t0 + at, DownsamplingMessage::Push, ke);
+        let push = |at: Duration, ke| ds.admit_at(t0 + at, DownsamplingMessage::Push, ke, None);
         assert!(push(Duration::ZERO, "demo/data"), "first is admitted");
         assert!(
             !push(Duration::from_millis(40), "demo/data"),
@@ -339,14 +386,15 @@ mod tests {
         let ds = ingress(vec![rule(&["demo/**"], Duration::from_millis(100))]);
         let t0 = Instant::now();
         assert!(
-            ds.admit_at(t0, DownsamplingMessage::Push, "demo/a"),
+            ds.admit_at(t0, DownsamplingMessage::Push, "demo/a", None),
             "first under the rule is admitted"
         );
         assert!(
             !ds.admit_at(
                 t0 + Duration::from_millis(10),
                 DownsamplingMessage::Push,
-                "demo/b"
+                "demo/b",
+                None
             ),
             "demo/b shares the rule timer with demo/a -> dropped"
         );
@@ -365,24 +413,27 @@ mod tests {
             min_interval: Duration::from_millis(100),
             messages: vec![DownsamplingMessage::Query],
             flows: InterceptorFlow::ALL.to_vec(),
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         }]);
         let t0 = Instant::now();
         // The query plane IS governed — a second query inside the interval drops.
-        assert!(query_only.admit_at(t0, DownsamplingMessage::Query, "demo/q"));
+        assert!(query_only.admit_at(t0, DownsamplingMessage::Query, "demo/q", None));
         assert!(
             !query_only.admit_at(
                 t0 + Duration::from_millis(10),
                 DownsamplingMessage::Query,
-                "demo/q"
+                "demo/q",
+                None
             ),
             "Query is in the rule's messages set -> rate-limited"
         );
         // ... and the kinds it does NOT list are unlimited on that same keyexpr,
         // however fast they arrive.
         for ungoverned in [DownsamplingMessage::Push, DownsamplingMessage::Reply] {
-            assert!(query_only.admit_at(t0, ungoverned, "demo/q"));
+            assert!(query_only.admit_at(t0, ungoverned, "demo/q", None));
             assert!(
-                query_only.admit_at(t0, ungoverned, "demo/q"),
+                query_only.admit_at(t0, ungoverned, "demo/q", None),
                 "{ungoverned:?} is not in the rule's messages set -> never throttled"
             );
         }
@@ -399,16 +450,19 @@ mod tests {
             min_interval: Duration::from_millis(100),
             messages: DownsamplingMessage::ALL.to_vec(),
             flows: vec![InterceptorFlow::Ingress],
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         }];
         let on_ingress = DownsamplingInterceptor::for_flow(&ingress_only, InterceptorFlow::Ingress)
             .expect("the ingress-scoped rule applies to ingress");
         let t0 = Instant::now();
-        assert!(on_ingress.admit_at(t0, DownsamplingMessage::Push, "demo/x"));
+        assert!(on_ingress.admit_at(t0, DownsamplingMessage::Push, "demo/x", None));
         assert!(
             !on_ingress.admit_at(
                 t0 + Duration::from_millis(10),
                 DownsamplingMessage::Push,
-                "demo/x"
+                "demo/x",
+                None
             ),
             "the ingress rule throttles an ingress Push"
         );
@@ -446,19 +500,171 @@ mod tests {
         let ds = ingress(vec![rule(&["demo/**"], interval_from_freq(0.0))]);
         let t0 = Instant::now();
         assert!(
-            !ds.admit_at(t0, DownsamplingMessage::Push, "demo/x"),
+            !ds.admit_at(t0, DownsamplingMessage::Push, "demo/x", None),
             "the FIRST message under a zero-frequency rule is already dropped"
         );
         assert!(
             !ds.admit_at(
                 t0 + Duration::from_secs(3600),
                 DownsamplingMessage::Push,
-                "demo/x"
+                "demo/x",
+                None
             ),
             "and no elapsed time ever makes one due"
         );
         // The rule still scopes to its keyexprs — drop-all is not deny-all.
-        assert!(ds.admit_at(t0, DownsamplingMessage::Push, "other/x"));
+        assert!(ds.admit_at(t0, DownsamplingMessage::Push, "other/x", None));
+    }
+
+    /// R311y453 — a subject for a link that resolved cleanly to one NIC.
+    fn on(protocol: InterceptorLink, nic: &str) -> LinkSubject {
+        LinkSubject {
+            protocol: Some(protocol),
+            interfaces: Some(vec![nic.to_owned()]),
+        }
+    }
+
+    /// R311y453 — the `link_protocols` SUBJECT axis: a rule narrowed to a protocol
+    /// governs only a face speaking it, and an EMPTY list does not narrow.
+    #[test]
+    fn a_rule_governs_only_the_link_protocols_it_lists() {
+        let tcp_only = ingress(vec![DownsamplingRule {
+            link_protocols: vec![InterceptorLink::Tcp],
+            ..rule(&["demo/**"], Duration::from_millis(100))
+        }]);
+        let t0 = Instant::now();
+        let tcp = on(InterceptorLink::Tcp, "lo");
+        let vsock = on(InterceptorLink::Vsock, "lo");
+
+        assert!(tcp_only.admit_at(t0, DownsamplingMessage::Push, "demo/x", Some(&tcp)));
+        assert!(
+            !tcp_only.admit_at(
+                t0 + Duration::from_millis(10),
+                DownsamplingMessage::Push,
+                "demo/x",
+                Some(&tcp)
+            ),
+            "a TCP face IS governed -> rate-limited"
+        );
+        // A face on another protocol is not governed at all, however fast it sends.
+        for _ in 0..3 {
+            assert!(
+                tcp_only.admit_at(t0, DownsamplingMessage::Push, "demo/x", Some(&vsock)),
+                "a vsock face is outside the rule's link_protocols -> never throttled"
+            );
+        }
+
+        // A subject that RESOLVED its NICs but could not say which PROTOCOL it
+        // speaks is INDETERMINATE on this axis, and fail-closed means the rule
+        // still governs it. Without this case the `None => true` arm of
+        // `matches_protocols` is unreachable from any test — which is exactly how
+        // it was found: a damage flipping that arm to `false` redded nothing.
+        let unknown_proto = ingress(vec![DownsamplingRule {
+            link_protocols: vec![InterceptorLink::Tcp],
+            ..rule(&["demo/**"], Duration::from_millis(100))
+        }]);
+        let nic_only = LinkSubject {
+            protocol: None,
+            interfaces: Some(vec!["eth0".to_owned()]),
+        };
+        assert!(unknown_proto.admit_at(t0, DownsamplingMessage::Push, "demo/x", Some(&nic_only)));
+        assert!(
+            !unknown_proto.admit_at(
+                t0 + Duration::from_millis(10),
+                DownsamplingMessage::Push,
+                "demo/x",
+                Some(&nic_only)
+            ),
+            "an indeterminate PROTOCOL is governed, not exempt (fail-closed)"
+        );
+    }
+
+    /// R311y453 — the `interfaces` SUBJECT axis, with the THREE-STATE distinction
+    /// zenoh cannot express: a link RESOLVED to no NIC is a definite non-match,
+    /// while a link whose NICs could NOT be determined matches (fail-closed).
+    ///
+    /// Each case gets a FRESH interceptor. That is not tidiness: the rate timer
+    /// is per RULE and wz runs ONE chain for every face, so a rule's timer is
+    /// shared across faces — reusing one instance would let the previous case's
+    /// admit stamp the timer and make the next case's first message look dropped
+    /// for the wrong reason. (That sharing is itself a divergence from zenoh,
+    /// whose per-transport FACTORY gives each transport its own `ke_state`
+    /// (`downsampling.rs:133-152`); wz aggregates across faces. Recorded as a
+    /// finding, not fixed here — it predates the subject axis, which only made it
+    /// visible.)
+    #[test]
+    fn a_rule_narrowed_to_an_interface_is_fail_closed_on_an_unknown_subject() {
+        let eth0_rule = || {
+            ingress(vec![DownsamplingRule {
+                interfaces: vec!["eth0".to_owned()],
+                ..rule(&["demo/**"], Duration::from_millis(100))
+            }])
+        };
+        let t0 = Instant::now();
+
+        // On the named NIC: governed.
+        {
+            let ds = eth0_rule();
+            let eth0 = on(InterceptorLink::Tcp, "eth0");
+            assert!(ds.admit_at(t0, DownsamplingMessage::Push, "demo/x", Some(&eth0)));
+            assert!(
+                !ds.admit_at(
+                    t0 + Duration::from_millis(10),
+                    DownsamplingMessage::Push,
+                    "demo/x",
+                    Some(&eth0)
+                ),
+                "a face on eth0 is governed -> rate-limited"
+            );
+        }
+
+        // RESOLVED to a different NIC, and RESOLVED to NO NIC (a unixsock / pipe /
+        // serial / vsock link): both are DEFINITE non-matches, never throttled.
+        // The second is the case zenoh conflates with a failed lookup, because it
+        // maps both to `vec![]`.
+        for (label, subject) in [
+            ("a different NIC", on(InterceptorLink::Tcp, "lo")),
+            (
+                "no NIC at all",
+                LinkSubject {
+                    protocol: Some(InterceptorLink::UnixsockStream),
+                    interfaces: Some(Vec::new()),
+                },
+            ),
+        ] {
+            let ds = eth0_rule();
+            for i in 0..3 {
+                assert!(
+                    ds.admit_at(
+                        t0 + Duration::from_millis(i),
+                        DownsamplingMessage::Push,
+                        "demo/x",
+                        Some(&subject)
+                    ),
+                    "{label} is outside an eth0-narrowed rule -> never throttled"
+                );
+            }
+        }
+
+        // INDETERMINATE: the resolver could not say. FAIL-CLOSED — the rule
+        // applies, because every §5.16 interceptor is restrictive when it does.
+        // An absent subject and an explicit UNKNOWN must behave identically.
+        for (label, subject) in [
+            ("an absent subject", None),
+            ("an explicit UNKNOWN", Some(&LinkSubject::UNKNOWN)),
+        ] {
+            let ds = eth0_rule();
+            assert!(ds.admit_at(t0, DownsamplingMessage::Push, "demo/x", subject));
+            assert!(
+                !ds.admit_at(
+                    t0 + Duration::from_millis(10),
+                    DownsamplingMessage::Push,
+                    "demo/x",
+                    subject
+                ),
+                "{label} is governed, not exempt"
+            );
+        }
     }
 
     /// The kind classification is bound to real built messages, so a codec arm

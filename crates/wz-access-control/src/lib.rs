@@ -60,6 +60,7 @@
 
 use wz_routing_graph::Zid;
 use wz_session_core::keyexpr_match::keyexpr_includes_target;
+use wz_session_core::link::{InterceptorLink, LinkSubject};
 
 /// Allow or deny — zenoh-config `Permission`. The verdict of every rule and the
 /// workspace default.
@@ -190,8 +191,38 @@ pub struct AclRule {
     pub messages: Vec<AclMessage>,
     /// The flow this rule applies to.
     pub flow: AclFlow,
+    /// R311y453 — the LINK-PROTOCOL subject axis: the rule governs only a face
+    /// whose transport speaks one of these. EMPTY means the rule does not narrow
+    /// by protocol, which is zenoh's `link_protocols: None`
+    /// (`zenoh-config/src/lib.rs:134`).
+    ///
+    /// FAIL-CLOSED on an indeterminate subject — see
+    /// [`LinkSubject::opt_matches_protocols`].
+    pub link_protocols: Vec<InterceptorLink>,
+    /// R311y453 — the NIC-NAME subject axis: the rule governs only a face whose
+    /// link sits on one of these interfaces. EMPTY means the rule does not narrow
+    /// by interface (zenoh's `interfaces: None`).
+    ///
+    /// FAIL-CLOSED on an indeterminate subject, and a link RESOLVED to no NIC (a
+    /// unix socket, pipe, serial, vsock) is a definite non-match — see
+    /// [`LinkSubject::opt_matches_interfaces`].
+    pub interfaces: Vec<String>,
     /// The verdict when the rule applies.
     pub permission: Permission,
+}
+
+impl AclRule {
+    /// R311y453 — whether this rule's LINK subject axes admit `subject`, i.e.
+    /// whether the rule governs the face the message arrived on at all.
+    ///
+    /// Both axes must pass, and an axis left EMPTY does not narrow. Kept beside
+    /// the rule rather than in the enforcer so the three §5.16 interceptors
+    /// cannot drift on the policy: the downsampler and the low-pass call the same
+    /// two [`LinkSubject`] matchers.
+    pub fn governs_link(&self, subject: Option<&LinkSubject>) -> bool {
+        LinkSubject::opt_matches_protocols(subject, &self.link_protocols)
+            && LinkSubject::opt_matches_interfaces(subject, &self.interfaces)
+    }
 }
 
 /// The access-control configuration — the wz mirror of `zenoh-config`'s
@@ -291,6 +322,7 @@ impl AclPolicy {
         flow: AclFlow,
         action: AclMessage,
         keyexpr: &str,
+        link: Option<&LinkSubject>,
     ) -> Permission {
         if self.config.rules.is_empty() {
             return self.config.default_permission;
@@ -301,6 +333,12 @@ impl AclPolicy {
         let applies = |rule: &AclRule| -> bool {
             rule.flow == flow
                 && rule.subject.matches(subject)
+                // R311y453 — the LINK subject axes, checked beside the zid
+                // subject: zenoh decides these in the interceptor FACTORY (it
+                // simply does not install the interceptor on a non-matching
+                // transport); wz has one chain for every face, so the same
+                // narrowing happens per rule, here.
+                && rule.governs_link(link)
                 && rule.messages.contains(&action)
                 && rule
                     .key_exprs
@@ -349,6 +387,8 @@ mod tests {
             messages: vec![AclMessage::Put],
             flow: AclFlow::Ingress,
             permission: Permission::Deny,
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         }
     }
 
@@ -424,7 +464,8 @@ mod tests {
                 &z,
                 AclFlow::Ingress,
                 AclMessage::Put,
-                "x/y"
+                "x/y",
+                None
             ),
             Permission::Allow
         );
@@ -433,7 +474,8 @@ mod tests {
                 &z,
                 AclFlow::Ingress,
                 AclMessage::Put,
-                "x/y"
+                "x/y",
+                None
             ),
             Permission::Deny
         );
@@ -448,12 +490,12 @@ mod tests {
         });
         // Denied: the deny rule's `admin/**` includes `admin/cfg`.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "admin/cfg"),
+            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
             Permission::Deny
         );
         // Allowed: outside the deny keyexpr, the allow default carries it.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "demo/data"),
+            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "demo/data", None),
             Permission::Allow
         );
     }
@@ -466,12 +508,12 @@ mod tests {
             rules: vec![allow_rule(SubjectSelector::Any, "metrics/**")],
         });
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "metrics/cpu"),
+            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "metrics/cpu", None),
             Permission::Allow
         );
         // Default-deny carries everything the allow rule does not cover.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "admin/cfg"),
+            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
             Permission::Deny
         );
     }
@@ -488,12 +530,12 @@ mod tests {
         });
         // Both rules apply to `secret/key`; deny wins.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "secret/key"),
+            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "secret/key", None),
             Permission::Deny
         );
         // Only the allow applies here.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "secret/pub"),
+            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "secret/pub", None),
             Permission::Allow
         );
     }
@@ -508,12 +550,18 @@ mod tests {
         });
         // The named peer is denied admin/**.
         assert_eq!(
-            policy.decision(&denied, AclFlow::Ingress, AclMessage::Put, "admin/cfg"),
+            policy.decision(
+                &denied,
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "admin/cfg",
+                None
+            ),
             Permission::Deny
         );
         // Another peer is not governed by that rule -> allow default.
         assert_eq!(
-            policy.decision(&other, AclFlow::Ingress, AclMessage::Put, "admin/cfg"),
+            policy.decision(&other, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
             Permission::Allow
         );
     }
@@ -527,7 +575,7 @@ mod tests {
         });
         // The deny rule is Ingress-flow; an Egress request is not governed by it.
         assert_eq!(
-            policy.decision(&z, AclFlow::Egress, AclMessage::Put, "admin/cfg"),
+            policy.decision(&z, AclFlow::Egress, AclMessage::Put, "admin/cfg", None),
             Permission::Allow
         );
     }
@@ -546,10 +594,12 @@ mod tests {
                 messages: vec![AclMessage::Delete, AclMessage::DeclareSubscriber],
                 flow: AclFlow::Ingress,
                 permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
             }],
         });
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Delete, "admin/cfg"),
+            policy.decision(&z, AclFlow::Ingress, AclMessage::Delete, "admin/cfg", None),
             Permission::Deny
         );
         assert_eq!(
@@ -557,13 +607,14 @@ mod tests {
                 &z,
                 AclFlow::Ingress,
                 AclMessage::DeclareSubscriber,
-                "admin/cfg"
+                "admin/cfg",
+                None
             ),
             Permission::Deny
         );
         // Put is not in the rule's action set -> allow default carries it.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "admin/cfg"),
+            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
             Permission::Allow
         );
     }

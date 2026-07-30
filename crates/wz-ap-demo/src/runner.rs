@@ -2524,6 +2524,8 @@ async fn run_peer_until(
             ],
             flow,
             permission: Permission::Deny,
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         };
         AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -2580,6 +2582,8 @@ async fn run_peer_until(
             min_interval,
             messages: DownsamplingMessage::ALL.to_vec(),
             flows: InterceptorFlow::ALL.to_vec(),
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
         }];
     }
 
@@ -2601,6 +2605,8 @@ async fn run_peer_until(
                     max_payload_size,
                     messages: LowPassMessage::ALL.to_vec(),
                     flows: InterceptorFlow::ALL.to_vec(),
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
                 }];
             }
             Err(_) => log::warn!(

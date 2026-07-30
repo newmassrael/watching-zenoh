@@ -104,7 +104,9 @@ impl Interceptor for AclInterceptor {
         let Some(keyexpr) = ctx.full_keyexpr(msg) else {
             return true;
         };
-        self.policy.decision(&subject, self.flow, action, &keyexpr) == Permission::Allow
+        self.policy
+            .decision(&subject, self.flow, action, &keyexpr, ctx.link_subject())
+            == Permission::Allow
     }
 }
 
@@ -150,6 +152,8 @@ mod tests {
                 ],
                 flow: AclFlow::Ingress,
                 permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
             }],
         })
     }

@@ -3110,9 +3110,16 @@ layer_c1y_cargo_test_routing_peer() {
     # selector, its own `flows` selector + the no-interceptor-on-an-ungoverned-flow
     # twin, the Hz->interval mapping, the `freq == 0.0` drop-all that drops even the
     # FIRST message, and the body-level kind classification bound to real built
-    # messages). Like C1ah's `node_clock::` pin this is a COUNT, not a SET: it
-    # catches a test that stops being selected, not a test renamed into still-21.
-    _runci_guarded_test "C1y interceptor" 21 \
+    # messages).
+    # R311y453 — 21 -> 23: the two SUBJECT-axis tests (a rule narrowed by
+    # link_protocols governs only a face speaking one of them, including the
+    # fail-closed arm for a face whose protocol is indeterminate; and a rule
+    # narrowed by interfaces, which separates RESOLVED-to-a-different-NIC and
+    # RESOLVED-to-no-NIC — both definite non-matches — from COULD-NOT-DETERMINE,
+    # which is fail-closed and governed). Like C1ah's `node_clock::` pin this is a
+    # COUNT, not a SET: it catches a test that stops being selected, not a test
+    # renamed into still-23.
+    _runci_guarded_test "C1y interceptor" 23 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     _runci_guarded_test "C1y linkstate+access" 211 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
