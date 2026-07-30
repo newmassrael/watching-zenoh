@@ -161,6 +161,72 @@ MNEMOSYNE_MAX_SCHEMA="44"
 cargo install --git https://github.com/newmassrael/mnemosyne \
   --rev "$MNEMOSYNE_REV" --bin mnemosyne-cli --force mnemosyne-cli
 
+# R311y465 — ALSO place the build in the pin's per-revision root, so `[tool] pin`
+# has something to DELEGATE to. Upstream (mnemosyne R872) reported the gap: the
+# pin's contract is "if the PATH build is not the pinned rev, hand over to
+# `$MN_ROOT/<pin>/bin`", and this script only ever populated the SHARED slot, so
+# a green run meant "PATH happens to equal the pin" rather than "the pin is
+# satisfiable". On this machine the shared slot moved TWICE in one day, so the
+# drift case is routine, not hypothetical.
+#
+# COPY, and in THIS direction, for two reasons that are easy to get backwards:
+#
+#  1. NOT `--root` INSTEAD of `--force`. Three sites resolve the CLI through
+#     `command -v mnemosyne-cli` — `.githooks/pre-commit`, `.githooks/pre-push`
+#     (both HARD-FAIL on absence since R311y418) and verify-mnemosyne-pin.sh,
+#     whose comment says it grades `command -v` precisely so a shadowing binary
+#     is caught rather than bypassed. Moving the install out of the shared slot
+#     would empty the path all three look at.
+#  2. NOT `cargo install --root` as a SECOND install. That is a second build,
+#     and — the part that matters — the shared slot's `~/.cargo/.crates.toml`
+#     entry is what R311y436 established as the SSOT for reading the full pinned
+#     SHA (`--version` is refused for that job). Keeping `cargo install` on the
+#     shared slot keeps that ledger truthful; the per-rev root needs no ledger.
+#
+# A bare copy is sufficient by upstream's own design: the handover VERIFIES the
+# target by asking it `--version` and refuses an unverifiable one
+# (mnemosyne-config/src/lib.rs, Round 861), and `pinned_binary` is just
+# `<root>/bin/<name>` — the `cargo install --root` layout read back. The
+# directory name is the pin string VERBATIM (`pinned_root` joins it unmodified),
+# which is why this uses "$MNEMOSYNE_REV" and not a shortened form.
+_mn_shared_cli="${CARGO_HOME:-$HOME/.cargo}/bin/mnemosyne-cli"
+_mn_pin_root="${MN_ROOT:-$HOME/.local/mn}/$MNEMOSYNE_REV"
+if [ -x "$_mn_shared_cli" ]; then
+    mkdir -p "$_mn_pin_root/bin"
+    cp -f "$_mn_shared_cli" "$_mn_pin_root/bin/mnemosyne-cli"
+    # Self-check the copy the way the handover will: `--version` stamps a short
+    # `git describe` hash, and the pin is matched by PREFIX on the shorter of the
+    # two. A copy that cannot answer for itself is worse than no copy, because
+    # the handover would refuse it and name THIS path in the error.
+    #
+    # The EMPTY-stamp case is handled first and separately on purpose: a `case`
+    # pattern built from an empty variable collapses to `*`, which matches
+    # anything, so folding "unreadable" into the prefix test would silently turn
+    # this self-check into a no-op — the hollow-gate shape R311y416/y417 kept
+    # finding. Not knowing is refused, exactly as the handover refuses it.
+    _mn_stamp="$("$_mn_pin_root/bin/mnemosyne-cli" --version 2>/dev/null \
+        | sed -n 's/.*(\([0-9a-f]\{4,\}\)).*/\1/p')"
+    if [ -z "$_mn_stamp" ]; then
+        echo "install-mnemosyne-cli: FAIL — the copy at $_mn_pin_root/bin does not" >&2
+        echo "  answer \`--version\` with a revision stamp, so the handover would" >&2
+        echo "  refuse it as unverifiable and name this path in the error." >&2
+        exit 1
+    fi
+    case "$MNEMOSYNE_REV" in
+        "$_mn_stamp"*)
+            echo "install-mnemosyne-cli: pin root ready — $_mn_pin_root/bin/mnemosyne-cli ($_mn_stamp)" ;;
+        *)
+            echo "install-mnemosyne-cli: FAIL — the copy at $_mn_pin_root/bin stamps" >&2
+            echo "  '$_mn_stamp', which is not a prefix of the pinned" >&2
+            echo "  $MNEMOSYNE_REV. The handover would refuse it and blame this path." >&2
+            exit 1 ;;
+    esac
+else
+    echo "install-mnemosyne-cli: FAIL — no binary at $_mn_shared_cli after" >&2
+    echo "  \`cargo install --force\`; the shared slot is what the hooks resolve." >&2
+    exit 1
+fi
+
 # R311y419 — ask the binary just installed what schema it actually reads, and
 # refuse to hand a mismatched pin to the rest of the job.
 #
