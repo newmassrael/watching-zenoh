@@ -55,6 +55,21 @@ surface and may drift from the store. To read the SSOT, use
    restart the session. Do NOT proceed treating the concepts as
    unavailable, and do NOT edit `mnemosyne.toml` to make the old server
    start.
+
+   R311y462 made this failure mode LOUD instead of latent, and added one
+   rule. `mnemosyne.toml` now carries `[tool] pin`, which must equal
+   `MNEMOSYNE_REV` in `scripts/install-mnemosyne-cli.sh` — one fact in two
+   places on purpose: the installer constant is the SSOT (both workflows
+   install it; `install-mnemosyne-mcp.sh` parses it out of HEAD), while the
+   toml key is where every binary reads it, **including the MCP server,
+   which the installer's schema gate never interrogates**. A build whose
+   rev does not prefix-match the pin now refuses with an actionable error
+   instead of silently reinterpreting the tree. Consequence when moving
+   it: install the new rev's **cli AND mcp**, confirm both from cargo's own
+   ledger (`~/.cargo/.crates.toml`, not `--version`), then move both
+   constants in ONE commit. Backwards, the old binary dies in TOML parse
+   before it can explain itself, and `MNEMOSYNE_PIN_SKIP=1` does not
+   rescue that — it is read only after the config has parsed.
 2. Run `validate_workspace` to surface the current baseline (T1 orphan
    count, atomic ledger entries/sections, style violations). Snapshot
    the numbers — you will compare against this after your mutation.
