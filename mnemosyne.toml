@@ -59,6 +59,31 @@ entry_id_prefix = "Round "
 paths = ["crates", "deploy", "xtask"]
 scan_exclusions = ["vendor", "out"]
 
+# R311y462 — WHICH Mnemosyne build is allowed to interpret this workspace.
+#
+# Why it exists: without it, every gate here is interpreted by whatever binary
+# was installed on the machine LAST, so the same tree and the same command can
+# report the same green for OPPOSITE reasons on the same day. Upstream measured
+# exactly that here (mnemosyne R868 notice) and it was reproduced before this
+# key was added: the PATH CLI had drifted to be4c1647 (R869) while
+# scripts/install-mnemosyne-cli.sh still pinned 25d30d16 (R807). The pin makes a
+# mismatch a loud refusal instead of a silent reinterpretation.
+#
+# The value MUST equal MNEMOSYNE_REV in scripts/install-mnemosyne-cli.sh. That
+# file stays the pin's SSOT — it is what ci.yml:594 installs and what
+# scripts/install-mnemosyne-mcp.sh parses out of HEAD — and this key is the same
+# fact stated where every binary reads it, including `mnemosyne-mcp`, which the
+# installer's schema gate never sees. Matching is by PREFIX on the shorter of
+# the two, so the full SHA here also accepts a short-`describe` build.
+#
+# ORDER, when moving it: install the new rev's cli AND mcp, confirm both with
+# `--version` plus cargo's own ledger (~/.cargo/.crates.toml), THEN change this
+# and MNEMOSYNE_REV together in ONE commit. Backwards and the old binary dies in
+# TOML parse before it can explain itself, and MNEMOSYNE_PIN_SKIP=1 does NOT
+# rescue that — the env var is read only AFTER the config has parsed.
+[tool]
+pin = "a886cd0f25682056b4f0fb1d88be89356180f32a"
+
 [style]
 locale = "en"
 # Round 253 EXTERNAL-LEDGER adoption — legacy orphan carry (75 entries).

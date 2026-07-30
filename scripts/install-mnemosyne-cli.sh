@@ -96,7 +96,29 @@ set -euo pipefail
 # install ledger (~/.cargo/.crates.toml records the full SHA), not from
 # `--version`; see the new pin-vs-installed gate for why that distinction is
 # load-bearing.
-MNEMOSYNE_REV="25d30d161c2c54c3bbcfde9f2a0156724b5f6471"
+#
+# R311y462 — moved 25d30d16 -> a886cd0f, and this bump is NOT schema-forced: it
+# is what makes `mnemosyne.toml [tool] pin` safe to declare in the same commit.
+# Upstream sent an unsolicited notice (mnemosyne R868/R871) reporting that this
+# tree's gate RESULT changed twice in one day with nothing changed here, because
+# a repo that declares no `[tool] pin` gets whatever binary was installed on the
+# machine LAST. Measured here before acting: the PATH CLI had drifted to
+# be4c1647 (R869) while this constant still said 25d30d16 (R807), so the hooks
+# were already running a reader the repo does not name. `[tool] pin` turns that
+# silent mismatch into a loud refusal — which is the point — but the key is
+# parsed by EVERY mnemosyne binary that opens this workspace, and an older one
+# dies on it at TOML parse. That was measured on an isolated copy, not inferred:
+# 0c82ad73 (R858) and be4c1647 (R869) both KNOW the key and enforce it, while
+# 25d30d16 — the rev this constant pinned, and the rev `mnemosyne-mcp` was
+# actually installed at — fails with "TOML parse error ... [tool]". Since
+# ci.yml:594 installs THIS constant and then validates with it, declaring the
+# key without moving the rev would have red-ed every hosted job, and killed the
+# agent-session MCP server (the CLAUDE.md `Connection closed` shape). Upstream's
+# own escape hatch does not cover it: MNEMOSYNE_PIN_SKIP=1 is read AFTER the
+# config parses. MNEMOSYNE_MAX_SCHEMA stays 44 because 44 is what the NEW rev
+# reads (see below) — the pairing rule binds a ceiling that moves alone, not a
+# rev that moves alone.
+MNEMOSYNE_REV="a886cd0f25682056b4f0fb1d88be89356180f32a"
 
 # The pinned rev's CURRENT_SCHEMA_VERSION: the HIGHEST atomic-store schema this
 # CLI can read. Verified at the pin, not inherited from prose —
@@ -128,6 +150,12 @@ MNEMOSYNE_REV="25d30d161c2c54c3bbcfde9f2a0156724b5f6471"
 # `on_disk_version > CURRENT_SCHEMA_VERSION`. Reading the constant matters even
 # when the store already says 44, because the store proves only what some
 # writer produced, never what the pinned READER accepts.
+# R311y462 — UNCHANGED at 44, and re-read at the new rev rather than carried:
+# `git show a886cd0f:crates/mnemosyne-atomic/src/lib.rs:1688` defines
+# `CURRENT_SCHEMA_VERSION: u32 = 44`, and :1972 still rejects
+# `on_disk_version > CURRENT_SCHEMA_VERSION`. verify-mnemosyne-pin.sh then
+# confirms it from the installed binary's own `describe-schema --json`, so the
+# number is asserted twice and inherited zero times.
 MNEMOSYNE_MAX_SCHEMA="44"
 
 cargo install --git https://github.com/newmassrael/mnemosyne \
