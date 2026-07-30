@@ -164,6 +164,14 @@ pub struct Face {
     pub id: FaceId,
     pub peer: AcceptedPeer,
     pub peer_zid: Option<Vec<u8>>,
+    /// R311y463 — the peer's handshake ROLE, the second half of the routing
+    /// classification `peer_zid` is the first half of. `tier_of` maps it to the
+    /// FaceTier that decides whether this face is eligible for the CLIENT-only
+    /// token/subscriber current-dump and future-push paths, so a face-lifecycle
+    /// observer that omits it cannot explain a face that routes nothing.
+    /// `None` = the INIT never surfaced a role (kept distinct from `Some(Peer)`,
+    /// which is what the routing boundary DEFAULTS such a face to).
+    pub peer_whatami: Option<wz_codecs::whatami::WhatAmI>,
 }
 
 /// A request from the topology forwarder to the accept loop: dial a peer that
@@ -1527,6 +1535,7 @@ where
                             id,
                             peer,
                             peer_zid: opened.peer_zid(),
+                            peer_whatami: opened.peer_whatami(),
                         };
                         // R311y205 (transport-multilink) — aggregation JOIN. When
                         // `max_links > 1` and this established link's peer zid

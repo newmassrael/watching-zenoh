@@ -2418,6 +2418,27 @@ impl OpenedSession {
         self.actions.peer_zid()
     }
 
+    /// R311y463 — the remote peer's WhatAmI role, or `None` if the INIT exchange
+    /// never surfaced it. The sibling of [`Self::peer_zid`]: together they are the
+    /// TWO inputs the routing boundary classifies a face by
+    /// (`tier_of(peer_whatami_routing(..))`), and the tier decides whether the face
+    /// is eligible for the CLIENT-only token / subscriber future-push and
+    /// current-dump paths at all.
+    ///
+    /// `None` is kept DISTINCT from `Some(Peer)` on purpose, which is why this does
+    /// not reuse `peer_whatami_routing`'s warn-and-default-to-Peer: at the routing
+    /// boundary defaulting is correct (an unclassifiable face must route nothing
+    /// dangerous), but for an OBSERVER "the role never arrived" and "the peer said
+    /// peer" are different facts, and conflating them is what makes a face that
+    /// silently routes nothing indistinguishable from one that correctly routes
+    /// nothing. The wire -> role mapping stays the `WhatAmI::from_wire` SSOT rather
+    /// than a second copy here.
+    pub fn peer_whatami(&self) -> Option<wz_codecs::whatami::WhatAmI> {
+        self.actions
+            .peer_whatami_wire()
+            .and_then(wz_codecs::whatami::WhatAmI::from_wire)
+    }
+
     /// R311y205 (transport-multilink IMPL-2b-ii) — the peer's captured ephemeral
     /// multilink pubkey (encoded ZPublicKey bytes), latched during the 0x4
     /// handshake, or `None` if this session did not negotiate multilink

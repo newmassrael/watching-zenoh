@@ -1969,11 +1969,16 @@ fn zid_hex(zid: Option<&[u8]>) -> String {
 fn log_face_event(node_label: &str, event: &wz::runtime_tokio::accept_loop::AcceptEvent) {
     use wz::runtime_tokio::accept_loop::AcceptEvent;
     match event {
+        // R311y463 — the ROLE is logged beside the zid because it, not the zid,
+        // decides the face's routing tier, and the CLIENT-only token/subscriber
+        // current-dump and future-push paths key off that tier. Without it a face
+        // that routes nothing looks identical to one that routes correctly.
         AcceptEvent::FaceUp(face) => log::info!(
-            "wz-ap-demo {node_label}: face {} UP (peer {}, zid {})",
+            "wz-ap-demo {node_label}: face {} UP (peer {}, zid {}, whatami {:?})",
             face.id.0,
             face.peer,
-            zid_hex(face.peer_zid.as_deref())
+            zid_hex(face.peer_zid.as_deref()),
+            face.peer_whatami
         ),
         AcceptEvent::FaceDown(face, outcome) => log::info!(
             "wz-ap-demo {node_label}: face {} DOWN (peer {}, {outcome:?})",
