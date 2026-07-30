@@ -924,8 +924,13 @@ impl LinkstateForwarder {
 /// delegate to (one governed-kind match, not one per forwarder). Push / Request /
 /// Response carry the keyexpr inline; a DeclareSubscriber / DeclareQueryable carries
 /// it in the declaration body; any other kind (UndeclareSubscriber / alias
-/// declaration / keyless ResponseFinal / Oam) carries no governed keyexpr, so the
-/// enforcer admits it (`None`). Adding a new governed kind is a ONE-place edit here.
+/// declaration / keyless ResponseFinal / Oam) carries no governed keyexpr and
+/// answers `None`. `None` is NOT an admit verdict: an ungoverned kind admits
+/// because [`acl_action`](crate::interceptor::access_control) returns no action
+/// for it, BEFORE the enforcer asks for a keyexpr at all — a governed kind that
+/// lands here on `None` (an undeclared expr-id, or the empty wireexpr of a
+/// synthesized timeout `Err`) is DENIED, as in every governed zenoh arm.
+/// Adding a new governed kind is a ONE-place edit here.
 pub(crate) fn resolve_governed_keyexpr(
     msg: &NetworkMessage,
     keyexpr_table: &hashbrown::HashMap<u64, String>,

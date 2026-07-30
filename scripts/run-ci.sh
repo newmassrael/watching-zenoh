@@ -3227,7 +3227,16 @@ layer_c1y_cargo_test_routing_peer() {
     # which is fail-closed and governed). Like C1ah's `node_clock::` pin this is a
     # COUNT, not a SET: it catches a test that stops being selected, not a test
     # renamed into still-23.
-    _runci_guarded_test "C1y interceptor" 23 \
+    # R311y457 — 23 -> 28: the five fail-OPEN-close tests. Two are the
+    # discriminators (an undeclared expr-id is denied; the empty-wireexpr timeout
+    # Err is denied) — they are the only two that red when `intercept`'s
+    # unresolvable-keyexpr branch is put back to `return true`. The other three
+    # bound what the deny means: the SAME alias admits once declared, a declared
+    # alias resolving into `admin/**` is denied by the RULE (so resolution really
+    # feeds the policy), and a `ResponseFinal` admits at the ACTION arm rather
+    # than the keyexpr one (which is what makes folding it into the governed
+    # `Response` arm red here first).
+    _runci_guarded_test "C1y interceptor" 28 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     _runci_guarded_test "C1y linkstate+access" 211 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1

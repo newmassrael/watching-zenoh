@@ -70,8 +70,13 @@ fn acl_action(msg: &NetworkMessage) -> Option<AclMessage> {
             _ => None,
         },
         // A query reply (a `Response`, Reply or Err body) — both bodies are a
-        // `Reply` action; the keyless `ResponseFinal` end-marker is not governed
-        // (it carries no keyexpr, so it admits via the `None` keyexpr path).
+        // `Reply` action. This arm does NOT cover the end-marker:
+        // [`ResponseFinal`](NetworkMessage::ResponseFinal) is its own
+        // `NetworkMessage` variant (`wz_session_core::network_message`), not a
+        // `Response` body, so it exits at the `_ => None` arm below and never
+        // reaches the keyexpr branch at all — the same place zenoh puts it
+        // (an explicitly unfiltered arm beside `Interest` and `OAM`,
+        // net/routing/interceptor/access_control.rs:615-617 / :922-924).
         NetworkMessage::Response(_) => Some(AclMessage::Reply),
         NetworkMessage::Declare(d)
             if matches!(d.body, DeclareOwnedVariant::CodecZenohDeclSubscriber(_)) =>
@@ -99,10 +104,22 @@ impl Interceptor for AclInterceptor {
         let Some(subject) = ctx.subject() else {
             return true;
         };
-        // An unresolvable keyexpr (an undeclared alias) would drop in routing
-        // anyway; admit and let the routing path handle it.
+        // A GOVERNED kind whose keyexpr does not resolve -> DENY. The enforcer
+        // cannot decide a rule it cannot name a keyexpr for, and fail-open is the
+        // wrong default for the one place that says no: zenoh takes the same
+        // branch in ALL 22 of its governed arms
+        // (`let Some(keyexpr) = ctx.full_keyexpr(msg) else { return false };`,
+        // net/routing/interceptor/access_control.rs:386-600, ingress + egress).
+        // Two message shapes reach this branch, and zenoh denies both: an
+        // UNDECLARED expr-id (`resolve_wireexpr` misses the face's alias table)
+        // and the EMPTY wireexpr a synthesized timeout `Err` carries (zenoh
+        // `WireExpr::empty()`, dispatcher/queries.rs:317 — its `full_keyexpr`
+        // composes the root prefix `""` and `KeyExpr::new("")` then fails on the
+        // empty chunk, so the Response arm returns false). So an installed ACL
+        // dropping the timeout `Err` is upstream behaviour, not a wz regression;
+        // the querier still terminates on its own timeout.
         let Some(keyexpr) = ctx.full_keyexpr(msg) else {
-            return true;
+            return false;
         };
         self.policy
             .decision(&subject, self.flow, action, &keyexpr, ctx.link_subject())
@@ -116,15 +133,33 @@ mod tests {
     use hashbrown::HashMap;
     use wz_access_control::{AclConfig, AclRule, SubjectSelector};
     use wz_routing_graph::Zid;
-    use wz_session_core::push_build::{build_push_del_literal, build_push_literal};
-    use wz_session_core::wireexpr_resolve::resolve_wireexpr;
+    use wz_session_core::push_build::{
+        build_push_aliased, build_push_del_literal, build_push_literal,
+    };
 
-    /// A context that hands back a fixed subject and resolves a Push keyexpr
-    /// through the SAME [`resolve_wireexpr`] SSOT the forwarder's real
-    /// `IngressContext` uses (an empty alias table — the test pushes are literal
-    /// id-0 keyexprs).
+    /// A context that hands back a fixed subject and resolves the message keyexpr
+    /// through the PRODUCTION SSOT — the same
+    /// [`resolve_governed_keyexpr`](crate::linkstate_forward::resolve_governed_keyexpr)
+    /// both forwarders' real `FaceContext::full_keyexpr` delegates to — against
+    /// `aliases`, this fixture's stand-in for a face's link-local alias table. It
+    /// resolves what production resolves, so an "undeclared expr-id" and a keyless
+    /// `Err` are the production shapes here, not mock-only ones (the earlier
+    /// hand-written Push-only body could not have expressed either).
     struct MockCtx {
         subject: Option<Zid>,
+        aliases: HashMap<u64, String>,
+    }
+
+    impl MockCtx {
+        /// A context attributing every message to `subject`, with an EMPTY alias
+        /// table — the literal id-0 keyexprs the fixtures build resolve verbatim,
+        /// and any aliased one is by construction undeclared.
+        fn with_subject(subject: Option<Zid>) -> Self {
+            Self {
+                subject,
+                aliases: HashMap::new(),
+            }
+        }
     }
 
     impl InterceptorContext for MockCtx {
@@ -132,10 +167,7 @@ mod tests {
             self.subject
         }
         fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
-            match msg {
-                NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, &HashMap::new()),
-                _ => None,
-            }
+            crate::linkstate_forward::resolve_governed_keyexpr(msg, &self.aliases)
         }
     }
 
@@ -188,9 +220,7 @@ mod tests {
     #[test]
     fn a_denied_put_is_dropped() {
         let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
-        let ctx = MockCtx {
-            subject: Some(Zid::from_slice(&[0x0A])),
-        };
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
         let put = NetworkMessage::Push(Box::new(
             build_push_literal("admin/secret", b"x").expect("build"),
         ));
@@ -200,9 +230,7 @@ mod tests {
     #[test]
     fn an_admitted_put_passes() {
         let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
-        let ctx = MockCtx {
-            subject: Some(Zid::from_slice(&[0x0A])),
-        };
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
         let put = NetworkMessage::Push(Box::new(
             build_push_literal("demo/data", b"x").expect("build"),
         ));
@@ -214,9 +242,7 @@ mod tests {
         // Del is a governed action (maps to AclMessage::Delete); a Del on the
         // denied keyexpr is dropped just like a Put.
         let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
-        let ctx = MockCtx {
-            subject: Some(Zid::from_slice(&[0x0A])),
-        };
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
         let del = NetworkMessage::Push(Box::new(
             build_push_del_literal("admin/secret").expect("build"),
         ));
@@ -226,13 +252,155 @@ mod tests {
     #[test]
     fn a_message_with_no_subject_is_admitted() {
         let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
-        let ctx = MockCtx { subject: None };
+        let ctx = MockCtx::with_subject(None);
         let put = NetworkMessage::Push(Box::new(
             build_push_literal("admin/secret", b"x").expect("build"),
         ));
         assert!(
             acl.intercept(&ctx, &put),
             "an unattributable message is admitted, not blocked"
+        );
+    }
+
+    /// A Put aliased to `mapping_id`, with the fixed `/data` suffix — the one
+    /// message shape the three alias legs below vary the TABLE around, so the
+    /// only difference between them is whether (and to what) the id is declared.
+    fn aliased_put(mapping_id: u64) -> NetworkMessage {
+        NetworkMessage::Push(Box::new(
+            build_push_aliased(mapping_id, Some("/data"), b"x").expect("build aliased push"),
+        ))
+    }
+
+    #[test]
+    fn an_undeclared_expr_id_is_denied() {
+        // The fail-OPEN close. A governed Put naming an expr-id the face never
+        // declared has no resolvable keyexpr, so no rule can be evaluated for it;
+        // wz used to ADMIT it, where zenoh denies in all 22 governed arms.
+        // DISCRIMINATING: the policy defaults to ALLOW and its only rule covers
+        // `admin/**`, so the unresolvable-keyexpr branch is the ONLY thing that
+        // can deny here — restoring `intercept`'s `return true` fails this and
+        // nothing else in the file.
+        let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
+        let put = aliased_put(7);
+        assert_eq!(
+            acl_action(&put),
+            Some(AclMessage::Put),
+            "precondition: the message IS governed, so it reaches the keyexpr branch",
+        );
+        assert_eq!(
+            ctx.full_keyexpr(&put),
+            None,
+            "precondition: expr-id 7 is absent from the alias table",
+        );
+        assert!(
+            !acl.intercept(&ctx, &put),
+            "an undeclared expr-id is denied"
+        );
+    }
+
+    #[test]
+    fn the_same_alias_admits_once_declared() {
+        // The PAIR to the leg above: the deny is about a resolution FAILURE, not
+        // about aliased messages. Declaring 7 -> `demo` makes the identical Put
+        // resolve to `demo/data`, which the default-Allow policy admits.
+        let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
+        let mut aliases = HashMap::new();
+        aliases.insert(7u64, "demo".to_owned());
+        let ctx = MockCtx {
+            subject: Some(Zid::from_slice(&[0x0A])),
+            aliases,
+        };
+        let put = aliased_put(7);
+        assert_eq!(
+            ctx.full_keyexpr(&put).as_deref(),
+            Some("demo/data"),
+            "the declared prefix composes with the message suffix",
+        );
+        assert!(
+            acl.intercept(&ctx, &put),
+            "a declared alias resolves and allows"
+        );
+    }
+
+    #[test]
+    fn a_declared_alias_into_the_denied_space_is_denied_by_the_rule() {
+        // The third leg of the same triple: a RESOLVED keyexpr actually reaches
+        // the policy. Declaring 7 -> `admin` composes `admin/data`, which the
+        // `admin/**` rule denies — so the alias path feeds the rule engine, and
+        // the deny in the first leg is not simply "aliased messages fail".
+        let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
+        let mut aliases = HashMap::new();
+        aliases.insert(7u64, "admin".to_owned());
+        let ctx = MockCtx {
+            subject: Some(Zid::from_slice(&[0x0A])),
+            aliases,
+        };
+        let put = aliased_put(7);
+        assert_eq!(ctx.full_keyexpr(&put).as_deref(), Some("admin/data"));
+        assert!(
+            !acl.intercept(&ctx, &put),
+            "a declared alias resolving into admin/** is denied by the rule"
+        );
+    }
+
+    #[test]
+    fn the_empty_keyexpr_timeout_err_is_denied() {
+        // The OTHER shape that reaches the unresolvable branch, and the one wz
+        // message an installed ACL now drops that it used to pass: the synthesized
+        // timeout `Err` carries the EMPTY wireexpr (zenoh `WireExpr::empty()`),
+        // which resolves to nothing. zenoh denies it too — its `full_keyexpr`
+        // composes the root prefix "" and `KeyExpr::new("")` fails on the empty
+        // chunk, so the governed Response arm returns false.
+        use wz_session_core::response_build::build_response_err_empty;
+
+        let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
+        let err = NetworkMessage::Response(Box::new(
+            build_response_err_empty(42, b"Timeout").expect("build empty err"),
+        ));
+        assert_eq!(
+            acl_action(&err),
+            Some(AclMessage::Reply),
+            "precondition: an Err body is a governed Reply",
+        );
+        assert_eq!(
+            ctx.full_keyexpr(&err),
+            None,
+            "precondition: the empty wireexpr resolves to nothing",
+        );
+        assert!(
+            !acl.intercept(&ctx, &err),
+            "the empty-keyexpr timeout Err is denied, as in zenoh"
+        );
+    }
+
+    #[test]
+    fn a_response_final_admits_via_the_action_arm_not_the_keyexpr_one() {
+        // The end-marker is keyless AND ungoverned, and WHICH branch admits it is
+        // the load-bearing part: `ResponseFinal` is its own `NetworkMessage`
+        // variant, so `acl_action` returns None and `intercept` admits BEFORE
+        // asking for a keyexpr. Were it ever folded into the governed `Response`
+        // arm, it would now hit the deny branch and every query end-marker would
+        // drop — this test is what reds first if that happens.
+        let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
+        let fin = NetworkMessage::ResponseFinal(
+            wz_session_core::response_final_build::build_response_final(42),
+        );
+        assert_eq!(
+            acl_action(&fin),
+            None,
+            "ResponseFinal is ungoverned at the ACTION arm",
+        );
+        assert_eq!(
+            ctx.full_keyexpr(&fin),
+            None,
+            "and it has no keyexpr, so admitting cannot be coming from there",
+        );
+        assert!(
+            acl.intercept(&ctx, &fin),
+            "the end-marker admits despite having no keyexpr"
         );
     }
 }
