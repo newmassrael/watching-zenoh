@@ -1541,6 +1541,24 @@ jobs:
       - name: Layer C1bm — pico unixpipe/quic --listen admit (R311y413)
         run: bash scripts/run-ci.sh --layer C1bm
 
+      # R311y454 — Layer C1bd (`locator-iface`, the `#iface=` HONOR) belongs in this
+      # job's genre: an off-default feature subset no other job composes. It had the
+      # same shape as the C1y case above — it existed in run-ci.sh, it was NOT in this
+      # workflow's --layer set, so it ran ONLY in a manual local full sweep. And it was
+      # weaker than that: until R311y454 it only clippy-compiled the honor path, so
+      # even the local sweep executed none of it. It now runs the getifaddrs resolver
+      # unit tests and the quic LISTEN-side DELIVERY A/B (a `lo`-pinned acceptor takes
+      # a loopback dial, a non-lo-pinned one cannot). Proven to gate BY FALSIFICATION,
+      # measured not guessed: reverting `quic_server_endpoint`'s pre-bound arm to
+      # quinn's convenience `Endpoint::server` — i.e. device-binding a socket and then
+      # dropping it — reds the A/B and nothing else in the file. Pure cargo, no oracle
+      # provisioning. The MULTICAST half of the atom rides Layer M, which owns real
+      # group sockets.
+      # The name is QUOTED: an unquoted YAML scalar treats ` #` as a comment start, so
+      # `locator-iface #iface= honor` would silently truncate to `locator-iface`.
+      - name: "Layer C1bd — locator-iface #iface= honor (R311y454)"
+        run: bash scripts/run-ci.sh --layer C1bd
+
       # R311y424 — routing-peer / access-* / extauth, and it lands here because
       # this job's genre line describes it exactly: an off-default feature subset
       # no other job composes. It matters more than the usual local-only lane:

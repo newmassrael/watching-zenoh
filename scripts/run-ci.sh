@@ -1747,12 +1747,26 @@ layer_c1bc_cargo_test_mcast_qos() {
 # (link_pipeline, gated not(locator-iface)) run in the DEFAULT lanes; this lane
 # pins that the honor path itself builds clean under the feature for every
 # transport that carries it.
+# R311y454 — this lane was clippy+build ONLY, and it RAN NOWHERE HOSTED (absent from
+# ci.yml's --layer set, so only a manual local full sweep reached it). Both are fixed:
+# the lane is registered in ci.yml, and it now EXECUTES the honor path rather than
+# merely compiling it. Three test legs, each owning a build variant nothing else has:
+#   - the getifaddrs resolver unit tests (NotFound vs Undetermined, the carrier
+#     cross-check against sysfs, both resolution directions agreeing);
+#   - the quic LISTEN-side delivery A/B (`lo` accepts a loopback dial, a non-lo device
+#     does not) -- DELIVERY-based on purpose: an implementation that device-binds a
+#     socket and then drops it, still calling quinn's convenience constructor, passes
+#     every "binding to lo works" and "absent device gives ENODEV" test;
+#   - the multicast honor rides Layer M (it needs real group sockets), not here.
 layer_c1bd_locator_iface() {
     (cd crates \
         && cargo test -p wz-session-core --lib locator::tests --quiet \
+        && cargo test -p wz-runtime-tokio --features locator-iface,transport-link-udp --lib link_interfaces --quiet \
+        && cargo test -p wz-runtime-tokio --features locator-iface,transport-link-quic --test quic_e2e --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features locator-iface,transport-link-udp,transport-link-ws --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features locator-iface,transport-link-tls --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features locator-iface,transport-link-quic,transport-link-quic-datagram --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features locator-iface,transport-multicast --quiet -- -D warnings \
         && cargo build -p wz --features locator-iface --quiet)
 }
 
@@ -6323,6 +6337,26 @@ PY
         --features transport-multicast,transport-qos \
         --test multicast_pubsub_loopback qos \
         -- --ignored --quiet) || return 1
+    # R311y454 — the `locator-iface` MULTICAST honor arm (IP_MULTICAST_IF on the
+    # sender + imr_interface on the join). Its own invocation because the multicast
+    # honor needs the `locator-iface` feature, which the sets above omit: without it
+    # `multicast_iface_selector_v4` takes its warn-noop arm and the test is compiled
+    # out entirely. This lane therefore OWNS that build variant.
+    #
+    # wz-INTERNAL and that is deliberate, not a gap papered over: the interface pin is
+    # NOT foreign-observable on a single host. IP_MULTICAST_ALL defaults to 1 and the
+    # leaking membership is per (group, device), so any other membership for the group
+    # on the delivering device makes the pin invisible -- and a foreign peer has to
+    # share the group to interoperate at all. Measured, not reasoned. The test uses a
+    # dedicated 239.0.0.0/8 group for exactly that reason.
+    # Count-guarded (`1 passed`): this leg carries a NAME FILTER, so a renamed test
+    # selects 0, `cargo test` exits 0, and a bare invocation would report green having
+    # run nothing. The sibling legs above select whole binaries and do not need it.
+    (cd crates && cargo test -p wz-runtime-tokio \
+        --features transport-multicast,locator-iface \
+        --test multicast_pubsub_loopback a_multicast_iface \
+        -- --ignored --quiet 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     # R311y428 — ACTIVE SCOUTING cross-impl: a wz `--scout` discovers a
     # multicast-scouting zenohd on 224.0.0.224:7446 and opens a session on the
     # locator that router's HELLO advertised. The first cross-impl witness for
@@ -6607,7 +6641,17 @@ layer_z_zenohd_interop() {
     # opposite directions and neither alone covers the other. Additive like the
     # rest of this list: the advanced subscriber / publisher are declared only when
     # their flags are passed, so every other leg dials through the unchanged binary.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group --quiet) || return 1
+    # R311y454 adds `locator-iface` (the `#iface=` HONOR). Two reasons, and the
+    # second is the load-bearing one: the new `wz_quic_acceptor_iface_zenohd_interop`
+    # leg needs a demo that actually honours the tail, AND the A4 cross-impl gate
+    # requires every `active` atom a proof CLAIMS to sit inside the feature closure
+    # of a crate the proof builds (`crossimpl_audit.py` containment). `locator-iface`
+    # was in NEITHER closure, so the claim would have failed containment regardless
+    # of the test. KEEP THIS ON ONE LINE: `feature_closure.py`'s scraper is
+    # `cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,-]+)`, whose class
+    # cannot cross a newline — a `\`-continued build silently drops the WHOLE feature
+    # set from the closure and reds A4-5.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -6881,6 +6925,20 @@ layer_z_zenohd_interop() {
     # -> exit 0) reddens instead of silently passing.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    # R311y454 — the `locator-iface` LISTEN-side HONOR, cross-impl (§5.2 x the quic
+    # accept seam x zenohd->wz). A real zenohd dials the SAME wz quic acceptor twice,
+    # differing only in the device the listen locator names: `#iface=lo` establishes,
+    # `#iface=<a non-lo NIC>` does not, because SO_BINDTODEVICE delivers only packets
+    # that ARRIVED on the named device and a datagram to 127.0.0.1 arrives on `lo`.
+    # A SEPARATE FILE, not a second #[test] in the leg above: that leg's count guard
+    # is `1 passed`, so adding a test there would red it. This leg carries its own
+    # `1 passed` guard for the same dropped-#[ignore] reason. No pico hop -- the
+    # Established/not-Established pair IS the discriminator, and a routed Put would
+    # add a second foreign binary without adding discrimination. The demo build above
+    # gained `locator-iface`, which is also what puts the atom in the A4 closure.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_quic_acceptor_iface_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
         | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     # R311y407 — wz MESH QUIC acceptor cross-impl (transport-link-quic x mesh accept
     # loop x zenohd->wz): a real zenohd DIALS a wz `--peer quic/...` / `--router-hat
