@@ -49,10 +49,11 @@ use tokio_tungstenite::{accept_async, client_async, WebSocketStream};
 
 use wz_runtime_core::Runtime;
 
+use crate::link_interfaces::ip_link_subject;
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::{InterceptorLink, LinkSubject};
 
 /// Dial a WebSocket-over-TCP connection — TCP-connect to `addr`, then run the
 /// RFC6455 client handshake ([`client_async`]) over it, returning the
@@ -91,11 +92,14 @@ pub async fn accept_ws(tcp: TcpStream) -> io::Result<WebSocketStream<TcpStream>>
 pub fn wire_ws_stream(
     ws: WebSocketStream<TcpStream>,
 ) -> (WsReadDriver, Arc<WsWriteDriver>, TokioJoinHandle<()>) {
+    // R311y453 — the §5.16 subject, off the TCP socket the WebSocket wraps,
+    // read BEFORE the split takes ownership of the halves.
+    let subject = ip_link_subject(InterceptorLink::Ws, ws.get_ref().local_addr().ok());
     let (sink, stream) = ws.split();
     let inbound = WsReadDriver::new(stream);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(ws_writer_task(sink, rx));
-    let outbound = Arc::new(WsWriteDriver::new(tx));
+    let outbound = Arc::new(WsWriteDriver::new(tx, subject));
     (inbound, outbound, writer_handle)
 }
 
@@ -171,20 +175,20 @@ impl LinkDriver for WsReadDriver {
 /// the unbounded 65535 default a stream link inherits.
 pub struct WsWriteDriver {
     tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// R311y453 — the §5.16 link-derived subject, resolved once at open.
+    subject: LinkSubject,
 }
 
 impl WsWriteDriver {
-    fn new(tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
-        Self { tx }
+    fn new(tx: mpsc::UnboundedSender<Vec<u8>>, subject: LinkSubject) -> Self {
+        Self { tx, subject }
     }
 }
 
 impl BoxedLinkDriver for WsWriteDriver {
-    // R311y453 -- the `link_protocols` subject axis. This driver serves
-    // exactly a WebSocket-over-TCP datagram link, so the scheme is fixed by the module rather than
-    // threaded through its constructor.
-    fn link_protocol(&self) -> Option<InterceptorLink> {
-        Some(InterceptorLink::Ws)
+    // R311y453 — the §5.16 subject resolved at open. A field read, not a syscall.
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        Some(&self.subject)
     }
 
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {

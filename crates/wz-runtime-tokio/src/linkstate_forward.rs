@@ -192,6 +192,7 @@ pub use crate::interceptor::InterceptorFlow;
 // The gossip-target role set lives in the codec layer beside `WhatAmI`; the
 // forwarder consumes it to gate which faces a link-state flood reaches.
 use wz_codecs::whatami::WhatAmIMatcher;
+use wz_session_core::link::LinkSubject;
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
 /// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The
@@ -954,6 +955,13 @@ struct FaceContext<'a> {
 impl InterceptorContext for FaceContext<'_> {
     fn subject(&self) -> Option<Zid> {
         peer_zid_routing(&self.face.actions)
+    }
+
+    // R311y453 — the §5.16 link-derived subject, read off the driver this face
+    // already holds. `link_driver()` borrows from `actions`, which outlives
+    // `&self`, so the reference costs nothing and clones no interface names.
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        self.face.actions.link_subject()
     }
 
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
@@ -8863,10 +8871,7 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes
         sink_a.reset();
         sink_b.reset();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_policy("demo/**")),
-            ..Default::default()
-        });
+        fwd.set_interceptors(InterceptorConfig::default().with_acl(deny_put_policy("demo/**")));
 
         let outcome = DriverLoopOutcome::FramePayload {
             priority: wz_session_core::qos::Priority::DEFAULT,
@@ -8907,10 +8912,8 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data");
         sink_a.reset();
         sink_b.reset();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(deny_put_policy("admin/**")), // denies admin, not demo
-            ..Default::default()
-        });
+        // denies admin, not demo
+        fwd.set_interceptors(InterceptorConfig::default().with_acl(deny_put_policy("admin/**")));
 
         let outcome = DriverLoopOutcome::FramePayload {
             priority: wz_session_core::qos::Priority::DEFAULT,
@@ -9040,10 +9043,7 @@ mod tests {
         // RUNTIME RECONFIGURE — mutate the typed config to DENY demo/**; under
         // config-mutate-runtime the live forwarder is re-driven.
         config.reconfigure_interceptors(
-            InterceptorConfig {
-                acl: Some(deny_put_policy("demo/**")),
-                ..Default::default()
-            },
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**")),
             &fwd,
         );
 
@@ -9089,10 +9089,8 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data");
 
         // Pre-write config denies an UNRELATED key; demo/data is admitted.
-        let mut config = WzConfig::new().with_interceptors(InterceptorConfig {
-            acl: Some(deny_put_policy("other/**")),
-            ..Default::default()
-        });
+        let mut config = WzConfig::new()
+            .with_interceptors(InterceptorConfig::default().with_acl(deny_put_policy("other/**")));
         config.install_interceptors(&fwd);
         sink_a.reset();
         sink_b.reset();
@@ -9154,10 +9152,7 @@ mod tests {
         // A config-write deny reconfigure -> the denied keyexpr now appears in
         // the GET view (observable on the SAME instance the forwarder drives).
         config.reconfigure_interceptors(
-            InterceptorConfig {
-                acl: Some(deny_put_policy("demo/**")),
-                ..Default::default()
-            },
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**")),
             &fwd,
         );
         assert!(
@@ -9219,10 +9214,7 @@ mod tests {
         fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
         assert_eq!(fwd.data_seen(), 1, "admitted before any rule");
         config.reconfigure_interceptors(
-            InterceptorConfig {
-                acl: Some(deny_put_policy("demo/**")),
-                ..Default::default()
-            },
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**")),
             &fwd,
         );
         sink_b.reset();
@@ -9289,10 +9281,7 @@ mod tests {
         fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
         // Store a DENY rule, but with the feature OFF it is not re-applied.
         config.reconfigure_interceptors(
-            InterceptorConfig {
-                acl: Some(deny_put_policy("demo/**")),
-                ..Default::default()
-            },
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**")),
             &fwd,
         );
         fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
@@ -9318,8 +9307,8 @@ mod tests {
         let (face_a, _sa) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(AclPolicy::new(AclConfig {
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
                 default_permission: Permission::Allow,
                 rules: vec![AclRule {
                     subject: SubjectSelector::Any,
@@ -9329,8 +9318,7 @@ mod tests {
                     permission: Permission::Deny,
                 }],
             })),
-            ..Default::default()
-        });
+        );
 
         let denied = build_declare_subscriber(0, 0, Some("admin/sub")).expect("build");
         let outcome = DriverLoopOutcome::FramePayload {
@@ -9388,8 +9376,8 @@ mod tests {
         let (face_a, _sa) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(AclPolicy::new(AclConfig {
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
                 default_permission: Permission::Allow,
                 rules: vec![AclRule {
                     subject: SubjectSelector::Any,
@@ -9399,8 +9387,7 @@ mod tests {
                     permission: Permission::Deny,
                 }],
             })),
-            ..Default::default()
-        });
+        );
 
         let denied = build_declare_queryable(0, 0, Some("admin/q")).expect("build");
         let outcome = DriverLoopOutcome::FramePayload {
@@ -9464,8 +9451,8 @@ mod tests {
         // QUERY gate; the DeclareQueryable gate is the prior test).
         declare_queryable_interest(&fwd, FaceId(1), "admin/q");
         declare_queryable_interest(&fwd, FaceId(1), "demo/q");
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(AclPolicy::new(AclConfig {
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
                 default_permission: Permission::Allow,
                 rules: vec![AclRule {
                     subject: SubjectSelector::Any,
@@ -9475,8 +9462,7 @@ mod tests {
                     permission: Permission::Deny,
                 }],
             })),
-            ..Default::default()
-        });
+        );
         sink_a.reset();
         sink_c.reset();
 
@@ -9558,8 +9544,8 @@ mod tests {
         sink_c.reset();
 
         // Now DENY Reply on demo/** EGRESS.
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(AclPolicy::new(AclConfig {
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
                 default_permission: Permission::Allow,
                 rules: vec![AclRule {
                     subject: SubjectSelector::Any,
@@ -9569,8 +9555,7 @@ mod tests {
                     permission: Permission::Deny,
                 }],
             })),
-            ..Default::default()
-        });
+        );
 
         // C replies; the Response would route back to A, but egress denies it.
         let response =
@@ -9612,8 +9597,8 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes
         sink_a.reset();
         sink_b.reset();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(AclPolicy::new(AclConfig {
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
                 default_permission: Permission::Allow,
                 rules: vec![AclRule {
                     subject: SubjectSelector::Any,
@@ -9623,8 +9608,7 @@ mod tests {
                     permission: Permission::Deny,
                 }],
             })),
-            ..Default::default()
-        });
+        );
 
         let outcome = DriverLoopOutcome::FramePayload {
             priority: wz_session_core::qos::Priority::DEFAULT,
@@ -9665,16 +9649,17 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data");
         sink_a.reset();
         sink_b.reset();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(AclPolicy::new(AclConfig::allow_all())), // present but permissive
-            downsampling: vec![DownsamplingRule {
-                key_exprs: vec!["demo/**".to_owned()],
-                min_interval: std::time::Duration::from_secs(1),
-                messages: DownsamplingMessage::ALL.to_vec(),
-                flows: InterceptorFlow::ALL.to_vec(),
-            }],
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default()
+                // present but permissive
+                .with_acl(AclPolicy::new(AclConfig::allow_all()))
+                .with_downsampling(vec![DownsamplingRule {
+                    key_exprs: vec!["demo/**".to_owned()],
+                    min_interval: std::time::Duration::from_secs(1),
+                    messages: DownsamplingMessage::ALL.to_vec(),
+                    flows: InterceptorFlow::ALL.to_vec(),
+                }]),
+        );
 
         let mk = || DriverLoopOutcome::FramePayload {
             priority: wz_session_core::qos::Priority::DEFAULT,
@@ -9736,25 +9721,25 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data");
         sink_a.reset();
         sink_b.reset();
-        fwd.set_interceptors(InterceptorConfig {
-            acl: Some(AclPolicy::new(AclConfig {
-                default_permission: Permission::Allow,
-                rules: vec![AclRule {
-                    subject: SubjectSelector::Any,
-                    key_exprs: vec!["demo/secret".to_owned()],
-                    messages: vec![AclMessage::Put],
-                    flow: AclFlow::Ingress,
-                    permission: Permission::Deny,
-                }],
-            })),
-            downsampling: vec![DownsamplingRule {
-                key_exprs: vec!["demo/**".to_owned()],
-                min_interval: std::time::Duration::from_secs(1),
-                messages: DownsamplingMessage::ALL.to_vec(),
-                flows: InterceptorFlow::ALL.to_vec(),
-            }],
-            ..Default::default()
-        });
+        fwd.set_interceptors(
+            InterceptorConfig::default()
+                .with_acl(AclPolicy::new(AclConfig {
+                    default_permission: Permission::Allow,
+                    rules: vec![AclRule {
+                        subject: SubjectSelector::Any,
+                        key_exprs: vec!["demo/secret".to_owned()],
+                        messages: vec![AclMessage::Put],
+                        flow: AclFlow::Ingress,
+                        permission: Permission::Deny,
+                    }],
+                }))
+                .with_downsampling(vec![DownsamplingRule {
+                    key_exprs: vec!["demo/**".to_owned()],
+                    min_interval: std::time::Duration::from_secs(1),
+                    messages: DownsamplingMessage::ALL.to_vec(),
+                    flows: InterceptorFlow::ALL.to_vec(),
+                }]),
+        );
 
         // (1) demo/secret — downsampler stamps the rule timer, ACL then denies.
         let secret = build_push_literal("demo/secret", b"x").expect("build");
@@ -9816,15 +9801,14 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data");
         sink_a.reset();
         sink_b.reset();
-        fwd.set_interceptors(InterceptorConfig {
-            low_pass: vec![LowPassRule {
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_low_pass(vec![LowPassRule {
                 key_exprs: vec!["demo/**".to_owned()],
                 max_payload_size: 8,
                 messages: LowPassMessage::ALL.to_vec(),
                 flows: InterceptorFlow::ALL.to_vec(),
-            }],
-            ..Default::default()
-        });
+            }]),
+        );
 
         let big = build_push_literal("demo/data", &[0u8; 32]).expect("build");
         let o1 = DriverLoopOutcome::FramePayload {

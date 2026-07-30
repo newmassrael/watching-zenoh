@@ -89,9 +89,10 @@ use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 // re-export hop. The link pipeline is transport-agnostic (a multicast deploy
 // binds a UDP multicast socket too), so it must not depend on the
 // `transport-unicast`-gated `session_glue`.
+use crate::link_interfaces::ip_link_subject;
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::{InterceptorLink, LinkSubject};
 
 /// Maximum UDP payload (65535 IP datagram - 20 IPv4 header - 8 UDP header).
 /// A larger frame is a wz-side encoder bug; the driver drops it loud rather
@@ -383,10 +384,12 @@ pub fn wire_udp_socket(
     peer: SocketAddr,
 ) -> (UdpReadDriver, Arc<UdpWriteDriver>, TokioJoinHandle<()>) {
     let socket = Arc::new(socket);
+    // R311y453 — the §5.16 subject, off the socket this face owns.
+    let subject = ip_link_subject(InterceptorLink::Udp, socket.local_addr().ok());
     let inbound = UdpReadDriver::from_socket(socket.clone());
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(udp_writer_task(socket, peer, rx));
-    let outbound = Arc::new(UdpWriteDriver::new(tx));
+    let outbound = Arc::new(UdpWriteDriver::new(tx, subject));
     (inbound, outbound, writer_handle)
 }
 
@@ -408,10 +411,13 @@ pub fn wire_udp_demuxed(
         send_socket,
         pump,
     } = inputs;
+    // R311y453 — the §5.16 subject: an accept-demux face shares the listener's
+    // send socket, so the local address is that socket's.
+    let subject = ip_link_subject(InterceptorLink::Udp, send_socket.local_addr().ok());
     let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(udp_writer_task(send_socket, peer, rx));
-    let outbound = Arc::new(UdpWriteDriver::new(tx));
+    let outbound = Arc::new(UdpWriteDriver::new(tx, subject));
     (inbound, outbound, writer_handle)
 }
 
@@ -534,20 +540,20 @@ impl LinkDriver for UdpReadDriver {
 /// crosses that boundary cleanly.
 pub struct UdpWriteDriver {
     tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// R311y453 — the §5.16 link-derived subject, resolved once at open.
+    subject: LinkSubject,
 }
 
 impl UdpWriteDriver {
-    fn new(tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
-        Self { tx }
+    fn new(tx: mpsc::UnboundedSender<Vec<u8>>, subject: LinkSubject) -> Self {
+        Self { tx, subject }
     }
 }
 
 impl BoxedLinkDriver for UdpWriteDriver {
-    // R311y453 -- the `link_protocols` subject axis. This driver serves
-    // exactly a UDP datagram link, so the scheme is fixed by the module rather than
-    // threaded through its constructor.
-    fn link_protocol(&self) -> Option<InterceptorLink> {
-        Some(InterceptorLink::Udp)
+    // R311y453 — the §5.16 subject resolved at open. A field read, not a syscall.
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        Some(&self.subject)
     }
 
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
@@ -637,7 +643,7 @@ mod tests {
     #[tokio::test]
     async fn write_driver_drops_oversize_datagram() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let driver = UdpWriteDriver::new(tx);
+        let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN);
         driver.send_blocking(&vec![0u8; MAX_UDP_PAYLOAD + 1], Reliability::BestEffort);
         driver.send_blocking(b"ok", Reliability::BestEffort);
         // Only the in-range datagram reached the channel.
@@ -663,7 +669,7 @@ mod tests {
         const _: () = assert!(UDP_LINK_MTU < MAX_UDP_PAYLOAD);
 
         let (tx, _rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let driver = UdpWriteDriver::new(tx);
+        let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN);
         assert_eq!(driver.link_mtu(), UDP_LINK_MTU);
     }
 

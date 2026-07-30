@@ -38,7 +38,38 @@
 //! `transport-link-unixpipe` for `mkfifo`), so the §5.16 subject axis costs the
 //! from-scratch reimplementation no new third-party surface.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+
+use wz_session_core::link::{InterceptorLink, LinkSubject};
+
+/// The §5.16 subject of an IP-addressed link: its protocol, plus the NICs its
+/// LOCAL address sits on, resolved live at link open.
+///
+/// `local` is the socket's own address; `None` means the pipeline could not read
+/// it, which propagates as an INDETERMINATE interface set (`None`) rather than an
+/// empty one — the caller could not determine the NICs, which is not the same
+/// statement as "there are none".
+pub fn ip_link_subject(protocol: InterceptorLink, local: Option<SocketAddr>) -> LinkSubject {
+    LinkSubject {
+        protocol: Some(protocol),
+        interfaces: local.and_then(|addr| interface_names_for(addr.ip())),
+    }
+}
+
+/// The §5.16 subject of a link that has no IP address at all — a unix stream
+/// socket, a named pipe, a serial tty, an AF_VSOCK channel.
+///
+/// Its interface set is `Some(empty)`: a DEFINITE "this link is on no NIC", not
+/// an indeterminate one. A rule narrowed by `interfaces` therefore does not
+/// govern it, while a rule narrowed only by `link_protocols` still can. zenoh
+/// cannot draw that line — it reports `vec![]` for a failed lookup too
+/// (`io/zenoh-link-commons/src/unicast.rs:112-118`).
+pub fn addressless_link_subject(protocol: InterceptorLink) -> LinkSubject {
+    LinkSubject {
+        protocol: Some(protocol),
+        interfaces: Some(Vec::new()),
+    }
+}
 
 /// The names of the network interfaces configured with `addr`, or `None` when
 /// that could not be determined.

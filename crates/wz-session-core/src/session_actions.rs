@@ -1309,6 +1309,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.link.link_driver()
     }
 
+    /// R311y453 — the §5.16 link-derived SUBJECT of this binding's link: the
+    /// protocol it speaks and the NICs it sits on, resolved by the driver at open.
+    ///
+    /// A narrow public window onto the driver rather than making
+    /// [`link_driver`](Self::link_driver) itself public: the routing forwarders'
+    /// `InterceptorContext` impls need exactly this one datum, and publishing the
+    /// whole write seam so they could reach it would hand every consumer
+    /// `send_blocking` as well. Borrows `self`, so the read costs no allocation.
+    pub fn link_subject(&self) -> Option<&crate::link::LinkSubject> {
+        self.link_driver().link_subject()
+    }
+
     /// R311y9 — public snapshot of this session's transport byte/message
     /// counters (`transport-stats`). The standalone read path (the adminspace
     /// `@/<zid>/.../stats` consumer stays P4); surfaced on the AP

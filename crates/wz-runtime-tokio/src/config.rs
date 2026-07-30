@@ -502,6 +502,74 @@ mod tests {
         );
     }
 
+    // R311y453 — the FOUR combinations of {acl, downsampling, quota} that had NO
+    // assertion at all. The comment above claims the split covers every build
+    // that emits a shape, but 4 of the 8 subsets fell through every gate:
+    // downsampling-only, quota-only, acl+downsampling and acl+quota. The visible
+    // symptom was a `router_config is never used` dead-code error under a single
+    // access knob with `--all-targets` (recorded as a pre-existing defect in the
+    // R311y452 carry, uncovered by any lane because C1y clippies each knob
+    // LIB-only); the actual defect is the coverage hole the dead helper was
+    // pointing at. Closing the hole is what removes the warning — an `#[allow]`
+    // would have silenced the messenger.
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-downsampling",
+        not(feature = "access-acl"),
+        not(feature = "access-quota")
+    ))]
+    #[test]
+    fn to_admin_json_downsampling_only_alphabetical() {
+        // downsampling sorts between batch_size and lease_ms.
+        assert_eq!(
+            router_config().to_admin_json(),
+            r#"{"batch_size":65535,"downsampling":[],"lease_ms":10000,"whatami":"router"}"#
+        );
+    }
+
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-quota",
+        not(feature = "access-acl"),
+        not(feature = "access-downsampling")
+    ))]
+    #[test]
+    fn to_admin_json_quota_only_alphabetical() {
+        // low_pass sorts between lease_ms and whatami.
+        assert_eq!(
+            router_config().to_admin_json(),
+            r#"{"batch_size":65535,"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
+        );
+    }
+
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-acl",
+        feature = "access-downsampling",
+        not(feature = "access-quota")
+    ))]
+    #[test]
+    fn to_admin_json_acl_and_downsampling_alphabetical() {
+        assert_eq!(
+            router_config().to_admin_json(),
+            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"downsampling":[],"lease_ms":10000,"whatami":"router"}"#
+        );
+    }
+
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-acl",
+        feature = "access-quota",
+        not(feature = "access-downsampling")
+    ))]
+    #[test]
+    fn to_admin_json_acl_and_quota_alphabetical() {
+        assert_eq!(
+            router_config().to_admin_json(),
+            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
+        );
+    }
+
     #[cfg(all(
         feature = "routing-peer",
         feature = "access-acl",

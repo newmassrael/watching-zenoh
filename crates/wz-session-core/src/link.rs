@@ -11,6 +11,7 @@
 //!
 //! Layer: §5.C link-tier value-type surface.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use wz_runtime_core::Runtime;
 
@@ -121,25 +122,124 @@ pub trait BoxedLinkDriver {
         DEFAULT_LINK_MTU
     }
 
-    /// R311y453 — which link PROTOCOL this driver speaks, the wz analogue of
-    /// zenoh's `InterceptorLink` (`zenoh-config`), or `None` for a driver whose
-    /// protocol is not a locator scheme (the test doubles).
+    /// R311y453 — the LINK-DERIVED SUBJECT of this driver's transport: what the
+    /// §5.16 interceptors scope their rules by, or `None` for a driver that
+    /// carries no subject at all (the test doubles).
     ///
-    /// This is the `link_protocols` SUBJECT axis the §5.16 interceptors scope
-    /// their rules by: zenoh narrows a rule to transports whose link type is in
-    /// the rule's list (`net/routing/interceptor/downsampling.rs:99-116`, and the
-    /// identical block in `access_control.rs` / `low_pass.rs`). Reading it here —
-    /// on the link driver, which is the only object that KNOWS its scheme —
-    /// rather than re-deriving it from a locator string keeps the axis correct
-    /// for an ACCEPTED link, which never had a dial locator.
+    /// Resolved ONCE, at link open, and stored — so this is a field read on the
+    /// per-message admission path, never a syscall. Returning a reference rather
+    /// than an owned [`LinkSubject`] is what makes that true: an owned return
+    /// would clone the interface-name vector per message.
     ///
-    /// Defaults to `None`, i.e. "unknown protocol", which every rule carrying a
-    /// `link_protocols` list must treat as NOT matching — a rule that narrows to
-    /// `tcp` must not silently govern a link that cannot say what it is. A
-    /// production driver overrides this with its real scheme; the default exists
-    /// so the six test doubles that impl this trait need no change.
-    fn link_protocol(&self) -> Option<InterceptorLink> {
+    /// Read here, on the link driver, because it is the only object that knows
+    /// its own scheme and its own local address — deriving it from a dial
+    /// locator instead would be wrong for an ACCEPTED link, which never had one.
+    fn link_subject(&self) -> Option<&LinkSubject> {
         None
+    }
+}
+
+/// R311y453 — the subject a §5.16 rule can narrow itself to, as derived from the
+/// LINK a message arrived on: the wz counterpart of the `interfaces` +
+/// `link_protocols` pair zenoh checks in every interceptor factory
+/// (`net/routing/interceptor/downsampling.rs:90-116`, and the identical block in
+/// `access_control.rs` / `low_pass.rs`).
+///
+/// One value type rather than one accessor per axis, because the axis set GROWS:
+/// zenoh's ACL subject also has cert-CN and username
+/// (`interceptor/authorization.rs:39-46`), which wz does not resolve yet. Those
+/// land as fields here, not as a fourth trait method and a fourth constructor
+/// parameter on six pipelines.
+///
+/// Every field is an [`Option`], and the distinction is load-bearing — see
+/// [`interfaces`](Self::interfaces).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkSubject {
+    /// Which link protocol the transport speaks, or `None` when the driver
+    /// cannot say (a test double). A rule narrowed by `link_protocols` treats
+    /// `None` as MATCHING — see the fail-closed note below.
+    pub protocol: Option<InterceptorLink>,
+    /// The names of the NICs this link's local address sits on:
+    ///
+    /// - `Some(names)` — resolved. An EMPTY set is a DEFINITE answer, "this link
+    ///   is on no NIC", which is the honest report for a unix-socket, pipe,
+    ///   serial or vsock link. A rule narrowed by `interfaces` does NOT match it.
+    /// - `None` — could not be determined (the resolver failed, or the platform
+    ///   has no implementation). A rule narrowed by `interfaces` DOES match it.
+    ///
+    /// zenoh cannot express that difference: it maps a failed lookup to the same
+    /// `vec![]` it uses for "no NICs"
+    /// (`io/zenoh-link-commons/src/unicast.rs:112-118`), so upstream silently
+    /// reads a broken syscall as a definite negative.
+    pub interfaces: Option<Vec<String>>,
+}
+
+impl LinkSubject {
+    /// A subject nothing is known about — every axis indeterminate. What a
+    /// driver with no transport identity reports, and the value a
+    /// [`BoxedLinkDriver::link_subject`] of `None` is equivalent to.
+    pub const UNKNOWN: Self = Self {
+        protocol: None,
+        interfaces: None,
+    };
+
+    /// Whether this subject is governed by a rule narrowed to `protocols`.
+    ///
+    /// FAIL-CLOSED: an indeterminate protocol MATCHES, so a rule still applies to
+    /// a link that cannot identify itself. All three §5.16 interceptors are
+    /// RESTRICTIVE when they apply — a deny, a rate limit, a size cap — so
+    /// "apply when unsure" is the conservative direction for every one of them.
+    ///
+    /// This is a DELIBERATE divergence, and it fixes an upstream inconsistency
+    /// rather than inventing a policy: zenoh's two subject axes disagree with
+    /// each other on the error path. Its `interfaces` arm SKIPS the whole check
+    /// when `transport.get_links()` fails, leaving the interceptor installed
+    /// (restrictive); its `link_protocols` arm returns `(None, None)` when
+    /// `transport.get_auth_ids()` fails, installing NOTHING (permissive)
+    /// — `downsampling.rs:90-116`. wz applies one policy to both.
+    pub fn matches_protocols(&self, protocols: &[InterceptorLink]) -> bool {
+        match self.protocol {
+            Some(p) => protocols.contains(&p),
+            None => true,
+        }
+    }
+
+    /// Whether this subject is governed by a rule narrowed to `interfaces`.
+    ///
+    /// Fail-closed on an indeterminate set, exactly as
+    /// [`matches_protocols`](Self::matches_protocols); a RESOLVED-but-empty set
+    /// is a definite negative and does not match.
+    ///
+    /// The quantifier is ANY — the link matches if any of its NIC names is
+    /// listed. zenoh uses ANY on its `link_protocols` axis but ALL-links on its
+    /// `interfaces` axis (`downsampling.rs:92-96` returns early unless EVERY link
+    /// of the transport has a listed interface), a second inconsistency between
+    /// the two axes that wz does not reproduce.
+    pub fn matches_interfaces(&self, interfaces: &[String]) -> bool {
+        match &self.interfaces {
+            Some(names) => names.iter().any(|n| interfaces.contains(n)),
+            None => true,
+        }
+    }
+
+    /// [`matches_protocols`](Self::matches_protocols) over an OPTIONAL subject: an
+    /// ABSENT subject is indeterminate, exactly as an absent protocol is, and so
+    /// matches. The two "unknown" spellings — `None` subject and `UNKNOWN`
+    /// subject — must not diverge, which is why the fold lives here rather than
+    /// at each of the three call sites.
+    ///
+    /// An EMPTY `protocols` list means the rule does not narrow by protocol at
+    /// all, so it matches everything; the same holds for
+    /// [`opt_matches_interfaces`](Self::opt_matches_interfaces). That is what
+    /// makes both axes OPT-IN, as zenoh's `Option<NEVec<_>>` config fields are.
+    pub fn opt_matches_protocols(subject: Option<&Self>, protocols: &[InterceptorLink]) -> bool {
+        protocols.is_empty() || subject.map_or(true, |s| s.matches_protocols(protocols))
+    }
+
+    /// [`matches_interfaces`](Self::matches_interfaces) over an OPTIONAL subject.
+    /// See [`opt_matches_protocols`](Self::opt_matches_protocols).
+    pub fn opt_matches_interfaces(subject: Option<&Self>, interfaces: &[String]) -> bool {
+        interfaces.is_empty() || subject.map_or(true, |s| s.matches_interfaces(interfaces))
     }
 }
 

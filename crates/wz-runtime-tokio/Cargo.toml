@@ -714,8 +714,13 @@ codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/co
 # reserved (link-tls/quic/ws/unixsock/vsock, compression, shm,
 # lowlatency) stay declaration-only at the wz facade Cargo.toml level;
 # this crate does not own them.
-transport-link-tcp = []
-transport-link-udp = []
+# R311y453 — every link pipeline resolves its own §5.16 subject at open, so
+# the `link_interfaces` resolver is a LINK-tier dependency. Hanging it off the
+# access-* knobs instead broke a bare `routing-peer` build, which has the TCP
+# pipeline but no access knob: the pipeline imported a module the feature
+# graph had not compiled.
+transport-link-tcp = ["link-interfaces"]
+transport-link-udp = ["link-interfaces"]
 # R311y236 — locator-iface: honour the `#iface=<name>` locator config tail by
 # binding the dialing socket to the named NIC (SO_BINDTODEVICE, Linux/Android;
 # a warn-noop off-platform). Pulls `socket2` for the syscall. The PARSE of
@@ -735,7 +740,11 @@ locator-iface = ["dep:socket2"]
 # udp session-open build does. The `serial_pipeline` drivers themselves
 # compile standalone under this feature alone. NOT in the default set —
 # zenoh-pico ships serial default-OFF (optional Z_FEATURE_LINK_SERIAL).
-transport-link-serial = ["wz-session-core/transport-link-serial", "dep:tokio-serial"]
+transport-link-serial = [
+    "link-interfaces",
+    "wz-session-core/transport-link-serial",
+    "dep:tokio-serial",
+]
 # R311oa — host TLS-over-TCP backend for the TLS link. Forwards
 # `transport-link-tcp` (TLS reuses the ENTIRE TCP stream pipeline — the
 # StreamEnvelope length-prefix framing, the shared `poll_framed` reader, the
@@ -760,7 +769,7 @@ transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemf
 # protocol layer) split via `futures_util`. No tcp forward (the session-open
 # Ws arm rides the tcp+unicast-gated `session_open` like the udp arm). NOT
 # default — pico ships WS as an optional link (Z_FEATURE_LINK_WS).
-transport-link-ws = ["dep:tokio-tungstenite", "dep:futures-util"]
+transport-link-ws = ["link-interfaces", "dep:tokio-tungstenite", "dep:futures-util"]
 # R311xi — host Unix-domain-stream link backend. Like TLS (and UNLIKE WS), it
 # forwards `transport-link-tcp` because a unix socket is a reliable byte STREAM
 # (zenoh's `unixsock_stream` link: `is_streamed() = true`, MTU 65535) that

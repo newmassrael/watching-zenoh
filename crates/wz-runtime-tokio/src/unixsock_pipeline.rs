@@ -50,6 +50,7 @@ use tokio::sync::mpsc;
 
 use wz_runtime_core::Runtime;
 
+use crate::link_interfaces::addressless_link_subject;
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use wz_session_core::link::InterceptorLink;
@@ -139,7 +140,7 @@ pub fn wire_unixsock_stream(
     let outbound = Arc::new(StreamWriteDriver::new(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        InterceptorLink::UnixsockStream,
+        addressless_link_subject(InterceptorLink::UnixsockStream),
     ));
     (inbound, outbound, writer_handle)
 }

@@ -55,6 +55,7 @@ pub mod low_pass;
 #[cfg(feature = "access-acl")]
 use wz_access_control::{AclFlow, AclPolicy};
 use wz_routing_graph::Zid;
+use wz_session_core::link::LinkSubject;
 use wz_session_core::network_message::NetworkMessage;
 
 #[cfg(feature = "access-acl")]
@@ -82,6 +83,30 @@ pub trait InterceptorContext {
     /// aliased id the peer never declared on this face (the message would drop
     /// in routing anyway), in which case an enforcer admits.
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String>;
+
+    /// R311y453 — the LINK-derived subject of the face this message arrived on:
+    /// its protocol and the NICs it sits on, for the `link_protocols` /
+    /// `interfaces` rule-scoping axes.
+    ///
+    /// zenoh resolves these once per transport, inside each interceptor FACTORY,
+    /// and decides there whether to install the interceptor at all
+    /// (`net/routing/interceptor/downsampling.rs:90-116`). wz has no per-transport
+    /// factory — one chain serves every face — so the subject is read per message
+    /// off the face's already-held driver, which is a field read rather than a
+    /// re-resolution (see [`LinkSubject`](wz_session_core::link::LinkSubject)).
+    ///
+    /// Returns a REFERENCE, not an owned value: this is read once per message per
+    /// subject-narrowed rule, and an owned return would clone the interface-name
+    /// vector every time.
+    ///
+    /// `None` means the same thing as [`LinkSubject::UNKNOWN`] — every axis
+    /// indeterminate — which the fail-closed matchers
+    /// ([`LinkSubject::opt_matches_protocols`]) treat as MATCHING every narrowed
+    /// rule. The default exists for the test contexts; both production impls
+    /// override it.
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        None
+    }
 }
 
 /// One message interceptor — zenoh `InterceptorTrait::intercept(msg) -> bool`.
@@ -190,6 +215,42 @@ pub struct InterceptorConfig {
 }
 
 impl InterceptorConfig {
+    /// R311y453 — set the ACL policy, returning `self` for chaining.
+    ///
+    /// These three builders exist because a STRUCT LITERAL of this type cannot be
+    /// written feature-agnostically: which fields exist depends on the enabled
+    /// `access-*` set, so `InterceptorConfig { low_pass, ..Default::default() }`
+    /// is correct under the full set and a `clippy::needless_update` error under
+    /// `access-quota` alone — the shape that made `--all-targets -D warnings` fail
+    /// on four of the eight access subsets (recorded as a pre-existing defect in
+    /// the R311y452 carry). Assigning onto a `default()` instead just trades that
+    /// for `clippy::field_reassign_with_default`. A builder has neither problem,
+    /// and a caller no longer has to know which fields its feature set compiled.
+    #[cfg(feature = "access-acl")]
+    #[must_use]
+    pub fn with_acl(mut self, policy: AclPolicy) -> Self {
+        self.acl = Some(policy);
+        self
+    }
+
+    /// Set the downsampling (rate-limit) rules, returning `self` for chaining.
+    /// See [`with_acl`](Self::with_acl) for why these are builders.
+    #[cfg(feature = "access-downsampling")]
+    #[must_use]
+    pub fn with_downsampling(mut self, rules: Vec<DownsamplingRule>) -> Self {
+        self.downsampling = rules;
+        self
+    }
+
+    /// Set the low-pass (per-key size cap) rules, returning `self` for chaining.
+    /// See [`with_acl`](Self::with_acl) for why these are builders.
+    #[cfg(feature = "access-quota")]
+    #[must_use]
+    pub fn with_low_pass(mut self, rules: Vec<LowPassRule>) -> Self {
+        self.low_pass = rules;
+        self
+    }
+
     /// Build the interceptor chain for `flow`, in zenoh's FIXED factory order:
     /// downsampling, then access-control, then low-pass (zenoh
     /// `interceptor_factories` `mod.rs:133-136`, minus the qos-overwrite wz does

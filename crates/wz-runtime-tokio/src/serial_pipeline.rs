@@ -64,10 +64,11 @@ use tokio_serial::SerialStream;
 
 use wz_runtime_core::Runtime;
 
+use crate::link_interfaces::addressless_link_subject;
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::{InterceptorLink, LinkSubject};
 use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::{
     encode_frame, DecodedFrame, HandshakeStep, SerialFrameReader, SerialHandshake, SerialRole,
@@ -226,7 +227,10 @@ pub fn wire_serial_stream(
     let inbound = SerialReadDriver::new(reader);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(serial_writer_task(writer, rx));
-    let outbound = Arc::new(SerialWriteDriver::new(tx));
+    let outbound = Arc::new(SerialWriteDriver::new(
+        tx,
+        addressless_link_subject(InterceptorLink::Serial),
+    ));
     (inbound, outbound, writer_handle)
 }
 
@@ -339,20 +343,20 @@ impl LinkDriver for SerialReadDriver {
 /// channel carries the RAW payload; the writer task does the serial framing.
 pub struct SerialWriteDriver {
     tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// R311y453 — the §5.16 link-derived subject, resolved once at open.
+    subject: LinkSubject,
 }
 
 impl SerialWriteDriver {
-    fn new(tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
-        Self { tx }
+    fn new(tx: mpsc::UnboundedSender<Vec<u8>>, subject: LinkSubject) -> Self {
+        Self { tx, subject }
     }
 }
 
 impl BoxedLinkDriver for SerialWriteDriver {
-    // R311y453 -- the `link_protocols` subject axis. This driver serves
-    // exactly a serial (tty) link, so the scheme is fixed by the module rather than
-    // threaded through its constructor.
-    fn link_protocol(&self) -> Option<InterceptorLink> {
-        Some(InterceptorLink::Serial)
+    // R311y453 — the §5.16 subject resolved at open. A field read, not a syscall.
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        Some(&self.subject)
     }
 
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
@@ -456,7 +460,7 @@ mod tests {
         const _: () = assert!(SERIAL_MTU < wz_session_core::link::DEFAULT_LINK_MTU);
 
         let (tx, _rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let driver = SerialWriteDriver::new(tx);
+        let driver = SerialWriteDriver::new(tx, LinkSubject::UNKNOWN);
         assert_eq!(driver.link_mtu(), SERIAL_MTU);
     }
 

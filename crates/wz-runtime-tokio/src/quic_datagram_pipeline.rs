@@ -61,11 +61,12 @@ use wz_runtime_core::Runtime;
 // R311y13 — the QUIC handshake SSOT (client connect / server endpoint / accept)
 // is shared from quic_pipeline; this module owns only the datagram-vs-stream
 // delta (no open_bi/accept_bi, max_bidi=0, the datagram read/write drivers).
+use crate::link_interfaces::ip_link_subject;
 use crate::quic_pipeline::{accept_quic_connection, connect_quic_client, quic_server_endpoint};
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::{InterceptorLink, LinkSubject};
 
 /// Conservative per-datagram MTU floor used when the connection has not yet
 /// reported a negotiated `max_datagram_size` (the QUIC initial datagram budget
@@ -151,14 +152,14 @@ impl LinkDriver for QuicDatagramReadDriver {
 pub struct QuicDatagramWriteDriver {
     tx: mpsc::UnboundedSender<Vec<u8>>,
     mtu: usize,
+    /// R311y453 — the §5.16 link-derived subject, resolved once at open.
+    subject: LinkSubject,
 }
 
 impl BoxedLinkDriver for QuicDatagramWriteDriver {
-    // R311y453 -- the `link_protocols` subject axis. This driver serves
-    // exactly a QUIC unreliable-datagram link (RFC9221), so the scheme is fixed by the module rather than
-    // threaded through its constructor.
-    fn link_protocol(&self) -> Option<InterceptorLink> {
-        Some(InterceptorLink::QuicDatagram)
+    // R311y453 — the §5.16 subject resolved at open. A field read, not a syscall.
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        Some(&self.subject)
     }
 
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
@@ -332,7 +333,9 @@ pub fn wire_quic_datagram(
         .unwrap_or(QUIC_DATAGRAM_LINK_MTU);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(quic_datagram_writer_task(connection.clone(), rx));
-    let outbound = Arc::new(QuicDatagramWriteDriver { tx, mtu });
+    // R311y453 — the §5.16 subject, off the quinn endpoint's bound address.
+    let subject = ip_link_subject(InterceptorLink::QuicDatagram, endpoint.local_addr().ok());
+    let outbound = Arc::new(QuicDatagramWriteDriver { tx, mtu, subject });
     let inbound = QuicDatagramReadDriver {
         connection,
         _endpoint: endpoint,
@@ -362,6 +365,7 @@ mod tests {
     async fn write_driver_drops_oversize_datagram() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let driver = QuicDatagramWriteDriver {
+            subject: LinkSubject::UNKNOWN,
             tx,
             mtu: QUIC_DATAGRAM_LINK_MTU,
         };

@@ -374,6 +374,7 @@ use wz_codecs::ext_entry::ExtEntryOwned;
 use wz_codecs::request::RequestOwned;
 use wz_codecs::response::ResponseOwned;
 use wz_codecs::response_final::ResponseFinalOwned;
+use wz_session_core::link::LinkSubject;
 use wz_session_core::query_mode::QueryTarget;
 use wz_session_core::queryable_info::{read_queryable_info, QueryableInfo};
 use wz_session_core::request_build::set_request_keyexpr_literal;
@@ -5781,6 +5782,13 @@ struct RouterFaceContext<'a> {
 impl InterceptorContext for RouterFaceContext<'_> {
     fn subject(&self) -> Option<Zid> {
         peer_zid_routing(&self.face.actions)
+    }
+
+    // R311y453 — the §5.16 link-derived subject, off the driver this face already
+    // holds. Same one-liner as the single-net twin: both forwarders read the
+    // subject from the same place, so the two cannot drift.
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        self.face.actions.link_subject()
     }
 
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
