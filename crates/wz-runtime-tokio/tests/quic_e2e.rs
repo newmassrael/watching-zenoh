@@ -74,8 +74,12 @@ async fn wz_to_wz_over_quic_reaches_established_and_delivers_put() {
     // Bind the QUIC server endpoint BEFORE the initiator dials (learn the
     // OS-chosen port race-free, the bind/accept split pattern). The test owns
     // the endpoint so it outlives both sessions.
-    let endpoint = bind_quic("127.0.0.1:0".parse().expect("loopback addr"), server_config)
-        .expect("bind quic server endpoint");
+    let endpoint = bind_quic(
+        "127.0.0.1:0".parse().expect("loopback addr"),
+        server_config,
+        None,
+    )
+    .expect("bind quic server endpoint");
     let addr = endpoint.local_addr().expect("endpoint local addr");
 
     // ── Open BOTH sessions concurrently: the acceptor accepts the inbound QUIC
@@ -204,5 +208,101 @@ async fn wz_to_wz_over_quic_reaches_established_and_delivers_put() {
         fired.load(Ordering::SeqCst),
         1,
         "exactly one delivery from the Put over the quic link"
+    );
+}
+
+/// R311y454 — the LISTEN-side `#iface=` bind decides whether a loopback dial can
+/// reach the acceptor at all: pinned to `lo` the QUIC handshake completes, pinned to
+/// a device loopback traffic never arrives on it cannot.
+///
+/// This is DELIVERY-based on purpose, and that is the whole point of it. The obvious
+/// cheaper tests do not catch the likely bug. An implementation that builds a
+/// socket, calls `SO_BINDTODEVICE` on it, DROPS it, and then still calls quinn's
+/// convenience `Endpoint::server` would pass a "binding to `lo` works" test AND a
+/// "binding to a nonexistent device returns ENODEV" test — the syscall ran, on a
+/// socket quinn never used. Only asking whether a dial can actually connect
+/// distinguishes a socket that was device-bound from one that was device-bound and
+/// then thrown away.
+///
+/// The cross-impl sibling of this A/B is
+/// `wz-integration-tests/tests/wz_quic_acceptor_iface_zenohd_interop.rs`, where the
+/// dialer is a real zenohd; this one keeps the same discriminator inside the crate
+/// that owns the code, so a regression reds without a foreign binary present.
+#[cfg(feature = "locator-iface")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listen_iface_bind_decides_whether_a_loopback_quic_dial_connects() {
+    use wz_runtime_tokio::quic_pipeline::{accept_quic_on, dial_quic};
+
+    // Arm B needs a device that merely EXISTS — not one that works. A DOWN device is
+    // a fine answer: `SO_BINDTODEVICE` accepts it and loopback traffic still never
+    // arrives on it. Sorted for reproducibility; a `lo`-only host panics rather than
+    // skipping, because a skipped arm is a green test that proved nothing.
+    let mut names: Vec<String> = std::fs::read_dir("/sys/class/net")
+        .expect("read /sys/class/net (Linux host with sysfs)")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "lo")
+        .collect();
+    names.sort();
+    let other = names
+        .into_iter()
+        .next()
+        .expect("a non-loopback interface name; this A/B cannot run on a lo-only host");
+
+    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate self-signed localhost cert");
+    let cert_pem = issued.cert.pem();
+    let key_pem = issued.key_pair.serialize_pem();
+
+    /// One arm: bind a quic acceptor pinned to `iface`, run one accept, and report
+    /// whether an UNPINNED loopback dial completed its handshake inside `budget`.
+    async fn dial_reaches(
+        iface: &str,
+        cert_pem: &str,
+        key_pem: &str,
+        budget: Duration,
+    ) -> std::io::Result<bool> {
+        let server_config =
+            quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
+                .expect("build quic server config");
+        let client_config =
+            quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client");
+        let endpoint = bind_quic(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            server_config,
+            Some(iface),
+        )?;
+        // The bind must SUCCEED in both arms — `bind(127.0.0.1)` with a foreign
+        // device bound does not fail — so a difference in outcome is a difference in
+        // DELIVERY, which is the property under test.
+        let addr = endpoint.local_addr()?;
+        // quinn completes the server half of the handshake only once the `Incoming`
+        // is accepted, so the acceptor has to be live for arm A to connect.
+        let acceptor = tokio::spawn(async move { accept_quic_on(&endpoint).await.map(|_| ()) });
+        let dialed =
+            tokio::time::timeout(budget, dial_quic(addr, client_config, "localhost", None)).await;
+        acceptor.abort();
+        Ok(matches!(dialed, Ok(Ok(_))))
+    }
+
+    let reached_via_lo = dial_reaches("lo", &cert_pem, &key_pem, Duration::from_secs(5))
+        .await
+        .expect("binding a quic acceptor to `lo` must succeed");
+    let reached_via_other = dial_reaches(&other, &cert_pem, &key_pem, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|e| panic!("binding a quic acceptor to `{other}` must succeed: {e}"));
+
+    assert!(
+        reached_via_lo,
+        "a quic acceptor pinned to `lo` did not accept a loopback dial within 5s — \
+         loopback traffic DOES arrive on `lo`, so the pin is over-restrictive and the \
+         negative arm below would prove nothing"
+    );
+    assert!(
+        !reached_via_other,
+        "a quic acceptor pinned to `{other}` STILL accepted a dial to 127.0.0.1. That \
+         datagram arrives on `lo`, so the listen socket cannot have been bound to \
+         `{other}` — either the iface parameter is a no-op, or the device-bound socket \
+         was built and then not handed to quinn"
     );
 }

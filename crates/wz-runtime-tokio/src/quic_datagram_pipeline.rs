@@ -256,16 +256,23 @@ pub async fn dial_quic_datagram(
 /// datagram-only; datagrams stay enabled (quinn's default `TransportConfig`
 /// advertises `max_datagram_frame_size`, so the peer may send to us). The caller
 /// owns the returned `Endpoint` and loops [`accept_quic_datagram_on`] over it.
+///
+/// R311y454 — `iface` is the `#iface=<name>` LISTEN-side bind. It needs no code
+/// of its own: the shared [`quic_server_endpoint`] owns the pre-bind +
+/// `SO_BINDTODEVICE` arm, so the datagram backend inherits the honor from the
+/// same SSOT that gives it the stream limits. One fix closed BOTH the quic and
+/// quic-datagram listen residuals for exactly this reason.
 pub fn bind_quic_datagram(
     addr: SocketAddr,
     server_config: Arc<RustlsServerConfig>,
+    iface: Option<&str>,
 ) -> io::Result<Endpoint> {
     // Datagram-only: max_bidi = 0 (the shared quic_server_endpoint also pins
     // uni = 0). The QUIC handshake rides crypto frames, not application streams,
     // so it completes; datagrams are on by default (TransportConfig default sets
     // datagram_receive_buffer_size = Some). The datagram mirror of bind_quic's
     // max_bidi = 1.
-    quic_server_endpoint(addr, server_config, 0)
+    quic_server_endpoint(addr, server_config, 0, iface)
 }
 
 /// Accept ONE inbound QUIC datagram connection from a *borrowed* server

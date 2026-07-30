@@ -82,8 +82,12 @@ async fn wz_to_wz_over_quic_datagram_reaches_established_and_delivers_put() {
     // Bind the QUIC datagram server endpoint BEFORE the initiator dials (learn
     // the OS-chosen port race-free, the bind/accept split). The test owns the
     // endpoint so it outlives both sessions.
-    let endpoint = bind_quic_datagram("127.0.0.1:0".parse().expect("loopback addr"), server_config)
-        .expect("bind quic datagram server endpoint");
+    let endpoint = bind_quic_datagram(
+        "127.0.0.1:0".parse().expect("loopback addr"),
+        server_config,
+        None,
+    )
+    .expect("bind quic datagram server endpoint");
     let addr = endpoint.local_addr().expect("endpoint local addr");
 
     // ── Open BOTH sessions concurrently: the acceptor accepts the inbound QUIC

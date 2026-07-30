@@ -182,10 +182,34 @@ pub(crate) async fn connect_quic_client(
 /// datagram-only). uni is always 0 (wz uses neither). The QUIC handshake rides
 /// crypto frames, not application streams, so it completes regardless of the
 /// limit. Mirrors zenoh's `new_listener` stream-limit setup.
+///
+/// R311y454 — `iface` is the LISTEN-side `#iface=<name>` honor, closing the
+/// residual that only the dial half bound its socket to the named NIC. quinn's
+/// convenience `Endpoint::server` owns the UDP socket it binds and exposes no
+/// bind-device hook, so a device-bound listener needs the socket built FIRST:
+/// bind, `SO_BINDTODEVICE`, then hand it to `Endpoint::new`. This is the exact
+/// mirror of the dial-side [`connect_quic_client`] arm, and of zenoh's own
+/// listener, which binds a UDP socket, calls `set_bind_to_device_udp_socket`, and
+/// passes it to `Endpoint::new_with_abstract_socket`
+/// (`zenoh-link-quic/src/unicast.rs:408-427`); `Endpoint::new` IS that call plus
+/// `wrap_udp_socket`. Both stay on the `Endpoint::server` path when no iface is
+/// named, so the un-narrowed listener is byte-for-byte the pre-R311y454 one.
+///
+/// The socket MUST reach quinn. Building it, setting the device on it and then
+/// dropping it would leave a listener that passes every "binding to `lo` works"
+/// and "an absent device gives ENODEV" test while honouring nothing — the syscall
+/// ran, on a socket quinn never used. That failure mode is what the delivery-based
+/// A/B in `tests/quic_e2e.rs` exists to catch.
+///
+/// Deliberate divergence, named because it is a divergence and not a port: wz
+/// hardcodes `quinn::TokioRuntime` where zenoh asks `quinn::default_runtime()`.
+/// wz-runtime-tokio IS the tokio runtime crate, so there is no other answer to
+/// give, and the dial half already hardcodes it.
 pub(crate) fn quic_server_endpoint(
     addr: SocketAddr,
     server_config: Arc<RustlsServerConfig>,
     max_bidi: u8,
+    iface: Option<&str>,
 ) -> io::Result<Endpoint> {
     let quic_crypto = QuicServerConfig::try_from(server_config).map_err(io_other)?;
     let mut sc = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
@@ -193,7 +217,23 @@ pub(crate) fn quic_server_endpoint(
     transport.max_concurrent_uni_streams(0u8.into());
     transport.max_concurrent_bidi_streams(max_bidi.into());
     sc.transport_config(Arc::new(transport));
-    Endpoint::server(sc, addr)
+    match iface {
+        // No `#iface=`: quinn binds its own socket (the original path).
+        None => Endpoint::server(sc, addr),
+        // A device-bound listener. `quinn::TokioRuntime` is spelled out because
+        // this module also imports wz's OWN `TokioRuntime` (the
+        // `wz_runtime_core::Runtime` impl) — two unrelated types, one name.
+        Some(iface) => {
+            let sock = std::net::UdpSocket::bind(addr)?;
+            crate::iface_bind::bind_socket_to_device(&sock, iface)?;
+            Endpoint::new(
+                quinn::EndpointConfig::default(),
+                Some(sc),
+                sock,
+                Arc::new(quinn::TokioRuntime),
+            )
+        }
+    }
 }
 
 /// Accept one inbound QUIC connection from a *borrowed* server [`Endpoint`] and
@@ -242,8 +282,18 @@ pub async fn dial_quic(
 /// [`quic_server_endpoint`] with `max_bidi = 1`), mirroring zenoh's
 /// `new_listener`, so the QUIC link is exactly one StreamEnvelope byte stream.
 /// The caller owns the returned `Endpoint` and loops [`accept_quic_on`] over it.
-pub fn bind_quic(addr: SocketAddr, server_config: Arc<RustlsServerConfig>) -> io::Result<Endpoint> {
-    quic_server_endpoint(addr, server_config, 1)
+///
+/// R311y454 — `iface` is the `#iface=<name>` LISTEN-side bind, the parameter
+/// shape the sibling acceptors already use (`bind_tcp`,
+/// [`crate::udp_pipeline::bind_udp_demux`]). Still SYNC: `Endpoint::server` was
+/// already binding a std socket and reaching for the ambient tokio runtime, so
+/// the pre-bound arm adds no await.
+pub fn bind_quic(
+    addr: SocketAddr,
+    server_config: Arc<RustlsServerConfig>,
+    iface: Option<&str>,
+) -> io::Result<Endpoint> {
+    quic_server_endpoint(addr, server_config, 1, iface)
 }
 
 /// Accept the ARRIVAL of one inbound QUIC connection attempt from a *borrowed*

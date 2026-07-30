@@ -1885,7 +1885,12 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // R311y401 — a `quic/...` acceptor binds a QUIC server `Endpoint` on the
             // listen addr, the crypto config baked in from `AcceptConfig.quic` (the
             // QUIC twin of the `Proto::Tls` arm). `bind_quic` is SYNC (`?`, not
-            // `.await`) and takes no iface (a quinn Endpoint owns its socket).
+            // `.await`). R311y454 — it DOES honour `#iface=` now: the claim that it
+            // "takes no iface (a quinn Endpoint owns its socket)" was true only of
+            // quinn's CONVENIENCE constructor, and it was this comment that recorded
+            // the residual. `quic_server_endpoint` pre-binds a device-bound socket
+            // and hands it to `Endpoint::new` instead, so the listen half is now
+            // symmetric with the dial half and with every sibling acceptor above.
             // Absent the cert config => typed `Unsupported`, so a QUIC acceptor is
             // opt-in — the accept mirror of dial_locator's `Proto::Quic => match &cfg.quic`.
             #[cfg(feature = "transport-link-quic")]
@@ -1893,6 +1898,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                 Some(q) => Ok(BoundListener::Quic(bind_quic(
                     ip.addr,
                     q.server_config.clone(),
+                    ip.iface.as_deref(),
                 )?)),
                 None => Err(unsupported(
                     "quic acceptor requires AcceptConfig.quic (a server cert + key)",
@@ -1908,7 +1914,8 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // SAME cert as the stream backend, matching zenoh's shared
             // `transport.link.tls` block). The exact datagram twin of the
             // `Proto::Quic` arm above: `bind_quic_datagram` is SYNC (`?`, not
-            // `.await`) and takes no iface (a quinn Endpoint owns its socket). Absent
+            // `.await`) and — since R311y454, like its stream sibling — HONOURS
+            // `#iface=`, through the one shared `quic_server_endpoint`. Absent
             // the cert config => typed `Unsupported`, so it is opt-in — the accept
             // mirror of dial_locator's `Proto::QuicDatagram => match &cfg.quic`.
             #[cfg(feature = "transport-link-quic-datagram")]
@@ -1916,6 +1923,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                 Some(q) => Ok(BoundListener::QuicDatagram(bind_quic_datagram(
                     ip.addr,
                     q.server_config.clone(),
+                    ip.iface.as_deref(),
                 )?)),
                 None => Err(unsupported(
                     "quic-datagram acceptor requires AcceptConfig.quic (a server cert + key)",
@@ -3963,8 +3971,12 @@ mod tests {
             None,
         )
         .expect("build quic server config");
-        let ep = bind_quic("127.0.0.1:0".parse().expect("loopback addr"), server_config)
-            .expect("bind quic endpoint");
+        let ep = bind_quic(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            server_config,
+            None,
+        )
+        .expect("bind quic endpoint");
         let listener = BoundListener::Quic(ep);
         assert!(
             listener.supports_mesh_multi_peer(),
@@ -3996,6 +4008,7 @@ mod tests {
         let ep = crate::quic_datagram_pipeline::bind_quic_datagram(
             "127.0.0.1:0".parse().expect("loopback addr"),
             server_config,
+            None,
         )
         .expect("bind quic-datagram endpoint");
         let listener = BoundListener::QuicDatagram(ep);
