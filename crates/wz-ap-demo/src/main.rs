@@ -242,6 +242,13 @@ fn main() -> ExitCode {
             // 500 ms the flag alone has always meant. `0` is upstream's DROP-ALL
             // rule. Inert without `--downsample`.
             let downsample_freq = parse_pair(rest, "--downsample-freq");
+            // R311y453 — the §5.16 SUBJECT axes on the downsampling rule.
+            // `--downsample-link-protocol <name>` narrows it to faces speaking that
+            // link protocol; `--downsample-interface <nic>` to faces whose link sits
+            // on that NIC. Either absent leaves its axis unnarrowed, which is
+            // zenoh's `None`. Both inert without `--downsample`.
+            let downsample_link_protocol = parse_pair(rest, "--downsample-link-protocol");
+            let downsample_interface = parse_pair(rest, "--downsample-interface");
             // R311tx (§5.16 access-quota) — `--max-payload <bytes>` caps every
             // keyexpr's Put payload size (zenoh low_pass); a larger Put is dropped
             // on egress. Off by default.
@@ -382,6 +389,8 @@ fn main() -> ExitCode {
                     acl_deny,
                     downsample,
                     downsample_freq,
+                    downsample_link_protocol,
+                    downsample_interface,
                     max_payload,
                 },
             );
@@ -1609,6 +1618,12 @@ pub(crate) struct InterceptorOpts {
     /// R311y452 — the `--downsample` rate as zenoh's maximum frequency in Hertz;
     /// `None` keeps the 2 Hz (500 ms) the flag alone has always meant.
     pub(crate) downsample_freq: Option<String>,
+    /// R311y453 — narrow the downsampling rule to one link PROTOCOL, or `None`
+    /// to leave that subject axis unnarrowed (zenoh's `link_protocols: None`).
+    pub(crate) downsample_link_protocol: Option<String>,
+    /// R311y453 — narrow the downsampling rule to one NIC NAME, or `None` to
+    /// leave that axis unnarrowed (zenoh's `interfaces: None`).
+    pub(crate) downsample_interface: Option<String>,
     pub(crate) max_payload: Option<String>,
 }
 

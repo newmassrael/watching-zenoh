@@ -90,6 +90,49 @@ pub enum InterceptorLink {
     Ws,
 }
 
+impl InterceptorLink {
+    /// The config spelling of this link protocol — zenoh serialises
+    /// `InterceptorLink` with `#[serde(rename_all = "kebab-case")]`
+    /// (`zenoh-config/src/lib.rs:314-327`), so `UnixsockStream` is
+    /// `unixsock-stream`, not the shorter scheme wz's own locator grammar uses.
+    /// A deploy config is written against UPSTREAM's vocabulary.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InterceptorLink::Tcp => "tcp",
+            InterceptorLink::Udp => "udp",
+            InterceptorLink::Tls => "tls",
+            InterceptorLink::Quic => "quic",
+            InterceptorLink::QuicDatagram => "quic-datagram",
+            InterceptorLink::Serial => "serial",
+            InterceptorLink::Unixpipe => "unixpipe",
+            InterceptorLink::UnixsockStream => "unixsock-stream",
+            InterceptorLink::Vsock => "vsock",
+            InterceptorLink::Ws => "ws",
+        }
+    }
+
+    /// Parse a config spelling back, or `None` for an unknown name. The inverse of
+    /// [`as_str`](Self::as_str), kept beside it so the two cannot drift; every
+    /// config surface (the demo knobs today, a `deploy.yaml` loader later) parses
+    /// through this one function rather than growing its own table.
+    pub fn from_config_str(s: &str) -> Option<Self> {
+        [
+            InterceptorLink::Tcp,
+            InterceptorLink::Udp,
+            InterceptorLink::Tls,
+            InterceptorLink::Quic,
+            InterceptorLink::QuicDatagram,
+            InterceptorLink::Serial,
+            InterceptorLink::Unixpipe,
+            InterceptorLink::UnixsockStream,
+            InterceptorLink::Vsock,
+            InterceptorLink::Ws,
+        ]
+        .into_iter()
+        .find(|link| link.as_str() == s)
+    }
+}
+
 /// The link MTU a [`BoxedLinkDriver`] reports when it has no fixed
 /// frame-size bound of its own — zenoh-pico's `_z_get_link_mtu_tcp`
 /// (`src/link/unicast/tcp.c:86`) returns the identical `65535`, the

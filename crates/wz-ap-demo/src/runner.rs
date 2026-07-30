@@ -2329,8 +2329,8 @@ async fn run_peer_until(
     use wz::runtime_tokio::linkstate_forward::{
         default_autoconnect_matcher, interval_from_freq, AclConfig, AclFlow, AclMessage, AclPolicy,
         AclRule, AutoConnect, DownsamplingMessage, DownsamplingRule, InterceptorConfig,
-        InterceptorFlow, LinkstateForwarder, LowPassMessage, LowPassRule, Permission,
-        SubjectSelector, WhatAmI, Zid,
+        InterceptorFlow, InterceptorLink, LinkstateForwarder, LowPassMessage, LowPassRule,
+        Permission, SubjectSelector, WhatAmI, Zid,
     };
     use wz::runtime_tokio::session_open::bind_endpoint_with_config;
 
@@ -2573,17 +2573,45 @@ async fn run_peer_until(
             },
         };
         let min_interval = interval_from_freq(freq);
+        // R311y453 — the two SUBJECT axes. An absent knob leaves its axis EMPTY,
+        // which does not narrow (zenoh's `link_protocols: None` / `interfaces:
+        // None`). An unparseable protocol name is a hard error rather than a
+        // silent no-op: a deploy that meant to narrow the rule and instead got an
+        // unnarrowed one would enforce MORE than it asked for, which is exactly
+        // the class of silent misconfiguration this axis exists to prevent.
+        let link_protocols = match interceptors.downsample_link_protocol.as_deref() {
+            None => Vec::new(),
+            Some(name) => match InterceptorLink::from_config_str(name) {
+                Some(link) => vec![link],
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--downsample-link-protocol '{name}' is not a known link \
+                             protocol (tcp/udp/tls/quic/quic-datagram/serial/unixpipe/\
+                             unixsock-stream/vsock/ws)"
+                        ),
+                    ));
+                }
+            },
+        };
+        let interfaces: Vec<String> = interceptors
+            .downsample_interface
+            .as_deref()
+            .map(|nic| vec![nic.to_owned()])
+            .unwrap_or_default();
         log::info!(
             "wz-ap-demo peer: downsampling enabled (--downsample {downsample_keyexpr} \
-             @ {freq}Hz -> {min_interval:?})"
+             @ {freq}Hz -> {min_interval:?}, link_protocols {link_protocols:?}, \
+             interfaces {interfaces:?})"
         );
         interceptor_config.downsampling = vec![DownsamplingRule {
             key_exprs: vec![downsample_keyexpr.to_owned()],
             min_interval,
             messages: DownsamplingMessage::ALL.to_vec(),
             flows: InterceptorFlow::ALL.to_vec(),
-            link_protocols: Vec::new(),
-            interfaces: Vec::new(),
+            link_protocols,
+            interfaces,
         }];
     }
 
@@ -4801,6 +4829,8 @@ mod peer_quic_cert_tests {
             acl_deny: None,
             downsample: None,
             downsample_freq: None,
+            downsample_link_protocol: None,
+            downsample_interface: None,
             max_payload: None,
         };
 
@@ -4885,6 +4915,8 @@ mod peer_failfast_tests {
             acl_deny: None,
             downsample: None,
             downsample_freq: None,
+            downsample_link_protocol: None,
+            downsample_interface: None,
             max_payload: None,
         };
 

@@ -189,10 +189,13 @@ pub use crate::interceptor::InterceptorConfig;
 // rule needs the flow vocabulary from the same facade path. Unconditional (the
 // seam lives under `routing-peer`, not under an `access-*` knob).
 pub use crate::interceptor::InterceptorFlow;
+// R311y453 — the §5.16 SUBJECT vocabulary, re-exported beside the rule types: a
+// deploy that narrows a rule by `link_protocols` needs the link-protocol names,
+// and it must spell them the way upstream's config does (`from_config_str`).
+pub use wz_session_core::link::{InterceptorLink, LinkSubject};
 // The gossip-target role set lives in the codec layer beside `WhatAmI`; the
 // forwarder consumes it to gate which faces a link-state flood reaches.
 use wz_codecs::whatami::WhatAmIMatcher;
-use wz_session_core::link::LinkSubject;
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
 /// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The

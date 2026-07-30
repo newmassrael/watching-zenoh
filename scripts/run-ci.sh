@@ -7417,6 +7417,22 @@ layer_e6_peer_mesh() {
     else
         _pico_cli_unavailable "E6 leg wz_peer_downsampling_pico_interop" || return 1
     fi
+    # R311y453 — pico §5.16 SUBJECT-SCOPING cross-impl, the axis that decides
+    # whether a rule governs a face at all. Two A/B arms on the SAME pico burst
+    # and the SAME E6 binary: a rule narrowed to the link protocol pico actually
+    # dials (tcp) throttles it to 1 of 3, the identical rule narrowed to vsock is
+    # inert at 3 of 3; likewise a rule narrowed to `lo` throttles the accepted
+    # loopback link while one narrowed to an absent NIC is inert. The interface
+    # arm is ALSO the live-getifaddrs witness: it only throttles if the peer
+    # resolved 127.0.0.1 to `lo` at link open. Guarded on the one foreign binary
+    # it drives (RED, measured: with both subject matchers made inert, BOTH
+    # negative arms throttle and both tests fail).
+    if [[ -x target/zenoh-pico-cli/z_pub ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_subject_scoping_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    else
+        _pico_cli_unavailable "E6 leg wz_peer_subject_scoping_pico_interop" || return 1
+    fi
     # R311y165 — the STRONG peer-mode future-push CROSS-IMPL e2e (the leg-5 peer analog,
     # now that D4 gave the peer a client data plane): a pico z_pub CLIENT of peer-A
     # (pub-before-sub) + a pico z_sub CLIENT of peer-B; A pushes the future
