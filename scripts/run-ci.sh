@@ -7551,6 +7551,25 @@ layer_e6_peer_mesh() {
     else
         _pico_cli_unavailable "E6 leg wz_peer_acl_pico_interop" || return 1
     fi
+    # R311y459 — pico ACCESS-CONTROL cross-impl, LIVELINESS plane (§5.16): the
+    # foreign witness for the three kinds R311y458 added arms for. z_liveliness
+    # emits a DeclareToken AND, one second later, its UndeclareToken carrying the
+    # keyexpr in the OPTIONAL ext_wire_expr (vendor/zenoh-pico src/net/
+    # liveliness.c:32-50), so a denied token costs TWO drops and the second one
+    # is what exercises the undeclare arm; z_get_liveliness emits EXACTLY ONE
+    # message, a token-carrying CURRENT Interest (:314-362), so its drop is
+    # attributable to the LivelinessQuery arm alone. Every ALLOWED message runs
+    # FIRST and must leave the counter at zero, which is a stronger positive
+    # control than a per-message one: it rules out the ACL dropping the whole
+    # liveliness plane. Needs BOTH foreign binaries, so both are guarded. Rides
+    # the same E6 binary (routing-peer pulls access-acl). RED: before y458 none
+    # of these kinds was governed and every drop barrier times out.
+    if [[ -x target/zenoh-pico-cli/z_liveliness && -x target/zenoh-pico-cli/z_get_liveliness ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_acl_liveliness_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    else
+        _pico_cli_unavailable "E6 leg wz_peer_acl_liveliness_pico_interop" || return 1
+    fi
     # R311y451 — pico LOW-PASS cross-impl (§5.16 access-quota), the size-budget
     # sibling of the ACL leg above and on the SAME E6 binary (routing-peer pulls
     # access-quota). A pico z_pub_attachment Put whose PAYLOAD ALONE exactly fills
