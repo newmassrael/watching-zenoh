@@ -7901,9 +7901,30 @@ layer_e7_router_hat() {
     # of the prior router-hat-router; the router admin legs are additive, so the
     # existing wz<->wz router mesh tests are unaffected) so the pico router-adminspace
     # witness rides the same binary.
-    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,adminspace-router-linkstate --quiet) || return 1
+    # R311y463 — plus routing-token-tables, so this lane OWNS the build the router
+    # liveliness-TOKEN plane needs. It is NOT reachable any other way: `routing-peer`
+    # does not pull it (crates/wz/Cargo.toml:473 vs :857), so the Layer E6 demo has
+    # the whole plane — ingest_client_token / dump_interest_tokens /
+    # push_future_token — compiled OUT, and a proof placed there passes vacuously.
+    # Additive like the y273 adminspace superset above: it adds the token plane and
+    # touches neither the data nor the query forwarding the mesh tests assert.
+    (cd crates && cargo build -p wz-ap-demo \
+        --features router-hat-router,adminspace-router-linkstate,routing-token-tables --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_mesh -- --ignored --quiet) || return 1
+    # R311y463 — liveliness-historical-samples, the RESPONDER half of liveliness
+    # history: pico A declares a token, THEN pico B subscribes with `-h`, and wz
+    # replays the token B never saw declared. The pair differs in that ONE pico flag,
+    # which is exactly the CURRENT bit on the wire (vendor/zenoh-pico
+    # src/net/liveliness.c:196-205), so the twin is what makes the sample the atom's.
+    # Guarded on BOTH foreign binaries; rides the token-tables build above.
+    if [[ -x target/zenoh-pico-cli/z_liveliness && -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_router_hat_liveliness_history_pico_interop \
+            -- --ignored --quiet --test-threads=1) || return 1
+    else
+        _pico_cli_unavailable "Layer E7 (pico liveliness history z_liveliness/z_sub_liveliness)" || return 1
+    fi
     # R311y273 — the CROSS-IMPL half: a pico z_get reads the router's link-state DOT +
     # the computed route-successor table across a two-router federation. FULL (all three
     # legs carry content once a second router exists; probed before the round). Guarded

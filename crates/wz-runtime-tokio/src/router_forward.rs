@@ -10034,6 +10034,84 @@ mod tests {
         );
     }
 
+    /// R311y463 — the CURRENT+FUTURE (`CurrentFuture`) arm of the same fold, which
+    /// no test above reaches: every sibling passes `future = false`, so only the
+    /// `build_declare_token_reply` branch of [`RouterForwarder::dump_interest_tokens`]
+    /// was covered and the `future` branch — `intern_current_reply` +
+    /// `build_declare_token_reply_with_id` — had none.
+    ///
+    /// This is the mode a REAL foreign liveliness subscriber sends: zenoh-pico's
+    /// `z_sub_liveliness -h` emits `KEYEXPRS|TOKENS|RESTRICTED|CURRENT|FUTURE`
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:196-205`, the `history` ternary),
+    /// while `-h` omitted drops to FUTURE-only. So C+F is not a corner: it is the
+    /// only shape the `history = true` subscriber ever puts on the wire.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn token_current_future_interest_replies_with_a_client_token() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_CLIENT); // token holder
+        let (b, sink_b) = face(zid(0xBB), WIRE_CLIENT); // history subscriber
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data"));
+        sink_b.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(9, "live/data", true, true, false),
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            2,
+            "a CURRENT+FUTURE token interest gets the same replay + DeclareFinal as \
+             CURRENT-only; the FUTURE bit must not suppress the current dump"
+        );
+        assert!(
+            matches!(
+                forwarded_declare(&sink_b.frame_bytes(0)).body,
+                DeclareOwnedVariant::CodecZenohDeclToken(_)
+            ),
+            "the C+F replay carries a DeclToken (the interned-id branch)"
+        );
+    }
+
+    /// R311y463 — the WILDCARD target arm. Every token-interest test above asks
+    /// with the token's own LITERAL, so `keyexpr_intersects_target` was only ever
+    /// exercised on an exact match. A foreign subscriber asks with a pattern
+    /// (`z_sub_liveliness -k 'group1/**'`), so the intersect is on the real path.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn token_current_future_interest_matches_a_wildcard_target() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_CLIENT);
+        let (b, sink_b) = face(zid(0xBB), WIRE_CLIENT);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        forward_one(
+            &fwd,
+            FaceId(0),
+            declare_client_token_msg(7, "group1/member"),
+        );
+        sink_b.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(9, "group1/**", true, true, false),
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            2,
+            "a wildcard token interest replays the intersecting client token + Final"
+        );
+        assert!(
+            matches!(
+                forwarded_declare(&sink_b.frame_bytes(0)).body,
+                DeclareOwnedVariant::CodecZenohDeclToken(_)
+            ),
+            "the wildcard target intersected the client-sourced token"
+        );
+    }
+
     #[cfg(feature = "routing-token-tables")]
     #[test]
     fn token_current_interest_excludes_the_requesters_own_token() {
