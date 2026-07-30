@@ -10,12 +10,16 @@
 //! subject + keyexpr off the [`InterceptorContext`], and asks the policy for a
 //! verdict.
 //!
-//! Governed actions: the data-plane `Put` / `Del` (a Push or a write-Request
-//! body), the query plane `Query` (a Request's Query body) / `Reply` (a
-//! Response) / `DeclareQueryable`, and the control plane `DeclareSubscriber`.
-//! Every other kind — the rest of the `Declare` family, the keyless
-//! `ResponseFinal`, the liveliness messages — is admitted here and gains its own
-//! arm as the action set grows. Because the per-kind dispatch is a `match`,
+//! Governed actions, and as of R311y458 the SAME set zenoh governs: the
+//! data-plane `Put` / `Del` (a Push or a write-Request body), the query plane
+//! `Query` (a Request's Query body) / `Reply` (a Response) / `DeclareQueryable`,
+//! the subscription plane `DeclareSubscriber`, and the liveliness plane
+//! (`LivelinessToken`, plus a token-carrying `Interest` split on MODE into
+//! `LivelinessQuery` and `DeclareLivelinessSubscriber`). Each (un)declare pair
+//! shares ONE action, as upstream. What stays ungoverned — a keyexpr-alias
+//! (un)declaration, `DeclareFinal`, the keyless `ResponseFinal`, an `Oam`, a
+//! non-token or `Final` Interest — is ungoverned in zenoh too, in its
+//! explicitly-unfiltered arms. Because the per-kind dispatch is a `match`,
 //! adding an action is a new arm, not a new check site.
 
 use wz_access_control::{AclFlow, AclMessage, AclPolicy, Permission};
@@ -43,30 +47,76 @@ impl AclInterceptor {
     }
 }
 
+/// One governed message kind's verdict inputs: the [`AclMessage`] a rule is
+/// evaluated for, plus whether the kind is an UNDECLARE — the one bit the
+/// unresolvable-keyexpr branch needs, because zenoh treats an undeclare
+/// differently there and only on ingress (see [`AclInterceptor::intercept`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GovernedAction {
+    action: AclMessage,
+    undeclare: bool,
+}
+
+impl GovernedAction {
+    /// A governed DECLARE-side (or data / query plane) kind.
+    const fn decl(action: AclMessage) -> Self {
+        Self {
+            action,
+            undeclare: false,
+        }
+    }
+
+    /// A governed UNDECLARE kind, evaluated under the SAME action as its
+    /// declaration — zenoh reuses one `AclMessage` for the pair rather than
+    /// adding an undeclare action.
+    const fn undecl(action: AclMessage) -> Self {
+        Self {
+            action,
+            undeclare: true,
+        }
+    }
+}
+
 /// The ACL action a message represents, or `None` for a kind this enforcer does
 /// not govern (which is then admitted). The wz analogue of zenoh's
-/// per-`NetworkBody` dispatch in `access_control.rs::intercept`: a Push / Request
-/// maps to [`Put`](AclMessage::Put) / [`Delete`](AclMessage::Delete) /
-/// [`Query`](AclMessage::Query) on its body, a Response to
-/// [`Reply`](AclMessage::Reply), a `DeclareSubscriber` /  `DeclareQueryable` to
-/// [`DeclareSubscriber`](AclMessage::DeclareSubscriber) /
-/// [`DeclareQueryable`](AclMessage::DeclareQueryable). An UndeclareSubscriber /
-/// keyexpr-alias declaration, the keyless `ResponseFinal`, and the liveliness
-/// kinds are not governed, so they return `None` and admit.
-fn acl_action(msg: &NetworkMessage) -> Option<AclMessage> {
+/// per-`NetworkBody` dispatch in `access_control.rs::intercept`, and as of
+/// R311y458 the same governed SET: the data plane (Push / write-Request bodies),
+/// the query plane (Request(Query), Response, Declare/UndeclareQueryable), the
+/// subscription plane (Declare/UndeclareSubscriber), and the liveliness plane
+/// (Declare/UndeclareToken, plus a token-carrying `Interest` split on MODE).
+///
+/// Ungoverned, and therefore admitted at this arm before a keyexpr is ever
+/// asked for: a keyexpr-alias (un)declaration, `DeclareFinal`, the keyless
+/// `ResponseFinal`, an `Oam`, and any Interest that does not carry the token
+/// flag — including the `Final` terminator, which zenoh also leaves unfiltered
+/// (`access_control.rs:593-599` on ingress) because routing rejects it if the
+/// Interest it closes was denied.
+fn acl_action(msg: &NetworkMessage) -> Option<GovernedAction> {
     match msg {
         NetworkMessage::Push(p) => match &p.body {
-            PushOwnedVariant::CodecZenohMsgPut(_) => Some(AclMessage::Put),
-            PushOwnedVariant::CodecZenohMsgDel(_) => Some(AclMessage::Delete),
+            PushOwnedVariant::CodecZenohMsgPut(_) => Some(GovernedAction::decl(AclMessage::Put)),
+            PushOwnedVariant::CodecZenohMsgDel(_) => Some(GovernedAction::decl(AclMessage::Delete)),
             _ => None,
         },
         // A routed Request maps by its body, the same as a Push: a Query body is
         // the query plane (governed as `Query`); a Put / Del body is a write
         // routed via the request mechanism (governed as the data-plane action).
+        //
+        // R311y458 CORRECTION — the Put / Del arms are NOT a zenoh mirror, as the
+        // prose here used to imply. zenoh's `RequestBody` has exactly one variant,
+        // `Query` (`zenoh-protocol/src/zenoh/mod.rs:79-81`), so its enforcer has
+        // no Request-write arm to mirror. The wz codec's `RequestOwnedVariant`
+        // does carry Put / Del, so these arms are a deliberate SUPERSET on the
+        // deny side: a body zenoh's protocol cannot express is governed rather
+        // than silently admitted if one ever arrives.
         NetworkMessage::Request(r) => match &r.body {
-            RequestOwnedVariant::CodecZenohQuery(_) => Some(AclMessage::Query),
-            RequestOwnedVariant::CodecZenohMsgPut(_) => Some(AclMessage::Put),
-            RequestOwnedVariant::CodecZenohMsgDel(_) => Some(AclMessage::Delete),
+            RequestOwnedVariant::CodecZenohQuery(_) => {
+                Some(GovernedAction::decl(AclMessage::Query))
+            }
+            RequestOwnedVariant::CodecZenohMsgPut(_) => Some(GovernedAction::decl(AclMessage::Put)),
+            RequestOwnedVariant::CodecZenohMsgDel(_) => {
+                Some(GovernedAction::decl(AclMessage::Delete))
+            }
             _ => None,
         },
         // A query reply (a `Response`, Reply or Err body) — both bodies are a
@@ -77,16 +127,49 @@ fn acl_action(msg: &NetworkMessage) -> Option<AclMessage> {
         // reaches the keyexpr branch at all — the same place zenoh puts it
         // (an explicitly unfiltered arm beside `Interest` and `OAM`,
         // net/routing/interceptor/access_control.rs:615-617 / :922-924).
-        NetworkMessage::Response(_) => Some(AclMessage::Reply),
-        NetworkMessage::Declare(d)
-            if matches!(d.body, DeclareOwnedVariant::CodecZenohDeclSubscriber(_)) =>
-        {
-            Some(AclMessage::DeclareSubscriber)
-        }
-        NetworkMessage::Declare(d)
-            if matches!(d.body, DeclareOwnedVariant::CodecZenohDeclQueryable(_)) =>
-        {
-            Some(AclMessage::DeclareQueryable)
+        NetworkMessage::Response(_) => Some(GovernedAction::decl(AclMessage::Reply)),
+        // The six governed declaration bodies, each (un)declare pair sharing one
+        // action exactly as zenoh pairs them (`access_control.rs:451-554`).
+        NetworkMessage::Declare(d) => match &d.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => {
+                Some(GovernedAction::decl(AclMessage::DeclareSubscriber))
+            }
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
+                Some(GovernedAction::undecl(AclMessage::DeclareSubscriber))
+            }
+            DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
+                Some(GovernedAction::decl(AclMessage::DeclareQueryable))
+            }
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
+                Some(GovernedAction::undecl(AclMessage::DeclareQueryable))
+            }
+            DeclareOwnedVariant::CodecZenohDeclToken(_) => {
+                Some(GovernedAction::decl(AclMessage::LivelinessToken))
+            }
+            DeclareOwnedVariant::CodecZenohUndeclToken(_) => {
+                Some(GovernedAction::undecl(AclMessage::LivelinessToken))
+            }
+            _ => None,
+        },
+        // A TOKEN-carrying Interest, split on MODE and not on the flag: zenoh
+        // gives CURRENT-only its own action (a one-shot liveliness GET) and
+        // FUTURE / CURRENT+FUTURE another (registering for the token stream) —
+        // `access_control.rs:557-591`. The mode lives in the outer header's C / F
+        // bits (`zenoh-codec network/interest.rs:53-58`: Final 0b00, Current
+        // 0b01, Future 0b10, CurrentFuture 0b11), the token flag in the body's
+        // `to` bit. A Final Interest has NO body at all, so it takes the
+        // no-token exit and is admitted here, which is zenoh's unfiltered arm.
+        NetworkMessage::Interest(i) => {
+            if !i.body.as_ref().is_some_and(|b| b.to()) {
+                return None;
+            }
+            match (i.c(), i.f()) {
+                (true, false) => Some(GovernedAction::decl(AclMessage::LivelinessQuery)),
+                (_, true) => Some(GovernedAction::decl(
+                    AclMessage::DeclareLivelinessSubscriber,
+                )),
+                (false, false) => None,
+            }
         }
         _ => None,
     }
@@ -95,7 +178,7 @@ fn acl_action(msg: &NetworkMessage) -> Option<AclMessage> {
 impl Interceptor for AclInterceptor {
     fn intercept(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool {
         // A kind this atom does not govern is admitted (zenoh's unmatched arms).
-        let Some(action) = acl_action(msg) else {
+        let Some(governed) = acl_action(msg) else {
             return true;
         };
         // No resolved subject -> admit: the enforcer cannot attribute the
@@ -118,12 +201,27 @@ impl Interceptor for AclInterceptor {
         // empty chunk, so the Response arm returns false). So an installed ACL
         // dropping the timeout `Err` is upstream behaviour, not a wz regression;
         // the querier still terminates on its own timeout.
+        //
+        // R311y458 — the ONE exception, and it is zenoh's, not a wz softening: an
+        // INGRESS UNDECLARE admits instead. zenoh routes exactly those three arms
+        // through `cached_result_or_action_undecl`, whose `None` keyexpr answers
+        // `Permission::Allow` (:159-166), because an undeclare carries its
+        // keyexpr only in the OPTIONAL `ext_wire_expr` and a peer that omits it
+        // has its undeclare rejected by routing anyway if the matching
+        // declaration was denied (:472-478). EGRESS has no such arm — there the
+        // keyexpr is required and a miss denies (:762-776) — so the asymmetry is
+        // keyed on the flow this enforcer was built for, which is why it lives
+        // here and not in the resolver.
         let Some(keyexpr) = ctx.full_keyexpr(msg) else {
-            return false;
+            return governed.undeclare && self.flow == AclFlow::Ingress;
         };
-        self.policy
-            .decision(&subject, self.flow, action, &keyexpr, ctx.link_subject())
-            == Permission::Allow
+        self.policy.decision(
+            &subject,
+            self.flow,
+            governed.action,
+            &keyexpr,
+            ctx.link_subject(),
+        ) == Permission::Allow
     }
 }
 
@@ -133,6 +231,13 @@ mod tests {
     use hashbrown::HashMap;
     use wz_access_control::{AclConfig, AclRule, SubjectSelector};
     use wz_routing_graph::Zid;
+    use wz_session_core::declare_build::{
+        build_declare_token, build_undeclare_subscriber, build_undeclare_subscriber_with_keyexpr,
+        build_undeclare_token_with_keyexpr,
+    };
+    use wz_session_core::interest_build::{
+        build_interest_final, build_interest_liveliness_get, build_interest_liveliness_subscriber,
+    };
     use wz_session_core::push_build::{
         build_push_aliased, build_push_del_literal, build_push_literal,
     };
@@ -194,9 +299,11 @@ mod tests {
     fn acl_action_maps_the_query_plane() {
         // R311ud — the query-plane action mapping: a Request(Query) -> Query, a
         // Response -> Reply, a DeclareQueryable -> DeclareQueryable. The
-        // Request(Put|Del)-body -> Put|Delete arms are the faithful zenoh
-        // body-dispatch (and gate a Request-carried write rather than admit it),
-        // but wz emits only Request(Query) today, so they are not exercised here.
+        // Request(Put|Del)-body -> Put|Delete arms gate a Request-carried write
+        // rather than admit it, but wz emits only Request(Query) today, so they
+        // are not exercised here. R311y458 CORRECTION: they are a wz SUPERSET,
+        // not the "faithful zenoh body-dispatch" this comment used to claim --
+        // zenoh's RequestBody has only a Query variant.
         use wz_session_core::declare_build::build_declare_queryable;
         use wz_session_core::request_build::build_request_query;
         use wz_session_core::response_build::build_response_reply_literal;
@@ -204,17 +311,26 @@ mod tests {
         let query = NetworkMessage::Request(Box::new(
             build_request_query(1, 0, Some("demo/q")).expect("build query"),
         ));
-        assert_eq!(acl_action(&query), Some(AclMessage::Query));
+        assert_eq!(
+            acl_action(&query),
+            Some(GovernedAction::decl(AclMessage::Query))
+        );
 
         let reply = NetworkMessage::Response(Box::new(
             build_response_reply_literal(1, "demo/q", b"x").expect("build reply"),
         ));
-        assert_eq!(acl_action(&reply), Some(AclMessage::Reply));
+        assert_eq!(
+            acl_action(&reply),
+            Some(GovernedAction::decl(AclMessage::Reply))
+        );
 
         let decl_qabl = NetworkMessage::Declare(Box::new(
             build_declare_queryable(0, 0, Some("demo/q")).expect("build decl queryable"),
         ));
-        assert_eq!(acl_action(&decl_qabl), Some(AclMessage::DeclareQueryable));
+        assert_eq!(
+            acl_action(&decl_qabl),
+            Some(GovernedAction::decl(AclMessage::DeclareQueryable))
+        );
     }
 
     #[test]
@@ -285,7 +401,7 @@ mod tests {
         let put = aliased_put(7);
         assert_eq!(
             acl_action(&put),
-            Some(AclMessage::Put),
+            Some(GovernedAction::decl(AclMessage::Put)),
             "precondition: the message IS governed, so it reaches the keyexpr branch",
         );
         assert_eq!(
@@ -361,7 +477,7 @@ mod tests {
         ));
         assert_eq!(
             acl_action(&err),
-            Some(AclMessage::Reply),
+            Some(GovernedAction::decl(AclMessage::Reply)),
             "precondition: an Err body is a governed Reply",
         );
         assert_eq!(
@@ -401,6 +517,244 @@ mod tests {
         assert!(
             acl.intercept(&ctx, &fin),
             "the end-marker admits despite having no keyexpr"
+        );
+    }
+
+    /// The R311y458 policy: `admin/**` denied for the SIX actions this round
+    /// added arms for, so a test can tell "denied by the rule" from "denied by
+    /// the unresolvable-keyexpr branch" — the rule only ever fires on a keyexpr
+    /// that RESOLVED.
+    fn deny_admin_liveliness_policy() -> AclPolicy {
+        AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["admin/**".to_owned()],
+                messages: vec![
+                    AclMessage::DeclareSubscriber,
+                    AclMessage::DeclareQueryable,
+                    AclMessage::LivelinessToken,
+                    AclMessage::LivelinessQuery,
+                    AclMessage::DeclareLivelinessSubscriber,
+                ],
+                flow: AclFlow::Ingress,
+                permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
+            }],
+        })
+    }
+
+    #[test]
+    fn an_undeclare_carrying_the_ext_keyexpr_is_judged_by_the_rule() {
+        // UndeclareSubscriber is now GOVERNED, under the SAME action as its
+        // declaration (zenoh reuses `DeclareSubscriber` for the pair). The
+        // keyexpr is not inline — it rides the optional `ext_wire_expr`, so this
+        // also proves the enforcer reads that extension and feeds it to the
+        // policy. Both arms of the pair, so the deny is attributable to the rule.
+        let acl = AclInterceptor::new(deny_admin_liveliness_policy(), AclFlow::Ingress);
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
+
+        let denied = build_undeclare_subscriber_with_keyexpr("admin/secret").expect("build");
+        let denied = NetworkMessage::Declare(Box::new(denied));
+        assert_eq!(
+            acl_action(&denied),
+            Some(GovernedAction::undecl(AclMessage::DeclareSubscriber)),
+            "precondition: an undeclare is governed under its declaration's action",
+        );
+        assert_eq!(
+            ctx.full_keyexpr(&denied).as_deref(),
+            Some("admin/secret"),
+            "precondition: the ext_wire_expr is what supplies the keyexpr",
+        );
+        assert!(
+            !acl.intercept(&ctx, &denied),
+            "admin/** undeclare is denied"
+        );
+
+        let allowed = build_undeclare_subscriber_with_keyexpr("demo/data").expect("build");
+        let allowed = NetworkMessage::Declare(Box::new(allowed));
+        assert!(
+            acl.intercept(&ctx, &allowed),
+            "the same kind on an allowed keyexpr passes, so the deny is the RULE"
+        );
+    }
+
+    #[test]
+    fn an_ingress_undeclare_without_the_ext_keyexpr_admits() {
+        // zenoh's DELIBERATE asymmetry, and the one exception to R311y457's
+        // deny-on-unresolvable: an id-only undeclare carries no keyexpr at all,
+        // and on INGRESS zenoh routes it through cached_result_or_action_undecl,
+        // whose None arm answers Allow (:159-166). Routing rejects it anyway if
+        // the declaration it retracts was denied.
+        let acl = AclInterceptor::new(deny_admin_liveliness_policy(), AclFlow::Ingress);
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
+        let undecl = NetworkMessage::Declare(Box::new(build_undeclare_subscriber(7)));
+        assert_eq!(
+            acl_action(&undecl),
+            Some(GovernedAction::undecl(AclMessage::DeclareSubscriber)),
+            "precondition: it IS governed, so it reaches the keyexpr branch",
+        );
+        assert_eq!(
+            ctx.full_keyexpr(&undecl),
+            None,
+            "precondition: an id-only undeclare has no ext_wire_expr to resolve",
+        );
+        assert!(
+            acl.intercept(&ctx, &undecl),
+            "an ingress undeclare with no ext_wire_expr admits"
+        );
+    }
+
+    #[test]
+    fn an_egress_undeclare_without_the_ext_keyexpr_is_denied() {
+        // The PAIR that makes the asymmetry real rather than a blanket softening
+        // of R311y457: the SAME message through an EGRESS enforcer is denied,
+        // because zenoh's egress undeclare arms take the ordinary
+        // `else { return false }` (:762-776) and require the keyexpr. Only the
+        // flow differs between this test and the one above.
+        let acl = AclInterceptor::new(deny_admin_liveliness_policy(), AclFlow::Egress);
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
+        let undecl = NetworkMessage::Declare(Box::new(build_undeclare_subscriber(7)));
+        assert!(
+            !acl.intercept(&ctx, &undecl),
+            "an egress undeclare with no ext_wire_expr is denied"
+        );
+    }
+
+    #[test]
+    fn a_liveliness_token_declaration_is_governed() {
+        // DeclareToken carries its keyexpr INLINE (like DeclareSubscriber) and is
+        // governed as LivelinessToken; its undeclare shares the action.
+        let acl = AclInterceptor::new(deny_admin_liveliness_policy(), AclFlow::Ingress);
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
+
+        let denied = NetworkMessage::Declare(Box::new(
+            build_declare_token(1, 0, Some("admin/secret")).expect("build decl token"),
+        ));
+        assert_eq!(
+            acl_action(&denied),
+            Some(GovernedAction::decl(AclMessage::LivelinessToken)),
+        );
+        assert!(!acl.intercept(&ctx, &denied), "admin/** token is denied");
+
+        let allowed = NetworkMessage::Declare(Box::new(
+            build_declare_token(1, 0, Some("demo/alive")).expect("build decl token"),
+        ));
+        assert!(
+            acl.intercept(&ctx, &allowed),
+            "demo/alive token is admitted"
+        );
+
+        let undecl = build_undeclare_token_with_keyexpr("admin/secret").expect("build");
+        let undecl = NetworkMessage::Declare(Box::new(undecl));
+        assert_eq!(
+            acl_action(&undecl),
+            Some(GovernedAction::undecl(AclMessage::LivelinessToken)),
+            "the undeclare shares the declaration's action",
+        );
+        assert!(!acl.intercept(&ctx, &undecl), "admin/** untoken is denied");
+    }
+
+    #[test]
+    fn a_token_interest_maps_on_its_mode_and_an_untokened_one_is_ungoverned() {
+        // zenoh splits the Interest arms on MODE, not on the token flag: CURRENT
+        // alone is a one-shot liveliness GET (LivelinessQuery), anything with
+        // FUTURE is registering for the stream (DeclareLivelinessSubscriber), and
+        // Final is unfiltered. The mode lives in the outer C / F header bits, so
+        // this also pins that wz reads them from the right byte.
+        let get = NetworkMessage::Interest(
+            build_interest_liveliness_get(1, 0, Some("demo/alive")).expect("build get"),
+        );
+        assert_eq!(
+            acl_action(&get),
+            Some(GovernedAction::decl(AclMessage::LivelinessQuery)),
+            "CURRENT-only is the one-shot GET",
+        );
+
+        let sub = NetworkMessage::Interest(
+            build_interest_liveliness_subscriber(1, false, 0, Some("demo/alive"))
+                .expect("build sub"),
+        );
+        assert_eq!(
+            acl_action(&sub),
+            Some(GovernedAction::decl(
+                AclMessage::DeclareLivelinessSubscriber
+            )),
+            "FUTURE is the subscription",
+        );
+
+        let sub_hist = NetworkMessage::Interest(
+            build_interest_liveliness_subscriber(1, true, 0, Some("demo/alive"))
+                .expect("build sub"),
+        );
+        assert_eq!(
+            acl_action(&sub_hist),
+            Some(GovernedAction::decl(
+                AclMessage::DeclareLivelinessSubscriber
+            )),
+            "CURRENT+FUTURE is still the subscription, not the GET",
+        );
+
+        let fin = NetworkMessage::Interest(build_interest_final(1));
+        assert_eq!(
+            acl_action(&fin),
+            None,
+            "the Final terminator is unfiltered, as in zenoh",
+        );
+
+        // The TOKEN flag is load-bearing on its own, separately from the mode: an
+        // Interest that carries a keyexpr body but NOT the token bit is zenoh's
+        // catch-all `Interest(_)` unfiltered arm. wz has no builder for one (all
+        // three interest builders are liveliness), so this takes the FUTURE
+        // subscription above and clears the body's `to` bit — same message,
+        // one bit different — and asserts that precondition before the claim.
+        let NetworkMessage::Interest(mut untokened) = NetworkMessage::Interest(
+            build_interest_liveliness_subscriber(1, false, 0, Some("demo/alive"))
+                .expect("build sub"),
+        ) else {
+            unreachable!("built as an Interest")
+        };
+        let body = untokened
+            .body
+            .as_mut()
+            .expect("a FUTURE interest has a body");
+        body.header &= !0x08;
+        assert!(!body.to(), "precondition: the TOKENS bit is now clear");
+        let untokened = NetworkMessage::Interest(untokened);
+        assert_eq!(
+            acl_action(&untokened),
+            None,
+            "a non-token Interest is ungoverned even though it carries a keyexpr",
+        );
+    }
+
+    #[test]
+    fn a_liveliness_get_on_a_denied_keyexpr_is_dropped() {
+        // The Interest arm end-to-end, not just its mapping: the keyexpr comes
+        // from the Interest BODY (which zenoh writes only for a non-Final mode),
+        // so this proves the resolver reaches it and the rule adjudicates.
+        let acl = AclInterceptor::new(deny_admin_liveliness_policy(), AclFlow::Ingress);
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
+        let denied = NetworkMessage::Interest(
+            build_interest_liveliness_get(1, 0, Some("admin/secret")).expect("build get"),
+        );
+        assert_eq!(
+            ctx.full_keyexpr(&denied).as_deref(),
+            Some("admin/secret"),
+            "precondition: the keyexpr is read out of the Interest body",
+        );
+        assert!(
+            !acl.intercept(&ctx, &denied),
+            "admin/** liveliness GET denied"
+        );
+
+        let allowed = NetworkMessage::Interest(
+            build_interest_liveliness_get(1, 0, Some("demo/alive")).expect("build get"),
+        );
+        assert!(
+            acl.intercept(&ctx, &allowed),
+            "demo/alive liveliness GET is admitted"
         );
     }
 }

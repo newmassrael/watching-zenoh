@@ -2525,6 +2525,14 @@ async fn run_peer_until(
                 AclMessage::Query,
                 AclMessage::DeclareQueryable,
                 AclMessage::Reply,
+                // R311y458 — the liveliness plane, so `--acl-deny K` means what
+                // it says: a peer denied K cannot assert liveliness on it, nor
+                // register for its token stream, nor snapshot it. Omitting these
+                // would leave the three actions the enforcer now governs
+                // unreachable from the only CLI that installs a policy.
+                AclMessage::LivelinessToken,
+                AclMessage::DeclareLivelinessSubscriber,
+                AclMessage::LivelinessQuery,
             ],
             flow,
             permission: Permission::Deny,

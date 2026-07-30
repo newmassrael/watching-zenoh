@@ -922,15 +922,19 @@ impl LinkstateForwarder {
 /// Resolve the GOVERNED keyexpr a §5.16 ACL enforcer gates for `msg`, alias-aware
 /// against `keyexpr_table` — the SSOT both forwarders' `InterceptorContext::full_keyexpr`
 /// delegate to (one governed-kind match, not one per forwarder). Push / Request /
-/// Response carry the keyexpr inline; a DeclareSubscriber / DeclareQueryable carries
-/// it in the declaration body; any other kind (UndeclareSubscriber / alias
-/// declaration / keyless ResponseFinal / Oam) carries no governed keyexpr and
-/// answers `None`. `None` is NOT an admit verdict: an ungoverned kind admits
-/// because [`acl_action`](crate::interceptor::access_control) returns no action
-/// for it, BEFORE the enforcer asks for a keyexpr at all — a governed kind that
-/// lands here on `None` (an undeclared expr-id, or the empty wireexpr of a
-/// synthesized timeout `Err`) is DENIED, as in every governed zenoh arm.
-/// Adding a new governed kind is a ONE-place edit here.
+/// Response carry the keyexpr inline; a Declare resolves through
+/// [`declare_governed_keyexpr`]; an `Interest` carries it in its (mode != Final)
+/// body; any other kind — an alias declaration, the keyless `ResponseFinal`, an
+/// `Oam` — carries no governed keyexpr and answers `None`.
+///
+/// `None` is NOT an admit verdict: an ungoverned kind admits because
+/// [`acl_action`](crate::interceptor::access_control) returns no action for it,
+/// BEFORE the enforcer asks for a keyexpr at all — a governed kind that lands
+/// here on `None` (an undeclared expr-id, or the empty wireexpr of a synthesized
+/// timeout `Err`) is DENIED, as in every governed zenoh arm. The ONE exception is
+/// an INGRESS undeclare, which zenoh deliberately admits when its `ext_wire_expr`
+/// is unset; the enforcer owns that asymmetry, not this resolver, because it
+/// depends on the flow. Adding a new governed kind is a ONE-place edit here.
 pub(crate) fn resolve_governed_keyexpr(
     msg: &NetworkMessage,
     keyexpr_table: &hashbrown::HashMap<u64, String>,
@@ -939,11 +943,50 @@ pub(crate) fn resolve_governed_keyexpr(
         NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, keyexpr_table),
         NetworkMessage::Request(r) => resolve_wireexpr(&r.keyexpr.body, keyexpr_table),
         NetworkMessage::Response(r) => resolve_wireexpr(&r.keyexpr.body, keyexpr_table),
-        NetworkMessage::Declare(d) => declare_subscriber_wireexpr(d)
-            .or_else(|| declare_queryable_wireexpr(d))
+        NetworkMessage::Declare(d) => declare_governed_keyexpr(d, keyexpr_table),
+        // An Interest carries its keyexpr in the body zenoh writes only when the
+        // mode is not Final (`zenoh-codec network/interest.rs:69-73`), so a Final
+        // Interest answers `None` here — and is ungoverned at the action arm, the
+        // same place zenoh leaves it unfiltered.
+        NetworkMessage::Interest(i) => i
+            .body
+            .as_ref()
+            .and_then(|b| b.keyexpr.as_ref())
             .and_then(|we| resolve_wireexpr(&we.body, keyexpr_table)),
         _ => None,
     }
+}
+
+/// The governed keyexpr of a `Declare`, alias-resolved — the Declare half of
+/// [`resolve_governed_keyexpr`], split out because the six governed declaration
+/// bodies carry their keyexpr in TWO different places.
+///
+/// `DeclareSubscriber` / `DeclareQueryable` / `DeclareToken` carry it INLINE. The
+/// three undeclares carry only `{ id }` on the wire, so zenoh puts the keyexpr in
+/// the optional `ext_wire_expr` extension (`UndeclareSubscriber { id,
+/// ext_wire_expr }`) — read here through the same
+/// [`resolve_ext_keyexpr`](wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr)
+/// SSOT the forwarders' undeclare ingest already uses. An undeclare whose peer
+/// omitted that extension answers `None`, which is not a resolution FAILURE but
+/// an absent field: on ingress the enforcer admits it (zenoh's deliberate
+/// asymmetry, `access_control.rs:472-485`), on egress it denies (`:762-776`).
+fn declare_governed_keyexpr(
+    declare: &DeclareOwned,
+    keyexpr_table: &hashbrown::HashMap<u64, String>,
+) -> Option<String> {
+    if let Some(we) = declare_subscriber_wireexpr(declare)
+        .or_else(|| declare_queryable_wireexpr(declare))
+        .or_else(|| declare_token_wireexpr(declare))
+    {
+        return resolve_wireexpr(&we.body, keyexpr_table);
+    }
+    let exts = match &declare.body {
+        DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
+        DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
+        DeclareOwnedVariant::CodecZenohUndeclToken(u) => u.extensions.as_ref(),
+        _ => return None,
+    };
+    resolve_ext_keyexpr(exts, keyexpr_table)
 }
 
 /// The per-message [`InterceptorContext`] for one face — borrows that face's
@@ -4842,7 +4885,11 @@ pub(crate) fn declare_queryable_wireexpr(declare: &DeclareOwned) -> Option<&Wire
 /// [`declare_subscriber_wireexpr`]; the `DeclareToken` carries its keyexpr
 /// inline (like `DeclareSubscriber`), returned raw (literal OR aliased) so the
 /// caller resolves it against the inbound face's alias table (B1b).
-#[cfg(feature = "routing-token-tables")]
+///
+/// R311y458 dropped the `routing-token-tables` gate: [`resolve_governed_keyexpr`]
+/// calls it on every `routing-peer` build, so it is no longer dead code without
+/// that feature and gating it would only cfg the §5.16 liveliness arms out of
+/// builds that do enforce them.
 pub(crate) fn declare_token_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
     match &declare.body {
         DeclareOwnedVariant::CodecZenohDeclToken(t) => Some(&t.keyexpr),

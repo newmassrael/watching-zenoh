@@ -3236,7 +3236,14 @@ layer_c1y_cargo_test_routing_peer() {
     # feeds the policy), and a `ResponseFinal` admits at the ACTION arm rather
     # than the keyexpr one (which is what makes folding it into the governed
     # `Response` arm red here first).
-    _runci_guarded_test "C1y interceptor" 28 \
+    # R311y458 — 28 -> 34: the six tests for the governed kinds this round added.
+    # Four are the discriminators, each falsified by its own damage: removing the
+    # undeclare / token arms reds four of them; dropping the INGRESS-only
+    # condition on the undeclare admit reds only the egress one; swapping the two
+    # Interest mode arms, or ignoring the body's TOKENS bit, reds only the mode
+    # one. The undeclare pair also proves the enforcer reads the OPTIONAL
+    # ext_wire_expr, which is the only place an undeclare's keyexpr lives.
+    _runci_guarded_test "C1y interceptor" 34 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     _runci_guarded_test "C1y linkstate+access" 211 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1

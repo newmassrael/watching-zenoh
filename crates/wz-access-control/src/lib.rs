@@ -105,13 +105,14 @@ impl AclFlow {
     }
 }
 
-/// The action a rule restricts — zenoh `AclMessage`. Covers the actions a
-/// routing peer's inbound seam processes: the data-plane [`Put`](AclMessage::Put)
-/// / [`Delete`](AclMessage::Delete) (a Push body) and the control-plane
-/// [`DeclareSubscriber`](AclMessage::DeclareSubscriber). The rest of zenoh's set
-/// (`Query`, `Reply`, `DeclareQueryable`, the liveliness actions) arrive as the
-/// enforcer adapter gains each message-kind arm — a non-breaking enum extension,
-/// since [`AclPolicy::decision`] is generic over the action.
+/// The action a rule restricts — zenoh `AclMessage`, and as of R311y458 the
+/// SAME NINE actions in the same order (`zenoh-config/src/lib.rs:354-364`):
+/// the data plane ([`Put`](AclMessage::Put) / [`Delete`](AclMessage::Delete)),
+/// the query plane ([`Query`](AclMessage::Query) / [`Reply`](AclMessage::Reply)
+/// / [`DeclareQueryable`](AclMessage::DeclareQueryable)), the subscription
+/// control plane ([`DeclareSubscriber`](AclMessage::DeclareSubscriber)), and the
+/// three liveliness actions. An action governs BOTH the declare and the
+/// undeclare of its kind, exactly as zenoh reuses one action for the pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AclMessage {
     /// A data Push with a `Put` payload.
@@ -133,6 +134,20 @@ pub enum AclMessage {
     /// A query reply (a `Response`, Reply or Err) — denying it stops a peer from
     /// answering a query on the keyexpr (zenoh `AclMessage::Reply`).
     Reply,
+    /// A liveliness token declaration — denying it stops a peer from asserting
+    /// liveliness on the keyexpr (zenoh `AclMessage::LivelinessToken`). Governs
+    /// the `UndeclareToken` too.
+    LivelinessToken,
+    /// A liveliness SUBSCRIPTION — a token-carrying `Interest` whose mode
+    /// includes FUTURE, i.e. a peer registering for the token stream (zenoh
+    /// `AclMessage::DeclareLivelinessSubscriber`).
+    DeclareLivelinessSubscriber,
+    /// A one-shot liveliness GET — a token-carrying `Interest` whose mode is
+    /// CURRENT only, i.e. a snapshot of the alive matching tokens (zenoh
+    /// `AclMessage::LivelinessQuery`). Separate from
+    /// [`DeclareLivelinessSubscriber`](AclMessage::DeclareLivelinessSubscriber)
+    /// because zenoh splits the Interest arms on mode, not on the token flag.
+    LivelinessQuery,
 }
 
 impl AclMessage {
@@ -146,6 +161,9 @@ impl AclMessage {
             AclMessage::Query => "query",
             AclMessage::DeclareQueryable => "declare_queryable",
             AclMessage::Reply => "reply",
+            AclMessage::LivelinessToken => "liveliness_token",
+            AclMessage::DeclareLivelinessSubscriber => "declare_liveliness_subscriber",
+            AclMessage::LivelinessQuery => "liveliness_query",
         }
     }
 }
@@ -153,9 +171,12 @@ impl AclMessage {
 /// Which subject a rule applies to — the auth-free subset of zenoh's
 /// `SubjectProperty`. [`Any`](SubjectSelector::Any) is zenoh's `Wildcard` (the
 /// rule applies to every peer); [`Zid`](SubjectSelector::Zid) is `Exactly(zid)`
-/// (only that peer). The interface / cert-common-name / username / link-protocol
-/// subjects need transport authentication and are deferred to the §5.16
-/// `access-extauth-*` features.
+/// (only that peer). The link-protocol and interface subjects are NOT here: they
+/// narrow a rule rather than name a peer, so R311y453 put them on
+/// [`AclRule`](AclRule#structfield.link_protocols) instead. What remains absent
+/// from zenoh's `SubjectProperty` set is the cert-common-name and the username
+/// (`interceptor/authorization.rs:40-45`), both of which need transport
+/// authentication — deferred to the §5.16 `access-extauth-*` features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubjectSelector {
     /// Matches every peer (zenoh `SubjectProperty::Wildcard`).
