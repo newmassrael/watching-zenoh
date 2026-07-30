@@ -491,6 +491,13 @@ fn main() -> ExitCode {
                     quic_cert: parse_pair(rest, "--quic-cert"),
                     quic_key: parse_pair(rest, "--quic-key"),
                 },
+                // R311y454 — `--multicast-locator udp/<group>:<port>[#iface=<name>]`:
+                // the router's data-plane multicast group, spelled as a LOCATOR so the
+                // `#iface=` tail is honoured by the same parser every unicast locator
+                // uses. Absent => the historical hardcoded group, unnarrowed. Validated
+                // in `run_router_hat_until` (which owns the group defaults) and a bad
+                // value is a hard error there, not a silent default.
+                parse_pair(rest, "--multicast-locator"),
             );
         }
         #[cfg(not(feature = "router-hat-router"))]
@@ -1699,6 +1706,9 @@ fn run_router_hat_mode(
     multicast_qos: bool,
     zid_override: Option<Vec<u8>>,
     cert_paths: crate::runner::AcceptCertPaths,
+    // R311y454 — `--multicast-locator`, the router's data-plane group as a locator
+    // so its `#iface=` tail reaches the multicast honor.
+    multicast_locator: Option<String>,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -1715,6 +1725,7 @@ fn run_router_hat_mode(
         multicast_qos,
         zid_override,
         &cert_paths,
+        multicast_locator.as_deref(),
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

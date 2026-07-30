@@ -229,6 +229,19 @@ quic-datagram = ["quic", "wz/transport-link-quic-datagram"]
 # the wire — the plumbing the routing-namespace cross-impl leg 18 exercises
 # against a zenohd router + a zenoh-pico `<prefix>/**` subscriber.
 namespace = ["wz/routing-namespace"]
+# R311y454 — opt-in `#iface=<name>` locator HONOR, forwarding the wz facade's
+# `locator-iface` (which pulls socket2 for SO_BINDTODEVICE and, since this round,
+# the getifaddrs resolver the multicast half needs). NOT in `default`: the honor
+# costs two deps and the demo's other lanes do not narrow interfaces.
+#
+# Why the demo needs the key at all, rather than the framework flag being enough:
+# the A4 cross-impl gate requires every `active` atom that a proof CLAIMS to sit
+# inside the feature closure of a crate the proof builds (`crossimpl_audit.py`
+# containment). `locator-iface` was in NEITHER the wz-integration-tests nor the
+# wz-ap-demo closure, so a `// wz-proves: locator-iface` claim would have failed
+# containment no matter how good the test was. run-ci Layer Z's wz-ap-demo build
+# carries it for exactly that reason.
+locator-iface = ["wz/locator-iface"]
 # R311y428 — opt-in ACTIVE multicast scouting (`--scout`), forwarding the wz
 # facade's `scouting-active` (which pulls the wz-runtime-tokio scouting FSM +
 # glue, and with them transport-link-udp + codec-scout + codec-hello). The
