@@ -59,6 +59,29 @@
 //! device path it opens would carry `#baudrate=115200` and the open would
 //! fail with ENOENT.
 //!
+//! ## Why the claim is `partial` — a MEASURED divergence, not a hedge
+//!
+//! The two grammars agree on the shape this test drives and DISAGREE on
+//! zenoh's `?<metadata>` separator, which wz does not split on any leaf
+//! (`locator.rs` says so for the IP leaf; the serial leaf inherits it by
+//! splitting `#` out of `rest` directly). Both halves were measured, not
+//! reasoned, by handing the SAME string to each stack:
+//!
+//! - `serial/<dev>#baudrate=115200` — pico opens the device and writes
+//!   `020101010101010100` (COBS of header INIT / len 0 / crc32 0); wz
+//!   parses `Device("<dev>")`. AGREE, and that is what the e2e below runs.
+//! - `serial/<dev>` (no tail) — pico writes nothing and prints "Unable to
+//!   open session!", i.e. its baudrate genuinely comes from the
+//!   `#`-delimited config map and is REQUIRED.
+//! - `serial/<dev>?meta=x#baudrate=115200` — pico still opens `<dev>` (it
+//!   cuts the address at `?`); wz yields `Device("<dev>?meta=x")` and
+//!   `accept_serial` fails `NotFound`. DIVERGE.
+//!
+//! So the atom is witnessed on the `#config` shape and carries a named
+//! residual on the `?metadata` shape. Making it whole is a decision about
+//! the WHOLE locator surface — every leaf ignores `?` today — not a
+//! serial-local patch, so it is recorded rather than quietly fixed here.
+//!
 //! That the split is load-bearing HERE — and not merely asserted here — was
 //! measured, not argued: with `parse_serial_locator` changed to leave the
 //! tail on the address AND this file's parse assertions bypassed, the run
@@ -132,7 +155,7 @@ struct Captured {
     fired: usize,
 }
 
-// wz-proves: locator-serial pico->wz
+// wz-proves: locator-serial pico->wz partial
 // wz-proves: transport-link-serial pico->wz partial
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_pub built with Z_FEATURE_LINK_SERIAL); Layer E runs via --ignored"]
