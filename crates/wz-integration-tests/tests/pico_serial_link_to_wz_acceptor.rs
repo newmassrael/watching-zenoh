@@ -49,38 +49,40 @@
 //!
 //! ## What would break it
 //!
-//! wz's `parse_serial_locator` (`wz-session-core/src/locator.rs:306`) splits
-//! the config tail at `#` and the pin form at `.`; pico's
-//! `_z_serial_endpoint_parse` (`serial_protocol.c:79`) takes its address
-//! from `_z_locator_t::_address` — cut at `?` or `#`
+//! wz's `parse_serial_locator` (`wz-session-core/src/locator.rs`) takes the
+//! ADDRESS span — cut at whichever of `?` / `#` comes first — and the pin
+//! form at `.`; pico's `_z_serial_endpoint_parse` (`serial_protocol.c:79`)
+//! takes its address from `_z_locator_t::_address` — cut at `?` or `#`
 //! (`endpoint.c:123-127`) — and its baudrate from the `#`-delimited
 //! ENDPOINT CONFIG map (`endpoint.c:388`, key `"baudrate"`,
 //! `link/config/serial.h:31`). Had wz cut the tail anywhere else, the
-//! device path it opens would carry `#baudrate=115200` and the open would
-//! fail with ENOENT.
+//! device path it opens would carry the tail and the open would fail ENOENT.
 //!
-//! ## Why the claim is `partial` — a MEASURED divergence, not a hedge
+//! ## Both locator SHAPES are driven — the R311y467 residual, closed
 //!
-//! The two grammars agree on the shape this test drives and DISAGREE on
-//! zenoh's `?<metadata>` separator, which wz does not split on any leaf
-//! (`locator.rs` says so for the IP leaf; the serial leaf inherits it by
-//! splitting `#` out of `rest` directly). Both halves were measured, not
-//! reasoned, by handing the SAME string to each stack:
+//! R311y466 hardened ONE shape and R311y467 had to downgrade the claim to
+//! `partial`, because handing the SAME string to both stacks across the
+//! shape SPACE found a real divergence. Measured then, and the reason this
+//! file now runs two arms rather than one:
 //!
 //! - `serial/<dev>#baudrate=115200` — pico opens the device and writes
 //!   `020101010101010100` (COBS of header INIT / len 0 / crc32 0); wz
-//!   parses `Device("<dev>")`. AGREE, and that is what the e2e below runs.
+//!   parsed `Device("<dev>")`. AGREE.
 //! - `serial/<dev>` (no tail) — pico writes nothing and prints "Unable to
 //!   open session!", i.e. its baudrate genuinely comes from the
 //!   `#`-delimited config map and is REQUIRED.
-//! - `serial/<dev>?meta=x#baudrate=115200` — pico still opens `<dev>` (it
-//!   cuts the address at `?`); wz yields `Device("<dev>?meta=x")` and
-//!   `accept_serial` fails `NotFound`. DIVERGE.
+//! - `serial/<dev>?meta=x#baudrate=115200` — pico still opened `<dev>` (it
+//!   cuts the address at `?`); wz yielded `Device("<dev>?meta=x")` and
+//!   `accept_serial` failed `NotFound`. DIVERGED.
 //!
-//! So the atom is witnessed on the `#config` shape and carries a named
-//! residual on the `?metadata` shape. Making it whole is a decision about
-//! the WHOLE locator surface — every leaf ignores `?` today — not a
-//! serial-local patch, so it is recorded rather than quietly fixed here.
+//! R311y469 closed that by giving EVERY leaf zenoh's canon three-way split
+//! (`split_locator_parts`), so the shape space is now driven rather than
+//! described: [`pico_serial_client_establishes_and_publishes_to_wz_acceptor`]
+//! runs the `#config` shape and
+//! [`pico_serial_client_establishes_over_a_metadata_bearing_locator`] runs the
+//! `?metadata#config` shape, both handing the identical string to pico and to
+//! wz. A cross-impl grammar claim needs the shape SPACE enumerated, which is
+//! the lesson R311y467 recorded and this file now implements.
 //!
 //! That the split is load-bearing HERE — and not merely asserted here — was
 //! measured, not argued: with `parse_serial_locator` changed to leave the
@@ -155,11 +157,34 @@ struct Captured {
     fired: usize,
 }
 
-// wz-proves: locator-serial pico->wz partial
+/// The shape both stacks already agreed on before R311y469: no metadata span.
+const METADATA_ABSENT: &str = "";
+/// The `?metadata` span R311y467 measured as DIVERGENT. pico cut the address
+/// at `?` and opened the device; wz carried `?meta=x` into the device path and
+/// failed the open. Driving it is what closes that residual.
+const METADATA_PRESENT: &str = "?meta=x";
+
+// wz-proves: locator-serial pico->wz
 // wz-proves: transport-link-serial pico->wz partial
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_pub built with Z_FEATURE_LINK_SERIAL); Layer E runs via --ignored"]
 async fn pico_serial_client_establishes_and_publishes_to_wz_acceptor() {
+    serial_interop_over_metadata_span(METADATA_ABSENT).await;
+}
+
+// wz-proves: locator-serial pico->wz
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "binary-dep e2e (zenoh-pico CLI z_pub built with Z_FEATURE_LINK_SERIAL); Layer E runs via --ignored"]
+async fn pico_serial_client_establishes_over_a_metadata_bearing_locator() {
+    serial_interop_over_metadata_span(METADATA_PRESENT).await;
+}
+
+/// One pico->wz serial interop run, parameterised on the `?metadata` span so
+/// the two arms differ in NOTHING else: the `#baudrate=` config span is built
+/// identically from [`BAUDRATE`] in both, because that is where pico reads the
+/// speed from. The metadata span is therefore the only variable, which is what
+/// makes the second arm a measurement of the grammar rather than of the link.
+async fn serial_interop_over_metadata_span(metadata: &str) {
     let z_pub = zenoh_pico_cli_binary("z_pub");
 
     // ── The wire: two pty pairs, masters pumped into each other. wz takes
@@ -167,13 +192,13 @@ async fn pico_serial_client_establishes_and_publishes_to_wz_acceptor() {
     //    file descriptor.
     let wz_end = pty_end();
     let pico_end = pty_end();
-    let wz_locator = format!("serial/{}#baudrate={BAUDRATE}", wz_end.path);
-    let pico_locator = format!("serial/{}#baudrate={BAUDRATE}", pico_end.path);
+    let wz_locator = format!("serial/{}{metadata}#baudrate={BAUDRATE}", wz_end.path);
+    let pico_locator = format!("serial/{}{metadata}#baudrate={BAUDRATE}", pico_end.path);
     tokio::spawn(bridge(wz_end.master, pico_end.master));
 
-    // ── THE ATOM'S OWN CODE. `parse_serial_locator` must cut the config
-    //    tail exactly where pico's endpoint parser cuts it; the assertions
-    //    name the split rather than trusting the open to imply it.
+    // ── THE ATOM'S OWN CODE. `parse_serial_locator` must cut the tail exactly
+    //    where pico's endpoint parser cuts it; the assertions name the split
+    //    rather than trusting the open to imply it.
     let parsed = parse_any_locator(&wz_locator).expect("wz parses its own serial locator");
     let endpoint = match parsed {
         AnyLocator::Serial(ep) => ep,
@@ -182,7 +207,8 @@ async fn pico_serial_client_establishes_and_publishes_to_wz_acceptor() {
     assert_eq!(
         endpoint.target,
         SerialTarget::Device(wz_end.path.clone()),
-        "the device path stops at `#` — the config tail is not part of it"
+        "the device path stops at the first `?` or `#` — no tail is part of it \
+         (locator `{wz_locator}`)"
     );
     assert_eq!(
         endpoint.baudrate, BAUDRATE,

@@ -58,16 +58,30 @@
 //! decided here — resolution stays an AP-side (`std`) concern, out of this
 //! no_std-compatible parse (the dial seam resolves a `Named` tcp endpoint).
 //!
-//! R311y236 — the `#`-delimited config tail IS now parsed on the IP leaf:
+//! R311y236 — the `#`-delimited config tail IS parsed on the IP leaf:
 //! [`parse_locator`] / [`classify_named_ip`] split it off before the addr parse
 //! and extract `iface=<name>` (zenoh `BIND_INTERFACE`) into
 //! [`ParsedLocator::iface`] / [`AnyLocator::Named`], so
-//! `udp/1.2.3.4:7447#iface=eth0` now parses (the runtime dial/listen seam binds
+//! `udp/1.2.3.4:7447#iface=eth0` parses (the runtime dial/listen seam binds
 //! the socket to the NIC via `SO_BINDTODEVICE` under the `locator-iface`
 //! feature). Config keys OTHER than `iface` are accepted-then-ignored
-//! (forward-compat), and zenoh's `?`-delimited METADATA separator is NOT split
-//! (wz carries no `?metadata` grammar) — both are silent, so a dial-semantic
-//! config key beyond `iface` would not take effect.
+//! (forward-compat).
+//!
+//! R311y469 — the full canon `<proto>/<address>[?<metadata>][#<config>]`
+//! (`zenoh-protocol/src/core/endpoint.rs:460`) is now honoured on EVERY leaf
+//! through the one shared [`split_locator_parts`] seam. Before it the leaves
+//! split only `#` — and unixsock / unixpipe split nothing at all — so a canon
+//! locator carrying metadata pushed it into the ADDRESS: R311y467 measured pico
+//! opening `<dev>` from `serial/<dev>?meta=x#baudrate=115200` while wz built the
+//! device path `<dev>?meta=x` and failed the open with `NotFound`.
+//!
+//! Of the metadata vocabulary only `rel` is HONOURED, and only where it changes
+//! which link is dialed: on the `quic` scheme `rel=0` selects the QUIC DATAGRAM
+//! link, because zenoh gives both QUIC links the same `"quic"` scheme string and
+//! separates them by that key alone (`io/zenoh-link/src/lib.rs:165-171`). See
+//! [`reliability_adjusted_proto`]. `prio` (priority-range link selection) and
+//! `rel` on the other schemes are parsed and NOT honoured — they belong to the
+//! `transport-multilink` and reliability axes, and are not claimed here.
 //!
 //! Still surfaced as parse errors rather than silently mis-parsed:
 //! - other transports not yet wired (`bt/...`).
@@ -188,52 +202,159 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
         "quic-datagram" => Proto::QuicDatagram,
         other => return Err(LocatorParseError::UnknownProto(other.to_string())),
     };
-    // R311y236 — split off the `#`-delimited config tail (zenoh
-    // `CONFIG_SEPARATOR`, endpoint.rs:24) BEFORE the numeric addr parse: the
-    // address is the part before `#`, the config carries `iface=<name>` (the
-    // only key wz honours; unknown keys are ignored for forward-compat). This
-    // flips the pre-R311y236 reject where the raw `1.2.3.4:7447#iface=eth0`
-    // string failed `SocketAddr::from_str` as `BadAddress`.
-    let (numeric, config) = split_config_tail(addr_str);
-    let addr = SocketAddr::from_str(numeric)
-        .map_err(|_| LocatorParseError::BadAddress(numeric.to_string()))?;
+    // R311y236 / R311y469 — cut the address off the `?metadata` / `#config`
+    // spans BEFORE the numeric addr parse: the config carries `iface=<name>`
+    // (the only config key wz honours) and the metadata carries `rel`, which on
+    // the `quic` scheme selects the datagram link. This flips both the
+    // pre-R311y236 reject of `1.2.3.4:7447#iface=eth0` and the pre-R311y469
+    // reject of `1.2.3.4:7447?prio=1-3`, each of which failed
+    // `SocketAddr::from_str` as `BadAddress` with the tail still attached.
+    let parts = split_locator_parts(addr_str);
+    let proto = reliability_adjusted_proto(proto, parts.metadata);
+    let addr = SocketAddr::from_str(parts.address)
+        .map_err(|_| LocatorParseError::BadAddress(parts.address.to_string()))?;
     Ok(ParsedLocator {
         proto,
         addr,
-        iface: parse_iface(config),
+        iface: parse_iface(parts.config),
     })
 }
 
-/// R311y236 — split an IP address token into its numeric `addr:port` head and
-/// its `#`-delimited config tail (zenoh's `CONFIG_SEPARATOR`). No `#` => the
-/// whole token is the address and the config is empty. Shared by the numeric
-/// [`parse_locator`] and the DNS-name [`classify_named_ip`] so the two agree on
-/// where the address ends and the config begins.
-fn split_config_tail(addr_token: &str) -> (&str, &str) {
-    match addr_token.split_once('#') {
-        Some((addr, config)) => (addr, config),
-        None => (addr_token, ""),
-    }
-}
+/// zenoh's locator separators (`zenoh-protocol/src/core/endpoint.rs:22-24`),
+/// mirrored by pico (`include/zenoh-pico/link/endpoint.h:49,71`).
+const LOCATOR_METADATA_SEPARATOR: char = '?';
+const LOCATOR_CONFIG_SEPARATOR: char = '#';
 
-/// R311y236 — extract the optional `iface=<name>` interface-binding name from
-/// the `;`-delimited `key=value` config tail (zenoh `BIND_INTERFACE = "iface"`,
-/// zenoh-link-commons/src/lib.rs:52). Unknown keys are ignored (forward-compat
-/// with zenoh's richer config grammar); an empty value or an absent `iface` key
-/// yields `None`. Pure alloc string work, like [`parse_baudrate`].
-fn parse_iface(config: &str) -> Option<String> {
-    for pair in config.split(';') {
-        if let Some((key, value)) = pair.split_once('=') {
-            if key == LOCATOR_IFACE_KEY && !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
-}
+/// The `key=value` list grammar SHARED by the metadata and config spans
+/// (zenoh routes both through one `parameters` module —
+/// `zenoh-protocol/src/core/parameters.rs:32-33`).
+const LOCATOR_PARAM_LIST_SEPARATOR: char = ';';
+const LOCATOR_PARAM_FIELD_SEPARATOR: char = '=';
 
 /// zenoh `BIND_INTERFACE` config key (`io/zenoh-link-commons/src/lib.rs:52`).
 const LOCATOR_IFACE_KEY: &str = "iface";
+
+/// zenoh `Metadata::RELIABILITY` metadata key
+/// (`zenoh-protocol/src/core/endpoint.rs:196`).
+const LOCATOR_RELIABILITY_KEY: &str = "rel";
+
+/// `rel=0` = `Reliability::BestEffort` (`zenoh-protocol/src/core/mod.rs:460-463`;
+/// the default when the key is absent is `Reliable`).
+const LOCATOR_RELIABILITY_BEST_EFFORT: &str = "0";
+
+/// R311y469 — the three spans of a locator BODY (everything after the
+/// `<proto>/` separator) under zenoh's canon form
+/// `<proto>/<address>[?<metadata>][#<config>]`
+/// (`zenoh-protocol/src/core/endpoint.rs:460`).
+///
+/// Borrowed slices, so the split allocates nothing and every leaf can share it.
+struct LocatorParts<'a> {
+    /// Up to whichever of `?` / `#` comes first — zenoh `address()`
+    /// (endpoint.rs:32-37), pico `_z_locator_address_from_string`
+    /// (src/link/endpoint.c:110-137).
+    address: &'a str,
+    /// Between `?` and the following `#` — zenoh `metadata()` (endpoint.rs:39-47).
+    /// Empty when there is no `?`.
+    metadata: &'a str,
+    /// Everything after the first `#` — zenoh `config()` (endpoint.rs:49-54).
+    /// Empty when there is no `#`.
+    config: &'a str,
+}
+
+/// R311y469 — split a locator body into address / metadata / config, mirroring
+/// zenoh's three accessors. The single seam EVERY leaf goes through, so no leaf
+/// can drift on where the address ends.
+///
+/// Before R311y469 the leaves split only `#` (and unixsock / unixpipe split
+/// nothing at all), so a canon locator carrying `?<metadata>` pushed it into the
+/// ADDRESS: R311y467 measured pico opening `<dev>` from
+/// `serial/<dev>?meta=x#baudrate=115200` while wz built the device path
+/// `<dev>?meta=x` and failed the open.
+///
+/// zenoh's own `metadata()` would panic on the non-canon order `#` before `?`
+/// (a reversed slice); its `EndPoint::try_from` rejects that string outright
+/// (endpoint.rs:626-630). Here the metadata span is simply empty in that case,
+/// which agrees with zenoh byte-for-byte on every string zenoh accepts and
+/// keeps `address` / `config` equal to its accessors on the rest.
+fn split_locator_parts(body: &str) -> LocatorParts<'_> {
+    let midx = body.find(LOCATOR_METADATA_SEPARATOR);
+    let cidx = body.find(LOCATOR_CONFIG_SEPARATOR);
+    let address_end = match (midx, cidx) {
+        (Some(m), Some(c)) => m.min(c),
+        (Some(m), None) => m,
+        (None, Some(c)) => c,
+        (None, None) => body.len(),
+    };
+    let metadata = match (midx, cidx) {
+        (Some(m), Some(c)) if m < c => &body[m + 1..c],
+        (Some(m), None) => &body[m + 1..],
+        _ => "",
+    };
+    let config = match cidx {
+        Some(c) => &body[c + 1..],
+        None => "",
+    };
+    LocatorParts {
+        address: &body[..address_end],
+        metadata,
+        config,
+    }
+}
+
+/// R311y469 — look one key up in a `;`-delimited `key=value` list. The metadata
+/// and config spans share this grammar in zenoh (one `parameters` module serves
+/// both, parameters.rs:32-33), so they share it here too. Unknown keys are
+/// ignored — forward-compat with zenoh's richer vocabulary.
+fn lookup_param<'a>(params: &'a str, key: &str) -> Option<&'a str> {
+    params
+        .split(LOCATOR_PARAM_LIST_SEPARATOR)
+        .filter_map(|pair| pair.split_once(LOCATOR_PARAM_FIELD_SEPARATOR))
+        .find(|(k, _)| *k == key)
+        .map(|(_, value)| value)
+}
+
+/// R311y236 — extract the optional `iface=<name>` interface-binding name from
+/// the `#`-delimited CONFIG span (zenoh `BIND_INTERFACE = "iface"`,
+/// zenoh-link-commons/src/lib.rs:52). An empty value or an absent `iface` key
+/// yields `None`. Pure alloc string work, like [`parse_baudrate`].
+///
+/// R311y469 — takes the config span specifically, never the metadata one: the
+/// two are distinct namespaces in zenoh even though they share a grammar, so
+/// `?iface=eth0` is NOT a NIC bind.
+fn parse_iface(config: &str) -> Option<String> {
+    lookup_param(config, LOCATOR_IFACE_KEY)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+/// R311y469 — apply the one metadata key that SELECTS A LINK KIND rather than
+/// merely annotating one: on the `quic` scheme, `rel=0` (BestEffort) picks
+/// zenoh's QUIC DATAGRAM link and anything else picks the QUIC stream link
+/// (`io/zenoh-link/src/lib.rs:165-171`, via `QuicLocatorInspector::is_reliable`,
+/// `zenoh-link-quic/src/lib.rs:59-70`).
+///
+/// zenoh gives both links the SAME locator scheme — `QUIC_LOCATOR_PREFIX` and
+/// `QUIC_DATAGRAM_LOCATOR_PREFIX` are both `"quic"`
+/// (`zenoh-link-quic/src/lib.rs:42`, `zenoh-link-quic_datagram/src/lib.rs:35`)
+/// — so `rel` is the ONLY thing separating them on the wire-visible string. wz
+/// additionally exposes the distinct `quic-datagram` scheme (see
+/// [`Proto::QuicDatagram`]); that wz-only spelling states the choice outright
+/// and does not consult `rel`. This mapping is what lets wz CONSUME the
+/// zenoh-canonical spelling instead of dialing a stream where zenoh dials a
+/// datagram.
+///
+/// Every OTHER metadata key is parsed and not honoured — `prio` (link selection
+/// by priority range, endpoint.rs:464-470) belongs to `transport-multilink`, and
+/// `rel` on the non-`quic` schemes to the reliability axis; neither is claimed
+/// here.
+fn reliability_adjusted_proto(proto: Proto, metadata: &str) -> Proto {
+    if proto == Proto::Quic
+        && lookup_param(metadata, LOCATOR_RELIABILITY_KEY) == Some(LOCATOR_RELIABILITY_BEST_EFFORT)
+    {
+        return Proto::QuicDatagram;
+    }
+    proto
+}
 
 // ─── serial locator leaf ───
 //
@@ -311,15 +432,15 @@ pub fn parse_serial_locator(locator: &str) -> Result<SerialEndpoint, SerialLocat
         return Err(SerialLocatorError::NotSerialScheme);
     }
 
-    let (address, config) = match rest.split_once('#') {
-        Some((addr, cfg)) => (addr, cfg),
-        None => (rest, ""),
-    };
+    // R311y469 — the shared canon split, so a `?<metadata>` span no longer ends
+    // up inside the device path (the divergence R311y467 measured against pico).
+    let parts = split_locator_parts(rest);
+    let address = parts.address;
     if address.is_empty() {
         return Err(SerialLocatorError::EmptyAddress);
     }
 
-    let baudrate = parse_baudrate(config)?;
+    let baudrate = parse_baudrate(parts.config)?;
 
     let target = match address.split_once('.') {
         Some((tx_str, rx_str)) => {
@@ -414,12 +535,18 @@ const UNIXSOCK_SCHEME: &str = "unixsock-stream";
 /// [`parse_serial_locator`] (serial); [`parse_any_locator`] is the
 /// scheme-dispatcher delegating to the three leaves.
 pub fn parse_unixsock_locator(locator: &str) -> Result<UnixsockEndpoint, UnixsockLocatorError> {
-    let (scheme, path) = locator
+    let (scheme, body) = locator
         .split_once('/')
         .ok_or(UnixsockLocatorError::NotUnixsockScheme)?;
     if scheme != UNIXSOCK_SCHEME {
         return Err(UnixsockLocatorError::NotUnixsockScheme);
     }
+    // R311y469 — the path is the ADDRESS span, not the whole remainder. This
+    // leaf took the remainder verbatim, so it carried BOTH a `?metadata` and a
+    // `#config` tail into the socket path; zenoh cuts at either (endpoint.rs:32-37).
+    // A path containing `#` or `?` is unaddressable in zenoh and pico too — the
+    // limitation is the grammar's, and mirroring it is the point.
+    let path = split_locator_parts(body).address;
     if path.is_empty() {
         return Err(UnixsockLocatorError::EmptyPath);
     }
@@ -465,12 +592,15 @@ const UNIXPIPE_SCHEME: &str = "unixpipe";
 /// absolute path keeps its leading `/`: `unixpipe//tmp/wz.pipe` -> path
 /// `/tmp/wz.pipe`). An empty path is rejected ([`UnixpipeLocatorError::EmptyPath`]).
 pub fn parse_unixpipe_locator(locator: &str) -> Result<UnixpipeEndpoint, UnixpipeLocatorError> {
-    let (scheme, path) = locator
+    let (scheme, body) = locator
         .split_once('/')
         .ok_or(UnixpipeLocatorError::NotUnixpipeScheme)?;
     if scheme != UNIXPIPE_SCHEME {
         return Err(UnixpipeLocatorError::NotUnixpipeScheme);
     }
+    // R311y469 — the FIFO-pair base path is the ADDRESS span, exactly as for
+    // the unixsock sibling above.
+    let path = split_locator_parts(body).address;
     if path.is_empty() {
         return Err(UnixpipeLocatorError::EmptyPath);
     }
@@ -550,12 +680,15 @@ const VSOCK_SCHEME: &str = "vsock";
 /// (serial) and [`parse_unixsock_locator`] (unixsock); [`parse_any_locator`]
 /// is the scheme-dispatcher delegating to the four leaves.
 pub fn parse_vsock_locator(locator: &str) -> Result<VsockEndpoint, VsockLocatorError> {
-    let (scheme, addr) = locator
+    let (scheme, body) = locator
         .split_once('/')
         .ok_or(VsockLocatorError::NotVsockScheme)?;
     if scheme != VSOCK_SCHEME {
         return Err(VsockLocatorError::NotVsockScheme);
     }
+    // R311y469 — the `<CID>:<PORT>` pair is the ADDRESS span; without the cut a
+    // `?metadata` / `#config` tail landed in the PORT token and failed BadPort.
+    let addr = split_locator_parts(body).address;
     // Exactly `<CID>:<PORT>` — zenoh's `split(':')` requires len == 2, so a
     // missing or extra `:` is rejected (an empty CID/PORT then fails its own
     // numeric parse below).
@@ -794,11 +927,14 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, Option<String
         "quic-datagram" => Proto::QuicDatagram,
         _ => return None,
     };
-    // R311y236 — strip the `#`-delimited config tail before shape-classifying
-    // the host:port, so a DNS-named locator carries its `iface=` bind exactly
-    // like the numeric leaf (else `example.org:7447#iface=eth0` would look
-    // malformed and reject). Shared `split_config_tail` keeps the two agreeing.
-    let (addr, config) = split_config_tail(addr);
+    // R311y236 / R311y469 — strip the `?metadata` / `#config` spans before
+    // shape-classifying the host:port, so a DNS-named locator carries its
+    // `iface=` bind and its `rel=` link-kind choice exactly like the numeric
+    // leaf (else `example.org:7447#iface=eth0` would look malformed and
+    // reject). The shared `split_locator_parts` keeps the two agreeing.
+    let parts = split_locator_parts(addr);
+    let proto = reliability_adjusted_proto(proto, parts.metadata);
+    let (addr, config) = (parts.address, parts.config);
     // A bracketed address is an IPv6 literal; if it did not parse as a
     // SocketAddr above, it is malformed, not a name.
     if addr.starts_with('[') {
@@ -1367,6 +1503,237 @@ mod tests {
         assert_eq!(
             parse_serial_locator("serial/0.13#baudrate=9600"),
             Err(SerialLocatorError::BadNumber("0".to_string()))
+        );
+    }
+
+    // ─── R311y469: the `?<metadata>` separator, on every leaf ───
+    //
+    // zenoh canon is `<proto>/<address>[?<metadata>][#<config>]`
+    // (zenoh-protocol/src/core/endpoint.rs:460); `address()` (:32-37) cuts at
+    // whichever of `?` / `#` comes FIRST, `metadata()` (:39-47) is the span
+    // between them, `config()` (:49-54) is everything after the first `#`.
+    // pico agrees (endpoint.h:49,71; endpoint.c:110-137). Before R311y469 wz
+    // split only `#`, so a canon locator carrying metadata pushed it into the
+    // ADDRESS on every leaf. R311y467 measured that on serial against pico.
+
+    #[test]
+    fn ip_leaf_cuts_address_at_the_metadata_separator() {
+        // `?prio=1-3` is metadata, not part of the numeric addr.
+        let p = parse_locator("tcp/1.2.3.4:7447?prio=1-3").expect("metadata tail parses");
+        assert_eq!(p.proto, Proto::Tcp);
+        assert_eq!(p.addr, "1.2.3.4:7447".parse::<SocketAddr>().unwrap());
+        assert_eq!(p.iface, None);
+    }
+
+    #[test]
+    fn ip_leaf_takes_metadata_and_config_together() {
+        // The full canon shape: address | metadata | config, in that order.
+        let p = parse_locator("udp/1.2.3.4:7447?prio=1-3;rel=0#iface=eth0")
+            .expect("metadata+config parses");
+        assert_eq!(p.proto, Proto::Udp);
+        assert_eq!(p.addr, "1.2.3.4:7447".parse::<SocketAddr>().unwrap());
+        assert_eq!(p.iface.as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn ip_leaf_does_not_read_config_keys_out_of_metadata() {
+        // DISCRIMINATOR: a fix that merely cut on `[?#]` and fed the whole tail
+        // to the config parser would wrongly honour this as a NIC bind. `iface`
+        // is a CONFIG key (zenoh BIND_INTERFACE); in the metadata span it is
+        // not a bind.
+        let p = parse_locator("tcp/1.2.3.4:7447?iface=eth0").expect("addr parses");
+        assert_eq!(p.addr, "1.2.3.4:7447".parse::<SocketAddr>().unwrap());
+        assert_eq!(p.iface, None);
+    }
+
+    #[test]
+    fn named_ip_cuts_address_at_the_metadata_separator() {
+        // The DNS-name classifier shares the split, so a named locator carrying
+        // metadata still classifies (and still carries its `#iface=` bind).
+        assert_eq!(
+            parse_any_locator("tcp/example.org:7447?rel=0#iface=eth0"),
+            Ok(AnyLocator::Named {
+                proto: Proto::Tcp,
+                host: "example.org".to_string(),
+                port: 7447,
+                iface: Some("eth0".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn serial_leaf_cuts_device_at_the_metadata_separator() {
+        // R311y467's MEASURED divergence: pico opened `<dev>` from
+        // `serial/<dev>?meta=x#baudrate=115200` while wz yielded the device
+        // `<dev>?meta=x` and failed the open with NotFound.
+        assert_eq!(
+            parse_serial_locator("serial//dev/ttyUSB0?meta=x#baudrate=115200"),
+            Ok(SerialEndpoint {
+                target: SerialTarget::Device("/dev/ttyUSB0".to_string()),
+                baudrate: 115200,
+            })
+        );
+    }
+
+    #[test]
+    fn serial_leaf_does_not_read_baudrate_out_of_metadata() {
+        // DISCRIMINATOR, as for `iface` above: `baudrate` is a CONFIG key
+        // (pico config/serial.h:29-52). In the metadata span it is absent,
+        // so the required-baudrate reject must still fire.
+        assert_eq!(
+            parse_serial_locator("serial//dev/ttyUSB0?baudrate=115200"),
+            Err(SerialLocatorError::MissingBaudrate)
+        );
+    }
+
+    #[test]
+    fn serial_leaf_still_reports_an_empty_address_before_metadata() {
+        assert_eq!(
+            parse_serial_locator("serial/?meta=x#baudrate=115200"),
+            Err(SerialLocatorError::EmptyAddress)
+        );
+    }
+
+    #[test]
+    fn unixsock_leaf_cuts_path_at_both_separators() {
+        // The unixsock leaf took the whole remainder VERBATIM, so it carried
+        // BOTH separators into the socket path — the `#config` hole here is
+        // wider than the IP leaf's and predates the metadata one.
+        assert_eq!(
+            parse_unixsock_locator("unixsock-stream//tmp/zenoh.sock?meta=x#iface=eth0"),
+            Ok(UnixsockEndpoint {
+                path: "/tmp/zenoh.sock".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn unixpipe_leaf_cuts_path_at_both_separators() {
+        assert_eq!(
+            parse_unixpipe_locator("unixpipe//tmp/wz.pipe?meta=x#iface=eth0"),
+            Ok(UnixpipeEndpoint {
+                path: "/tmp/wz.pipe".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn vsock_leaf_cuts_address_at_both_separators() {
+        assert_eq!(
+            parse_vsock_locator("vsock/2:7447?prio=1-3#iface=eth0"),
+            Ok(VsockEndpoint { cid: 2, port: 7447 })
+        );
+    }
+
+    #[test]
+    fn parse_any_routes_every_scheme_past_a_metadata_tail() {
+        // The dispatcher must reach each leaf with the tail present, not only
+        // the leaf called directly.
+        assert!(matches!(
+            parse_any_locator("tcp/1.2.3.4:7447?prio=1-3"),
+            Ok(AnyLocator::Ip(_))
+        ));
+        assert!(matches!(
+            parse_any_locator("serial//dev/ttyUSB0?meta=x#baudrate=115200"),
+            Ok(AnyLocator::Serial(_))
+        ));
+        assert!(matches!(
+            parse_any_locator("unixsock-stream//tmp/z.sock?meta=x"),
+            Ok(AnyLocator::Unixsock(_))
+        ));
+        assert!(matches!(
+            parse_any_locator("unixpipe//tmp/z.pipe?meta=x"),
+            Ok(AnyLocator::Unixpipe(_))
+        ));
+        assert!(matches!(
+            parse_any_locator("vsock/2:7447?prio=1-3"),
+            Ok(AnyLocator::Vsock(_))
+        ));
+    }
+
+    // ─── R311y469: `rel`, the one metadata key that picks a link kind ───
+
+    #[test]
+    fn quic_with_rel_zero_selects_the_datagram_link() {
+        // zenoh gives the QUIC stream and QUIC datagram links the SAME `"quic"`
+        // scheme (zenoh-link-quic/src/lib.rs:42, quic_datagram/src/lib.rs:35)
+        // and separates them by `rel` alone (zenoh-link/src/lib.rs:165-171).
+        // Ignoring the key would dial a STREAM where zenoh dials a DATAGRAM.
+        let p = parse_locator("quic/1.2.3.4:7447?rel=0").expect("quic locator");
+        assert_eq!(p.proto, Proto::QuicDatagram);
+    }
+
+    #[test]
+    fn quic_without_rel_stays_the_stream_link() {
+        // `Reliability::DEFAULT` is Reliable (zenoh core/mod.rs:467).
+        assert_eq!(
+            parse_locator("quic/1.2.3.4:7447")
+                .expect("quic locator")
+                .proto,
+            Proto::Quic
+        );
+        assert_eq!(
+            parse_locator("quic/1.2.3.4:7447?rel=1")
+                .expect("quic locator")
+                .proto,
+            Proto::Quic
+        );
+    }
+
+    #[test]
+    fn rel_zero_does_not_touch_a_non_quic_scheme() {
+        // DISCRIMINATOR: only the `quic` scheme has two link kinds behind one
+        // scheme string, so only there does `rel` select. `rel` elsewhere is
+        // the reliability axis, which this parser does not claim.
+        assert_eq!(
+            parse_locator("tcp/1.2.3.4:7447?rel=0")
+                .expect("tcp locator")
+                .proto,
+            Proto::Tcp
+        );
+        assert_eq!(
+            parse_locator("udp/1.2.3.4:7447?rel=0")
+                .expect("udp locator")
+                .proto,
+            Proto::Udp
+        );
+    }
+
+    #[test]
+    fn rel_in_the_config_span_does_not_select_the_datagram_link() {
+        // DISCRIMINATOR: `rel` is a METADATA key. The same text after `#` is a
+        // config key, a different namespace — so it must not select.
+        assert_eq!(
+            parse_locator("quic/1.2.3.4:7447#rel=0")
+                .expect("quic locator")
+                .proto,
+            Proto::Quic
+        );
+    }
+
+    #[test]
+    fn named_quic_with_rel_zero_selects_the_datagram_link() {
+        // The DNS-name classifier shares the mapping with the numeric leaf.
+        assert_eq!(
+            parse_any_locator("quic/example.org:7447?rel=0"),
+            Ok(AnyLocator::Named {
+                proto: Proto::QuicDatagram,
+                host: "example.org".to_string(),
+                port: 7447,
+                iface: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_metadata_only_tail_leaves_the_config_empty() {
+        // `metadata()` ends at the first `#`; with no `#` the config is empty,
+        // so no config key can leak out of a metadata-only tail.
+        let p = parse_locator("tcp/1.2.3.4:7447?prio=1-3").expect("addr parses");
+        assert_eq!(p.iface, None);
+        assert_eq!(
+            parse_serial_locator("serial//dev/ttyUSB0?meta=x"),
+            Err(SerialLocatorError::MissingBaudrate)
         );
     }
 }
