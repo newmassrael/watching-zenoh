@@ -1973,8 +1973,20 @@ fn log_face_event(node_label: &str, event: &wz::runtime_tokio::accept_loop::Acce
         // decides the face's routing tier, and the CLIENT-only token/subscriber
         // current-dump and future-push paths key off that tier. Without it a face
         // that routes nothing looks identical to one that routes correctly.
+        //
+        // R311y464 — NEW FIELDS GO OUTSIDE THE PARENS. The `(peer <p>, zid <z>)`
+        // group is a needle contract, and two barriers in
+        // wz_gossip_autoconnect_zenohd_interop.rs constrain it from BOTH sides:
+        // `settle_needle` wants `, zid <z>)` (the paren is its right delimiter —
+        // without one, `zid ff` also matches `zid ffab…`) and `face_needle` wants
+        // `UP (peer <ip>:<port>, zid <z>)` with peer and zid ADJACENT. So no
+        // position inside the parens satisfies both: y463 appended `whatami` after
+        // the zid and stranded all four tests in that file, and moving it between
+        // `peer` and `zid` fixed three while still stranding the fourth. Appending
+        // after the group strands none, which is why the field sits there and not
+        // where it would read more naturally.
         AcceptEvent::FaceUp(face) => log::info!(
-            "wz-ap-demo {node_label}: face {} UP (peer {}, zid {}, whatami {:?})",
+            "wz-ap-demo {node_label}: face {} UP (peer {}, zid {}) whatami {:?}",
             face.id.0,
             face.peer,
             zid_hex(face.peer_zid.as_deref()),

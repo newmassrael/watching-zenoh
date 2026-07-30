@@ -2061,7 +2061,11 @@ layer_c1ay_cargo_test_router_hat() {
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY router_forward 139" 139 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 171" 171 \
+    # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
+    # _client_token and token_current_future_interest_matches_a_wildcard_target, both
+    # cfg(routing-token-tables), so ONLY this arm of the six moves. The other five
+    # feature sets compile them out, which is why they still read 136/138/139/142/136.
+    _runci_guarded_test "C1AY router_forward 173" 173 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY router_forward 142" 142 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
