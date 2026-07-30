@@ -1714,9 +1714,33 @@ impl UdpDriver {
     // group (zenoh shares the `224.0.0.224:7446` locator for both). The
     // caller passes the group, so the same constructor builds the scout
     // driver and the multicast session driver.
+    // R311y454 — `iface` is the `#iface=<name>` MULTICAST honor, the third and
+    // last residual of the `locator-iface` atom. It pins BOTH directions on this
+    // one socket, because this one socket does both: `imr_interface` on the join
+    // (which interface's membership is installed) and `IP_MULTICAST_IF` (which
+    // interface egress leaves by), the pair zenoh splits across its `mcast_sock`
+    // (`multicast.rs:315-322`) and `ucast_sock` (`:264-282`). `None` keeps the
+    // pre-R311y454 behaviour byte for byte.
+    //
+    // What `imr_interface` is NOT: a source filter. It selects the interface whose
+    // membership is installed; it does not narrow which senders are accepted.
+    // `INADDR_ANY` does not mean "every interface" either — the kernel resolves it
+    // to exactly one via the routing table. So this change is implicit -> explicit,
+    // not one -> many.
     #[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
-    pub async fn bind_multicast_v4(group: std::net::Ipv4Addr, port: u16) -> io::Result<Self> {
+    pub async fn bind_multicast_v4(
+        group: std::net::Ipv4Addr,
+        port: u16,
+        iface: Option<&str>,
+    ) -> io::Result<Self> {
         use socket2::{Domain, Protocol, Socket, Type};
+
+        // Resolve BEFORE touching the socket, so a bad `#iface=` fails without
+        // leaving a half-configured group membership behind.
+        let selector = match iface {
+            Some(iface) => crate::link_interfaces::multicast_iface_selector_v4(iface)?,
+            None => None,
+        };
 
         // Step 1: REUSEADDR + REUSEPORT must be set before bind, and
         // tokio's UdpSocket exposes no pre-bind setsockopt hook, so the
@@ -1726,17 +1750,72 @@ impl UdpDriver {
         raw.set_reuse_port(true)?;
         // tokio requires the std socket to be non-blocking before adoption.
         raw.set_nonblocking(true)?;
+        // Egress interface, set through socket2: tokio's `UdpSocket` wraps
+        // `IP_ADD_MEMBERSHIP` and `IP_MULTICAST_LOOP` but NOT `IP_MULTICAST_IF`,
+        // so this has to happen while the socket is still a `socket2::Socket`.
+        // Independent of the bind address (`0.0.0.0` below) — `IP_MULTICAST_IF`
+        // chooses the egress path, not the local name.
+        if let Some(addr) = selector {
+            raw.set_multicast_if_v4(&addr)?;
+        }
         let bind_addr = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
         raw.bind(&bind_addr.into())?;
 
         // Step 2 done by the bind above; steps 3-4 use tokio's wrappers.
         let socket = UdpSocket::from_std(raw.into())?;
-        socket.join_multicast_v4(group, std::net::Ipv4Addr::UNSPECIFIED)?;
+        socket.join_multicast_v4(group, selector.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED))?;
         socket.set_multicast_loop_v4(true)?;
         let peer = SocketAddr::from((group, port));
         Ok(Self {
             socket: Some(socket),
             peer: Some(peer),
+        })
+    }
+
+    /// R311y454 — a SEND-ONLY multicast driver: an ephemeral local socket whose
+    /// egress interface is pinned by `#iface=`, writing to `group:port`.
+    ///
+    /// This is the wz counterpart of zenoh's `ucast_sock` — the separate unicast
+    /// socket its multicast link sends from (`zenoh-link-udp/src/multicast.rs:264-290`),
+    /// distinct from the wildcard-bound `mcast_sock` it joins and reads on
+    /// (`:293-322`). wz already had that split at a higher level: the router's
+    /// egress spawns an ephemeral sender (`crate::multicast_glue`) while its
+    /// ingress uses [`Self::bind_multicast_v4`]. What the egress half lacked was
+    /// the interface pin, which is why it needs a constructor rather than a bare
+    /// `UdpSocket::bind` — there is now a setsockopt between the bind and the
+    /// driver, and one SSOT is better than the same three lines at each sender.
+    ///
+    /// No join: a sender needs no group membership. So this deliberately does NOT
+    /// set `IP_MULTICAST_LOOP` either — a send-only socket never reads back its
+    /// own traffic. (The bidirectional [`Self::bind_multicast_v4`] does set it,
+    /// and that IS a divergence from upstream, which sets `IP_MULTICAST_LOOP`
+    /// nowhere; it is load-bearing for wz's same-host tests, where the ZID
+    /// self-echo gate is what keeps a node from admitting its own JOIN.)
+    #[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+    pub async fn bind_multicast_tx_v4(
+        group: std::net::Ipv4Addr,
+        port: u16,
+        iface: Option<&str>,
+    ) -> io::Result<Self> {
+        use socket2::{Domain, Protocol, Socket, Type};
+
+        let selector = match iface {
+            Some(iface) => crate::link_interfaces::multicast_iface_selector_v4(iface)?,
+            None => None,
+        };
+        // Without an iface this is exactly the `UdpSocket::bind((UNSPECIFIED, 0))`
+        // the senders did before, so the un-narrowed path is unchanged.
+        let raw = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        raw.set_nonblocking(true)?;
+        if let Some(addr) = selector {
+            raw.set_multicast_if_v4(&addr)?;
+        }
+        let bind_addr = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0));
+        raw.bind(&bind_addr.into())?;
+        let socket = UdpSocket::from_std(raw.into())?;
+        Ok(Self {
+            socket: Some(socket),
+            peer: Some(SocketAddr::from((group, port))),
         })
     }
 }

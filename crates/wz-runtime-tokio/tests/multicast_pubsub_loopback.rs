@@ -78,7 +78,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
 #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 async fn publisher_push_reaches_group_subscriber() {
     // Subscriber node B: group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, PORT)
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, PORT, None)
         .await
         .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -197,7 +197,7 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     };
 
     // Subscriber node B: qos group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, QOS_PORT)
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, QOS_PORT, None)
         .await
         .expect("bind qos multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -323,7 +323,7 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
     const REFUSE_PORT: u16 = 7454;
 
     // Subscriber node B is NON-qos (the mc_params default is_qos=false).
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, REFUSE_PORT)
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, REFUSE_PORT, None)
         .await
         .expect("bind non-qos multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -444,7 +444,7 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
         ..mc_params(zid_byte)
     };
 
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, FRAG_PORT)
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, FRAG_PORT, None)
         .await
         .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -568,7 +568,7 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
     };
 
     // ── Subscriber B: joins the group, collects every delivered payload.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, CONC_PORT)
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, CONC_PORT, None)
         .await
         .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -715,7 +715,7 @@ async fn router_egress_helper_reaches_group_subscriber() {
     const HELPER_PORT: u16 = 7451;
 
     // Subscriber node: group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, HELPER_PORT)
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, HELPER_PORT, None)
         .await
         .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -751,7 +751,7 @@ async fn router_egress_helper_reaches_group_subscriber() {
     // own task and returns the sender `RouterForwarder::attach_mcast_group` holds.
     // `qos = false`: this loopback witness pins the pico-faithful 2-channel group
     // (the per-priority conduit is exercised by the dedicated qos witness, R311y232).
-    let tx = spawn_router_mcast_egress(GROUP, HELPER_PORT, vec![0xAA; 4], false);
+    let tx = spawn_router_mcast_egress(GROUP, HELPER_PORT, vec![0xAA; 4], false, None);
 
     let fired_probe = fired.clone();
     let scenario = async move {
@@ -782,5 +782,132 @@ async fn router_egress_helper_reaches_group_subscriber() {
         dispatcher_b.active_peers(),
         1,
         "B admitted the egress helper from its JOIN beacon"
+    );
+}
+
+/// R311y454 — the `#iface=` MULTICAST honor, both halves, on real sockets: the
+/// receiver joins the group on one interface and the sender pins its egress to
+/// another, and the datagram does not arrive; pin both to the same interface and it
+/// does.
+///
+/// # Why this is a wz-internal proof and not a cross-impl one
+///
+/// The interface pin is NOT foreign-observable on a single host, and that is
+/// measured rather than assumed. `IP_MULTICAST_ALL` defaults to 1, so a
+/// wildcard-bound socket receives group traffic joined ANYWHERE on the host — and a
+/// foreign peer co-bound on the same group and port (which
+/// `SO_REUSEADDR`/`SO_REUSEPORT` exist to allow, and which zenoh-pico sets
+/// unconditionally at `vendor/zenoh-pico/src/link/transport/udp/udp_multicast_posix.c`
+/// :180,185) supplies exactly that device-level membership. With a pico peer joined
+/// on a real NIC, a `lo`-joined wz socket still receives that NIC's traffic, so the
+/// A/B collapses. Observing the pin needs two link domains — two hosts, or netns
+/// with `CAP_NET_ADMIN`.
+///
+/// # The precondition, and why a unique PORT is not enough
+///
+/// The leaking membership is per `(group, device)` — the PORT only decides which
+/// socket receives what the membership already let in. So a sibling test joining
+/// `224.0.0.224` with `INADDR_ANY` (which the kernel resolves to the default-route
+/// device) installs a host membership on that device, and this test's arm B, whose
+/// egress is pinned to that same device, then receives its own datagram on a port
+/// nothing else binds. Measured: this test passed alone and FAILED inside the
+/// file's concurrent run for exactly that reason.
+///
+/// Hence a DEDICATED GROUP in the organization-local `239.0.0.0/8` scope, which no
+/// other test, lane, or zenoh default touches — with no host membership for that
+/// group on the other device, arm B has nothing to leak through. A unique port is
+/// kept too, but it is the group that carries the guarantee.
+///
+/// This is also the precise reason the cross-impl version cannot exist: a foreign
+/// peer has to share the GROUP to be interoperating at all, and sharing the group
+/// is what creates the membership that hides the pin.
+#[cfg(feature = "locator-iface")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real multicast sockets + a non-loopback NIC (environment-dependent, the \
+            file's opt-in convention); Layer M runs it via --ignored"]
+async fn a_multicast_iface_pin_decides_whether_the_group_datagram_arrives() {
+    use wz_runtime_tokio::{LinkDriver, Reliability, TxFrame, UdpDriver};
+
+    // A group NOTHING else joins — not this file's other tests, not any lane, not
+    // zenoh's `224.0.0.224` default. Organization-local scope (239.0.0.0/8, RFC2365),
+    // the range reserved for exactly this. The discriminator rests on there being no
+    // OTHER host membership for this group (see the doc comment); the distinct port
+    // is belt-and-braces.
+    const IFACE_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 77, 78);
+    const IFACE_PORT: u16 = 7459;
+
+    // Arm B needs a non-`lo` device that is USABLE as a multicast selector: up,
+    // running, and carrying an IPv4 address. Unlike the `SO_BINDTODEVICE` arm in
+    // `quic_e2e` — which accepts any device that merely exists, DOWN included —
+    // `IP_MULTICAST_IF` takes an ADDRESS, so a carrier-less bridge is rejected
+    // outright (upstream `bail!`s on exactly that, `zenoh-util/src/net/mod.rs:233-238`,
+    // and so does wz). Picking the first sorted non-`lo` name without this filter
+    // chose a DOWN docker bridge on the author's host and the arm errored instead of
+    // discriminating. Sorted for reproducibility; a host with no usable non-loopback
+    // NIC panics rather than skipping, because a skipped arm reports green while
+    // proving nothing.
+    let mut names: Vec<String> = std::fs::read_dir("/sys/class/net")
+        .expect("read /sys/class/net (Linux host with sysfs)")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "lo")
+        .collect();
+    names.sort();
+    let other = names
+        .into_iter()
+        .find(|n| {
+            // The production resolver is the filter, used here only to choose test
+            // DATA — the assertions below are about datagram delivery, never about
+            // what this call returned.
+            wz_runtime_tokio::link_interfaces::unicast_addresses_of_interface(n)
+                .is_ok_and(|addrs| addrs.iter().any(|a| a.is_ipv4()))
+        })
+        .expect(
+            "a non-loopback interface that is up, running and has an IPv4 address; \
+             this A/B cannot run without one",
+        );
+
+    /// One arm: join the group pinned to `rx_iface`, send one frame pinned to
+    /// `tx_iface`, and report whether it arrived inside the budget.
+    async fn arrives(group: Ipv4Addr, rx_iface: &str, tx_iface: &str, port: u16) -> bool {
+        let mut rx = UdpDriver::bind_multicast_v4(group, port, Some(rx_iface))
+            .await
+            .unwrap_or_else(|e| panic!("join {group}:{port} on {rx_iface}: {e}"));
+        let mut tx = UdpDriver::bind_multicast_tx_v4(group, port, Some(tx_iface))
+            .await
+            .unwrap_or_else(|e| panic!("multicast tx pinned to {tx_iface}: {e}"));
+        // A raw datagram, not a zenoh frame: the property under test is whether the
+        // kernel delivers across the pinned interfaces at all, so decoding it would
+        // only add ways for the test to fail for unrelated reasons.
+        let payload = b"wz-iface-pin-probe".to_vec();
+        for _ in 0..5 {
+            tx.send(&TxFrame { bytes: &payload }, Reliability::BestEffort)
+                .await
+                .expect("send to the group");
+            match tokio::time::timeout(Duration::from_millis(200), rx.poll_event()).await {
+                Ok(_) => return true,
+                Err(_) => continue,
+            }
+        }
+        false
+    }
+
+    // Arm A (calibration): both halves on `lo`, the interface loopback multicast
+    // actually traverses. Must arrive, or arm B's silence proves nothing.
+    let same_iface = arrives(IFACE_GROUP, "lo", "lo", IFACE_PORT).await;
+    // Arm B (the discriminator): receiver joined on `lo`, egress pinned elsewhere.
+    let crossed_ifaces = arrives(IFACE_GROUP, "lo", &other, IFACE_PORT + 1).await;
+
+    assert!(
+        same_iface,
+        "a group joined on `lo` did not receive a datagram whose egress was also pinned \
+         to `lo` — the pin is over-restrictive, and the negative arm below would then \
+         prove nothing"
+    );
+    assert!(
+        !crossed_ifaces,
+        "a group joined on `lo` received a datagram whose egress was pinned to \
+         `{other}` — one of the two pins did not take effect (IP_MULTICAST_IF on the \
+         sender, or imr_interface on the join)"
     );
 }

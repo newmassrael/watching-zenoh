@@ -1050,7 +1050,15 @@ transport-unicast = ["wz-session-core/session-unicast"]
 # import did not resolve in a `transport-multicast`-without-default build
 # (the facade composability gap). A multicast transport that cannot process
 # a peer's Close is incomplete, so codec-close is a select, not optional.
-transport-multicast = ["wz-session-core/session-multicast", "codec-join", "codec-frame", "codec-close", "dep:socket2"]
+# R311y454 — `link-interfaces` (the getifaddrs SSOT) joins the select list: the
+# multicast `#iface=` honor resolves a NIC NAME to a local ADDRESS, because
+# IP_MULTICAST_IF and IP_ADD_MEMBERSHIP both take one (unlike the unicast honor,
+# which needs only a device name for SO_BINDTODEVICE). `scouting-active` reaches
+# it already via `transport-link-udp`; `transport-multicast` was the sole
+# multicast entry point that did not, so the resolver was unreachable from a
+# multicast-only build. Same shape as `transport-link-tcp`/`-udp`/`-ws`, which
+# each carry `link-interfaces` for the same reason.
+transport-multicast = ["wz-session-core/session-multicast", "codec-join", "codec-frame", "codec-close", "dep:socket2", "link-interfaces"]
 # chunk-5 — forward to the wz-session-core same-named gate so the migrated
 # start/stop_keepalive_worker action bodies compile under the keepalive axis.
 transport-keepalive = ["wz-session-core/transport-keepalive"]

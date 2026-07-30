@@ -125,7 +125,7 @@ async fn wz_subscriber_admits_pico_multicast_push() {
     // Bind + join the group FIRST so wz is listening when pico emits its
     // initial JOIN. The REUSEADDR/REUSEPORT bind (R311no) is what lets wz
     // co-bind the host group port that pico's peer also binds.
-    let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT)
+    let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT, None)
         .await
         .expect("bind wz multicast subscriber link (REUSE co-bind)");
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));

@@ -68,7 +68,7 @@ fn craft_hello_datagram(locator: &str) -> Vec<u8> {
 #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 async fn scout_discovers_peer_locator_over_multicast() {
     // Scout side: bind the group port, join the group, loopback on.
-    let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT)
+    let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT, None)
         .await
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
@@ -214,7 +214,7 @@ mod round2 {
         let session_locator = format!("tcp/{session_addr}");
 
         // Scout side: bind the multicast group port, join, loopback on.
-        let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT)
+        let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT, None)
             .await
             .expect("bind multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
@@ -348,7 +348,7 @@ mod round3_tls {
         let session_locator = format!("tls/{session_addr}");
 
         // Scout side: bind the multicast group port, join, loopback on.
-        let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT)
+        let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT, None)
             .await
             .expect("bind multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
