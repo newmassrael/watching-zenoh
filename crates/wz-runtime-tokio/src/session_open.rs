@@ -839,6 +839,57 @@ impl BoundListener {
         }
     }
 
+    /// R311y470 — the LOCATOR to advertise for this listener: the string a
+    /// FOREIGN peer has to be able to dial, given the bound address rendered by
+    /// [`Self::local_addr_display`].
+    ///
+    /// Distinct from [`Self::transport_name`] on purpose. That is a LOG word and
+    /// is pinned as one (`unixsock_e2e.rs` asserts `"unixsock"`), and reusing it
+    /// as the locator SCHEME — which the advertise sites did — diverged on two of
+    /// the nine variants:
+    ///
+    /// - `unixsock` is not a scheme at all. zenoh's is `unixsock-stream`
+    ///   (`UNIXSOCKSTREAM_LOCATOR_PREFIX`) and so is wz's own
+    ///   (`UNIXSOCK_SCHEME`), so the advertised string failed even wz's OWN
+    ///   parser with `NotUnixsockScheme`.
+    /// - `quic-datagram` is a wz-only spelling. zenoh gives BOTH its QUIC links
+    ///   the `"quic"` scheme (`QUIC_LOCATOR_PREFIX` and
+    ///   `QUIC_DATAGRAM_LOCATOR_PREFIX` are both `"quic"`) and selects between
+    ///   them with the `rel` metadata key (`io/zenoh-link/src/lib.rs:165-171`);
+    ///   an unknown scheme hits its `_ => bail!("Unicast not supported for {}
+    ///   protocol")` arm (:183). wz keeps ACCEPTING `quic-datagram/...` inbound
+    ///   (its explicit spelling), and emits the canonical one.
+    ///
+    /// This matters because these strings are not diagnostics: `run_router` /
+    /// `run_peer` hand them to `set_self_locators`, which floods them through
+    /// `LinkstateForwarder` into the neighbour graph and hence to peers.
+    ///
+    /// The match is WILDCARD-FREE, like [`Self::supports_mesh_multi_peer`] and
+    /// [`Self::transport_name`]: a new variant must state its advertised scheme
+    /// explicitly rather than inherit a log word that may not be one. That
+    /// inheritance is exactly what produced both divergences above.
+    pub fn advertised_locator(&self, address: &str) -> String {
+        match self {
+            BoundListener::Tcp(_) => format!("tcp/{address}"),
+            #[cfg(feature = "transport-link-ws")]
+            BoundListener::Ws(_) => format!("ws/{address}"),
+            #[cfg(feature = "transport-link-tls")]
+            BoundListener::Tls(..) => format!("tls/{address}"),
+            #[cfg(feature = "transport-link-unixsock")]
+            BoundListener::Unixsock(_) => format!("unixsock-stream/{address}"),
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            BoundListener::Vsock(_) => format!("vsock/{address}"),
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            BoundListener::Unixpipe(_) => format!("unixpipe/{address}"),
+            #[cfg(feature = "transport-link-udp")]
+            BoundListener::Udp(_) => format!("udp/{address}"),
+            #[cfg(feature = "transport-link-quic")]
+            BoundListener::Quic(_) => format!("quic/{address}"),
+            #[cfg(feature = "transport-link-quic-datagram")]
+            BoundListener::QuicDatagram(_) => format!("quic/{address}?rel=0"),
+        }
+    }
+
     /// Whether this bound listener's acceptor is MESH-CAPABLE — i.e. wz's CURRENT
     /// accept path for it yields multiple DISTINCT per-peer connections, so the
     /// multi-accept [`accept_loop`](crate::accept_loop) can hold N faces off it.
@@ -4037,6 +4088,109 @@ mod tests {
             listener.supports_mesh_multi_peer(),
             "a quic-datagram listener is mesh-capable (deferred-handshake split, R311y408)"
         );
+        drop(listener);
+    }
+
+    // ── R311y470 — the ADVERTISED locator must be one a FOREIGN peer can dial.
+    //
+    // `transport_name()` is a LOG word and is pinned as such (`unixsock_e2e.rs`
+    // asserts `"unixsock"`). Reusing it as the locator SCHEME diverged twice:
+    // wz emitted `unixsock/<path>`, which is not even its OWN scheme
+    // (`UNIXSOCK_SCHEME = "unixsock-stream"`, matching zenoh's
+    // `UNIXSOCKSTREAM_LOCATOR_PREFIX`), and `quic-datagram/<addr>`, a spelling
+    // zenoh has no prefix for — it gives BOTH quic links the `"quic"` scheme and
+    // separates them by `rel` (`io/zenoh-link/src/lib.rs:165-171`), so an
+    // unknown scheme lands on its `_ => bail!("Unicast not supported")` arm
+    // (:183). These strings are FLOODED to peers via `set_self_locators` ->
+    // `LinkstateForwarder` -> the neighbour graph, so they are a wire surface.
+
+    #[cfg(feature = "transport-link-unixsock")]
+    #[tokio::test]
+    async fn advertised_unixsock_locator_uses_the_zenoh_scheme_and_parses_back() {
+        let path = std::env::temp_dir()
+            .join(format!("wz-adv-{}.sock", std::process::id()))
+            .display()
+            .to_string();
+        let _ = std::fs::remove_file(&path);
+        let listener = bind_endpoint(&format!("unixsock-stream/{path}"))
+            .await
+            .expect("bind a unixsock listener");
+        let advertised = listener.advertised_locator(
+            &listener
+                .local_addr_display()
+                .expect("a bound unixsock listener has a path"),
+        );
+        assert_eq!(
+            advertised,
+            format!("unixsock-stream/{path}"),
+            "the advertised scheme is zenoh's UNIXSOCKSTREAM_LOCATOR_PREFIX, not the log word"
+        );
+        // The sharper half: it must PARSE BACK. `unixsock/<path>` does not —
+        // wz's own leaf rejects it NotUnixsockScheme — so this arm alone shows
+        // the pre-R311y470 string was undialable even wz-to-wz.
+        assert_eq!(
+            parse_any_locator(&advertised),
+            Ok(AnyLocator::Unixsock(
+                wz_session_core::locator::UnixsockEndpoint { path }
+            )),
+        );
+        drop(listener);
+    }
+
+    #[cfg(feature = "transport-link-quic-datagram")]
+    #[tokio::test]
+    async fn advertised_quic_datagram_locator_uses_zenoh_quic_scheme_and_rel_metadata() {
+        use wz_runtime_tokio_test_support::localhost_cert_key_pem;
+        let (cert_pem, key_pem) = localhost_cert_key_pem();
+        let server_config = crate::quic_config::quic_server_config_from_pem(
+            cert_pem.as_bytes(),
+            key_pem.as_bytes(),
+            None,
+        )
+        .expect("build quic server config");
+        let ep = crate::quic_datagram_pipeline::bind_quic_datagram(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            server_config,
+            None,
+        )
+        .expect("bind quic-datagram endpoint");
+        let listener = BoundListener::QuicDatagram(ep);
+        let addr = listener
+            .local_addr_display()
+            .expect("a bound quic-datagram listener has an address");
+        let advertised = listener.advertised_locator(&addr);
+        assert_eq!(
+            advertised,
+            format!("quic/{addr}?rel=0"),
+            "zenoh has no `quic-datagram` prefix — both its QUIC links are `quic` and \
+             `rel=0` is what selects the datagram one"
+        );
+        // Round-trip: the zenoh-canonical spelling must still come back as the
+        // DATAGRAM proto on the wz side. That only holds because R311y469 taught
+        // the IP leaf to honour `rel`, so this pins the two rounds together.
+        assert!(
+            matches!(
+                parse_any_locator(&advertised),
+                Ok(AnyLocator::Ip(ref p)) if p.proto == Proto::QuicDatagram
+            ),
+            "the advertised quic-datagram locator must parse back as QuicDatagram"
+        );
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn advertised_tcp_locator_is_scheme_plus_address() {
+        // CONTROL: the 7 variants whose log word already IS their zenoh scheme
+        // must be untouched by the two special arms.
+        let listener = bind_endpoint("tcp/127.0.0.1:0")
+            .await
+            .expect("bind a tcp listener");
+        let addr = listener.local_addr_display().expect("tcp listener addr");
+        assert_eq!(listener.advertised_locator(&addr), format!("tcp/{addr}"));
+        assert!(matches!(
+            parse_any_locator(&listener.advertised_locator(&addr)),
+            Ok(AnyLocator::Ip(_))
+        ));
         drop(listener);
     }
 }

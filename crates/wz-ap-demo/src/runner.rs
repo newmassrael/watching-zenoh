@@ -2484,9 +2484,13 @@ async fn run_peer_until(
     // Advertise this peer's listen address as its dial locator BEFORE the first
     // face registers, so self's first FULL flood already carries it. A neighbour
     // then learns where to reach this peer (the discovery data — what a future
-    // gossip/autoconnect step dials). The locator scheme is the listener's ACTUAL
-    // `transport_name()` (R311y397 — no longer a `tcp/` hardcode), so a `ws/`/`tls/`/
-    // `udp/` or non-IP `unixpipe/` listen advertises a faithful dial string.
+    // gossip/autoconnect step dials). The locator comes from the listener's
+    // `advertised_locator()` (R311y397 dropped the `tcp/` hardcode for
+    // `transport_name()`; R311y470 moved it off that to the advertised-scheme SSOT,
+    // because `transport_name()` is a LOG word and on two variants is not a dialable
+    // scheme — `unixsock` vs zenoh's `unixsock-stream`, and `quic-datagram`, which
+    // zenoh spells `quic/<addr>?rel=0`). These strings are FLOODED to peers, so a
+    // wrong scheme is a wire defect, not a cosmetic one.
     //
     // An unspecified IP bind (0.0.0.0 / [::], the deploy default) is NOT a dialable
     // address: advertising `tcp/0.0.0.0:<port>` hands a peer a locator it cannot
@@ -2498,7 +2502,7 @@ async fn run_peer_until(
     // scheme+path unconditionally (the R311y396 run_router_hat discipline).
     let self_locators: Vec<String> = match local_ip {
         Some(addr) if !addr.ip().is_unspecified() => {
-            vec![format!("{}/{}", listener.transport_name(), addr)]
+            vec![listener.advertised_locator(&addr.to_string())]
         }
         Some(addr) => {
             log::warn!(
@@ -2507,7 +2511,7 @@ async fn run_peer_until(
             );
             Vec::new()
         }
-        None => vec![format!("{}/{}", listener.transport_name(), local_display)],
+        None => vec![listener.advertised_locator(&local_display)],
     };
     // Clone so `self_locators` survives for the §5.23 admin handler below (the
     // forwarder-hosted admin's `local_data` advertises the same dial locators).
@@ -3790,17 +3794,17 @@ async fn run_router_hat_until(
         let version = env!("CARGO_PKG_VERSION").to_string();
         // The admin `local_data` dial locator: the router sets no forwarder
         // self-locator, but its listen address is a faithful `local_data` locator
-        // (withheld on an unspecified IP bind, the run_peer discipline). The scheme
-        // is `transport_name()` in BOTH arms — an IP listen is `tcp/`/`ws/`/`tls/`/
-        // `udp/` by its actual transport (not hardcoded tcp), a non-IP listen is
-        // its scheme+path (`unixpipe/<base>`, the same string a client `--connect`s
-        // — advertised rather than withheld since it has no wildcard bind).
+        // (withheld on an unspecified IP bind, the run_peer discipline). R311y470 —
+        // the scheme comes from `advertised_locator()` in BOTH arms, NOT from
+        // `transport_name()`: that is a log word, and on two variants it is not a
+        // dialable scheme at all (`unixsock` vs zenoh's `unixsock-stream`;
+        // `quic-datagram`, which zenoh spells `quic/<addr>?rel=0`).
         let locators: Vec<String> = match local_ip {
             Some(addr) if !addr.ip().is_unspecified() => {
-                vec![format!("{}/{}", listener.transport_name(), addr)]
+                vec![listener.advertised_locator(&addr.to_string())]
             }
             Some(_) => Vec::new(),
-            None => vec![format!("{}/{}", listener.transport_name(), local_display)],
+            None => vec![listener.advertised_locator(&local_display)],
         };
         let queryable_key = admin_queryable_key(&zid_hex, whatami_str);
         let routers_view = forwarder.routers_net_view();
