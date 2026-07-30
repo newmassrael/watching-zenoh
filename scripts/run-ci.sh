@@ -1198,6 +1198,100 @@ layer_c0_test_discipline() {
         echo "  #[ignore = \"binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored\"]" >&2
         return 1
     fi
+
+    # R311y455 — the SKIP-TOKEN NAMING OBLIGATION, now enforced.
+    #
+    # Layer E's default sweep excludes whole families with libtest `--skip <token>`
+    # (see the skip block in `layer_e_ap_demo_round_trip`). libtest matches a skip
+    # against the TEST NAME, which for an integration test is the FUNCTION name --
+    # NOT the file name. So a fixture named `wz_peer_*.rs` whose test fns do not
+    # themselves contain `wz_peer` is NOT skipped, and Layer E runs it against
+    # whatever demo binary that lane happens to have built.
+    #
+    # This lane exists because that already happened. R311y453 added
+    # wz_peer_subject_scoping_pico_interop.rs with fns named
+    # `a_link_protocol_scoped_rule_...` / `an_interface_scoped_rule_...`; Layer E ran
+    # both against a demo built without `routing-peer`, the demo refused `--peer`,
+    # and the hosted run for 2ab214a4 went RED. run-ci.sh had ALREADY written the
+    # hazard down at the E4i lane -- "The token is a NAMING OBLIGATION that no gate
+    # enforces" -- and a documented-but-ungated hazard is one that recurs. It is
+    # gated now: a file whose basename carries a skip token must have EVERY test fn
+    # carry it too.
+    local naming_violations
+    naming_violations="$(python3 - <<'PY'
+import pathlib, re, sys
+
+# The tokens must stay in step with the `--skip` list in
+# layer_e_ap_demo_round_trip. Deliberately duplicated rather than scraped: this
+# check has to fail LOUD if the two drift, and the drift itself is caught by the
+# self-check below, which requires every token to appear in that skip block.
+TOKENS = ["wz_e2e_", "multicast", "zenohd", "wz_router", "wz_peer",
+          "wz_storage_host", "zenoh_ext", "inert"]
+
+runci = pathlib.Path("scripts/run-ci.sh").read_text()
+missing = [t for t in TOKENS if f"--skip {t}" not in runci]
+if missing:
+    print(f"SELFCHECK this check's token list has drifted from Layer E's "
+          f"--skip block; not present there: {missing}")
+    sys.exit(0)
+
+TEST_ATTR = re.compile(r"#\[(?:tokio::)?test\b")
+FN_NAME = re.compile(r"^\s*(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
+
+# SCOPE: Layer E runs `cargo test -p wz-integration-tests` and nothing else
+# (see the invocation in layer_e_ap_demo_round_trip). A `--skip` cannot reach a
+# fixture in another crate, so checking one would be a false gate -- and a false
+# gate that fails the build is worse than no gate. Calibrated against this fact
+# after a first draft flagged 29 sites of which 28 were not hazards.
+TESTS = sorted(pathlib.Path("crates/wz-integration-tests/tests").glob("*.rs"))
+if not TESTS:
+    print("SELFCHECK no wz-integration-tests fixtures found; this check "
+          "asserted nothing")
+    sys.exit(0)
+
+for path in TESTS:
+    # A basename carrying a token declares the fixture part of an excluded
+    # family. Only then is anything owed.
+    if not any(t in path.stem for t in TOKENS):
+        continue
+    lines = path.read_text().splitlines()
+    pending = False
+    for line in lines:
+        if TEST_ATTR.search(line):
+            pending = True
+            continue
+        m = FN_NAME.match(line)
+        if pending and m:
+            fn = m.group(1)
+            # ANY token suffices: one match is enough for libtest to exclude the
+            # test, and it need not be the same token the filename carries --
+            # `wz_gossip_autoconnect_zenohd_interop`'s fns are excluded by their
+            # `wz_peer` prefix, not by `zenohd`.
+            if not any(t in fn for t in TOKENS):
+                print(f"{path}::{fn} carries NO Layer E skip token while its "
+                      f"filename declares the family; the token set is {TOKENS}")
+            pending = False
+PY
+)" || {
+        echo "Layer C0 FAIL: the skip-token naming check errored" >&2
+        return 1
+    }
+    if [[ -n "$naming_violations" ]]; then
+        echo "Layer C0 FAIL: skip-token NAMING OBLIGATION violated" >&2
+        echo "" >&2
+        echo "$naming_violations" >&2
+        echo "" >&2
+        echo "libtest --skip matches the FUNCTION name, not the file name. A" >&2
+        echo "fixture whose basename carries a family token but whose test fns" >&2
+        echo "do not is run by Layer E's default sweep against an" >&2
+        echo "arbitrary-feature binary -- exactly how the hosted run for" >&2
+        echo "2ab214a4 went red." >&2
+        echo "" >&2
+        echo "Fix: rename the test fn so it contains the token (e.g." >&2
+        echo "  fn wz_peer_<what_it_asserts>()), which is how the zenohd and" >&2
+        echo "  inert families already stay covered." >&2
+        return 1
+    fi
     return 0
 }
 

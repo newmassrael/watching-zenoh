@@ -155,7 +155,7 @@ fn assert_admitted(captured: &str, n: u32, label: &str, why: &str) {
 // wz-proves: access-downsampling pico->wz
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer + zenoh-pico z_pub CLI); Layer E6 runs via --ignored"]
-fn a_link_protocol_scoped_rule_governs_only_the_protocol_pico_dials() {
+fn wz_peer_link_protocol_scoped_rule_governs_only_the_protocol_pico_dials() {
     // pico dials tcp/... , so a tcp-scoped rule GOVERNS this face -> throttled.
     let tcp = admitted_pushes("subject-tcp", &["--downsample-link-protocol", "tcp"]);
     assert_admitted(
@@ -184,7 +184,7 @@ fn a_link_protocol_scoped_rule_governs_only_the_protocol_pico_dials() {
 // wz-proves: access-downsampling pico->wz
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer + zenoh-pico z_pub CLI); Layer E6 runs via --ignored"]
-fn an_interface_scoped_rule_governs_only_the_nic_the_link_resolved_to() {
+fn wz_peer_interface_scoped_rule_governs_only_the_nic_the_link_resolved_to() {
     // The accepted TCP link's local address is 127.0.0.1, which getifaddrs
     // resolves to `lo` — so an lo-scoped rule GOVERNS this face.
     let lo = admitted_pushes("subject-lo", &["--downsample-interface", "lo"]);
