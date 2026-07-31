@@ -258,7 +258,14 @@ async fn serial_interop_over_metadata_span(metadata: &str) {
     let mut opened = tokio::time::timeout(
         Duration::from_secs(20),
         accept_and_open_session(
-            DialedLink::Serial(wz_serial),
+            // R311y475 — the variant carries the dialled endpoint since R311y474 (a
+            // tty's address is not readable off the stream, and the adminspace
+            // `{src,dst}` view needs it). This site has the REAL one in hand: it is
+            // the endpoint `accept_serial` just opened.
+            DialedLink::Serial {
+                stream: wz_serial,
+                endpoint: endpoint.clone(),
+            },
             fixture_session_init_params(),
             TokioTime::new(),
             Some(ITER_CAP),
