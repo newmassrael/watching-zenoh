@@ -365,12 +365,79 @@ pub mod common {
         ];
         for c in &candidates {
             if c.is_file() {
+                assert_capi_cdylib_is_not_stale(c, &crates_dir);
                 return c.clone();
             }
         }
         panic!(
             "libwz_capi_pico.so not found in {candidates:?}; \
              run `cargo build -p wz-capi-pico` first"
+        );
+    }
+
+    /// R311y482 — refuse a cdylib OLDER than the `wz-capi-pico` sources it is
+    /// supposed to be built from.
+    ///
+    /// `wz-capi-pico` is deliberately NOT a dependency of this crate (its
+    /// `#[no_mangle]` `z_*` exports would collide with the real zenoh-pico ones
+    /// linked via `zenoh-pico-sys`), so `cargo test -p wz-integration-tests` does
+    /// not rebuild it and cargo's own staleness tracking never sees it. run-ci's
+    /// Layer E builds it explicitly for that reason, but a HAND invocation has no
+    /// such step and silently links whatever `.so` is already in `target/debug`.
+    ///
+    /// That is not a hypothetical: a damage test on `TokenState::drop` during
+    /// R311y482 read GREEN because the edit had never reached the linked artifact,
+    /// and the round nearly concluded the damaged function was not load-bearing.
+    /// A gate that cannot trust its input must not report green
+    /// (`feedback_damage_must_build_before_you_read_it`), so this is a HARD panic
+    /// naming the command, not a warning.
+    ///
+    /// Compares against the newest mtime under `wz-capi-pico/src` plus its
+    /// `Cargo.toml`. A missing mtime is treated as "cannot establish freshness"
+    /// and passes — the check exists to catch the stale-artifact case, and a
+    /// filesystem that will not report mtimes is a different problem that should
+    /// not turn every run of this crate red.
+    fn assert_capi_cdylib_is_not_stale(cdylib: &Path, crates_dir: &Path) {
+        fn newest_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+            let mut newest = None;
+            let mut stack = vec![dir.to_path_buf()];
+            while let Some(p) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&p) else {
+                    continue;
+                };
+                for e in entries.flatten() {
+                    let path = e.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().is_some_and(|x| x == "rs") {
+                        if let Ok(m) = e.metadata().and_then(|m| m.modified()) {
+                            newest = Some(newest.map_or(m, |n: std::time::SystemTime| n.max(m)));
+                        }
+                    }
+                }
+            }
+            newest
+        }
+
+        let src = crates_dir.join("wz-capi-pico/src");
+        let manifest = crates_dir.join("wz-capi-pico/Cargo.toml");
+        let Ok(lib_mtime) = std::fs::metadata(cdylib).and_then(|m| m.modified()) else {
+            return;
+        };
+        let mut newest_src = newest_mtime(&src);
+        if let Ok(m) = std::fs::metadata(&manifest).and_then(|m| m.modified()) {
+            newest_src = Some(newest_src.map_or(m, |n: std::time::SystemTime| n.max(m)));
+        }
+        let Some(newest_src) = newest_src else { return };
+        assert!(
+            lib_mtime >= newest_src,
+            "{} is OLDER than the wz-capi-pico sources it links.\n\
+             `cargo test -p wz-integration-tests` does NOT rebuild it (wz-capi-pico \
+             is not a dependency of this crate), so this run would witness code that \
+             is no longer in the tree -- including a damage edit that would read as \
+             'not load-bearing'.\n\
+             run: cargo build -p wz-capi-pico",
+            cdylib.display(),
         );
     }
 

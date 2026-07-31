@@ -199,22 +199,38 @@ fn pico_zsub_source_on_wz_capi_receives_from_real_pico_zput() {
     );
     drop(reservation);
 
-    let put = Command::new(&z_put)
+    // R311y482 — captured even though the exit status is asserted below. A zero
+    // exit says the process ran, not that it published: pico's z_put prints
+    // `Putting Data ('<ke>': '<v>')...` and can still exit 0 on a session it never
+    // established. The capture is what the panic further down reads.
+    let mut put_out = tempfile::tempfile().expect("foreign z_put stdout capture");
+    let put_writer = put_out.try_clone().expect("dup foreign z_put handle");
+    let put = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&z_put)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(put_writer))
         .stderr(Stdio::null())
         .status()
         .expect("run the real zenoh-pico z_put");
-    assert!(put.success(), "real zenoh-pico z_put exited {put:?}");
+    assert!(
+        put.success(),
+        "real zenoh-pico z_put exited {put:?}\n--- its stdout ---\n{}",
+        read_captured(&mut put_out)
+    );
 
     // The subscriber self-terminates on its first sample; wait for that exit so
     // the capture is complete, then assert.
     let captured =
         wait_for_substring(&mut sub_out, payload, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+            let driver = read_captured(&mut put_out);
             panic!(
                 "upstream z_sub.c running on wz's C-ABI never reported the payload \
                  published by the REAL zenoh-pico z_put.\nexpected substring: {payload}\n\
-                 --- z_sub.c (on wz) stdout ---\n{captured}"
+                 the foreign publisher reached its put: {}\n\
+                 --- z_sub.c (on wz) stdout ---\n{captured}\n\
+                 --- REAL pico z_put (driver) stdout ---\n{driver}",
+                driver.contains("Putting Data"),
             )
         });
     // Upstream's handler prints `>> [Subscriber] Received ('<key>': '<payload>')`,
@@ -417,9 +433,19 @@ fn pico_zput_source_on_wz_capi_declares_and_reaches_real_pico_zsub() {
     );
     drop(reservation);
 
-    let put = Command::new(&dropin)
+    // R311y482 — the wz-side DRIVER's stdout is captured. This leg is the one that
+    // fails most often under file-parallel runs, and with the driver silent the
+    // panic below could only report that pico received nothing — it could not say
+    // whether wz's z_put.c ever declared and published. Upstream prints
+    // `Declaring key expression '<ke>'...` and `Putting Data ('<ke>': '<v>')...`,
+    // which is precisely the missing half.
+    let mut put_out = tempfile::tempfile().expect("z_put drop-in stdout capture");
+    let put_writer = put_out.try_clone().expect("dup z_put drop-in handle");
+    let put = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(put_writer))
         .stderr(Stdio::null())
         .status()
         .expect("run the compiled z_put drop-in");
@@ -434,10 +460,19 @@ fn pico_zput_source_on_wz_capi_declares_and_reaches_real_pico_zsub() {
 
     let foreign =
         wait_for_substring(&mut sub_out, payload, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+            // R311y482 — BOTH sides, and the driver's line is what names the leg.
+            // `Putting Data` present means wz declared + published and the sample
+            // did not arrive; absent means wz never got that far, so the subscriber
+            // side is not implicated at all.
+            let driver = read_captured(&mut put_out);
             panic!(
                 "the REAL zenoh-pico z_sub never received the declared-keyexpr put \
                  that upstream's z_put.c issued while running on wz's C-ABI.\n\
-                 expected substring: {payload}\n--- REAL pico z_sub stdout ---\n{captured}"
+                 expected substring: {payload}\n\
+                 wz-side driver reached its put: {}\n\
+                 --- REAL pico z_sub stdout ---\n{captured}\n\
+                 --- z_put.c-on-wz (driver) stdout ---\n{driver}",
+                driver.contains("Putting Data"),
             )
         });
     // The KEY is the part the alias has to reconstruct. wz sends a numeric id
@@ -483,13 +518,23 @@ fn pico_zping_source_on_wz_capi_round_trips_through_real_pico_zpong() {
     let endpoint = format!("tcp/127.0.0.1:{port}");
     const PINGS: usize = 5;
 
-    // The FOREIGN echo listens; the drop-in dials in. `z_pong` runs until
-    // killed, so its own output is not the witness — the drop-in's is.
+    // The FOREIGN echo listens; the drop-in dials in. `z_pong` runs until killed,
+    // so its own output is not the WITNESS — the drop-in's is.
+    //
+    // R311y482 — it is captured anyway, because "not the witness" is not the same
+    // as "not evidence". When the drop-in reports fewer than PINGS round trips, the
+    // question is whether the echo ever saw a ping at all, and z_pong prints one
+    // line per sample it re-publishes. Discarding that made a failure here
+    // undiagnosable in exactly the way this round's other legs were.
+    let mut pong_out = tempfile::tempfile().expect("z_pong stdout capture");
+    let pong_writer = pong_out.try_clone().expect("dup z_pong stdout handle");
     let mut pong = ChildGuard::wrap(
         "real zenoh-pico z_pong",
-        Command::new(&z_pong)
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_pong)
             .args(["-l", &endpoint, "-m", "peer"])
-            .stdout(Stdio::null())
+            .stdout(Stdio::from(pong_writer))
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn the real zenoh-pico z_pong"),
@@ -527,11 +572,20 @@ fn pico_zping_source_on_wz_capi_round_trips_through_real_pico_zpong() {
 
     let status = wait_for_exit(ping.child_mut(), EXCHANGE_TIMEOUT).unwrap_or_else(|why| {
         graceful_terminate(ping.child_mut(), Duration::from_secs(5));
+        // R311y482 — the echo's own capture, which is what splits the two causes
+        // this message names. z_pong prints a line per re-published sample, so its
+        // presence means the publish leg worked and the drop-in's background
+        // SUBSCRIBER is the broken half; its absence means the publish never
+        // arrived and the subscriber is not implicated.
+        let echo = read_captured(&mut pong_out);
         panic!(
             "upstream z_ping.c on wz's C-ABI never finished its {PINGS} round trips \
              against the REAL zenoh-pico z_pong ({why}). Its load_loop spins on an \
              atomic the echo callback bumps, so this is what a broken publish OR a \
-             broken background subscriber looks like."
+             broken background subscriber looks like.\n\
+             the foreign echo saw traffic: {}\n\
+             --- REAL pico z_pong stdout ---\n{echo}",
+            !echo.trim().is_empty(),
         )
     });
     assert!(status.success(), "z_ping.c on wz exited {status:?}");
@@ -754,7 +808,18 @@ fn pico_zsubliveliness_source_on_wz_capi_sees_real_pico_token_come_and_go() {
     );
     drop(reservation);
 
-    let token = Command::new(&z_liveliness)
+    // R311y482 — captured for the reason leg 5's twin states: this leg is the MIRROR
+    // (foreign holder, wz observer), so the holder's `Undeclaring liveliness
+    // token...` line is what separates "the foreign side never retracted" from "it
+    // retracted and wz's observer did not surface it". Without it the two are the
+    // same missing line, and the two point at opposite code.
+    let mut holder_out = tempfile::tempfile().expect("foreign z_liveliness stdout capture");
+    let holder_writer = holder_out
+        .try_clone()
+        .expect("dup foreign z_liveliness handle");
+    let token = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&z_liveliness)
         .args([
             "-e",
             &endpoint,
@@ -765,21 +830,30 @@ fn pico_zsubliveliness_source_on_wz_capi_sees_real_pico_token_come_and_go() {
             "-t",
             TOKEN_HOLD_SECS,
         ])
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(holder_writer))
         .stderr(Stdio::null())
         .status()
         .expect("run the real zenoh-pico z_liveliness");
     assert!(
         token.success(),
-        "real zenoh-pico z_liveliness exited {token:?}"
+        "real zenoh-pico z_liveliness exited {token:?}\n--- its stdout ---\n{}",
+        read_captured(&mut holder_out)
     );
 
     let local = wait_for_substring(&mut sub_out, "Dropped token", EXCHANGE_TIMEOUT).unwrap_or_else(
         |captured| {
+            let holder = read_captured(&mut holder_out);
             panic!(
                 "upstream z_sub_liveliness.c on wz never reported the REAL pico \
-                 token going away, so wz did not deliver the UndeclToken as a \
-                 DELETE-kind sample.\n--- z_sub_liveliness.c (on wz) stdout ---\n{captured}"
+                 token going away.\n\
+                 the FOREIGN holder reached its undeclare: {}\n\
+                 If TRUE, pico retracted and wz did not deliver the UndeclToken as a \
+                 DELETE-kind sample -- the defect this leg names. If FALSE, the \
+                 foreign holder never retracted, so wz's delivery path is not \
+                 implicated.\n\
+                 --- z_sub_liveliness.c (on wz) stdout ---\n{captured}\n\
+                 --- REAL pico z_liveliness (holder) stdout ---\n{holder}",
+                holder.contains("Undeclaring liveliness token"),
             )
         },
     );

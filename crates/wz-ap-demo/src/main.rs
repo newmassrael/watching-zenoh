@@ -110,6 +110,15 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let rest = &args[1..];
 
+    // R311y482 — the BUILD FEATURES line, emitted HERE: ahead of the --help
+    // return AND ahead of every mode branch below, so no invocation can omit it.
+    // `eprintln!` rather than `log::info!` on purpose — the `--router` / `--peer`
+    // / `--router-hat` / `--storage-host` modes each own their env_logger init
+    // further down, so a logged line would be dropped by whichever path had not
+    // initialised yet. See `usage::build_features` for why this line is
+    // load-bearing rather than decorative.
+    eprintln!("{}", crate::usage::build_features());
+
     if rest.is_empty() || rest.iter().any(|a| a == "--help" || a == "-h") {
         print_usage();
         return ExitCode::SUCCESS;

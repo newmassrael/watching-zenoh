@@ -16,6 +16,74 @@ pub(crate) const ABOUT: &str = concat!(
     " — AP MVP demo binary",
 );
 
+/// R311y482 — the compiled feature set, as ONE line on stderr, emitted by every
+/// invocation before any mode branches.
+///
+/// WHY THIS EXISTS, and it is not convenience. Every feature-set-specific lane
+/// writes the SAME artifact path (`crates/target/debug/wz-ap-demo`), so whichever
+/// `cargo build` ran last wins, and a fixture that needs a different set silently
+/// drives the wrong binary. That cost THREE misdiagnoses in one session: a
+/// `preset-ap-full` reply-err leg read as a wz defect against an ap-client build;
+/// `wz_advanced_pubsub_zenoh_ext_interop` reported 11 failures against an ap-full
+/// build (which deliberately excludes `advanced`); and a damage test read GREEN.
+/// In every case the captured stderr already existed and simply did not say which
+/// binary had produced it.
+///
+/// Each entry is the demo's OWN cargo key, so this reports what argv can reach —
+/// not what the wz library was compiled with. A key absent from the list is a
+/// flag that will be rejected or run INERT, which is exactly the question a
+/// failing fixture needs answered. Deliberately a flat sorted list rather than a
+/// hash: a fixture asserts `contains("advanced")`, and a hash would force every
+/// reader to look up what it meant.
+pub(crate) fn build_features() -> String {
+    let mut on: Vec<&str> = Vec::new();
+    macro_rules! push_if {
+        ($($feat:literal),* $(,)?) => {
+            $(
+                #[cfg(feature = $feat)]
+                on.push($feat);
+            )*
+        };
+    }
+    push_if!(
+        "adminspace-config-hotreload",
+        "adminspace-introspection-handlers",
+        "adminspace-metrics",
+        "adminspace-plugins-handlers",
+        "adminspace-router-linkstate",
+        "adminspace-write",
+        "advanced",
+        "group",
+        "locator-iface",
+        "namespace",
+        "query-attachment",
+        "quic",
+        "quic-datagram",
+        "router-connect-reconcile",
+        "router-hat-router",
+        "router-multicast-faces",
+        "routing-peer",
+        "routing-router",
+        "routing-routes",
+        "routing-token-tables",
+        "scouting-active",
+        "session-extcompression",
+        "storage-backend",
+        "switchboard",
+        "time-hlc",
+        "tls",
+        "transport-link-unixpipe",
+        "transport-lowlatency",
+        "transport-multilink",
+        "transport-qos",
+        "unixsock",
+        "vsock",
+        "ws",
+    );
+    on.sort_unstable();
+    format!("wz-ap-demo: BUILD FEATURES = [{}]", on.join(" "))
+}
+
 pub(crate) fn print_usage() {
     eprintln!("{ABOUT}");
     eprintln!();
