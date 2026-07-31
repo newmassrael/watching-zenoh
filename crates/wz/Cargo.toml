@@ -1716,6 +1716,32 @@ preset-ap-full = [
     "access-extauth-jwt",
     "access-extauth-pubkey",
     "access-extauth-usrpwd",
+    # R311y488 — the ADVANCED PUB/SUB family, the last whole PLANE this
+    # "kitchen-sink" preset omitted, and the omission was not recorded as a
+    # decision anywhere: not in this comment, not in the ledger, not in any
+    # member atom's inventory reason. It left the same incoherent artifact
+    # R311y461 fixed for `routing-token-tables`, one plane wider. `wz-ap-demo`
+    # deliberately mirrors this list rather than extending it (see its
+    # Cargo.toml R311y480 note, which names `advanced` / `group` among the demo
+    # keys held back BECAUSE the preset omits their atoms), so an AP-full
+    # BINARY answered `--advanced-publish` with an INERT warning and declared no
+    # cache. Measured before the change: the AP-full demo's own
+    # `BUILD FEATURES = [...]` line carries no `advanced`.
+    #
+    # The whole family, not a subset. A partial membership is what produced the
+    # y461 defect — the publisher without its cache is a publisher whose history
+    # GET has nothing to answer from, and the subscriber without recovery /
+    # miss-detection is one that cannot notice the gap it exists to close.
+    "ext-pubsub-advanced-publisher",
+    "ext-pubsub-advanced-subscriber",
+    "ext-pubsub-advanced-cache",
+    "ext-pubsub-advanced-history",
+    "ext-pubsub-advanced-recovery",
+    "ext-pubsub-sample-miss-detection",
+    "ext-pubsub-fetching-subscriber",
+    "ext-pubsub-querying-subscriber",
+    "ext-pubsub-group-membership",
+    "ext-pubsub-serde-codec",
     "time-system-clock",
     "time-ntp64",
     "time-timestamp-source",

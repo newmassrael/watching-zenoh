@@ -8348,6 +8348,44 @@ layer_e9_apfull_preset_pico() {
         | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
 }
 
+# ─── Layer E11 — AP-full ADVANCED-PUBSUB against a real zenoh-pico ─────
+#
+# R311y488. The `ext-pubsub-*` plane's FIRST zenoh-pico witness, in both
+# directions: wz's cache answers a real `z_advanced_sub`'s history GET, and wz's
+# AdvancedSubscriber recovers a real `z_advanced_pub`'s cache. Both cross the
+# AP-full `--peer` between two of its clients, so the lane also covers the peer
+# routing the `@adv` QUERY plane rather than only pushes.
+#
+# The pico guard names z_advanced_sub / z_advanced_pub SPECIFICALLY, and that is
+# the point: those two binaries are NEW to the curated CLI set and a machine with
+# a pre-y488 `target/zenoh-pico-cli/` has every OTHER pico binary present. A guard
+# that checked only `z_put` would SKIP-green here while reporting a full pico
+# provisioning — which is the R311y265 masked-skip burn wearing the opposite mask.
+# A pre-y488 build that HAS the binaries but built them without the cmake flags
+# cannot slip through either: those are stub `main`s and the test asserts against
+# their stub message.
+#
+# BUILD FIRST, GUARD SECOND, for the same reason Layer E9 states: a SKIP is green,
+# so a build sitting behind the guard would leave the preset's advanced membership
+# ungated on machines without the foreign CLI.
+layer_e11_apfull_advanced_pubsub_pico() {
+    (cd crates && cargo build -p wz-ap-demo --no-default-features \
+        --features preset-ap-full --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_advanced_sub \
+        || ! -x target/zenoh-pico-cli/z_advanced_pub ]]; then
+        _pico_cli_unavailable "Layer E11" || return 1
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test apfull_advanced_pubsub_pico_interop -- --ignored --quiet --test-threads=1 \
+        --exact apfull_cache_history_recovered_by_a_real_pico_advanced_subscriber 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test apfull_advanced_pubsub_pico_interop -- --ignored --quiet --test-threads=1 \
+        --exact apfull_advanced_subscriber_recovers_history_from_a_real_pico_cache 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -8577,6 +8615,7 @@ run_layer E8 layer_e8_router_hat_pico || overall=1
 run_layer E8t layer_e8t_router_hat_hlc_stamp_pico || overall=1
 run_layer E9 layer_e9_apfull_preset_pico || overall=1
 run_layer E10 layer_e10_close_frame_on_teardown || overall=1
+run_layer E11 layer_e11_apfull_advanced_pubsub_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

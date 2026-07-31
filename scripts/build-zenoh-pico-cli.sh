@@ -57,7 +57,15 @@ INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
 # (`z_queryable_attachment.c:32-37,71-87`), so wz must emit pico's
 # `ze_serializer` kv-pair wire form, not an opaque blob — same constraint the
 # y-era `z_sub_attachment` push witness already lives under.
-TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong z_queryable_attachment)
+# R311y488 — z_advanced_sub / z_advanced_pub join as the ONLY foreign oracles
+# for the ADVANCED pub/sub plane. Before this the `ext-pubsub-*` atoms had a
+# zenoh-ext (Rust) witness and no pico one, and could not have had: pico's
+# advanced pub/sub is compiled OUT by the vendor default, so every advanced
+# example in this tree was a `#else` STUB main. They are the pair, not one
+# each way: z_advanced_sub carries the history/recovery/miss-detection and
+# publisher-detection surface (liveliness token discovery), z_advanced_pub the
+# cache + sequencing side.
+TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong z_queryable_attachment z_advanced_sub z_advanced_pub)
 
 if [[ ! -e "$VENDOR_DIR/.git" && ! -f "$VENDOR_DIR/CMakeLists.txt" ]]; then
     echo "build-zenoh-pico-cli: vendor/zenoh-pico/ not initialized." >&2
@@ -348,11 +356,54 @@ mkdir -p "$BUILD_DIR" "$INSTALL_DIR"
 # open session!" and strace shows it never `openat`s the device at all.
 # `Z_FEATURE_UNSTABLE_API=ON` above is safe only because its consumers use
 # `#ifdef`, which any non-empty value satisfies.
+#
+# Z_FEATURE_ADVANCED_PUBLICATION / _SUBSCRIPTION=1 compile pico's ADVANCED
+# pub/sub in (vendor defaults 0, CMakeLists.txt:319/321). They obey the same
+# `1`-not-`ON` rule as the serial flag — `z_advanced_sub.c:20` guards on
+# `#if Z_FEATURE_ADVANCED_SUBSCRIPTION == 1` — and they fail LOUDER than a
+# silent elision if they are off: the example's `#else` arm is a STUB main
+# that prints "ERROR: Zenoh pico was compiled without ..." and exits -2. The
+# witnesses assert the real markers, so a stub cannot pass one.
+#
+# There is a THIRD way these can end up 0 with the flag spelled right:
+# CMakeLists.txt:386 FORCE-disables ADVANCED_PUBLICATION (with a cmake
+# WARNING, not an error) unless UNSTABLE_API + PUBLICATION + LIVELINESS are
+# all on. All three are on here — UNSTABLE_API from the line above,
+# PUBLICATION and LIVELINESS from the vendor defaults — but a future flag
+# change could break it silently, which is why the generated config.h is
+# ASSERTED below rather than assumed.
 cmake -B "$BUILD_DIR" -S "$EXAMPLES_DIR" \
     -DCMAKE_C_STANDARD=11 \
     -DCMAKE_BUILD_TYPE=Release \
     -DZ_FEATURE_UNSTABLE_API=ON \
+    -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
+    -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
     -DZ_FEATURE_LINK_SERIAL=1 >&2
+
+# Read back what was actually COMPILED, not what was requested. Every
+# mechanism that turns a requested pico feature into a compiled-out one is
+# silent-to-quiet: `ON` evaluating to 0 in `#if`, and the CMakeLists
+# prerequisite guards that FORCE a flag back to 0 with a mere warning. The
+# generated header is the only place the truth is written down, so the
+# STRING-valued flags this script sets are asserted against it here. A
+# mismatch fails the build instead of shipping a stub binary that reads
+# downstream as a wz interop defect.
+GENERATED_CONFIG="$BUILD_DIR/zenohpico/include/zenoh-pico/config.h"
+if [[ ! -f "$GENERATED_CONFIG" ]]; then
+    echo "build-zenoh-pico-cli: generated config.h missing: $GENERATED_CONFIG" >&2
+    exit 1
+fi
+for expect in \
+    "Z_FEATURE_ADVANCED_PUBLICATION 1" \
+    "Z_FEATURE_ADVANCED_SUBSCRIPTION 1" \
+    "Z_FEATURE_LINK_SERIAL 1"; do
+    if ! grep -qx "#define $expect" "$GENERATED_CONFIG"; then
+        echo "build-zenoh-pico-cli: requested '$expect' but the GENERATED config.h says:" >&2
+        grep -E "^#define ${expect%% *}( |$)" "$GENERATED_CONFIG" >&2 \
+            || echo "  (not defined at all)" >&2
+        exit 1
+    fi
+done
 
 # Build only the curated CLI targets (avoids the full examples target
 # set; faster + smaller install surface).

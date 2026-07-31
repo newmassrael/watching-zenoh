@@ -145,8 +145,17 @@ KIND_CLASS = {
     "pico->wz": {"pico", "codec"},
     "wz->zenohd": {"zenohd"},
     "zenohd->wz": {"zenohd"},
-    # Only a zenoh-ext application can witness the advanced-pubsub plane: the
-    # router has no cache to answer from and pico has no such plane at all.
+    # R311y488 corrected the second half of this note. It used to read "the router
+    # has no cache to answer from and pico has no such plane at all". The router
+    # half stands; the pico half was FALSE, and it was a build fact mistaken for an
+    # implementation fact: zenoh-pico ships `z_advanced_pub` / `z_advanced_sub` and
+    # `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`, both DEFAULTING TO 0, so
+    # every advanced example in this tree compiled to a stub `main` until
+    # `scripts/build-zenoh-pico-cli.sh` set them. The advanced plane is therefore
+    # witnessable by the `pico` class too, and `apfull_advanced_pubsub_pico_interop`
+    # claims it through `wz->pico` / `pico->wz` rather than through a new kind —
+    # those kinds already carry the right class set, and adding an `advanced`-only
+    # kind would have encoded the retired assumption a second time.
     "wz->zenoh-ext": {"zenoh-ext"},
     "zenoh-ext->wz": {"zenoh-ext"},
     "codec-parity": {"codec"},
