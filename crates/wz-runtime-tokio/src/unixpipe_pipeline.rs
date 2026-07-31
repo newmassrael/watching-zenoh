@@ -80,7 +80,7 @@ use tokio::sync::mpsc;
 
 use wz_runtime_core::Runtime;
 
-use crate::link_interfaces::addressless_link_subject;
+use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use wz_session_core::link::InterceptorLink;
@@ -271,6 +271,13 @@ impl FifoReadEnd {
             node: Some(node),
         }
     }
+
+    /// R311y474 — the FIFO node this end reads from, the `src` half of the
+    /// adminspace locator pair. Read off the field the drop-unlink already needs,
+    /// so the path is not stored twice.
+    fn node_path(&self) -> Option<&str> {
+        self.node.as_deref()
+    }
 }
 
 impl AsyncRead for FifoReadEnd {
@@ -311,6 +318,11 @@ pub struct UnixpipeLink {
     pub read: FifoReadEnd,
     /// The outbound FIFO end (`AsyncWrite`).
     pub sender: Sender,
+    /// R311y474 — the FIFO node [`Self::sender`] writes to: the `dst` half of the
+    /// adminspace locator pair. The read half's node is already carried inside
+    /// [`FifoReadEnd`] (it unlinks it on drop); the write half's is not, because
+    /// [`Sender`] has no node to release, so it rides here.
+    pub write_node: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +447,7 @@ pub async fn dial_unixpipe(path: &str) -> io::Result<UnixpipeLink> {
     Ok(UnixpipeLink {
         read,
         sender: ul_sender,
+        write_node: uplink,
     })
 }
 
@@ -481,6 +494,7 @@ async fn finish_handshake(base: &str, suffix: u32) -> io::Result<UnixpipeLink> {
     Ok(UnixpipeLink {
         read,
         sender: dl_sender,
+        write_node: downlink,
     })
 }
 
@@ -637,7 +651,27 @@ pub fn wire_unixpipe_stream(
     Arc<StreamWriteDriver>,
     TokioJoinHandle<()>,
 ) {
-    let UnixpipeLink { read, sender } = link;
+    let UnixpipeLink {
+        read,
+        sender,
+        write_node,
+    } = link;
+    // R311y474 — the adminspace `{src,dst}` pair, and the round that closes
+    // R311y473's named unixpipe residual by correcting its premise. That note said
+    // the pair could not be named because the rendezvous BASE path belongs to the
+    // acceptor rather than the link — but upstream does not use the base either. It
+    // renders the DEDICATED per-link pair, `src` = the FIFO this end READS and
+    // `dst` = the FIFO it WRITES, on both sides
+    // (`zenoh-link-unixpipe/src/unix/unicast.rs:264-274` client,
+    // `:417-427` listener). Both nodes are known to both ends, so no type had to be
+    // widened beyond carrying the write node the `Sender` does not track.
+    //
+    // `None` survives only for a read end with no node at all, which today cannot
+    // arise (`FifoReadEnd::new` always sets one) — but the field is an `Option`, so
+    // this reads it rather than asserting on it.
+    let endpoints = read
+        .node_path()
+        .map(|src| addressless_link_endpoints(InterceptorLink::Unixpipe, src, write_node.as_str()));
     let inbound = StreamReadDriver::new(read, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(writer_task(sender, rx));
@@ -647,12 +681,7 @@ pub fn wire_unixpipe_stream(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         addressless_link_subject(InterceptorLink::Unixpipe),
-        // R311y473 — a unixpipe link is a pair of already-opened FIFO handles; the
-        // rendezvous BASE path is the acceptor's, not the link's, and neither half
-        // can name it. NAMED residual, not an oversight: threading the base here
-        // means widening `UnixpipeLink`, which is a separate change. The admin host
-        // still emits the link, so the aggregation COUNT stays truthful.
-        None,
+        endpoints,
     ));
     (inbound, outbound, writer_handle)
 }

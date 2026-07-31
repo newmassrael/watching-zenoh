@@ -61,12 +61,12 @@ use wz_runtime_core::Runtime;
 // R311y13 — the QUIC handshake SSOT (client connect / server endpoint / accept)
 // is shared from quic_pipeline; this module owns only the datagram-vs-stream
 // delta (no open_bi/accept_bi, max_bidi=0, the datagram read/write drivers).
-use crate::link_interfaces::ip_link_subject;
+use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
 use crate::quic_pipeline::{accept_quic_connection, connect_quic_client, quic_server_endpoint};
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::{InterceptorLink, LinkSubject};
+use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
 
 /// Conservative per-datagram MTU floor used when the connection has not yet
 /// reported a negotiated `max_datagram_size` (the QUIC initial datagram budget
@@ -154,12 +154,19 @@ pub struct QuicDatagramWriteDriver {
     mtu: usize,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
+    /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
+    endpoints: Option<LinkEndpoints>,
 }
 
 impl BoxedLinkDriver for QuicDatagramWriteDriver {
     // R311y453 — the §5.16 subject resolved at open. A field read, not a syscall.
     fn link_subject(&self) -> Option<&LinkSubject> {
         Some(&self.subject)
+    }
+
+    // R311y474 — the adminspace `{src,dst}` pair resolved at open. A field read.
+    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
+        self.endpoints.as_ref()
     }
 
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
@@ -342,7 +349,39 @@ pub fn wire_quic_datagram(
     let writer_handle = TokioRuntime.spawn(quic_datagram_writer_task(connection.clone(), rx));
     // R311y453 — the §5.16 subject, off the quinn endpoint's bound address.
     let subject = ip_link_subject(InterceptorLink::QuicDatagram, endpoint.local_addr().ok());
-    let outbound = Arc::new(QuicDatagramWriteDriver { tx, mtu, subject });
+    // R311y474 — the adminspace `{src,dst}` pair. `Connection::remote_address` is
+    // infallible (a completed handshake HAS a peer), so the only `None` arm is a
+    // failed `local_addr`. The scheme carries the `?rel=0` datagram marker via
+    // `InterceptorLink::locator_for`, which is what makes the string DIALABLE — the
+    // bare `quic/` spelling would name the reliable sibling transport (R311y470).
+    //
+    // The SRC is a deliberate SUPERSET of upstream. zenoh publishes
+    // `quic_endpoint.local_addr()` verbatim (`zenoh-link-quic_datagram/src/unicast.rs`
+    // :292, after the same UNSPECIFIED:0 client bind at :255-263), so a zenoh
+    // client's own src reads `quic/0.0.0.0:<port>?rel=0` — a string nothing can dial
+    // and not the address its peer sees. quinn already knows the concrete one for
+    // THIS connection (`Connection::local_ip`, whose own doc names the wildcard-bind
+    // case), so wz prefers it and keeps the endpoint's PORT, falling back to the
+    // bound address only when quinn cannot say. The result is what upstream's
+    // ACCEPTOR reports for the same link, which is what makes the pair mirror.
+    let local = endpoint
+        .local_addr()
+        .ok()
+        .map(|bound| match connection.local_ip() {
+            Some(ip) => SocketAddr::new(ip, bound.port()),
+            None => bound,
+        });
+    let endpoints = ip_link_endpoints(
+        InterceptorLink::QuicDatagram,
+        local,
+        Some(connection.remote_address()),
+    );
+    let outbound = Arc::new(QuicDatagramWriteDriver {
+        tx,
+        mtu,
+        subject,
+        endpoints,
+    });
     let inbound = QuicDatagramReadDriver {
         connection,
         _endpoint: endpoint,
@@ -373,6 +412,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let driver = QuicDatagramWriteDriver {
             subject: LinkSubject::UNKNOWN,
+            endpoints: None,
             tx,
             mtu: QUIC_DATAGRAM_LINK_MTU,
         };

@@ -37,6 +37,8 @@ use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
 // R311y473 — the single dialable-locator scheme table `advertised_locator`
 // delegates to (and the adminspace per-link emitter shares).
 use wz_session_core::link::InterceptorLink;
+#[cfg(feature = "transport-link-serial")]
+use wz_session_core::locator::SerialEndpoint;
 use wz_session_core::locator::{
     parse_any_locator, AnyLocator, AnyLocatorError, LocatorParseError, Proto,
 };
@@ -501,8 +503,17 @@ pub enum DialedLink {
     /// wrapped here — [`dial_serial`] (Initiator) / `accept_serial`
     /// (Responder) drive it before returning, so the steady-state split
     /// path is uniform with the other transports.
+    ///
+    /// R311y474 — carries the dialled [`SerialEndpoint`] alongside the stream. A
+    /// tty's address is not readable off the stream the way a socket's is
+    /// (`SerialStream` exposes no device name), so the endpoint that opened it is
+    /// the only object that can name the link — and the adminspace `{src,dst}`
+    /// view needs that name.
     #[cfg(feature = "transport-link-serial")]
-    Serial(SerialStream),
+    Serial {
+        stream: SerialStream,
+        endpoint: SerialEndpoint,
+    },
     /// A connected + rustls-handshaked TLS-over-TCP stream, split downstream
     /// via [`wire_tls_stream`] (R311oa). Like serial, the handshake (here the
     /// TLS handshake) has ALREADY run by the time the stream is wrapped:
@@ -601,7 +612,7 @@ impl DialedLink {
             #[cfg(feature = "transport-link-udp")]
             DialedLink::UdpDemuxed { .. } => "udp",
             #[cfg(feature = "transport-link-serial")]
-            DialedLink::Serial(_) => "serial",
+            DialedLink::Serial { .. } => "serial",
             #[cfg(feature = "transport-link-tls")]
             DialedLink::Tls(_) => "tls",
             #[cfg(feature = "transport-link-ws")]
@@ -1693,7 +1704,10 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // Initiator role is correct here: `dial_locator` is the dial (Initiator)
         // seam; the Responder side comes up via `accept_serial`.
         #[cfg(feature = "transport-link-serial")]
-        AnyLocator::Serial(ep) => Ok(DialedLink::Serial(dial_serial(&ep).await?)),
+        AnyLocator::Serial(ep) => Ok(DialedLink::Serial {
+            stream: dial_serial(&ep).await?,
+            endpoint: ep,
+        }),
         // R311ny — `AnyLocator::Serial` is an ALWAYS-present variant (the
         // serial locator leaf is ungated in wz-session-core), so this arm
         // must exist whatever this crate's features are. Without the serial
@@ -2395,8 +2409,8 @@ pub fn wire_dialed_link_with_lowlatency(
             (InboundLink::Udp(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-serial")]
-        DialedLink::Serial(stream) => {
-            let (inbound, outbound, handle) = wire_serial_stream(stream);
+        DialedLink::Serial { stream, endpoint } => {
+            let (inbound, outbound, handle) = wire_serial_stream(stream, &endpoint);
             (InboundLink::Serial(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-tls")]

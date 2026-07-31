@@ -393,6 +393,34 @@ pub struct SerialEndpoint {
     pub baudrate: u32,
 }
 
+impl SerialEndpoint {
+    /// R311y474 — the ADDRESS span of this endpoint's locator, PLUS the `#config`
+    /// tail it needs to parse back: the argument
+    /// [`crate::link::InterceptorLink::locator_for`] prefixes with the scheme to
+    /// form a full, DIALABLE `serial/...` locator.
+    ///
+    /// Lives beside [`parse_serial_locator`] deliberately. An emitter that spells
+    /// the grammar out for itself is exactly how R311y470 shipped two locators no
+    /// peer could dial, so the renderer and the parser sit adjacent and are pinned
+    /// against each other by a round-trip test rather than by two hand-kept tables.
+    /// The SCHEME is not written here either — it comes from `locator_for`, the one
+    /// table R311y473 collapsed every emitter onto.
+    ///
+    /// The `#baudrate=` tail is NOT optional: [`parse_serial_locator`] rejects a
+    /// string without it (`MissingBaudrate`), so an emitter that dropped it would
+    /// produce a locator wz's own parser refuses.
+    pub fn locator_address_with_config(&self) -> alloc::string::String {
+        use alloc::format;
+        // The address form is the `.`-heuristic parse_serial_locator reads back
+        // (`/dev/ttyUSB0` device vs `12.13` pins, serial_protocol.c:109).
+        let address = match &self.target {
+            SerialTarget::Device(path) => path.clone(),
+            SerialTarget::Pins { tx, rx } => format!("{tx}.{rx}"),
+        };
+        format!("{address}#{SERIAL_BAUDRATE_KEY}={}", self.baudrate)
+    }
+}
+
 /// Why a `serial/...` locator string did not parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SerialLocatorError {
@@ -951,6 +979,36 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R311y474 — the serial RENDERER and PARSER must be exact inverses, for BOTH
+    /// address forms of the grammar. This is the pin that keeps the two adjacent
+    /// functions from drifting: the adminspace emitter composes
+    /// `locator_address_with_config` through `InterceptorLink::locator_for`, and a
+    /// string that does not parse back is a locator an admin client cannot dial
+    /// (the R311y470 defect class).
+    #[test]
+    fn a_rendered_serial_locator_parses_back_to_the_same_endpoint() {
+        for endpoint in [
+            SerialEndpoint {
+                target: SerialTarget::Device("/dev/ttyUSB0".into()),
+                baudrate: 115_200,
+            },
+            SerialEndpoint {
+                target: SerialTarget::Pins { tx: 12, rx: 13 },
+                baudrate: 9_600,
+            },
+        ] {
+            let locator = crate::link::InterceptorLink::Serial
+                .locator_for(&endpoint.locator_address_with_config());
+            let parsed = parse_serial_locator(&locator).unwrap_or_else(|e| {
+                panic!("the rendered locator {locator:?} must parse back, got {e:?}")
+            });
+            assert_eq!(
+                parsed, endpoint,
+                "render -> parse must be lossless for {locator:?}"
+            );
+        }
+    }
 
     #[test]
     fn parses_tcp_ipv4() {

@@ -1414,6 +1414,7 @@ layer_c1t_cargo_test_serial() {
         && cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
         && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial,transport-fragmentation --quiet -- -D warnings)
 }
@@ -2320,6 +2321,7 @@ layer_c1aj_cargo_test_quic_datagram() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic-datagram --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic-datagram --quiet -- -D warnings)
 }
@@ -2397,6 +2399,7 @@ layer_c1al_cargo_test_unixpipe() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test unixpipe_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib mesh_accept_loop_holds_two_unixpipe_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib boundlistener_unixpipe_is_mesh_capable --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixpipe --quiet -- -D warnings \
@@ -4076,6 +4079,12 @@ layer_c1l_reassembly() {
     _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation --test udp_frag_e2e --quiet \
         || return 1
     _runci_guarded_test C1l 3 cargo test -p wz-runtime-tokio --features transport-fragmentation --test udp_chaos_e2e --quiet \
+        || return 1
+    # R311y474 — the udp leg of the adminspace {src,dst} pairing proof. Only ONE
+    # test selects here: the file's other four legs are gated on link features this
+    # set does not arm, and each is guarded in ITS OWN transport lane (C1t serial,
+    # the quic-datagram lane, the unixpipe lane) rather than all in one place.
+    _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation --test link_endpoints_pairing --quiet \
         || return 1
     (cd crates \
         && cargo test -p wz-session-core --features reassembly --quiet \

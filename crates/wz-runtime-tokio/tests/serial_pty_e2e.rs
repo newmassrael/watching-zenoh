@@ -46,7 +46,18 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::SerialRole;
+
+/// The endpoint a PTY-pair test stands in for — `SerialStream::pair()` exposes no
+/// device name, so the address is supplied the way the real dial path supplies the
+/// one it parsed out of the locator.
+fn pty_endpoint() -> SerialEndpoint {
+    SerialEndpoint {
+        target: SerialTarget::Device("/dev/wz-test-pty".to_string()),
+        baudrate: 115_200,
+    }
+}
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
@@ -82,7 +93,10 @@ async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
         let mut params = fixture_session_init_params();
         params.zid = vec![0x02; 4]; // distinct from the initiator
         accept_and_open_session(
-            DialedLink::Serial(end_acc),
+            DialedLink::Serial {
+                stream: end_acc,
+                endpoint: pty_endpoint(),
+            },
             params,
             TokioTime::new(),
             Some(ITER_CAP),
@@ -95,7 +109,10 @@ async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
         let mut params = fixture_session_init_params();
         params.zid = vec![0x01; 4];
         initiate_and_open_session(
-            DialedLink::Serial(end_init),
+            DialedLink::Serial {
+                stream: end_init,
+                endpoint: pty_endpoint(),
+            },
             params,
             TokioTime::new(),
             Some(ITER_CAP),
@@ -238,7 +255,10 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
         let mut params = fixture_session_init_params();
         params.zid = vec![0x02; 4];
         accept_and_open_session(
-            DialedLink::Serial(end_acc),
+            DialedLink::Serial {
+                stream: end_acc,
+                endpoint: pty_endpoint(),
+            },
             params,
             TokioTime::new(),
             Some(ITER_CAP),
@@ -251,7 +271,10 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
         let mut params = fixture_session_init_params();
         params.zid = vec![0x01; 4];
         initiate_and_open_session(
-            DialedLink::Serial(end_init),
+            DialedLink::Serial {
+                stream: end_init,
+                endpoint: pty_endpoint(),
+            },
             params,
             TokioTime::new(),
             Some(ITER_CAP),

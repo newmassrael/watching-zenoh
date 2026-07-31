@@ -64,11 +64,11 @@ use tokio_serial::SerialStream;
 
 use wz_runtime_core::Runtime;
 
-use crate::link_interfaces::addressless_link_subject;
+use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::{InterceptorLink, LinkSubject};
+use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
 use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::{
     encode_frame, DecodedFrame, HandshakeStep, SerialFrameReader, SerialHandshake, SerialRole,
@@ -216,8 +216,13 @@ where
 /// `BiLock`-guarded references to the one tty fd. The handle is awaited at
 /// teardown so a tail frame the FSM enqueues during its final transition
 /// still drains to the peer before the tty drops.
+/// `endpoint` is the tty this stream was opened from — carried in only so the
+/// driver can report its adminspace `{src,dst}` pair (R311y474). A serial link's
+/// address is not readable off the stream the way a socket's is, so the ONE object
+/// that knows it is the endpoint the caller dialled.
 pub fn wire_serial_stream(
     stream: SerialStream,
+    endpoint: &SerialEndpoint,
 ) -> (
     SerialReadDriver,
     Arc<SerialWriteDriver>,
@@ -227,9 +232,28 @@ pub fn wire_serial_stream(
     let inbound = SerialReadDriver::new(reader);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(serial_writer_task(writer, rx));
+    // R311y474 — the adminspace `{src,dst}` pair. BOTH ends are this tty's own
+    // locator, which is upstream's DIAL-side behaviour verbatim: zenoh passes its
+    // one `path` as both `src_path` and `dst_path`
+    // (`zenoh-link-serial/src/unicast.rs:310-315`). For a point-to-point tty that
+    // is the honest answer — the device IS the link, and dialling that locator
+    // from this host reaches this link.
+    //
+    // The one upstream behaviour deliberately NOT reproduced is its LISTENER side,
+    // which puts a random UUIDv4 in `dst` (`unicast.rs:329-333`). That string is
+    // not a locator anything can dial, which violates the contract on
+    // `BoxedLinkDriver::link_endpoints`; and wz has no wired serial acceptor to
+    // apply it to anyway (`session_open.rs:2048` — a serial accept is a tty open,
+    // not a listen bind).
+    let locator = endpoint.locator_address_with_config();
     let outbound = Arc::new(SerialWriteDriver::new(
         tx,
         addressless_link_subject(InterceptorLink::Serial),
+        Some(addressless_link_endpoints(
+            InterceptorLink::Serial,
+            &locator,
+            &locator,
+        )),
     ));
     (inbound, outbound, writer_handle)
 }
@@ -345,11 +369,21 @@ pub struct SerialWriteDriver {
     tx: mpsc::UnboundedSender<Vec<u8>>,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
+    /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
+    endpoints: Option<LinkEndpoints>,
 }
 
 impl SerialWriteDriver {
-    fn new(tx: mpsc::UnboundedSender<Vec<u8>>, subject: LinkSubject) -> Self {
-        Self { tx, subject }
+    fn new(
+        tx: mpsc::UnboundedSender<Vec<u8>>,
+        subject: LinkSubject,
+        endpoints: Option<LinkEndpoints>,
+    ) -> Self {
+        Self {
+            tx,
+            subject,
+            endpoints,
+        }
     }
 }
 
@@ -357,6 +391,11 @@ impl BoxedLinkDriver for SerialWriteDriver {
     // R311y453 — the §5.16 subject resolved at open. A field read, not a syscall.
     fn link_subject(&self) -> Option<&LinkSubject> {
         Some(&self.subject)
+    }
+
+    // R311y474 — the adminspace `{src,dst}` pair resolved at open. A field read.
+    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
+        self.endpoints.as_ref()
     }
 
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
@@ -445,6 +484,17 @@ pub async fn serial_writer_task(
 mod tests {
     use super::*;
 
+    /// The endpoint a PTY-pair test stands in for. `SerialStream::pair()` opens an
+    /// `openpty` pair and exposes NEITHER end's device name, so a wired PTY link
+    /// has no readable address — the endpoint is supplied, exactly as the real dial
+    /// path supplies the one it parsed from the locator.
+    fn pty_endpoint() -> SerialEndpoint {
+        SerialEndpoint {
+            target: SerialTarget::Device("/dev/wz-test-pty".to_string()),
+            baudrate: 115_200,
+        }
+    }
+
     /// The serial write driver reports the serial link MTU (not the
     /// unbounded `DEFAULT_LINK_MTU` a stream link inherits), so the
     /// transport's `negotiated_batch_mtu` mins its TX fragment budget down
@@ -460,7 +510,7 @@ mod tests {
         const _: () = assert!(SERIAL_MTU < wz_session_core::link::DEFAULT_LINK_MTU);
 
         let (tx, _rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let driver = SerialWriteDriver::new(tx, LinkSubject::UNKNOWN);
+        let driver = SerialWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
         assert_eq!(driver.link_mtu(), SERIAL_MTU);
     }
 
@@ -497,8 +547,8 @@ mod tests {
         ia.expect("initiator connected");
         rb.expect("responder connected");
 
-        let (_a_in, a_out, a_writer) = wire_serial_stream(a);
-        let (mut b_in, _b_out, _b_writer) = wire_serial_stream(b);
+        let (_a_in, a_out, a_writer) = wire_serial_stream(a, &pty_endpoint());
+        let (mut b_in, _b_out, _b_writer) = wire_serial_stream(b, &pty_endpoint());
 
         let payload = b"hello-serial-frame";
         a_out.send_blocking(payload, Reliability::Reliable);

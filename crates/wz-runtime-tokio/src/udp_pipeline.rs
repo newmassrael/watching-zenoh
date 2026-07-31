@@ -22,10 +22,11 @@
 //!
 //! - [`dial_udp`] — the raw-dial primitive: bind an ephemeral local socket
 //!   whose address family mirrors `peer` (a v4-bound socket cannot reach a
-//!   v6 peer), returning it unwrapped so the caller chooses its consumption
-//!   shape. The session-open path wires it via [`wire_udp_socket`];
-//!   [`crate::UdpDriver::connect`] wraps the same bind in the unified
-//!   single-driver shape.
+//!   v6 peer) and `connect` it to that peer (R311y474), returning it unwrapped
+//!   so the caller chooses its consumption shape. The session-open path wires
+//!   it via [`wire_udp_socket`]; [`crate::UdpDriver::connect`] repeats the same
+//!   BIND in the unified single-driver shape but does NOT connect, so the two
+//!   seams diverge — see [`dial_udp`].
 //! - [`wire_udp_socket`] — shares the bound socket into the cooperating
 //!   `(UdpReadDriver, Arc<UdpWriteDriver>, writer-task handle)` triple.
 //! - [`UdpReadDriver`] — impls [`LinkDriver`] with `poll_event` receiving one
@@ -89,10 +90,10 @@ use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 // re-export hop. The link pipeline is transport-agnostic (a multicast deploy
 // binds a UDP multicast socket too), so it must not depend on the
 // `transport-unicast`-gated `session_glue`.
-use crate::link_interfaces::ip_link_subject;
+use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::{InterceptorLink, LinkSubject};
+use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
 
 /// Maximum UDP payload (65535 IP datagram - 20 IPv4 header - 8 UDP header).
 /// A larger frame is a wz-side encoder bug; the driver drops it loud rather
@@ -124,14 +125,20 @@ const MAX_UDP_PAYLOAD: usize = 65507;
 /// rather than a magic `1450`, the same way serial's e2e pins `SERIAL_MTU`.
 pub const UDP_LINK_MTU: usize = 1450;
 
-/// Bind an outbound UDP socket targeting `peer` — the raw-dial primitive for
-/// the datagram transport. Returns the bound [`UdpSocket`] unwrapped so the
-/// caller can choose its consumption shape: the session-open path shares it
-/// via [`wire_udp_socket`], while [`crate::UdpDriver::connect`] wraps it in a
-/// unified driver. The local bind address family mirrors `peer` (a v4-bound
+/// Bind AND `connect` an outbound UDP socket targeting `peer` — the raw-dial
+/// primitive for the datagram transport. Returns the socket unwrapped so the
+/// caller can choose its consumption shape; the session-open path shares it via
+/// [`wire_udp_socket`]. The local bind address family mirrors `peer` (a v4-bound
 /// socket cannot reach a v6 peer); the ephemeral port (`:0`) lets the kernel
 /// assign — the peer learns this Initiator port from the first datagram's
 /// source address.
+///
+/// R311y474 — the `connect` is part of the contract, not an implementation
+/// detail: it is what makes `local_addr` report the concrete egress address
+/// rather than the wildcard the bind leaves, and it filters inbound datagrams to
+/// this one peer. See the body for the upstream citation and the consequences.
+/// [`crate::UdpDriver::connect`] performs the SAME bind but NOT the connect — it
+/// is a separate unified-driver seam, so the two paths diverge here.
 pub async fn dial_udp(peer: SocketAddr, iface: Option<&str>) -> io::Result<UdpSocket> {
     let bind_addr: SocketAddr = match peer {
         SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
@@ -145,6 +152,24 @@ pub async fn dial_udp(peer: SocketAddr, iface: Option<&str>) -> io::Result<UdpSo
     if let Some(iface) = iface {
         crate::iface_bind::bind_socket_to_device(&socket, iface)?;
     }
+    // R311y474 — CONNECT the dial socket to its peer, as zenoh does
+    // (`zenoh-link-udp/src/unicast.rs:311`, immediately after its identical
+    // UNSPECIFIED:0 bind). Two consequences, and the second is why this is not
+    // cosmetic:
+    //
+    // 1. The kernel resolves the ROUTE, so `local_addr` stops reporting the
+    //    wildcard `0.0.0.0:<port>` the bind left and starts reporting the concrete
+    //    address this link actually egresses from — which is what upstream's
+    //    `src_addr` is (`unicast.rs:317`), and the only form the adminspace can
+    //    publish as a DIALABLE locator.
+    // 2. The socket receives ONLY this peer's datagrams. For a unicast dial face
+    //    that is the correct filter and upstream's; it also means an off-path
+    //    sender can no longer inject into an established dial link.
+    //
+    // Scoped to the DIAL path deliberately: the acceptor's socket is shared across
+    // faces and must stay unconnected (see `bind_udp`), and the multicast /
+    // scouting sockets have their own binds and never route through here.
+    socket.connect(peer).await?;
     Ok(socket)
 }
 
@@ -386,10 +411,15 @@ pub fn wire_udp_socket(
     let socket = Arc::new(socket);
     // R311y453 — the §5.16 subject, off the socket this face owns.
     let subject = ip_link_subject(InterceptorLink::Udp, socket.local_addr().ok());
+    // R311y474 — the adminspace `{src,dst}` pair. `peer` is the unicast target
+    // every outbound datagram is addressed to, so the DST is known exactly; the
+    // SRC is this face's own socket. Both ends known means no `None` arm here
+    // beyond a failed `local_addr` syscall.
+    let endpoints = ip_link_endpoints(InterceptorLink::Udp, socket.local_addr().ok(), Some(peer));
     let inbound = UdpReadDriver::from_socket(socket.clone());
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(udp_writer_task(socket, peer, rx));
-    let outbound = Arc::new(UdpWriteDriver::new(tx, subject));
+    let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
 
@@ -414,10 +444,18 @@ pub fn wire_udp_demuxed(
     // R311y453 — the §5.16 subject: an accept-demux face shares the listener's
     // send socket, so the local address is that socket's.
     let subject = ip_link_subject(InterceptorLink::Udp, send_socket.local_addr().ok());
+    // R311y474 — the adminspace `{src,dst}` pair. The SRC is the SHARED listener
+    // socket's address (every demux face reports the same one, which is the truth:
+    // they are one socket), and the DST is this face's own demultiplexed peer.
+    let endpoints = ip_link_endpoints(
+        InterceptorLink::Udp,
+        send_socket.local_addr().ok(),
+        Some(peer),
+    );
     let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(udp_writer_task(send_socket, peer, rx));
-    let outbound = Arc::new(UdpWriteDriver::new(tx, subject));
+    let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
 
@@ -542,11 +580,21 @@ pub struct UdpWriteDriver {
     tx: mpsc::UnboundedSender<Vec<u8>>,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
+    /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
+    endpoints: Option<LinkEndpoints>,
 }
 
 impl UdpWriteDriver {
-    fn new(tx: mpsc::UnboundedSender<Vec<u8>>, subject: LinkSubject) -> Self {
-        Self { tx, subject }
+    fn new(
+        tx: mpsc::UnboundedSender<Vec<u8>>,
+        subject: LinkSubject,
+        endpoints: Option<LinkEndpoints>,
+    ) -> Self {
+        Self {
+            tx,
+            subject,
+            endpoints,
+        }
     }
 }
 
@@ -554,6 +602,11 @@ impl BoxedLinkDriver for UdpWriteDriver {
     // R311y453 — the §5.16 subject resolved at open. A field read, not a syscall.
     fn link_subject(&self) -> Option<&LinkSubject> {
         Some(&self.subject)
+    }
+
+    // R311y474 — the adminspace `{src,dst}` pair resolved at open. A field read.
+    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
+        self.endpoints.as_ref()
     }
 
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
@@ -615,9 +668,24 @@ pub async fn udp_writer_task(
     peer: SocketAddr,
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
+    // R311y474 — a DIAL socket is `connect`ed to its one peer, so it emits with
+    // `send`; the shared LISTENER socket serves N peers and must address each
+    // datagram, so it emits with `send_to`. Reading the socket's own connectedness
+    // (rather than taking a flag) means the two wire paths cannot disagree with the
+    // socket they were handed: `peer_addr` succeeds exactly when `connect` ran.
+    //
+    // Not merely stylistic. `sendto(2)` on a CONNECTED socket is permitted on Linux
+    // but returns EISCONN on macOS/BSD, so an unconditional `send_to` would make
+    // every udp dial fail on a platform §5.20 carries as an atom.
+    let connected = socket.peer_addr().is_ok();
     while let Some(payload) = rx.recv().await {
-        if let Err(e) = socket.send_to(&payload, peer).await {
-            log::warn!("wz-runtime-tokio: udp_writer_task send_to failed: {e}; closing");
+        let sent = if connected {
+            socket.send(&payload).await
+        } else {
+            socket.send_to(&payload, peer).await
+        };
+        if let Err(e) = sent {
+            log::warn!("wz-runtime-tokio: udp_writer_task send failed: {e}; closing");
             return;
         }
     }
@@ -643,7 +711,7 @@ mod tests {
     #[tokio::test]
     async fn write_driver_drops_oversize_datagram() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN);
+        let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
         driver.send_blocking(&vec![0u8; MAX_UDP_PAYLOAD + 1], Reliability::BestEffort);
         driver.send_blocking(b"ok", Reliability::BestEffort);
         // Only the in-range datagram reached the channel.
@@ -669,7 +737,7 @@ mod tests {
         const _: () = assert!(UDP_LINK_MTU < MAX_UDP_PAYLOAD);
 
         let (tx, _rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN);
+        let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
         assert_eq!(driver.link_mtu(), UDP_LINK_MTU);
     }
 
