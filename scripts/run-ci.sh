@@ -2244,7 +2244,11 @@ layer_c1ag_cargo_test_transport_compose() {
 #       `time-hlc` WITH routing before this round, so the seam could have failed
 #       to compile — or been cfg'd out entirely — with every lane still green.
 #       C4 builds preset-ap-full (which carries both) but is build-only and
-#       clippy-free.
+#       clippy-free. R311y480 narrows that: C4 is still library-build-only, but
+#       Layer E9 now RUNS a preset-ap-full DEMO BINARY against real zenoh-pico.
+#       It is not a substitute for this lane — E9 proves the composition
+#       interoperates, not that `time-hlc` WITH routing composes as a clippy-clean
+#       seam, which is what the combo below is for.
 layer_c1ah_cargo_test_time_hlc() {
     _runci_guarded_test "C1ah timestamp_source" 5 \
         cargo test -p wz-runtime-tokio --features time-hlc --lib timestamp_source:: --quiet || return 1
@@ -3188,7 +3192,9 @@ layer_c1x_cargo_test_routing_routes() {
 #      method (extauth_usrpwd) — are TESTED under `access-extauth-usrpwd` and
 #      clippy-gated both there and codec-only (`--no-default-features --features
 #      session-extauth`). Without this the auth unit tests ran in NO lane
-#      (preset-ap-full carries the features but is build-only).
+#      (preset-ap-full carries the features but is build-only — still true of the
+#      LIBRARY build C4 does; R311y480's Layer E9 adds a preset-ap-full BINARY
+#      driven against pico, which exercises composition but runs no unit test).
 #   7. §5.16 usrpwd LIVE wiring (R3b): the wz<->wz usrpwd handshake e2e
 #      (`usrpwd_handshake_e2e`) drives a real initiator<->responder handshake
 #      over the encode/parse/dispatch path (matching creds -> Established;
@@ -5324,9 +5330,16 @@ layer_e_ap_demo_round_trip() {
     # added here were first named for what they do (`..._relay_induced_gap`),
     # which reads better and would have put them on this sweep's default binary,
     # where they fail with a correct INERT diagnosis in the wrong lane.
+    # R311y480 — also exclude `apfull`: `apfull_preset_pico_interop.rs` drives the
+    # `--no-default-features --features preset-ap-full` demo binary, which THIS lane
+    # does not build (it builds the default preset-ap-client one at :4985). Its leg 2
+    # needs `--peer`, so on this sweep's binary it would fail at spawn with exit 2 —
+    # a real failure for the wrong reason. Layer E9 owns that binary. Same one-substring
+    # convention as `wz_peer` / `wz_router` above; `--skip` matches the TEST FN name,
+    # and both fns are named `apfull_preset_*`.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
-        --skip wz_storage_host --skip zenoh_ext --skip inert)
+        --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -8222,6 +8235,54 @@ layer_e8t_router_hat_hlc_stamp_pico() {
         | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
 }
 
+# ─── Layer E9 — the preset-ap-full COMPOSITION, driven against pico ──
+#
+# R311y480. Until this round `preset-ap-full` had NO executable: Layer C4
+# ran `cargo build -p wz --no-default-features --features preset-ap-full`,
+# a LIBRARY typecheck, and `wz-ap-demo` had no `preset-ap-full` key at all
+# (`cargo build -p wz-ap-demo --features preset-ap-full` answered "the
+# package 'wz-ap-demo' does not contain this feature"). So the kitchen-sink
+# preset had never been RUN and no foreign peer had ever spoken to it.
+#
+# Every other pico lane in this file drives a NARROW binary — E6 builds
+# `--features routing-peer`, E8t `--features router-hat-router,time-hlc`,
+# E6e `--features storage-backend`. Composition is the one axis none of
+# them reaches, and it is not a formality: preset-ap-full drags in
+# `session-extqos`, `session-extshm` (recorded WIRE-INCOMPATIBLE) and
+# `transport-shm` alongside the live handshake. They are reserved (declared
+# cargo key, no cfg site) so the expectation is that they change no wire
+# byte — an expectation no lane could observe before this one.
+#
+# The two tests are named EXPLICITLY rather than swept, so a rename or a
+# silently-dropped test fails the lane instead of shrinking it quietly
+# (the `--exact` + `1 passed` pin E8t uses). Leg 2 is also the build
+# discriminator: `--peer` is cfg(routing-peer), so a binary built from the
+# wrong feature set exits 2 at spawn and this lane reds.
+layer_e9_apfull_preset_pico() {
+    # BUILD FIRST, GUARD SECOND — deliberately in this order. The pico guard below
+    # can SKIP-green on a machine without the foreign CLI, and a SKIP is green: if
+    # the build sat behind it, the `preset-ap-full` demo key would get NO gate at
+    # all on those machines, which is precisely how a feature-list drift (a renamed
+    # or removed atom in the preset) would reach main invisibly. wz artifacts are
+    # never a reason to skip (the R311y265 rule Layer E states); only the FOREIGN
+    # binary is.
+    (cd crates && cargo build -p wz-ap-demo --no-default-features \
+        --features preset-ap-full --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub \
+        || ! -x target/zenoh-pico-cli/z_pub ]]; then
+        _pico_cli_unavailable "Layer E9" || return 1
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test apfull_preset_pico_interop -- --ignored --quiet --test-threads=1 \
+        --exact apfull_preset_acceptor_round_trips_with_a_real_pico_z_put 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test apfull_preset_pico_interop -- --ignored --quiet --test-threads=1 \
+        --exact apfull_preset_peer_forwards_between_two_real_pico_clients 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -8449,6 +8510,7 @@ run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1
 run_layer E7u layer_e7u_router_hat_unixpipe_forward || overall=1
 run_layer E8 layer_e8_router_hat_pico || overall=1
 run_layer E8t layer_e8t_router_hat_hlc_stamp_pico || overall=1
+run_layer E9 layer_e9_apfull_preset_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

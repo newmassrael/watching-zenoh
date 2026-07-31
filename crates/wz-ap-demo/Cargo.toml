@@ -140,6 +140,44 @@ default = ["preset-ap-client"]
 # facade does NOT enable switchboard), so the framework footprint for other
 # preset-ap-client consumers is unchanged.
 preset-ap-client = ["wz/preset-ap-client", "switchboard"]
+# R311y480 — the AP-FULL preset had NO demo-side key at all, so
+# `preset-ap-full` was reachable only as `cargo build -p wz
+# --no-default-features --features preset-ap-full`: a LIBRARY typecheck
+# (Layer C4) with no executable behind it. `cargo build -p wz-ap-demo
+# --features preset-ap-full` answered "the package 'wz-ap-demo' does not
+# contain this feature", so no lane had ever RUN the kitchen-sink preset,
+# and no foreign peer had ever spoken to it. This key is the binary.
+#
+# It forwards the facade preset plus `switchboard` (mirroring
+# preset-ap-client) plus every demo-side passthrough whose ATOM the preset
+# already carries — the passthroughs gate the CLI surface, not the library
+# feature, so without them the binary would compile the transports in and
+# then be unable to reach them from argv (an incoherent kitchen sink).
+# Deliberately NOT included: demo keys whose atoms the preset omits
+# (namespace / advanced / group / transport-multilink / transport-qos /
+# storage-backend-filesystem / the adminspace-* family), which would make
+# this key a superset of the contract it is named after.
+preset-ap-full = [
+    "wz/preset-ap-full",
+    "switchboard",
+    "tls",
+    "quic",
+    "quic-datagram",
+    "ws",
+    "unixsock",
+    "vsock",
+    "transport-link-unixpipe",
+    "locator-iface",
+    "scouting-active",
+    "transport-lowlatency",
+    "session-extcompression",
+    "time-hlc",
+    "storage-backend",
+    "routing-router",
+    "routing-routes",
+    "routing-peer",
+    "routing-token-tables",
+]
 # gc-3 carry #2 — the live application machine + observer switchboard fan-out.
 # Pulls the wz-ap-demo-app crate (the app statechart + generated injector) and
 # the wz facade's switchboard feature (ApplicationLayerObserver.switchboard +
