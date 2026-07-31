@@ -327,8 +327,55 @@ async fn drive_dial(
         _ = shutdown_future(shutdown, stop) => {}
     }
 
+    // `face_down` FIRST, and the ordering is load-bearing for LATENCY, not for
+    // delivery — a distinction established by damaging it rather than by
+    // reasoning about it. The registry's `FaceEntry` holds this session's
+    // `TokioSession`, hence a clone of the `Arc<SessionLinkActions>` that owns
+    // the outbound sender, and the drain below ends when that channel closes.
+    // Move this line after the drain and every byte still arrives (the writer
+    // drains the channel during the window either way; only its EXIT is missed),
+    // so the delivery gate stays green — while every `z_close` silently pays the
+    // full `WRITER_DRAIN_MS`: measured 51.5 ms against 0.1-0.5 ms.
+    // `an_idle_z_close_does_not_burn_the_whole_drain_window` is what holds it.
     shared.face_down(DIAL_FACE_ID);
-    drop(writer_handle);
+    // R311y486 — DRAIN, do not detach. `drop(writer_handle)` only detaches the
+    // task, and `open_blocking`'s driver thread drops its per-session runtime on
+    // the very next line, which aborts that task wherever it stands: with an
+    // unbounded outbound channel and a peer that has stopped reading, "wherever
+    // it stands" routinely means blocked mid-write with encoded frames still
+    // queued, and every one of them is discarded after `z_put` already returned
+    // `Z_OK`.
+    //
+    // The pico contract this restores is NOT that its `z_close` flushes — read
+    // `_z_session_close` (`vendor/zenoh-pico/src/session/utils.c:167`) and it
+    // stops the runtime and frees the resource / subscription / queryable /
+    // pending-query registries; it moves no outbound byte. It does not have to:
+    // pico's `z_put` writes on the CALLING thread all the way down
+    // (`_z_write` -> `_z_send_n_msg` -> `_z_transport_tx_send_n_msg`,
+    // `vendor/zenoh-pico/src/net/primitives.c:170`,
+    // `vendor/zenoh-pico/src/transport/common/tx.c:487`), so when it returns the
+    // bytes are already the kernel's and there is no queue left to lose. This
+    // crate's `z_put` hands off to an async writer task instead — a queue pico
+    // does not have, and therefore a teardown obligation pico does not have.
+    // Draining it is what makes the two `z_put`s mean the same thing to a C
+    // caller.
+    //
+    // Reconstructing the struct to reach `drain_to_close` is deliberate: the
+    // drop order (engine before actions before the bounded await) is the whole
+    // correctness argument, and R311y484 recorded it as the thing to COPY. A
+    // hand-inlined copy here would be a second place for that order to rot, so
+    // the dial role runs the library's own primitive — the same one
+    // `accept_loop` drains every accepted face through, which is why the LISTEN
+    // role never had this defect.
+    OpenedSession {
+        engine,
+        actions,
+        inbound: driver,
+        writer_handle,
+        clock,
+    }
+    .drain_to_close()
+    .await;
 }
 
 /// R311y406 — build the LISTEN [`AcceptConfig`] from the native
