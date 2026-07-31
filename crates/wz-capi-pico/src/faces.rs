@@ -73,13 +73,16 @@ use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session::{
+    LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
+};
+use wz_runtime_tokio::session::{
     PublishAliasError, PublishError, PublishOptions, Queryable, QueryableOptions, SubscribeOptions,
     Subscriber, TokioSession,
 };
 use wz_runtime_tokio::session_glue::{IterationEvent, SessionLinkActions};
 use wz_runtime_tokio::sync::Mutex as WzMutex;
 
-use crate::pubsub::{make_subscriber_callback, CClosure};
+use crate::pubsub::{make_liveliness_callback, make_subscriber_callback, CClosure};
 use crate::query::{make_queryable_callback, CQueryClosure};
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries.
@@ -104,6 +107,13 @@ struct FaceEntry {
     session: TokioSession,
     subs: BTreeMap<SubId, Subscriber<TokioRuntime>>,
     qbls: BTreeMap<QblId, Queryable<TokioRuntime>>,
+    /// Per-face liveliness TOKENS. Dropping one emits that face's UndeclToken,
+    /// which is how a C `z_drop` on the owned token reaches every peer.
+    tokens: BTreeMap<TokenId, LivelinessToken<TokioRuntime>>,
+    /// Per-face liveliness SUBSCRIBERS, keyed by the C subscription id so they
+    /// share `SubId` space with the ordinary ones — a C `z_owned_subscriber_t`
+    /// is the same type either way, so its undeclare must find both.
+    live_subs: BTreeMap<SubId, LivelinessSubscriber<TokioRuntime>>,
     /// R311y296 — the signal that this face's drive loop should re-arm its wake
     /// because a `z_get` just registered a pending query with a nearer deadline
     /// than whatever the loop is currently parked on. Owned per face because
@@ -148,6 +158,30 @@ struct KexprEntry {
     keyexpr: String,
 }
 
+/// A C-declared liveliness TOKEN — the fourth SSOT. Replayed onto every face
+/// exactly as the others are, which is what makes a token declared before any
+/// peer connected visible to that peer when it arrives. Upstream's
+/// `z_liveliness.c` declares and then sleeps, so that is the common case, not
+/// the corner one.
+struct TokenEntry {
+    id: TokenId,
+    keyexpr: String,
+}
+
+/// A C-declared liveliness SUBSCRIPTION — the fifth SSOT. Shares `SubId` space
+/// with the ordinary subscriptions because both are handed back to C as a
+/// `z_owned_subscriber_t`; `undeclare_subscriber` therefore looks in both maps.
+struct LiveSubEntry {
+    id: SubId,
+    keyexpr: String,
+    history: bool,
+    closure: Arc<CClosure>,
+}
+
+/// A C-level liveliness token id, keying the per-face wz tokens one C
+/// declaration spawned.
+pub(crate) type TokenId = u64;
+
 #[derive(Default)]
 struct Inner {
     faces: BTreeMap<u64, FaceEntry>,
@@ -155,6 +189,9 @@ struct Inner {
     next_sub_id: SubId,
     qbls: Vec<QblEntry>,
     next_qbl_id: QblId,
+    tokens: Vec<TokenEntry>,
+    next_token_id: TokenId,
+    live_subs: Vec<LiveSubEntry>,
     kexprs: Vec<KexprEntry>,
     /// Next alias id to hand out. Starts at 0 and is PRE-incremented, so the
     /// first id issued is 1: zero is reserved on the wire
@@ -238,12 +275,38 @@ impl SharedSession {
         // `drop(context)` under the registry lock. A fresh face id makes this
         // `None` in practice; the discipline is uniform rather than
         // conditional on that.
+        // Liveliness replay: tokens first, then the liveliness subscriptions.
+        // A token this session already holds must be ANNOUNCED to the new peer
+        // (pico pushes its declarations at accept time), and a liveliness
+        // subscription must be re-declared so the new peer's tokens reach the
+        // one C callback.
+        let mut tokens = BTreeMap::new();
+        for entry in &guard.tokens {
+            if let Ok(tok) = session.declare_token(entry.keyexpr.clone(), LivelinessOptions::new())
+            {
+                tokens.insert(entry.id, tok);
+            }
+        }
+        let mut live_subs = BTreeMap::new();
+        for entry in &guard.live_subs {
+            let mut opts = LivelinessSubscriberOptions::default();
+            opts.history = entry.history;
+            if let Ok(sub) = session.declare_liveliness_subscriber(
+                entry.keyexpr.clone(),
+                opts,
+                make_liveliness_callback(entry.closure.clone()),
+            ) {
+                live_subs.insert(entry.id, sub);
+            }
+        }
         let replaced = guard.faces.insert(
             id,
             FaceEntry {
                 session,
                 subs,
                 qbls,
+                tokens,
+                live_subs,
                 revised: Arc::new(Notify::new()),
             },
         );
@@ -469,6 +532,92 @@ impl SharedSession {
         }
     }
 
+    /// Record a C liveliness TOKEN in the SSOT and declare it on every live
+    /// face, returning its id.
+    ///
+    /// Declare-before-peer, like every other declaration here: with no face
+    /// yet nothing goes on the wire and the entry is still recorded, so each
+    /// future face announces it in [`Self::face_up`]. That is the ordinary case
+    /// for upstream's `z_liveliness.c`, which declares and then sleeps.
+    ///
+    /// `None` when the id space is exhausted, which cannot happen in practice
+    /// (u64) but is surfaced rather than wrapped, for the same reason
+    /// [`Self::declare_keyexpr`] refuses: a reused id would retract a live
+    /// token belonging to someone else.
+    pub(crate) fn declare_liveliness_token(&self, keyexpr: String) -> Option<TokenId> {
+        let mut guard = self.lock();
+        let id = guard.next_token_id.checked_add(1)?;
+        guard.next_token_id = id;
+
+        for face in guard.faces.values_mut() {
+            if let Ok(tok) = face
+                .session
+                .declare_token(keyexpr.clone(), LivelinessOptions::new())
+            {
+                face.tokens.insert(id, tok);
+            }
+        }
+        guard.tokens.push(TokenEntry { id, keyexpr });
+        Some(id)
+    }
+
+    /// Retract a C liveliness token: drop the SSOT entry so no future face
+    /// announces it, and drop every face's wz token — each emitting that face's
+    /// UndeclToken, which is what tells subscribers the resource is gone.
+    pub(crate) fn undeclare_liveliness_token(&self, id: TokenId) {
+        let mut dropped = Vec::new();
+        {
+            let mut guard = self.lock();
+            if let Some(pos) = guard.tokens.iter().position(|e| e.id == id) {
+                guard.tokens.remove(pos);
+            }
+            for face in guard.faces.values_mut() {
+                if let Some(tok) = face.tokens.remove(&id) {
+                    dropped.push(tok);
+                }
+            }
+        }
+        // Drop OUTSIDE the lock. A token teardown emits on the wire and can
+        // re-enter the session, which the non-reentrant registry mutex would
+        // deadlock on — the same discipline every other teardown here follows.
+        drop(dropped);
+    }
+
+    /// Record a C liveliness SUBSCRIPTION in the SSOT and declare it on every
+    /// live face, returning its id.
+    ///
+    /// Shares [`SubId`] space with [`Self::declare_subscriber`] on purpose: C
+    /// gets back a `z_owned_subscriber_t` either way, so one id space is what
+    /// lets [`Self::undeclare_subscriber`] serve both without the caller
+    /// having to remember which kind it holds.
+    pub(crate) fn declare_liveliness_subscriber(
+        &self,
+        keyexpr: String,
+        options: LivelinessSubscriberOptions,
+        closure: Arc<CClosure>,
+    ) -> SubId {
+        let mut guard = self.lock();
+        let id = guard.next_sub_id;
+        guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
+
+        for face in guard.faces.values_mut() {
+            if let Ok(sub) = face.session.declare_liveliness_subscriber(
+                keyexpr.clone(),
+                options.clone(),
+                make_liveliness_callback(closure.clone()),
+            ) {
+                face.live_subs.insert(id, sub);
+            }
+        }
+        guard.live_subs.push(LiveSubEntry {
+            id,
+            keyexpr,
+            history: options.history,
+            closure,
+        });
+        id
+    }
+
     /// A snapshot of every connected face's session, taken OUT of the registry
     /// lock — what a fan-out operation iterates.
     ///
@@ -545,6 +694,8 @@ impl SharedSession {
     pub(crate) fn undeclare_subscriber(&self, id: SubId) {
         let mut dropped = Vec::new();
         let mut dropped_entry = None;
+        let mut dropped_live = Vec::new();
+        let mut dropped_live_entry = None;
         {
             let mut guard = self.lock();
             // Remove the SSOT entry into a binding rather than `retain`-dropping
@@ -560,6 +711,19 @@ impl SharedSession {
                     dropped.push(sub);
                 }
             }
+            // The LIVELINESS subscriptions share this id space (see
+            // `declare_liveliness_subscriber`), so an id belongs to exactly one
+            // of the two maps and both must be searched — a `z_owned_subscriber_t`
+            // does not record which kind it came from, and it should not have to.
+            if let Some(pos) = guard.live_subs.iter().position(|entry| entry.id == id) {
+                let entry = guard.live_subs.remove(pos);
+                dropped_live_entry = Some(entry);
+            }
+            for face in guard.faces.values_mut() {
+                if let Some(sub) = face.live_subs.remove(&id) {
+                    dropped_live.push(sub);
+                }
+            }
         }
         // Drop OUTSIDE the lock: releasing the last `Arc<CClosure>` — whether
         // the final per-face subscriber or the SSOT entry — runs the C
@@ -567,6 +731,8 @@ impl SharedSession {
         // that re-enters the session would deadlock the non-reentrant mutex).
         drop(dropped);
         drop(dropped_entry);
+        drop(dropped_live);
+        drop(dropped_live_entry);
     }
 
     /// Record a C queryable in the SSOT and declare it on every live face —

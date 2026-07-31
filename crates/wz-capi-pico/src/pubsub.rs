@@ -29,6 +29,7 @@
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
+use wz_runtime_tokio::declare::LivelinessSample;
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::sample::SampleKind;
 use wz_runtime_tokio::session::PublishOptions;
@@ -157,7 +158,7 @@ pub struct z_moved_closure_sample_t {
 
 impl z_owned_closure_sample_t {
     #[inline]
-    fn null_value() -> Self {
+    pub(crate) fn null_value() -> Self {
         Self {
             context: std::ptr::null_mut(),
             call: None,
@@ -203,6 +204,41 @@ unsafe impl Sync for CClosure {}
 /// `z_loaned_sample_t` and invokes the C `call`. The marshal (and so the
 /// borrowed keyexpr / payload) is valid only for the duration of that call —
 /// pico's contract, which is why the C side must copy anything it keeps.
+/// Marshal a wz LIVELINESS event into the borrowed `z_loaned_sample_t` a C
+/// sample closure expects.
+///
+/// pico hands liveliness events to an ORDINARY `z_closure_sample_t`, so this is
+/// the same shape as [`make_subscriber_callback`] with two differences that are
+/// the whole mapping: the payload is EMPTY (a presence event carries no data)
+/// and the kind carries the discriminator — a token appearing is `PUT`, one
+/// going away is `DELETE`. Upstream's `z_sub_liveliness.c` switches on exactly
+/// that to print "Alive"/"Dropped".
+pub(crate) fn make_liveliness_callback(
+    closure: Arc<CClosure>,
+) -> impl FnMut(LivelinessSample<'_>) + Send + 'static {
+    move |sample: LivelinessSample<'_>| {
+        let call = match closure.call {
+            Some(f) => f,
+            None => return,
+        };
+        let mut marshal = SampleMarshal::new(
+            sample.keyexpr.to_owned(),
+            Vec::new(),
+            crate::liveliness::liveliness_kind_of(sample.kind),
+        );
+        marshal.bind();
+        let sample_ptr = marshal.as_loaned();
+        // SAFETY + panic discipline identical to `make_subscriber_callback`:
+        // the marshal outlives the call, the borrowed sample is valid only for
+        // its duration, and an unwind out of the C callback would tear down the
+        // drive thread, so it is caught here.
+        let ctx = closure.context.0;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            call(sample_ptr, ctx);
+        }));
+    }
+}
+
 pub(crate) fn make_subscriber_callback(
     closure: Arc<CClosure>,
 ) -> impl FnMut(&dyn SampleView) + Send + 'static {
@@ -280,9 +316,9 @@ impl z_owned_publisher_t {
 /// the SSOT (so no future face replays it) and dropping every live face's wz
 /// subscriber, which emits each wire undeclare and releases the last closure
 /// reference (→ the C `drop(context)`).
-struct SubscriberState {
-    shared: Arc<SharedSession>,
-    id: SubId,
+pub(crate) struct SubscriberState {
+    pub(crate) shared: Arc<SharedSession>,
+    pub(crate) id: SubId,
 }
 
 impl Drop for SubscriberState {

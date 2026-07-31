@@ -48,13 +48,13 @@
 //! them from a real body. That is why this file names its examples explicitly
 //! instead of sweeping a glob: a glob would have counted six vacuous passes.
 //!
-//! Census at this round, measured that way: SEVEN examples link with a real
-//! body — `z_ping`, `z_pong`, `z_put`, `z_queryable`, `z_queryable_lat`,
-//! `z_sub`, `z_sub_thr` — 6 link as stubs, 17 are still short of exports, and 2
-//! are both. Four of the seven are legs below; `z_pong` is used as this file's
-//! own foreign counterparty rather than as a subject, and `z_queryable_lat` /
-//! `z_sub_thr` link but are not yet driven, which is recorded here rather than
-//! rounded up into the leg count.
+//! Census at this round, measured that way: NINE examples link with a real
+//! body — `z_liveliness`, `z_ping`, `z_pong`, `z_put`, `z_queryable`,
+//! `z_queryable_lat`, `z_sub`, `z_sub_liveliness`, `z_sub_thr` — 6 link as
+//! stubs, 15 are still short of exports, and 2 are both. SIX of the nine are
+//! legs below; `z_pong` is used as this file's own foreign counterparty rather
+//! than as a subject, and `z_queryable_lat` / `z_sub_thr` link but are not yet
+//! driven, which is recorded here rather than rounded up into the leg count.
 //!
 //! ## Leg 3 needs a discriminator the other two do not
 //!
@@ -76,12 +76,13 @@
 //!
 //! ## Scope, stated as a limit rather than implied
 //!
-//! Every claim is `partial`, and deliberately: the atom covers 172 of pico's
-//! 726 declared functions, and four programs are four programs. What is proven
-//! is that the drop-in is REAL for the paths those programs exercise — inbound
-//! samples, queryable replies, a declared-keyexpr publish, and a full
-//! publish/background-subscribe round trip — compiled and linked the way a pico
-//! user would.
+//! Every claim is `partial`, and deliberately: the atom covers 184 of pico's
+//! 726 declared functions, and six programs are six programs. What is proven is
+//! that the drop-in is REAL for the paths those programs exercise — inbound
+//! samples, queryable replies, a declared-keyexpr publish, a full
+//! publish/background-subscribe round trip, and both directions of the presence
+//! plane including the DEPARTURE half — compiled and linked the way a pico user
+//! would.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -524,4 +525,184 @@ fn pico_zping_source_on_wz_capi_round_trips_through_real_pico_zpong() {
     );
 
     graceful_terminate(pong.child_mut(), Duration::from_secs(5));
+}
+
+/// The `-t` seconds upstream's `z_liveliness.c` holds its token before dropping
+/// it. Short, because the DROP is the half under test and the leg waits for it.
+const TOKEN_HOLD_SECS: &str = "3";
+
+/// LEG 5 (`wz->pico`) — upstream's `z_liveliness.c`, running on wz, is seen
+/// ALIVE and then DROPPED by a real zenoh-pico `z_sub_liveliness`.
+///
+/// Both halves are asserted, and the second is the one worth having. pico's
+/// `z_liveliness_token_drop` retracts through `_z_liveliness_token_clear`
+/// (`vendor/zenoh-pico/src/api/liveliness.c:35-43`), and upstream's program
+/// never calls the explicit undeclare — it just lets the token go out of scope.
+/// A wz drop that only freed memory would still produce the ALIVE line, so an
+/// alive-only assertion would pass against a build in which nothing ever
+/// reports a peer's departure. The foreign subscriber printing "Dropped" is
+/// what rules that out, and it prints it because a real UndeclToken arrived.
+// wz-proves: api-compat-pico wz->pico partial
+// wz-proves: liveliness-token wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_sub_liveliness CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zliveliness_source_on_wz_capi_is_seen_alive_then_dropped_by_real_pico() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_liveliness", dir.path());
+    let z_sub_liveliness = zenoh_pico_cli_binary("z_sub_liveliness");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "dropin/leg5/token";
+
+    // `-n 2` — exit after ALIVE + DROPPED, which is what flushes both lines.
+    let mut sub_out = tempfile::tempfile().expect("z_sub_liveliness stdout capture");
+    let writer = sub_out.try_clone().expect("dup capture handle");
+    let mut sub = ChildGuard::wrap(
+        "real zenoh-pico z_sub_liveliness",
+        Command::new(&z_sub_liveliness)
+            .args([
+                "-l",
+                &endpoint,
+                "-m",
+                "peer",
+                "-k",
+                "dropin/leg5/**",
+                "-n",
+                "2",
+            ])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_sub_liveliness"),
+    );
+    assert!(
+        wait_for_tcp_accept(port, LISTEN_TIMEOUT),
+        "the real zenoh-pico z_sub_liveliness never accepted on {endpoint}"
+    );
+    drop(reservation);
+
+    let token = Command::new(&dropin)
+        .args([
+            "-e",
+            &endpoint,
+            "-m",
+            "client",
+            "-k",
+            key,
+            "-t",
+            TOKEN_HOLD_SECS,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the compiled z_liveliness drop-in");
+    assert!(token.success(), "z_liveliness.c on wz exited {token:?}");
+
+    let foreign = wait_for_substring(&mut sub_out, "Dropped token", EXCHANGE_TIMEOUT)
+        .unwrap_or_else(|captured| {
+            panic!(
+                "the REAL zenoh-pico subscriber never saw the token go away. A drop \
+                 that frees the local value without retracting produces the ALIVE \
+                 line and nothing else, which is exactly what this asserts against.\n\
+                 --- REAL pico z_sub_liveliness stdout ---\n{captured}"
+            )
+        });
+    assert!(
+        foreign.contains("New alive token") && foreign.contains(key),
+        "the foreign subscriber saw a drop but not the matching alive declaration \
+         on {key}.\n--- REAL pico z_sub_liveliness stdout ---\n{foreign}"
+    );
+
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 6 (`pico->wz`) — upstream's `z_sub_liveliness.c`, running on wz, sees a
+/// real zenoh-pico token appear and then go away.
+///
+/// The inbound mirror of leg 5, and it covers what leg 5 cannot: the DECODE of a
+/// foreign peer's `DeclToken` / `UndeclToken` into the PUT / DELETE sample kinds
+/// upstream's handler switches on. A wz build that delivered both events with
+/// the same kind would print "New alive token" twice and fail here while leg 5
+/// stayed green.
+// wz-proves: api-compat-pico pico->wz partial
+// wz-proves: liveliness-subscriber pico->wz partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_liveliness CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zsubliveliness_source_on_wz_capi_sees_real_pico_token_come_and_go() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_sub_liveliness", dir.path());
+    let z_liveliness = zenoh_pico_cli_binary("z_liveliness");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "dropin/leg6/token";
+
+    let mut sub_out = tempfile::tempfile().expect("drop-in stdout capture");
+    let writer = sub_out.try_clone().expect("dup capture handle");
+    let mut sub = ChildGuard::wrap(
+        "z_sub_liveliness.c on wz-capi-pico",
+        Command::new(&dropin)
+            .args([
+                "-l",
+                &endpoint,
+                "-m",
+                "peer",
+                "-k",
+                "dropin/leg6/**",
+                "-n",
+                "2",
+            ])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the compiled z_sub_liveliness drop-in"),
+    );
+    assert!(
+        wait_for_tcp_accept(port, LISTEN_TIMEOUT),
+        "the z_sub_liveliness.c drop-in never accepted on {endpoint}; capture so far:\n{}",
+        read_captured(&mut sub_out)
+    );
+    drop(reservation);
+
+    let token = Command::new(&z_liveliness)
+        .args([
+            "-e",
+            &endpoint,
+            "-m",
+            "client",
+            "-k",
+            key,
+            "-t",
+            TOKEN_HOLD_SECS,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the real zenoh-pico z_liveliness");
+    assert!(
+        token.success(),
+        "real zenoh-pico z_liveliness exited {token:?}"
+    );
+
+    let local = wait_for_substring(&mut sub_out, "Dropped token", EXCHANGE_TIMEOUT).unwrap_or_else(
+        |captured| {
+            panic!(
+                "upstream z_sub_liveliness.c on wz never reported the REAL pico \
+                 token going away, so wz did not deliver the UndeclToken as a \
+                 DELETE-kind sample.\n--- z_sub_liveliness.c (on wz) stdout ---\n{captured}"
+            )
+        },
+    );
+    assert!(
+        local.contains("New alive token") && local.contains(key),
+        "the drop-in saw a drop but not the matching alive declaration on {key}.\n\
+         --- z_sub_liveliness.c (on wz) stdout ---\n{local}"
+    );
+
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
 }

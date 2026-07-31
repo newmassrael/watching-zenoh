@@ -28,6 +28,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+/* z_clock_t is `struct timespec` on every Unix, as it is in zenoh-pico. */
+#include <time.h>
+
+typedef struct timespec z_clock_t;
 
 #ifdef __cplusplus
 extern "C" {
@@ -180,6 +184,53 @@ z_loaned_keyexpr_t *z_keyexpr_loan_mut(z_owned_keyexpr_t *obj);
 z_moved_keyexpr_t *z_keyexpr_move(z_owned_keyexpr_t *obj);
 void z_keyexpr_take(z_owned_keyexpr_t *dst, z_moved_keyexpr_t *src);
 void z_keyexpr_drop(z_moved_keyexpr_t *obj);
+
+/* --- liveliness (presence plane) --- */
+/* A token going out of scope RETRACTS it: z_liveliness_token_drop notifies
+   subscribers, matching pico, whose z_liveliness.c never calls the explicit
+   undeclare. A liveliness subscriber's callback is an ordinary sample closure:
+   a token appearing is Z_SAMPLE_KIND_PUT with an EMPTY payload, one going away
+   is Z_SAMPLE_KIND_DELETE. */
+typedef struct { uint8_t __dummy; } z_liveliness_token_options_t;
+typedef struct { bool history; } z_liveliness_subscriber_options_t;
+typedef struct { void *_handle; void *_pad[2]; } z_owned_liveliness_token_t;  /* 24 B */
+typedef struct { void *_handle; void *_pad[2]; } z_loaned_liveliness_token_t;
+typedef struct { z_owned_liveliness_token_t _this; } z_moved_liveliness_token_t;
+
+z_result_t z_liveliness_token_options_default(z_liveliness_token_options_t *options);
+z_result_t z_liveliness_subscriber_options_default(z_liveliness_subscriber_options_t *options);
+z_result_t z_liveliness_declare_token(const z_loaned_session_t *zs, z_owned_liveliness_token_t *token,
+                                      const z_loaned_keyexpr_t *keyexpr,
+                                      const z_liveliness_token_options_t *options);
+z_result_t z_liveliness_undeclare_token(z_moved_liveliness_token_t *token);
+void z_internal_liveliness_token_null(z_owned_liveliness_token_t *obj);
+bool z_internal_liveliness_token_check(const z_owned_liveliness_token_t *obj);
+const z_loaned_liveliness_token_t *z_liveliness_token_loan(const z_owned_liveliness_token_t *obj);
+z_loaned_liveliness_token_t *z_liveliness_token_loan_mut(z_owned_liveliness_token_t *obj);
+z_moved_liveliness_token_t *z_liveliness_token_move(z_owned_liveliness_token_t *obj);
+void z_liveliness_token_take(z_owned_liveliness_token_t *dst, z_moved_liveliness_token_t *src);
+void z_liveliness_token_drop(z_moved_liveliness_token_t *obj);
+z_result_t z_liveliness_declare_subscriber(const z_loaned_session_t *zs, z_owned_subscriber_t *sub,
+                                           const z_loaned_keyexpr_t *keyexpr,
+                                           z_moved_closure_sample_t *callback,
+                                           z_liveliness_subscriber_options_t *options);
+
+/* --- platform (libc shims pico programs reach for) --- */
+void *z_malloc(size_t size);
+void z_free(void *ptr);
+z_result_t z_sleep_us(size_t time);
+z_result_t z_sleep_ms(size_t time);
+z_result_t z_sleep_s(size_t time);
+z_clock_t z_clock_now(void);
+unsigned long z_clock_elapsed_us(z_clock_t *instant);
+unsigned long z_clock_elapsed_ms(z_clock_t *instant);
+unsigned long z_clock_elapsed_s(z_clock_t *instant);
+z_result_t z_bytes_from_buf(z_owned_bytes_t *bytes, uint8_t *data, size_t len,
+                            void (*deleter)(void *data, void *context), void *context);
+z_result_t z_bytes_from_static_buf(z_owned_bytes_t *bytes, const uint8_t *data, size_t len);
+void z_view_keyexpr_from_str_unchecked(z_view_keyexpr_t *keyexpr, const char *name);
+z_result_t z_declare_background_subscriber(const z_loaned_session_t *zs, const z_loaned_keyexpr_t *keyexpr,
+                                           z_moved_closure_sample_t *callback, const void *options);
 
 /* --- bytes / slice / string --- */
 z_result_t z_bytes_copy_from_buf(z_owned_bytes_t *bytes, const uint8_t *data, size_t len);

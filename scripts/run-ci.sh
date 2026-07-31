@@ -5165,8 +5165,11 @@ layer_e_ap_demo_round_trip() {
     # tree whose CLIs were built by the previous script would have z_put and
     # friends but not z_pong. Without it in this list Layer E would run and the
     # leg would PANIC on a missing binary instead of taking the honest
-    # SKIP-or-require path every other foreign prereq takes.
-    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_sub_attachment || ! -x target/zenoh-pico-cli/z_pub_attachment || ! -x target/zenoh-pico-cli/z_pong ]]; then
+    # SKIP-or-require path every other foreign prereq takes. R311y479 adds
+    # z_liveliness and z_sub_liveliness on the same grounds -- they were already
+    # in the build script's TARGETS but never guarded, so a tree that had them
+    # and a tree that did not were indistinguishable to this lane.
+    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_sub_attachment || ! -x target/zenoh-pico-cli/z_pub_attachment || ! -x target/zenoh-pico-cli/z_pong || ! -x target/zenoh-pico-cli/z_liveliness || ! -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
         _pico_cli_unavailable "Layer E" || return 1
         return 0
     fi
