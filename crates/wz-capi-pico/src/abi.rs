@@ -92,22 +92,98 @@ define_handle_type!(z_owned_slice_t, z_loaned_slice_t, z_moved_slice_t, 3);
 // `z_string_data` / `z_string_len` read — no allocation, no leak.
 // ---------------------------------------------------------------------------
 
-/// Loaned keyexpr — a borrowed UTF-8 `{ start, len }` (pico
-/// `z_loaned_keyexpr_t` is read by-pointer only in the R1 flow).
+/// Loaned keyexpr. pico's `z_loaned_keyexpr_t` is `_z_declared_keyexpr_t`
+/// (`{ _declaration, _inner }`, 48 B) and BOTH a view keyexpr and a declared
+/// one loan to it — `z_view_keyexpr_loan` and `z_keyexpr_loan` return the same
+/// type. wz reproduces that by giving the two producers ONE layout:
+///
+/// | slot | view (borrowed literal) | declared (`z_declare_keyexpr`) |
+/// |------|-------------------------|--------------------------------|
+/// | 0/1  | `{ start, len }` into the caller's storage | `{ start, len }` into the OWNED copy |
+/// | 2    | null                    | `Box<DeclaredKeyexpr>` handle  |
+/// | 3    | 0                       | the wire mapping id (never 0)  |
+///
+/// Keeping `{ start, len }` at slots 0/1 for BOTH is what lets
+/// [`crate::keyexpr::keyexpr_str`] stay a single branchless read: the literal
+/// is always there, and the declaration is additive information a publish path
+/// may consult. The alternative — a handle at slot 0 for the owned form —
+/// would make slot 0 ambiguous (a non-null pointer means "literal" in one arm
+/// and "handle" in the other) and force every reader to carry a tag.
+///
+/// Slot 3 doubles as the discriminant: `mapping == 0` is "not declared", which
+/// is sound rather than merely convenient, because 0 is RESERVED on the wire
+/// (`SendDeclareError::ReservedMappingIdZero`) and can never be a real id.
 #[repr(C)]
 pub struct z_loaned_keyexpr_t {
     pub(crate) _start: *const u8,
     pub(crate) _len: usize,
+    pub(crate) _handle: Handle,
+    pub(crate) _mapping: usize,
+}
+
+impl z_loaned_keyexpr_t {
+    /// The BORROWED arm: a literal `{ start, len }` with no declaration.
+    ///
+    /// Every inbound keyexpr (a delivered sample's, a received query's) is
+    /// built through here. A constructor rather than six struct literals
+    /// because the two declaration slots must be zeroed at every one of those
+    /// sites, and a forgotten zero would be read as a live mapping id — the
+    /// publish path would then alias an id the peer never received.
+    #[inline]
+    pub(crate) fn borrowed(start: *const u8, len: usize) -> Self {
+        Self {
+            _start: start,
+            _len: len,
+            _handle: std::ptr::null_mut(),
+            _mapping: 0,
+        }
+    }
 }
 
 /// View keyexpr (pico `z_view_keyexpr_t`, 48 B). Slots 0/1 are `{ start, len }`
 /// so `z_view_keyexpr_loan` is a pointer reinterpretation to
-/// `z_loaned_keyexpr_t`.
+/// `z_loaned_keyexpr_t`; `_pad` covers the declaration slots a view never
+/// carries, and `z_view_keyexpr_from_str` zeroes it.
 #[repr(C)]
 pub struct z_view_keyexpr_t {
     pub(crate) _start: *const u8,
     pub(crate) _len: usize,
     pub(crate) _pad: [usize; 4],
+}
+
+/// Owned keyexpr (pico `z_owned_keyexpr_t`, 48 B — measured with a real C
+/// compiler against pico's headers, same size as the view because pico wraps
+/// the same `_z_declared_keyexpr_t`).
+///
+/// Produced only by [`crate::keyexpr::z_declare_keyexpr`]. Its first four slots
+/// are laid out exactly as [`z_loaned_keyexpr_t`], so `z_keyexpr_loan` is a
+/// pointer reinterpretation, matching every other type in this module.
+#[repr(C)]
+pub struct z_owned_keyexpr_t {
+    pub(crate) _start: *const u8,
+    pub(crate) _len: usize,
+    pub(crate) _handle: Handle,
+    pub(crate) _mapping: usize,
+    pub(crate) _pad: [usize; 2],
+}
+
+/// Moved owned keyexpr (pico `z_moved_keyexpr_t`).
+#[repr(C)]
+pub struct z_moved_keyexpr_t {
+    pub(crate) _this: z_owned_keyexpr_t,
+}
+
+impl z_owned_keyexpr_t {
+    #[inline]
+    pub(crate) fn null_value() -> Self {
+        Self {
+            _start: std::ptr::null(),
+            _len: 0,
+            _handle: std::ptr::null_mut(),
+            _mapping: 0,
+            _pad: [0usize; 2],
+        }
+    }
 }
 
 /// Loaned string — a borrowed `{ start, len }`. Produced both by an owned

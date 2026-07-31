@@ -9,16 +9,21 @@
 //! must keep alive while the keyexpr is used (the pico contract). `z_put` /
 //! `z_declare_*` read the borrowed UTF-8 back via [`keyexpr_str`].
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, c_void, CStr};
 
 use crate::abi::{
-    view_bytes, z_loaned_keyexpr_t, z_loaned_string_t, z_view_keyexpr_t, z_view_string_t,
+    view_bytes, z_loaned_keyexpr_t, z_loaned_string_t, z_moved_keyexpr_t, z_owned_keyexpr_t,
+    z_view_keyexpr_t, z_view_string_t,
 };
 use crate::ffi::{guard_val, guarded};
-use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
+use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
+use crate::session::{session_state, z_loaned_session_t};
 
 /// Resolve a loaned keyexpr to its borrowed UTF-8 string, or `None` if null /
 /// not valid UTF-8.
+///
+/// Branchless across the view / declared arms by construction: both keep the
+/// literal at slots 0/1 (see [`z_loaned_keyexpr_t`]).
 ///
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
@@ -28,6 +33,26 @@ pub(crate) unsafe fn keyexpr_str<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
     }
     let bytes = view_bytes((*ke)._start, (*ke)._len)?;
     std::str::from_utf8(bytes).ok()
+}
+
+/// The wire alias id a `z_declare_keyexpr` bound to this keyexpr, or `None`
+/// when it is an undeclared view.
+///
+/// The publish path consults this to choose between an aliased Push (the
+/// bandwidth-efficient shape a declaration exists to enable) and a literal
+/// one. `0` is the "absent" encoding and is sound as such: the wire reserves
+/// it, so it can never name a real declaration.
+///
+/// # Safety
+/// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
+pub(crate) unsafe fn keyexpr_mapping(ke: *const z_loaned_keyexpr_t) -> Option<u64> {
+    if ke.is_null() {
+        return None;
+    }
+    match (*ke)._mapping {
+        0 => None,
+        id => Some(id as u64),
+    }
 }
 
 /// Build a view keyexpr borrowing the caller's C string (pico
@@ -118,4 +143,174 @@ pub unsafe extern "C" fn z_view_string_loan(
     string: *const z_view_string_t,
 ) -> *const z_loaned_string_t {
     string as *const z_loaned_string_t
+}
+
+// --- declared keyexpr (the `z_declare_keyexpr` family) ---------------------
+
+/// Behind a `z_owned_keyexpr_t` handle: the OWNED literal.
+///
+/// Owned, not borrowed, and that is the difference between this and the view
+/// type. pico's `z_declare_keyexpr` produces a value that outlives the string
+/// the caller built it from — upstream's `z_put.c` declares from `argv`-backed
+/// storage and keeps the owned keyexpr past it — so a borrow here would be a
+/// dangling read waiting for a caller that frees first.
+///
+/// `z_owned_keyexpr_t::_start` points into this `String`'s HEAP buffer, which
+/// is stable when the `Box` moves (the same distinction `crate::bytes`
+/// documents for `StringState`).
+pub(crate) struct DeclaredKeyexpr {
+    literal: String,
+}
+
+/// Declare a keyexpr, binding it to a numerical id on every connected peer
+/// (pico `z_declare_keyexpr`).
+///
+/// The id is announced on every live face and REPLAYED onto faces that connect
+/// later (`SharedSession::declare_keyexpr` / `face_up`), so a program that
+/// declares before its first peer — which upstream's `z_put.c` does whenever it
+/// wins the race — still publishes aliased to that peer.
+///
+/// Returns `Z_ERR_GENERIC` when the wire's `u16` alias space is exhausted.
+/// Refusing beats wrapping: a reused id would silently re-point a peer's live
+/// alias at a different keyexpr.
+#[no_mangle]
+pub unsafe extern "C" fn z_declare_keyexpr(
+    zs: *const z_loaned_session_t,
+    declared: *mut z_owned_keyexpr_t,
+    keyexpr: *const z_loaned_keyexpr_t,
+) -> ZResult {
+    guarded(|| {
+        if declared.is_null() {
+            return Z_ERR_NULL;
+        }
+        let state = match session_state(zs) {
+            Some(s) => s,
+            None => return Z_ERR_NULL,
+        };
+        let literal = match keyexpr_str(keyexpr) {
+            Some(k) => k.to_owned(),
+            None => return Z_ERR_INVALID,
+        };
+        let Some(mapping) = state.shared.declare_keyexpr(literal.clone()) else {
+            return Z_ERR_GENERIC;
+        };
+        let boxed = Box::new(DeclaredKeyexpr { literal });
+        // Read the heap pointer BEFORE the box is consumed by `into_raw`, and
+        // note it survives that: `String`'s buffer does not move with the box.
+        let start = boxed.literal.as_ptr();
+        let len = boxed.literal.len();
+        *declared = z_owned_keyexpr_t {
+            _start: start,
+            _len: len,
+            _handle: Box::into_raw(boxed) as *mut c_void,
+            _mapping: mapping as usize,
+            _pad: [0usize; 2],
+        };
+        Z_OK
+    })
+}
+
+/// Retract a keyexpr declaration (pico `z_undeclare_keyexpr`). Consumes the
+/// moved value on every path, including the error paths — pico's
+/// `z_move` contract.
+#[no_mangle]
+pub unsafe extern "C" fn z_undeclare_keyexpr(
+    zs: *const z_loaned_session_t,
+    keyexpr: *mut z_moved_keyexpr_t,
+) -> ZResult {
+    guarded(|| {
+        if keyexpr.is_null() {
+            return Z_ERR_NULL;
+        }
+        // Take the value out first so the owned literal is freed and the
+        // caller's struct nulled whether or not the session resolves.
+        let mapping = (*keyexpr)._this._mapping;
+        let handle = (*keyexpr)._this._handle;
+        (*keyexpr)._this = z_owned_keyexpr_t::null_value();
+        if !handle.is_null() {
+            drop(Box::from_raw(handle as *mut DeclaredKeyexpr));
+        }
+        let state = match session_state(zs) {
+            Some(s) => s,
+            None => return Z_ERR_NULL,
+        };
+        if mapping != 0 {
+            state.shared.undeclare_keyexpr(mapping as u64);
+        }
+        Z_OK
+    })
+}
+
+/// Zero an owned keyexpr in place (pico `z_internal_keyexpr_null`).
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_keyexpr_null(obj: *mut z_owned_keyexpr_t) {
+    if !obj.is_null() {
+        *obj = z_owned_keyexpr_t::null_value();
+    }
+}
+
+/// `true` iff the owned keyexpr holds a live declaration (pico
+/// `z_internal_keyexpr_check`).
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_keyexpr_check(obj: *const z_owned_keyexpr_t) -> bool {
+    guard_val(false, || !obj.is_null() && !(*obj)._handle.is_null())
+}
+
+/// Borrow a declared keyexpr (pico `z_keyexpr_loan`). The owned and loaned
+/// layouts share their first four slots, so this is a reinterpretation — the
+/// same shape `z_view_keyexpr_loan` has.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_loan(
+    obj: *const z_owned_keyexpr_t,
+) -> *const z_loaned_keyexpr_t {
+    obj as *const z_loaned_keyexpr_t
+}
+
+/// Borrow a declared keyexpr mutably (pico `z_keyexpr_loan_mut`).
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_loan_mut(
+    obj: *mut z_owned_keyexpr_t,
+) -> *mut z_loaned_keyexpr_t {
+    obj as *mut z_loaned_keyexpr_t
+}
+
+/// Move-cast (pico `z_keyexpr_move`) — a pure reinterpretation; the consuming
+/// callee nulls the source.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_move(obj: *mut z_owned_keyexpr_t) -> *mut z_moved_keyexpr_t {
+    obj as *mut z_moved_keyexpr_t
+}
+
+/// Take the value out of `src` into `dst`, leaving `src` null (pico
+/// `z_keyexpr_take`).
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_take(dst: *mut z_owned_keyexpr_t, src: *mut z_moved_keyexpr_t) {
+    if dst.is_null() || src.is_null() {
+        return;
+    }
+    std::ptr::copy_nonoverlapping(&(*src)._this, dst, 1);
+    (*src)._this = z_owned_keyexpr_t::null_value();
+}
+
+/// Drop a declared keyexpr (pico `z_keyexpr_drop`).
+///
+/// Frees the LOCAL value only; it does NOT retract the declaration from peers.
+/// That asymmetry is pico's, not an omission: the retraction is what
+/// [`z_undeclare_keyexpr`] is for, and it needs a session this signature does
+/// not take. A drop that silently retracted would also break the `z_move`
+/// contract in the other direction — the C side would lose a live alias by
+/// letting a value go out of scope.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_drop(obj: *mut z_moved_keyexpr_t) {
+    let _ = guarded(|| {
+        if obj.is_null() {
+            return Z_OK;
+        }
+        let handle = (*obj)._this._handle;
+        if !handle.is_null() {
+            drop(Box::from_raw(handle as *mut DeclaredKeyexpr));
+        }
+        (*obj)._this = z_owned_keyexpr_t::null_value();
+        Z_OK
+    });
 }

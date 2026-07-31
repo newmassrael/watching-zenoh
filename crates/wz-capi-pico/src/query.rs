@@ -255,10 +255,7 @@ impl QueryMarshal {
             // must hand C a pointer either way (see the field docs).
             payload: view.payload().map(<[u8]>::to_vec).unwrap_or_default(),
             attachment: view.attachment().map(<[u8]>::to_vec).unwrap_or_default(),
-            loaned_keyexpr: z_loaned_keyexpr_t {
-                _start: std::ptr::null(),
-                _len: 0,
-            },
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
                 handle: std::ptr::null_mut(),
                 _pad: [std::ptr::null_mut(); 3],
@@ -294,10 +291,8 @@ impl QueryMarshal {
     /// [`QueryableState`] binds after its `Box::new`. Both reach the same
     /// invariant — bind at the final address.
     fn bind(&mut self) {
-        self.loaned_keyexpr = z_loaned_keyexpr_t {
-            _start: self.keyexpr.as_ptr(),
-            _len: self.keyexpr.len(),
-        };
+        self.loaned_keyexpr =
+            z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
         self.loaned_payload.handle = &self.payload as *const Vec<u8> as *mut c_void;
         self.loaned_attachment.handle = &self.attachment as *const Vec<u8> as *mut c_void;
     }
@@ -798,16 +793,11 @@ pub unsafe extern "C" fn z_declare_queryable(
                     shared,
                     id,
                     keyexpr: ke,
-                    loaned_keyexpr: z_loaned_keyexpr_t {
-                        _start: std::ptr::null(),
-                        _len: 0,
-                    },
+                    loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
                 });
                 // Point the cached view at the boxed keyexpr's final address.
-                boxed.loaned_keyexpr = z_loaned_keyexpr_t {
-                    _start: boxed.keyexpr.as_ptr(),
-                    _len: boxed.keyexpr.len(),
-                };
+                boxed.loaned_keyexpr =
+                    z_loaned_keyexpr_t::borrowed(boxed.keyexpr.as_ptr(), boxed.keyexpr.len());
                 *queryable = z_owned_queryable_t {
                     handle: Box::into_raw(boxed) as *mut c_void,
                     _pad: [std::ptr::null_mut(); 3],

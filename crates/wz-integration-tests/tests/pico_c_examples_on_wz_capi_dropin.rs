@@ -34,23 +34,49 @@
 //! headline claim was unwitnessed. Upstream's examples were written with no
 //! knowledge of wz, so what they call is what a pico program actually calls —
 //! including the getters wz had never been forced to get right. That is not
-//! hypothetical: measuring the 31 upstream examples at this pin, exactly ONE
+//! hypothetical: measuring all 32 upstream examples at this pin, exactly ONE
 //! (`z_sub.c`) linked against wz's cdylib with its real body compiled, and
 //! bringing `z_queryable.c` to the same state exposed a crash-level divergence
-//! in `z_query_payload` (see `crates/wz-capi-pico/src/query.rs`). Five other
-//! examples appear to "link" only because their bodies are `#if`-ed out to a
-//! stub `main` by the generated feature set — a vacuous pass, and the reason
-//! this file names its two examples explicitly rather than sweeping a glob.
+//! in `z_query_payload` (see `crates/wz-capi-pico/src/query.rs`).
+//!
+//! **A link is not a pass, and the difference is measurable.** Six examples
+//! link while calling nothing at all — `z_advanced_pub`, `z_advanced_sub`,
+//! `z_pub_st`, `z_pub_tls`, `z_sub_st`, `z_sub_tls` compile to a `#else` stub
+//! `main` because the CMake-generated feature set disagrees with what they
+//! demand (`z_pub_st` and `z_sub_st` want `Z_FEATURE_MULTI_THREAD == 0`, and
+//! the generated config has it at 1). `nm -u <obj> | grep z_open` separates
+//! them from a real body. That is why this file names its examples explicitly
+//! instead of sweeping a glob: a glob would have counted six vacuous passes.
+//!
+//! At this round the real-body linkers are `z_sub`, `z_queryable` and `z_put`
+//! — the three legs below — with 21 examples still short of exports and 2 more
+//! that are stubs AND short.
+//!
+//! ## Leg 3 needs a discriminator the other two do not
+//!
+//! `z_put.c` DECLARES its keyexpr and then publishes on the declared value, so
+//! the property under test is that the publish goes out ALIASED — the wire
+//! carrying a numeric id the peer resolves through the mapping table our
+//! `DeclareKeyExpr` built. A literal Push would reach the same subscriber and
+//! print the same line, so the OUTCOME cannot tell the two apart and the leg
+//! would pass just as happily against a build that ignored the declaration
+//! entirely.
+//!
+//! What separates them is a damage, and it is recorded here because the test
+//! body cannot express it: suppressing only the DECLARE
+//! (`SharedSession::declare_keyexpr`'s per-face `send_declare_keyexpr`) while
+//! leaving the aliased publish in place makes the peer drop the Push for an id
+//! it never registered, and this leg reds. Against a literal-publishing build
+//! that same damage changes nothing. That asymmetry is what makes the green
+//! here mean "aliased", and it was run.
 //!
 //! ## Scope, stated as a limit rather than implied
 //!
-//! Both claims are `partial`, and deliberately: the atom covers 149 of pico's
-//! 725 exports, and two programs are two programs. What is proven is that the
-//! drop-in is REAL for the pub/sub-receive and queryable-reply paths those two
-//! programs exercise, compiled and linked the way a pico user would. The
-//! keyexpr-declaration family (`z_declare_keyexpr` / `z_undeclare_keyexpr` /
-//! `z_keyexpr_loan` / `z_keyexpr_move`) is still absent, which is what keeps
-//! upstream's `z_put.c` from joining this file.
+//! All three claims are `partial`, and deliberately: the atom covers 150 of
+//! pico's 726 declared functions, and three programs are three programs. What
+//! is proven is that the drop-in is REAL for the paths those programs exercise
+//! — inbound samples, queryable replies, and a declared-keyexpr publish —
+//! compiled and linked the way a pico user would.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -292,4 +318,103 @@ fn pico_zqueryable_source_on_wz_capi_answers_real_pico_zget() {
     });
 
     graceful_terminate(qable.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 3 (`wz->pico`) — upstream's `z_put.c`, running on wz, DECLARES its
+/// keyexpr and the resulting aliased publish is received by a real zenoh-pico
+/// `z_sub`.
+///
+/// This is the leg the keyexpr-declaration family exists for. Upstream's
+/// program calls `z_declare_keyexpr`, publishes on the OWNED keyexpr that
+/// returns, and then `z_undeclare_keyexpr`s it — so a build that exported those
+/// symbols as stubs, or that quietly published the literal instead, would be
+/// caught only by the damage described in the module docs, not by this
+/// assertion. The assertion's job is the other half: that the peer RESOLVES
+/// what wz sent, on the right key.
+///
+/// Direction and roles follow upstream's own design rather than this file's
+/// convenience: `z_put.c` is a one-shot DIALER, so the real pico `z_sub`
+/// listens and the drop-in connects to it. That also puts the foreign process
+/// on the reporting side, as in leg 2.
+// wz-proves: api-compat-pico wz->pico partial
+// wz-proves: declare-keyexpr wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_sub CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zput_source_on_wz_capi_declares_and_reaches_real_pico_zsub() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_put", dir.path());
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let payload = "ALIASED-PUT-FROM-PICO-SOURCE-ON-WZ";
+    let key = "demo/dropin/leg3";
+
+    // The FOREIGN process listens here, and `-n 1` makes it exit on the first
+    // sample so its block-buffered stdout is flushed before we read it.
+    let mut sub_out = tempfile::tempfile().expect("z_sub stdout capture");
+    let writer = sub_out.try_clone().expect("dup z_sub stdout handle");
+    let mut sub = ChildGuard::wrap(
+        "real zenoh-pico z_sub",
+        Command::new(&z_sub)
+            .args([
+                "-l",
+                &endpoint,
+                "-m",
+                "peer",
+                "-k",
+                "demo/dropin/**",
+                "-n",
+                "1",
+            ])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_sub"),
+    );
+
+    assert!(
+        wait_for_tcp_accept(port, LISTEN_TIMEOUT),
+        "the real zenoh-pico z_sub never accepted on {endpoint}; capture so far:\n{}",
+        read_captured(&mut sub_out)
+    );
+    drop(reservation);
+
+    let put = Command::new(&dropin)
+        .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the compiled z_put drop-in");
+    // A non-zero exit is itself a finding: upstream returns -1 when
+    // `z_declare_keyexpr` fails, so this catches a declaration that never
+    // happened before the subscriber assertion can mask it as a lost sample.
+    assert!(
+        put.success(),
+        "upstream z_put.c on wz's C-ABI exited {put:?} — it returns -1 when \
+         z_open, z_view_keyexpr_from_str or z_declare_keyexpr fails"
+    );
+
+    let foreign =
+        wait_for_substring(&mut sub_out, payload, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+            panic!(
+                "the REAL zenoh-pico z_sub never received the declared-keyexpr put \
+                 that upstream's z_put.c issued while running on wz's C-ABI.\n\
+                 expected substring: {payload}\n--- REAL pico z_sub stdout ---\n{captured}"
+            )
+        });
+    // The KEY is the part the alias has to reconstruct. wz sends a numeric id
+    // plus no suffix; the peer prints whatever ITS mapping table resolved that
+    // id to. So a declaration that registered the wrong literal shows up here
+    // as the wrong key, not as a missing sample.
+    assert!(
+        foreign.contains(key),
+        "the sample reached the foreign subscriber on the wrong key (expected \
+         {key}), so the peer's mapping table resolved the alias to something \
+         else.\n--- REAL pico z_sub stdout ---\n{foreign}"
+    );
+
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
 }

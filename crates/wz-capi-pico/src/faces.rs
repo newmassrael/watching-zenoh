@@ -73,8 +73,8 @@ use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session::{
-    PublishError, PublishOptions, Queryable, QueryableOptions, SubscribeOptions, Subscriber,
-    TokioSession,
+    PublishAliasError, PublishError, PublishOptions, Queryable, QueryableOptions, SubscribeOptions,
+    Subscriber, TokioSession,
 };
 use wz_runtime_tokio::session_glue::{IterationEvent, SessionLinkActions};
 use wz_runtime_tokio::sync::Mutex as WzMutex;
@@ -134,6 +134,20 @@ struct QblEntry {
     closure: Arc<CQueryClosure>,
 }
 
+/// A C-declared keyexpr alias — the third SSOT, replayed onto every face
+/// exactly as [`SubEntry`] and [`QblEntry`] are.
+///
+/// The mapping id is allocated ONCE per C declaration and reused on every
+/// face, which is pico's model rather than a shortcut: `_z_get_resource_id`
+/// is a session-global counter and the same id is announced to every peer.
+/// It is safe because a keyexpr mapping table is DIRECTIONAL — each peer
+/// holds our ids in its own inbound table, so two peers cannot collide, and
+/// a peer's own outbound ids live in a different table entirely.
+struct KexprEntry {
+    id: u64,
+    keyexpr: String,
+}
+
 #[derive(Default)]
 struct Inner {
     faces: BTreeMap<u64, FaceEntry>,
@@ -141,6 +155,12 @@ struct Inner {
     next_sub_id: SubId,
     qbls: Vec<QblEntry>,
     next_qbl_id: QblId,
+    kexprs: Vec<KexprEntry>,
+    /// Next alias id to hand out. Starts at 0 and is PRE-incremented, so the
+    /// first id issued is 1: zero is reserved on the wire
+    /// (`SendDeclareError::ReservedMappingIdZero`) and is also this crate's
+    /// "not declared" discriminant in `z_loaned_keyexpr_t::_mapping`.
+    next_kexpr_id: u64,
 }
 
 /// The registry behind a `z_owned_session_t`, shared between the C thread
@@ -178,6 +198,20 @@ impl SharedSession {
         let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock));
 
         let mut guard = self.lock();
+        // Keyexpr aliases replay FIRST, before the subscriber and queryable
+        // declares below. Ordering is load-bearing on the reliable channel: a
+        // peer resolves an aliased id through the mapping table it built from
+        // our DeclareKeyExpr, so any declaration or Push that could reference
+        // the alias must not reach it earlier. Cheap to guarantee here, and
+        // impossible to notice if it were wrong until a race showed up.
+        for entry in &guard.kexprs {
+            // Best-effort per face, exactly as the sub/qbl replays below: a
+            // face mid-teardown drops its declare and the SSOT entry survives
+            // for the next face.
+            let _ = session
+                .actions()
+                .send_declare_keyexpr(entry.id, &entry.keyexpr);
+        }
         let mut subs = BTreeMap::new();
         for entry in &guard.subs {
             if let Ok(sub) = session.declare_subscriber(
@@ -356,6 +390,83 @@ impl SharedSession {
             }
         }
         Ok(delivered)
+    }
+
+    /// Fan an ALIASED publish over every face (pico `_z_write` on a
+    /// `_z_declared_keyexpr_t` whose declaration is live).
+    ///
+    /// Each face resolves the literal from its OWN outbound mapping table via
+    /// `publish_aliased_auto`, which is why the id can be session-global while
+    /// the resolution stays per-face: the table was populated by that face's
+    /// own `send_declare_keyexpr`, either at declare time or on replay.
+    ///
+    /// `UnknownMapping` on a face is treated as the per-face transient
+    /// [`Self::publish_all`] treats `TransportUnavailable`. It is reachable
+    /// without any bug: a face whose declare failed mid-teardown never got the
+    /// table entry, and skipping it lets the healthy peers still receive the
+    /// sample. Every other error is deterministic and face-independent, so it
+    /// is surfaced.
+    pub(crate) fn publish_aliased_all(
+        &self,
+        mapping_id: u64,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<usize, ()> {
+        let sessions = self.face_sessions();
+        let mut delivered = 0usize;
+        for session in sessions {
+            match session.publish_aliased_auto(mapping_id, None, payload, opts.clone()) {
+                Ok(n) => delivered += n,
+                Err(PublishAliasError::UnknownMapping(_)) => {}
+                Err(PublishAliasError::TransportUnavailable) => {}
+                Err(_) => return Err(()),
+            }
+        }
+        Ok(delivered)
+    }
+
+    /// Record a C keyexpr declaration in the SSOT and announce it on every live
+    /// face, returning the allocated mapping id (never 0).
+    ///
+    /// Same declare-before-peer semantics as [`Self::declare_subscriber`]: with
+    /// no face yet, nothing goes on the wire and the entry is still recorded,
+    /// so every FUTURE face replays it in [`Self::face_up`].
+    ///
+    /// Returns `None` when the id space is exhausted. The space is the WIRE's,
+    /// not ours: zenoh types `DeclareKeyExpr.id` as `ExprId = u16` and pico's
+    /// `_z_decl_kexpr_t` holds a `uint16_t`, so ids above `u16::MAX` are
+    /// rejected by `send_declare_keyexpr` and must not be handed out. Refusing
+    /// is the honest answer — wrapping would silently re-issue a live id and
+    /// re-point a peer's existing alias at a different keyexpr.
+    pub(crate) fn declare_keyexpr(&self, keyexpr: String) -> Option<u64> {
+        let mut guard = self.lock();
+        let id = guard.next_kexpr_id.checked_add(1)?;
+        if id > u64::from(u16::MAX) {
+            return None;
+        }
+        guard.next_kexpr_id = id;
+
+        for face in guard.faces.values() {
+            let _ = face.session.actions().send_declare_keyexpr(id, &keyexpr);
+        }
+        guard.kexprs.push(KexprEntry { id, keyexpr });
+        Some(id)
+    }
+
+    /// Retract a C keyexpr declaration: drop the SSOT entry so no future face
+    /// replays it, and emit the wire undeclare on every live face.
+    ///
+    /// No cross-lock drop dance is needed here, unlike the subscriber and
+    /// queryable twins: a [`KexprEntry`] owns a `String` and no `Arc<CClosure>`,
+    /// so releasing it cannot run C code.
+    pub(crate) fn undeclare_keyexpr(&self, mapping_id: u64) {
+        let mut guard = self.lock();
+        if let Some(pos) = guard.kexprs.iter().position(|e| e.id == mapping_id) {
+            guard.kexprs.remove(pos);
+        }
+        for face in guard.faces.values() {
+            face.session.actions().send_undeclare_kexpr(mapping_id);
+        }
     }
 
     /// A snapshot of every connected face's session, taken OUT of the registry

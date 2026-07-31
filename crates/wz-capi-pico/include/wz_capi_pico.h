@@ -81,9 +81,19 @@ typedef struct { const uint8_t *_start; size_t _len; size_t _pad[2]; } z_view_st
 
 /* ------------------------------------------------------------------- keyexpr */
 /* A keyexpr view aliases the caller's NUL-terminated string (borrowed
- * `{ start, len }`); the caller keeps that string alive for the view. */
-typedef struct { const uint8_t *_start; size_t _len; } z_loaned_keyexpr_t;
+ * `{ start, len }`); the caller keeps that string alive for the view. A
+ * DECLARED keyexpr (z_declare_keyexpr) instead OWNS its literal and adds the
+ * wire alias id. Both loan to z_loaned_keyexpr_t, which is why the literal
+ * stays at slots 0/1 in each: _handle and _mapping are zero for a view, and
+ * _mapping == 0 means "not declared" (0 is reserved on the wire). */
+typedef struct {
+    const uint8_t *_start; size_t _len; void *_handle; size_t _mapping;
+} z_loaned_keyexpr_t;
 typedef struct { const uint8_t *_start; size_t _len; size_t _pad[4]; } z_view_keyexpr_t; /* 48 B */
+typedef struct {
+    const uint8_t *_start; size_t _len; void *_handle; size_t _mapping; size_t _pad[2];
+} z_owned_keyexpr_t; /* 48 B */
+typedef struct { z_owned_keyexpr_t _this; } z_moved_keyexpr_t;
 
 /* -------------------------------------------------------------------- sample */
 /* Opaque: the callback only borrows it (valid during the call) and passes it
@@ -155,6 +165,21 @@ z_loaned_keyexpr_t *z_view_keyexpr_loan_mut(z_view_keyexpr_t *keyexpr);
 void z_view_keyexpr_empty(z_view_keyexpr_t *keyexpr);
 z_result_t z_keyexpr_as_view_string(const z_loaned_keyexpr_t *keyexpr, z_view_string_t *string);
 const z_loaned_string_t *z_view_string_loan(const z_view_string_t *string);
+
+/* declared keyexpr: binds the keyexpr to a numeric alias on every peer, so a
+   later z_put on the DECLARED value emits the id instead of the literal.
+   z_keyexpr_drop frees the local value only — retraction is z_undeclare_keyexpr,
+   which is pico's split too (drop takes no session). */
+z_result_t z_declare_keyexpr(const z_loaned_session_t *zs, z_owned_keyexpr_t *declared_keyexpr,
+                             const z_loaned_keyexpr_t *keyexpr);
+z_result_t z_undeclare_keyexpr(const z_loaned_session_t *zs, z_moved_keyexpr_t *keyexpr);
+void z_internal_keyexpr_null(z_owned_keyexpr_t *obj);
+bool z_internal_keyexpr_check(const z_owned_keyexpr_t *obj);
+const z_loaned_keyexpr_t *z_keyexpr_loan(const z_owned_keyexpr_t *obj);
+z_loaned_keyexpr_t *z_keyexpr_loan_mut(z_owned_keyexpr_t *obj);
+z_moved_keyexpr_t *z_keyexpr_move(z_owned_keyexpr_t *obj);
+void z_keyexpr_take(z_owned_keyexpr_t *dst, z_moved_keyexpr_t *src);
+void z_keyexpr_drop(z_moved_keyexpr_t *obj);
 
 /* --- bytes / slice / string --- */
 z_result_t z_bytes_copy_from_buf(z_owned_bytes_t *bytes, const uint8_t *data, size_t len);

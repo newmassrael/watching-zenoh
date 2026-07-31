@@ -42,7 +42,7 @@ use crate::abi::{
 use crate::bytes::ByteBuf;
 use crate::faces::{SharedSession, SubId};
 use crate::ffi::{guarded, CClosure as FfiClosure};
-use crate::keyexpr::keyexpr_str;
+use crate::keyexpr::{keyexpr_mapping, keyexpr_str};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
 
@@ -85,10 +85,7 @@ impl SampleMarshal {
             keyexpr,
             payload,
             kind,
-            loaned_keyexpr: z_loaned_keyexpr_t {
-                _start: std::ptr::null(),
-                _len: 0,
-            },
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
                 handle: std::ptr::null_mut(),
                 _pad: [std::ptr::null_mut(); 3],
@@ -99,10 +96,8 @@ impl SampleMarshal {
     /// Point the cached views at this marshal's own fields. MUST run only once
     /// the marshal sits at its FINAL address.
     pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = z_loaned_keyexpr_t {
-            _start: self.keyexpr.as_ptr(),
-            _len: self.keyexpr.len(),
-        };
+        self.loaned_keyexpr =
+            z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
         self.loaned_payload.handle = &self.payload as *const Vec<u8> as *mut c_void;
     }
 
@@ -440,7 +435,19 @@ pub unsafe extern "C" fn z_put(
             Some(k) => k,
             None => return Z_ERR_INVALID,
         };
-        match state.shared.publish_all(ke, &buf, &put_options()) {
+        // A keyexpr that carries a live declaration publishes ALIASED — the
+        // wire carries the id instead of the literal, which is the entire
+        // reason `z_declare_keyexpr` exists (pico's `_z_write` reads the same
+        // discriminant off its `_z_declared_keyexpr_t`). Each face resolves the
+        // literal from its own outbound mapping table, so this is correct even
+        // for a face that joined after the declaration and got it by replay.
+        let result = match keyexpr_mapping(keyexpr) {
+            Some(mapping) => state
+                .shared
+                .publish_aliased_all(mapping, &buf, &put_options()),
+            None => state.shared.publish_all(ke, &buf, &put_options()),
+        };
+        match result {
             Ok(_) => Z_OK,
             Err(_) => Z_ERR_GENERIC,
         }
