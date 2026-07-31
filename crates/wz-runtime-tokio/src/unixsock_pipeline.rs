@@ -50,7 +50,7 @@ use tokio::sync::mpsc;
 
 use wz_runtime_core::Runtime;
 
-use crate::link_interfaces::addressless_link_subject;
+use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use wz_session_core::link::InterceptorLink;
@@ -130,6 +130,28 @@ pub fn wire_unixsock_stream(
     Arc<StreamWriteDriver>,
     TokioJoinHandle<()>,
 ) {
+    // R311y473 — the adminspace `{src,dst}` pair. A unix stream is addressed by a
+    // PATH, and only a BOUND end has one: an accepted server-side peer, and the
+    // client end of any connection, are `unnamed`. Both ends are required (the
+    // helper's contract), so a pair with an unnamed end resolves to `None` and the
+    // admin host renders the link with blank ends rather than inventing a path.
+    let endpoints = match (
+        stream
+            .local_addr()
+            .ok()
+            .and_then(|a| a.as_pathname().map(|p| p.to_string_lossy().into_owned())),
+        stream
+            .peer_addr()
+            .ok()
+            .and_then(|a| a.as_pathname().map(|p| p.to_string_lossy().into_owned())),
+    ) {
+        (Some(local), Some(peer)) => Some(addressless_link_endpoints(
+            InterceptorLink::UnixsockStream,
+            &local,
+            &peer,
+        )),
+        _ => None,
+    };
     let (reader, writer) = stream.into_split();
     let inbound =
         StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
@@ -141,6 +163,7 @@ pub fn wire_unixsock_stream(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         addressless_link_subject(InterceptorLink::UnixsockStream),
+        endpoints,
     ));
     (inbound, outbound, writer_handle)
 }

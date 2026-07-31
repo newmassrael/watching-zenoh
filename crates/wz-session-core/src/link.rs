@@ -111,6 +111,39 @@ impl InterceptorLink {
         }
     }
 
+    /// R311y473 — the DIALABLE LOCATOR for this protocol at `address`: the string
+    /// a foreign peer has to be able to parse and connect to.
+    ///
+    /// Deliberately NOT [`as_str`](Self::as_str). That is a CONFIG spelling, and
+    /// two of these ten differ between the two roles — `quic-datagram` is a
+    /// wz-only word (zenoh gives both its QUIC links the `quic` scheme and selects
+    /// with the `rel` metadata key, `io/zenoh-link/src/lib.rs:165-171`), and
+    /// `unixsock-stream` happens to coincide only because the config spelling was
+    /// already written as the scheme. R311y470 shipped a round fixing exactly this
+    /// confusion at the listener-advertise sites, where a log word had been reused
+    /// as a scheme and produced two locators no zenoh peer could dial.
+    ///
+    /// This is the ONE table. `BoundListener::advertised_locator` (the R311y470
+    /// site) delegates here rather than carrying a second copy, so a new
+    /// transport's scheme is stated once and every emitter inherits it. The match
+    /// is wildcard-free for the same reason it is there: a new variant must state
+    /// its scheme rather than inherit a plausible-looking neighbour's.
+    pub fn locator_for(&self, address: &str) -> String {
+        use alloc::format;
+        match self {
+            InterceptorLink::Tcp => format!("tcp/{address}"),
+            InterceptorLink::Udp => format!("udp/{address}"),
+            InterceptorLink::Tls => format!("tls/{address}"),
+            InterceptorLink::Quic => format!("quic/{address}"),
+            InterceptorLink::QuicDatagram => format!("quic/{address}?rel=0"),
+            InterceptorLink::Serial => format!("serial/{address}"),
+            InterceptorLink::Unixpipe => format!("unixpipe/{address}"),
+            InterceptorLink::UnixsockStream => format!("unixsock-stream/{address}"),
+            InterceptorLink::Vsock => format!("vsock/{address}"),
+            InterceptorLink::Ws => format!("ws/{address}"),
+        }
+    }
+
     /// Parse a config spelling back, or `None` for an unknown name. The inverse of
     /// [`as_str`](Self::as_str), kept beside it so the two cannot drift; every
     /// config surface (the demo knobs today, a `deploy.yaml` loader later) parses
@@ -179,6 +212,54 @@ pub trait BoxedLinkDriver {
     /// locator instead would be wrong for an ACCEPTED link, which never had one.
     fn link_subject(&self) -> Option<&LinkSubject> {
         None
+    }
+
+    /// R311y473 — the LOCATOR PAIR of this driver's transport: the `{src,dst}`
+    /// zenoh's adminspace renders per link (`link_to_json`,
+    /// `net/runtime/adminspace.rs:608-613`), or `None` for a driver that cannot
+    /// name its endpoints (the test doubles, and the MCU drivers whose stack has
+    /// no address to read).
+    ///
+    /// Resolved ONCE, at link open, and stored, for the same reason
+    /// [`Self::link_subject`] is: the constructing pipeline is the only object
+    /// that knows both its own scheme AND its own socket, and an admin GET must
+    /// not turn into a syscall per reply.
+    ///
+    /// The strings are DIALABLE LOCATORS, not log words. R311y470 found two of
+    /// nine advertise sites emitting a scheme no zenoh peer — and in one case not
+    /// even wz's own parser — could dial, because they reused a transport's log
+    /// name as its scheme. This accessor feeds an admin surface a foreign client
+    /// reads, so it inherits that contract: build the string through
+    /// [`crate::link::LinkEndpoints::new`]'s callers in the runtime's
+    /// `link_interfaces` helpers, which state the scheme explicitly.
+    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
+        None
+    }
+}
+
+/// R311y473 — one link's locator pair, the wz counterpart of the `{src,dst}`
+/// object zenoh's `link_to_json` emits per link of a transport
+/// (`net/runtime/adminspace.rs:608-613`). Populated into
+/// [`crate::adminspace::AdminLink`] by the admin host, so a foreign admin client
+/// sees the same shape against wz as against zenohd.
+///
+/// Both fields are LOCATORS (`<scheme>/<address>`), not bare addresses — see the
+/// dialability contract on [`BoxedLinkDriver::link_endpoints`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LinkEndpoints {
+    /// This end of the link — zenoh's `Link::src`.
+    pub src: String,
+    /// The peer end of the link — zenoh's `Link::dst`.
+    pub dst: String,
+}
+
+impl LinkEndpoints {
+    /// Build a pair from two already-rendered locator strings.
+    pub fn new(src: impl Into<String>, dst: impl Into<String>) -> Self {
+        Self {
+            src: src.into(),
+            dst: dst.into(),
+        }
     }
 }
 

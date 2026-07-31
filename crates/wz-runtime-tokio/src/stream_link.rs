@@ -36,6 +36,7 @@ use wz_codecs::stream_envelope::StreamEnvelope;
 
 use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::LinkEndpoints;
 use wz_session_core::link::LinkSubject;
 
 /// Inbound read half of a split byte-stream link — owns the read half `R`
@@ -139,6 +140,14 @@ pub struct StreamWriteDriver {
     /// through the constructor rather than guessed, so a new stream pipeline must
     /// state its subject to compile.
     subject: LinkSubject,
+    /// R311y473 — this link's `{src,dst}` locator pair for the adminspace's
+    /// per-link view. Threaded through the constructor for the SAME reason
+    /// `subject` is: this type is transport-NEUTRAL and so can name neither its
+    /// scheme nor its socket, while each of the six constructing pipelines can
+    /// name both. `None` when the pipeline could not read one of the two ends —
+    /// the admin host still emits the link (the COUNT stays truthful), with the
+    /// ends left blank rather than guessed.
+    endpoints: Option<LinkEndpoints>,
 }
 
 impl StreamWriteDriver {
@@ -146,11 +155,13 @@ impl StreamWriteDriver {
         tx: mpsc::UnboundedSender<Vec<u8>>,
         lowlatency: Arc<AtomicBool>,
         subject: LinkSubject,
+        endpoints: Option<LinkEndpoints>,
     ) -> Self {
         Self {
             tx,
             lowlatency,
             subject,
+            endpoints,
         }
     }
 }
@@ -160,6 +171,12 @@ impl BoxedLinkDriver for StreamWriteDriver {
     // driver is shared across six of them. A field read, never a syscall.
     fn link_subject(&self) -> Option<&LinkSubject> {
         Some(&self.subject)
+    }
+
+    // R311y473 — the adminspace `{src,dst}` pair the constructing pipeline
+    // resolved, for the same six-pipelines reason as the subject above.
+    fn link_endpoints(&self) -> Option<&wz_session_core::link::LinkEndpoints> {
+        self.endpoints.as_ref()
     }
 
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
@@ -245,8 +262,12 @@ mod tests {
     #[tokio::test]
     async fn write_driver_drops_oversize_frame() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let driver =
-            StreamWriteDriver::new(tx, Arc::new(AtomicBool::new(false)), LinkSubject::UNKNOWN);
+        let driver = StreamWriteDriver::new(
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            LinkSubject::UNKNOWN,
+            None,
+        );
         driver.send_blocking(&vec![0u8; 65_536], Reliability::Reliable);
         driver.send_blocking(b"ok", Reliability::Reliable);
         // Only the in-range frame reached the channel, u16-framed at enqueue

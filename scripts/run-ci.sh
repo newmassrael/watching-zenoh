@@ -6775,6 +6775,14 @@ layer_z_zenohd_interop() {
     # parsed only under that feature, AND its `transport-multilink` claim must sit
     # inside this build's feature closure or A4-5 containment reds. Additive: the
     # knob defaults to 1 (single-link), so every other leg dials unchanged.
+    # R311y473 adds NOTHING here, and that is a measured result rather than an
+    # assumption. Its new leg drives `--config-queryable`, whose handler block is
+    # `adminspace-core`-gated, and its claim needs that feature inside this closure
+    # for A4-5 containment. `adminspace-core` is absent from preset-ap-client -- but
+    # checking only the preset is checking the wrong set: `routing-peer` (added here
+    # by R311y471) pulls `wz/adminspace-core` (wz-ap-demo/Cargo.toml), so the FULL
+    # build line already carries it. Resolved from wz-ap-demo's own feature table,
+    # not read off one preset.
     (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
@@ -7041,6 +7049,19 @@ layer_z_zenohd_interop() {
     # build. Same --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_multilink_aggregation_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y473 — the READ side of the same atom: R311y472 had to ask ZENOH how many
+    # links it had bound because wz's own adminspace reported none (the `sessions[]`
+    # array was hard-coded empty at both admin hosts, and `to_admin_json` rendered
+    # neither `max_links` nor the link set). That was transport-multilink's named S5
+    # residual. Now a `--max-links 2 --config-queryable` wz peer is asked the same
+    # question about ITSELF, and answers ONE router session carrying TWO links plus
+    # the budget in its config body. Its calibration twin ships in the same file: the
+    # SAME argv against a STOCK zenohd must report ONE link, so the number wz renders
+    # follows a FOREIGN process's config and cannot be a wz-side constant. The
+    # `sessions[]` body is parsed with the parser built for ZENOH's adminspace, so
+    # reusing it is also the wire-shape fidelity assertion.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_own_adminspace_reports_aggregated_links -- --ignored --quiet --test-threads=1) || return 1
     # R311y399 — wz UDP-DEMUX ACCEPTOR cross-impl (transport-link-udp zenohd->wz):
     # the DATAGRAM sibling of the ws/tls/unixsock acceptor legs above, and the first
     # cross-impl proof of a structurally-datagram wz acceptor. A real zenohd DIALS

@@ -40,7 +40,42 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use wz_session_core::link::{InterceptorLink, LinkSubject};
+use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
+
+/// R311y473 — the `{src,dst}` LOCATOR PAIR of an IP-addressed link, for the
+/// adminspace's per-link view (zenoh `link_to_json`,
+/// `net/runtime/adminspace.rs:608-613`).
+///
+/// Both ends are required: `None` when either address could not be read, which
+/// is the same "could not determine" honesty [`ip_link_subject`] applies to its
+/// interface set. A half-known pair rendered as a locator would be a string an
+/// admin client cannot dial and cannot tell apart from one it can.
+///
+/// The scheme comes from [`InterceptorLink::locator_for`] — the single table
+/// `BoundListener::advertised_locator` also delegates to — so this emitter cannot
+/// repeat the R311y470 defect of shipping a log word where a scheme belongs.
+pub fn ip_link_endpoints(
+    protocol: InterceptorLink,
+    local: Option<SocketAddr>,
+    peer: Option<SocketAddr>,
+) -> Option<LinkEndpoints> {
+    Some(LinkEndpoints::new(
+        protocol.locator_for(&local?.to_string()),
+        protocol.locator_for(&peer?.to_string()),
+    ))
+}
+
+/// R311y473 — the `{src,dst}` pair of a link addressed by something other than an
+/// IP socket: a unix-socket path, a vsock `cid:port`, a named pipe, a serial
+/// device. The caller renders each end's ADDRESS; the scheme is applied here from
+/// the same single table [`ip_link_endpoints`] uses.
+pub fn addressless_link_endpoints(
+    protocol: InterceptorLink,
+    local: &str,
+    peer: &str,
+) -> LinkEndpoints {
+    LinkEndpoints::new(protocol.locator_for(local), protocol.locator_for(peer))
+}
 
 /// The §5.16 subject of an IP-addressed link: its protocol, plus the NICs its
 /// LOCAL address sits on, resolved live at link open.

@@ -1321,6 +1321,48 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.link_driver().link_subject()
     }
 
+    /// R311y473 — this session's links as the adminspace renders them: the
+    /// session-centric mirror of the array zenoh's `transport_unicast_to_json`
+    /// builds from `transport.get_links()` (`net/runtime/adminspace.rs:607-637`).
+    ///
+    /// ONE entry per PHYSICAL link, which is the whole point. R311y472 put a real
+    /// zenohd on the far end of the 0x4 aggregation envelope and read the verdict
+    /// off ZENOH'S adminspace, because wz's own reported no links at all — the
+    /// admin host hard-coded an empty vector. That was the atom's named S5
+    /// residual, and this is the read side of closing it.
+    ///
+    /// The AGGREGATION SET is the source when it is populated (a multilink session
+    /// registers its own first link into the set at join time, so the set is the
+    /// complete picture, not the extra links). An empty set means a single-link
+    /// session — including every session in a non-multilink build — and then this
+    /// binding's own link is the one entry. The two cases are one method rather
+    /// than a caller-side branch precisely so a caller cannot forget the second.
+    ///
+    /// A link whose driver cannot name its endpoints
+    /// ([`BoxedLinkDriver::link_endpoints`] `None` — a test double, a FIFO pair, an
+    /// MCU stack with no address) still gets an entry, with blank ends. The COUNT
+    /// is the load-bearing fact for an admin client asking "is this one session
+    /// over two links?", so dropping such a link would corrupt the answer in order
+    /// to tidy a string.
+    #[cfg(feature = "adminspace-core")]
+    pub fn admin_links(&self) -> Vec<crate::adminspace::AdminLink> {
+        let render = |driver: &dyn BoxedLinkDriver| match driver.link_endpoints() {
+            Some(e) => crate::adminspace::AdminLink {
+                src: e.src.clone(),
+                dst: e.dst.clone(),
+            },
+            None => crate::adminspace::AdminLink::default(),
+        };
+        #[cfg(feature = "transport-multilink")]
+        {
+            let links = self.links.lock().expect("multilink set mutex");
+            if !links.is_empty() {
+                return links.iter().map(|l| render(l.link_driver())).collect();
+            }
+        }
+        alloc::vec![render(self.link_driver())]
+    }
+
     /// R311y9 — public snapshot of this session's transport byte/message
     /// counters (`transport-stats`). The standalone read path (the adminspace
     /// `@/<zid>/.../stats` consumer stays P4); surfaced on the AP

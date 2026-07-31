@@ -94,8 +94,9 @@ pub struct WzConfig {
     /// field via [`Self::with_max_links`] from `--max-links` and hands the SAME
     /// `WzConfig` instance to both the aggregation loop and the `--config-queryable`
     /// admin handler, so there is ONE budget source, not a second (a structural
-    /// no-desync; `to_admin_json` does not yet render `max_links`, so it is not
-    /// GET-observable). `peer_loop` reads the activation
+    /// no-desync). R311y473 made it GET-OBSERVABLE too: `to_admin_json` renders
+    /// `max_links`, so the budget is readable over the wire and not only off a
+    /// startup log line. `peer_loop` reads the activation
     /// knob off [`FaceSources::max_links`](crate::accept_loop::FaceSources) (the
     /// zid-registry join at `Step::Opened`); the runner bridges the two. (Until
     /// R311y213 this note claimed no such runner could exist because a
@@ -122,8 +123,8 @@ pub struct WzConfig {
     /// the offer directly, while the reference peer runner bridges `WzConfig.qos ->
     /// FaceSources.qos -> the `*_with_multilink` entrypoints` (R311y218 delivered
     /// the demo `--qos` reader over the multilink path; per-face priority-band
-    /// segregation is R311y219). `to_admin_json` does not render it (as with
-    /// `max_links`).
+    /// segregation is R311y219). R311y473 — `to_admin_json` renders it (as with
+    /// `max_links`), as the node's OFFER rather than the negotiated outcome.
     #[cfg(feature = "transport-qos")]
     pub qos: bool,
 }
@@ -345,6 +346,22 @@ impl WzConfig {
             fields.push(("low_pass", lp));
         }
 
+        // R311y473 — max_links: the EFFECTIVE aggregation budget, closing the
+        // "structural no-desync but not GET-observable" caveat R311y213 left on
+        // this field. It is the config half of transport-multilink's S5 residual:
+        // the runtime half is the per-link `sessions[].links` array the admin
+        // `local_data` now renders. An operator could previously only read the
+        // budget off a startup LOG LINE, which is not a wire surface.
+        #[cfg(feature = "transport-multilink")]
+        fields.push(("max_links", self.max_links.to_string()));
+
+        // R311y473 — qos: the same treatment for the transport-qos offer, whose
+        // doc-comment carried the identical "to_admin_json does not render it (as
+        // with max_links)" caveat. This is the OFFER this node makes, not the
+        // negotiated outcome (QoS engages only if the peer offers too).
+        #[cfg(feature = "transport-qos")]
+        fields.push(("qos", self.qos.to_string()));
+
         fields.push(("batch_size", self.batch_size.to_string()));
         fields.push(("lease_ms", self.lease_ms.to_string()));
         let mut whatami = String::new();
@@ -472,11 +489,22 @@ mod tests {
         }
     }
 
-    #[cfg(not(any(
-        feature = "access-acl",
-        feature = "access-downsampling",
-        feature = "access-quota"
-    )))]
+    // R311y473 — the seven exact-string tests below pin the ACCESS axis, and each
+    // is gated to exactly the build emitting its shape. They now also exclude the
+    // two TRANSPORT-axis keys (`max_links` / `qos`), which are orthogonal to
+    // access and would otherwise multiply seven assertions by four. The combo that
+    // carries all of them — the preset-ap-full shape — gets its own exact pin in
+    // `to_admin_json_ap_full_shape_alphabetical`, so no shipped combo is left
+    // without one.
+    #[cfg(all(
+        not(any(
+            feature = "access-acl",
+            feature = "access-downsampling",
+            feature = "access-quota"
+        )),
+        not(feature = "transport-multilink"),
+        not(feature = "transport-qos")
+    ))]
     #[test]
     fn to_admin_json_base_alphabetical() {
         // No access interceptor feature: just the 3 read-at-open keys.
@@ -490,7 +518,9 @@ mod tests {
         feature = "routing-peer",
         feature = "access-acl",
         not(feature = "access-downsampling"),
-        not(feature = "access-quota")
+        not(feature = "access-quota"),
+        not(feature = "transport-multilink"),
+        not(feature = "transport-qos")
     ))]
     #[test]
     fn to_admin_json_acl_only_alphabetical() {
@@ -516,7 +546,9 @@ mod tests {
         feature = "routing-peer",
         feature = "access-downsampling",
         not(feature = "access-acl"),
-        not(feature = "access-quota")
+        not(feature = "access-quota"),
+        not(feature = "transport-multilink"),
+        not(feature = "transport-qos")
     ))]
     #[test]
     fn to_admin_json_downsampling_only_alphabetical() {
@@ -531,7 +563,9 @@ mod tests {
         feature = "routing-peer",
         feature = "access-quota",
         not(feature = "access-acl"),
-        not(feature = "access-downsampling")
+        not(feature = "access-downsampling"),
+        not(feature = "transport-multilink"),
+        not(feature = "transport-qos")
     ))]
     #[test]
     fn to_admin_json_quota_only_alphabetical() {
@@ -546,7 +580,9 @@ mod tests {
         feature = "routing-peer",
         feature = "access-acl",
         feature = "access-downsampling",
-        not(feature = "access-quota")
+        not(feature = "access-quota"),
+        not(feature = "transport-multilink"),
+        not(feature = "transport-qos")
     ))]
     #[test]
     fn to_admin_json_acl_and_downsampling_alphabetical() {
@@ -560,7 +596,9 @@ mod tests {
         feature = "routing-peer",
         feature = "access-acl",
         feature = "access-quota",
-        not(feature = "access-downsampling")
+        not(feature = "access-downsampling"),
+        not(feature = "transport-multilink"),
+        not(feature = "transport-qos")
     ))]
     #[test]
     fn to_admin_json_acl_and_quota_alphabetical() {
@@ -574,7 +612,9 @@ mod tests {
         feature = "routing-peer",
         feature = "access-acl",
         feature = "access-downsampling",
-        feature = "access-quota"
+        feature = "access-quota",
+        not(feature = "transport-multilink"),
+        not(feature = "transport-qos")
     ))]
     #[test]
     fn to_admin_json_full_access_alphabetical() {
@@ -584,6 +624,71 @@ mod tests {
         assert_eq!(
             router_config().to_admin_json(),
             r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"downsampling":[],"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
+        );
+    }
+
+    /// R311y473 — the preset-ap-full config shape: the full access set PLUS the two
+    /// transport-axis keys. This combo previously had NO exact-string pin (the seven
+    /// access-axis tests all exclude it now that `max_links` / `qos` land), and it
+    /// is the shape wz-ap-demo actually ships, so it gets one here.
+    ///
+    /// `max_links` sorts between `lease_ms` and `qos`, `qos` between `max_links` and
+    /// `whatami` — both mid-object, which is exactly the position bookkeeping the
+    /// R311y50 sorted-pairs rewrite exists to make free.
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-acl",
+        feature = "access-downsampling",
+        feature = "access-quota",
+        feature = "transport-multilink",
+        feature = "transport-qos"
+    ))]
+    #[test]
+    fn to_admin_json_ap_full_shape_alphabetical() {
+        assert_eq!(
+            router_config().to_admin_json(),
+            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"downsampling":[],"lease_ms":10000,"low_pass":[],"max_links":1,"qos":false,"whatami":"router"}"#
+        );
+    }
+
+    /// R311y473 — `max_links` in the admin body tracks the BUILDER, not a constant.
+    ///
+    /// A presence assertion alone would pass against a hard-coded `1`, which is also
+    /// the default — so the load-bearing leg is that `with_max_links(2)` moves it.
+    /// This is the config half of closing transport-multilink's S5 residual: before
+    /// it, the aggregation budget was readable only off a startup log line, and
+    /// R311y213's "ONE budget source" was a structural claim with no wire surface to
+    /// check it against.
+    #[cfg(feature = "transport-multilink")]
+    #[test]
+    fn to_admin_json_max_links_tracks_the_builder() {
+        let base = router_config().to_admin_json();
+        assert!(
+            base.contains(r#""max_links":1"#),
+            "the default budget is the single-link 1, rendered: {base}"
+        );
+        let aggregating = router_config().with_max_links(2).to_admin_json();
+        assert!(
+            aggregating.contains(r#""max_links":2"#),
+            "with_max_links(2) must be GET-observable, not just structurally held: {aggregating}"
+        );
+    }
+
+    /// R311y473 — the `qos` twin of
+    /// [`to_admin_json_max_links_tracks_the_builder`]: the rendered value follows
+    /// `with_qos`, and it is this node's OFFER (a session negotiates QoS only when
+    /// the peer offers too, so the admin body must not be read as the outcome).
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn to_admin_json_qos_tracks_the_builder() {
+        assert!(
+            router_config().to_admin_json().contains(r#""qos":false"#),
+            "the default offer is false (byte-identical to a pre-QoS session)"
+        );
+        let offered = router_config().with_qos(true).to_admin_json();
+        assert!(
+            offered.contains(r#""qos":true"#),
+            "with_qos(true) must be GET-observable: {offered}"
         );
     }
 

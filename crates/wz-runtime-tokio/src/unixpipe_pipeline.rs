@@ -647,6 +647,12 @@ pub fn wire_unixpipe_stream(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         addressless_link_subject(InterceptorLink::Unixpipe),
+        // R311y473 — a unixpipe link is a pair of already-opened FIFO handles; the
+        // rendezvous BASE path is the acceptor's, not the link's, and neither half
+        // can name it. NAMED residual, not an oversight: threading the base here
+        // means widening `UnixpipeLink`, which is a separate change. The admin host
+        // still emits the link, so the aggregation COUNT stays truthful.
+        None,
     ));
     (inbound, outbound, writer_handle)
 }

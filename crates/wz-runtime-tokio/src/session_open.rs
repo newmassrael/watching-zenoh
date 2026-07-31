@@ -34,6 +34,9 @@ use tokio::net::{TcpListener, TcpStream};
 use wz_runtime_core::TimeSource;
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
+// R311y473 — the single dialable-locator scheme table `advertised_locator`
+// delegates to (and the adminspace per-link emitter shares).
+use wz_session_core::link::InterceptorLink;
 use wz_session_core::locator::{
     parse_any_locator, AnyLocator, AnyLocatorError, LocatorParseError, Proto,
 };
@@ -868,25 +871,39 @@ impl BoundListener {
     /// [`Self::transport_name`]: a new variant must state its advertised scheme
     /// explicitly rather than inherit a log word that may not be one. That
     /// inheritance is exactly what produced both divergences above.
+    /// R311y473 — the scheme table itself moved to
+    /// [`InterceptorLink::locator_for`], which is now the ONE copy. This site
+    /// keeps its own wildcard-free match because the thing it must state is which
+    /// PROTOCOL a bound listener speaks; the scheme for that protocol is then not
+    /// its business. The adminspace per-link `{src,dst}` emitter (R311y473) reads
+    /// the same table, so the two cannot diverge the way a second copy would.
     pub fn advertised_locator(&self, address: &str) -> String {
+        self.interceptor_link().locator_for(address)
+    }
+
+    /// R311y473 — which §5.16 link protocol this bound listener speaks. Extracted
+    /// so [`Self::advertised_locator`] can delegate its scheme to the single
+    /// [`InterceptorLink::locator_for`] table. Wildcard-free: a new
+    /// `BoundListener` variant must name its protocol.
+    pub fn interceptor_link(&self) -> InterceptorLink {
         match self {
-            BoundListener::Tcp(_) => format!("tcp/{address}"),
+            BoundListener::Tcp(_) => InterceptorLink::Tcp,
             #[cfg(feature = "transport-link-ws")]
-            BoundListener::Ws(_) => format!("ws/{address}"),
+            BoundListener::Ws(_) => InterceptorLink::Ws,
             #[cfg(feature = "transport-link-tls")]
-            BoundListener::Tls(..) => format!("tls/{address}"),
+            BoundListener::Tls(..) => InterceptorLink::Tls,
             #[cfg(feature = "transport-link-unixsock")]
-            BoundListener::Unixsock(_) => format!("unixsock-stream/{address}"),
+            BoundListener::Unixsock(_) => InterceptorLink::UnixsockStream,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
-            BoundListener::Vsock(_) => format!("vsock/{address}"),
+            BoundListener::Vsock(_) => InterceptorLink::Vsock,
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-            BoundListener::Unixpipe(_) => format!("unixpipe/{address}"),
+            BoundListener::Unixpipe(_) => InterceptorLink::Unixpipe,
             #[cfg(feature = "transport-link-udp")]
-            BoundListener::Udp(_) => format!("udp/{address}"),
+            BoundListener::Udp(_) => InterceptorLink::Udp,
             #[cfg(feature = "transport-link-quic")]
-            BoundListener::Quic(_) => format!("quic/{address}"),
+            BoundListener::Quic(_) => InterceptorLink::Quic,
             #[cfg(feature = "transport-link-quic-datagram")]
-            BoundListener::QuicDatagram(_) => format!("quic/{address}?rel=0"),
+            BoundListener::QuicDatagram(_) => InterceptorLink::QuicDatagram,
         }
     }
 

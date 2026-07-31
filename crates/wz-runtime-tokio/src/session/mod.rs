@@ -2938,7 +2938,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 sessions.push(AdminSession {
                     peer_zid_hex: zid_to_zenoh_hex(&peer),
                     whatami: peer_whatami,
-                    links: Vec::new(),
+                    // R311y473 — the session's REAL links, resolved live per query
+                    // off the same captured bundle the peer zid comes from. This
+                    // was a hard-coded `Vec::new()`, which is why R311y472 had to
+                    // read a multilink session's link count off ZENOH'S adminspace:
+                    // wz's own could not answer. An aggregating session reports one
+                    // entry per physical link here.
+                    links: actions.admin_links(),
                 });
             }
             // The match+reply SSOT (root local_data / metrics / config + the read

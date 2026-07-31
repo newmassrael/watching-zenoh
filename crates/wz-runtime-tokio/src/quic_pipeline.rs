@@ -370,6 +370,13 @@ pub fn wire_quic_stream(
     } = link;
     // R311y453 — the §5.16 subject: quinn reports the endpoint's bound address.
     let subject = ip_link_subject(InterceptorLink::Quic, endpoint.local_addr().ok());
+    // R311y473 — the adminspace `{src,dst}` pair: the endpoint's bound address is
+    // this end, quinn's `Connection::remote_address` the peer's.
+    let endpoints = crate::link_interfaces::ip_link_endpoints(
+        InterceptorLink::Quic,
+        endpoint.local_addr().ok(),
+        Some(connection.remote_address()),
+    );
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(writer_task(send, rx));
     // transport-lowlatency is a TCP-path negotiation; QUIC keeps the universal
@@ -378,6 +385,7 @@ pub fn wire_quic_stream(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         subject,
+        endpoints,
     ));
     let inbound = QuicReadDriver {
         inner: StreamReadDriver::new(recv, Arc::new(std::sync::atomic::AtomicBool::new(false))),

@@ -44,7 +44,7 @@ use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 
 use wz_runtime_core::Runtime;
 
-use crate::link_interfaces::addressless_link_subject;
+use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use wz_session_core::link::InterceptorLink;
@@ -110,6 +110,17 @@ pub async fn accept_vsock_on(listener: &mut VsockListener) -> io::Result<VsockSt
 pub fn wire_vsock_stream(
     stream: VsockStream,
 ) -> (VsockReadDriver, Arc<StreamWriteDriver>, TokioJoinHandle<()>) {
+    // R311y473 — the adminspace `{src,dst}` pair, rendered in wz's OWN vsock
+    // locator form `vsock/<CID>:<PORT>` (module doc) so an admin client reads back
+    // a string it could dial, not a Debug rendering of the address struct.
+    let endpoints = match (stream.local_addr().ok(), stream.peer_addr().ok()) {
+        (Some(local), Some(peer)) => Some(addressless_link_endpoints(
+            InterceptorLink::Vsock,
+            &format!("{}:{}", local.cid(), local.port()),
+            &format!("{}:{}", peer.cid(), peer.port()),
+        )),
+        _ => None,
+    };
     let (reader, writer) = split(stream);
     let inbound =
         StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
@@ -121,6 +132,7 @@ pub fn wire_vsock_stream(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         addressless_link_subject(InterceptorLink::Vsock),
+        endpoints,
     ));
     (inbound, outbound, writer_handle)
 }

@@ -108,6 +108,13 @@ pub fn wire_tls_stream(
     // R311y453 — the §5.16 subject: a TLS link is a TCP socket underneath, so
     // its local address comes from the wrapped stream.
     let subject = ip_link_subject(InterceptorLink::Tls, stream.get_ref().0.local_addr().ok());
+    // R311y473 — the adminspace `{src,dst}` pair, read off the same wrapped TCP
+    // socket and in the same before-the-split window as the subject above.
+    let endpoints = crate::link_interfaces::ip_link_endpoints(
+        InterceptorLink::Tls,
+        stream.get_ref().0.local_addr().ok(),
+        stream.get_ref().0.peer_addr().ok(),
+    );
     let (reader, writer) = split(stream);
     // transport-lowlatency is a TCP-path negotiation; TLS keeps the universal
     // u16 prefix (an always-false flag).
@@ -121,6 +128,7 @@ pub fn wire_tls_stream(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         subject,
+        endpoints,
     ));
     (inbound, outbound, writer_handle)
 }

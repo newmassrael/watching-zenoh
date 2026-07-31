@@ -95,11 +95,18 @@ pub fn wire_ws_stream(
     // R311y453 — the §5.16 subject, off the TCP socket the WebSocket wraps,
     // read BEFORE the split takes ownership of the halves.
     let subject = ip_link_subject(InterceptorLink::Ws, ws.get_ref().local_addr().ok());
+    // R311y473 — the adminspace `{src,dst}` pair, off the same wrapped TCP socket
+    // and in the same before-the-split window.
+    let endpoints = crate::link_interfaces::ip_link_endpoints(
+        InterceptorLink::Ws,
+        ws.get_ref().local_addr().ok(),
+        ws.get_ref().peer_addr().ok(),
+    );
     let (sink, stream) = ws.split();
     let inbound = WsReadDriver::new(stream);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(ws_writer_task(sink, rx));
-    let outbound = Arc::new(WsWriteDriver::new(tx, subject));
+    let outbound = Arc::new(WsWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
 
@@ -177,11 +184,21 @@ pub struct WsWriteDriver {
     tx: mpsc::UnboundedSender<Vec<u8>>,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
+    /// R311y473 — this link's `{src,dst}` locator pair for the adminspace.
+    endpoints: Option<wz_session_core::link::LinkEndpoints>,
 }
 
 impl WsWriteDriver {
-    fn new(tx: mpsc::UnboundedSender<Vec<u8>>, subject: LinkSubject) -> Self {
-        Self { tx, subject }
+    fn new(
+        tx: mpsc::UnboundedSender<Vec<u8>>,
+        subject: LinkSubject,
+        endpoints: Option<wz_session_core::link::LinkEndpoints>,
+    ) -> Self {
+        Self {
+            tx,
+            subject,
+            endpoints,
+        }
     }
 }
 
@@ -189,6 +206,11 @@ impl BoxedLinkDriver for WsWriteDriver {
     // R311y453 — the §5.16 subject resolved at open. A field read, not a syscall.
     fn link_subject(&self) -> Option<&LinkSubject> {
         Some(&self.subject)
+    }
+
+    // R311y473 — the adminspace `{src,dst}` pair resolved at open.
+    fn link_endpoints(&self) -> Option<&wz_session_core::link::LinkEndpoints> {
+        self.endpoints.as_ref()
     }
 
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {

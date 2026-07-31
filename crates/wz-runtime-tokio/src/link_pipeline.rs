@@ -39,7 +39,7 @@ use tokio::sync::mpsc;
 
 use wz_runtime_core::Runtime;
 
-use crate::link_interfaces::ip_link_subject;
+use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use wz_session_core::link::InterceptorLink;
@@ -295,11 +295,19 @@ pub fn wire_tcp_stream_with_lowlatency(
     // R311y453 — the §5.16 subject is resolved BEFORE the split, while the
     // stream still owns its socket and can report its local address.
     let subject = ip_link_subject(InterceptorLink::Tcp, stream.local_addr().ok());
+    // R311y473 — the adminspace `{src,dst}` pair, resolved in the same
+    // before-the-split window and for the same reason: after `into_split` neither
+    // half is the socket any more.
+    let endpoints = ip_link_endpoints(
+        InterceptorLink::Tcp,
+        stream.local_addr().ok(),
+        stream.peer_addr().ok(),
+    );
     let (reader, writer) = stream.into_split();
     let inbound = StreamReadDriver::new(reader, lowlatency.clone());
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(writer_task(writer, rx));
-    let outbound = Arc::new(StreamWriteDriver::new(tx, lowlatency, subject));
+    let outbound = Arc::new(StreamWriteDriver::new(tx, lowlatency, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
 

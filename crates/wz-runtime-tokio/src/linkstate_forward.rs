@@ -2185,6 +2185,50 @@ impl LinkstateForwarder {
         Self::group_interest_sources(&self.qabls.borrow())
     }
 
+    /// R311y473 — the held faces as the adminspace `sessions[]` array: the
+    /// forwarder-hosted counterpart of the enumeration `Session::declare_adminspace`
+    /// does for its single peer, and the wz analogue of zenoh's
+    /// `get_transports_unicast()` walk (`net/runtime/adminspace.rs:664`).
+    ///
+    /// This is the enumeration the §5.23 host had DEFERRED — it passed an empty
+    /// slice, so a wz peer's admin GET reported no sessions at all, whatever it was
+    /// actually connected to.
+    ///
+    /// ONE entry per face, with NO aggregation de-duplication, and that is a
+    /// measured statement rather than an oversight. The obvious worry is that a
+    /// multilink peer holds one face per physical link, so a 2-link session would
+    /// render as TWO single-link `sessions[]` entries — which is exactly what a
+    /// router that REFUSED the aggregation produces, and exactly the confusion
+    /// R311y472's structural parser exists to tell apart. It cannot happen here: an
+    /// aggregated link is recorded through
+    /// [`register_joined`](Self::register_joined) (`accept_loop.rs`), which writes
+    /// only the `joined_faces` id mapping, while `faces` is written by
+    /// [`register`](Self::register) on the PRIMARY alone. `faces` is therefore
+    /// already one-entry-per-logical-session — reinforced by
+    /// [`dedups_faces_by_zid`](Self::dedups_faces_by_zid), which drops a redundant
+    /// second face per zid at establishment.
+    ///
+    /// R311y473 first shipped a `!joined_faces.contains_key(id)` filter here on that
+    /// worry. Damaging the filter changed no test outcome, which is what sent the
+    /// question to the registration sites; the filter could never fire, so it was
+    /// removed rather than kept as a guard whose prose claimed work it did not do.
+    /// The aggregated links still appear, inside the primary's `links` array, because
+    /// [`SessionLinkActions::admin_links`] reads the shared aggregation set.
+    #[cfg(feature = "adminspace-core")]
+    pub fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession> {
+        self.faces
+            .borrow()
+            .values()
+            .map(|face| wz_session_core::adminspace::AdminSession {
+                peer_zid_hex: peer_zid_routing(&face.actions)
+                    .map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
+                    .unwrap_or_default(),
+                whatami: Some(String::from(peer_whatami_routing(&face.actions).to_str())),
+                links: face.actions.admin_links(),
+            })
+            .collect()
+    }
+
     /// Emit the unsolicited FUTURE `DeclareSubscriber` pushes a newly-learned
     /// subscription `new_ke` (sourced at `origin`, `None` for this node's own local
     /// subscriber) triggers: one per CLIENT face whose stored FUTURE interest

@@ -2770,6 +2770,19 @@ async fn run_peer_until(
         std::cell::RefCell<Vec<wz::runtime_tokio::adminspace::AdminDeclaration>>,
     > = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
 
+    // R311y473 (§5.23) — the admin `local_data` `sessions[]` buffer. Shares the
+    // shape and the REASON of `introspection` directly above: the
+    // `--config-queryable` handler lives INSIDE the forwarder and therefore cannot
+    // also hold `&forwarder`, so the app-tick loop — which does — re-snapshots
+    // `forwarder.admin_sessions()` here each tick and the handler reads it.
+    //
+    // Freshness is therefore one app-tick, exactly as for the introspection buffer.
+    // That is why a caller waits for a node-side event (the face-up / aggregation
+    // log line) before asserting on an admin GET, rather than racing the tick.
+    let admin_sessions: std::rc::Rc<
+        std::cell::RefCell<Vec<wz::runtime_tokio::adminspace::AdminSession>>,
+    > = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+
     // `--config-queryable`: §5.23 Phase 2b — host this peer's adminspace on the
     // forwarder. A querier's GET for `@/<zid>/peer/config` routes to A's
     // forward_request, finds no remote queryable (the admin key is self-unique),
@@ -2798,6 +2811,8 @@ async fn run_peer_until(
         // node's own declared subs/qabls from it per query (empty when the feature is
         // off — never refreshed — so the reply legs stay inert).
         let introspection_h = introspection.clone();
+        // R311y473 — the app-tick-refreshed held-face snapshot (see its declaration).
+        let sessions_h = admin_sessions.clone();
         // R311y276 (§5.23 adminspace-read) — resolve the GET permit through the
         // library admin_read_permit cfg site (the read-side mirror of the
         // config-write host's admin_write_permit): --no-admin-read ->
@@ -2828,11 +2843,15 @@ async fn run_peer_until(
             let plugins = wz::runtime_tokio::compiled_plugins(&version);
             #[cfg(not(feature = "adminspace-plugins-handlers"))]
             let plugins: Vec<wz::runtime_tokio::adminspace::AdminPlugin> = Vec::new();
+            // R311y473 — the LIVE held-face enumeration, replacing the empty slice
+            // the §5.23 host shipped as a documented deferral. Resolved per query
+            // (never a retained side-table), like `introspection` above.
+            let sessions = sessions_h.borrow();
             answer_admin_query(
                 view,
                 out,
                 &ctx,
-                &[],
+                &sessions,
                 &introspection_h.borrow(),
                 &plugins,
                 &config_json,
@@ -3010,7 +3029,33 @@ async fn run_peer_until(
         TokioTime::new(),
         DEFAULT_OPEN_TICK_MS,
         shutdown,
-        |event: &AcceptEvent| log_face_event("peer", event),
+        {
+            // R311y473 — refresh the admin `sessions[]` snapshot on every face
+            // event, BEFORE the event is logged, and the order is the point.
+            //
+            // The app-tick refresh below is a safety net, not the guarantee: it
+            // leaves a window in which faces are up and the admin view is still
+            // EMPTY, and that window is reached in practice. Measured — the
+            // aggregation leg queried immediately after the peer logged its JOIN
+            // and read `sessions: []`, while its own twin passed only because a
+            // 10s needle timeout happened to let a tick land first. A test that
+            // passes for that reason is flaky, and the fix belongs here rather
+            // than in a barrier: an admin GET should not depend on tick phase.
+            //
+            // Refreshing BEFORE the log makes the log line a real happens-before
+            // edge for any observer keyed on it, instead of a nearly-always-true
+            // race.
+            let admin_sessions_ev = admin_sessions.clone();
+            let forwarder_ev = &forwarder;
+            move |event: &AcceptEvent| {
+                {
+                    let mut buf = admin_sessions_ev.borrow_mut();
+                    buf.clear();
+                    buf.extend(forwarder_ev.admin_sessions());
+                }
+                log_face_event("peer", event)
+            }
+        },
         &forwarder,
     );
     tokio::pin!(loop_fut);
@@ -3183,6 +3228,22 @@ async fn run_peer_until(
                             sources: sources(zids),
                         }
                     }));
+                }
+                // R311y473 (§5.23) — re-snapshot the HELD FACES into the admin
+                // `sessions[]` buffer, the same full-re-materialization discipline as
+                // the introspection block above (never an incremental side-table).
+                //
+                // NOT gated on `adminspace-introspection-handlers`: `sessions[]`
+                // belongs to `local_data` (adminspace-core), not to the per-entity
+                // handlers. And NOT gated on `adminspace-core` either — that is not a
+                // wz-ap-demo feature key, only a forwarded one; `run_peer` is
+                // `routing-peer`-gated and `routing-peer` pulls `wz/adminspace-core`,
+                // which is why the `--config-queryable` block above needs no cfg of
+                // its own.
+                {
+                    let mut buf = admin_sessions.borrow_mut();
+                    buf.clear();
+                    buf.extend(forwarder.admin_sessions());
                 }
                 if let Some(key) = publish_key {
                     // R311y220 — a `--express-high` / `--low` peer originates its Put
