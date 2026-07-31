@@ -908,7 +908,9 @@ fn zenoh_ext_cache_refuses_a_get_without_anyke() {
     let mut reader = stdout;
     let child = ChildGuard::wrap(
         "pico z_get (no _anyke)",
-        Command::new(&z_get)
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_get)
             .arg("-m")
             .arg("client")
             .arg("-e")

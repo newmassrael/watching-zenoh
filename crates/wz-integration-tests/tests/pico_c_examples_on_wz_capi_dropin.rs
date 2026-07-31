@@ -106,6 +106,25 @@ const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// for a subscriber, a one-shot `z_get`, `-n 5` for the ping loop) and asserts
 /// on the capture AFTER the wait, rather than polling a partially-flushed
 /// buffer.
+///
+/// R311y482 — THE ABOVE IS TRUE OF THE PASS PATH AND WAS WRONG AS AN EXEMPTION.
+/// R311y480's own ledger recorded a scan for pico spawns lacking `stdbuf` and
+/// cleared this file as a "deliberate exit-flush design". That reasoning holds
+/// only while the test SUCCEEDS. When it fails, the self-terminating invocation
+/// has by definition NOT reached its exit count, so libc never flushes and the
+/// capture handed to the panic message is **0 bytes** — measured, and measured
+/// again after a kill, which loses the buffer outright. Every failure mode in a
+/// leg therefore produced a byte-identical empty capture, and one Layer E run did
+/// fail here with a panic message asserting a mode the capture could not
+/// distinguish from any other.
+///
+/// So every C-program spawn in this file is now wrapped in `stdbuf -oL -eL`
+/// (measured: 148 bytes mid-run against 0 without). The exit-driven reads above
+/// are UNCHANGED and still correct — line buffering only adds the partial
+/// evidence a failing run needs, and costs a passing run nothing. The rule this
+/// encodes: a harness that reads a foreign process's stdout must line-buffer it,
+/// because "it flushes on exit" is a statement about the path where you do not
+/// need the output.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Compile an upstream example against wz's cdylib, failing the test with the
@@ -154,7 +173,9 @@ fn pico_zsub_source_on_wz_capi_receives_from_real_pico_zput() {
     // buffer onto the capture file (see EXCHANGE_TIMEOUT).
     let mut sub = ChildGuard::wrap(
         "z_sub.c on wz-capi-pico",
-        Command::new(&dropin)
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
             .args([
                 "-l",
                 &endpoint,
@@ -246,7 +267,9 @@ fn pico_zqueryable_source_on_wz_capi_answers_real_pico_zget() {
     let writer = qable_out.try_clone().expect("dup queryable stdout handle");
     let mut qable = ChildGuard::wrap(
         "z_queryable.c on wz-capi-pico",
-        Command::new(&dropin)
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
             // `-n 1`: serve exactly one query and exit. Needed for the handler
             // assertion below — upstream increments its counter AFTER
             // `z_query_reply`, so the reply is on the wire before the process
@@ -283,7 +306,9 @@ fn pico_zqueryable_source_on_wz_capi_answers_real_pico_zget() {
     // exits — which is what flushes its capture.
     let mut get_out = tempfile::tempfile().expect("z_get stdout capture");
     let get_writer = get_out.try_clone().expect("dup z_get stdout handle");
-    let get = Command::new(&z_get)
+    let get = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&z_get)
         .args(["-e", &endpoint, "-m", "client", "-k", selector])
         .stdout(Stdio::from(get_writer))
         .stderr(Stdio::null())
@@ -366,7 +391,9 @@ fn pico_zput_source_on_wz_capi_declares_and_reaches_real_pico_zsub() {
     let writer = sub_out.try_clone().expect("dup z_sub stdout handle");
     let mut sub = ChildGuard::wrap(
         "real zenoh-pico z_sub",
-        Command::new(&z_sub)
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub)
             .args([
                 "-l",
                 &endpoint,
@@ -477,7 +504,9 @@ fn pico_zping_source_on_wz_capi_round_trips_through_real_pico_zpong() {
     let writer = ping_out.try_clone().expect("dup z_ping stdout handle");
     let mut ping = ChildGuard::wrap(
         "z_ping.c on wz-capi-pico",
-        Command::new(&dropin)
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
             .args([
                 "-e",
                 &endpoint,
@@ -557,12 +586,33 @@ fn pico_zliveliness_source_on_wz_capi_is_seen_alive_then_dropped_by_real_pico() 
     let endpoint = format!("tcp/127.0.0.1:{port}");
     let key = "dropin/leg5/token";
 
-    // `-n 2` — exit after ALIVE + DROPPED, which is what flushes both lines.
+    // `-n 2` — exit after ALIVE + DROPPED.
+    //
+    // R311y482 — line-buffered via `stdbuf`, which this spawn used to omit. The
+    // omission was not cosmetic: it made this test's FAILURE undiagnosable, and
+    // that is measured, not argued. With stdout redirected to a file and no
+    // `stdbuf`, pico's libc buffers block-wise and two short lines never fill 4 KB,
+    // so the capture stays at **0 bytes** until the process EXITS — and it exits
+    // only on the SECOND event. A run that saw the ALIVE and not the drop therefore
+    // produced a capture byte-identical to a run that saw nothing at all, and
+    // killing the child loses the buffer outright (measured: 0 bytes before the
+    // kill, 0 bytes after). One Layer E run did fail here, its panic named exactly
+    // the mode the capture could not distinguish, and the round that hit it could
+    // not tell the two apart. With `-oL` the ALIVE line lands the moment it is
+    // printed (measured: 148 bytes mid-run against 0 without), so the next failure
+    // separates "the token was never seen alive" from "it was seen and never
+    // retracted".
+    //
+    // The sibling `spawn_subscribed_zsub` / `spawn_answering_zqueryable` helpers
+    // have always spawned pico under `stdbuf -oL -eL` for this reason; this file
+    // spawns pico directly and had drifted from that convention.
     let mut sub_out = tempfile::tempfile().expect("z_sub_liveliness stdout capture");
     let writer = sub_out.try_clone().expect("dup capture handle");
     let mut sub = ChildGuard::wrap(
         "real zenoh-pico z_sub_liveliness",
-        Command::new(&z_sub_liveliness)
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub_liveliness)
             .args([
                 "-l",
                 &endpoint,
@@ -584,7 +634,20 @@ fn pico_zliveliness_source_on_wz_capi_is_seen_alive_then_dropped_by_real_pico() 
     );
     drop(reservation);
 
-    let token = Command::new(&dropin)
+    // R311y482 — the TOKEN HOLDER's own output is CAPTURED, not discarded. It used
+    // to go to `Stdio::null()`, which threw away the only evidence that decides
+    // this leg's failure: upstream's `z_liveliness.c` prints `Undeclaring liveliness
+    // token...` immediately BEFORE `z_drop(z_move(token))`, so its presence
+    // separates "wz never reached the retraction" from "wz retracted and the frame
+    // did not reach the peer". With both sides discarded, a failing run said only
+    // that pico had not printed `Dropped token` — which is the observation, not a
+    // diagnosis. `stdbuf` for the same reason as the subscriber: this is a C program
+    // writing to a file.
+    let mut holder_out = tempfile::tempfile().expect("token-holder stdout capture");
+    let holder_writer = holder_out.try_clone().expect("dup token-holder handle");
+    let token = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
         .args([
             "-e",
             &endpoint,
@@ -595,7 +658,7 @@ fn pico_zliveliness_source_on_wz_capi_is_seen_alive_then_dropped_by_real_pico() 
             "-t",
             TOKEN_HOLD_SECS,
         ])
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(holder_writer))
         .stderr(Stdio::null())
         .status()
         .expect("run the compiled z_liveliness drop-in");
@@ -603,11 +666,31 @@ fn pico_zliveliness_source_on_wz_capi_is_seen_alive_then_dropped_by_real_pico() 
 
     let foreign = wait_for_substring(&mut sub_out, "Dropped token", EXCHANGE_TIMEOUT)
         .unwrap_or_else(|captured| {
+            // R311y482 — the message states what the capture can SHOW and names both
+            // modes, instead of asserting one of them. Its previous wording said a
+            // failure here "produces the ALIVE line and nothing else", which was a
+            // claim about a state the harness could not observe: without `stdbuf`
+            // the capture was empty in BOTH modes (see the spawn site). With line
+            // buffering the ALIVE line is now present or absent on its own, so the
+            // reader is pointed at that distinction rather than told the answer.
+            let saw_alive = captured.contains("New alive token");
+            let holder = read_captured(&mut holder_out);
+            let holder_undeclared = holder.contains("Undeclaring liveliness token");
             panic!(
-                "the REAL zenoh-pico subscriber never saw the token go away. A drop \
-                 that frees the local value without retracting produces the ALIVE \
-                 line and nothing else, which is exactly what this asserts against.\n\
-                 --- REAL pico z_sub_liveliness stdout ---\n{captured}"
+                "the REAL zenoh-pico subscriber never printed 'Dropped token'.\n\
+                 subscriber saw the ALIVE line: {saw_alive}\n\
+                 token holder reached its undeclare: {holder_undeclared}\n\
+                 Read those two together -- they name the leg, which a single \
+                 missing line cannot:\n\
+                 * alive=true, undeclare=true  -> wz RETRACTED and the UndeclToken \
+                 did not reach the foreign peer. That is the defect this leg exists \
+                 to catch (a drop that frees the local value without emitting).\n\
+                 * alive=true, undeclare=false -> the holder never got as far as the \
+                 drop, so the retraction path is NOT implicated; look at its hold/exit.\n\
+                 * alive=false                 -> the token was never seen alive at \
+                 all, so the failure is upstream of the drop (session open / declare).\n\
+                 --- REAL pico z_sub_liveliness stdout ---\n{captured}\n\
+                 --- z_liveliness.c-on-wz (token holder) stdout ---\n{holder}"
             )
         });
     assert!(
@@ -646,7 +729,9 @@ fn pico_zsubliveliness_source_on_wz_capi_sees_real_pico_token_come_and_go() {
     let writer = sub_out.try_clone().expect("dup capture handle");
     let mut sub = ChildGuard::wrap(
         "z_sub_liveliness.c on wz-capi-pico",
-        Command::new(&dropin)
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
             .args([
                 "-l",
                 &endpoint,
