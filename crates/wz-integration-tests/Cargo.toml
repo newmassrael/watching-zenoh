@@ -245,6 +245,19 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # `storage-mgr-multi-storage-host` (lib.rs:1128), opt-in. Same additive-
     # unification note as the storage-* pins above.
     "storage-mgr-multi-storage-host",
+    # R311y475 (pico cross-impl leg) — the storage HISTORY serve interop e2e
+    # (tests/wz_storage_history_serves_pico_zget.rs) seeds THREE timestamped
+    # versions of ONE key into a `History::All` backend and a foreign zenoh-pico
+    # `z_get` must receive ALL THREE; its twin leg seeds the identical three into
+    # the `History::Latest` `MemoryStorage` and the SAME pico binary must receive
+    # exactly ONE. `HistoryStorage` lives in the `storage_history` module, gated
+    # `storage-history` (wz-session-core lib.rs:999) and OPT-IN — never in any
+    # default set — so without this pin the module is absent and the proof does
+    # not compile. The wz-runtime-tokio feature forwards
+    # `wz-session-core/storage-history`, so this one pin reaches both crates. Same
+    # additive-unification note as the storage-* pins above; it adds no
+    # third-party dep (a `BTreeMap<key, Vec<StoredData>>`).
+    "storage-history",
     # R311y370 (pico cross-impl leg) — the storage complete-flag wz->pico
     # witness (tests/wz_storage_complete_flag_pico_codec.rs) drives an
     # IN-PROCESS wz StorageService with StorageConfig.complete = true / false
