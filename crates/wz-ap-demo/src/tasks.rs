@@ -32,7 +32,7 @@ use wz::runtime_tokio::sample::SampleKind;
 use wz::runtime_tokio::session::{
     LivelinessGetOptions, PublishAliasError, PublishOptions, TokioSession,
 };
-use wz::runtime_tokio::session_glue::SessionLinkActions;
+use wz::runtime_tokio::session_glue::{QueryMetadata, SessionLinkActions};
 use wz::runtime_tokio::Reliability;
 
 use crate::args::{LivelinessGetSpec, PublisherSpec, PushOperation};
@@ -98,10 +98,27 @@ pub(crate) const QUERY_RID: u64 = 1;
 /// [`TimeSource::sleep`], continuing the R253 leaf-first cadence.
 /// R255 — deadline math also migrated to u64 ms (option (b) from
 /// R254 carry); `std::time::Instant` is no longer referenced here.
-pub(crate) async fn query_task<T>(actions: Arc<SessionLinkActions>, keyexpr: String, clock: T)
-where
+///
+/// R311y481 — the emit moved from `send_request_query` to
+/// `send_request_query_with_meta` so `--query-params` / `--query-attachment` can
+/// ride the Query body. The no-flag path is byte-UNCHANGED: an empty
+/// `QueryMetadata` is pinned to produce the identical frame
+/// (`send_request_query_with_meta_empty_emits_same_bytes_as_no_meta`,
+/// session_glue.rs), so every pre-existing Layer E fixture that greps this
+/// task's wire output keeps passing without a fixture edit.
+pub(crate) async fn query_task<T>(
+    actions: Arc<SessionLinkActions>,
+    spec: crate::args::QueryEmitSpec,
+    clock: T,
+) where
     T: TimeSource + Send + 'static,
 {
+    let crate::args::QueryEmitSpec {
+        keyexpr,
+        parameters,
+        attachment,
+        after_ms,
+    } = spec;
     let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
     loop {
         if actions.is_established() {
@@ -117,14 +134,65 @@ where
         }
         clock.sleep(QUERY_HANDSHAKE_POLL_INTERVAL_MS).await;
     }
+    // R311y481 — the ordering hold, logged as a BRACKET for the reason
+    // `liveliness_get_task`'s twin states: a fixture that waits on a foreign
+    // queryable's decode must be able to prove the wait happened, or a green run
+    // could equally mean the Query fired at t=0 and got lucky. That is not
+    // hypothetical here -- a hand run with no hold passed exactly that way.
+    if let Some(ms) = after_ms {
+        log::info!(
+            "wz-ap-demo: query_task holding the Query {ms}ms after Established \
+             (--query-after-ms), leaving the peer time to declare its queryable"
+        );
+        clock.sleep(ms).await;
+        log::info!("wz-ap-demo: query_task hold elapsed after {ms}ms");
+    }
     log::info!(
         "wz-ap-demo: query_task observed Established; emitting Query \
          on keyexpr='{keyexpr}' rid={QUERY_RID}"
     );
+    // R311y481 — the attachment is encoded HERE rather than at argv parse time so
+    // the kv-pair wire form has a single producer: `serialize_kv_attachment` is
+    // the same SSOT the push-side `z_sub_attachment` witness uses, and pico's
+    // deserializer reads the leading sequence count, so a second encoder would be
+    // a second place for that count to drift.
+    #[cfg(feature = "query-attachment")]
+    let attachment_blob = attachment.as_ref().map(|pairs| {
+        let borrowed: Vec<(&[u8], &[u8])> = pairs
+            .iter()
+            .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
+            .collect();
+        wz::runtime_tokio::attachment::serialize_kv_attachment(&borrowed)
+    });
+    // The OFF arm is LOUD rather than silent, for the reason the `advanced`-OFF
+    // arms in runner.rs state: a fixture that greps pico's `with attachment:`
+    // line must be able to tell "built without the attachment plane" from "wz
+    // attached and the foreign decode failed". A silent `None` here would read as
+    // the second when it was the first.
+    #[cfg(not(feature = "query-attachment"))]
+    let attachment_blob: Option<Vec<u8>> = {
+        if let Some(pairs) = attachment.as_ref() {
+            log::warn!(
+                "wz-ap-demo: --query-attachment={pairs:?} is INERT (built without the \
+                 `query-attachment` feature); the Query carries no attachment ext"
+            );
+        }
+        None
+    };
+    let meta = QueryMetadata {
+        parameters: parameters.as_ref().map(|p| p.as_bytes().to_vec()),
+        attachment: attachment_blob,
+        ..Default::default()
+    };
     actions
-        .send_request_query(QUERY_RID, /*mapping_id=*/ 0, Some(&keyexpr))
+        .send_request_query_with_meta(QUERY_RID, /*mapping_id=*/ 0, Some(&keyexpr), &meta)
         .expect("demo query keyexpr is a fixed short literal, within codec bounds");
-    log::info!("wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID}");
+    log::info!(
+        "wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID} params={:?} \
+         attachment_pairs={}",
+        parameters,
+        attachment.as_ref().map_or(0, |p| p.len()),
+    );
 }
 
 /// R311y445 — `--group-join`: join a zenoh-ext GROUP as a member and hold the

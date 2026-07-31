@@ -168,6 +168,7 @@ preset-ap-full = [
     "vsock",
     "transport-link-unixpipe",
     "locator-iface",
+    "query-attachment",
     "scouting-active",
     "transport-lowlatency",
     "session-extcompression",
@@ -280,6 +281,20 @@ namespace = ["wz/routing-namespace"]
 # containment no matter how good the test was. run-ci Layer Z's wz-ap-demo build
 # carries it for exactly that reason.
 locator-iface = ["wz/locator-iface"]
+# R311y481 — `--query-attachment`'s demo-side cfg key, for the containment reason
+# the `locator-iface` block above states: `query-attachment` is a preset-ap-full
+# MEMBER and absent from preset-ap-client, so the default demo build has no
+# attachment plane at all and a `// wz-proves: query-attachment` claim needs the
+# binary under test to carry it.
+#
+# The only demo key this round needs. `--query-params` and `--reply-err` reach
+# their atoms through SIGNATURE-STABLE surfaces (`QueryMetadata.parameters` is an
+# ungated pub field; `ReplyOut::reply_err` is ungated on the trait), so their
+# argv paths compile in every feature set and their inertness is decided
+# downstream at the atoms' own cfg sites. `--query-attachment` cannot: it needs
+# the `attachment` MODULE, which does not exist when the gate is off, so this key
+# is what lets the OFF build say so out loud instead of failing to compile.
+query-attachment = ["wz/query-attachment"]
 # R311y428 — opt-in ACTIVE multicast scouting (`--scout`), forwarding the wz
 # facade's `scouting-active` (which pulls the wz-runtime-tokio scouting FSM +
 # glue, and with them transport-link-udp + codec-scout + codec-hello). The

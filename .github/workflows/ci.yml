@@ -952,10 +952,18 @@ jobs:
         # witness; SKIPs if the pico CLI is absent, like E8.
         run: bash scripts/run-ci.sh --layer E8t
 
-      - name: Layer E9 — the preset-ap-full COMPOSITION vs real zenoh-pico
+      - name: Layer E9 — the preset-ap-full COMPOSITION + QUERY PLANE vs real zenoh-pico
         # R311y480. Wired here in the SAME commit that adds the lane, for the reason
         # E6e/E7/E8t above record: a proof that runs only in the local sweep moves
         # A4's all-lanes count but NOT the executed count that gates merges.
+        #
+        # R311y481 grew the lane from 2 legs to 5, on the SAME preset build: the query
+        # plane (`query-selector-parameters` / `query-attachment` / `query-reply-err`).
+        # All three atoms are `preset-ap-full`-ONLY and each had a `codec-parity` claim
+        # and nothing else, so none had ever faced a live foreign process — the bytes
+        # were pinned against pico's own encoder in-process while nothing checked that
+        # they reached a socket. No new step is needed here: the legs ride this same
+        # `--layer E9` invocation, which is why the lane NAME is what changed.
         #
         # This lane is the first execution of `preset-ap-full` ever. Layer C4 only
         # `cargo build`s the wz LIBRARY under it, and `wz-ap-demo` had no

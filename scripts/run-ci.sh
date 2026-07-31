@@ -5337,6 +5337,13 @@ layer_e_ap_demo_round_trip() {
     # a real failure for the wrong reason. Layer E9 owns that binary. Same one-substring
     # convention as `wz_peer` / `wz_router` above; `--skip` matches the TEST FN name,
     # and both fns are named `apfull_preset_*`.
+    # R311y481 — the token now covers a SECOND file, `apfull_query_plane_pico_interop.rs`
+    # (fns `apfull_query_*`), on the same grounds and with the same naming obligation
+    # R311y443 states: every future leg on the preset-ap-full binary must carry the
+    # `apfull` substring or it lands on THIS sweep's ap-client binary, where the two
+    # querier legs die at argv (no `--query-params` / `--query-attachment` key) and the
+    # reply-err leg silently answers nothing. Measured, not assumed: dropping
+    # `--skip apfull` takes this sweep 59 -> 64 and names exactly those five.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull)
@@ -8269,7 +8276,9 @@ layer_e9_apfull_preset_pico() {
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full --quiet) || return 1
     if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub \
-        || ! -x target/zenoh-pico-cli/z_pub ]]; then
+        || ! -x target/zenoh-pico-cli/z_pub || ! -x target/zenoh-pico-cli/z_get \
+        || ! -x target/zenoh-pico-cli/z_queryable \
+        || ! -x target/zenoh-pico-cli/z_queryable_attachment ]]; then
         _pico_cli_unavailable "Layer E9" || return 1
         return 0
     fi
@@ -8280,6 +8289,33 @@ layer_e9_apfull_preset_pico() {
     (cd crates && cargo test -p wz-integration-tests \
         --test apfull_preset_pico_interop -- --ignored --quiet --test-threads=1 \
         --exact apfull_preset_peer_forwards_between_two_real_pico_clients 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    # R311y481 — the QUERY PLANE legs, on the SAME preset build above. Each is the
+    # first live-foreign witness for an atom whose only prior claim was
+    # `codec-parity` (query-selector-parameters / query-attachment /
+    # query-reply-err), so before this they had never faced a real process at all.
+    #
+    # Named `--exact` one per invocation, like the two legs above and for the same
+    # reason: a rename or a silently-dropped test then fails the lane instead of
+    # shrinking it quietly. They must run on the preset-ap-full binary this
+    # function built at the top — all three atoms are absent from
+    # `preset-ap-client`, so an ap-client binary rejects the two querier flags at
+    # spawn and answers NOTHING on the reply-err leg. That is not hypothetical: the
+    # reply-err leg was first authored against a default-features binary that a
+    # later `cargo build -p wz-ap-demo` had written over the same target path, and
+    # the missing Err frame read exactly like a wz defect (see the test file's
+    # module doc). The legs each assert a build-discriminating marker for it.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test apfull_query_plane_pico_interop -- --ignored --quiet --test-threads=1 \
+        --exact apfull_query_selector_parameters_decoded_by_a_real_pico_queryable 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test apfull_query_plane_pico_interop -- --ignored --quiet --test-threads=1 \
+        --exact apfull_query_attachment_decoded_by_a_real_pico_queryable 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test apfull_query_plane_pico_interop -- --ignored --quiet --test-threads=1 \
+        --exact apfull_query_reply_err_decoded_by_a_real_pico_z_get 2>&1 \
         | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
 }
 

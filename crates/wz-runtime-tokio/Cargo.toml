@@ -1151,15 +1151,43 @@ session-matching = ["wz-session-core/session-matching"]
 # pubsub-allow-loop stays AP-only (no session-core dispatch arm gates on
 # it — it governs the wz-runtime-tokio self-publish loopback path).
 # attachment domain primitive forward: gates the wz-session-core
-# `attachment` SSOT module. Selected transitively by pubsub-attachment /
-# query-attachment (via their wz-session-core forwards); declared here as
-# a standalone feature so the wz facade can forward `?/attachment-bytes`
-# and so the primitive can be enabled independently.
+# `attachment` SSOT module. Declared here as a standalone feature so the wz
+# facade can forward `?/attachment-bytes` and so the primitive can be
+# enabled independently.
+#
+# R311y481 CORRECTS this row's own comment, which said the feature is
+# "selected transitively by pubsub-attachment / query-attachment (via their
+# wz-session-core forwards)". It is NOT, and cargo cannot make it so:
+# `pubsub-attachment = ["wz-session-core/pubsub-attachment"]` enables
+# wz-session-core's `attachment-bytes`, never wz-runtime-tokio's own. The
+# comment described the CHILD's gate while naming the PARENT's feature, and
+# the two had drifted apart silently because nothing in wz-runtime-tokio had
+# ever written `#[cfg(feature = "attachment-bytes")]` — measured:
+# `cargo metadata` reports only `access-quota` + itself reaching this key.
+# The `attachment` module forward in lib.rs is the first such cfg site.
+#
+# The asymmetry is REAL and was measured directly: with the forward
+# temporarily UNGATED and ONLY `query-attachment` enabled,
+# `wz_session_core::attachment` resolves — i.e. the child had compiled the
+# module while this crate's own key was OFF, so a gated forward would be
+# elided and a consumer enabling `query-attachment` alone could not reach
+# `wz::runtime_tokio::attachment` at all. The two edges below fix that by
+# restoring the mirror the `wz` facade already keeps (`wz/Cargo.toml`
+# spells both rows `["attachment-bytes", …]`).
+#
+# STATED HONESTLY, because the first draft of this comment overclaimed:
+# these edges are NOT what unblocked R311y481's own `--query-attachment`
+# demo path. `preset-ap-full` carries `access-quota`, which already reaches
+# this key, so that build compiled with or without them — verified by
+# reverting the edges and rebuilding green. They are a feature-graph
+# correctness fix for the NARROW subsets, not a dependency of this round.
+# No atom containment moves either: `wz`'s rows already coupled the keys,
+# so every closure the A3/A4 audits compute is unchanged.
 attachment-bytes = ["wz-session-core/attachment-bytes"]
 pubsub-put = ["wz-session-core/pubsub-put"]
 pubsub-delete = ["wz-session-core/pubsub-delete"]
 pubsub-allow-loop = []
-pubsub-attachment = ["wz-session-core/pubsub-attachment"]
+pubsub-attachment = ["attachment-bytes", "wz-session-core/pubsub-attachment"]
 pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
 pubsub-encoding = ["wz-session-core/pubsub-encoding"]
 pubsub-source-info = ["wz-session-core/pubsub-source-info"]
@@ -1286,7 +1314,7 @@ keyexpr-includes = ["wz-session-core/keyexpr-includes"]
 # build_request_query_with_source_info fn — the _with_meta path carries
 # it). In the default set + foreign-proven wz->pico on the Query carrier
 # (R311y244, wz_query_source_info_to_pico_zqueryable).
-query-attachment = ["wz-session-core/query-attachment"]
+query-attachment = ["attachment-bytes", "wz-session-core/query-attachment"]
 query-selector-parameters = ["wz-session-core/query-selector-parameters"]
 query-source-info = ["wz-session-core/query-source-info"]
 # query-value (11th feature): the outbound Query VALUE ext (id 0x03

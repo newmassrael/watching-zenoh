@@ -204,6 +204,30 @@ pub use wz_session_core::qos;
 // verbatim across the wz-runtime-tokio surface.
 pub use wz_session_core::sample;
 
+/// R311y481 — attachment wire helpers: the `ze_serializer` kv-sequence
+/// SERIALIZER / parser pair (`serialize_kv_attachment` /
+/// `parse_kv_attachment`) plus the ext encode/decode.
+///
+/// Re-exported for the same reason `sample` above is: an AP consumer that
+/// attaches structured metadata needs the kv-sequence SSOT, and the alternative
+/// is every consumer hand-rolling the leading sequence count. That count is
+/// exactly what a foreign decoder reads FIRST
+/// (`ze_deserializer_deserialize_sequence_length`), so a second encoder is a
+/// second place for it to drift — and a drifted count makes a foreign peer print
+/// nothing at all rather than fail loudly.
+///
+/// The first consumer is `wz-ap-demo --query-attachment`, which depends on the
+/// `wz` facade alone and so has no path to `wz_session_core::attachment`.
+///
+/// Gated on this crate's own `attachment-bytes`, which mirrors the module's
+/// session-core gate (`all(alloc, attachment-bytes)`; wz-runtime-tokio always
+/// enables session-core's `alloc`). This is the FIRST `attachment-bytes` cfg
+/// site in this crate, and standing it up is what exposed the missing
+/// `pubsub-attachment` / `query-attachment` → `attachment-bytes` edges the
+/// Cargo.toml row now documents.
+#[cfg(feature = "attachment-bytes")]
+pub use wz_session_core::attachment;
+
 /// R311gb-2b — sample-delivery seam (`SampleView` accessor contract +
 /// `SampleSink` DIP trait + the `alloc` `BoxedSink` closure adapter).
 /// Re-exported so AP consumers name `crate::sink::SampleView` in the

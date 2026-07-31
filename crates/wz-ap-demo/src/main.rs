@@ -100,7 +100,8 @@ mod usage;
 use crate::args::DEMO_ZID;
 use crate::args::{
     parse_pair, AdvancedPublishSpec, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec,
-    PushOperation, QueryRoleSpec, RemoteLogSpec, ReplyConsumerSpec, Role, DEFAULT_SCOUT_BUDGET_MS,
+    PushOperation, QueryEmitSpec, QueryRoleSpec, QueryableReply, QueryableSpec, RemoteLogSpec,
+    ReplyConsumerSpec, Role, DEFAULT_SCOUT_BUDGET_MS,
 };
 use crate::runner::run_demo;
 use crate::usage::{print_usage, ABOUT};
@@ -768,6 +769,34 @@ fn main() -> ExitCode {
     let queryable_opt = parse_pair(rest, "--queryable");
     let reply_opt = parse_pair(rest, "--reply");
     let query_opt = parse_pair(rest, "--query");
+    // R311y481 — `--reply-err <text>` makes the queryable answer an ERR-form
+    // Reply instead of `--reply`'s OK Put-form one. Mutually exclusive with
+    // `--reply` (rejected below): a queryable answers one Query with one arm.
+    let reply_err_opt = parse_pair(rest, "--reply-err");
+    // R311y481 — `--query-params <params>` puts URL-style selector parameters on
+    // the outbound Query body (`Q_P` flag + slice), and `--query-attachment
+    // <k>=<v>[,…]` puts a kv-pair attachment on its ext 0x05. Both feature-uniform
+    // (always parsed); see `QueryEmitSpec` for why the inertness is decided
+    // downstream rather than here.
+    let query_params_opt = parse_pair(rest, "--query-params");
+    let query_attachment_opt = parse_pair(rest, "--query-attachment");
+    // R311y481 — `--query-after-ms <ms>` holds the one-shot Query that long after
+    // Established, so a foreign queryable has time to finish declaring. A
+    // malformed value is a HARD error rather than a silent None, for the reason
+    // `--liveliness-get-after-ms` rejects: an ordering knob that quietly does
+    // nothing leaves the Query firing at t=0, which is the exact race it exists to
+    // remove -- and the proof would then go green only when the timing happened to
+    // work, i.e. flakily.
+    let query_after_ms: Option<u64> = match parse_pair(rest, "--query-after-ms") {
+        Some(s) => match s.trim().parse::<u64>() {
+            Ok(ms) => Some(ms),
+            Err(_) => {
+                eprintln!("wz-ap-demo: --query-after-ms expects milliseconds, got '{s}'");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
     // liveliness-get — optional `--liveliness-get <keyexpr>` issues one
     // CURRENT liveliness snapshot Interest once Established and logs each
     // reply + the terminating final. Reply-consuming "get" surface on the
@@ -1144,15 +1173,29 @@ fn main() -> ExitCode {
         print_usage();
         return ExitCode::from(2);
     }
-    if queryable_opt.is_some() && reply_opt.is_none() {
-        eprintln!("wz-ap-demo: --queryable requires --reply");
+    // R311y481 — `--reply-err` joins `--reply` as a legitimate answer arm, so both
+    // directions of this pair-check widen with it. The mutual EXCLUSION of the two
+    // is checked here too rather than beside the spec construction below: this is
+    // where the demo's argv pair-checks live, and a second validation site is a
+    // second place for the rules to drift.
+    if reply_opt.is_some() && reply_err_opt.is_some() {
+        eprintln!(
+            "wz-ap-demo: --reply and --reply-err are mutually exclusive; a queryable \
+             answers a Query with an OK reply OR an ERR reply, not both",
+        );
         eprintln!();
         print_usage();
         return ExitCode::from(2);
     }
-    if queryable_opt.is_none() && reply_opt.is_some() {
+    if queryable_opt.is_some() && reply_opt.is_none() && reply_err_opt.is_none() {
+        eprintln!("wz-ap-demo: --queryable requires --reply <text> or --reply-err <text>");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if queryable_opt.is_none() && (reply_opt.is_some() || reply_err_opt.is_some()) {
         eprintln!(
-            "wz-ap-demo: --reply is only meaningful with --queryable (rejected to surface mis-wired argv)",
+            "wz-ap-demo: --reply / --reply-err are only meaningful with --queryable (rejected to surface mis-wired argv)",
         );
         eprintln!();
         print_usage();
@@ -1248,11 +1291,66 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let queryable_spec: Option<(String, String)> = match (queryable_opt, reply_opt) {
-        (Some(p), Some(r)) => Some((p, r)),
+    // The three argv pair-checks this match relies on (`--reply` xor `--reply-err`;
+    // each needs `--queryable`; `--queryable` needs one of them) all fired above,
+    // at the demo's pair-check site. So every reachable combination here is
+    // well-formed and the `_` arm is genuinely "no queryable requested".
+    let queryable_spec: Option<QueryableSpec> = match (queryable_opt, reply_opt, reply_err_opt) {
+        (Some(keyexpr), Some(text), None) => Some(QueryableSpec {
+            keyexpr,
+            reply: QueryableReply::Ok(text),
+        }),
+        (Some(keyexpr), None, Some(text)) => Some(QueryableSpec {
+            keyexpr,
+            reply: QueryableReply::Err(text),
+        }),
         _ => None,
     };
-    let query_spec: Option<String> = query_opt;
+    // R311y481 — `--query-params` / `--query-attachment` decorate `--query`, so a
+    // run that passes one without it would emit nothing at all. Reject rather
+    // than ignore, for the reason the `--reply` guard above states.
+    if query_opt.is_none()
+        && (query_params_opt.is_some()
+            || query_attachment_opt.is_some()
+            || query_after_ms.is_some())
+    {
+        eprintln!(
+            "wz-ap-demo: --query-params / --query-attachment / --query-after-ms \
+             decorate an outbound Query; pass --query <keyexpr>"
+        );
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    // `<k>=<v>[,<k>=<v>…]`. A malformed pair is a HARD error: an attachment that
+    // silently drops a pair changes the sequence COUNT a foreign decoder reads,
+    // so it would corrupt the very witness the flag exists to produce.
+    let query_attachment_pairs: Option<Vec<(String, String)>> = match &query_attachment_opt {
+        Some(spec) => {
+            let mut pairs = Vec::new();
+            for item in spec.split(',') {
+                match item.split_once('=') {
+                    Some((k, v)) if !k.is_empty() => pairs.push((k.to_string(), v.to_string())),
+                    _ => {
+                        eprintln!(
+                            "wz-ap-demo: --query-attachment expects \
+                             '<key>=<value>[,<key>=<value>…]' with a non-empty key, \
+                             got {item:?}"
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            Some(pairs)
+        }
+        None => None,
+    };
+    let query_spec: Option<QueryEmitSpec> = query_opt.map(|keyexpr| QueryEmitSpec {
+        keyexpr,
+        parameters: query_params_opt,
+        attachment: query_attachment_pairs,
+        after_ms: query_after_ms,
+    });
 
     // R311y428 — the env_logger init + the `{ABOUT}` banner that stood here
     // moved UP, ahead of the `--scout` locator resolution (see the comment at
@@ -1343,12 +1441,36 @@ fn main() -> ExitCode {
             log::info!("declare-id = {n} (R121g DECLARE-aliased mode)");
         }
     }
-    if let Some((p, r)) = &queryable_spec {
-        log::info!("queryable = {p}");
-        log::info!("reply     = {r}");
+    if let Some(QueryableSpec { keyexpr, reply }) = &queryable_spec {
+        log::info!("queryable = {keyexpr}");
+        match reply {
+            QueryableReply::Ok(text) => log::info!("reply     = {text}"),
+            QueryableReply::Err(text) => {
+                log::info!("reply-err = {text} (ERR-form Reply, not a Put-form one)")
+            }
+        }
     }
-    if let Some(q) = &query_spec {
-        log::info!("query   = {q}");
+    if let Some(QueryEmitSpec {
+        keyexpr,
+        parameters,
+        attachment,
+        after_ms,
+    }) = &query_spec
+    {
+        log::info!("query   = {keyexpr}");
+        if let Some(ms) = after_ms {
+            log::info!("query-after = {ms}ms (one-shot Query held; line idle for this window)");
+        }
+        if let Some(params) = parameters {
+            log::info!("query-params = {params} (Q_P flag + selector slice)");
+        }
+        if let Some(pairs) = attachment {
+            log::info!(
+                "query-attachment = {} pair(s) {:?} (ext 0x05, ze_serializer kv form)",
+                pairs.len(),
+                pairs,
+            );
+        }
     }
     if let Some(d) = &declare_token_opt {
         log::info!("declare-token = {d}");
@@ -1393,7 +1515,7 @@ fn main() -> ExitCode {
         ("--key", key_opt.as_deref()),
         (
             "--queryable",
-            queryable_spec.as_ref().map(|(p, _)| p.as_str()),
+            queryable_spec.as_ref().map(|q| q.keyexpr.as_str()),
         ),
         ("--declare-token", declare_token_opt.as_deref()),
         // R311y442 — `--advanced-subscribe` joined for the same reason as `--key`:

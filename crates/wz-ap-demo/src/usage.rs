@@ -24,8 +24,10 @@ pub(crate) fn print_usage() {
     eprintln!("               [--key <keyexpr>]");
     eprintln!("               [--publish <keyexpr> --value <text>]");
     eprintln!("               [--delete <keyexpr>]");
-    eprintln!("               [--queryable <keyexpr> --reply <text>]");
-    eprintln!("               [--query <keyexpr>]");
+    eprintln!("               [--queryable <keyexpr> --reply <text> | --reply-err <text>]");
+    eprintln!("               [--query <keyexpr> [--query-params <params>]");
+    eprintln!("                                  [--query-attachment <k>=<v>[,<k>=<v>...]]");
+    eprintln!("                                  [--query-after-ms <ms>]]");
     eprintln!("               [--declare-token <keyexpr>]");
     eprintln!("               [--liveliness-subscribe <keyexpr>]");
     eprintln!(
@@ -104,9 +106,22 @@ pub(crate) fn print_usage() {
     eprintln!("    --queryable <keyexpr>    register a queryable for the given pattern;");
     eprintln!("                             each inbound Request(Query) whose keyexpr matches");
     eprintln!("                             fires a callback that emits one Reply via --reply");
-    eprintln!("    --reply <text>           reply payload for the registered queryable");
-    eprintln!("                             (required with --queryable)");
+    eprintln!("    --reply <text>           OK Put-form reply payload for the queryable");
+    eprintln!("                             (--queryable requires this or --reply-err)");
+    eprintln!("    --reply-err <text>       answer with an ERR-form Reply carrying <text>");
+    eprintln!("                             instead of --reply's OK one; the two are");
+    eprintln!("                             mutually exclusive. Needs query-reply-err:");
+    eprintln!("                             an OFF build answers NOTHING, not an OK reply");
     eprintln!("    --query <keyexpr>        send a single Request(Query) on this keyexpr");
+    eprintln!("    --query-params <params>  put URL-style selector parameters on the Query");
+    eprintln!("                             body (Q_P flag + slice) -- what a zenoh");
+    eprintln!("                             selector spells after '?'. Requires --query");
+    eprintln!("    --query-attachment <kv>  attach '<k>=<v>[,<k>=<v>...]' to the Query as a");
+    eprintln!("                             ze_serializer kv sequence (ext 0x05). Requires");
+    eprintln!("                             --query; INERT without query-attachment");
+    eprintln!("    --query-after-ms <ms>    hold the one-shot Query this long after");
+    eprintln!("                             Established, so a foreign queryable has time");
+    eprintln!("                             to declare. Requires --query");
     eprintln!("                             literal once the session reaches Established");
     eprintln!("    --declare-token <keyexpr>");
     eprintln!("                             send a single Declare(DeclToken) on this keyexpr");

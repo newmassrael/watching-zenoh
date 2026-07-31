@@ -46,7 +46,18 @@ INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
 # oracle in this set that exercises a wz-ABI program's publish AND subscribe in
 # ONE round trip, which is what the `z_ping.c`-on-wz leg needs. Its own keyexprs
 # are hard-coded in the example, so no flag threading is required.
-TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong)
+# R311y481 — z_queryable_attachment joins as the ONLY stock oracle that reads
+# an INBOUND Query's attachment. The plain z_queryable ignores it entirely
+# (`z_queryable.c` never calls `z_query_attachment`), and z_get_attachment is the
+# opposite direction (it ATTACHES to an outbound get and reads the REPLY). So a
+# `query-attachment` witness — wz attaches, a foreign process decodes — has no
+# other oracle in this set. Its handler runs
+# `ze_deserializer_deserialize_sequence_length` then a per-element string pair
+# and prints `with attachment:` + `i: <key>, <value>`
+# (`z_queryable_attachment.c:32-37,71-87`), so wz must emit pico's
+# `ze_serializer` kv-pair wire form, not an opaque blob — same constraint the
+# y-era `z_sub_attachment` push witness already lives under.
+TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong z_queryable_attachment)
 
 if [[ ! -e "$VENDOR_DIR/.git" && ! -f "$VENDOR_DIR/CMakeLists.txt" ]]; then
     echo "build-zenoh-pico-cli: vendor/zenoh-pico/ not initialized." >&2

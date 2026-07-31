@@ -589,8 +589,8 @@ pub(crate) struct ReplyConsumerSpec {
 /// run_demo's clippy::too_many_arguments threshold stays satisfied
 /// with the new reply_log_spec.
 pub(crate) struct QueryRoleSpec {
-    pub(crate) queryable: Option<(String, String)>,
-    pub(crate) query: Option<String>,
+    pub(crate) queryable: Option<QueryableSpec>,
+    pub(crate) query: Option<QueryEmitSpec>,
     /// liveliness-get — optional `--liveliness-get <keyexpr>` bundle.
     /// When `Some`, the demo spawns an Established-gated
     /// [`crate::tasks::liveliness_get_task`] that issues one
@@ -601,6 +601,104 @@ pub(crate) struct QueryRoleSpec {
     /// declaration plane (a CURRENT liveliness Interest), not the
     /// Request/Query plane.
     pub(crate) liveliness_get: Option<LivelinessGetSpec>,
+}
+
+/// R311y481 — the `--queryable` bundle. Was a bare `(String, String)` tuple
+/// (pattern, reply_text) threaded through [`QueryRoleSpec`]; `--reply-err` makes
+/// the answer a two-armed CHOICE rather than a second string, so it is named per
+/// the sibling idiom here ([`PublisherSpec`], [`DeclareEmitSpec`],
+/// [`LivelinessGetSpec`]) instead of growing into a triple whose arms would be
+/// distinguishable only by position.
+pub(crate) struct QueryableSpec {
+    /// `--queryable <keyexpr>` — the pattern the routed queryable declares on.
+    pub(crate) keyexpr: String,
+    /// How this queryable answers a matching inbound Query.
+    pub(crate) reply: QueryableReply,
+}
+
+/// R311y481 — the queryable's answer form: an OK Put-form reply (`--reply`) or
+/// an ERR reply (`--reply-err`).
+///
+/// An enum rather than two `Option<String>` fields because the two are mutually
+/// exclusive on the wire — a queryable answers a given Query with one or the
+/// other, never both — and the parser rejects the pair. Making the exclusion
+/// unrepresentable is cheaper than a runtime guard
+/// (`feedback_unrepresentable_over_test`).
+pub(crate) enum QueryableReply {
+    /// `--reply <text>` — a Put-form Reply carrying `text` as the payload. The
+    /// R121j-5c-e2e shape, unchanged.
+    Ok(String),
+    /// `--reply-err <text>` — an ERR-form Reply carrying `text` as the error
+    /// payload, via [`wz_session_core::query_sink::ReplyOut::reply_err`].
+    ///
+    /// `reply_err` is signature-STABLE (ungated on the trait) but its emit is
+    /// gated: `query.rs`'s impl calls `send_err` only under
+    /// `#[cfg(feature = "query-reply-err")]` and drops the call otherwise. So an
+    /// OFF build answers a matching Query with NOTHING — not with a degraded OK
+    /// reply that would read like a working error path. That is what binds a
+    /// foreign witness of this flag to the atom's OWN gated code
+    /// (`feedback_claim_binds_to_atom_code`).
+    Err(String),
+}
+
+/// R311y481 — the `--query` bundle. Was a bare `String` (the keyexpr) threaded
+/// through `run_demo` and `spawn_background_tasks`; `--query-params` and
+/// `--query-attachment` make it a three-field payload, so it is named per the
+/// sibling idiom rather than grown into a tuple of two consecutive `Option`s.
+///
+/// Both new fields are feature-UNIFORM (always parsed), on the same terms as
+/// `--namespace` / `--lowlatency` / `--publish-after-ms`: the argv surface must
+/// parse identically in the OFF build. Their inertness is decided downstream by
+/// `build_request_query_with_meta`, which threads `meta.parameters` only under
+/// `#[cfg(feature = "query-selector-parameters")]` and `meta.attachment` only
+/// under `#[cfg(feature = "query-attachment")]` — the atoms' own gates. A
+/// build without them emits the same Query bytes as a run without the flags,
+/// which is exactly the RED arm a damage test needs.
+pub(crate) struct QueryEmitSpec {
+    /// `--query <keyexpr>` — the literal the outbound Query carries.
+    pub(crate) keyexpr: String,
+    /// `--query-params <params>` — the URL-style selector parameters that ride
+    /// the Query body's `Q_P` flag + params slice (what a zenoh selector spells
+    /// after `?`). `None` elides the flag entirely.
+    ///
+    /// Foreign-observable with no patch: pico's stock queryable handlers print
+    /// the keyexpr and the parameters CONCATENATED —
+    /// `Received Query '<keyexpr><params>'` via `z_query_parameters`
+    /// (`z_queryable.c:38-39`) — so a dropped `Q_P` slice prints the bare
+    /// keyexpr and a witness on the full string separates the two.
+    pub(crate) parameters: Option<String>,
+    /// `--query-attachment <k>=<v>[,<k>=<v>…]` — kv pairs serialized into the
+    /// Query attachment ext (0x05) in pico's `ze_serializer` sequence form.
+    ///
+    /// Pairs rather than an opaque blob because the ORACLE is structured: pico's
+    /// `z_queryable_attachment` runs
+    /// `ze_deserializer_deserialize_sequence_length` and prints one
+    /// `i: <key>, <value>` line per pair, and a bare byte blob fails that
+    /// deserialize and prints NOTHING (`z_queryable_attachment.c:71-87`). The
+    /// same constraint the push-side `z_sub_attachment` witness lives under, so
+    /// the same SSOT encodes it (`serialize_kv_attachment`).
+    pub(crate) attachment: Option<Vec<(String, String)>>,
+    /// `--query-after-ms <ms>` — hold the Query this long AFTER Established.
+    ///
+    /// The `--liveliness-get-after-ms` precedent, and needed for the SAME narrow
+    /// reason that doc states: this Query is ONE-SHOT with no retry, so unlike the
+    /// burst-driven publisher fixtures (whose 5x200ms burst covers the window for
+    /// a remote declaration to land) it gets exactly one chance. A foreign
+    /// queryable that has not finished declaring when the Query arrives never sees
+    /// it, and the demo has nothing to absorb that with.
+    ///
+    /// This was MEASURED, not assumed: a hand run with no hold passed, and passed
+    /// only because pico happened to print `Creating Queryable on` before the
+    /// Query landed. Relying on that is the flake this knob removes — a fixture
+    /// gates on pico's readiness line and sets the hold past it, so the ordering
+    /// is owned rather than raced (`feedback_no_flaky_ever`,
+    /// `feedback_hand_composed_fixture_needs_twin`).
+    ///
+    /// Deliberately NOT cfg-gated on any query atom, for the reason
+    /// `--publish-after-ms` is not gated on `transport-keepalive`: it is a pure
+    /// ordering delay, inert when the atoms are off, and it must stay reachable in
+    /// the OFF build so the RED arm walks the identical path.
+    pub(crate) after_ms: Option<u64>,
 }
 
 /// R311y353 — the `--liveliness-get` bundle. Was a bare `String` (the keyexpr)

@@ -93,8 +93,8 @@ use wz::runtime_tokio::sync::Mutex;
 #[cfg(feature = "scouting-active")]
 use crate::args::DEMO_PROTO_VERSION;
 use crate::args::{
-    demo_session_init_params, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec, QueryRoleSpec,
-    RemoteLogSpec, ReplyConsumerSpec, Role,
+    demo_session_init_params, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec, QueryEmitSpec,
+    QueryRoleSpec, QueryableReply, QueryableSpec, RemoteLogSpec, ReplyConsumerSpec, Role,
 };
 use crate::shutdown::shutdown_signal;
 use crate::tasks::{liveliness_get_task, publisher_task, query_task, QUERY_RID};
@@ -779,7 +779,7 @@ fn install_session_handles(
     session: &TokioSession,
     key: Option<String>,
     declare_spec: &DeclareEmitSpec,
-    queryable_spec: Option<(String, String)>,
+    queryable_spec: Option<QueryableSpec>,
     matching_publisher_keyexpr: Option<&str>,
 ) -> SessionHandles {
     // R311y442 — the four declare-side knobs arrive as the `DeclareEmitSpec`
@@ -888,10 +888,13 @@ fn install_session_handles(
             .expect("liveliness-subscriber feature is ON in wz-ap-demo default build")
     });
 
-    let queryable = queryable_spec.and_then(|(pattern, reply_text)| {
+    let queryable = queryable_spec.and_then(|spec| {
+        let QueryableSpec {
+            keyexpr: pattern,
+            reply: reply_mode,
+        } = spec;
         let pattern_for_callback = pattern.clone();
         let pattern_for_log = pattern.clone();
-        let reply_text_for_callback = reply_text.clone();
         // R311ow — `--queryable` now declares a ROUTED queryable: register the
         // local reply callback AND emit `Declare(DeclQueryable)` so a router
         // (e.g. zenohd) routes matching Query requests to this session. The
@@ -908,13 +911,36 @@ fn install_session_handles(
             pattern,
             QueryableOptions::default(),
             move |query, responder| {
-                responder.reply(reply_text_for_callback.as_bytes());
+                // R311y481 — the answer arm. `reply_err` is signature-stable but
+                // its emit is gated `query-reply-err` (`query.rs`'s ReplyOut impl
+                // calls `send_err` only under the cfg), so an OFF build answers
+                // NOTHING here rather than degrading to the OK arm — which is what
+                // makes a foreign witness of the ERR line bind to the atom's own
+                // code instead of to this dispatch.
+                //
+                // The log line is emitted AFTER the send in both arms and names
+                // which arm ran, so a fixture can tell "wz never fired" from "wz
+                // fired and the Reply did not decode" — the two failures a single
+                // missing witness line otherwise conflates.
+                let arm = match &reply_mode {
+                    QueryableReply::Ok(text) => {
+                        responder.reply(text.as_bytes());
+                        format!("reply='{text}'")
+                    }
+                    QueryableReply::Err(text) => {
+                        responder.reply_err(
+                            /*encoding_id=*/ None,
+                            /*schema=*/ None,
+                            text.as_bytes(),
+                        );
+                        format!("reply-err='{text}'")
+                    }
+                };
                 log::info!(
-                    "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
+                    "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' {arm}",
                     pattern_for_callback,
                     query.rid(),
                     query.keyexpr(),
-                    reply_text_for_callback,
                 );
             },
         );
@@ -1111,7 +1137,7 @@ fn install_session_handles(
 /// matches how the declare side is already passed (one [`DeclareEmitSpec`]).
 struct BackgroundTaskSpecs {
     publisher: Option<PublisherSpec>,
-    query: Option<String>,
+    query: Option<QueryEmitSpec>,
     liveliness_get: Option<LivelinessGetSpec>,
     advanced_publish: Option<crate::args::AdvancedPublishSpec>,
     group_join: Option<crate::args::GroupJoinSpec>,
@@ -1141,9 +1167,9 @@ fn spawn_background_tasks(
         ))
     });
 
-    let query_handle = query_spec.map(|keyexpr| {
+    let query_handle = query_spec.map(|spec| {
         let actions_for_query = actions.clone();
-        TokioRuntime.spawn(query_task(actions_for_query, keyexpr, session_clock))
+        TokioRuntime.spawn(query_task(actions_for_query, spec, session_clock))
     });
 
     let liveliness_get_handle = liveliness_get_spec.map(|spec| {
@@ -1578,7 +1604,7 @@ pub(crate) async fn run_demo(
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     install_observer_callbacks(
         &observer,
-        query_spec.as_deref(),
+        query_spec.as_ref().map(|q| q.keyexpr.as_str()),
         &remote_log_spec,
         &reply_log_spec,
         session_clock,
