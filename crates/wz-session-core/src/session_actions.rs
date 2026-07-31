@@ -387,6 +387,23 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     #[cfg(feature = "transport-stats")]
     pub stats: crate::stats::TransportStats,
     pub params: SessionInitParams,
+    /// The largest message this profile can REASSEMBLE, in bytes — the TX
+    /// twin of the RX reassembly slot `CAP`. A fragment chain longer than
+    /// this is refused at
+    /// [`emit_frame_or_fragments`](SessionLinkActions::emit_frame_or_fragments)
+    /// with [`SendWireError::ExceedsReassemblyCap`] instead of being emitted
+    /// into a receiver that will drop it mid-stage.
+    ///
+    /// `usize::MAX` (the default) means "no cap", so a host that never calls
+    /// [`set_max_reassembly_bytes`](SessionLinkActions::set_max_reassembly_bytes)
+    /// keeps the pre-existing behavior byte for byte. The AP host sets it to
+    /// its reassembly pool's slot size; the MCU hosts set theirs.
+    ///
+    /// Held behind `R::Mutex` rather than an atomic on purpose: ARMv6-M has
+    /// no `target_has_atomic = "ptr"`, and every other configured-once slot
+    /// on this struct uses the same seam.
+    #[cfg(feature = "transport-fragmentation")]
+    pub max_reassembly_bytes: R::Mutex<usize>,
     pub trace: R::Mutex<ActionTrace>,
     /// Cookie material captured from a peer's InitAck via
     /// `handle_inbound`. When populated this overrides
@@ -1035,6 +1052,53 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     pub link: R::Shared<LinkState<R>>,
 }
 
+/// The per-frame context [`SessionLinkActions::emit_frame_or_fragments`]
+/// needs to decide between one frame and a fragment chain, and to route
+/// whichever it emits.
+///
+/// Grouped rather than passed as six positional arguments: they are ONE
+/// decision's inputs, they are resolved together at the top of
+/// `dispatch_network_message` (before the `tx_mutex` hold), and they travel
+/// together to both call sites. All `Copy`, so the grouping is free.
+///
+/// Carries the SAME feature gate as
+/// [`SessionLinkActions::emit_frame_or_fragments`], its only consumer: a
+/// build with none of these codecs (the lwIP MCU profiles reach it) emits
+/// no network message at all, and an ungated struct is dead code the
+/// workspace's `-D warnings` rejects.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-final",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+#[derive(Clone, Copy)]
+struct FrameEmit {
+    /// The frame's own `ext_qos` — `Some(p)` iff the effective priority is
+    /// non-DEFAULT, which is also how the emit reconstructs the SN conduit.
+    ext_qos: Option<Priority>,
+    /// The already-minted Frame SN. A fragment chain reuses it as the FIRST
+    /// fragment's SN (R311y206) rather than re-minting a block.
+    sn: u64,
+    /// Reliable vs best-effort — selects the conduit and the frame's R flag.
+    reliable: bool,
+    /// The outbound budget one frame may occupy; over it, the message
+    /// fragments (or is emitted as-is when fragmentation is compiled out).
+    mtu: usize,
+    /// The negotiated SN ring the chain's follow-on SNs walk.
+    sn_mask: u64,
+    /// This profile's reassembly cap — a chain longer than this is refused,
+    /// because no same-profile peer could rejoin it. `usize::MAX` = no cap.
+    max_reassembly_bytes: usize,
+}
+
 impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
     type Target = SessionCore<R, T>;
     #[inline]
@@ -1224,6 +1288,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "transport-stats")]
                 stats: crate::stats::TransportStats::default(),
                 params,
+                // "No cap" until a host declares one — a profile that never
+                // configures its reassembly bound keeps the prior behavior.
+                #[cfg(feature = "transport-fragmentation")]
+                max_reassembly_bytes: R::new_mutex(usize::MAX),
                 trace: R::new_mutex(ActionTrace::default()),
                 inbound_cookie: R::new_mutex(None::<Vec<u8>>),
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
@@ -1628,6 +1696,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Some(p) => own.min(p.batch_size as usize).min(link),
             None => own.min(link),
         }
+    }
+
+    /// Declare the largest message this profile can reassemble, in bytes —
+    /// see [`SessionCore::max_reassembly_bytes`]. The host passes its own
+    /// reassembly pool's slot size (the AP tokio host: the
+    /// `reassembly_pool_ap` `SLOT_SIZE`); nothing negotiates it, because it
+    /// describes THIS side's staging budget, not the peer's.
+    ///
+    /// Configured once, before data flows. Sends above the cap are refused
+    /// with [`SendWireError::ExceedsReassemblyCap`] rather than emitted into
+    /// a chain the receiver drops mid-stage.
+    #[cfg(feature = "transport-fragmentation")]
+    pub fn set_max_reassembly_bytes(&self, bytes: usize) {
+        R::with_mutex_mut(&self.max_reassembly_bytes, |slot| *slot = bytes);
+    }
+
+    /// The configured reassembly cap, or `usize::MAX` when the host declared
+    /// none. Resolved BEFORE the `tx_mutex` hold by
+    /// [`Self::dispatch_network_message`], for the same disjoint-mutex
+    /// discipline `negotiated_batch_mtu` / `negotiated_sn_mask` follow.
+    #[cfg(feature = "transport-fragmentation")]
+    pub fn max_reassembly_bytes(&self) -> usize {
+        R::with_mutex_mut(&self.max_reassembly_bytes, |slot| *slot)
     }
 
     /// Replace the ext chain for the given role. Production callers
@@ -2960,6 +3051,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // session mutex scopes stay disjoint by discipline.
         let sn_mask = self.negotiated_sn_mask();
 
+        // This profile's own reassembly budget, resolved HERE for the same
+        // reason as `mtu` and `sn_mask` above: the accessor takes a mutex,
+        // and session mutex scopes stay disjoint by discipline. Without
+        // `transport-fragmentation` nothing fragments, so no cap applies.
+        #[cfg(feature = "transport-fragmentation")]
+        let max_reassembly_bytes = self.max_reassembly_bytes();
+        #[cfg(not(feature = "transport-fragmentation"))]
+        let max_reassembly_bytes = usize::MAX;
+
         // R311jq / R311kf — ONE `tx_mutex` hold covers the WHOLE TX
         // decision: the batching absorb / overflow-reopen / oversize arms
         // AND the immediate frame-per-message path, mint through emit.
@@ -3017,13 +3117,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             // fragmentation is off), still under the lock.
                             let frame = core::mem::take(&mut batch.buf);
                             batch.count = 0;
-                            self.emit_frame_or_fragments(
-                                ext_qos, &frame, sn, reliable, mtu, sn_mask,
+                            // A refusal here leaves the batch EMPTY and
+                            // `count = 0` — the take above already cleared it,
+                            // so the rejected message stages nothing for a
+                            // later flush to emit half of.
+                            return self.emit_frame_or_fragments(
+                                &frame,
+                                FrameEmit {
+                                    ext_qos,
+                                    sn,
+                                    reliable,
+                                    mtu,
+                                    sn_mask,
+                                    max_reassembly_bytes,
+                                },
                             );
                         } else {
                             batch.count = 1;
                         }
-                        return;
+                        return Ok(());
                     }
                     // R311y222 — the open frame is ONE (priority, reliability)
                     // conduit; a message on a DIFFERENT conduit flushes it and
@@ -3070,7 +3182,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     encode_into(&mut batch.buf);
                     if batch.buf.len() <= mtu {
                         batch.count += 1;
-                        return;
+                        return Ok(());
                     }
                     // Overflow: roll the partial encode back, flush the
                     // open frame, loop into the open-fresh-frame arm.
@@ -3102,9 +3214,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 ext_qos,
                 &encode_body,
             );
-            self.emit_frame_or_fragments(ext_qos, &wire, sn, reliable, mtu, sn_mask);
-        });
-        Ok(())
+            self.emit_frame_or_fragments(
+                &wire,
+                FrameEmit {
+                    ext_qos,
+                    sn,
+                    reliable,
+                    mtu,
+                    sn_mask,
+                    max_reassembly_bytes,
+                },
+            )
+        })
     }
 
     /// R311jq — terminal emit for one already-encoded outbound frame:
@@ -3139,15 +3260,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    fn emit_frame_or_fragments(
-        &self,
-        ext_qos: Option<Priority>,
-        frame: &[u8],
-        sn: u64,
-        reliable: bool,
-        mtu: usize,
-        sn_mask: u64,
-    ) {
+    fn emit_frame_or_fragments(&self, frame: &[u8], emit: FrameEmit) -> Result<(), SendWireError> {
+        let FrameEmit {
+            ext_qos,
+            sn,
+            reliable,
+            mtu,
+            sn_mask,
+            max_reassembly_bytes,
+        } = emit;
         let reliability = if reliable {
             Reliability::Reliable
         } else {
@@ -3168,6 +3289,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // `[0x31][priority]` prepends to the reassembled batch and breaks
                 // the peer's parse_frame_payload).
                 let body = crate::frame_encode::frame_wire_body(frame, sn, ext_qos);
+                // `body` is EXACTLY what a receiver stages: the chunks below
+                // carry it and nothing else, and the reassembler rejoins them
+                // into it. So it is the right unit to test against the slot
+                // cap — the framed `frame` would over-count by the header the
+                // fragments strip, and the caller's payload would under-count
+                // by the network-message envelope they keep.
+                //
+                // Refuse before the follow-on SN reserve and before the first
+                // `send_wire`, so NO wire bytes leave and the chain reserves
+                // none of the `count - 1` follow-on SNs.
+                //
+                // One SN is still spent: both callers mint `sn` before they
+                // can know the encoded length (the batching arm frames into
+                // `batch.buf`, the immediate arm into `encode_frame_envelope`),
+                // so a refused send leaves a 1-SN gap in this conduit's ring.
+                // That is the same 1-SN gap the pre-R311y206 fragment path put
+                // on the wire routinely, which the note below records as
+                // tolerated by the peer's half-window SN check — and here it
+                // costs one SN on a path the caller is told failed, instead of
+                // a message the caller was told succeeded. Closing the gap
+                // means minting lazily after the encode, which is a bigger
+                // change to the one-lock mint-through-emit discipline than
+                // this error path earns.
+                if body.len() > max_reassembly_bytes {
+                    return Err(SendWireError::ExceedsReassemblyCap);
+                }
                 // R311y215 — a QoS chain carries an ext_qos on every fragment, so
                 // the count (which the follow-on SN reserve below must match) uses
                 // the same qos budget the `fragment_body` chunker does.
@@ -3197,14 +3344,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // chain pins to one link (y217 one-conduit=one-link).
                     self.send_wire(&frag, reliability, priority);
                 }
-                return;
+                return Ok(());
             }
         }
         #[cfg(not(feature = "transport-fragmentation"))]
-        let _ = (sn, mtu, sn_mask);
+        let _ = (sn, mtu, sn_mask, max_reassembly_bytes);
         // The frame's conduit reconstructed from its own ext_qos (`Some(p)` iff
         // `p != DEFAULT`, else `None -> DEFAULT`) — the same key the SN mint used.
         self.send_wire(frame, reliability, ext_qos.unwrap_or(Priority::DEFAULT));
+        Ok(())
     }
 
     /// R311jq — drain the open batch frame to the link, if any. Private

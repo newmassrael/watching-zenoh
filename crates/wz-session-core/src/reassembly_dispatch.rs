@@ -586,7 +586,7 @@ fn stage<const CAP: usize>(buf: &mut BoundedVec<u8, CAP>, payload: &[u8]) -> Res
 /// otherwise silent). A zero-eviction sweep reports nothing, so the steady
 /// state stays event-free.
 ///
-/// Generic over the pool dims so the AP (32 / 65536) and MCU (4 / 4096)
+/// Generic over the pool dims so the AP (32 / 1 MiB) and MCU (4 / 4096)
 /// profiles share one path. R311mh relocated it here from `crate::drive`: it
 /// is a pure reassembly helper (no unicast actions / runtime generic), so it
 /// belongs next to [`ReassemblyDispatcher`], not in the session-unicast-gated

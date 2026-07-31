@@ -714,6 +714,9 @@ impl From<SendWireError> for LivelinessGetError {
             // session; the existing variant names the same contract.
             SendWireError::TransportUnavailable => LivelinessGetError::NotEstablished,
             SendWireError::UnsupportedVariant => LivelinessGetError::RequiresUnicast,
+            // Both mean "too large to send; no wire bytes emitted" — one
+            // bound is the codec's, the other the reassembly slot's.
+            SendWireError::ExceedsReassemblyCap => LivelinessGetError::ExceedsCapacity,
         }
     }
 }
@@ -819,6 +822,9 @@ impl From<SendWireError> for QueryAliasError {
             SendWireError::FeatureDisabled => QueryAliasError::FeatureDisabled,
             SendWireError::TransportUnavailable => QueryAliasError::TransportUnavailable,
             SendWireError::UnsupportedVariant => QueryAliasError::RequiresUnicast,
+            // Both mean "too large to send; no wire bytes emitted" — one
+            // bound is the codec's, the other the reassembly slot's.
+            SendWireError::ExceedsReassemblyCap => QueryAliasError::ExceedsCapacity,
         }
     }
 }

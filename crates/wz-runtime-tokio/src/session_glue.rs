@@ -316,7 +316,16 @@ pub fn new_session_actions<T: TimeSource>(
     // returns the non-injective `R::ActionsHandle<T>` (this profile's `Arc`),
     // so neither the `Arc<dyn _>` driver arg nor the declared return type can
     // back-infer `R` the way the former `Arc<Self>` return did.
-    SessionLinkActions::<TokioRuntime, T>::new_generic(driver, params, clock)
+    let actions = SessionLinkActions::<TokioRuntime, T>::new_generic(driver, params, clock);
+    // Declare this profile's reassembly budget to the TX side, so an
+    // oversize send is refused where the caller can see it instead of being
+    // fragmented into a chain this host's own dispatcher would drop
+    // mid-stage. The value is the SAME constant `TokioReassembly` stages
+    // against — a TX bound that merely agreed with the RX bound would drift
+    // the first time one of them moved.
+    #[cfg(feature = "transport-fragmentation")]
+    actions.set_max_reassembly_bytes(crate::reassembly::REASSEMBLY_SLOT_SIZE);
+    actions
 }
 
 /// Build a production session engine: an [`Engine`] over the generated

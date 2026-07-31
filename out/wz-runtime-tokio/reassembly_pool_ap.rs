@@ -1,8 +1,8 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 894a6b60fb90b18183ca0a188b298a1ae3c9e51f6597b75c8f380d479a614e8a
+// source-hash: e812b8b9426089658c190b079d72f4505398532fde65fe2c41c3ec6148939d1b
 // template-hash: d43b22670550c67cebe189489d0fdc39f585b0c09803917dea05e0ded254e31e
 // generated-at: 0
-// SCE-MAP: reassembly_pool_ap.scxml:38
+// SCE-MAP: reassembly_pool_ap.scxml:59
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="buffer-pool")
 // Runtime: self-contained on (rust, std) — no SCE-side helper crate.
@@ -37,7 +37,7 @@ use core::marker::PhantomData;
 pub const SLOT_COUNT: usize = 32;
 
 /// Bytes per slot (`<sce:slot-size>`).
-pub const SLOT_SIZE: usize = 65536;
+pub const SLOT_SIZE: usize = 1048576;
 
 /// SRAM region name (`<sce:section>`). Round-tripped here so that
 /// downstream linker integration can read it without re-parsing

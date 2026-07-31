@@ -116,9 +116,27 @@ workspace = true
 # via wz-runtime-tokio's default bundle, but this crate's own note above plans
 # to trim that bundle — so the plane names what it structurally requires
 # instead of relying on a bundle it does not control.
+# `transport-fragmentation` is selected EXPLICITLY for the same reason as
+# `query-timeout` above: it is NOT in wz-runtime-tokio's default bundle, and its
+# absence is SILENT at the C ABI. R311y484 measured, through a recording TCP
+# relay, that without it a `z_put` above the negotiated 65535-byte batch
+# produces ZERO wire bytes while `z_put` still returns `Z_OK` — the message has
+# no fragmentation path, so it is dropped, and a C caller cannot tell a
+# delivered put from a discarded one. `codec-fragment` IS in the default bundle,
+# so the Fragment wire body was always encodable; what was missing is the TX
+# gate that splits an oversize message into a chain (`wz-session-core/
+# transport-fragmentation`) and the RX wiring that rejoins it (`reassembly`,
+# which this feature pulls). Both halves are needed here because wz-capi-pico is
+# BOTH peers in the pico topology — a C program dials with it and another
+# accepts with it — so a TX-only build would fragment into a peer that cannot
+# reassemble. zenoh-pico itself fragments (`Z_FRAG_MAX_SIZE`), so this is
+# pico-faithful, not a superset. Gated by tests/fragmentation_roundtrip.rs,
+# which publishes 200 / 65000 / 131072 / 262144 bytes through the exported
+# symbols and asserts each arrives byte-identical at the subscriber closure.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "routing-accept",
     "query-timeout",
+    "transport-fragmentation",
 ] }
 
 # Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions

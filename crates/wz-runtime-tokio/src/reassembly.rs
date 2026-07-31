@@ -31,10 +31,20 @@ use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatche
 ///
 /// The emit types the slot dims as `usize`, so they bind directly as the
 /// dispatcher const generics (no cast). The AP machine's dims are larger
-/// than the MCU's (32 / 65536 vs 4 / 4096) — the tokio host IS the AP
-/// node, so it correctly uses the AP machine's pool.
+/// than the MCU's (32 / 1 MiB vs 4 / 4096) — the tokio host IS the AP
+/// node, so it correctly uses the AP machine's pool. The AP slot size is
+/// the per-chain reassembly CAP, and it must exceed the link's batch
+/// budget by a real margin or fragmentation is unusable end-to-end: a
+/// chain only forms above the batch, so a cap equal to it leaves no
+/// window (see `sources/network/reassembly_pool_ap.scxml`).
 const REASSEMBLY_SLOTS: usize = crate::reassembly_pool_ap::SLOT_COUNT;
-const REASSEMBLY_SLOT_SIZE: usize = crate::reassembly_pool_ap::SLOT_SIZE;
+/// `pub(crate)` because the TX side reads the SAME constant: the sender
+/// refuses a chain this profile could not rejoin
+/// (`SessionLinkActions::set_max_reassembly_bytes`, wired in
+/// [`crate::session_glue::new_session_actions`]), and that refusal is only
+/// exact while the bound it tests and the bound [`TokioReassembly`] enforces
+/// are one value rather than two that agree today.
+pub(crate) const REASSEMBLY_SLOT_SIZE: usize = crate::reassembly_pool_ap::SLOT_SIZE;
 
 /// The AP tokio host's reassembly Router type. The std `alloc` backing
 /// keeps each chain's staging buffer on the heap; `REASSEMBLY_SLOT_SIZE`

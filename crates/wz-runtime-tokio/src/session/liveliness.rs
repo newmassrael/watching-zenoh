@@ -877,6 +877,9 @@ impl From<SendWireError> for LivelinessSubscriberAliasError {
             // session; the existing variant names the same contract.
             SendWireError::TransportUnavailable => LivelinessSubscriberAliasError::NotEstablished,
             SendWireError::UnsupportedVariant => LivelinessSubscriberAliasError::RequiresUnicast,
+            // Both mean "too large to send; no wire bytes emitted" — one
+            // bound is the codec's, the other the reassembly slot's.
+            SendWireError::ExceedsReassemblyCap => LivelinessSubscriberAliasError::ExceedsCapacity,
         }
     }
 }

@@ -96,6 +96,19 @@ pub enum SendDeclareError {
     /// Variant ordering: appended at end, per the note on
     /// [`Self::FeatureDisabled`].
     MappingIdTooWideForWire(u64),
+    /// Declare-plane projection of
+    /// [`SendWireError::ExceedsReassemblyCap`](crate::send_wire_error::SendWireError::ExceedsReassemblyCap):
+    /// the DECLARE was larger than this profile's own reassembly cap, so its
+    /// fragment chain could not have been rejoined by a peer running this
+    /// profile. A no-emit reject — nothing is cached and nothing reaches the
+    /// wire, so the caller may re-declare with a smaller keyexpr set.
+    ///
+    /// Reachable in practice on the flooding declare/OAM paths, where the
+    /// message grows with the mesh rather than with one caller's argument.
+    ///
+    /// Variant ordering: appended at end, per the note on
+    /// [`Self::FeatureDisabled`].
+    ExceedsReassemblyCap,
 }
 
 impl fmt::Display for SendDeclareError {
@@ -121,6 +134,11 @@ impl fmt::Display for SendDeclareError {
                 "send_declare_keyexpr: mapping_id {id} exceeds u16::MAX \
                  (both zenoh and zenoh-pico type the alias id as u16, so \
                  a wider id cannot be represented at the peer)"
+            ),
+            Self::ExceedsReassemblyCap => f.write_str(
+                "send_declare: DECLARE exceeds this profile's reassembly cap \
+                 — its fragment chain could not be rejoined by a peer running \
+                 this profile, so no bytes were emitted and nothing was cached",
             ),
             Self::Codec(e) => write!(
                 f,
@@ -180,6 +198,7 @@ impl From<crate::send_wire_error::SendWireError> for SendDeclareError {
             W::FeatureDisabled => Self::FeatureDisabled,
             W::TransportUnavailable => Self::TransportUnavailable,
             W::UnsupportedVariant => Self::RequiresUnicast,
+            W::ExceedsReassemblyCap => Self::ExceedsReassemblyCap,
         }
     }
 }

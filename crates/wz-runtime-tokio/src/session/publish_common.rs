@@ -525,6 +525,9 @@ impl From<SendWireError> for PublishError {
             }
             SendWireError::TransportUnavailable => PublishError::TransportUnavailable,
             SendWireError::UnsupportedVariant => PublishError::RequiresUnicast,
+            // Both mean "too large to send; no wire bytes emitted" — one
+            // bound is the codec's, the other the reassembly slot's.
+            SendWireError::ExceedsReassemblyCap => PublishError::ExceedsCapacity,
         }
     }
 }

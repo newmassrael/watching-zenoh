@@ -27,8 +27,29 @@
   `reassembly_pool_mcu.scxml`. SCE's cross-doc deploy validators
   (`slot_size >= max_fragments * mtu`, `peer_table.capacity *
   per_peer_quota >= slot_count`) hold for these values against the AP
-  link mtu 1472 / peer_table 256: 65536 >= 44*1472 = 64768, and
+  link mtu 1472 / peer_table 256: 1048576 >= 44*1472 = 64768, and
   256*8 = 2048 >= 32.
+
+  slot-size was 65536 until it was raised to 1 MiB. The old value was
+  derived from the 1472-byte AP LINK mtu of this deploy (44*1472 =
+  64768, rounded up to 65536) — correct for that link, but it is the
+  per-chain reassembly CAP for EVERY AP link, and a TCP unicast link
+  negotiates a 65535-byte batch. A chain only forms when the frame
+  exceeds the batch, so on TCP the reassembly window was
+  (65535, 65536] — one byte wide. Every fragmented message a TCP peer
+  sent was therefore staged past the cap and dropped, which is what
+  made `transport-fragmentation` unobservable end-to-end on the AP
+  profile (the sender fragmented correctly; the receiver could never
+  absorb the chain). 1 MiB restores a usable window: at the 65535-byte
+  batch it is 16 fragments, well inside `max-fragments-per-message` 44,
+  and it bounds a peer's staging at `per-peer-quota` 8 x 1 MiB.
+
+  Cost is a cap, not an allocation: the AP dispatcher is the `alloc`
+  backing (`TokioReassembly`), which stages each chain on the heap and
+  reads slot-size only as the per-chain limit it enforces. SCE also
+  emits a `ReassemblyPoolAp` struct holding a literal
+  `[[u8; SLOT_SIZE]; SLOT_COUNT]`, but the AP host never instantiates
+  it (see the §5.E note below), so the raise adds no static footprint.
 
   Only the five reassembly constants are consumed by wz; the buffer-pool
   template's §5.E DMA slot-lifecycle API (Slot<S> / pool struct) is part
@@ -40,7 +61,7 @@
        sce:kind="buffer-pool" name="reassembly_pool_ap" version="1.0">
   <sce:variant>reassembly</sce:variant>
   <sce:slot-count>32</sce:slot-count>
-  <sce:slot-size>65536</sce:slot-size>
+  <sce:slot-size>1048576</sce:slot-size>
   <sce:section>heap</sce:section>
   <sce:alignment>64</sce:alignment>
   <sce:cache-policy>none</sce:cache-policy>

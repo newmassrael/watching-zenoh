@@ -3069,7 +3069,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 match e {
                     SendDeclareError::Keyexpr(inner) => QueryableError::InvalidKeyexpr(inner),
                     // W3 — literal keyexpr over MAX_KEYEXPR_BYTES, typed through.
-                    SendDeclareError::Codec(_) => QueryableError::ExceedsCapacity,
+                    // Both mean "too large to send; no wire bytes emitted, and
+                    // nothing cached" — one bound is the codec's, the other the
+                    // reassembly slot's.
+                    SendDeclareError::Codec(_) | SendDeclareError::ExceedsReassemblyCap => {
+                        QueryableError::ExceedsCapacity
+                    }
                     // F2 — reconnect-window reject, typed through.
                     SendDeclareError::TransportUnavailable => QueryableError::TransportUnavailable,
                     // R311g1 — reachable only in a feature combo where
@@ -3269,7 +3274,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 match e {
                     SendDeclareError::Keyexpr(inner) => SubscribeError::InvalidKeyexpr(inner),
                     // W3 — literal keyexpr over MAX_KEYEXPR_BYTES, typed through.
-                    SendDeclareError::Codec(_) => SubscribeError::ExceedsCapacity,
+                    // Both mean "too large to send; no wire bytes emitted, and
+                    // nothing cached" — one bound is the codec's, the other the
+                    // reassembly slot's.
+                    SendDeclareError::Codec(_) | SendDeclareError::ExceedsReassemblyCap => {
+                        SubscribeError::ExceedsCapacity
+                    }
                     // F2 — reconnect-window reject, typed through.
                     SendDeclareError::TransportUnavailable => SubscribeError::TransportUnavailable,
                     // R311g1 — reachable only in a feature combo where
@@ -3407,7 +3417,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // is a reachable caller-data condition (not a
                     // protocol invariant), so it projects to the typed
                     // public reject rather than the unreachable guard.
-                    SendDeclareError::Codec(_) => LivelinessAliasError::ExceedsCapacity,
+                    // The reassembly-cap refusal is named here rather than
+                    // left to the `other` arm below: a DECLARE is bounded by
+                    // MAX_KEYEXPR_BYTES, far under any configured cap, so it
+                    // should not arise — but "should not" is the wrong thing
+                    // to back with a panic when the honest projection costs
+                    // one arm.
+                    SendDeclareError::Codec(_) | SendDeclareError::ExceedsReassemblyCap => {
+                        LivelinessAliasError::ExceedsCapacity
+                    }
                     other => unreachable!(
                         "declare_token literal-mode prepare/seam returned \
                          {other:?} unexpectedly"
@@ -3520,8 +3538,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
                     // W3 — reconstructed keyexpr over MAX_KEYEXPR_BYTES is a
                     // reachable caller-data condition projecting to the
-                    // typed public reject.
-                    SendDeclareError::Codec(_) => LivelinessAliasError::ExceedsCapacity,
+                    // typed public reject. The reassembly-cap refusal joins
+                    // it: both mean "too large to send; no wire bytes
+                    // emitted, and nothing cached".
+                    SendDeclareError::Codec(_) | SendDeclareError::ExceedsReassemblyCap => {
+                        LivelinessAliasError::ExceedsCapacity
+                    }
                     // F2 — reconnect-window reject, typed through.
                     SendDeclareError::TransportUnavailable => {
                         LivelinessAliasError::TransportUnavailable

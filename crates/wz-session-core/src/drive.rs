@@ -694,7 +694,7 @@ use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispa
 /// Refused) report only the `Fragment` outcome. The peer ZID (the §2.3 chain
 /// key) is read from `actions.inbound_peer_zid` through `R::with_mutex_mut`.
 ///
-/// Generic over the pool dims (`SLOTS` / `CAP`) so the AP (32 / 65536) and MCU
+/// Generic over the pool dims (`SLOTS` / `CAP`) so the AP (32 / 1 MiB) and MCU
 /// (4 / 4096) profiles share one ingest path; the AP host passes its
 /// `TokioReassembly`, the MCU loop its `CoopReassembly`.
 #[cfg(feature = "reassembly")]

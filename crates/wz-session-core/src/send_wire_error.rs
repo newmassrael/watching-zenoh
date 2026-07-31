@@ -81,6 +81,34 @@ pub enum SendWireError {
     /// downstream crates surface a non-exhaustive-match warning rather
     /// than silently rebind a prior variant.
     UnsupportedVariant,
+    /// The message is larger than the profile's own reassembly cap, so its
+    /// fragment chain could never be rejoined by a peer running this
+    /// profile — the send is refused instead of emitted.
+    ///
+    /// Why refuse rather than emit and hope: fragmentation splits a message
+    /// the link cannot carry whole, and the receiver stages the chunks until
+    /// the chain completes. That staging is bounded (the reassembly slot
+    /// `CAP`). A chain over the cap is dropped mid-stage, and the sender
+    /// learns nothing — which is precisely the failure R311y484 recorded at
+    /// the C ABI: `z_put` returned success for bytes that went nowhere, so a
+    /// caller could not distinguish a delivered put from a discarded one.
+    ///
+    /// The bound is LOCAL and that is the whole of its claim. A peer's cap
+    /// is not observable, so this does not promise delivery — a smaller-cap
+    /// peer (zenoh-pico's `Z_FRAG_MAX_SIZE` is 4096 by default) may still
+    /// drop a chain this side accepted. What it removes is the case the
+    /// sender could have known about and reported: a message its OWN profile
+    /// could not have reassembled. No wire bytes are emitted.
+    ///
+    /// Inert unless the host sets a cap
+    /// ([`SessionLinkActions::set_max_reassembly_bytes`](crate::session_actions::SessionLinkActions::set_max_reassembly_bytes));
+    /// the default is "no cap", so a profile that never configures one
+    /// behaves exactly as before.
+    ///
+    /// Variant ordering: appended at end so existing match arms in
+    /// downstream crates surface a non-exhaustive-match warning rather
+    /// than silently rebind a prior variant.
+    ExceedsReassemblyCap,
 }
 
 impl fmt::Display for SendWireError {
@@ -100,6 +128,12 @@ impl fmt::Display for SendWireError {
                 "send_wire: transport not available (link released or \
                  reconnecting; Established not re-entered) — no bytes \
                  emitted; retry after the session re-establishes",
+            ),
+            Self::ExceedsReassemblyCap => f.write_str(
+                "send_wire: message exceeds this profile's reassembly cap — \
+                 its fragment chain could not be rejoined by a peer running \
+                 this profile, so no bytes were emitted (refused locally \
+                 rather than dropped silently mid-stage)",
             ),
             Self::UnsupportedVariant => f.write_str(
                 "send_wire: non-Push NetworkMessage reached the multicast \
