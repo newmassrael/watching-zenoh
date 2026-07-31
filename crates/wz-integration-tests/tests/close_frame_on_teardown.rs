@@ -73,6 +73,12 @@ const LEG_TIMEOUT: Duration = Duration::from_secs(20);
 /// can reach one, and the pico leg is what places that zero inside or outside
 /// the foreign envelope. Split into three tests, the two that carry no assertion
 /// could stop running and the survivor would still be green.
+// wz-proves: none -- a MEASUREMENT, and its result was a RETRACTION rather than
+// a witness. It establishes that a bare TCP FIN at close is inside real pico's
+// own envelope (pico emitted a Close in 3 of 20 runs), which removes a claimed
+// gap instead of proving an atom. The pico round trip it rides on is already
+// witnessed by ap_demo_round_trip.rs; claiming it again here would double-count
+// the same exchange under a second atom.
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); measurement lane"]
 fn who_sends_a_session_close_at_teardown() {
