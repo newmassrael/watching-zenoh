@@ -779,6 +779,37 @@ pub mod common {
         }
     }
 
+    /// Poll `try_wait()` every 50 ms until the child EXITS or `budget` elapses,
+    /// returning its status or a diagnosis.
+    ///
+    /// `Child::wait` blocks forever, which is the wrong shape for any child that
+    /// can legitimately spin. Upstream's `z_ping.c` is exactly that: its
+    /// `load_loop` busy-waits on an atomic that only advances when the echo
+    /// arrives, with no timeout of its own, so a broken return path does not
+    /// fail it — it pins a core and never returns. A lane that HANGS is worse
+    /// than one that reds, because CI reports nothing at all until the job
+    /// budget expires, so the bound belongs on this side.
+    ///
+    /// The caller keeps the child (this only borrows it), so a timeout can still
+    /// be followed by [`graceful_terminate`] before the assertion fires.
+    pub fn wait_for_exit(
+        child: &mut Child,
+        budget: Duration,
+    ) -> Result<std::process::ExitStatus, String> {
+        let deadline = Instant::now() + budget;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) => {}
+                Err(e) => return Err(format!("try_wait on the spawned child failed: {e}")),
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("still running after {budget:?}"));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Poll the captured tempfile every 50 ms until either `needle`
     /// appears in the contents or `timeout` elapses. Returns the
     /// matching snapshot on success or the final captured snapshot

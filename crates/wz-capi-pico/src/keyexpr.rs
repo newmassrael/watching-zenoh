@@ -82,6 +82,44 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str(
     })
 }
 
+/// Build a view keyexpr WITHOUT validating it (pico
+/// `z_view_keyexpr_from_str_unchecked`).
+///
+/// Returns `void`, not a result — that is pico's signature, and it is the whole
+/// point of the "unchecked" variant: the caller asserts the string is already a
+/// canon keyexpr, so there is no failure to report. wz's checked
+/// [`z_view_keyexpr_from_str`] validates UTF-8 and rejects; this one records the
+/// borrow as given.
+///
+/// wz still refuses to build a view over a NULL pointer or non-UTF-8 bytes, and
+/// leaves the view EMPTY in that case rather than storing a pointer it cannot
+/// later read as `&str`. That is narrower than pico, which would store the
+/// bytes and misbehave later, and it is deliberate: with no error channel, an
+/// empty keyexpr surfaces at the next publish instead of as undefined
+/// behaviour inside the library.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_keyexpr_from_str_unchecked(
+    keyexpr: *mut z_view_keyexpr_t,
+    name: *const c_char,
+) {
+    let _ = guarded(|| {
+        if keyexpr.is_null() {
+            return Z_ERR_NULL;
+        }
+        if name.is_null() || CStr::from_ptr(name).to_str().is_err() {
+            z_view_keyexpr_empty(keyexpr);
+            return Z_ERR_INVALID;
+        }
+        let bytes = CStr::from_ptr(name).to_bytes();
+        *keyexpr = z_view_keyexpr_t {
+            _start: bytes.as_ptr(),
+            _len: bytes.len(),
+            _pad: [0usize; 4],
+        };
+        Z_OK
+    });
+}
+
 /// `true` iff the view keyexpr is empty (pico `z_view_keyexpr_is_empty`).
 #[no_mangle]
 pub unsafe extern "C" fn z_view_keyexpr_is_empty(keyexpr: *const z_view_keyexpr_t) -> bool {

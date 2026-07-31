@@ -40,7 +40,13 @@ INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
 # only a few extra add_dependencies(examples ...) targets in the
 # CMake build; the wz-codec coverage matrix decides which round
 # adopts each new external CLI.
-TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment)
+# R311y478 — z_pong joins as the counterparty for the §5.27 api-compat-pico
+# drop-in witness. It is the ECHO half of upstream's latency pair: it subscribes
+# `test/ping` and republishes each sample to `test/pong`. That makes it the only
+# oracle in this set that exercises a wz-ABI program's publish AND subscribe in
+# ONE round trip, which is what the `z_ping.c`-on-wz leg needs. Its own keyexprs
+# are hard-coded in the example, so no flag threading is required.
+TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong)
 
 if [[ ! -e "$VENDOR_DIR/.git" && ! -f "$VENDOR_DIR/CMakeLists.txt" ]]; then
     echo "build-zenoh-pico-cli: vendor/zenoh-pico/ not initialized." >&2

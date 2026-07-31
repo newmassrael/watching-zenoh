@@ -74,6 +74,7 @@ mod faces;
 mod ffi;
 pub mod get;
 pub mod keyexpr;
+pub mod platform;
 pub mod pubsub;
 pub mod query;
 pub mod result;

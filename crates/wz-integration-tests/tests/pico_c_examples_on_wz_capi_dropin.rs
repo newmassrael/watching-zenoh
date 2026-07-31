@@ -14,7 +14,7 @@
 //! there is no cc dependency and no C lane"*. A C ABI whose only consumer is
 //! Rust is not an ABI, it is a naming convention.
 //!
-//! Both legs below therefore hand the checking to artifacts wz does not own:
+//! Every leg below therefore hands the checking to artifacts wz does not own:
 //!
 //!   * the PROGRAM is `vendor/zenoh-pico/examples/unix/c11/<name>.c`, unmodified;
 //!   * the HEADERS are zenoh-pico's own — its types, its struct SIZES, and the
@@ -48,9 +48,13 @@
 //! them from a real body. That is why this file names its examples explicitly
 //! instead of sweeping a glob: a glob would have counted six vacuous passes.
 //!
-//! At this round the real-body linkers are `z_sub`, `z_queryable` and `z_put`
-//! — the three legs below — with 21 examples still short of exports and 2 more
-//! that are stubs AND short.
+//! Census at this round, measured that way: SEVEN examples link with a real
+//! body — `z_ping`, `z_pong`, `z_put`, `z_queryable`, `z_queryable_lat`,
+//! `z_sub`, `z_sub_thr` — 6 link as stubs, 17 are still short of exports, and 2
+//! are both. Four of the seven are legs below; `z_pong` is used as this file's
+//! own foreign counterparty rather than as a subject, and `z_queryable_lat` /
+//! `z_sub_thr` link but are not yet driven, which is recorded here rather than
+//! rounded up into the leg count.
 //!
 //! ## Leg 3 needs a discriminator the other two do not
 //!
@@ -72,32 +76,35 @@
 //!
 //! ## Scope, stated as a limit rather than implied
 //!
-//! All three claims are `partial`, and deliberately: the atom covers 150 of
-//! pico's 726 declared functions, and three programs are three programs. What
-//! is proven is that the drop-in is REAL for the paths those programs exercise
-//! — inbound samples, queryable replies, and a declared-keyexpr publish —
-//! compiled and linked the way a pico user would.
+//! Every claim is `partial`, and deliberately: the atom covers 172 of pico's
+//! 726 declared functions, and four programs are four programs. What is proven
+//! is that the drop-in is REAL for the paths those programs exercise — inbound
+//! samples, queryable replies, a declared-keyexpr publish, and a full
+//! publish/background-subscribe round trip — compiled and linked the way a pico
+//! user would.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    compile_pico_example_against_wz_capi, graceful_terminate, read_captured, wait_for_substring,
-    wait_for_tcp_accept, zenoh_pico_cli_binary, ChildGuard, PortReservation,
+    compile_pico_example_against_wz_capi, graceful_terminate, read_captured, wait_for_exit,
+    wait_for_substring, wait_for_tcp_accept, zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
 
 /// How long a compiled drop-in gets to bind its listener. Generous relative to
 /// the sub-100 ms observed path: the gate is a TCP connect, so a slow bind
 /// costs only latency here, never a false PASS.
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long the foreign CLI gets to complete its exchange and EXIT.
+/// How long a leg's exchange gets to complete, ending in the observed process
+/// EXITING.
 ///
-/// Exit is load-bearing, not incidental. Both witnesses are read from a C
+/// Exit is load-bearing, not incidental. Every witness here is read from a C
 /// program's `printf` output captured to a file, where libc is block-buffered —
 /// so the bytes are only guaranteed on the file after the process flushes at
-/// exit. Every leg below is therefore driven by a self-terminating invocation
-/// (`-n 1` for the subscriber, a one-shot `z_get`) and asserts on the capture
-/// AFTER the wait, rather than polling a partially-flushed buffer.
+/// exit. Each leg is therefore driven by a self-terminating invocation (`-n 1`
+/// for a subscriber, a one-shot `z_get`, `-n 5` for the ping loop) and asserts
+/// on the capture AFTER the wait, rather than polling a partially-flushed
+/// buffer.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Compile an upstream example against wz's cdylib, failing the test with the
@@ -417,4 +424,104 @@ fn pico_zput_source_on_wz_capi_declares_and_reaches_real_pico_zsub() {
     );
 
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 4 (round trip) — upstream's `z_ping.c`, running on wz, measures real
+/// round-trip latencies against the REAL zenoh-pico `z_pong` binary.
+///
+/// This is the widest leg in the file, and it is the one that could not have
+/// been faked. Every printed line requires a COMPLETE circuit: wz publishes the
+/// ping, a foreign process receives it and republishes to `test/pong`, wz's
+/// background subscriber delivers the echo, and upstream's own callback bumps
+/// the atomic its `load_loop` is spinning on. Publish, subscribe and the
+/// platform clock all have to be right at once, and the loop has no timeout of
+/// its own — it simply never returns if any of them is wrong.
+///
+/// That is also why the child is waited on with a BUDGET rather than
+/// `Command::status()`: a broken echo path pins a core forever, and a hung lane
+/// tells CI less than a red one.
+// wz-proves: api-compat-pico wz->pico partial
+// wz-proves: api-compat-pico pico->wz partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_pong CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zping_source_on_wz_capi_round_trips_through_real_pico_zpong() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_ping", dir.path());
+    let z_pong = zenoh_pico_cli_binary("z_pong");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    const PINGS: usize = 5;
+
+    // The FOREIGN echo listens; the drop-in dials in. `z_pong` runs until
+    // killed, so its own output is not the witness — the drop-in's is.
+    let mut pong = ChildGuard::wrap(
+        "real zenoh-pico z_pong",
+        Command::new(&z_pong)
+            .args(["-l", &endpoint, "-m", "peer"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_pong"),
+    );
+    assert!(
+        wait_for_tcp_accept(port, LISTEN_TIMEOUT),
+        "the real zenoh-pico z_pong never accepted on {endpoint}"
+    );
+    drop(reservation);
+
+    let mut ping_out = tempfile::tempfile().expect("z_ping stdout capture");
+    let writer = ping_out.try_clone().expect("dup z_ping stdout handle");
+    let mut ping = ChildGuard::wrap(
+        "z_ping.c on wz-capi-pico",
+        Command::new(&dropin)
+            .args([
+                "-e",
+                &endpoint,
+                "-m",
+                "client",
+                "-n",
+                &PINGS.to_string(),
+                "-s",
+                "64",
+                "-w",
+                "500",
+            ])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the compiled z_ping drop-in"),
+    );
+
+    let status = wait_for_exit(ping.child_mut(), EXCHANGE_TIMEOUT).unwrap_or_else(|why| {
+        graceful_terminate(ping.child_mut(), Duration::from_secs(5));
+        panic!(
+            "upstream z_ping.c on wz's C-ABI never finished its {PINGS} round trips \
+             against the REAL zenoh-pico z_pong ({why}). Its load_loop spins on an \
+             atomic the echo callback bumps, so this is what a broken publish OR a \
+             broken background subscriber looks like."
+        )
+    });
+    assert!(status.success(), "z_ping.c on wz exited {status:?}");
+
+    // Upstream prints one bare integer per completed round trip, and nothing
+    // else on the success path. Counting parsed integers is therefore an exact
+    // count of circuits closed — a partial echo path yields fewer lines rather
+    // than wrong ones.
+    let captured = read_captured(&mut ping_out);
+    let samples: Vec<u64> = captured
+        .lines()
+        .filter_map(|l| l.trim().parse::<u64>().ok())
+        .collect();
+    assert_eq!(
+        samples.len(),
+        PINGS,
+        "expected {PINGS} round-trip measurements from upstream z_ping.c on wz, got \
+         {}.\n--- z_ping.c (on wz) stdout ---\n{captured}",
+        samples.len()
+    );
+
+    graceful_terminate(pong.child_mut(), Duration::from_secs(5));
 }

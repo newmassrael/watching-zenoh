@@ -686,6 +686,54 @@ pub unsafe extern "C" fn z_declare_subscriber(
     })
 }
 
+/// Declare a subscriber with NO owned handle (pico
+/// `z_declare_background_subscriber`). Consumes the moved closure.
+///
+/// The subscription lives for the session's lifetime and the caller gets
+/// nothing back to undeclare it with — pico's "background" declaration, used by
+/// programs that subscribe once and then loop forever. Upstream's `z_ping.c`,
+/// `z_pong.c` and `z_sub_thr.c` all take this form, which is why one export
+/// unlocks three examples.
+///
+/// Everything except the handle is [`z_declare_subscriber`]: same SSOT
+/// registration, same declare-before-peer replay, same up-front keyexpr gate,
+/// same consume-on-all-paths closure contract. The registry entry is simply
+/// never removed, and `z_close` clears it with the rest of the session — which
+/// is also where the C `drop(context)` finally runs.
+#[no_mangle]
+pub unsafe extern "C" fn z_declare_background_subscriber(
+    zs: *const z_loaned_session_t,
+    keyexpr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    _options: *const c_void,
+) -> ZResult {
+    guarded(|| {
+        if callback.is_null() {
+            return Z_ERR_NULL;
+        }
+        let owned = &mut (*callback)._this;
+        let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
+        *owned = z_owned_closure_sample_t::null_value();
+
+        let state = match session_state(zs) {
+            Some(s) => s,
+            None => return Z_ERR_NULL,
+        };
+        let ke = match keyexpr_str(keyexpr) {
+            Some(k) => k.to_owned(),
+            None => return Z_ERR_INVALID,
+        };
+        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+            return Z_ERR_INVALID;
+        }
+        // The returned SubId is deliberately discarded: with no owned handle
+        // there is nothing that could ever undeclare it, so retaining the id
+        // would only invite a caller-less removal path that pico does not have.
+        let _ = state.shared.declare_subscriber(ke, Arc::new(cclosure));
+        Z_OK
+    })
+}
+
 /// Undeclare a subscriber (pico `z_undeclare_subscriber`): drops the wz
 /// subscriber (undeclare on the wire) and the callback (→ C `drop(context)`).
 #[no_mangle]

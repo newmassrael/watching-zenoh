@@ -5160,7 +5160,13 @@ _pico_cli_unavailable() {
 }
 
 layer_e_ap_demo_round_trip() {
-    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_sub_attachment || ! -x target/zenoh-pico-cli/z_pub_attachment ]]; then
+    # R311y478 — z_pong joins the guarded set. It is the counterparty for the
+    # §5.27 drop-in round-trip leg, and it arrived AFTER the other four, so a
+    # tree whose CLIs were built by the previous script would have z_put and
+    # friends but not z_pong. Without it in this list Layer E would run and the
+    # leg would PANIC on a missing binary instead of taking the honest
+    # SKIP-or-require path every other foreign prereq takes.
+    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_sub_attachment || ! -x target/zenoh-pico-cli/z_pub_attachment || ! -x target/zenoh-pico-cli/z_pong ]]; then
         _pico_cli_unavailable "Layer E" || return 1
         return 0
     fi

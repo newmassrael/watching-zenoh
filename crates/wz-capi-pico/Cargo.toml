@@ -129,6 +129,15 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
 # source wz-runtime-tokio already uses AP-side for signing-key entropy.
 getrandom = "0.2"
 
+# R311y478 — the pico PLATFORM surface (z_malloc / z_free / z_clock_* ) forwards
+# to libc rather than reimplementing it. `z_malloc` and `z_free` MUST be the C
+# allocator so a program may mix them with plain malloc/free on one pointer
+# (pico defines them as exactly that), and `CLOCK_MONOTONIC` differs per
+# platform (1 on Linux, 6 on macOS), so hand-writing the constant would be a
+# portability bug. Already in this workspace's graph — wz-runtime-tokio deps it
+# optionally — so this adds no new third-party crate.
+libc = "0.2"
+
 [dependencies.tokio]
 version = "1"
 default-features = false
