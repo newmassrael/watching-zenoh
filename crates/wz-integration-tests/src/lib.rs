@@ -736,6 +736,125 @@ pub mod common {
         digits.parse().ok()
     }
 
+    /// The ONE line of a capture that carries `needle`.
+    ///
+    /// [`wait_for_substring`] hands back the WHOLE captured buffer — not the
+    /// matching line, and not the tail from the needle onward. Measured in
+    /// R311y472 while authoring the multilink leg: `captured.lines().next()`
+    /// returned the child's startup banner and was then asserted against as if
+    /// it were the awaited line, which reds a healthy run with a convincing but
+    /// false diagnosis.
+    pub fn line_with(captured: &str, needle: &str) -> Option<String> {
+        captured
+            .lines()
+            .find(|line| line.contains(needle))
+            .map(str::to_string)
+    }
+
+    /// One unicast session as ZENOH reports it in its `@/<zid>/router` adminspace
+    /// answer: the peer's zid, its whatami, and how many PHYSICAL links zenoh has
+    /// bound to that ONE transport.
+    ///
+    /// The link count is the whole point (R311y472): it is zenoh's own statement
+    /// that it aggregated N links onto one session, which no amount of wz-side
+    /// bookkeeping can reach.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ZenohSession {
+        pub peer: String,
+        pub whatami: String,
+        pub links: usize,
+    }
+
+    /// Return the substring bracketed by `open`/`close` that STARTS at `from`
+    /// (which must index the opening bracket), tracking nesting and string
+    /// literals.
+    ///
+    /// A depth counter rather than a search for the first `close`, because a
+    /// zenoh locator may legitimately contain one — `tcp/[::1]:7447` carries a
+    /// `]` inside a JSON string, and a naive scan would cut the links array
+    /// there and under-report.
+    fn bracketed(s: &str, from: usize, open: u8, close: u8) -> Option<&str> {
+        let bytes = s.as_bytes();
+        if bytes.get(from) != Some(&open) {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut in_string = false;
+        for (i, &b) in bytes.iter().enumerate().skip(from) {
+            if in_string {
+                if b == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match b {
+                b'"' => in_string = true,
+                _ if b == open => depth += 1,
+                _ if b == close => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&s[from..=i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Read the string value of `"<key>":"<value>"` out of a JSON object slice.
+    fn string_field(obj: &str, key: &str) -> Option<String> {
+        let marker = format!("\"{key}\":\"");
+        let start = obj.find(&marker)? + marker.len();
+        let end = obj[start..].find('"')? + start;
+        Some(obj[start..end].to_string())
+    }
+
+    /// Parse zenoh's `@/<zid>/router` adminspace body into one entry per session.
+    ///
+    /// Deliberately STRUCTURAL rather than a substring count. The question is how
+    /// many links sit under ONE session object, and a count of `"dst"` across the
+    /// whole document answers a different one: it reads 2 for two SEPARATE
+    /// single-link sessions, which is exactly the state a router that REFUSED the
+    /// aggregation produces — i.e. exactly the confusion the multilink leg exists
+    /// to rule out.
+    ///
+    /// Lives here rather than beside its caller because Layer C0's binary-dep
+    /// discipline requires every `#[test]` in a `tests/` file that spawns
+    /// binaries to be `#[ignore]`d, and a measuring instrument whose calibration
+    /// never runs is not calibrated. In this crate's lib the units run in the
+    /// ordinary Layer C1 workspace lane.
+    pub fn parse_zenoh_admin_sessions(admin_body: &str) -> Vec<ZenohSession> {
+        let marker = "\"sessions\":";
+        let Some(idx) = admin_body.find(marker).map(|i| i + marker.len()) else {
+            return Vec::new();
+        };
+        let Some(array) = bracketed(admin_body, idx, b'[', b']') else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut cursor = 1; // past the array's own '['
+        while let Some(rel) = array[cursor..].find('{') {
+            let start = cursor + rel;
+            let Some(obj) = bracketed(array, start, b'{', b'}') else {
+                break;
+            };
+            cursor = start + obj.len();
+            let links = obj
+                .find("\"links\":")
+                .map(|i| i + "\"links\":".len())
+                .and_then(|i| bracketed(obj, i, b'[', b']'))
+                .map(|arr| arr.matches("\"dst\":").count())
+                .unwrap_or(0);
+            out.push(ZenohSession {
+                peer: string_field(obj, "peer").unwrap_or_default(),
+                whatami: string_field(obj, "whatami").unwrap_or_default(),
+                links,
+            });
+        }
+        out
+    }
+
     /// The `RUST_LOG` filter the spawned `wz-ap-demo` children run with. `info` is the
     /// level every witness this crate asserts on is logged at, so it is the default —
     /// but a hardcoded level is also what blocks a diagnostic run: the topology
@@ -1867,6 +1986,45 @@ pub mod common {
         (guard, port)
     }
 
+    /// R311y472 — spawn a zenohd whose unicast transport AGGREGATES up to
+    /// `max_links` physical links per peer, the foreign oracle for the
+    /// `transport-multilink` cross-impl leg.
+    ///
+    /// `transport/unicast/max_links` defaults to **1**
+    /// (`zenoh-config-1.5.0` `src/defaults.rs`), and that default is what makes
+    /// the aggregation observable at all: zenoh only builds its `MultiLink`
+    /// establishment state — and therefore only offers the 0x4 ext on its
+    /// InitAck — when the configured budget is `> 1`
+    /// (`MultiLink::make(.., is_multilink)`). Below the budget a second link
+    /// from an already-known zid is REFUSED, so the link count zenoh reports
+    /// for a peer tracks THIS knob rather than anything the dialer asserts.
+    ///
+    /// No cargo feature is needed on the router: `transport_multilink` rides
+    /// zenoh's DEFAULT feature set, so the STOCK `target/zenohd/zenohd` speaks
+    /// it — like the compression oracle, and unlike the unixpipe / vsock ones
+    /// which needed variant builds.
+    ///
+    /// The un-configured [`spawn_zenohd_on_ephemeral_tcp`] is this helper's
+    /// TWIN: the SAME wz `--max-links 2` peer dialed twice against it lands ONE
+    /// link and its second dial is refused, which is what makes the two-link
+    /// assertion a discriminator rather than a tautology.
+    pub fn spawn_zenohd_multilink_on_ephemeral_tcp(
+        max_links: usize,
+        mut mk_probe_stderr: impl FnMut() -> File,
+    ) -> (ChildGuard, u16) {
+        let cfg = format!("transport/unicast/max_links:{max_links}");
+        let (guard, port) = spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs(
+            &zenohd_binary(),
+            "zenohd (reference router, multilink)",
+            None,
+            &[],
+            None,
+            &[cfg.as_str()],
+        );
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
+        (guard, port)
+    }
+
     /// R311y374 — spawn a zenohd that DIALS a wz `ws/...` acceptor
     /// (`-e ws/<wz_ws_endpoint>`) while also listening on an OS-assigned tcp port (RETURNED beside the guard) for a
     /// pico client. This is the FOREIGN WebSocket DIALER that verifies wz's new ws
@@ -2841,7 +2999,10 @@ pub mod common {
 
 #[cfg(test)]
 mod tests {
-    use super::common::{wait_for_tcp_accept_alive, ChildGuard, ZENOHD_TCP_ACCEPT_BUDGET};
+    use super::common::{
+        line_with, parse_zenoh_admin_sessions, wait_for_tcp_accept_alive, ChildGuard, ZenohSession,
+        ZENOHD_TCP_ACCEPT_BUDGET,
+    };
     use socket2::{Domain, Socket, Type};
     use std::net::{SocketAddr, TcpListener};
     use std::process::Command;
@@ -3295,5 +3456,73 @@ mod tests {
             Ok(41059),
             "the wait must return the announced port for a live child"
         );
+    }
+
+    /// R311y472 — the multilink leg's measuring instrument, calibrated against a
+    /// body captured VERBATIM from a live zenohd rather than a hand-drawn shape.
+    #[test]
+    fn parses_the_aggregated_shape_zenohd_actually_emits() {
+        let body = "{\"locators\":[\"tcp/127.0.0.1:47447\"],\"metadata\":null,\"plugins\":{},\
+            \"sessions\":[{\"links\":[{\"dst\":\"tcp/127.0.0.1:49538\",\"src\":\"tcp/127.0.0.1:47447\"},\
+            {\"dst\":\"tcp/127.0.0.1:49548\",\"src\":\"tcp/127.0.0.1:47447\"}],\"peer\":\"2007370\",\
+            \"weight\":null,\"whatami\":\"peer\"},{\"links\":[{\"dst\":\"tcp/127.0.0.1:33334\",\
+            \"src\":\"tcp/127.0.0.1:47447\"}],\"peer\":\"4030201\",\"weight\":null,\
+            \"whatami\":\"client\"}],\"version\":\"v1.5.0\",\"zid\":\"7ad3ed7c\"}";
+        assert_eq!(
+            parse_zenoh_admin_sessions(body),
+            vec![
+                ZenohSession {
+                    peer: "2007370".into(),
+                    whatami: "peer".into(),
+                    links: 2,
+                },
+                ZenohSession {
+                    peer: "4030201".into(),
+                    whatami: "client".into(),
+                    links: 1,
+                },
+            ]
+        );
+    }
+
+    /// The state a router that REFUSED the aggregation produces, and the one a
+    /// document-wide `"dst"` count would misread as success: TWO separate
+    /// single-link sessions, not one two-link session.
+    #[test]
+    fn two_separate_single_link_sessions_are_not_one_aggregated_session() {
+        let body = "{\"sessions\":[{\"links\":[{\"dst\":\"tcp/1\",\"src\":\"tcp/0\"}],\
+            \"peer\":\"2007370\",\"whatami\":\"peer\"},{\"links\":[{\"dst\":\"tcp/2\",\
+            \"src\":\"tcp/0\"}],\"peer\":\"2007370\",\"whatami\":\"peer\"}]}";
+        let sessions = parse_zenoh_admin_sessions(body);
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|s| s.links == 1));
+    }
+
+    /// A `]` inside a locator STRING must not terminate the links array — the
+    /// reason the scan tracks depth and string literals instead of taking the
+    /// first closing bracket.
+    #[test]
+    fn an_ipv6_locator_does_not_truncate_the_links_array() {
+        let body =
+            "{\"sessions\":[{\"links\":[{\"dst\":\"tcp/[::1]:7447\",\"src\":\"tcp/[::1]:1\"},\
+            {\"dst\":\"tcp/[fe80::2]:7447\",\"src\":\"tcp/[::1]:1\"}],\"peer\":\"2007370\",\
+            \"whatami\":\"peer\"}]}";
+        assert_eq!(
+            parse_zenoh_admin_sessions(body).first().map(|s| s.links),
+            Some(2)
+        );
+    }
+
+    /// [`line_with`] must return the line carrying the needle, NOT the first
+    /// line of the capture — the defect measured while authoring R311y472.
+    #[test]
+    fn line_with_returns_the_needles_line_not_the_first() {
+        let captured = "peer: listening on 127.0.0.1:41287\nADVERTISED SELF LOCATOR tcp/x\n\
+                        peer: link AGGREGATED to zid abc (live links now 2)\n";
+        assert_eq!(
+            line_with(captured, "link AGGREGATED to zid").as_deref(),
+            Some("peer: link AGGREGATED to zid abc (live links now 2)")
+        );
+        assert_eq!(line_with(captured, "no such needle"), None);
     }
 }

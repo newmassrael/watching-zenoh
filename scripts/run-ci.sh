@@ -6770,7 +6770,12 @@ layer_z_zenohd_interop() {
     # (`BoundListener::advertised_locator` -> `set_self_locators`), and that path is
     # `routing-peer`-gated. Additive like the rest: no other leg passes `--peer`, so
     # they all dial through the unchanged binary.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer --quiet) || return 1
+    # R311y472 adds `transport-multilink` for the same two reasons: the new
+    # `wz_multilink_aggregation_zenohd_interop` leg drives `--max-links`, which is
+    # parsed only under that feature, AND its `transport-multilink` claim must sit
+    # inside this build's feature closure or A4-5 containment reds. Additive: the
+    # knob defaults to 1 (single-link), so every other leg dials unchanged.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -7023,6 +7028,19 @@ layer_z_zenohd_interop() {
     # `unixsock/<path>` endpoint (measured), which is what makes it a real gate.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_advertised_locator_zenohd_dial -- --ignored --quiet --test-threads=1) || return 1
+    # R311y472 — wz MULTILINK AGGREGATION cross-impl (transport-multilink wz->zenohd),
+    # the S4 gap the atom's own reason named: the whole C1ba behavioural lane is
+    # wz<->wz, so nothing had ever put a foreign stack on the other end of the 0x4
+    # MultiLink establishment ext. A `--max-links 2` wz peer dials ONE zenohd twice
+    # and the verdict is read off zenohd's OWN adminspace (`@/*/router` -> one session
+    # object carrying two links), never off wz's "link AGGREGATED" log. Ships with its
+    # calibration twin in the same file: the SAME argv against a STOCK zenohd
+    # (max_links defaults to 1) must report ONE link, so the count is reading the
+    # router's budget rather than restating wz's. `transport_multilink` rides zenoh's
+    # DEFAULT features, so the STOCK oracle speaks it once configured -- no variant
+    # build. Same --test-threads=1 per-zenohd isolation.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_multilink_aggregation_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y399 — wz UDP-DEMUX ACCEPTOR cross-impl (transport-link-udp zenohd->wz):
     # the DATAGRAM sibling of the ws/tls/unixsock acceptor legs above, and the first
     # cross-impl proof of a structurally-datagram wz acceptor. A real zenohd DIALS
