@@ -5178,6 +5178,17 @@ layer_e_ap_demo_round_trip() {
     # here under the same rule as the demo above: never SKIP on a wz binary we
     # can build, or the lane goes green without proving anything.
     (cd crates && cargo build -p wz-e2e-silent-peer --quiet) || return 1
+    # The §5.27 api-compat-pico drop-in witness needs the C-ABI `cdylib`
+    # ITSELF, not a Rust dependency on it: `tests/pico_c_examples_on_wz_capi_dropin.rs`
+    # compiles an upstream zenoh-pico example with `cc` and links it against
+    # `libwz_capi_pico.so`. wz-capi-pico is deliberately NOT a dev-dependency of
+    # wz-integration-tests — its `#[no_mangle]` `z_*` exports would collide with
+    # the REAL zenoh-pico ones this crate links via zenoh-pico-sys for the layer3
+    # codec-parity tests — so nothing in `cargo test -p wz-integration-tests`
+    # builds it, and on a fresh checkout the helper would panic on a missing .so.
+    # Built here under the same rule as the two binaries above: never SKIP (or
+    # crash) on a wz artifact we can just build.
+    (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
     # R121e + R121f + R121f1 + R121g: bundle the integration tests
     # into a single cargo invocation so the compilation/link step
     # runs once and the lane timing stays predictable. `--test`

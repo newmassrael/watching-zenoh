@@ -203,10 +203,19 @@ struct QueryMarshal {
     /// [`parameters_has_anyke`]) — the same derivation pico does, and the gate
     /// `z_query_reply` consults.
     anyke: bool,
+    /// The query's value payload, EMPTY when the query carried no value ext.
+    ///
+    /// There is deliberately no `has_payload` companion. pico's
+    /// `z_query_payload` is `return &..->_value.payload` — it hands back a
+    /// pointer unconditionally and lets an empty payload speak for itself
+    /// (`vendor/zenoh-pico/src/api/api.c:476`), and the same is true of
+    /// `z_query_attachment` (:472). Carrying a presence flag here invites the
+    /// accessor to return NULL for absence, which is the one thing a pico
+    /// program cannot survive; see the accessors' own docstrings.
     payload: Vec<u8>,
-    has_payload: bool,
+    /// The query's attachment, EMPTY when absent. Same no-presence-flag rule as
+    /// [`Self::payload`].
     attachment: Vec<u8>,
-    has_attachment: bool,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
@@ -237,17 +246,15 @@ impl QueryMarshal {
     /// UNBOUND — [`Self::bind`] must run once the value has reached its final
     /// address. Splitting the two is load-bearing; see `bind`.
     fn new(view: &dyn QueryView) -> Self {
-        let payload = view.payload().map(<[u8]>::to_vec);
-        let attachment = view.attachment().map(<[u8]>::to_vec);
         let parameters = view.parameters().map(<[u8]>::to_vec).unwrap_or_default();
         Self {
             keyexpr: view.keyexpr().to_owned(),
             anyke: parameters_has_anyke(&parameters),
             parameters,
-            has_payload: payload.is_some(),
-            payload: payload.unwrap_or_default(),
-            has_attachment: attachment.is_some(),
-            attachment: attachment.unwrap_or_default(),
+            // Absence collapses to EMPTY here, not to a flag: the accessors
+            // must hand C a pointer either way (see the field docs).
+            payload: view.payload().map(<[u8]>::to_vec).unwrap_or_default(),
+            attachment: view.attachment().map(<[u8]>::to_vec).unwrap_or_default(),
             loaned_keyexpr: z_loaned_keyexpr_t {
                 _start: std::ptr::null(),
                 _len: 0,
@@ -901,15 +908,33 @@ pub unsafe extern "C" fn z_query_parameters(
     });
 }
 
-/// Borrow the query's value payload (pico `z_query_payload`). Null when the
-/// query carries no value ext — pico's own contract for a payload-less query.
+/// Borrow the query's value payload (pico `z_query_payload`). A payload-less
+/// query yields a valid pointer to an EMPTY payload, never null; null is
+/// reserved for an invalid `query` pointer.
+///
+/// This is pico's contract, read off its implementation:
+/// `z_query_payload` is `return &_Z_RC_IN_VAL(query)->_value.payload`
+/// (`vendor/zenoh-pico/src/api/api.c:476`) — an unconditional address-of, with
+/// no presence check anywhere. The neighbouring `z_query_source_info` (:478-481)
+/// DOES do `_z_source_info_check(info) ? info : NULL`, so pico's own getters are
+/// asymmetric on purpose, and reading the shape off the wrong sibling is how
+/// this diverged.
+///
+/// The divergence was not cosmetic. Real pico programs call this getter
+/// unconditionally — `examples/unix/c11/z_queryable.c` does
+/// `z_bytes_to_string(z_query_payload(query), &payload_string)` and only THEN
+/// tests `z_string_len(...) > 0`. Returning null made `z_bytes_to_string` fail,
+/// which leaves the caller's stack-allocated `z_owned_string_t` UNINITIALIZED,
+/// and the very next line loans it: the upstream queryable example aborted on
+/// a garbage handle the moment a real `z_get` reached it. An absent payload is
+/// an empty payload, and the C side must be able to say so without a crash.
 #[no_mangle]
 pub unsafe extern "C" fn z_query_payload(
     query: *const z_loaned_query_t,
 ) -> *const z_loaned_bytes_t {
     match query_marshal(query) {
-        Some(marshal) if marshal.has_payload => &marshal.loaned_payload as *const z_loaned_bytes_t,
-        _ => std::ptr::null(),
+        Some(marshal) => &marshal.loaned_payload as *const z_loaned_bytes_t,
+        None => std::ptr::null(),
     }
 }
 
@@ -942,17 +967,24 @@ pub unsafe extern "C" fn z_query_accepts_replies(
     })
 }
 
-/// Borrow the query's attachment (pico `z_query_attachment`). Null when the
-/// query carries no attachment ext.
+/// Borrow the query's attachment (pico `z_query_attachment`). An attachment-less
+/// query yields a valid pointer to an EMPTY attachment, never null; null is
+/// reserved for an invalid `query` pointer.
+///
+/// Same contract and same reasoning as [`z_query_payload`]: pico's getter is
+/// `return &_Z_RC_IN_VAL(query)->_attachment` with no presence check
+/// (`vendor/zenoh-pico/src/api/api.c:472`). Fixed together with its sibling
+/// rather than only the one a running example happened to crash on — the two
+/// had the identical shape, so a caller that reads the attachment
+/// unconditionally would have hit the identical uninitialized-owned-struct
+/// abort.
 #[no_mangle]
 pub unsafe extern "C" fn z_query_attachment(
     query: *const z_loaned_query_t,
 ) -> *const z_loaned_bytes_t {
     match query_marshal(query) {
-        Some(marshal) if marshal.has_attachment => {
-            &marshal.loaned_attachment as *const z_loaned_bytes_t
-        }
-        _ => std::ptr::null(),
+        Some(marshal) => &marshal.loaned_attachment as *const z_loaned_bytes_t,
+        None => std::ptr::null(),
     }
 }
 

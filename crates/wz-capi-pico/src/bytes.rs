@@ -166,6 +166,39 @@ pub unsafe extern "C" fn z_bytes_copy_from_str(
     })
 }
 
+/// Build a payload from a statically allocated C string (pico
+/// `z_bytes_from_static_str`).
+///
+/// pico's contract is ALIASING: the payload borrows the caller's static
+/// storage and never frees it, which is why the name says `static` and why
+/// there is no failure mode for allocation. wz COPIES instead, because this
+/// crate's payload model is an owning [`ByteBuf`] (`Vec<u8>`) shared by every
+/// consumer — a borrowing variant would have to widen `ByteBuf` into a
+/// two-arm owned/aliased type and re-audit every reader of it.
+///
+/// The divergence is confined to cost, not to observable behaviour: the C
+/// contract only requires the bytes to remain readable for the payload's
+/// lifetime, and an owned copy satisfies that strictly more safely than an
+/// alias (it survives even a caller that violates the `static` precondition).
+/// What a program CAN observe is the copy itself, so a pico program that
+/// passes a very large static buffer pays an allocation here that real pico
+/// does not. Recorded as a named divergence rather than hidden behind the
+/// shared name.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_from_static_str(
+    bytes: *mut z_owned_bytes_t,
+    value: *const c_char,
+) -> ZResult {
+    guarded(|| {
+        if bytes.is_null() || value.is_null() {
+            return Z_ERR_NULL;
+        }
+        let buf = CStr::from_ptr(value).to_bytes().to_vec();
+        store_bytes(bytes, buf);
+        Z_OK
+    })
+}
+
 // --- conversions ----------------------------------------------------------
 
 /// Copy a payload into an owned slice (pico `z_bytes_to_slice`).

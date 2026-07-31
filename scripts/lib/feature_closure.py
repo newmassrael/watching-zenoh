@@ -125,6 +125,16 @@ def binary_closure(binary: str) -> frozenset[str]:
     """Closure for a binary a corpus test drives, by the harness helper it calls."""
     if binary == "wz-ap-demo":
         return closure("wz-ap-demo", ap_demo_lane_features())
+    if binary == "wz-capi-pico":
+        # The C-ABI cdylib (§5.27) is reached through the `wz` facade's
+        # `api-compat-pico` feature, which is where the atom's ONLY cfg site
+        # lives (`crates/wz/src/lib.rs`: `#[cfg(feature = "api-compat-pico")]
+        # pub use wz_capi_pico as capi_pico`). Asking the wz-capi-pico package
+        # for its own closure would answer the wrong question and refute a true
+        # claim: the crate declares no feature by that name, because the feature
+        # that pulls it in belongs to the facade above it. So the closure of the
+        # artifact is the closure of the build that emits it.
+        return closure("wz", ("api-compat-pico",))
     return closure(binary)
 
 

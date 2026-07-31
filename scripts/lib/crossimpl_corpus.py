@@ -96,6 +96,16 @@ WZ_BINARY_ROOTS = {
     "wz_e2e_liveliness_binary": "wz-e2e-liveliness",
     "wz_e2e_liveliness_token_binary": "wz-e2e-liveliness-token",
     "wz_e2e_declare_observer_binary": "wz-e2e-declare-observer",
+    # The §5.27 api-compat-pico artifact is a cdylib, not an executable: the
+    # thing under test is a foreign C program linked AGAINST wz. It still
+    # belongs here rather than in FOREIGN_ROOTS -- the implementation answering
+    # every `z_*` call is wz's, so a test driving it is external-but-not-foreign
+    # exactly like `wz_ap_demo_binary`, and its foreignness has to come from the
+    # counterparty it talks to (a real pico CLI). Mapping it to the package
+    # keeps A4-5 honest: the claim gets checked against the closure of the build
+    # that PRODUCES the .so, not against this test crate's own dev-dep graph
+    # (which cannot contain the atom -- see feature_closure.binary_closure).
+    "wz_capi_pico_cdylib": "wz-capi-pico",
 }
 # A test that spawns no wz binary exercises the library in-process, i.e. the test
 # crate's own (dev-dependency) feature graph.

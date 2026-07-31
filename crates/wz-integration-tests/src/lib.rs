@@ -339,6 +339,158 @@ pub mod common {
         );
     }
 
+    /// Locate the `wz-capi-pico` C-ABI shared object — the artifact a
+    /// zenoh-pico C program links as a BINARY DROP-IN (§5.27
+    /// `api-compat-pico`).
+    ///
+    /// Unlike every other helper here this does NOT resolve an executable: it
+    /// resolves the `cdylib` a foreign C program is linked AGAINST. That is
+    /// the atom's whole claim, so it is the artifact a witness has to exercise.
+    ///
+    /// The `.so` is deliberately reached through the filesystem rather than by
+    /// making `wz-capi-pico` a dev-dependency of this crate. A dev-dep would
+    /// pull the rlib into the test binary, where its `#[no_mangle]` `z_*`
+    /// exports would sit alongside the REAL zenoh-pico ones this crate already
+    /// links through `zenoh-pico-sys` (the layer3 codec-parity tests) — two
+    /// definitions of `z_open`, `z_put`, `z_bytes_loan` and the rest in one
+    /// link. Keeping the drop-in at the OS linker boundary is what keeps the
+    /// two implementations separable, and it is also the only shape that
+    /// witnesses the real deployment: a C program picks ONE `libzenohpico`-
+    /// shaped library at link time.
+    pub fn wz_capi_pico_cdylib() -> PathBuf {
+        let crates_dir = project_root().join("crates");
+        let candidates = [
+            crates_dir.join("target/debug/libwz_capi_pico.so"),
+            crates_dir.join("target/release/libwz_capi_pico.so"),
+        ];
+        for c in &candidates {
+            if c.is_file() {
+                return c.clone();
+            }
+        }
+        panic!(
+            "libwz_capi_pico.so not found in {candidates:?}; \
+             run `cargo build -p wz-capi-pico` first"
+        );
+    }
+
+    /// The include directories that let a C compiler build a real zenoh-pico
+    /// program against the REAL zenoh-pico headers: the vendored source tree
+    /// plus the CMake-GENERATED `zenoh-pico/config.h`.
+    ///
+    /// Both are needed and neither substitutes for the other. The source tree
+    /// carries the API headers; `config.h` carries the `Z_FEATURE_*` switches,
+    /// and it does not exist in the source tree at all — CMake writes it from
+    /// the configure-time options. Reading the feature set off the cmake
+    /// command line instead of off the generated header is the trap R311y466
+    /// recorded (`-DFLAG=ON` on the command line can still leave the macro
+    /// OFF), so this points at the generated file and nothing else.
+    ///
+    /// The generated dir belongs to `scripts/build-zenoh-pico-cli.sh`, the same
+    /// script that installs the pico CLI oracles. That coupling is the point:
+    /// a program compiled through these includes sees the SAME feature
+    /// configuration as the `zenoh_pico_cli_binary` it will talk to, so a
+    /// mismatch between the two can never be mistaken for an interop failure.
+    ///
+    /// Panics with the build hint if either dir is missing — the same prereq
+    /// discipline as [`zenoh_pico_cli_binary`]; a missing header set must not
+    /// degrade into a green run.
+    pub fn zenoh_pico_include_dirs() -> [PathBuf; 2] {
+        let root = project_root();
+        let vendored = root.join("vendor/zenoh-pico/include");
+        let generated = root.join("target/zenoh-pico-build/zenohpico/include");
+        assert!(
+            vendored.is_dir(),
+            "vendored zenoh-pico headers missing at {}; run \
+             `git submodule update --init vendor/zenoh-pico`",
+            vendored.display()
+        );
+        assert!(
+            generated.is_dir(),
+            "GENERATED zenoh-pico config.h dir missing at {}; run \
+             scripts/build-zenoh-pico-cli.sh first (it is the CMake configure \
+             product, and it pins the Z_FEATURE_* set the pico oracles were \
+             built with)",
+            generated.display()
+        );
+        [generated, vendored]
+    }
+
+    /// Compile an UNMODIFIED upstream zenoh-pico example
+    /// (`vendor/zenoh-pico/examples/unix/c11/<example>.c`) against the REAL
+    /// zenoh-pico headers and link it against wz's C-ABI `cdylib`, returning
+    /// the executable's path.
+    ///
+    /// This is the §5.27 `api-compat-pico` witness apparatus. The claim under
+    /// test is "a zenoh-pico C program can link the wz cdylib as a binary
+    /// drop-in", and each half of that sentence is supplied by a foreign
+    /// artifact: upstream's own program TEXT, and upstream's own HEADERS
+    /// (types, struct sizes, and the `_Generic` `z_loan`/`z_move`/`z_drop`
+    /// dispatch in `api/macros.h`). Only the library is wz's. So the compiler
+    /// and the linker do the checking that no wz-authored test could do for
+    /// itself: a wrong struct size, a missing export, or a getter whose
+    /// null-contract differs from pico's is caught by pico's own program
+    /// rather than by an assertion we chose.
+    ///
+    /// `-DZENOH_LINUX` is required, not optional: pico's
+    /// `system/common/platform.h` `#error "Unknown platform"`s without one of
+    /// its `ZENOH_<PLATFORM>` macros, and it is the platform selector CMake
+    /// passes for a Unix build. `-Wl,-rpath` is baked so the produced binary
+    /// finds the `.so` without the caller having to export
+    /// `LD_LIBRARY_PATH` — the runtime library search is part of what "drop-in"
+    /// means.
+    ///
+    /// A compile or link failure is returned as `Err(diagnostics)` rather than
+    /// panicked, because for this atom a link failure is a MEASUREMENT (which
+    /// exports are missing) and a caller may want to assert on it.
+    pub fn compile_pico_example_against_wz_capi(
+        example: &str,
+        out_dir: &Path,
+    ) -> Result<PathBuf, String> {
+        let root = project_root();
+        let src = root
+            .join("vendor/zenoh-pico/examples/unix/c11")
+            .join(format!("{example}.c"));
+        assert!(
+            src.is_file(),
+            "upstream zenoh-pico example {} missing; run \
+             `git submodule update --init vendor/zenoh-pico`",
+            src.display()
+        );
+        let cdylib = wz_capi_pico_cdylib();
+        let libdir = cdylib
+            .parent()
+            .expect("cdylib path has a parent directory")
+            .to_path_buf();
+        let includes = zenoh_pico_include_dirs();
+        let exe = out_dir.join(format!("{example}_on_wz"));
+
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let mut cmd = Command::new(&cc);
+        cmd.arg(&src).arg("-DZENOH_LINUX");
+        for inc in &includes {
+            cmd.arg(format!("-I{}", inc.display()));
+        }
+        cmd.arg("-o")
+            .arg(&exe)
+            .arg(format!("-L{}", libdir.display()))
+            .arg("-lwz_capi_pico")
+            .arg(format!("-Wl,-rpath,{}", libdir.display()));
+
+        let out = cmd
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn C compiler {cc:?}: {e}"));
+        if !out.status.success() {
+            return Err(format!(
+                "{cc} failed for {example}.c (status {:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            ));
+        }
+        Ok(exe)
+    }
+
     /// Locate a zenoh-pico CLI binary under `target/zenoh-pico-cli/`.
     /// `scripts/build-zenoh-pico-cli.sh` produces `z_put`, `z_sub`,
     /// `z_get`, `z_queryable`; pass the bare name and this helper
