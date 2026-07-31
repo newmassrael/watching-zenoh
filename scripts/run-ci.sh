@@ -8265,6 +8265,35 @@ layer_e8t_router_hat_hlc_stamp_pico() {
 # (the `--exact` + `1 passed` pin E8t uses). Leg 2 is also the build
 # discriminator: `--peer` is cfg(routing-peer), so a binary built from the
 # wrong feature set exits 2 at spawn and this lane reds.
+# ─── Layer E10 — who sends a session Close at teardown (R311y487) ───────────
+#
+# A MEASUREMENT lane, and it is registered precisely because a measurement that
+# nobody re-runs decays into a quoted number. It counts DIALER -> ACCEPTOR
+# batches opening with T_MID_CLOSE through the harness's own counting relay, for
+# three closers against one wz-ap-demo acceptor: the demo itself on SIGTERM (the
+# positive control, without which every zero is unreadable), a real zenoh-pico
+# z_put, and the exported C ABI's z_close.
+#
+# What it established: a bare TCP FIN at z_close is INSIDE real pico's envelope.
+# pico emitted a Close in 3 of 20 runs and none in the other 17, so it is not a
+# usable equality oracle; wz-capi-pico emitted none in 20 of 20. The R311y486
+# carry calling that silence a fidelity gap is retracted by this lane.
+#
+# Only the control and the capi count are asserted (both stable across 20 runs).
+# The pico count is printed and deliberately NOT gated -- asserting it is a
+# 15%-red lane, which is the trap this comment exists to keep shut.
+layer_e10_close_frame_on_teardown() {
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_put ]]; then
+        _pico_cli_unavailable "Layer E10" || return 1
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test close_frame_on_teardown -- --ignored --nocapture --test-threads=1 \
+        --exact who_sends_a_session_close_at_teardown 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+}
+
 layer_e9_apfull_preset_pico() {
     # BUILD FIRST, GUARD SECOND — deliberately in this order. The pico guard below
     # can SKIP-green on a machine without the foreign CLI, and a SKIP is green: if
@@ -8547,6 +8576,7 @@ run_layer E7u layer_e7u_router_hat_unixpipe_forward || overall=1
 run_layer E8 layer_e8_router_hat_pico || overall=1
 run_layer E8t layer_e8t_router_hat_hlc_stamp_pico || overall=1
 run_layer E9 layer_e9_apfull_preset_pico || overall=1
+run_layer E10 layer_e10_close_frame_on_teardown || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

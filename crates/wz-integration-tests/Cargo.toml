@@ -47,6 +47,10 @@ path = "src/lib.rs"
 # as the wz-runtime-tokio frag/multicast pins below; resolver=2 keeps it
 # from unifying into wz-codecs's OWN default build under Layer C1.
 wz-codecs = { path = "../wz-codecs", features = ["codec-serial"] }
+# R311y487 - the close-frame teardown measurement drives the exported C ABI as
+# one of its three clients, so the measurement lives in ONE file beside the
+# pico + demo legs it is compared against (rlib crate-type makes this linkable).
+wz-capi-pico = { path = "../wz-capi-pico" }
 # W3 no-alloc bounded mirror migration — tests build owned-mirror
 # heapless fields via the `codec_bound::bounded_{bytes,string}` helpers
 # (the same idiom production code uses at decode boundaries).

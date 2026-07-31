@@ -2526,6 +2526,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-serial",
+ "wz-capi-pico",
  "wz-codecs",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",

@@ -770,7 +770,7 @@ jobs:
   # therefore stay local-only until that flakiness is root-caused, and A4's
   # EXECUTION line keeps saying so.
   interop:
-    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E6g + E6h + E7 + E8 + E8t + E9 + Z)
+    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E6g + E6h + E7 + E8 + E8t + E9 + E10 + Z)
     runs-on: ubuntu-22.04
     # A cold cache must build: the zenoh-pico CMake tree, the whole zenoh workspace in
     # release (zenohd AND the storage-manager plugin), four differently-featured
@@ -972,6 +972,21 @@ jobs:
         # here drives a NARROW single-feature build, so composition is the axis none of
         # them covers. SKIPs if the pico CLI is absent, like E8/E8t.
         run: bash scripts/run-ci.sh --layer E9
+
+      - name: Layer E10 — who sends a session Close at teardown (measurement)
+        # R311y487. Wired in the SAME commit that adds the lane, for the reason every
+        # sibling above records: a proof that runs only in the local sweep moves A4's
+        # all-lanes count but NOT the executed count that gates merges. A MEASUREMENT
+        # lane needs it more than most — an unrun measurement decays into a number
+        # quoted from a ledger, which is the failure this project keeps hitting.
+        #
+        # It counts Close-opening batches from three closers against one acceptor:
+        # wz-ap-demo on SIGTERM (the positive control), a real zenoh-pico z_put, and
+        # the C ABI's z_close. It retracted the R311y486 carry: a bare FIN at z_close
+        # is INSIDE pico's own envelope (pico emitted a Close in 3 of 20 runs), so the
+        # capi's silence is fidelity, not a gap. The pico count is printed and NOT
+        # asserted; gating it would be a 15%-red lane. SKIPs if the pico CLI is absent.
+        run: bash scripts/run-ci.sh --layer E10
 
       - name: Cache the unixpipe-enabled zenohd binary (R311y392)
         # A SEPARATE oracle from target/zenohd: zenoh's `default` omits
