@@ -237,8 +237,26 @@ impl WzConfig {
     /// `downsampling`/`sessions` fields, which sort mid-object). String values go
     /// through the shared [`wz_session_core::json::escape_into`] SSOT escaper.
     pub fn to_admin_json(&self) -> String {
-        // Alphabetically-ordered (key, value-json) pairs, present-only.
-        let mut fields: Vec<(&str, String)> = Vec::new();
+        // (key, value-json) pairs, present-only; sorted alphabetically below, so the
+        // order they are assembled in does not matter.
+        //
+        // R311y474 — the three UNCONDITIONAL fields seed the vector rather than
+        // being pushed after the cfg-gated ones. Same output (the sort follows), but
+        // it is now the type that says which fields every build carries, and it
+        // retires a REAL clippy::vec_init_then_push failure that Layer C1bb was
+        // already red on: with `Vec::new()` first, a feature combo in which several
+        // gated pushes expand back-to-back (transport-multilink + transport-qos was
+        // enough) leaves clippy looking at a plain push chain it wants folded into
+        // `vec![..]` — a suggestion the code CANNOT take, because under another combo
+        // those very pushes are absent. Seeding the vector removes the cause instead
+        // of silencing the lint.
+        let mut whatami = String::new();
+        wz_session_core::json::escape_into(self.whatami.to_str(), &mut whatami);
+        let mut fields: Vec<(&str, String)> = vec![
+            ("batch_size", self.batch_size.to_string()),
+            ("lease_ms", self.lease_ms.to_string()),
+            ("whatami", whatami),
+        ];
 
         // acl_default / acl_deny — the LIVE ACL view, present only on a build that
         // can carry an interceptor ACL. With no ACL the node admits all, so the
@@ -361,12 +379,6 @@ impl WzConfig {
         // negotiated outcome (QoS engages only if the peer offers too).
         #[cfg(feature = "transport-qos")]
         fields.push(("qos", self.qos.to_string()));
-
-        fields.push(("batch_size", self.batch_size.to_string()));
-        fields.push(("lease_ms", self.lease_ms.to_string()));
-        let mut whatami = String::new();
-        wz_session_core::json::escape_into(self.whatami.to_str(), &mut whatami);
-        fields.push(("whatami", whatami));
 
         // serde_json-BTreeMap alphabetical key order. R311y53 — an explicit sort (vs
         // the prior push-in-order assumption) so a new field is just "push it" with no
