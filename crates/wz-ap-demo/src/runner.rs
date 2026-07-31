@@ -2513,6 +2513,16 @@ async fn run_peer_until(
         }
         None => vec![listener.advertised_locator(&local_display)],
     };
+    // R311y471 — log what we advertise. Until this line the advertised locator was
+    // reachable only through an adminspace query, which is why R311y470's two
+    // undialable schemes (`unixsock/<path>`, `quic-datagram/<addr>`) survived: no
+    // e2e could see the string wz actually put on the wire, so every interop test
+    // hand-composed the locator for BOTH sides and agreed with itself. This makes
+    // the advertise path observable, so a foreign peer can be handed the string wz
+    // chose rather than one the test wrote.
+    for locator in &self_locators {
+        log::info!("wz-ap-demo: ADVERTISED SELF LOCATOR {locator}");
+    }
     // Clone so `self_locators` survives for the §5.23 admin handler below (the
     // forwarder-hosted admin's `local_data` advertises the same dial locators).
     forwarder.set_self_locators(self_locators.clone());
@@ -3806,6 +3816,12 @@ async fn run_router_hat_until(
             Some(_) => Vec::new(),
             None => vec![listener.advertised_locator(&local_display)],
         };
+        // R311y471 — same observability as run_peer's advertise above; the
+        // router-hat's `local_data` locators go through the same seam and had the
+        // same blind spot.
+        for locator in &locators {
+            log::info!("wz-ap-demo: ADVERTISED SELF LOCATOR {locator}");
+        }
         let queryable_key = admin_queryable_key(&zid_hex, whatami_str);
         let routers_view = forwarder.routers_net_view();
         let peers_view = forwarder.peers_net_view();

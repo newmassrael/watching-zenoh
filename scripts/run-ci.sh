@@ -6765,7 +6765,12 @@ layer_z_zenohd_interop() {
     # `cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,-]+)`, whose class
     # cannot cross a newline — a `\`-continued build silently drops the WHOLE feature
     # set from the closure and reds A4-5.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface --quiet) || return 1
+    # R311y471 adds `routing-peer`: the new `wz_advertised_locator_zenohd_dial` leg
+    # drives `--peer`, whose `run_peer` path is this crate's only ADVERTISE seam
+    # (`BoundListener::advertised_locator` -> `set_self_locators`), and that path is
+    # `routing-peer`-gated. Additive like the rest: no other leg passes `--peer`, so
+    # they all dial through the unchanged binary.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -7008,6 +7013,16 @@ layer_z_zenohd_interop() {
     # --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_unixsock_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y471 — the ADVERTISE-path sibling of the leg above, and deliberately NOT a
+    # duplicate of it. That leg writes `unixsock-stream/<path>` into BOTH wz's
+    # `--listen` and zenohd's `-e`, so the two sides agree by construction and wz's
+    # own advertised string is never consulted; it passes identically before and
+    # after R311y470. This leg reads the locator wz LOGGED for itself and hands that
+    # verbatim to zenohd, so it fails when wz advertises a scheme no foreign stack
+    # can dial. Under the pre-R311y470 rendering zenohd EXITS 255 on the
+    # `unixsock/<path>` endpoint (measured), which is what makes it a real gate.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_advertised_locator_zenohd_dial -- --ignored --quiet --test-threads=1) || return 1
     # R311y399 — wz UDP-DEMUX ACCEPTOR cross-impl (transport-link-udp zenohd->wz):
     # the DATAGRAM sibling of the ws/tls/unixsock acceptor legs above, and the first
     # cross-impl proof of a structurally-datagram wz acceptor. A real zenohd DIALS
