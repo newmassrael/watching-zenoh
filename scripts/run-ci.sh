@@ -8782,6 +8782,40 @@ layer_e13_apfull_storage_plane_pico() {
     done
 }
 
+# ─── Layer E15 — §5.21 router-connect-reconcile federation to a real zenoh-pico ───
+#
+# The reconcile's FOUR existing proofs (wz_router_hat_connect_reconcile.rs) are all
+# wz<->wz and all assert a LINK-STATE COUNT; none asks whether the face the reconcile
+# dialed carries application data. This lane is the pair that does, with both endpoints
+# foreign: leg 1 sends a real pico z_pub's sample across a federation face that did not
+# exist at startup to a real pico z_sub on the far router, and leg 2 is the calibration
+# that removes ONLY `--connect-after` and shows the same AP-full binary (multicast
+# faces compiled in, group live) forwards zero pushes. Without leg 2 a green leg 1
+# would not distinguish the reconcile from the multicast plane.
+#
+# Damage-established (R311y499): suppressing the reconcile channel send while LEAVING
+# its log line intact reds leg 1 and leaves BOTH Layer E9 legs green on the same
+# binary — so the claim binds to the reconcile path, and the existing AP-full
+# composition proof demonstrably survives a dead reconcile.
+layer_e15_apfull_reconcile_federation_pico() {
+    (cd crates && cargo build -p wz-ap-demo --no-default-features \
+        --features preset-ap-full --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_pub ]]; then
+        _pico_cli_unavailable "Layer E15" || return 1
+        return 0
+    fi
+    # Named `--exact` one per invocation, like E9/E11/E12/E13/E14: a rename or a
+    # silently dropped test then fails the lane instead of shrinking it quietly.
+    for leg in \
+        apfull_reconcile_federation_carries_data_between_two_real_picos \
+        apfull_without_the_reconcile_the_two_picos_cannot_reach_each_other; do
+        _runci_guarded_test "Layer E15 ($leg)" 1 \
+            cargo test -p wz-integration-tests \
+            --test apfull_router_reconcile_pico_interop -- --ignored --quiet \
+            --test-threads=1 --exact "$leg" || return 1
+    done
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -9020,6 +9054,7 @@ run_layer E11 layer_e11_apfull_advanced_pubsub_pico || overall=1
 run_layer E12 layer_e12_apfull_adminspace_pico || overall=1
 run_layer E13 layer_e13_apfull_storage_plane_pico || overall=1
 run_layer E14 layer_e14_apfull_dynamic_volume_pico || overall=1
+run_layer E15 layer_e15_apfull_reconcile_federation_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

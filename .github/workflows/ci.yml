@@ -863,7 +863,7 @@ jobs:
   # therefore stay local-only until that flakiness is root-caused, and A4's
   # EXECUTION line keeps saying so.
   interop:
-    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E6g + E6h + E7 + E8 + E8t + E9 + E10 + E11 + E12 + E13 + E14 + C1bp + Z)
+    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E6g + E6h + E7 + E8 + E8t + E9 + E10 + E11 + E12 + E13 + E14 + E15 + C1bp + Z)
     runs-on: ubuntu-22.04
     # A cold cache must build: the zenoh-pico CMake tree, the whole zenoh workspace in
     # release (zenohd AND the storage-manager plugin), four differently-featured
@@ -1163,6 +1163,29 @@ jobs:
         # wz-plugin-example `.so`, which exports `wz_plugin_entry` and no
         # `wz_volume_entry` — with the node still serving afterwards.
         run: bash scripts/run-ci.sh --layer E14
+
+      - name: Layer E15 — §5.21 router-connect-reconcile federation to a real zenoh-pico
+        # R311y499. Wired in the SAME commit that adds the lane, and into THIS job
+        # because this is the one that provisions the pico CLI — the R311y495 rule.
+        #
+        # `router-connect-reconcile` had four proofs and no foreign witness. All four
+        # live in wz_router_hat_connect_reconcile.rs, all are wz<->wz, and all assert a
+        # LINK-STATE COUNT — a federation face that establishes, floods link-state and
+        # then forwards nothing passes every one of them. That file also records why it
+        # stopped there ("Cross-impl is NOT needed for this atom: the reconcile
+        # introduces no new wire format"), which is right about the wire FORMAT and
+        # silent about the DATA PATH: what the reconcile creates is a face the router
+        # tier must then choose as a next-hop, a routing decision rather than a codec
+        # one.
+        #
+        # Leg 1 puts a real pico z_pub on R1 and a real pico z_sub on R2 with R1
+        # holding NO static --connect, so the sample can only arrive across the face
+        # --connect-after dialed at runtime. Leg 2 is why leg 1 means anything: the
+        # AP-full preset compiles router-multicast-faces, and a first run of this
+        # topology showed both routers logging mcast-ingress activity, so "the sample
+        # crossed" would not by itself name the reconcile. Removing ONLY
+        # --connect-after leaves the same binary forwarding `0 data push(es)`.
+        run: bash scripts/run-ci.sh --layer E15
 
       - name: Layer C1bp — §5.22 dynamic plugin loading, end to end
         # R311y495 — MOVED here from `validate + verify + test`, where R311y492
