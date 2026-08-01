@@ -135,7 +135,6 @@ use wz_runtime_tokio::session::QueryOptions;
 use wz_runtime_tokio::session_glue::{ConsolidationMode, QueryTarget};
 
 use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t};
-use crate::faces::SharedSession;
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::pubsub::{
@@ -144,6 +143,7 @@ use crate::pubsub::{
 use crate::query::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
+use wz_capi_core::faces::SharedSession;
 
 // --- pico enum-typed option fields -----------------------------------------
 
@@ -711,7 +711,7 @@ fn get_timeout_ms(timeout_ms: u64) -> u32 {
 /// **Fidelity.** pico's `allowed_destination` field exists only under
 /// `Z_FEATURE_LOCAL_QUERYABLE`, which defaults to **0**, and this crate's
 /// queryables are declared `Locality::Remote` for the same reason
-/// ([`crate::faces::queryable_options`]). A default pico build has no local
+/// ([`wz_capi_core::faces::queryable_options`]). A default pico build has no local
 /// queryable for a get to reach, so Remote-only IS the faithful default.
 ///
 /// **Soundness.** It closes the `allows_local` gate on `Session::query`'s

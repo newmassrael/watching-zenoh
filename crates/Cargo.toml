@@ -35,6 +35,17 @@ members = [
     # wrapping the wz AP tokio Session. Reverse of the *-sys crates
     # (which BIND to C); this crate EXPORTS a C ABI. AP/std-only.
     "wz-capi-pico",
+    # R311y498 (§5.27 api-compat-c) — the zenoh-c-compatible C ABI, the sibling of
+    # wz-capi-pico over the SAME session model. It ships NO header: zenoh-c's is
+    # cbindgen output, so it IS the ABI, and the claim under test is that a program
+    # built against UPSTREAM's header links this cdylib.
+    "wz-capi-c",
+    # R311y498 (§5.27) — the ABI-NEUTRAL session model both C ABI crates sit on:
+    # the face registry, the declaration SSOT replayed per face, and the drive
+    # thread. Extracted from wz-capi-pico when the zenoh-c ABI arrived, because the
+    # alternative was duplicating the race-free close and the drop-outside-the-lock
+    # discipline — the two things a second copy would get wrong invisibly.
+    "wz-capi-core",
     "wz-codecs",
     "wz-codecs-test-support",
     # R311y492 (§5.22 plugin-dynamic-loading) — the host<->plugin C ABI contract,

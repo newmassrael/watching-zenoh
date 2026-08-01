@@ -337,6 +337,47 @@ jobs:
       - name: Layer C1 — cargo test --workspace
         run: bash scripts/run-ci.sh --layer C1
 
+      - name: Cache the zenoh-c oracle (pinned 1.5.0)
+        # zenoh-c 1.5.0 is a FIXED upstream release, so headers + libzenohc.so +
+        # the example clone are a pure function of the version — cache the
+        # artifacts rather than re-fetching every run. Keyed on the SCRIPT's
+        # content too: a cache once populated by a recipe that installed the wrong
+        # feature set would otherwise strand the layout gate behind it for as long
+        # as the key lives.
+        id: zenoh-c-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/include
+            ~/.local/lib/libzenohc.so
+            ~/zenoh-c-ref
+          key: zenoh-c-1.5.0-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh') }}
+
+      - name: Provision the zenoh-c oracle (cache miss only)
+        if: steps.zenoh-c-cache.outputs.cache-hit != 'true'
+        run: bash scripts/install-zenoh-c.sh
+
+      - name: Layer C1cc — §5.27 api-compat-c, the zenoh-c drop-in
+        # R311y498. Wired in the SAME commit that adds the lane.
+        #
+        # WZ_C1CC_REQUIRE=1 because this job PROVISIONS the oracle above: without
+        # it an absent oracle is a SKIP, and a skip is green — the R311y265
+        # masked-skip burn that R311y495 caught C1bp committing for two rounds. If
+        # the provisioning step ever silently yields nothing, this lane reds
+        # instead of passing.
+        #
+        # Three bound properties, each shown by its own damage: the LAYOUT gate
+        # compares wz's type footprints against what a C compiler measures from
+        # the INSTALLED header (the crate's own const assertions cannot see the
+        # header move — they only check that file against itself); the DROP-IN leg
+        # compiles upstream's own z_put.c against upstream's own header and links
+        # it BOTH ways, requiring one wz subscriber to observe both arms; and the
+        # COVERAGE report prints how many upstream examples link, so a slice stays
+        # a measured fraction rather than a declared milestone.
+        env:
+          WZ_C1CC_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer C1cc
+
       - name: Layer C1bv — §5.24 dynamic storage-volume loading (unit + ABI + wire)
         # R311y497. Wired in the SAME commit that adds the lane.
         #

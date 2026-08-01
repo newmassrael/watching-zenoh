@@ -69,8 +69,10 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use tokio::sync::Notify;
 
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
+use wz_runtime_tokio::declare::LivelinessSample;
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
+use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
@@ -80,24 +82,75 @@ use wz_runtime_tokio::session::{
     Subscriber, TokioSession,
 };
 use wz_runtime_tokio::session_glue::{IterationEvent, SessionLinkActions};
+use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::Mutex as WzMutex;
 
-use crate::pubsub::{make_liveliness_callback, make_subscriber_callback, CClosure};
-use crate::query::{make_queryable_callback, CQueryClosure};
+// R311y498 — NO `use crate::pubsub` / `use crate::query` here, deliberately.
+//
+// This registry used to import the C closure TYPES and the `make_*_callback`
+// constructors that turn them into wz callbacks, which pointed the dependency
+// the wrong way: the ABI-neutral face/declaration model reached UP into one
+// specific C ABI's closure shape. That is what made it impossible to put a
+// second C ABI (§5.27 `api-compat-c`, the zenoh-c drop-in) over the same session
+// model without either duplicating this file or generalising it.
+//
+// The dependency is inverted through the three FACTORY aliases below: the ABI
+// shim hands in something that MINTS a callback, and this file never learns what
+// it closes over. A factory rather than a ready-made callback because a callback
+// is needed once PER FACE — every declaration is replayed onto each new face
+// (`face_up`), so a single pre-built callback could not be reused.
+//
+// The C drop semantics are preserved exactly, and they are the delicate part:
+// the factory owns whatever the shim captured (its `Arc<CClosure>`), so the last
+// factory released still runs the C `drop(context)` — which is why every release
+// below stays OUTSIDE the registry lock.
+
+/// Mints one subscriber callback per face — the inverted form of what used to be
+/// `make_subscriber_callback(Arc<CClosure>)`.
+pub type SubscriberSink =
+    Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
+
+/// Mints one liveliness-subscriber callback per face.
+pub type LivelinessSink =
+    Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
+
+/// Mints one queryable callback per face.
+pub type QueryableSink = Arc<
+    dyn Fn() -> Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static> + Send + Sync,
+>;
+
+/// Why a fan-out publish could not be delivered to ANY face.
+///
+/// Named `FanoutError`, not `PublishError`: wz-runtime-tokio already exports a
+/// per-session `PublishError` that this module imports, and two types with one
+/// name in one file is the shape a later reader resolves wrongly.
+///
+/// R311y498 — a real type rather than `Result<_, ()>`, and not merely to satisfy
+/// `clippy::result_unit_err`: this became public when the model moved out of the
+/// ABI crate, and a public function whose error carries no information leaves
+/// every shim mapping "something went wrong" onto its own generic code with no
+/// way to do better. The variant is face-INDEPENDENT by construction — a
+/// per-face failure is skipped rather than surfaced (see the fan-out docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanoutError {
+    /// The payload or keyexpr exceeded the bounded codec's capacity, so no face
+    /// could have carried it.
+    ExceedsCapacity,
+}
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries.
 /// It keys the per-face wz [`Subscriber`]s this one C subscription spawned.
-pub(crate) type SubId = u64;
+pub type SubId = u64;
 
 /// A C-level queryable id — what a `z_owned_queryable_t` handle carries. The
 /// responder-side mirror of [`SubId`], keying the per-face wz [`Queryable`]s
 /// one C queryable declaration spawned.
-pub(crate) type QblId = u64;
+pub type QblId = u64;
 
 /// The face id the dial (`connect`) role occupies. A dialed session has
 /// exactly one peer, so it needs no id space of its own; the accept role's
 /// ids come from the accept loop's own monotonic `FaceId`.
-pub(crate) const DIAL_FACE_ID: u64 = 0;
+pub const DIAL_FACE_ID: u64 = 0;
 
 /// One connected peer: its wz session, plus the wz subscribers this face
 /// carries keyed by the C subscription id that spawned them. Dropping the
@@ -128,7 +181,7 @@ struct FaceEntry {
 struct SubEntry {
     id: SubId,
     keyexpr: String,
-    closure: Arc<CClosure>,
+    sink: SubscriberSink,
 }
 
 /// A C-declared queryable — the responder-side SSOT, replayed onto every face
@@ -141,7 +194,7 @@ struct QblEntry {
     id: QblId,
     keyexpr: String,
     complete: bool,
-    closure: Arc<CQueryClosure>,
+    sink: QueryableSink,
 }
 
 /// A C-declared keyexpr alias — the third SSOT, replayed onto every face
@@ -175,12 +228,12 @@ struct LiveSubEntry {
     id: SubId,
     keyexpr: String,
     history: bool,
-    closure: Arc<CClosure>,
+    sink: LivelinessSink,
 }
 
 /// A C-level liveliness token id, keying the per-face wz tokens one C
 /// declaration spawned.
-pub(crate) type TokenId = u64;
+pub type TokenId = u64;
 
 #[derive(Default)]
 struct Inner {
@@ -203,13 +256,13 @@ struct Inner {
 /// The registry behind a `z_owned_session_t`, shared between the C thread
 /// (which declares and publishes) and the drive thread (which brings faces up
 /// and dispatches inbound samples).
-pub(crate) struct SharedSession {
+pub struct SharedSession {
     inner: StdMutex<Inner>,
     clock: TokioTime,
 }
 
 impl SharedSession {
-    pub(crate) fn new(clock: TokioTime) -> Self {
+    pub fn new(clock: TokioTime) -> Self {
         Self {
             inner: StdMutex::new(Inner::default()),
             clock,
@@ -230,7 +283,7 @@ impl SharedSession {
     /// A face reached Established: build its session and replay the whole
     /// declaration SSOT — subscriptions AND queryables — onto it (pico's
     /// push-declarations-to-the-new-peer, `accept.c:148-149`).
-    pub(crate) fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>) {
+    pub fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>) {
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock));
 
@@ -254,7 +307,7 @@ impl SharedSession {
             if let Ok(sub) = session.declare_subscriber(
                 entry.keyexpr.clone(),
                 SubscribeOptions::default(),
-                make_subscriber_callback(entry.closure.clone()),
+                (entry.sink)(),
             ) {
                 subs.insert(entry.id, sub);
             }
@@ -264,7 +317,7 @@ impl SharedSession {
             if let Ok(qbl) = session.declare_queryable(
                 entry.keyexpr.clone(),
                 queryable_options(entry.complete),
-                make_queryable_callback(entry.closure.clone()),
+                (entry.sink)(),
             ) {
                 qbls.insert(entry.id, qbl);
             }
@@ -291,11 +344,9 @@ impl SharedSession {
         for entry in &guard.live_subs {
             let mut opts = LivelinessSubscriberOptions::default();
             opts.history = entry.history;
-            if let Ok(sub) = session.declare_liveliness_subscriber(
-                entry.keyexpr.clone(),
-                opts,
-                make_liveliness_callback(entry.closure.clone()),
-            ) {
+            if let Ok(sub) =
+                session.declare_liveliness_subscriber(entry.keyexpr.clone(), opts, (entry.sink)())
+            {
                 live_subs.insert(entry.id, sub);
             }
         }
@@ -315,7 +366,7 @@ impl SharedSession {
     }
 
     /// A face left the live set (peer Close / link loss).
-    pub(crate) fn face_down(&self, id: u64) {
+    pub fn face_down(&self, id: u64) {
         // Drop OUTSIDE the lock: dropping the entry drops its subscribers,
         // and the last one may release the final `Arc<CClosure>` and run the
         // C `drop(context)`.
@@ -354,7 +405,7 @@ impl SharedSession {
     /// is pico's own behaviour: by the time this runs the drive thread has been
     /// joined, so no `call` can be in flight to race it — and the `Arc` refcount
     /// serialises it regardless (see the `unsafe impl Sync for CReplyClosure`).
-    pub(crate) fn clear_faces(&self) {
+    pub fn clear_faces(&self) {
         // Take OUTSIDE the lock, drop OUTSIDE the lock — the standing
         // discipline: dropping a face runs the C `drop(context)` for any
         // closure it held the last reference to.
@@ -394,7 +445,7 @@ impl SharedSession {
     /// cadence. Sweeping on EVERY event (not only a deadline wake) is
     /// deliberate: it is idempotent and cheap when nothing is expired, and it
     /// means inbound traffic also clears the table.
-    pub(crate) fn dispatch(&self, id: u64, event: IterationEvent<'_>) {
+    pub fn dispatch(&self, id: u64, event: IterationEvent<'_>) {
         // Clone the session out of the lock first: the dispatch fires the C
         // subscriber callback, which may re-enter this session (`z_put` from
         // inside a callback is a supported pico pattern), so holding the lock
@@ -415,7 +466,7 @@ impl SharedSession {
     /// table): a `z_get` fans one wz `query` per face, and each face's drive
     /// loop arms only its own deadline. A face with no pending get arms
     /// nothing, so an idle session's cadence is unchanged.
-    pub(crate) fn next_reply_deadline_ms(&self, id: u64) -> Option<u64> {
+    pub fn next_reply_deadline_ms(&self, id: u64) -> Option<u64> {
         let session = self.lock().faces.get(&id).map(|face| face.session.clone());
         session.and_then(|session| session.next_reply_deadline_ms())
     }
@@ -434,12 +485,12 @@ impl SharedSession {
     /// codec (`ExceedsCapacity`), which would fail identically on every face —
     /// is surfaced. Zero faces is `Ok(0)`: a put with no peer connected simply
     /// has no recipient (pico's empty peer list → OK).
-    pub(crate) fn publish_all(
+    pub fn publish_all(
         &self,
         keyexpr: &str,
         payload: &[u8],
         opts: &PublishOptions,
-    ) -> Result<usize, ()> {
+    ) -> Result<usize, FanoutError> {
         let sessions = self.face_sessions();
         let mut delivered = 0usize;
         for session in sessions {
@@ -449,7 +500,7 @@ impl SharedSession {
                 // best-effort, keep delivering to the surviving faces.
                 Err(PublishError::TransportUnavailable) => {}
                 // Deterministic, face-independent: fails on every face.
-                Err(_) => return Err(()),
+                Err(_) => return Err(FanoutError::ExceedsCapacity),
             }
         }
         Ok(delivered)
@@ -469,12 +520,12 @@ impl SharedSession {
     /// table entry, and skipping it lets the healthy peers still receive the
     /// sample. Every other error is deterministic and face-independent, so it
     /// is surfaced.
-    pub(crate) fn publish_aliased_all(
+    pub fn publish_aliased_all(
         &self,
         mapping_id: u64,
         payload: &[u8],
         opts: &PublishOptions,
-    ) -> Result<usize, ()> {
+    ) -> Result<usize, FanoutError> {
         let sessions = self.face_sessions();
         let mut delivered = 0usize;
         for session in sessions {
@@ -482,7 +533,7 @@ impl SharedSession {
                 Ok(n) => delivered += n,
                 Err(PublishAliasError::UnknownMapping(_)) => {}
                 Err(PublishAliasError::TransportUnavailable) => {}
-                Err(_) => return Err(()),
+                Err(_) => return Err(FanoutError::ExceedsCapacity),
             }
         }
         Ok(delivered)
@@ -501,7 +552,7 @@ impl SharedSession {
     /// rejected by `send_declare_keyexpr` and must not be handed out. Refusing
     /// is the honest answer — wrapping would silently re-issue a live id and
     /// re-point a peer's existing alias at a different keyexpr.
-    pub(crate) fn declare_keyexpr(&self, keyexpr: String) -> Option<u64> {
+    pub fn declare_keyexpr(&self, keyexpr: String) -> Option<u64> {
         let mut guard = self.lock();
         let id = guard.next_kexpr_id.checked_add(1)?;
         if id > u64::from(u16::MAX) {
@@ -522,7 +573,7 @@ impl SharedSession {
     /// No cross-lock drop dance is needed here, unlike the subscriber and
     /// queryable twins: a [`KexprEntry`] owns a `String` and no `Arc<CClosure>`,
     /// so releasing it cannot run C code.
-    pub(crate) fn undeclare_keyexpr(&self, mapping_id: u64) {
+    pub fn undeclare_keyexpr(&self, mapping_id: u64) {
         let mut guard = self.lock();
         if let Some(pos) = guard.kexprs.iter().position(|e| e.id == mapping_id) {
             guard.kexprs.remove(pos);
@@ -544,7 +595,7 @@ impl SharedSession {
     /// (u64) but is surfaced rather than wrapped, for the same reason
     /// [`Self::declare_keyexpr`] refuses: a reused id would retract a live
     /// token belonging to someone else.
-    pub(crate) fn declare_liveliness_token(&self, keyexpr: String) -> Option<TokenId> {
+    pub fn declare_liveliness_token(&self, keyexpr: String) -> Option<TokenId> {
         let mut guard = self.lock();
         let id = guard.next_token_id.checked_add(1)?;
         guard.next_token_id = id;
@@ -564,7 +615,7 @@ impl SharedSession {
     /// Retract a C liveliness token: drop the SSOT entry so no future face
     /// announces it, and drop every face's wz token — each emitting that face's
     /// UndeclToken, which is what tells subscribers the resource is gone.
-    pub(crate) fn undeclare_liveliness_token(&self, id: TokenId) {
+    pub fn undeclare_liveliness_token(&self, id: TokenId) {
         let mut dropped = Vec::new();
         {
             let mut guard = self.lock();
@@ -590,22 +641,21 @@ impl SharedSession {
     /// gets back a `z_owned_subscriber_t` either way, so one id space is what
     /// lets [`Self::undeclare_subscriber`] serve both without the caller
     /// having to remember which kind it holds.
-    pub(crate) fn declare_liveliness_subscriber(
+    pub fn declare_liveliness_subscriber(
         &self,
         keyexpr: String,
         options: LivelinessSubscriberOptions,
-        closure: Arc<CClosure>,
+        sink: LivelinessSink,
     ) -> SubId {
         let mut guard = self.lock();
         let id = guard.next_sub_id;
         guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
 
         for face in guard.faces.values_mut() {
-            if let Ok(sub) = face.session.declare_liveliness_subscriber(
-                keyexpr.clone(),
-                options.clone(),
-                make_liveliness_callback(closure.clone()),
-            ) {
+            if let Ok(sub) =
+                face.session
+                    .declare_liveliness_subscriber(keyexpr.clone(), options.clone(), sink())
+            {
                 face.live_subs.insert(id, sub);
             }
         }
@@ -613,7 +663,7 @@ impl SharedSession {
             id,
             keyexpr,
             history: options.history,
-            closure,
+            sink,
         });
         id
     }
@@ -626,7 +676,7 @@ impl SharedSession {
     /// `z_get`) may invoke C code, and a pico callback is allowed to re-enter
     /// the session, so walking `guard.faces` while calling into a face would
     /// deadlock the non-reentrant mutex.
-    pub(crate) fn face_sessions(&self) -> Vec<TokioSession> {
+    pub fn face_sessions(&self) -> Vec<TokioSession> {
         self.lock()
             .faces
             .values()
@@ -641,7 +691,7 @@ impl SharedSession {
     /// come from the same snapshot: a face that leaves the registry between the
     /// two reads would otherwise have its query issued and its wake never
     /// notified.
-    pub(crate) fn face_sessions_with_wake(&self) -> Vec<(TokioSession, Arc<Notify>)> {
+    pub fn face_sessions_with_wake(&self) -> Vec<(TokioSession, Arc<Notify>)> {
         self.lock()
             .faces
             .values()
@@ -650,7 +700,7 @@ impl SharedSession {
     }
 
     /// Face `id`'s drive-loop re-arm signal (see [`FaceEntry::revised`]).
-    pub(crate) fn deadline_revised(&self, id: u64) -> Option<Arc<Notify>> {
+    pub fn deadline_revised(&self, id: u64) -> Option<Arc<Notify>> {
         self.lock().faces.get(&id).map(|face| face.revised.clone())
     }
 
@@ -666,7 +716,7 @@ impl SharedSession {
     /// its first peer) this declares nothing on the wire and still records the
     /// entry — pico's declare-before-peer. Infallible today; keyexpr canonicity
     /// validation is a separate follow-up.
-    pub(crate) fn declare_subscriber(&self, keyexpr: String, closure: Arc<CClosure>) -> SubId {
+    pub fn declare_subscriber(&self, keyexpr: String, sink: SubscriberSink) -> SubId {
         let mut guard = self.lock();
         let id = guard.next_sub_id;
         guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
@@ -675,23 +725,19 @@ impl SharedSession {
             if let Ok(sub) = face.session.declare_subscriber(
                 keyexpr.clone(),
                 SubscribeOptions::default(),
-                make_subscriber_callback(closure.clone()),
+                sink(),
             ) {
                 face.subs.insert(id, sub);
             }
         }
-        guard.subs.push(SubEntry {
-            id,
-            keyexpr,
-            closure,
-        });
+        guard.subs.push(SubEntry { id, keyexpr, sink });
         id
     }
 
     /// Drop a C subscription: remove it from the SSOT so no future face
     /// replays it, and drop every face's wz subscriber for it (each emitting
     /// its wire undeclare).
-    pub(crate) fn undeclare_subscriber(&self, id: SubId) {
+    pub fn undeclare_subscriber(&self, id: SubId) {
         let mut dropped = Vec::new();
         let mut dropped_entry = None;
         let mut dropped_live = Vec::new();
@@ -745,22 +791,16 @@ impl SharedSession {
     /// allocates its own request ids (`alloc_next_request_id` is per
     /// `SessionLinkActions`), so two peers querying concurrently cannot
     /// correlate onto one another's reply chain.
-    pub(crate) fn declare_queryable(
-        &self,
-        keyexpr: String,
-        complete: bool,
-        closure: Arc<CQueryClosure>,
-    ) -> QblId {
+    pub fn declare_queryable(&self, keyexpr: String, complete: bool, sink: QueryableSink) -> QblId {
         let mut guard = self.lock();
         let id = guard.next_qbl_id;
         guard.next_qbl_id = guard.next_qbl_id.wrapping_add(1);
 
         for face in guard.faces.values_mut() {
-            if let Ok(qbl) = face.session.declare_queryable(
-                keyexpr.clone(),
-                queryable_options(complete),
-                make_queryable_callback(closure.clone()),
-            ) {
+            if let Ok(qbl) =
+                face.session
+                    .declare_queryable(keyexpr.clone(), queryable_options(complete), sink())
+            {
                 face.qbls.insert(id, qbl);
             }
         }
@@ -768,7 +808,7 @@ impl SharedSession {
             id,
             keyexpr,
             complete,
-            closure,
+            sink,
         });
         id
     }
@@ -777,7 +817,7 @@ impl SharedSession {
     /// it, and drop every face's wz queryable for it (each emitting its wire
     /// `Declare(UndeclQueryable)`). Mirror of [`Self::undeclare_subscriber`],
     /// including the drop-outside-the-lock discipline.
-    pub(crate) fn undeclare_queryable(&self, id: QblId) {
+    pub fn undeclare_queryable(&self, id: QblId) {
         let mut dropped = Vec::new();
         let mut dropped_entry = None;
         {
@@ -838,12 +878,12 @@ fn queryable_options(complete: bool) -> QueryableOptions {
 /// callback. It holds `Arc<SharedSession>` (so it is `Send`, unlike the
 /// `Rc`/`RefCell` routing forwarders) because the same registry is reachable
 /// from the C thread.
-pub(crate) struct CApiForwarder {
+pub struct CApiForwarder {
     shared: Arc<SharedSession>,
 }
 
 impl CApiForwarder {
-    pub(crate) fn new(shared: Arc<SharedSession>) -> Self {
+    pub fn new(shared: Arc<SharedSession>) -> Self {
         Self { shared }
     }
 }

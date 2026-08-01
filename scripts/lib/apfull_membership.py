@@ -72,6 +72,14 @@ EXCLUSIONS = {
     "platform-qnx": ("alt-platform", "this preset is the Linux deploy"),
     "platform-windows": ("alt-platform", "this preset is the Linux deploy"),
     "platform-zephyr": ("alt-platform", "this preset is the Linux deploy"),
+    # R311y498 — the same shape one layer further out, and it was found the hard
+    # way: the two C ABIs SHARE the `z_*` symbol namespace (both export z_open,
+    # z_put, z_session_loan, ... with different type layouts), so a binary can
+    # offer one or the other and linking both is a duplicate-symbol error. The
+    # preset names `api-compat-pico`; `api-compat-c` is its alternative, not an
+    # addition. The wz facade turns enabling both into a compile_error, so this
+    # exclusion records a constraint the code already enforces.
+    "api-compat-c": ("alt-abi", "this preset offers the zenoh-pico C ABI"),
     # Same shape one layer up: the preset names `runtime-tokio`, and an alternate
     # executor is a replacement for it rather than a companion to it.
     "runtime-async-std": ("alt-runtime", "this preset runs on tokio"),
@@ -83,10 +91,17 @@ EXCLUSIONS = {
     # member as of R311y496.
     "storage-backend-rocksdb": ("out-of-scope", "third-party system adapter"),
     "storage-backend-external-db": ("out-of-scope", "third-party system adapter"),
-    # Nothing to carry: the atom has no implementation behind it yet. This is the
-    # exclusion most likely to expire, and it expires by itself -- the predicate
-    # reads the inventory's own UNBUILT tag, so grading it otherwise fails here.
-    "api-compat-c": ("unbuilt", "no implementation to compose yet"),
+    # The `unbuilt` CATEGORY and its predicate remain defined below with no entry
+    # using them, deliberately: it is the exclusion an atom lands in when work is
+    # scheduled but not done, and both atoms that ever used it (R311y497's
+    # storage-mgr-dynamic-volume-loading, R311y498's api-compat-c) left it the only
+    # way it can be left -- by being built.
+    # R311y498 REMOVED the `api-compat-c` entry that sat here. It was the LAST
+    # atom this gate printed as OPEN, and it expired the only way an `unbuilt`
+    # exclusion can: by being built (slice 1 — upstream's own z_put.c links and
+    # runs against the wz cdylib, Layer C1cc). preset-ap-full carries it beside
+    # its zenoh-pico twin. The exclusion table is now entirely alt-platform,
+    # alt-runtime and ratified out-of-scope — no OPEN items remain.
     # R311y497 REMOVED the `storage-mgr-dynamic-volume-loading` entry that sat
     # here, and the way it left is the point of this table. R311y256 deprecated
     # that atom as OBVIATED while writing the condition into its own reason -- "if
@@ -113,6 +128,16 @@ def _predicate_alt_runtime(atom, entry):
     )
 
 
+def _predicate_alt_abi(atom, entry):
+    """An `api-compat-*` OTHER than the one this preset carries.
+
+    Mirrors the alt-platform / alt-runtime predicates: the exclusion is legitimate
+    only while the atom really is an alternative to a member, so naming an atom
+    that is not an `api-compat-*` fails here rather than being taken on trust.
+    """
+    return atom.startswith("api-compat-") and atom != "api-compat-pico"
+
+
 def _predicate_out_of_scope(atom, entry):
     return entry["reason"].lstrip().upper().startswith("OUT-OF-SCOPE")
 
@@ -124,6 +149,7 @@ def _predicate_unbuilt(atom, entry):
 PREDICATES = {
     "alt-platform": (_predicate_alt_platform, "a `platform-*` other than platform-linux"),
     "alt-runtime": (_predicate_alt_runtime, "a `runtime-*` other than the tokio set"),
+    "alt-abi": (_predicate_alt_abi, "an `api-compat-*` other than api-compat-pico"),
     "out-of-scope": (_predicate_out_of_scope, "an inventory reason tagged OUT-OF-SCOPE"),
     "unbuilt": (_predicate_unbuilt, "an inventory reason tagged UNBUILT"),
 }

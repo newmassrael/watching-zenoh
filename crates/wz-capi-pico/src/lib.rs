@@ -70,7 +70,6 @@
 pub mod abi;
 pub mod bytes;
 pub mod config;
-mod faces;
 mod ffi;
 pub mod get;
 pub mod keyexpr;

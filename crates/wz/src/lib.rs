@@ -97,6 +97,35 @@ pub use wz_rest as rest;
 #[cfg(feature = "api-compat-pico")]
 pub use wz_capi_pico as capi_pico;
 
+// §5.27 — THE TWO C ABIs ARE MUTUALLY EXCLUSIVE, and this is where that is
+// enforced rather than discovered.
+//
+// zenoh-pico and zenoh-c share the `z_*` symbol namespace: both export
+// `z_open`, `z_put`, `z_session_loan`, `z_session_loan_mut`, and so on, with
+// DIFFERENT type footprints and different semantics behind them. Linking both
+// into one binary is a duplicate-symbol error from `rust-lld`, which is exactly
+// how R311y498 found this — a full run-ci sweep reddened eight lanes with
+// `duplicate symbol: z_session_loan_mut` after preset-ap-full was given both.
+//
+// A `compile_error!` rather than a comment: the linker's message names a symbol
+// and no reason, so an operator who enabled both features would be reading
+// rust-lld output to learn a fact this crate already knows. This makes the
+// conflict unrepresentable at the layer that understands it.
+#[cfg(all(feature = "api-compat-pico", feature = "api-compat-c"))]
+compile_error!(
+    "api-compat-pico and api-compat-c cannot be enabled together: zenoh-pico and \
+     zenoh-c both export the `z_*` C symbols (z_open, z_put, z_session_loan, ...) \
+     with different type layouts, so linking both cdylibs into one binary is a \
+     duplicate-symbol error. Pick the ABI this deployment offers."
+);
+
+// §5.27 api-compat-c — the zenoh-c-compatible C ABI, re-exported as `wz::capi_c`.
+// Same shape and same reason as its pico twin above: the cfg gate here is the
+// atom's composition toggle (the A3 active-site) and the whole crate is elided
+// when the feature is off.
+#[cfg(feature = "api-compat-c")]
+pub use wz_capi_c as capi_c;
+
 // R311ax — runtime-coop namespace lands. Symmetric shape with the
 // AP-side `runtime_tokio` re-export so a generic consumer reading
 // `wz::runtime_tokio::TokioRuntime` and `wz::runtime_coop::CoopRuntime`

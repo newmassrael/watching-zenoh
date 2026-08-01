@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-capi-c — §5.27 api-compat-c, slice 1.
+#
+# A zenoh-c-compatible C ABI (`z_*` / `zc_*` `#[no_mangle] extern "C"` symbols)
+# over the wz AP session, so a program written for zenoh-c links wz's cdylib as a
+# binary drop-in. The sibling of `wz-capi-pico`, over the SAME session model
+# (`wz-capi-core`) — two ABIs, one model.
+#
+# ## It ships NO header, deliberately
+#
+# `wz-capi-pico` R1 shipped its own header, so a program compiled against THAT
+# header was self-consistent and the exact layout match could be deferred. This
+# crate cannot take that route and should not want to: zenoh-c's real header is
+# cbindgen OUTPUT, so it IS the ABI, and the whole claim here is that a program
+# compiled against UPSTREAM's unmodified header links this library. A wz-authored
+# header would make that claim untestable by construction.
+#
+# ## Slice 1 is defined by an upstream PROGRAM, not by a symbol list
+#
+# The scope is "upstream's `examples/z_put.c` links and runs against this
+# cdylib": 12 symbols, measured with `nm -u` rather than chosen. That distinction
+# is not pedantry — a hand-picked list drafted before the measurement had 4
+# symbols zenoh-c does not use and was missing 3 it does (`z_bytes_from_static_str`
+# rather than `z_bytes_copy_from_str`, `zc_config_from_file` +
+# `zc_config_insert_json5` rather than `zc_config_from_str`, and
+# `zc_init_log_from_env_or`, which nothing would have suggested).
+#
+# The remaining upstream examples are the backlog, and the lane REPORTS the ratio
+# every run so partial coverage stays visible instead of implied.
+#
+# crate-type = ["cdylib", "rlib"]:
+#   - cdylib: the artifact a zenoh-c program links.
+#   - rlib:   so the facade can re-export it and so gate tests can drive the
+#             exported symbols in-process.
+#
+# AP/std-only.
+
+[package]
+name = "wz-capi-c"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "zenoh-c-compatible C ABI (cdylib) over the wz AP session — a binary drop-in for zenoh-c programs (§5.27 api-compat-c slice 1)."
+
+[lib]
+name = "wz_capi_c"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# zenoh-c's own build flags change its ABI, so wz's must be able to follow.
+# `z_owned_bytes_t` is 40 bytes in upstream's published standalone archive (built
+# WITH Z_FEATURE_UNSTABLE_API) and 32 in a build without it — measured, by
+# provisioning the archive beside a local install and asking a C compiler.
+# DEFAULT = the published archive, because that is what a consumer installs and
+# what CI provisions. This feature selects the other.
+zenoh-c-no-unstable-api = []
+
+[dependencies]
+# The ABI-neutral session model, shared with wz-capi-pico.
+wz-capi-core = { path = "../wz-capi-core" }
+wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["routing-accept"] }
+
+[lints]
+workspace = true

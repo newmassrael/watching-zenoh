@@ -458,6 +458,99 @@ pub mod common {
         );
     }
 
+    /// R311y498 — the §5.27 `api-compat-c` cdylib, the zenoh-c ABI's artifact.
+    pub fn wz_capi_c_cdylib() -> PathBuf {
+        let crates_dir = project_root().join("crates");
+        let candidates = [
+            crates_dir.join("target/debug/libwz_capi_c.so"),
+            crates_dir.join("target/release/libwz_capi_c.so"),
+        ];
+        for c in &candidates {
+            if c.is_file() {
+                return c.clone();
+            }
+        }
+        panic!(
+            "libwz_capi_c.so not found in {candidates:?}; \
+             run `cargo build -p wz-capi-c` first"
+        );
+    }
+
+    /// The zenoh-c ORACLE on this machine: its include dir, its library dir, and
+    /// its example corpus.
+    ///
+    /// `None` when any part is missing. It is machine-local — the headers are an
+    /// installed artifact and the examples are a clone — so a caller must decide
+    /// whether absence is a SKIP or a hard failure. The lane makes that decision
+    /// with an arming flag; this function only reports.
+    ///
+    /// Overridable with `WZ_ZENOH_C_PREFIX` / `WZ_ZENOH_C_EXAMPLES` so a CI job
+    /// that provisions the oracle elsewhere does not need this list edited.
+    pub fn zenoh_c_oracle() -> Option<(PathBuf, PathBuf, PathBuf)> {
+        let home = PathBuf::from(std::env::var("HOME").ok()?);
+        let prefix = std::env::var("WZ_ZENOH_C_PREFIX")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".local"));
+        let examples = std::env::var("WZ_ZENOH_C_EXAMPLES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join("zenoh-c-ref/examples"));
+        let include = prefix.join("include");
+        let libdir = prefix.join("lib");
+        if !include.join("zenoh.h").is_file()
+            || !libdir.join("libzenohc.so").is_file()
+            || !examples.join("z_put.c").is_file()
+        {
+            return None;
+        }
+        Some((include, libdir, examples))
+    }
+
+    /// Compile ONE upstream zenoh-c example against a chosen library.
+    ///
+    /// `link` is the library NAME (`wz_capi_c` for the drop-in arm, `zenohc` for
+    /// the reference arm) and `libdir` is where it lives. The SOURCE and the
+    /// HEADERS are upstream's in both arms, unmodified — that is the whole point:
+    /// the only thing that differs between the two binaries is which
+    /// implementation answers the `z_*` calls.
+    pub fn compile_zenoh_c_example(
+        example: &str,
+        out_dir: &Path,
+        include: &Path,
+        examples: &Path,
+        libdir: &Path,
+        link: &str,
+    ) -> Result<PathBuf, String> {
+        let src = examples.join(format!("{example}.c"));
+        if !src.is_file() {
+            return Err(format!("upstream example {} missing", src.display()));
+        }
+        let exe = out_dir.join(format!("{example}_on_{link}"));
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let out = Command::new(&cc)
+            .arg(&src)
+            .arg("-std=c11")
+            .arg(format!("-I{}", include.display()))
+            // upstream's examples include their own `parse_args.h` from the
+            // example directory.
+            .arg(format!("-I{}", examples.display()))
+            .arg("-o")
+            .arg(&exe)
+            .arg(format!("-L{}", libdir.display()))
+            .arg(format!("-l{link}"))
+            .arg(format!("-Wl,-rpath,{}", libdir.display()))
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn C compiler {cc:?}: {e}"));
+        if !out.status.success() {
+            return Err(format!(
+                "{cc} failed for {example}.c against -l{link} (status {:?})\n\
+                 --- stderr ---\n{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr),
+            ));
+        }
+        Ok(exe)
+    }
+
     /// R311y482 — refuse a cdylib OLDER than the `wz-capi-pico` sources it is
     /// supposed to be built from.
     ///

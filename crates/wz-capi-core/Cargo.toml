@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-capi-core — the ABI-NEUTRAL session model every wz C ABI sits on (R311y498).
+#
+# wz exports more than one C ABI: §5.27 `api-compat-pico` (zenoh-pico's) and
+# `api-compat-c` (zenoh-c's). They are genuinely different ABIs — different
+# entry symbols, different type footprints (pico's owned session is 16 bytes,
+# zenoh-c's is 8), different ownership macros — but they are ONE session model:
+# a registry of per-face wz sessions, the declaration SSOT replayed onto each
+# face as it comes up, and one OS thread per session running a tokio runtime
+# that drives the whole lifecycle.
+#
+# That model used to live inside `wz-capi-pico`, which made the second ABI a
+# choice between duplicating it and generalising it. Duplicating would have
+# copied the part that is hardest to get right and easiest to let drift: the
+# race-free close (a stop latch set BEFORE the notify, because a `Notify` permit
+# is single-use) and the drop-outside-the-lock discipline that keeps a C
+# `drop(context)` from re-entering the registry it is being released from. A
+# second copy would have been wrong in ways no test in the second crate could
+# see.
+#
+# So the model moved here whole, and the ONE thing that was ABI-specific about
+# it — the C closure types it stored and converted — was inverted into callback
+# FACTORIES the ABI shim supplies. Nothing in this crate knows what a `z_*` type
+# is.
+#
+# `rlib` only: this is a Rust-internal seam, not an artifact anyone links from C.
+# The cdylibs are the ABI crates.
+
+[package]
+name = "wz-capi-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The ABI-neutral session model (face registry, declaration SSOT, drive thread) shared by watching-zenoh's C ABI crates."
+
+[lib]
+name = "wz_capi_core"
+path = "src/lib.rs"
+
+[features]
+# The two link kinds the LISTEN role's accept-config arms are cfg'd on. They
+# forward to wz-runtime-tokio exactly as wz-capi-pico's twins do; the drive half
+# moved here carries the `#[cfg]`s, so the feature names must exist here or the
+# arms silently become unknown-cfg (which `-D warnings` rejects, and did).
+transport-link-quic = ["wz-runtime-tokio/transport-link-quic"]
+transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe"]
+
+[dependencies]
+# OS entropy for the per-session zid, as zenoh-pico does at `z_open`
+# (`~/zenoh-pico/src/api/api.c:846-855`). Moved here with `fresh_zid`.
+getrandom = "0.2"
+# Same reasoning as wz-capi-pico's: depend on wz-runtime-tokio DIRECTLY, never
+# the `wz` facade, which re-exports the ABI crates and would form a cycle.
+# `routing-accept` is not in the default bundle and gates `accept_loop`, which
+# the listen role needs.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["routing-accept"] }
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
+
+[lints]
+workspace = true

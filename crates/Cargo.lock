@@ -2368,6 +2368,7 @@ version = "0.1.0"
 dependencies = [
  "lwip-sys",
  "sce-rust-runtime",
+ "wz-capi-c",
  "wz-capi-pico",
  "wz-link-lwip",
  "wz-rest",
@@ -2411,12 +2412,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-capi-c"
+version = "0.1.0"
+dependencies = [
+ "wz-capi-core",
+ "wz-runtime-tokio",
+]
+
+[[package]]
+name = "wz-capi-core"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "tokio",
+ "wz-runtime-tokio",
+]
+
+[[package]]
 name = "wz-capi-pico"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "libc",
  "tokio",
+ "wz-capi-core",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
 ]
@@ -2520,6 +2539,7 @@ name = "wz-integration-tests"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "libloading",
  "proptest",
  "sce-forge-runtime",
  "sce-rust-runtime",

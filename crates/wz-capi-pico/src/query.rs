@@ -74,11 +74,11 @@ use crate::abi::{
     handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
     z_view_string_t,
 };
-use crate::faces::{QblId, SharedSession};
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
+use wz_capi_core::faces::{QblId, SharedSession};
 
 // --- pico enum-typed option fields -----------------------------------------
 //
@@ -767,9 +767,12 @@ unsafe fn declare_queryable_inner(
     } else {
         (*options).complete
     };
-    let id = state
-        .shared
-        .declare_queryable(ke.clone(), complete, Arc::new(cclosure));
+    let id = state.shared.declare_queryable(ke.clone(), complete, {
+        // R311y498 — see the pubsub/liveliness twins: the shim mints, the
+        // registry calls the factory per face, the C drop(context) is unmoved.
+        let closure = Arc::new(cclosure);
+        Arc::new(move || Box::new(make_queryable_callback(closure.clone())) as Box<_>)
+    });
     Ok((state.shared.clone(), id, ke))
 }
 

@@ -58,7 +58,7 @@ crate-type = ["cdylib", "rlib"]
 # the `unixpipe/` scheme still parses but `bind_locator` returns a feature-gated
 # `Unsupported` at bind, so `bind_endpoint` errors before the guard. NOT enabled
 # by any default; only the run-ci C1bl-style pico lane builds with it.
-transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe"]
+transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe", "wz-capi-core/transport-link-unixpipe"]
 # R311y406 — off-default `quic/` ACCEPT transport, forwarding wz-runtime-tokio's
 # `transport-link-quic`. Unlike unixpipe, quic IS a zenoh-pico-native link (though
 # stock zenoh-pico's quic is client-dial only); wz-capi-pico adds the LISTEN side
@@ -67,12 +67,17 @@ transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe"]
 # With it, `z_open(listen="quic/..")` + those cert keys binds a mesh quic listener
 # (the --peer/--router/--router-hat demo twin, R311y405/y406); without it the
 # `quic/` scheme still parses but `bind_locator` returns `Unsupported` at bind.
-transport-link-quic = ["wz-runtime-tokio/transport-link-quic"]
+transport-link-quic = ["wz-runtime-tokio/transport-link-quic", "wz-capi-core/transport-link-quic"]
 
 [lints]
 workspace = true
 
 [dependencies]
+# R311y498 — the ABI-neutral session model (face registry + declaration SSOT +
+# drive thread) this crate used to OWN. It moved out when the zenoh-c ABI
+# arrived: two ABIs, one session model. See wz-capi-core's manifest for why
+# duplicating it was the worse option.
+wz-capi-core = { path = "../wz-capi-core" }
 # Depend on wz-runtime-tokio DIRECTLY, not the `wz` facade: the facade
 # re-exports this crate (`wz::capi_pico`), so a facade dependency here would
 # form a package cycle Cargo rejects. wz-runtime-tokio's default feature

@@ -51,6 +51,12 @@ path = "src/lib.rs"
 libc = "0.2"
 
 [dev-dependencies]
+# R311y498 — the §5.27 api-compat-c layout gate dlopens wz's OWN cdylib to read
+# its `wz_capi_c_layout` export, rather than re-transcribing the numbers into a
+# test. wz-capi-c is deliberately NOT a normal dependency here: its `#[no_mangle]`
+# `z_*` exports would collide with the real zenoh-pico symbols this crate links
+# for the layer3 codec-parity tests.
+libloading = "0.8"
 # R311nx — `codec-serial` pinned so tests/layer3_serial_framing.rs can
 # build the wz serial framing primitives (`wz_codecs::{cobs_encode,
 # cobs_decode, crc32, serial_envelope}`) for the byte-parity compare

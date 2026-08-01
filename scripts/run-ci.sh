@@ -8630,6 +8630,78 @@ layer_e12_apfull_adminspace_pico() {
 # leg that made it a cross-impl proof, because it was wired into a job that does
 # not provision the pico CLI. This lane touches no foreign binary at all, so it
 # cannot skip anywhere, and every leg that needs pico lives in E14.
+# ─── Layer C1cc — §5.27 api-compat-c: the zenoh-c drop-in ───────────
+#
+# R311y498. The ORACLE (zenoh-c's headers, libzenohc.so, and a clone of its
+# examples) is machine-local and is NOT in this repo, so the lane SKIPs when it is
+# absent — and `WZ_C1BC_REQUIRE=1` turns that skip into a hard failure on any job
+# that provisions it. The arming flag exists because a skip is green, which is the
+# R311y265 masked-skip burn and what R311y495 caught C1bp doing for two rounds.
+#
+# Named C1cc, not C1bc: C1bc is `layer_c1bc_cargo_test_mcast_qos`. The first draft
+# reused it and `--layer C1bc` ran BOTH lanes, which is how the collision showed.
+#
+# Three things run, and they are bound to different properties (each shown by its
+# own damage): the LAYOUT gate compares wz's footprints against what a C compiler
+# measures from the installed header — the in-file const assertions cannot see the
+# header move, because they only check that file against itself; the DROP-IN leg
+# compiles upstream's own z_put.c against upstream's own header and links it BOTH
+# ways, requiring the same wz subscriber to observe both; and the COVERAGE report
+# prints how many of upstream's examples link, so a slice stays a measured
+# fraction rather than a declared milestone.
+layer_c1cc_api_compat_c() {
+    # WHICH ABI to build. zenoh-c's own `Z_FEATURE_UNSTABLE_API` changes type
+    # SIZES (`z_owned_bytes_t` is 40 with it, 32 without), so "wz is a zenoh-c
+    # drop-in" is incomplete until the build is named. The lane reads the INSTALLED
+    # header and selects the matching arm rather than making every developer know
+    # which oracle they have — and the layout leg still checks the result, so a
+    # wrong selection here is caught rather than trusted.
+    local capi_c_features=()
+    local zc_configure="${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include/zenoh_configure.h"
+    if [[ -f "$zc_configure" ]] && ! grep -q '^#define Z_FEATURE_UNSTABLE_API' "$zc_configure"; then
+        capi_c_features=(--features zenoh-c-no-unstable-api)
+        echo "  Layer C1cc: oracle has no Z_FEATURE_UNSTABLE_API -> building wz-capi-c with zenoh-c-no-unstable-api"
+    fi
+    (cd crates && cargo build -p wz-capi-c "${capi_c_features[@]}" --quiet) || return 1
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    (cd crates && cargo clippy -p wz-capi-core --all-targets --quiet -- -D warnings) || return 1
+    # BOTH ABI arms are clippy-gated, not just the one this oracle selects: the
+    # other arm is still shipped code and a `#[cfg]` that stops compiling is
+    # invisible until someone with the other oracle tries it.
+    (cd crates && cargo clippy -p wz-capi-c --all-targets --quiet -- -D warnings) || return 1
+    (cd crates && cargo clippy -p wz-capi-c --features zenoh-c-no-unstable-api \
+        --all-targets --quiet -- -D warnings) || return 1
+    # Via the guarded helper, NOT a bare `| grep -q`: this script sets
+    # `set -o pipefail`, so grep's early exit races its upstream's SIGPIPE and
+    # reds the lane. The first draft here did exactly that and the lane failed
+    # with every one of its assertions passing — the hazard this helper exists to
+    # close, documented at its own definition.
+    _runci_guarded_test "C1cc wz-capi-c unit" + \
+        cargo test -p wz-capi-c --quiet || return 1
+    if [[ ! -f "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include/zenoh.h" \
+       || ! -f "${WZ_ZENOH_C_EXAMPLES:-$HOME/zenoh-c-ref/examples}/z_put.c" ]]; then
+        if [[ -n "${WZ_C1CC_REQUIRE:-}" ]]; then
+            echo "  Layer C1cc FAIL — required (WZ_C1CC_REQUIRE set) but the zenoh-c oracle is absent" >&2
+            return 1
+        fi
+        echo "  Layer C1cc SKIP (zenoh-c oracle absent: headers + examples clone)"
+        return 0
+    fi
+    # Named --exact one per invocation, like the E lanes: a rename or a silently
+    # dropped test then fails the lane instead of shrinking it.
+    for leg in \
+        the_wz_type_footprints_equal_upstreams_on_this_installation \
+        upstream_z_put_links_against_wz_capi_c_and_a_real_wz_subscriber_receives_it; do
+        _runci_guarded_test "C1cc $leg" 1 \
+            cargo test -p wz-integration-tests \
+            --test zenoh_c_examples_on_wz_capi_dropin -- --ignored --quiet --test-threads=1 \
+            --exact "$leg" || return 1
+    done
+    # REPORTED, never enforced — see the script's own header for why a ratchet
+    # needs a committed baseline and is a separate decision.
+    python3 scripts/lib/capi_c_coverage.py || return 1
+}
+
 layer_c1bv_dynamic_volume_loading() {
     # The two cdylibs. wz-volume-example is what the host loads; wz-plugin-example
     # is the honest NEGATIVE — a real loadable shared object that exports
@@ -8919,6 +8991,7 @@ run_layer D layer_d_validate_deploy || overall=1
 run_layer L layer_l_lockfile_freshness || overall=1
 run_layer C1bp layer_c1bp_plugin_dynamic_loading || overall=1
 run_layer C1bv layer_c1bv_dynamic_volume_loading || overall=1
+run_layer C1cc layer_c1cc_api_compat_c || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1

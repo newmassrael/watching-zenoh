@@ -37,7 +37,6 @@ use wz_runtime_tokio::declare::LivelinessSampleKind;
 use wz_runtime_tokio::session::LivelinessSubscriberOptions;
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t};
-use crate::faces::{SharedSession, TokenId};
 use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::keyexpr_str;
 use crate::pubsub::{
@@ -46,6 +45,7 @@ use crate::pubsub::{
 };
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
+use wz_capi_core::faces::{SharedSession, TokenId};
 
 /// pico `z_liveliness_token_options_t` — a single `uint8_t __dummy`
 /// (`api/liveliness.h:45-47`), 1 B measured. Carried for layout only; pico's
@@ -315,9 +315,16 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         // survives upstream adding a field.
         let mut opts = LivelinessSubscriberOptions::default();
         opts.history = history;
-        let id = state
-            .shared
-            .declare_liveliness_subscriber(ke, opts, Arc::new(cclosure));
+        let id = state.shared.declare_liveliness_subscriber(ke, opts, {
+            // R311y498 — the ABI shim mints the callback; the registry only
+            // calls the factory (once per face). The `Arc<CClosure>` lives
+            // in the factory, so the C `drop(context)` still fires when the
+            // last one is released.
+            let closure = Arc::new(cclosure);
+            Arc::new(move || {
+                Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>
+            })
+        });
         let boxed = Box::new(SubscriberState {
             shared: state.shared.clone(),
             id,

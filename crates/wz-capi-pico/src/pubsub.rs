@@ -41,11 +41,11 @@ use crate::abi::{
     z_owned_bytes_t,
 };
 use crate::bytes::ByteBuf;
-use crate::faces::{SharedSession, SubId};
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{keyexpr_mapping, keyexpr_str};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
+use wz_capi_core::faces::{SharedSession, SubId};
 
 // --- opaque loaned sample --------------------------------------------------
 
@@ -709,7 +709,10 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // records the entry (pico's declare-before-peer); each face replays the
         // SSOT as it comes up. Recording the local entry always succeeds
         // (mirrors pico's `_z_register_subscriber`).
-        let id = state.shared.declare_subscriber(ke, Arc::new(cclosure));
+        let id = state.shared.declare_subscriber(ke, {
+            let closure = Arc::new(cclosure);
+            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+        });
         let boxed = Box::new(SubscriberState {
             shared: state.shared.clone(),
             id,
@@ -765,7 +768,10 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         // The returned SubId is deliberately discarded: with no owned handle
         // there is nothing that could ever undeclare it, so retaining the id
         // would only invite a caller-less removal path that pico does not have.
-        let _ = state.shared.declare_subscriber(ke, Arc::new(cclosure));
+        let _ = state.shared.declare_subscriber(ke, {
+            let closure = Arc::new(cclosure);
+            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+        });
         Z_OK
     })
 }

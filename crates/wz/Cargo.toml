@@ -75,6 +75,9 @@ wz-rest = { path = "../wz-rest", optional = true }
 # depends on wz-runtime-tokio directly (NOT the facade) to avoid a package
 # cycle; the facade only re-exports it as `wz::capi_pico`.
 wz-capi-pico = { path = "../wz-capi-pico", optional = true, default-features = false }
+# R311y498 (§5.27 api-compat-c) — the zenoh-c-compatible C ABI, the sibling of
+# wz-capi-pico over the same session model. Optional + gated exactly as its twin.
+wz-capi-c = { path = "../wz-capi-c", optional = true, default-features = false }
 wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-features = false, features = ["alloc"] }
 # R311ax — wz-runtime-coop enters the facade as an optional dep.
 # The `runtime-coop` feature pulls this crate with its `alloc`
@@ -1018,7 +1021,11 @@ rest-http-bridge = [
 rest-sse-subscribe = ["rest-http-bridge", "wz-rest?/rest-sse-subscribe"]
 
 # ----- §5.27 api-compat (2 atomic: 1 active, 1 reserved) -----
-api-compat-c = []
+# R311y498 — api-compat-c BUILT (slice 1: upstream's own z_put.c links and runs
+# against the wz cdylib). Pulls the wz-capi-c cdylib and the tokio runtime it
+# wraps, rather than the no-op `= []` facade it was — the
+# facade-forward-separate-edit dead-stub trap. AP/std-only.
+api-compat-c = ["dep:wz-capi-c", "runtime-tokio"]
 # R311y284 — api-compat-pico BUILT: pulls the wz-capi-pico cdylib and
 # re-exports it as `wz::capi_pico` (src/lib.rs). Promoted from the `= []`
 # reserved placeholder to the real dep gate. Also turns on `runtime-tokio`
@@ -1902,6 +1909,9 @@ preset-ap-full = [
     "transport-qos",
     "transport-link-serial",
     "locator-serial",
+    # R311y498 — `api-compat-c` is NOT here, and that is a decision rather than an
+    # omission: the two C ABIs share the `z_*` symbol namespace, so a binary can
+    # offer one or the other. The facade turns enabling both into a compile_error.
     "api-compat-pico",
     "switchboard",
     "time-system-clock",
