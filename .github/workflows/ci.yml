@@ -448,18 +448,6 @@ jobs:
       - name: Layer D — deploy/*.yaml schema validate
         run: bash scripts/run-ci.sh --layer D
 
-      - name: Layer C1bp — §5.22 dynamic plugin loading, end to end
-        # R311y492. `plugin-dynamic-loading` was the one §5.22 atom R311y256 kept as
-        # real backlog; the other four were deprecated ON THE CONDITION it never got
-        # built ("if this is ever built they return with it"). Built, so gated.
-        #
-        # Builds wz-plugin-example (a cdylib nothing depends on, so no other lane
-        # provides it), runs the ABI gate's unit tests, the host's dlopen/lifecycle/
-        # registry tests against that real .so, clippy on the feature, then the pico
-        # e2e: a real z_get reads the dlopen'd plugin's REAL path beside the static
-        # subsystem's "__static__" marker, in one reply set.
-        run: bash scripts/run-ci.sh --layer C1bp
-
       - name: Layer L — every committed Cargo.lock resolves
         # R311y490. Wired in the SAME commit that adds the lane. Eight independent
         # cargo workspaces live here (crates/, xtask/, six under deploy/) and NONE
@@ -796,7 +784,7 @@ jobs:
   # therefore stay local-only until that flakiness is root-caused, and A4's
   # EXECUTION line keeps saying so.
   interop:
-    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E6g + E6h + E7 + E8 + E8t + E9 + E10 + E11 + Z)
+    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E6g + E6h + E7 + E8 + E8t + E9 + E10 + E11 + E12 + C1bp + Z)
     runs-on: ubuntu-22.04
     # A cold cache must build: the zenoh-pico CMake tree, the whole zenoh workspace in
     # release (zenohd AND the storage-manager plugin), four differently-featured
@@ -1053,6 +1041,18 @@ jobs:
         # z_put, since the write legs need the writer and a reader-only guard would
         # SKIP-green on a machine that has it.
         run: bash scripts/run-ci.sh --layer E12
+
+      - name: Layer C1bp — §5.22 dynamic plugin loading, end to end
+        # R311y495 — MOVED here from `validate + verify + test`, where R311y492
+        # first wired it and where it SKIP-passed on its very first hosted run:
+        # that job does not provision the zenoh-pico CLI, so the lane built the
+        # cdylib, ran the ABI + host unit tests and clippy (86s of real work) and
+        # then skipped the one leg that makes it a cross-impl proof. A SKIP is
+        # green, which is the R311y265 masked-skip burn, and it took a hosted log
+        # read to see it — the run's own conclusion said pass.
+        #
+        # This job provisions the pico CLI, so the guard cannot fire here.
+        run: bash scripts/run-ci.sh --layer C1bp
 
       - name: Cache the unixpipe-enabled zenohd binary (R311y392)
         # A SEPARATE oracle from target/zenohd: zenoh's `default` omits

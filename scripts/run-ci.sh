@@ -5162,44 +5162,68 @@ layer_c1bp_plugin_dynamic_loading() {
 
 # ─── Layer L — every committed Cargo.lock agrees with its manifests ────
 #
-# R311y490. This repo has EIGHT independent cargo workspaces — `crates/`,
-# `xtask/`, and six under `deploy/` — and until this lane NOTHING checked that
-# their committed locks still resolve. `deploy/mcu-multicast-e2e/Cargo.lock` had
-# silently rotted: `wz-runtime-tokio` gained an optional `libc` (via
-# `transport-link-unixpipe` / `link-interfaces`) and that workspace's lock was
-# never refreshed, so any build in that directory rewrote the file and dirtied a
-# tree that had changed nothing. It surfaced only because a full sweep left the
-# working tree dirty and the diff had to be explained.
+# R311y490 added this lane; R311y494 fixed its PREMISE, which hosted CI refuted
+# on the lane's first hosted run.
 #
-# `--locked` is the check: it resolves and FAILS rather than writing when the
-# lock would have to change.
+# This repo has EIGHT independent cargo workspaces — `crates/`, `xtask/`, and six
+# under `deploy/` — and until R311y490 nothing checked that their committed locks
+# still resolve. `deploy/mcu-multicast-e2e/Cargo.lock` had silently rotted, so any
+# build in that directory rewrote a committed file and dirtied an untouched tree.
 #
-# `--offline` is deliberate and so is the two-way message split. Offline keeps
-# the lane deterministic and network-free, but it also fails for a reason that is
-# NOT staleness — a dependency absent from the local cache, e.g. this tree's
-# macOS-only `io-kit-sys`, which made `crates/` look stale on a Linux box when it
-# was not. Encoding that distinction is the point: only the lock-would-change
-# message is a failure, a cache miss is reported and skipped. A lane that cannot
-# tell those apart would either cry wolf on every cold cache or be turned off.
+# `--locked` is the check: it resolves and FAILS rather than writing when the lock
+# would have to change.
+#
+# THE PREMISE THAT WAS WRONG. R311y490 ran it `--offline` and split the failure
+# messages two ways, treating "dependency not in the local cache" as a benign SKIP
+# distinct from staleness. Hosted CI produced a THIRD message the split did not
+# cover — `no matching package named `cortex-m` found` for every MCU deploy
+# workspace, whose dependencies that job never builds and so never caches — and
+# the catch-all correctly refused to guess, which is how the gap surfaced as a red
+# rather than as a silent pass.
+#
+# The deeper problem is not the missing third string: OFFLINE MODE CANNOT
+# CLASSIFY AT ALL. A lock that is stale BECAUSE it lacks a newly-added dependency
+# produces the not-cached message, not the `--locked` one, so the R311y490 split
+# would have SKIPPED exactly the drift the lane exists to catch. cargo says as
+# much in its own note ("offline mode … can sometimes cause surprising resolution
+# failures").
+#
+# So: `--offline` FIRST as a fast path, and on any failure that is not the
+# unambiguous `--locked` message, RETRY ONLINE. The retry is what makes the
+# verdict real — with the index available, a resolution failure means the lock is
+# genuinely stale and nothing else. A network outage on a cold cache then reports
+# as an unrecognised failure and FAILS, which is honest: the lane could not
+# determine the answer, and a gate that cannot read its input must not report
+# green.
 layer_l_lockfile_freshness() {
     local rc=0 lock dir out
     while IFS= read -r lock; do
         dir="$(dirname "$lock")"
+        # Fast path: no network, and conclusive when it succeeds or when it names
+        # the --locked refusal.
         if out="$( (cd "$dir" && cargo metadata --locked --offline --format-version 1 2>&1 >/dev/null) )"; then
-            echo "  L $lock OK"
+            echo "  L $lock OK (offline)"
             continue
         fi
         if grep -q "because --locked was passed" <<< "$out"; then
             echo "  L FAIL: $lock is STALE — it no longer resolves against its" >&2
-            echo "     manifests. Refresh it: (cd $dir && cargo update --workspace --offline)" >&2
+            echo "     manifests. Refresh it: (cd $dir && cargo update --workspace)" >&2
             rc=1
-        elif grep -q -- "--offline was specified" <<< "$out"; then
-            echo "  L $lock SKIP (dependency not in the local cache, not staleness)"
-        else
-            echo "  L FAIL: $lock — cargo metadata failed for an unrecognised reason:" >&2
-            echo "$out" | head -5 >&2
-            rc=1
+            continue
         fi
+        # Anything else offline is INCONCLUSIVE, not benign. Ask the index.
+        if out="$( (cd "$dir" && cargo metadata --locked --format-version 1 2>&1 >/dev/null) )"; then
+            echo "  L $lock OK (online; not in the local cache)"
+            continue
+        fi
+        if grep -q "because --locked was passed" <<< "$out"; then
+            echo "  L FAIL: $lock is STALE — it no longer resolves against its" >&2
+            echo "     manifests. Refresh it: (cd $dir && cargo update --workspace)" >&2
+        else
+            echo "  L FAIL: $lock — could not be resolved even with the index:" >&2
+            echo "$out" | head -5 >&2
+        fi
+        rc=1
     done < <(find . -name Cargo.lock -not -path "./vendor/*" -not -path "*/target/*" | sort)
     return "$rc"
 }
