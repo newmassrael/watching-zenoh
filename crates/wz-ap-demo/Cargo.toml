@@ -215,6 +215,11 @@ preset-ap-full = [
     # R311y492 — the `--plugin` CLI surface, now that `wz/preset-ap-full` claims
     # the atom. Held back before that for the reason this list's rule states.
     "plugin-dynamic-loading",
+    # R311y497 — the `--storage-volume` CLI surface, the storage-side twin of the
+    # key above. Its atom is the last one Layer A5 printed as OPEN, and without
+    # this key the flag would exist as an INERT warning: the atom would be in the
+    # library preset while the binary that hosts storages could not load one.
+    "storage-mgr-dynamic-volume-loading",
     "tls",
     "quic",
     "quic-datagram",
@@ -559,6 +564,23 @@ storage-backend = ["wz/storage-backend"]
 # static subsystem carries `"__static__"`) lands in a transcript pico already
 # decodes. NOT in `default`; the footprint baseline is unchanged.
 plugin-dynamic-loading = ["wz/plugin-dynamic-loading", "adminspace-config-hotreload"]
+# R311y497 (§5.24 storage-mgr-dynamic-volume-loading) — opt-in DYNAMIC storage
+# VOLUME host on the `--storage-host` run-mode: `--storage-volume <path.so>`
+# (+ `--storage-volume-config <text>`) dlopens a real volume, runs the ABI gate,
+# configures it, and registers it under the id the `.so` itself declares — so a
+# foreign client's `storage-add <name>@<volume_id>:<keyexpr>` mounts a storage on
+# it.
+#
+# The storage host rather than `--peer` because that is the mode that owns a
+# `RuntimeStorageManager` at all, and it already has a foreign witness reading its
+# storage plane (Layer E13). The atom's wire-visible difference is a value that
+# survives a host RESTART through a volume the host did not compile in — which is
+# only reachable if the client can name the volume, hence the storage-add payload
+# widening that lands with this key. NOT in `default`.
+storage-mgr-dynamic-volume-loading = [
+    "wz/storage-mgr-dynamic-volume-loading",
+    "adminspace-config-hotreload",
+]
 # R311y450 (§5.18 time-hlc) — forwards the facade `time-hlc` so the demo binary
 # carries the node-scoped Hybrid Logical Clock. It is opt-in and it CHANGES THE
 # WIRE on one run-mode: with it on, `--router-hat` (a `WhatAmI::Router`, the one

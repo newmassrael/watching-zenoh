@@ -1098,6 +1098,14 @@ pub mod storage_service;
 #[cfg(feature = "storage-backend-filesystem")]
 pub mod filesystem_storage;
 
+/// R311y497 — the `storage-mgr-dynamic-volume-loading` atom (§5.24): a `dlopen`ed
+/// storage [`Volume`](wz_session_core::storage_volume::Volume), the storage-side
+/// twin of [`plugin`]. R311y256 deprecated this atom on an explicit CONDITION —
+/// "if `plugin-dynamic-loading` is ever built, this returns with it" — which
+/// R311y492 fired; see the module doc. AP/std/unix-only and opt-in.
+#[cfg(all(unix, feature = "storage-mgr-dynamic-volume-loading"))]
+pub mod dynamic_volume;
+
 /// R311y69 — `ext-pubsub-advanced-cache` (§5.25): the publisher-side
 /// sample ring + the `@adv` queryable answering `_sn` / `_max` recovery
 /// and history selectors from it.

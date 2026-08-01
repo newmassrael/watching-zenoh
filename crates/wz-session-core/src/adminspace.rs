@@ -849,20 +849,29 @@ pub fn answer_router_admin_query(
 pub enum AdminConfigWrite {
     /// `.../config/acl-deny <keyexpr>` — deny the keyexpr carried in the payload.
     AclDeny(String),
-    /// `.../config/storage-add <name>:<keyexpr>` — live-spawn a storage `name`
-    /// owning `key_expr`, backed by the in-memory volume. The config-diff-driven
-    /// subsystem activation the host applies via the runtime storage manager
-    /// (R311y239). Split on the FIRST `:` only, so `key_expr` may itself contain `:`.
-    /// `volume_id` is always `"mem"` from the wire (explicit volume selection is a
-    /// deferred follow-up — it needs a keyexpr-safe delimiter or a json5 body); the
-    /// field is retained for programmatic construction.
+    /// `.../config/storage-add <name>[@<volume_id>]:<keyexpr>` — live-spawn a
+    /// storage `name` owning `key_expr`. The config-diff-driven subsystem
+    /// activation the host applies via the runtime storage manager (R311y239).
+    /// Split on the FIRST `:` only, so `key_expr` may itself contain `:`.
     AddStorage {
         /// The storage's unique name within the manager.
         name: String,
         /// The keyexpr the storage captures + answers on.
         key_expr: String,
-        /// The backing volume id (`"mem"` from the wire; a builder may set another).
-        volume_id: String,
+        /// The volume the client NAMED, or `None` when it named none.
+        ///
+        /// R311y497 made this `Option`, and the distinction is the whole point:
+        /// before it, the wire always said `"mem"` and the host unconditionally
+        /// overrode it, so a client could not choose a volume and a host could not
+        /// tell "the client wants mem" from "the client did not say". A
+        /// `dlopen`ed volume (`storage-mgr-dynamic-volume-loading`) is
+        /// unreachable from a foreign client without that distinction — which is
+        /// what made this the follow-up R311y496 named and this round closed.
+        ///
+        /// `None` keeps the pre-y497 behaviour byte-for-byte:
+        /// [`to_storage_config`](Self::to_storage_config) resolves it to `"mem"`,
+        /// and a host that maps storages onto its own volume still may.
+        volume_id: Option<String>,
     },
     /// `.../config/storage-del <name>` — live-despawn the storage named `name`
     /// (RAII undeclare of its capture-sub + queryable). R311y239.
@@ -883,7 +892,15 @@ impl AdminConfigWrite {
                 key_expr,
                 volume_id,
             } => Some(crate::storage_config::StorageConfig::new(
-                name, key_expr, volume_id,
+                name,
+                key_expr,
+                // A client that named NO volume resolves to the in-memory one,
+                // which is exactly what the pre-R311y497 wire always encoded — so
+                // a legacy `<name>:<keyexpr>` payload produces the identical
+                // config it always did. A host is free to map an un-named storage
+                // onto its own volume afterwards; it must NOT do that to a storage
+                // whose volume the client named.
+                volume_id.as_deref().unwrap_or(DEFAULT_STORAGE_VOLUME_ID),
             )),
             _ => None,
         }
@@ -979,30 +996,61 @@ pub fn parse_admin_config_write(
     }
 }
 
-/// R311y239 (`adminspace-config-hotreload`) — decode a `storage-add` payload
-/// `<name>:<keyexpr>` into `(name, key_expr, volume_id)`. The payload is split on the
-/// FIRST `:` only (`splitn(2)`): `name` is the leading field, `key_expr` is the entire
-/// remainder — so a keyexpr that itself contains `:` (a legal keyexpr byte per the
-/// zenoh grammar) is preserved verbatim, not silently truncated. Returns `None`
-/// (→ [`AdminConfigWriteOutcome::Malformed`]) if `name` or `key_expr` is empty, or if
-/// there is no `:` at all. `volume_id` is always `"mem"` (the in-memory volume) for
-/// this MVP affordance: explicit volume selection would need a delimiter that cannot
-/// appear in a keyexpr (or a json5 body), so it is a deferred §5.23 follow-up — the
-/// `AddStorage.volume_id` field is retained for programmatic construction.
+/// The volume an [`AddStorage`](AdminConfigWrite::AddStorage) that named none
+/// resolves to — the in-memory volume every host registers.
+///
+/// Named rather than repeated because it is the value the wire encoded
+/// unconditionally before R311y497, so it is what "unchanged for a legacy
+/// payload" means, in one place.
 #[cfg(feature = "adminspace-config-hotreload")]
-fn parse_storage_add_payload(payload: &[u8]) -> Option<(String, String, String)> {
+pub const DEFAULT_STORAGE_VOLUME_ID: &str = "mem";
+
+/// R311y239 (`adminspace-config-hotreload`) — decode a `storage-add` payload
+/// `<name>[@<volume_id>]:<keyexpr>` into `(name, key_expr, volume_id)`.
+///
+/// The payload is split on the FIRST `:` only: the leading field is the storage's
+/// IDENTITY and `key_expr` is the entire remainder — so a keyexpr that itself
+/// contains `:` (a legal keyexpr byte per the zenoh grammar) is preserved
+/// verbatim, not silently truncated. Returns `None`
+/// (→ [`AdminConfigWriteOutcome::Malformed`]) if `name` or `key_expr` is empty, or
+/// if there is no `:` at all.
+///
+/// R311y497 — the leading field may carry `@<volume_id>`, split on its LAST `@`.
+/// Volume selection is what a `dlopen`ed volume
+/// (`storage-mgr-dynamic-volume-loading`) needs to be reachable from a foreign
+/// client at all: before this, the wire always encoded `"mem"` and the host
+/// overrode it, so no client could ask for any other volume. R311y496 named this
+/// as the deferred follow-up and recorded WHY it had been deferred — "it needs a
+/// keyexpr-safe delimiter or a json5 body". The delimiter is keyexpr-safe by
+/// CONSTRUCTION here, not by luck: it is applied only to the leading NAME field,
+/// which is a manager-unique identifier and not a keyexpr, so the keyexpr's
+/// grammar freedom (which `@` is part of — every adminspace key begins `@/`) is
+/// untouched. Splitting on the LAST `@` keeps a name that itself contains one
+/// addressable, and an empty volume (`demo@:ke`) is Malformed rather than a
+/// storage on a volume called "".
+#[cfg(feature = "adminspace-config-hotreload")]
+fn parse_storage_add_payload(payload: &[u8]) -> Option<(String, String, Option<String>)> {
     let text = String::from_utf8_lossy(payload);
-    let (name, key_expr) = text.split_once(':')?;
-    let name = name.trim();
+    let (head, key_expr) = text.split_once(':')?;
+    let head = head.trim();
     let key_expr = key_expr.trim();
-    if name.is_empty() || key_expr.is_empty() {
+    if key_expr.is_empty() {
         return None;
     }
-    Some((
-        String::from(name),
-        String::from(key_expr),
-        String::from("mem"),
-    ))
+    let (name, volume_id) = match head.rsplit_once('@') {
+        Some((n, v)) => {
+            let (n, v) = (n.trim(), v.trim());
+            if v.is_empty() {
+                return None;
+            }
+            (n, Some(String::from(v)))
+        }
+        None => (head, None),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some((String::from(name), String::from(key_expr), volume_id))
 }
 
 /// The OpenMetrics body the admin `@/<zid>/<whatami>/metrics` GET replies with
@@ -1287,8 +1335,10 @@ mod tests {
         use super::*;
 
         #[test]
-        fn storage_add_decodes_name_keyexpr_default_volume() {
-            // `storage-add demo:demo/**` -> AddStorage, volume defaults to "mem".
+        fn storage_add_decodes_name_keyexpr_and_names_no_volume() {
+            // `storage-add demo:demo/**` -> AddStorage naming NO volume. R311y497
+            // made that distinct from naming "mem": a host may map an un-named
+            // storage onto its own volume, and must not do that to a named one.
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
@@ -1300,7 +1350,99 @@ mod tests {
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
                     name: String::from("demo"),
                     key_expr: String::from("demo/**"),
-                    volume_id: String::from("mem"),
+                    volume_id: None,
+                })
+            );
+        }
+
+        /// R311y497 — a legacy payload's CONFIG is byte-identical to what it
+        /// produced before the wire gained volume selection. This is the leg that
+        /// makes `volume_id: None` a widening rather than a change.
+        #[test]
+        fn a_payload_naming_no_volume_still_resolves_to_the_in_memory_one() {
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-add",
+                b"demo:demo/**",
+                true,
+            );
+            let AdminConfigWriteOutcome::Apply(intent) = out else {
+                panic!("storage-add must Apply");
+            };
+            let cfg = intent.to_storage_config().expect("AddStorage -> config");
+            assert_eq!(cfg.volume_id, DEFAULT_STORAGE_VOLUME_ID);
+            assert_eq!(cfg.volume_id, "mem");
+        }
+
+        /// R311y497 — the client SELECTS a volume, which is what makes a `dlopen`ed
+        /// volume reachable from a foreign peer.
+        #[test]
+        fn storage_add_may_name_a_volume_after_the_name() {
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-add",
+                b"demo@wzvol_example:demo/**",
+                true,
+            );
+            assert_eq!(
+                out,
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
+                    name: String::from("demo"),
+                    key_expr: String::from("demo/**"),
+                    volume_id: Some(String::from("wzvol_example")),
+                })
+            );
+            let AdminConfigWriteOutcome::Apply(intent) = out else {
+                unreachable!("asserted Apply above")
+            };
+            assert_eq!(
+                intent
+                    .to_storage_config()
+                    .expect("AddStorage -> config")
+                    .volume_id,
+                "wzvol_example",
+                "the NAMED volume reaches the config, not the default"
+            );
+        }
+
+        /// The `@` delimiter must not narrow the keyexpr grammar, and this is the
+        /// leg that holds it to that: `@` is legal in a keyexpr (every adminspace
+        /// key starts `@/`), and the split is applied ONLY to the leading name
+        /// field. A keyexpr carrying `@` therefore survives intact.
+        #[test]
+        fn the_volume_delimiter_does_not_touch_an_at_sign_in_the_keyexpr() {
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-add",
+                b"mirror:@/a1b2/peer/**",
+                true,
+            );
+            assert_eq!(
+                out,
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
+                    name: String::from("mirror"),
+                    key_expr: String::from("@/a1b2/peer/**"),
+                    volume_id: None,
+                })
+            );
+        }
+
+        /// A name that itself contains `@` stays addressable: the split is on the
+        /// LAST one, so the volume is unambiguous either way.
+        #[test]
+        fn a_name_containing_an_at_sign_splits_on_the_last_one() {
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-add",
+                b"a@b@fsdyn:demo/**",
+                true,
+            );
+            assert_eq!(
+                out,
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
+                    name: String::from("a@b"),
+                    key_expr: String::from("demo/**"),
+                    volume_id: Some(String::from("fsdyn")),
                 })
             );
         }
@@ -1308,7 +1450,7 @@ mod tests {
         #[test]
         fn storage_add_keyexpr_may_contain_colon() {
             // Split on the FIRST `:` only: a keyexpr containing `:` (a legal keyexpr
-            // byte) is preserved verbatim, NOT truncated. Volume is always "mem".
+            // byte) is preserved verbatim, NOT truncated.
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
@@ -1320,14 +1462,25 @@ mod tests {
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
                     name: String::from("demo"),
                     key_expr: String::from("foo:bar/**"),
-                    volume_id: String::from("mem"),
+                    volume_id: None,
                 })
             );
         }
 
         #[test]
         fn storage_add_empty_name_or_keyexpr_is_malformed() {
-            for payload in [&b":demo/**"[..], b"demo:", b"", b"  :  "] {
+            // R311y497 adds the empty-VOLUME cases: `demo@:ke` must be Malformed
+            // rather than a storage on a volume called "", which would resolve to
+            // no registered volume and fail one layer later with a worse message.
+            for payload in [
+                &b":demo/**"[..],
+                b"demo:",
+                b"",
+                b"  :  ",
+                b"demo@:demo/**",
+                b"demo@   :demo/**",
+                b"@fsdyn:demo/**",
+            ] {
                 let out = parse_admin_config_write(
                     WRITE_PREFIX,
                     "@/a1b2/peer/config/storage-add",

@@ -48,6 +48,19 @@ members = [
     # wz-plugin-abi and nothing else, which is itself the demonstration that the
     # ABI crate suffices to author a plugin.
     "wz-plugin-example",
+    # R311y497 (§5.24 storage-mgr-dynamic-volume-loading) — the host<->volume C
+    # ABI contract, the storage-side twin of wz-plugin-abi. Its own crate for the
+    # same reason, and NOT merged into wz-plugin-abi: a plugin is started and
+    # stopped while a volume creates stores that are put to and enumerated, so one
+    # crate would make every plugin author link a storage vtable they never fill
+    # and would tie the two ABI version numbers together.
+    "wz-volume-abi",
+    # R311y497 — a REAL loadable volume, cdylib-only so nothing can link it
+    # directly and skip the dlopen boundary. DURABLE (one file per key) because
+    # the host keeps a read mirror over every backend, so only survival across a
+    # PROCESS restart distinguishes the loaded `.so` from the host answering
+    # itself.
+    "wz-volume-example",
     "wz-codegen-build",
     "wz-runtime-core",
     "wz-session-core",

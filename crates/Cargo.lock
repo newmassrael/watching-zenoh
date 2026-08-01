@@ -2667,6 +2667,7 @@ dependencies = [
  "wz-session-core-test-support",
  "wz-session-wire-fixtures",
  "wz-statechart-bridge",
+ "wz-volume-abi",
  "zeroize",
 ]
 
@@ -2778,6 +2779,17 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "wz-volume-abi"
+version = "0.1.0"
+
+[[package]]
+name = "wz-volume-example"
+version = "0.1.0"
+dependencies = [
+ "wz-volume-abi",
 ]
 
 [[package]]

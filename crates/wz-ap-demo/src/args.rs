@@ -138,6 +138,32 @@ pub(crate) enum PushOperation {
     Delete,
 }
 
+/// R311y497 — the `--storage-volume <path.so>` + `--storage-volume-config <text>`
+/// pair, as ONE value.
+///
+/// A struct rather than two `Option<String>` parameters threaded side by side into
+/// [`crate::runner::run_storage_host`]: two adjacent same-typed optionals are the
+/// shape a caller silently transposes, and a transposed pair here would `dlopen`
+/// the operator's config text and hand the volume its own path as a directory.
+/// The config is `Option` INSIDE the struct because a volume may legitimately need
+/// none, while a path is what makes the whole thing exist.
+///
+/// Deliberately singular where `--plugin` is plural: a host loads a SET of
+/// plugins, but a dynamic volume is configured, and pairing an i-th config to an
+/// i-th path by argv order is an operator interface that misfires silently. One
+/// loaded volume is the honest MVP bound; N is a mechanical follow-up that needs a
+/// pairing syntax, not a second `Vec`.
+#[cfg(feature = "adminspace-config-hotreload")]
+pub(crate) struct DynamicVolumeArgs {
+    /// The `.so` to `dlopen`. The volume's registry id is NOT taken from here —
+    /// it is what the `.so` itself declares, so two different libraries cannot be
+    /// registered under one operator-chosen name.
+    pub(crate) path: String,
+    /// The volume's own configuration string, verbatim. Its meaning belongs to the
+    /// volume; the bundled example volume reads it as a root directory.
+    pub(crate) config: Option<String>,
+}
+
 /// Every `<flag> <value>` pair in `args`, in argv order.
 ///
 /// R311y492 — `--plugin` is repeatable because a plugin HOST loads a set, not a

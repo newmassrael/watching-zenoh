@@ -2637,7 +2637,13 @@ layer_c1am_cargo_test_adminspace() {
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib compiled_plugins --quiet || return 1
     _runci_guarded_test "C1AM compiled_plugins 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,storage-backend,query-get --lib compiled_plugins --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 22" 22 \
+    # R311y497: 22 -> 26. The storage-add payload gained client-selectable volumes,
+    # and the four new legs are what hold the widening to its promises — the legacy
+    # (no-@) payload still resolving to `mem`, a named volume reaching the config, an
+    # `@` inside a KEYEXPR left untouched (the delimiter must not narrow the keyexpr
+    # grammar), and a name that itself contains `@` splitting on the last one. This
+    # pin is why the count moved visibly instead of the module quietly growing.
+    _runci_guarded_test "C1AM adminspace 26" 26 \
         cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM storage_manager_service 5" 5 \
         cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet || return 1
@@ -8616,6 +8622,73 @@ layer_e12_apfull_adminspace_pico() {
 # BUILD FIRST, GUARD SECOND, as E9/E11/E12 all do and for the reason they state:
 # a SKIP is green, so a build behind the guard would leave the preset's storage
 # membership ungated on every machine without the foreign CLI.
+# ─── Layer C1bv — §5.24 dynamic storage-VOLUME loading (unit + ABI) ───
+#
+# R311y497. Deliberately split from Layer E14 rather than bundled the way C1bp
+# bundles its own unit and pico legs, and the split IS the R311y495 lesson applied
+# rather than re-learned: C1bp did 86s of real work and then SKIP-passed the one
+# leg that made it a cross-impl proof, because it was wired into a job that does
+# not provision the pico CLI. This lane touches no foreign binary at all, so it
+# cannot skip anywhere, and every leg that needs pico lives in E14.
+layer_c1bv_dynamic_volume_loading() {
+    # The two cdylibs. wz-volume-example is what the host loads; wz-plugin-example
+    # is the honest NEGATIVE — a real loadable shared object that exports
+    # `wz_plugin_entry` and no `wz_volume_entry`, which is the leg that justifies
+    # the two ABIs having distinct entry symbols.
+    (cd crates && cargo build -p wz-volume-example -p wz-plugin-example --quiet) || return 1
+    # The ABI contract's own gate: the compatibility check is a pure function, so
+    # it is unit-testable exhaustively in a way the e2e cannot be — a mismatched
+    # ABI needs a volume built against a different contract. It checks TWO layout
+    # fingerprints (vtable AND StoredEntry), unlike the plugin ABI, because this
+    # one passes a struct BY POINTER.
+    (cd crates && cargo test -p wz-volume-abi --quiet) || return 1
+    # The host: dlopen, the gate, the mirror rebuild, put/delete/entries across the
+    # boundary, and the out-of-band counters that establish the host really called
+    # THROUGH the vtable. Drives the REAL `.so` built above.
+    (cd crates && cargo test -p wz-runtime-tokio --no-default-features \
+        --features storage-mgr-dynamic-volume-loading --lib --quiet dynamic_volume:: 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. [0-9]+ passed') || return 1
+    # The WIRE half: the storage-add payload's volume selection, which is what
+    # makes a loaded volume reachable from a foreign client at all.
+    (cd crates && cargo test -p wz-session-core --features adminspace-config-hotreload \
+        --lib --quiet adminspace::tests::config_hotreload:: 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. [0-9]+ passed') || return 1
+    (cd crates && cargo clippy -p wz-runtime-tokio --no-default-features \
+        --features storage-mgr-dynamic-volume-loading --all-targets -- -D warnings) || return 1
+    (cd crates && cargo clippy -p wz-volume-abi -p wz-volume-example --all-targets \
+        -- -D warnings) || return 1
+}
+
+# ─── Layer E14 — §5.24 dynamic storage volume against a real zenoh-pico ───
+#
+# R311y497. The four legs are a set: 1 proves the WIRE selection reaches the loaded
+# volume, 2 proves DURABILITY through the `.so` across a host restart (the
+# load-bearing one — within one process the host's read mirror answers every read,
+# so only a value the previous process wrote can distinguish the volume from the
+# host answering itself), 3 is the calibration that the same payload mounts NOTHING
+# without the volume, and 4 is the refusal path with the node surviving.
+layer_e14_apfull_dynamic_volume_pico() {
+    (cd crates && cargo build -p wz-volume-example -p wz-plugin-example --quiet) || return 1
+    (cd crates && cargo build -p wz-ap-demo --no-default-features \
+        --features preset-ap-full --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_get || ! -x target/zenoh-pico-cli/z_put ]]; then
+        _pico_cli_unavailable "Layer E14" || return 1
+        return 0
+    fi
+    # Named `--exact` one per invocation, like E9/E11/E12/E13: a rename or a
+    # silently dropped test then fails the lane instead of shrinking it quietly.
+    for leg in \
+        apfull_dynamic_volume_selected_over_the_wire_serves_a_pico_write \
+        apfull_dynamic_volume_survives_a_host_restart_through_the_loaded_so \
+        apfull_without_the_loaded_volume_the_same_payload_mounts_nothing \
+        apfull_a_non_volume_shared_object_is_refused_and_the_node_survives; do
+        (cd crates && cargo test -p wz-integration-tests \
+            --test apfull_dynamic_volume_pico_interop -- --ignored --quiet --test-threads=1 \
+            --exact "$leg" 2>&1 \
+            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    done
+}
+
 layer_e13_apfull_storage_plane_pico() {
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full --quiet) || return 1
@@ -8845,6 +8918,7 @@ run_layer C4e layer_c4e_transport_axis_matrix || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer L layer_l_lockfile_freshness || overall=1
 run_layer C1bp layer_c1bp_plugin_dynamic_loading || overall=1
+run_layer C1bv layer_c1bv_dynamic_volume_loading || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1
@@ -8872,6 +8946,7 @@ run_layer E10 layer_e10_close_frame_on_teardown || overall=1
 run_layer E11 layer_e11_apfull_advanced_pubsub_pico || overall=1
 run_layer E12 layer_e12_apfull_adminspace_pico || overall=1
 run_layer E13 layer_e13_apfull_storage_plane_pico || overall=1
+run_layer E14 layer_e14_apfull_dynamic_volume_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

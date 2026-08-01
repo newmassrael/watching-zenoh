@@ -536,6 +536,22 @@ storage-mgr-garbage-collection = [
     "wz-session-core/storage-mgr-garbage-collection",
     "storage-backend",
 ]
+# R311y497 — storage-mgr-dynamic-volume-loading (§5.24): the `dlopen`ed storage
+# Volume host (`dynamic_volume`), the storage-side twin of plugin-dynamic-loading.
+# Pulls the same `libloading` the plugin host does (both are optional, so a build
+# without either is byte-identical) plus the new `wz-volume-abi` contract crate.
+#
+# It forwards only the wz-session-core kernel SEAM (`wz-session-core/storage-backend`
+# = StorageBackend / Volume / StorageConfig / StoredData), NOT the runtime
+# `storage-backend` driver — exactly like `storage-backend-filesystem`, and for the
+# same reason: a loaded volume IMPLEMENTS the seam and never touches the
+# StorageService, its queryable or the pub/sub wire. A host that also wants to
+# SERVE the volume pulls the driver itself (preset-ap-full does).
+storage-mgr-dynamic-volume-loading = [
+    "dep:libloading",
+    "dep:wz-volume-abi",
+    "wz-session-core/storage-backend",
+]
 # R311y106 — §5.21 routing-namespace active flip: forward the per-participant
 # keyexpr namespace decorator. The egress seam lives in this crate's unicast
 # `Tp::send_network_message` arm; the ingress + reply-egress + decorator state
@@ -1409,6 +1425,12 @@ scouting-static = ["wz-session-core/scouting-static"]
 # R311y492 — the host<->plugin C ABI contract, linked here and, INDEPENDENTLY,
 # by every plugin cdylib. Optional + pulled only by `plugin-dynamic-loading`.
 wz-plugin-abi = { path = "../wz-plugin-abi", optional = true }
+# R311y497 — the host<->volume C ABI contract, linked here and, INDEPENDENTLY, by
+# every volume cdylib. Optional + pulled only by
+# `storage-mgr-dynamic-volume-loading`. A SEPARATE crate from wz-plugin-abi on
+# purpose: see that crate's manifest header for why one merged ABI would tie two
+# unrelated version numbers together.
+wz-volume-abi = { path = "../wz-volume-abi", optional = true }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 # R311nv — host tty backend for the SERIAL link, behind the optional
 # `transport-link-serial` feature (`dep:tokio-serial`). `SerialStream`

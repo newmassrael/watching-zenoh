@@ -87,19 +87,17 @@ EXCLUSIONS = {
     # exclusion most likely to expire, and it expires by itself -- the predicate
     # reads the inventory's own UNBUILT tag, so grading it otherwise fails here.
     "api-compat-c": ("unbuilt", "no implementation to compose yet"),
-    # OPEN ITEM, deliberately not silenced. R311y256 deprecated this as OBVIATED
-    # because wz composes volumes at BUILD time -- and made the deprecation
-    # CONDITIONAL in its own reason: "if plugin-dynamic-loading is ever built,
-    # this returns with it". R311y492 BUILT plugin-dynamic-loading, so the
-    # condition fired, and R311y496 returned the atom to `reserved` backlog with
-    # an UNBUILT tag rather than leaving a status word whose condition had
-    # expired. It is excluded here for the same reason api-compat-c is -- there
-    # is nothing to compose yet -- and the gate PRINTS it every run so the
-    # backlog item cannot go quiet the way the conditional deprecation did.
-    "storage-mgr-dynamic-volume-loading": (
-        "unbuilt",
-        "R311y256's condition fired at R311y492; needs a volume ABI + dlopen host, not a membership line",
-    ),
+    # R311y497 REMOVED the `storage-mgr-dynamic-volume-loading` entry that sat
+    # here, and the way it left is the point of this table. R311y256 deprecated
+    # that atom as OBVIATED while writing the condition into its own reason -- "if
+    # plugin-dynamic-loading is ever built, this returns with it" -- R311y492 fired
+    # the condition, and R311y496 returned it to `reserved` with an UNBUILT tag and
+    # made this gate PRINT it every run so it could not go quiet a second time.
+    # R311y497 BUILT it (wz-volume-abi + a dlopen volume host + a client-selectable
+    # volume on the storage-add wire, Layers C1bv/E14), so it is a MEMBER and an
+    # exclusion for it would now be false. It was not re-categorised or
+    # re-worded: an `unbuilt` exclusion expires by being built, and this is what
+    # that expiry looks like.
 }
 
 

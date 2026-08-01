@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-volume-example — a REAL loadable storage volume (R311y497).
+#
+# It exists to be the thing the loader loads. A `storage-mgr-dynamic-volume-
+# loading` proof needs a `.so` that a host actually `dlopen`s, and a host-side
+# test that fabricated one would be testing its own fabrication — the same
+# objection R311y479 raised against a hand-written C program standing in for
+# upstream's examples.
+#
+# It depends on `wz-volume-abi` and NOTHING ELSE, and that is the load-bearing
+# part: it is a working demonstration that the ABI crate alone is sufficient to
+# write a volume. A volume that needed wz-session-core or wz-runtime-tokio would
+# prove the opposite of what this crate is for.
+#
+# It is DURABLE (one file per key, under a root the host configures) rather than
+# in-memory, and that is not gratuitous either: a volatile volume's proof cannot
+# distinguish "the host called through the vtable" from "the host's own read
+# mirror answered", because the host keeps a mirror for the borrowed-`get` seam.
+# Persistence across a PROCESS restart is a property only the loaded `.so` can
+# supply, so it is what the witness discriminates on.
+
+[package]
+name = "wz-volume-example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "A minimal loadable watching-zenoh storage volume cdylib — the real durable .so the dynamic volume loader's proof loads."
+
+[lib]
+path = "src/lib.rs"
+# `cdylib` ONLY. An rlib would let a Rust test link this crate directly and call
+# its functions, which is precisely the shortcut that would stop the proof from
+# crossing a dlopen boundary at all.
+crate-type = ["cdylib"]
+
+[dependencies]
+wz-volume-abi = { path = "../wz-volume-abi" }
+
+[lints]
+workspace = true

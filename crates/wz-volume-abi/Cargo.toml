@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-volume-abi — the §5.24 host<->VOLUME C ABI contract (R311y497).
+#
+# The storage-side twin of `wz-plugin-abi`, and a separate crate for the same
+# reason: it is the one thing both sides of a `dlopen` boundary must agree on, so
+# it can live in neither of them. The host (wz-runtime-tokio's loader, behind
+# `storage-mgr-dynamic-volume-loading`) and the volume (any `cdylib`, built by
+# anyone, at any time, with any compiler version) each link it INDEPENDENTLY.
+#
+# It is NOT merged into wz-plugin-abi even though the two are shaped alike. A
+# plugin is started and stopped; a volume creates stores that are put to, deleted
+# from, enumerated and dropped. Merging them would make every plugin author link
+# a storage vtable they never fill, and — worse — would tie the two ABI version
+# numbers together, so a storage-side field append would invalidate every
+# existing plugin `.so` for no reason. Two boundaries, two contracts.
+#
+# `no_std` + zero dependencies, everything `repr(C)`: Rust has no stable ABI and
+# this boundary is a real one. A volume can be written in C with no Rust at all.
+
+[package]
+name = "wz-volume-abi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Host<->volume C ABI contract for watching-zenoh dynamic storage volumes: entry symbol, vtable, stored-entry record, and the compatibility descriptor both sides link independently."
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -934,7 +934,11 @@ storage-backend-volume-trait = []
 # queryable COMPLETE bit); forward to the wz-runtime-tokio cfg site, not `= []`.
 storage-mgr-complete-flag = ["wz-runtime-tokio?/storage-mgr-complete-flag"]
 storage-mgr-config = []
-storage-mgr-dynamic-volume-loading = []
+# R311y497 — storage-mgr-dynamic-volume-loading is now a real cfg gate (the
+# `dynamic_volume` dlopen host); forward to the wz-runtime-tokio cfg site rather
+# than the no-op `= []` it was (the facade-forward-separate-edit dead-stub trap).
+# AP/std/unix-only: a runtime loader is beyond every MCU and no_std profile.
+storage-mgr-dynamic-volume-loading = ["wz-runtime-tokio?/storage-mgr-dynamic-volume-loading"]
 # R311wt slice 4 — storage-mgr-garbage-collection is now a real cfg gate (the
 # periodic wildcard-registry sweep + its timer driver); forward through
 # wz-runtime-tokio to the wz-session-core cfg site, not a no-op `= []`.
@@ -1878,6 +1882,14 @@ preset-ap-full = [
     "plugin-lifecycle",
     "plugin-manager",
     "plugin-static-registration",
+    # R311y497 — the STORAGE-side twin of the four above, and the last atom Layer
+    # A5 printed as OPEN. R311y256 deprecated it on the same explicit condition
+    # ("if plugin-dynamic-loading is ever built, this returns with it"), R311y492
+    # fired that condition, and R311y496 moved it back to `reserved` with the
+    # build named: a volume ABI plus a dlopen host for volumes. It is built, so it
+    # joins — and with it `--storage-volume` on the storage host and a client's
+    # ability to NAME a volume on the storage-add wire.
+    "storage-mgr-dynamic-volume-loading",
     # The singletons, each omitted with no rationale recorded anywhere.
     # `query-value` is the one §5.7 atom missing from an otherwise complete query
     # family; `transport-multilink` and `transport-qos` are the last two demo keys

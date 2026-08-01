@@ -4402,6 +4402,7 @@ pub(crate) async fn run_storage_host(
     listen: &str,
     storage_dir: Option<String>,
     plugin_paths: &[String],
+    dynamic_volume: Option<&crate::args::DynamicVolumeArgs>,
 ) -> io::Result<()> {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -4538,6 +4539,69 @@ pub(crate) async fn run_storage_host(
         log::warn!(
             "wz-ap-demo storage-host: --storage-host-dir ignored (build without the \
              `storage-backend-filesystem` feature); storages are volatile"
+        );
+    }
+    // R311y497 (§5.24 storage-mgr-dynamic-volume-loading) — the DYNAMIC volume.
+    // Loaded and configured BEFORE the listener binds, for the same reason the
+    // plugin host above is: a peer that connects at all connects to a node whose
+    // volume set is already settled, so a foreign client's `storage-add` naming
+    // this volume cannot race startup.
+    //
+    // It is registered under the id the `.so` ITSELF declares, not under an
+    // operator-chosen name — otherwise two different libraries could be registered
+    // as the same volume and a storage naming it would land on whichever was loaded
+    // last. That declared id is what a client puts in
+    // `storage-add <name>@<volume_id>:<keyexpr>`, so it is logged.
+    #[cfg(all(unix, feature = "storage-mgr-dynamic-volume-loading"))]
+    if let Some(dv) = dynamic_volume {
+        use wz::runtime_tokio::dynamic_volume::DynamicVolume;
+        // The `capability()` call below is the Volume trait's, and it is logged
+        // rather than merely read: whether the loaded volume claims Durable is the
+        // one thing an operator needs to see before trusting a storage to it.
+        use wz::runtime_tokio::storage_volume::Volume;
+        match DynamicVolume::load(&dv.path) {
+            Ok(vol) => match vol.configure(dv.config.as_deref()) {
+                Ok(()) => {
+                    let id = vol.id().to_string();
+                    let cap = vol.capability();
+                    manager.register_volume(id.clone(), Box::new(vol));
+                    log::info!(
+                        "wz-ap-demo storage-host: dlopen'd storage volume '{id}' from \
+                         {} ({cap:?}); a client mounts on it with \
+                         `storage-add <name>@{id}:<keyexpr>`",
+                        dv.path
+                    );
+                }
+                // A volume that refused its configuration is NOT registered: a
+                // storage hosted on one would look durable and persist nothing.
+                // The node keeps serving so an operator can reach its admin plane
+                // to diagnose exactly this.
+                Err(e) => log::warn!(
+                    "wz-ap-demo storage-host: storage volume from {} refused its \
+                     configuration: {e} — it is NOT registered",
+                    dv.path
+                ),
+            },
+            Err(e) => log::warn!("wz-ap-demo storage-host: storage volume load failed: {e}"),
+        }
+    }
+    // The INERT arm names its operand, and that is what makes it correct rather
+    // than merely polite: this arm is the ONLY reader of `DynamicVolumeArgs` in a
+    // build that carries `adminspace-config-hotreload` without the volume feature,
+    // so a warning that read no field left both fields dead — which `-D warnings`
+    // rejects, and which Layers C1bh and E6h caught. An operator who passed a path
+    // also learns WHICH path was ignored.
+    #[cfg(not(all(unix, feature = "storage-mgr-dynamic-volume-loading")))]
+    if let Some(dv) = dynamic_volume {
+        log::warn!(
+            "wz-ap-demo storage-host: --storage-volume {} given but this binary lacks \
+             the `storage-mgr-dynamic-volume-loading` feature — INERT, nothing was \
+             loaded{}",
+            dv.path,
+            match dv.config.as_deref() {
+                Some(c) => format!(" (--storage-volume-config {c} is unused)"),
+                None => String::new(),
+            }
         );
     }
     // The flag the GET handler reads; shared with the Send+'static handler via Arc.
@@ -4735,24 +4799,46 @@ pub(crate) async fn run_storage_host(
                 };
                 for intent in &drained {
                     match intent {
-                        AdminConfigWrite::AddStorage { name, .. } => {
+                        AdminConfigWrite::AddStorage {
+                            name,
+                            volume_id: named_volume,
+                            ..
+                        } => {
                             match intent.to_storage_config() {
                                 Some(mut cfg) => {
-                                    // Map the storage onto the operator-chosen host
-                                    // volume: durable "fs" under --storage-host-dir,
-                                    // else the wire default "mem". The wire always
-                                    // encodes volume_id="mem" (explicit client volume
-                                    // selection is the deferred §5.23 follow-up), so the
-                                    // HOST's flag is what decides durability.
-                                    cfg.volume_id = dispatch_volume_id.to_string();
+                                    // R311y497 — the host's volume choice applies ONLY
+                                    // when the client named none. Before this, the
+                                    // override was unconditional because the wire could
+                                    // not carry a volume, which made every registered
+                                    // volume beyond the host's own flag unreachable.
+                                    // A client that NAMES a volume gets that volume, or
+                                    // a VolumeNotFound it can see — not a silent
+                                    // substitution, which is the shape that would make
+                                    // a durable-looking storage volatile.
+                                    if named_volume.is_none() {
+                                        cfg.volume_id = dispatch_volume_id.to_string();
+                                    }
                                     match manager.add_storage(
                                         &session_for_dispatch,
                                         &cfg,
                                         dispatch_zid.clone(),
                                     ) {
+                                        // The volume goes at the END, and that position
+                                        // is load-bearing rather than cosmetic. TWO
+                                        // integration tests pin this line THROUGH its
+                                        // `— storage_manager Started` tail
+                                        // (apfull_adminspace_pico_interop.rs,
+                                        // wz_storage_host_config_hotreload_pico.rs), so
+                                        // inserting the volume mid-line breaks them —
+                                        // which it did, and both lanes (E12, E6h) caught
+                                        // it. Appending leaves every existing barrier a
+                                        // prefix of the new line, so a witness can assert
+                                        // WHICH volume a storage landed on without any
+                                        // consumer being edited.
                                         Ok(()) => log::info!(
                                     "wz-ap-demo storage-host: spawned live storage '{name}' \
-                                     — storage_manager Started"
+                                     — storage_manager Started (volume '{}')",
+                                    cfg.volume_id
                                 ),
                                         Err(e) => log::warn!(
                                     "wz-ap-demo storage-host: add_storage '{name}' failed: {e}"

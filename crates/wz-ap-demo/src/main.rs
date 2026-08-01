@@ -532,11 +532,36 @@ fn main() -> ExitCode {
     // silently no-op'ing, so the catalog claim and the binary stay in lockstep.
     if let Some(storage_host_listen) = parse_pair(rest, "--storage-host") {
         #[cfg(feature = "adminspace-config-hotreload")]
-        return run_storage_host_mode(
-            storage_host_listen,
-            parse_pair(rest, "--storage-host-dir"),
-            parse_repeated(rest, "--plugin"),
-        );
+        return {
+            // R311y497 — `--storage-volume <path.so>` (+ its config) dlopens a
+            // storage volume. A config with no path is REPORTED rather than
+            // ignored: it is an operator who asked for a dynamic volume and typed
+            // one flag, and silence would leave the storages on `mem` with nothing
+            // said about why.
+            let volume_config = parse_pair(rest, "--storage-volume-config");
+            let dynamic_volume = match parse_pair(rest, "--storage-volume") {
+                Some(path) => Some(crate::args::DynamicVolumeArgs {
+                    path,
+                    config: volume_config,
+                }),
+                None => {
+                    if volume_config.is_some() {
+                        eprintln!(
+                            "wz-ap-demo: --storage-volume-config given without \
+                             --storage-volume; no volume is loaded and the config is \
+                             unused"
+                        );
+                    }
+                    None
+                }
+            };
+            run_storage_host_mode(
+                storage_host_listen,
+                parse_pair(rest, "--storage-host-dir"),
+                parse_repeated(rest, "--plugin"),
+                dynamic_volume,
+            )
+        };
         #[cfg(not(feature = "adminspace-config-hotreload"))]
         {
             let _ = storage_host_listen;
@@ -1816,6 +1841,7 @@ fn run_storage_host_mode(
     listen: String,
     storage_dir: Option<String>,
     plugins: Vec<String>,
+    dynamic_volume: Option<crate::args::DynamicVolumeArgs>,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -1829,6 +1855,7 @@ fn run_storage_host_mode(
         &listen,
         storage_dir,
         &plugins,
+        dynamic_volume.as_ref(),
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
