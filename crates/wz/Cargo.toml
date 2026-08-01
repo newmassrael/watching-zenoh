@@ -857,11 +857,19 @@ routing-route-cache = []
 routing-token-tables = ["routing-router-hat", "wz-runtime-tokio?/routing-token-tables"]
 
 # ----- §5.22 plugin (6 atomic, all reserved) -----
-plugin-abi-compat = []
-plugin-dynamic-loading = []
-plugin-host-trait = []
-plugin-lifecycle = []
-plugin-manager = []
+# R311y492 (§5.22) — the five plugin atoms stop being `= []` no-op facades.
+# R311y256 deprecated four of them ON THE CONDITION that dynamic loading was
+# never built ("if this is ever built they return with it"); building it met the
+# condition, so all five forward to the ONE wz-runtime-tokio key that carries
+# them. They are not independently selectable and are not pretended to be: a
+# registry with nothing loadable, or an ABI gate with no cross-binary boundary,
+# has no behaviour of its own — the half-a-pair shape R311y461/y488/y489/y491
+# each had to fix.
+plugin-abi-compat = ["plugin-dynamic-loading"]
+plugin-dynamic-loading = ["wz-runtime-tokio?/plugin-dynamic-loading"]
+plugin-host-trait = ["plugin-dynamic-loading"]
+plugin-lifecycle = ["plugin-dynamic-loading"]
+plugin-manager = ["plugin-dynamic-loading"]
 plugin-static-registration = []
 
 # ----- §5.23 adminspace + config (11 atomic: 1 active + 10 reserved) -----
@@ -1788,6 +1796,13 @@ preset-ap-full = [
     "router-face-management",
     "router-master-election",
     "router-orchestration",
+    # R311y492 — the DYNAMIC PLUGIN HOST. This preset's stated scope is "every
+    # active + reserved feature reasonable for an AP host", and a runtime plugin
+    # loader is AP/unix/std-only by construction, which is exactly this profile.
+    # It carries the four atoms R311y256 deprecated conditionally; see the §5.22
+    # inventory reasons. The loader module is `cfg(all(unix, ..))`, so a non-unix
+    # build of this preset compiles the feature and simply has no loader.
+    "plugin-dynamic-loading",
     "time-system-clock",
     "time-ntp64",
     "time-timestamp-source",

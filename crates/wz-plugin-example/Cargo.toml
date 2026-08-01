@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-plugin-example — a REAL loadable plugin (R311y492).
+#
+# It exists to be the thing the loader loads. A `plugin-dynamic-loading` proof
+# needs a `.so` that a host actually `dlopen`s, and a host-side test that
+# fabricated one would be testing its own fabrication — the same objection
+# R311y479 raised against a hand-written C program standing in for upstream's
+# examples.
+#
+# It depends on `wz-plugin-abi` and NOTHING ELSE, and that is the load-bearing
+# part: it is a working demonstration that the ABI crate alone is sufficient to
+# write a plugin. A plugin that needed wz-session-core or wz-runtime-tokio would
+# prove the opposite of what this crate is for.
+
+[package]
+name = "wz-plugin-example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "A minimal loadable watching-zenoh plugin cdylib — the real .so the dynamic loader's proof loads."
+
+[lib]
+path = "src/lib.rs"
+# `cdylib` ONLY. An rlib would let a Rust test link this crate directly and call
+# its functions, which is precisely the shortcut that would stop the proof from
+# crossing a dlopen boundary at all.
+crate-type = ["cdylib"]
+
+[dependencies]
+wz-plugin-abi = { path = "../wz-plugin-abi" }
+
+[lints]
+workspace = true

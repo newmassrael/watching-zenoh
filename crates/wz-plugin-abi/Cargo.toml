@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-plugin-abi — the §5.22 host<->plugin C ABI contract (R311y492).
+#
+# THE ONE THING BOTH SIDES OF A dlopen BOUNDARY MUST AGREE ON, and therefore the
+# one thing that cannot live in either of them. The host (wz-runtime-tokio's
+# loader, behind `plugin-dynamic-loading`) and the plugin (any `cdylib`, built by
+# anyone, at any time, with any compiler version) each link this crate
+# INDEPENDENTLY. That is exactly why it is its own crate rather than a module in
+# wz-session-core: a third-party plugin author must be able to depend on the ABI
+# without pulling a session implementation in behind it.
+#
+# `no_std` + zero dependencies for the same reason. Every type here is `repr(C)`;
+# nothing is a Rust ABI type, because Rust has no stable ABI and this boundary is
+# a real one — the two sides are separate compilation units that may not even
+# share a rustc version.
+#
+# Its zenoh analogue is the `zenoh-plugin-trait` vtable + `Compatibility` pair
+# (`compatibility.rs:57`, `vtable.rs:61`). wz's version is smaller on purpose:
+# zenoh's `StructVersion` hashes field layout, which needs the plugin crate to
+# derive on the host's types; wz pins the ABI number plus the vtable's own size
+# and alignment, which a C plugin can fill in without any Rust machinery.
+
+[package]
+name = "wz-plugin-abi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Host<->plugin C ABI contract for watching-zenoh dynamic plugins: entry symbol, vtable, and the compatibility descriptor both sides link independently."
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

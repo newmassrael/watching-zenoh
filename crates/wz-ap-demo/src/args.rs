@@ -138,6 +138,20 @@ pub(crate) enum PushOperation {
     Delete,
 }
 
+/// Every `<flag> <value>` pair in `args`, in argv order.
+///
+/// R311y492 — `--plugin` is repeatable because a plugin HOST loads a set, not a
+/// singleton, and `parse_pair` silently keeps only the first. A flag that
+/// accepts one value while its concept is plural is the shape that makes an
+/// operator's second `--plugin` disappear without a word.
+#[cfg(feature = "adminspace-config-hotreload")]
+pub(crate) fn parse_repeated(args: &[String], flag: &str) -> Vec<String> {
+    args.windows(2)
+        .filter(|w| w[0] == flag)
+        .map(|w| w[1].clone())
+        .collect()
+}
+
 pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {

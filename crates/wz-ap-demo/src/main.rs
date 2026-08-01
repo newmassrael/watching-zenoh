@@ -96,6 +96,8 @@ mod tasks;
 mod teardown;
 mod usage;
 
+#[cfg(feature = "adminspace-config-hotreload")]
+use crate::args::parse_repeated;
 #[cfg(feature = "scouting-active")]
 use crate::args::DEMO_ZID;
 use crate::args::{
@@ -530,7 +532,11 @@ fn main() -> ExitCode {
     // silently no-op'ing, so the catalog claim and the binary stay in lockstep.
     if let Some(storage_host_listen) = parse_pair(rest, "--storage-host") {
         #[cfg(feature = "adminspace-config-hotreload")]
-        return run_storage_host_mode(storage_host_listen, parse_pair(rest, "--storage-host-dir"));
+        return run_storage_host_mode(
+            storage_host_listen,
+            parse_pair(rest, "--storage-host-dir"),
+            parse_repeated(rest, "--plugin"),
+        );
         #[cfg(not(feature = "adminspace-config-hotreload"))]
         {
             let _ = storage_host_listen;
@@ -1806,7 +1812,11 @@ fn run_peer_mode(
 /// just the admin GET queryable + config-write subscriber + the storage lifecycle
 /// apply (live-spawn / -despawn a `RuntimeStorageManager` storage).
 #[cfg(feature = "adminspace-config-hotreload")]
-fn run_storage_host_mode(listen: String, storage_dir: Option<String>) -> ExitCode {
+fn run_storage_host_mode(
+    listen: String,
+    storage_dir: Option<String>,
+    plugins: Vec<String>,
+) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
         Ok(rt) => rt,
@@ -1815,7 +1825,11 @@ fn run_storage_host_mode(listen: String, storage_dir: Option<String>) -> ExitCod
             return ExitCode::from(1);
         }
     };
-    match runtime.block_on(crate::runner::run_storage_host(&listen, storage_dir)) {
+    match runtime.block_on(crate::runner::run_storage_host(
+        &listen,
+        storage_dir,
+        &plugins,
+    )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wz-ap-demo: {e}");

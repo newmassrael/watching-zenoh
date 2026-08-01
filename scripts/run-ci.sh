@@ -5115,6 +5115,51 @@ layer_d_validate_deploy() {
     bash scripts/validate-deploy.sh
 }
 
+# ─── Layer C1bp — §5.22 dynamic plugin loading, end to end ─────────────
+#
+# R311y492. `plugin-dynamic-loading` was the ONE §5.22 atom R311y256 kept as real
+# backlog ("genuinely unbuilt and genuinely buildable ON THE AP PROFILE"); the
+# other four were deprecated ON THE CONDITION that it never got built, in that
+# round's own words: "if this is ever built they return with it". This lane is
+# the condition being met, gated.
+#
+# BUILD THE `.so` FIRST, and it is not optional. `wz-plugin-example` is a
+# `cdylib` that nothing depends on — no `cargo test` anywhere pulls it — so
+# without this step the host unit tests SKIP (loudly, but green) and the e2e
+# fails on a missing file. A lane whose subject is dynamic loading must provide
+# the thing to load.
+layer_c1bp_plugin_dynamic_loading() {
+    (cd crates && cargo build -p wz-plugin-example --quiet) || return 1
+    # The ABI contract's own gate: the compatibility check is a pure function, so
+    # it is unit-testable exhaustively in a way the e2e cannot be — a mismatched
+    # ABI needs a second plugin built against a different contract.
+    (cd crates && cargo test -p wz-plugin-abi --quiet) || return 1
+    # The host: dlopen, the gate, the lifecycle FSM, the registry. Drives the
+    # REAL `.so` built above.
+    (cd crates && cargo test -p wz-runtime-tokio --features plugin-dynamic-loading \
+        --lib --quiet plugin:: 2>&1 | tee /dev/stderr \
+        | grep -qE '^test result: ok\. [0-9]+ passed') || return 1
+    (cd crates && cargo clippy -p wz-runtime-tokio --features plugin-dynamic-loading \
+        --all-targets -- -D warnings) || return 1
+    # The AP-full binary for the pico e2e. `preset-ap-full` carries the plugin
+    # host since R311y492, so no extra key here — and the e2e asserts the demo's
+    # own BUILD FEATURES line rather than trusting this invocation.
+    (cd crates && cargo build -p wz-ap-demo --no-default-features \
+        --features preset-ap-full --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+        _pico_cli_unavailable "Layer C1bp" || return 1
+        return 0
+    fi
+    for leg in \
+        wz_plugin_dlopened_is_read_by_a_real_pico_beside_the_static_one \
+        wz_plugin_non_plugin_shared_object_is_refused_and_the_node_survives; do
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_plugin_dynamic_loading_pico -- --ignored --quiet --test-threads=1 \
+            --exact "$leg" 2>&1 \
+            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    done
+}
+
 # ─── Layer L — every committed Cargo.lock agrees with its manifests ────
 #
 # R311y490. This repo has EIGHT independent cargo workspaces — `crates/`,
@@ -5390,7 +5435,8 @@ layer_e_ap_demo_round_trip() {
     # `--skip apfull` takes this sweep 59 -> 64 and names exactly those five.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
-        --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull)
+        --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
+        --skip wz_plugin)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -8685,6 +8731,7 @@ run_layer C4d layer_c4d_runtime_tokio_subset_clippy || overall=1
 run_layer C4e layer_c4e_transport_axis_matrix || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer L layer_l_lockfile_freshness || overall=1
+run_layer C1bp layer_c1bp_plugin_dynamic_loading || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1

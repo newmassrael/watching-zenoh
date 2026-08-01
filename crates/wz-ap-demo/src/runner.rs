@@ -4384,7 +4384,11 @@ fn storage_host_volume_id(dir: Option<&str>) -> &'static str {
 /// sufficient for the plugins-STATE witness (which reads `!manager.is_empty()`) and
 /// MUST NOT be read as a claim that the storage serves cross-connection data.
 #[cfg(feature = "adminspace-config-hotreload")]
-pub(crate) async fn run_storage_host(listen: &str, storage_dir: Option<String>) -> io::Result<()> {
+pub(crate) async fn run_storage_host(
+    listen: &str,
+    storage_dir: Option<String>,
+    plugin_paths: &[String],
+) -> io::Result<()> {
     use std::sync::atomic::Ordering::Relaxed;
 
     use wz::runtime_tokio::adminspace::{
@@ -4398,6 +4402,60 @@ pub(crate) async fn run_storage_host(listen: &str, storage_dir: Option<String>) 
     use wz::runtime_tokio::sink::SampleView;
     use wz::runtime_tokio::storage_manager_service::RuntimeStorageManager;
     use wz::runtime_tokio::storage_volume::MemoryVolume;
+
+    // R311y492 (§5.22) — the DYNAMIC plugin host. Loaded and started BEFORE the
+    // listener binds, so a peer that connects at all connects to a node whose
+    // plugin set is already settled; a plugin appearing mid-transcript would make
+    // a foreign client's GET racy against startup rather than against anything
+    // real.
+    //
+    // `registry` is bound for the whole function on purpose: it OWNS every
+    // `libloading::Library`, and dropping it would `dlclose` a mapping the
+    // process may still hold pointers into (see wz-runtime-tokio's plugin module
+    // doc). Holding it to the end of the run-mode is the lifetime that is
+    // actually correct.
+    #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
+    let plugin_records: Vec<wz::runtime_tokio::adminspace::AdminPlugin> = {
+        let mut registry = wz::runtime_tokio::plugin::PluginRegistry::new();
+        for path in plugin_paths {
+            match registry.load(path) {
+                Ok(id) => {
+                    let id = id.to_string();
+                    log::info!("wz-ap-demo storage-host: dlopen'd plugin '{id}' from {path}");
+                    match registry.start(&id, None) {
+                        Ok(()) => {
+                            log::info!("wz-ap-demo storage-host: plugin '{id}' Started — {path}")
+                        }
+                        // A refusal is REPORTED and the plugin stays Loaded. Exiting
+                        // here would make one bad plugin take the node down, which is
+                        // the opposite of what a plugin host is for.
+                        Err(e) => log::warn!(
+                            "wz-ap-demo storage-host: plugin '{id}' refused to start: {e}"
+                        ),
+                    }
+                }
+                Err(e) => log::warn!("wz-ap-demo storage-host: plugin load failed: {e}"),
+            }
+        }
+        let records = registry.admin_records();
+        // Leak the registry rather than drop it at the end of this block: its
+        // Library handles must outlive every reply that names them, and this
+        // run-mode ends only when the process does. `Box::leak` states that
+        // outright instead of parking it in a binding whose drop order is a
+        // reader's problem.
+        Box::leak(Box::new(registry));
+        records
+    };
+    #[cfg(not(all(unix, feature = "plugin-dynamic-loading")))]
+    let plugin_records: Vec<wz::runtime_tokio::adminspace::AdminPlugin> = {
+        if !plugin_paths.is_empty() {
+            log::warn!(
+                "wz-ap-demo storage-host: --plugin given but this binary lacks the \
+                 `plugin-dynamic-loading` feature — INERT, nothing was loaded"
+            );
+        }
+        Vec::new()
+    };
     use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
 
     use crate::args::NodeKind;
@@ -4530,6 +4588,9 @@ pub(crate) async fn run_storage_host(listen: &str, storage_dir: Option<String>) 
         let get_started = storage_started.clone();
         let get_zid = zid_hex.clone();
         let get_version = version.clone();
+        // Cloned per-declare like `get_version`: the closure is `Send + 'static`,
+        // so it owns its copy of the records rather than borrowing the outer Vec.
+        let get_plugin_records = plugin_records.clone();
         let get_locators = locators.clone();
         let get_config = config_json.clone();
         let _admin_queryable: Option<Queryable> = match session.declare_queryable(
@@ -4546,7 +4607,12 @@ pub(crate) async fn run_storage_host(listen: &str, storage_dir: Option<String>) 
                 // The DYNAMIC registry: storage_manager is Started when a storage is
                 // live (!manager.is_empty(), reflected into storage_started), Loaded
                 // otherwise. This is what binds the witness to REAL add_storage.
-                let plugins = compiled_plugins_dyn(&get_version, get_started.load(Relaxed));
+                let mut plugins = compiled_plugins_dyn(&get_version, get_started.load(Relaxed));
+                // R311y492 — the dlopen'd plugins join the SAME slice as the
+                // statically composed subsystems, which is the whole point: one
+                // admin surface, and the only difference visible on the wire is
+                // the `path` field (a real `.so` vs `"__static__"`).
+                plugins.extend(get_plugin_records.iter().cloned());
                 answer_admin_query(view, out, &ctx, &[], &[], &plugins, &get_config);
             },
         ) {

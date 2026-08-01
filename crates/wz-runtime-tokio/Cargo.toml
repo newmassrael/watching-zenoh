@@ -74,6 +74,25 @@ path = "src/lib.rs"
 # emit continues to compile; `liveliness-subscriber` implies
 # `declare-interest` + `declare-final` (R280 send_interest_*).
 [features]
+# R311y492 (§5.22) — the DYNAMIC PLUGIN HOST, and with it the four atoms
+# R311y256 deprecated. That round's reasoning was correct and conditional: the
+# other four "exist only to SERVE dynamic loading, so if this is ever built they
+# return with it". This key is that condition being met.
+#
+# ONE cargo key for five atoms on purpose. They are not independently
+# selectable and pretending otherwise would be the incoherent-artifact shape
+# R311y461/y488/y489/y491 each had to fix: a registry with nothing loadable, or
+# an ABI gate with no cross-binary boundary, is the half-a-pair that has no
+# behaviour of its own. `plugin-static-registration` is NOT among them — cargo
+# `[features]` + `cfg` already ARE wz's static registration.
+#
+# It composes `adminspace-core`, and that is the coupling being TRUE rather than
+# a shortcut: a runtime plugin registry whose contents nothing can observe is not
+# a feature. `AdminPlugin` is the record type the §5.23 admin space already
+# serves for statically composed subsystems, and reporting a dlopen'd plugin
+# beside them — with its REAL `.so` path where a static one carries
+# `"__static__"` — is the only wire-visible difference this atom has.
+plugin-dynamic-loading = ["dep:libloading", "dep:wz-plugin-abi", "adminspace-core"]
 # R311a1 — codec-init-body / codec-open-body forwards to the matching
 # wz-codecs feature. Forward-only (no force-ON): the wz-codecs dep
 # below switches to `default-features = false` so the codec emit/
@@ -1387,6 +1406,9 @@ scouting-static = ["wz-session-core/scouting-static"]
 # codegen SSOT, so this crate has no build script and pulls no sce-codegen.
 
 [dependencies]
+# R311y492 — the host<->plugin C ABI contract, linked here and, INDEPENDENTLY,
+# by every plugin cdylib. Optional + pulled only by `plugin-dynamic-loading`.
+wz-plugin-abi = { path = "../wz-plugin-abi", optional = true }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 # R311nv — host tty backend for the SERIAL link, behind the optional
 # `transport-link-serial` feature (`dep:tokio-serial`). `SerialStream`
@@ -1627,6 +1649,12 @@ tokio-vsock = { version = "0.5", optional = true }
 # Linux is a subset of unix, so the unixpipe consumer is unaffected (its own code
 # keeps its `target_os = "linux"` gate).
 libc = { version = "0.2", optional = true }
+# R311y492 (§5.22 plugin-dynamic-loading) — `dlopen`/`dlsym` for the dynamic
+# plugin host. In the `cfg(unix)` table because that is what the atom is scoped
+# to: its inventory reason records it as "AP/std-only, unsafe-FFI", and no MCU or
+# `no_std` profile can carry a runtime loader at all. Optional, pulled ONLY by
+# `plugin-dynamic-loading`, so every other build is byte-identical.
+libloading = { version = "0.8", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

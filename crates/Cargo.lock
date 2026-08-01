@@ -2574,6 +2574,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-plugin-abi"
+version = "0.1.0"
+
+[[package]]
+name = "wz-plugin-example"
+version = "0.1.0"
+dependencies = [
+ "wz-plugin-abi",
+]
+
+[[package]]
 name = "wz-rest"
 version = "0.1.0"
 dependencies = [
@@ -2626,6 +2637,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hashbrown 0.15.5",
  "libc",
+ "libloading",
  "log",
  "memmap2",
  "portable-atomic",
@@ -2647,6 +2659,7 @@ dependencies = [
  "wz-access-control",
  "wz-codecs",
  "wz-codecs-test-support",
+ "wz-plugin-abi",
  "wz-routing-graph",
  "wz-runtime-core",
  "wz-runtime-tokio-test-support",

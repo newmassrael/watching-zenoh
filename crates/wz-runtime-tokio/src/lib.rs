@@ -52,6 +52,12 @@ use wz_codecs::stream_envelope::StreamEnvelope;
 /// call needs; all three `access-*` knobs pull it.
 #[cfg(feature = "link-interfaces")]
 pub mod link_interfaces;
+
+/// R311y492 (§5.22) — the dynamic plugin host: `dlopen` loading, the ABI gate,
+/// the lifecycle FSM and the runtime registry. AP/std/unix-only and opt-in; see
+/// the module doc for why four atoms R311y256 deprecated return with it.
+#[cfg(all(unix, feature = "plugin-dynamic-loading"))]
+pub mod plugin;
 #[cfg(feature = "transport-unicast")]
 pub mod session_glue;
 

@@ -37,6 +37,17 @@ members = [
     "wz-capi-pico",
     "wz-codecs",
     "wz-codecs-test-support",
+    # R311y492 (§5.22 plugin-dynamic-loading) — the host<->plugin C ABI contract,
+    # linked INDEPENDENTLY by the loader and by every plugin cdylib. Its own crate
+    # rather than a wz-session-core module precisely so a third-party plugin author
+    # can depend on the ABI without a session implementation behind it. no_std,
+    # zero deps, all repr(C).
+    "wz-plugin-abi",
+    # R311y492 — a REAL loadable plugin, cdylib-only so nothing can link it
+    # directly and skip the dlopen boundary the proof is about. Depends on
+    # wz-plugin-abi and nothing else, which is itself the demonstration that the
+    # ABI crate suffices to author a plugin.
+    "wz-plugin-example",
     "wz-codegen-build",
     "wz-runtime-core",
     "wz-session-core",

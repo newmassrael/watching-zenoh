@@ -448,6 +448,18 @@ jobs:
       - name: Layer D — deploy/*.yaml schema validate
         run: bash scripts/run-ci.sh --layer D
 
+      - name: Layer C1bp — §5.22 dynamic plugin loading, end to end
+        # R311y492. `plugin-dynamic-loading` was the one §5.22 atom R311y256 kept as
+        # real backlog; the other four were deprecated ON THE CONDITION it never got
+        # built ("if this is ever built they return with it"). Built, so gated.
+        #
+        # Builds wz-plugin-example (a cdylib nothing depends on, so no other lane
+        # provides it), runs the ABI gate's unit tests, the host's dlopen/lifecycle/
+        # registry tests against that real .so, clippy on the feature, then the pico
+        # e2e: a real z_get reads the dlopen'd plugin's REAL path beside the static
+        # subsystem's "__static__" marker, in one reply set.
+        run: bash scripts/run-ci.sh --layer C1bp
+
       - name: Layer L — every committed Cargo.lock resolves
         # R311y490. Wired in the SAME commit that adds the lane. Eight independent
         # cargo workspaces live here (crates/, xtask/, six under deploy/) and NONE

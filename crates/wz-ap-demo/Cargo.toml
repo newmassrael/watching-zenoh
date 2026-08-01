@@ -199,6 +199,9 @@ preset-ap-full = [
     "router-hat-router",
     "router-multicast-faces",
     "router-connect-reconcile",
+    # R311y492 — the `--plugin` CLI surface, now that `wz/preset-ap-full` claims
+    # the atom. Held back before that for the reason this list's rule states.
+    "plugin-dynamic-loading",
     "tls",
     "quic",
     "quic-datagram",
@@ -525,6 +528,17 @@ adminspace-config-hotreload = ["wz/adminspace-config-hotreload"]
 # `storage-backend` (which reaches wz-runtime-tokio's cfg site `compiled_plugins`
 # checks). NOT in `default`; Layer E6e builds the demo with it for the plugins E2E.
 storage-backend = ["wz/storage-backend"]
+# R311y492 (§5.22 plugin-dynamic-loading) — opt-in DYNAMIC plugin host on the
+# `--storage-host` run-mode: `--plugin <path.so>` dlopens a real plugin, runs the
+# ABI gate, starts it, and reports it through the SAME admin `plugins/**` legs
+# that already carry the statically composed subsystems.
+#
+# The storage host rather than `--peer`, because that mode already owns the
+# plugins reply slice (`compiled_plugins_dyn`) and already has a foreign witness
+# reading it — so the atom's wire-visible difference (a real `.so` path where a
+# static subsystem carries `"__static__"`) lands in a transcript pico already
+# decodes. NOT in `default`; the footprint baseline is unchanged.
+plugin-dynamic-loading = ["wz/plugin-dynamic-loading", "adminspace-config-hotreload"]
 # R311y450 (§5.18 time-hlc) — forwards the facade `time-hlc` so the demo binary
 # carries the node-scoped Hybrid Logical Clock. It is opt-in and it CHANGES THE
 # WIRE on one run-mode: with it on, `--router-hat` (a `WhatAmI::Router`, the one
