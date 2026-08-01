@@ -1767,6 +1767,27 @@ preset-ap-full = [
     "adminspace-plugins-handlers",
     "adminspace-config-hotreload",
     "adminspace-router-linkstate",
+    # R311y491 — the ROUTER-HAT TIER, and this one was HALF PRESENT in the sharpest
+    # way yet: the preset already carried the FOUNDATION (`routing-router-hat`, via
+    # `routing-token-tables` since R311y461) plus two things that exist only to
+    # serve that run-mode — the token tables themselves and, since R311y489,
+    # `adminspace-router-linkstate`, whose render lives inside `run_router_hat`.
+    # What it omitted was the run-mode's OWN atom. So the library contract carried
+    # the plumbing for a mode it did not claim, while `wz-ap-demo` reached the mode
+    # anyway (its `routing-token-tables` pulls the demo-side `router-hat-router`),
+    # making the demo a superset of the contract it is named after — precisely what
+    # that manifest's own held-back rule forbids.
+    #
+    # The whole tier rather than just the run-mode atom, by the rule R311y488 states
+    # one plane down: a partial membership is what produced the y461 defect. All
+    # seven build clean on top of this preset (measured).
+    "router-hat-router",
+    "router-hat-multihat",
+    "router-multicast-faces",
+    "router-connect-reconcile",
+    "router-face-management",
+    "router-master-election",
+    "router-orchestration",
     "time-system-clock",
     "time-ntp64",
     "time-timestamp-source",

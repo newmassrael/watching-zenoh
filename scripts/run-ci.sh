@@ -8469,7 +8469,9 @@ layer_e12_apfull_adminspace_pico() {
         apfull_adminspace_plane_decoded_by_a_real_pico_z_get \
         apfull_adminspace_read_gate_denies_every_leg_to_a_real_pico_z_get \
         apfull_adminspace_write_applied_and_observed_by_a_real_pico \
-        apfull_adminspace_write_gate_refuses_an_unpermitted_pico_put; do
+        apfull_adminspace_write_gate_refuses_an_unpermitted_pico_put \
+        apfull_router_hat_linkstate_decoded_by_a_real_pico_z_get \
+        apfull_storage_host_hotreload_state_flip_seen_by_a_real_pico; do
         (cd crates && cargo test -p wz-integration-tests \
             --test apfull_adminspace_pico_interop -- --ignored --quiet --test-threads=1 \
             --exact "$leg" 2>&1 \

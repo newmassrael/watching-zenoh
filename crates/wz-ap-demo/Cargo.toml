@@ -191,6 +191,14 @@ preset-ap-full = [
     "adminspace-plugins-handlers",
     "adminspace-config-hotreload",
     "adminspace-router-linkstate",
+    # R311y491 — the router-hat tier's demo keys, now that `wz/preset-ap-full`
+    # claims their atoms. `router-hat-router` was ALREADY reachable here through
+    # `routing-token-tables`, which is the incoherence that round found: the binary
+    # could enter a run-mode the library contract omitted. Naming it explicitly
+    # makes the membership a decision rather than a side effect.
+    "router-hat-router",
+    "router-multicast-faces",
+    "router-connect-reconcile",
     "tls",
     "quic",
     "quic-datagram",
