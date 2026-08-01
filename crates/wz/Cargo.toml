@@ -1572,11 +1572,19 @@ preset-ap-router = [
     "time-timestamp-source",
 ]
 
-# preset-ap-full — kitchen-sink Linux deploy (136 atomic features).
+# preset-ap-full — kitchen-sink Linux deploy.
 # Every active + reserved feature reasonable for an AP host: all
 # transport link kinds (incl. the wz-superset quic-datagram + unixpipe
 # backends + the transport-stats facade), all auth methods, all
 # encodings, all storage, all session extensions, attachment, advanced QoS.
+#
+# The MEMBER COUNT is deliberately not stated here. It was "136" for the four
+# rounds during which the list grew past it (y461, y488, y489, y491, y492), which
+# is the ordinary fate of a number kept by hand next to the thing it counts. Ask
+# cargo — `cargo metadata` resolves the closure; a regex over this file counts
+# feature names that appear in COMMENTS too, which is how a prior reading of 138
+# was produced for a 137-member list. `scripts/lib/apfull_membership.py` reports
+# it, and Layer A5 gates it.
 preset-ap-full = [
     "platform-linux",
     "runtime-tokio",
@@ -1803,6 +1811,87 @@ preset-ap-full = [
     # inventory reasons. The loader module is `cfg(all(unix, ..))`, so a non-unix
     # build of this preset compiles the feature and simply has no loader.
     "plugin-dynamic-loading",
+    # R311y496 — the four families and seven singletons below are EVERY remaining
+    # atom this preset can carry, established by building them
+    # (`cargo build -p wz --no-default-features --features preset-ap-full,<all 36>`
+    # clean under `[workspace.lints] warnings = "deny"`) rather than by judging
+    # them one at a time. `scripts/lib/apfull_membership.py` now derives the
+    # membership from the inventory and rejects any atom that is neither a member
+    # nor on its reasoned exclusion table, so the drift this list has taken four
+    # rounds running (y461, y488, y489, y491) cannot recur silently.
+    #
+    # STORAGE. The preset's own header above has claimed "all storage" since it
+    # was written, and carried four of seventeen atoms: `storage-backend`,
+    # `-aligner`, `-history`, `-replication`. The whole storage MANAGER and every
+    # backend implementation were compiled out, which is the y489 shape again —
+    # half present, so an AP-full node had the storage seam and nothing to mount
+    # on it. It is also the sharpest instance yet of why membership is not
+    # bookkeeping: `--storage-host` was reachable, so the node reported a live
+    # storage in its admin plane while its storage plane could answer no foreign
+    # read at all (R311y496 measured that against a real zenoh-pico, and Layer E13
+    # is the guard).
+    "storage-backend-volume-trait",
+    "storage-backend-capability",
+    "storage-backend-memory-volume",
+    "storage-backend-filesystem",
+    "storage-mgr-config",
+    "storage-mgr-multi-storage-host",
+    "storage-mgr-complete-flag",
+    "storage-mgr-strip-prefix",
+    "storage-mgr-wildcard-updates",
+    "storage-mgr-garbage-collection",
+    # CONFIG. The runtime configuration surface the adminspace write plane exists
+    # to drive: this preset has carried `adminspace-write` and
+    # `-config-hotreload` since y489 while omitting the config subsystem they
+    # mutate.
+    "config-mutate-runtime",
+    "config-change-notifier",
+    "config-json-pointer-access",
+    "config-plugin-validator",
+    # REST. `wz-rest` is a hand-rolled HTTP/1.1 bridge and its oracle ships inside
+    # the stock zenohd binary; an AP host serving one is exactly this preset's
+    # stated scope ("every active + reserved feature reasonable for an AP host").
+    "rest-http-bridge",
+    "rest-sse-subscribe",
+    # ROUTING, the rest of it. Seven are FOUNDATIONAL (always-on, no cfg gate of
+    # their own), so they add no code here — but a preset that names 8 of 15
+    # routing atoms is making a claim about the other 7 by omission, and that
+    # claim is false. `routing-namespace` is the one with a real gate, and the
+    # demo key it unblocks is one of the four this round empties from the demo's
+    # held-back list.
+    "routing-namespace",
+    "routing-route-cache",
+    "routing-data-route-compute",
+    "routing-query-route-compute",
+    "routing-interest-broker",
+    "routing-interest-pending-gc",
+    "routing-interceptor-framework",
+    "routing-interceptor-hotreload",
+    # PLUGIN, the rest of it. R311y492 built `plugin-dynamic-loading` and these
+    # four returned from their CONDITIONAL deprecation with it ("if that atom is
+    # ever built, this one returns with it"); `plugin-static-registration` is
+    # FOUNDATIONAL — cargo features + cfg ARE wz's static registration. Naming
+    # them makes the ABI boundary a claim of this preset rather than a side
+    # effect of the loader's closure.
+    "plugin-abi-compat",
+    "plugin-host-trait",
+    "plugin-lifecycle",
+    "plugin-manager",
+    "plugin-static-registration",
+    # The singletons, each omitted with no rationale recorded anywhere.
+    # `query-value` is the one §5.7 atom missing from an otherwise complete query
+    # family; `transport-multilink` and `transport-qos` are the last two demo keys
+    # held back; the serial pair is a link kind an automotive AP host plausibly
+    # has and every other link kind is already here; `api-compat-pico` is the
+    # zenoh-pico C ABI drop-in, a surface a kitchen-sink AP deploy offers;
+    # `switchboard` mirrors `preset-ap-client`, which has carried it all along.
+    "query-value",
+    "transport-multilink",
+    "transport-qos",
+    "transport-link-serial",
+    "locator-serial",
+    "api-compat-pico",
+    "switchboard",
     "time-system-clock",
     "time-ntp64",
     "time-timestamp-source",

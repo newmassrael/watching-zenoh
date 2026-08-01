@@ -925,6 +925,47 @@ layer_a4_audit_crossimpl_proof() {
     bash scripts/audit-crossimpl-proof.sh
 }
 
+# ─── Layer A5 — preset-ap-full MEMBERSHIP gate (R311y496) ───────────
+# A3 asks "is there a knob?", A4 asks "is it proven against a foreign impl?".
+# Neither asks whether the KITCHEN-SINK ARTIFACT actually contains the atom, and
+# nothing else did either: preset-ap-full's membership was hand-maintained and
+# dropped a whole family in four consecutive rounds (y461 routing-token-tables,
+# y488 ext-pubsub-*, y489 adminspace-*, y491 the router-hat tier), each found by
+# accident, none recorded as a decision anywhere. y496 found the fifth (the
+# storage manager and every backend) and, because that one left the AP-full node
+# reporting a live storage it could not serve a single read from, made the case
+# that four rounds of the same shape is a missing gate rather than five separate
+# mistakes.
+#
+# The gate DERIVES membership from cargo + the Mnemosyne inventory and enforces a
+# reasoned exclusion table whose entries are re-validated against the inventory
+# every run, so an exclusion cannot outlive its justification. It also enforces
+# the wz-ap-demo manifest's own "held back" rule, which was prose until now.
+#
+# mnemosyne-cli / python3 absence is a SKIP on a dev box (they may not have the
+# tool) and a FAIL where WZ_A5_REQUIRE is set -- the same rule as A3/A4/Qz: a
+# lane that SKIPs where the job provisions its input is a provisioning
+# regression wearing a green badge.
+layer_a5_apfull_membership() {
+    if ! command -v mnemosyne-cli >/dev/null 2>&1; then
+        if [[ -n "${WZ_A5_REQUIRE:-}" ]]; then
+            echo "  Layer A5 FAIL — required (WZ_A5_REQUIRE set) but mnemosyne-cli not on PATH" >&2
+            return 1
+        fi
+        echo "  Layer A5 SKIP (mnemosyne-cli not on PATH)"
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        if [[ -n "${WZ_A5_REQUIRE:-}" ]]; then
+            echo "  Layer A5 FAIL — required (WZ_A5_REQUIRE set) but python3 not on PATH" >&2
+            return 1
+        fi
+        echo "  Layer A5 SKIP (python3 not on PATH)"
+        return 0
+    fi
+    python3 scripts/lib/apfull_membership.py
+}
+
 # ─── Layer B — verify-codegen.sh per codec ──────────────────────────
 layer_b_verify_codegen() {
     if [[ $SKIP_CODEGEN -eq 1 ]]; then
@@ -8549,6 +8590,53 @@ layer_e12_apfull_adminspace_pico() {
     done
 }
 
+# ─── Layer E13 — AP-full STORAGE plane against a real zenoh-pico ───────
+#
+# R311y496. The §5.24 storage plane COMPOSED on one AP-full binary and driven
+# entirely by foreign processes: a real pico CONFIGURES a storage over the admin
+# write plane, a real pico WRITES a sample into it, and a LATER real pico READS
+# that sample back. Three one-shot clients, three separate sessions, one wz node.
+#
+# WHY E6h AND y362's LANE DO NOT COVER IT. Each proves a part on its own narrow
+# build — E6h the `storage-add` STATE flip (`storage_manager` reports Started),
+# y362 an in-process manager serving two storages. Neither crosses the session
+# boundary on the kitchen-sink binary, which is where this plane was broken: the
+# storage's capture subscriber and queryable were bound to whichever transient
+# client session had created the storage, so the admin plane reported a live
+# storage that the storage plane could not serve one foreign read from. Leg 1 is
+# the guard for the fix (`RuntimeStorageManager::rebind_all`) and FAILED before
+# it, with no reply at all for the key pico had just written.
+#
+# Legs 2 and 3 are a PAIR and neither is droppable: leg 2 restarts the host on
+# the same `--storage-host-dir` and requires the value back (the
+# `storage-backend-filesystem` claim, and the atom this preset held back until
+# y496), leg 3 runs the same script WITHOUT the flag and requires it gone. Alone,
+# leg 2 passes just as well if the value never left memory.
+#
+# BUILD FIRST, GUARD SECOND, as E9/E11/E12 all do and for the reason they state:
+# a SKIP is green, so a build behind the guard would leave the preset's storage
+# membership ungated on every machine without the foreign CLI.
+layer_e13_apfull_storage_plane_pico() {
+    (cd crates && cargo build -p wz-ap-demo --no-default-features \
+        --features preset-ap-full --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_get || ! -x target/zenoh-pico-cli/z_put ]]; then
+        _pico_cli_unavailable "Layer E13" || return 1
+        return 0
+    fi
+    # Named `--exact` one per invocation, like E9/E11/E12: a rename or a silently
+    # dropped test then fails the lane instead of shrinking it quietly.
+    for leg in \
+        apfull_storage_plane_serves_a_pico_write_to_a_later_pico_read \
+        apfull_storage_plane_survives_a_host_restart_on_a_durable_volume \
+        apfull_storage_plane_is_volatile_across_a_restart_without_the_durable_volume \
+        apfull_storage_del_stops_serving_a_real_pico_get; do
+        (cd crates && cargo test -p wz-integration-tests \
+            --test apfull_storage_plane_pico_interop -- --ignored --quiet --test-threads=1 \
+            --exact "$leg" 2>&1 \
+            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    done
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -8678,6 +8766,7 @@ run_layer A layer_a_mnemosyne || overall=1
 run_layer A2 layer_a2_audit_mid_values || overall=1
 run_layer A3 layer_a3_audit_catalog_status || overall=1
 run_layer A4 layer_a4_audit_crossimpl_proof || overall=1
+run_layer A5 layer_a5_apfull_membership || overall=1
 run_layer B layer_b_verify_codegen || overall=1
 run_layer B2 layer_b2_regen_diff || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
@@ -8782,6 +8871,7 @@ run_layer E9 layer_e9_apfull_preset_pico || overall=1
 run_layer E10 layer_e10_close_frame_on_teardown || overall=1
 run_layer E11 layer_e11_apfull_advanced_pubsub_pico || overall=1
 run_layer E12 layer_e12_apfull_adminspace_pico || overall=1
+run_layer E13 layer_e13_apfull_storage_plane_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

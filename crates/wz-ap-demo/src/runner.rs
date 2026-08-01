@@ -4371,18 +4371,32 @@ fn storage_host_volume_id(dir: Option<&str>) -> &'static str {
 /// `Rc<RefCell<>>` forwarder handlers are NOT reused here — an `Rc` capture would be
 /// a `cannot be sent between threads` compile error on the Session declare path.
 ///
-/// ## The "zombie storage" bound (NAMED)
+/// ## Hosted storages are REBOUND per client session (R311y496)
 ///
-/// A storage is spawned via `add_storage(&session, ..)` on the TRANSIENT z_put
-/// client Session. When that pico process exits and the session is dropped at end
-/// of the accept-loop iteration, the hosted `StorageService` SURVIVES: the manager
-/// is hoisted and the service holds `Arc` clones of the session's observer + actions
-/// (its RAII `Subscriber` / `Queryable` handles), and dead-link undeclare emits are
-/// swallowed. So the storage keeps the manager NON-EMPTY (`storage_started` stays
-/// true -> a later client's plugins GET reports `Started`), but it is a ZOMBIE:
-/// STATE-OBSERVABLE, not data-serving across the session boundary. This is
-/// sufficient for the plugins-STATE witness (which reads `!manager.is_empty()`) and
-/// MUST NOT be read as a claim that the storage serves cross-connection data.
+/// A storage is created by `add_storage(&session, ..)` on whichever TRANSIENT
+/// client Session carried the `storage-add`, and its capture subscriber and
+/// answering queryable are bound to that session. Until R311y496 nothing
+/// re-established them, so once that pico one-shot exited the storage was a
+/// ZOMBIE: it kept the manager non-empty — `storage_started` stayed true, so a
+/// later client's plugins GET reported `Started` — while capturing nothing and
+/// answering nothing. The admin plane and the storage plane disagreed about the
+/// same storage, and a real zenoh-pico `z_get` for a key a real zenoh-pico
+/// `z_put` had just written received only the terminating Final
+/// (`apfull_storage_plane_pico_interop.rs` leg 1, which failed before the fix).
+///
+/// The split is now explicit: the DATA is the `StorageState` over the
+/// volume-created backend and belongs to the storage, while the two declaration
+/// handles are a BINDING TO ONE SESSION. So every accepted client session calls
+/// [`RuntimeStorageManager::rebind_all`](wz::runtime_tokio::storage_manager_service::RuntimeStorageManager::rebind_all),
+/// which re-declares each hosted storage's
+/// subscriber + queryable on that session against the same stored state. The
+/// plugins-STATE witness is unaffected — it still reads `!manager.is_empty()` —
+/// and it is now backed by a storage that genuinely serves.
+///
+/// Data OUTLIVING THE PROCESS is a separate question, and it is the VOLUME's:
+/// `--storage-host-dir` puts hosted storages on a durable `FilesystemVolume`
+/// whose mirror is rebuilt on open, so a restarted host serves what the previous
+/// one stored; without it they ride the volatile `mem` volume and do not.
 #[cfg(feature = "adminspace-config-hotreload")]
 pub(crate) async fn run_storage_host(
     listen: &str,
@@ -4671,6 +4685,23 @@ pub(crate) async fn run_storage_host(
             }
         };
 
+        // ── R311y496: rebind every hosted storage onto THIS client's session ──
+        // A storage's stored data belongs to the storage; its capture subscriber
+        // and answering queryable belong to a session. This host serves one
+        // client session at a time, so without re-establishing that binding
+        // every client after the one that created a storage reaches a storage
+        // that is hosted but neither captures nor answers — which is what a real
+        // zenoh-pico measured before this call existed. Failure is logged and
+        // the session is still served: the admin surface remains reachable, which
+        // is how an operator would diagnose it.
+        if let Err(e) = manager.rebind_all(&session, node_zid.clone()) {
+            log::warn!(
+                "wz-ap-demo storage-host: could not rebind hosted storages onto this \
+                 client session: {e} — the admin plane is still served, but storage \
+                 reads on this session will not be answered"
+            );
+        }
+
         // ── the per-iteration dispatch closure ──
         // Fires the session's handlers, THEN drains + applies the stashed storage
         // intents. add_storage / remove_storage run AFTER
@@ -4787,10 +4818,14 @@ pub(crate) async fn run_storage_host(
         )
         .await;
 
-        // Stop this client's writer task before re-accepting. It would NOT exit on its
-        // own: any zombie StorageService the manager kept holds an `Arc` clone of this
-        // session's actions (a live channel sender), so the writer's channel never
-        // closes — abort it explicitly to avoid one lingering task per client.
+        // Stop this client's writer task before re-accepting. It would NOT exit on
+        // its own: a hosted StorageService holds an `Arc` clone of the actions of
+        // whichever session it is currently bound to (a live channel sender), so the
+        // writer's channel never closes — abort it explicitly to avoid one lingering
+        // task per client. R311y496 makes this MORE load-bearing rather than less:
+        // before the rebinding, only a storage created on this session held those
+        // actions; now every hosted storage does, until the next accepted client
+        // rebinds them off it.
         writer_handle.abort();
         match outcome {
             Some(o) => log::info!("wz-ap-demo storage-host: client session ended: {o:?}"),

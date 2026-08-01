@@ -169,7 +169,6 @@ where
         if local_zid.is_empty() {
             return Err(StorageServiceError::InvalidZid);
         }
-        let keyexpr: String = config.key_expr.clone();
         // The newer-wins gate over the backend, with the config's `strip_prefix`
         // applied to the live capture + query key path (R311y61): a stored key
         // is held RELATIVE to the mount point, and restored to its full keyexpr
@@ -183,11 +182,79 @@ where
         #[cfg(not(feature = "storage-mgr-strip-prefix"))]
         let state: SharedState<B> = Arc::new(Mutex::new(StorageState::new(backend)));
 
+        let (subscriber, queryable) = Self::declare_handles(session, config, &state, local_zid)?;
+        Ok(Self {
+            state,
+            _subscriber: subscriber,
+            _queryable: queryable,
+        })
+    }
+
+    /// R311y496 — re-declare this storage's capture subscriber and answering
+    /// queryable on `session`, KEEPING the stored data.
+    ///
+    /// A storage is two things with different lifetimes, and conflating them is
+    /// what made the AP-full storage host unable to answer a foreign read. The
+    /// DATA is the [`StorageState`] over the volume-created backend, and it
+    /// belongs to the storage for as long as the host hosts it. The two
+    /// declaration handles are a BINDING TO ONE SESSION, and they are only as
+    /// live as that session. A host that accepts one client at a time — the
+    /// `wz-ap-demo --storage-host` accept loop, and any acceptor serving
+    /// one-shot clients — therefore has to re-establish the binding per client,
+    /// or every session after the one that created the storage reaches a
+    /// storage that can neither capture nor answer.
+    ///
+    /// The previous handles are dropped as the new ones are stored, which
+    /// undeclares them on the session they belonged to (a dead-link undeclare
+    /// emit is swallowed, so a session that has already gone is not an error
+    /// here). The state `Arc` is untouched, so nothing stored is lost and any
+    /// external driver holding a clone of it — the digest publisher, the
+    /// garbage collector, both of which take one through `shared_state` — keeps
+    /// acting on the same gate across the rebinding. (Plain text rather than an
+    /// intra-doc link: `shared_state` is itself cfg-gated, so a link would be
+    /// broken on a build without those features.)
+    ///
+    /// `config` must be the one the storage was declared from: `key_expr` is
+    /// what the new handles bind to and `complete` is what the new queryable
+    /// declares. Passing a different config would silently re-mount the storage
+    /// rather than rebind it, which is why the manager holds each storage's
+    /// config beside it rather than asking the caller to supply one.
+    pub fn rebind(
+        &mut self,
+        session: &Session<R, T, Unicast>,
+        config: &StorageConfig,
+        local_zid: Vec<u8>,
+    ) -> Result<(), StorageServiceError> {
+        if local_zid.is_empty() {
+            return Err(StorageServiceError::InvalidZid);
+        }
+        let (subscriber, queryable) =
+            Self::declare_handles(session, config, &self.state, local_zid)?;
+        // Assigned AFTER both declares succeed: a failed rebind leaves the
+        // service on its previous binding rather than on none at all.
+        self._subscriber = subscriber;
+        self._queryable = queryable;
+        Ok(())
+    }
+
+    /// The declaration pair — the capture subscriber and the answering
+    /// queryable — over an EXISTING shared state. The one place both
+    /// [`declare_with_backend`](StorageService::declare_with_backend) and
+    /// [`rebind`](StorageService::rebind) construct them, so the two cannot
+    /// drift in what they declare.
+    fn declare_handles(
+        session: &Session<R, T, Unicast>,
+        config: &StorageConfig,
+        state: &SharedState<B>,
+        local_zid: Vec<u8>,
+    ) -> Result<(Subscriber<R>, Queryable<R, T>), StorageServiceError> {
+        let keyexpr: String = config.key_expr.clone();
+
         // Capture leg: each inbound sample locks the gate and applies it,
         // stamping a fallback wall-clock NTP64 timestamp when the sample
         // carries none (the §5.18 seam) — comparable to a real publisher
         // timestamp, so newer-wins competes fairly (see the module note).
-        let sub_state = Arc::clone(&state);
+        let sub_state = Arc::clone(state);
         // The §5.18 timestamp-source seam: with `time-hlc` on AND this node's
         // role timestamping, an un-timestamped sample is stamped by the NODE's
         // HLC (a logical counter + monotonicity over the wall clock); otherwise
@@ -214,7 +281,7 @@ where
 
         // Answer leg: each inbound query locks the gate and replies the
         // matching stored entries, each under its own concrete keyexpr.
-        let query_state = Arc::clone(&state);
+        let query_state = Arc::clone(state);
         let queryable = session.declare_queryable(
             keyexpr,
             QueryableOptions::default().with_complete(storage_queryable_complete(config.complete)),
@@ -224,11 +291,7 @@ where
             },
         )?;
 
-        Ok(Self {
-            state,
-            _subscriber: subscriber,
-            _queryable: queryable,
-        })
+        Ok((subscriber, queryable))
     }
 
     /// Read the stored state under the lock — the inspection seam for

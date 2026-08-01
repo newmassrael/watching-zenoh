@@ -67,6 +67,20 @@ use crate::storage_service::{StorageService, StorageServiceError};
 /// output) so one manager hosts heterogeneous backends behind one type.
 type HostedStorage<R, T> = StorageService<R, T, Box<dyn StorageBackend + Send>>;
 
+/// R311y496 — one hosted storage: its live service and the [`StorageConfig`] it
+/// was declared from.
+///
+/// The config is held rather than dropped after the declare because a storage
+/// OUTLIVES the session its handles are bound to. Re-establishing that binding
+/// ([`RuntimeStorageManager::rebind_all`]) needs the same `key_expr` and
+/// `complete` the storage was mounted with, and taking them from a caller would
+/// make it possible to silently re-mount a storage somewhere else while calling
+/// it a rebind.
+struct HostedEntry<R: SessionRuntime, T: TimeSource> {
+    config: StorageConfig,
+    service: HostedStorage<R, T>,
+}
+
 /// Why [`RuntimeStorageManager::add_storage`] failed.
 #[derive(Debug)]
 pub enum RuntimeStorageManagerError {
@@ -107,8 +121,9 @@ pub struct RuntimeStorageManager<R: SessionRuntime, T: TimeSource> {
     /// The shared volume registry — registration + the resolve/create step. No
     /// dead host map (see the module note).
     registry: VolumeRegistry,
-    /// The live services, keyed by storage name (sorted, BTreeMap order).
-    services: BTreeMap<String, HostedStorage<R, T>>,
+    /// The live services and their configs, keyed by storage name (sorted,
+    /// BTreeMap order).
+    services: BTreeMap<String, HostedEntry<R, T>>,
 }
 
 impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
@@ -131,7 +146,7 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
     /// The live storage named `name`, if any — the inspection / query handle
     /// (e.g. [`StorageService::with_state`]).
     pub fn storage(&self, name: &str) -> Option<&HostedStorage<R, T>> {
-        self.services.get(name)
+        self.services.get(name).map(|e| &e.service)
     }
 
     /// The names of the hosted storages, sorted (BTreeMap order).
@@ -204,7 +219,45 @@ where
             .map_err(RuntimeStorageManagerError::Volume)?;
         let service = StorageService::declare_with_backend(session, config, local_zid, backend)
             .map_err(RuntimeStorageManagerError::Service)?;
-        self.services.insert(config.name.clone(), service);
+        self.services.insert(
+            config.name.clone(),
+            HostedEntry {
+                config: config.clone(),
+                service,
+            },
+        );
+        Ok(())
+    }
+
+    /// R311y496 — re-establish every hosted storage's declaration on `session`,
+    /// keeping all stored data
+    /// ([`StorageService::rebind`](crate::storage_service::StorageService::rebind)).
+    ///
+    /// A host that serves ONE client session at a time must call this on each
+    /// accepted session. A storage is created on whichever session carried the
+    /// request that created it, and its capture subscriber and answering
+    /// queryable die with that session; without a rebinding, every later client
+    /// reaches a storage that is hosted (`len() > 0`, so the admin plane reports
+    /// it live) yet captures nothing and answers nothing. That divergence — the
+    /// admin plane and the storage plane disagreeing about the same storage — is
+    /// what R311y496 measured against a real zenoh-pico before fixing it.
+    ///
+    /// Applies to every hosted storage or to none: the first failure is
+    /// returned, and the storages already rebound in this call keep their new
+    /// binding (a partial rebinding is strictly better than none, and the caller
+    /// that gets an `Err` is expected to drop the session rather than serve on
+    /// it). Hosting nothing is a no-op success.
+    pub fn rebind_all(
+        &mut self,
+        session: &Session<R, T, Unicast>,
+        local_zid: Vec<u8>,
+    ) -> Result<(), RuntimeStorageManagerError> {
+        for entry in self.services.values_mut() {
+            entry
+                .service
+                .rebind(session, &entry.config, local_zid.clone())
+                .map_err(RuntimeStorageManagerError::Service)?;
+        }
         Ok(())
     }
 }

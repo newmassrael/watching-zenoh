@@ -175,10 +175,23 @@ preset-ap-client = ["wz/preset-ap-client", "switchboard"]
 # them; `adminspace-router-linkstate` composes `router-hat-router`, already a
 # member via `routing-token-tables`, so it adds no run-mode this preset lacked.
 #
-# `storage-backend-filesystem` STAYS held back, and that is the rule working
-# rather than an oversight: its atom is still absent from `wz/preset-ap-full`
-# (`storage-backend` is a member, the filesystem VOLUME is not), so including the
-# demo key would make this preset a superset of the contract it is named after.
+# R311y496 — THE HELD-BACK LIST IS NOW EMPTY, and it is empty because the rule
+# emptied it rather than because the rule was dropped. `wz/preset-ap-full` gained
+# every atom it can carry this round, so the four keys that were still held back
+# — `namespace`, `storage-backend-filesystem`, `transport-multilink`,
+# `transport-qos` — are keys whose atoms the preset now claims, and the rule that
+# put them on the list is the same one that requires them off it.
+#
+# `storage-backend-filesystem` is the one that was doing real work by its absence.
+# The demo's `--storage-host-dir` maps hosted storages onto a durable
+# FilesystemVolume, so without this key the AP-full binary's storage host had no
+# durable volume to offer and its `--storage-host-dir` was an accepted flag that
+# logged a warning and changed nothing.
+#
+# Layer A5 (`scripts/lib/apfull_membership.py`) now GATES this: the preset-ap-full
+# closure of this manifest must cover every non-preset feature it declares. A new
+# demo key whose atom the preset carries can no longer sit here unreached, and a
+# key added ahead of its atom fails on the wz side of the same gate.
 preset-ap-full = [
     "wz/preset-ap-full",
     "switchboard",
@@ -216,6 +229,13 @@ preset-ap-full = [
     "session-extcompression",
     "time-hlc",
     "storage-backend",
+    # R311y496 — the last four. `storage-backend-filesystem` is what makes
+    # `--storage-host-dir` real; `namespace`, `transport-multilink` and
+    # `transport-qos` are the CLI surface for atoms the preset now carries.
+    "storage-backend-filesystem",
+    "namespace",
+    "transport-multilink",
+    "transport-qos",
     "routing-router",
     "routing-routes",
     "routing-peer",

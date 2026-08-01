@@ -626,6 +626,24 @@ jobs:
           WZ_A4_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer A4
 
+      - name: Layer A5 — preset-ap-full membership
+        # R311y496. Wired in the SAME commit that adds the lane.
+        #
+        # preset-ap-full's membership was hand-maintained and dropped a WHOLE
+        # FAMILY in four consecutive rounds (y461 routing-token-tables, y488
+        # ext-pubsub-*, y489 adminspace-*, y491 the router-hat tier), each found
+        # by accident and none recorded as a decision anywhere. y496 found the
+        # fifth — the storage manager and every backend — and that one left the
+        # AP-full node reporting a live storage it could not serve one read from.
+        # Four rounds of one shape is a missing gate, not five mistakes.
+        #
+        # This job provisions mnemosyne-cli, so WZ_A5_REQUIRE turns the
+        # tool-absent SKIP into a FAIL here: a lane that skips where its input is
+        # provisioned is a provisioning regression wearing a green badge.
+        env:
+          WZ_A5_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer A5
+
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 
@@ -784,7 +802,7 @@ jobs:
   # therefore stay local-only until that flakiness is root-caused, and A4's
   # EXECUTION line keeps saying so.
   interop:
-    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E6g + E6h + E7 + E8 + E8t + E9 + E10 + E11 + E12 + C1bp + Z)
+    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E6g + E6h + E7 + E8 + E8t + E9 + E10 + E11 + E12 + E13 + C1bp + Z)
     runs-on: ubuntu-22.04
     # A cold cache must build: the zenoh-pico CMake tree, the whole zenoh workspace in
     # release (zenohd AND the storage-manager plugin), four differently-featured
@@ -1041,6 +1059,24 @@ jobs:
         # z_put, since the write legs need the writer and a reader-only guard would
         # SKIP-green on a machine that has it.
         run: bash scripts/run-ci.sh --layer E12
+
+      - name: Layer E13 — AP-full storage plane against a real zenoh-pico
+        # R311y496. Wired in the SAME commit that adds the lane, and into THIS job
+        # because this is the one that provisions the pico CLI — the R311y495 rule,
+        # learned from C1bp SKIP-passing for two rounds in a job that does not.
+        #
+        # The §5.24 storage plane COMPOSED and driven entirely by foreign
+        # processes: pico configures a storage over the admin write plane, pico
+        # writes a sample into it, a LATER pico reads that sample back. Before
+        # y496 the last step returned nothing at all — the storage's subscriber
+        # and queryable were bound to the transient client session that had
+        # created it, so the admin plane reported a live storage the storage plane
+        # could not serve.
+        #
+        # Legs 2 and 3 are a pair: restart on the same --storage-host-dir and the
+        # value must come back; run the same script without the flag and it must
+        # not. Leg 2 alone passes just as well if the value never left memory.
+        run: bash scripts/run-ci.sh --layer E13
 
       - name: Layer C1bp — §5.22 dynamic plugin loading, end to end
         # R311y495 — MOVED here from `validate + verify + test`, where R311y492
