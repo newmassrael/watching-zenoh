@@ -8386,6 +8386,53 @@ layer_e11_apfull_advanced_pubsub_pico() {
         | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
 }
 
+# ─── Layer E12 — AP-full ADMINSPACE plane against a real zenoh-pico ────
+#
+# R311y489. The `adminspace-*` plane COMPOSED on one binary, in both directions:
+# a real `z_get` reads every leg wz serves in ONE query (node record +
+# introspection + metrics + plugins), and a real `z_put` reconfigures the node and
+# then observes its own write through a second `z_get`.
+#
+# WHY THIS IS NOT COVERED BY E6b/E6e/E6f/E6g/E6. Each of those builds its OWN
+# narrow feature set — cargo uplifts every variant of the same `--bin` to one path
+# — and they assert the OTHER legs are absent (E6b's test ends by requiring
+# `.../metrics` to be missing, which is what makes its cfg-gate argument work). So
+# the plane had six proofs of six parts and none of the whole. That whole is what
+# `preset-ap-full` is for, and until y489 it could not be asked: the preset omitted
+# seven of the eight atoms while `routing-peer` pulled the eighth, so an AP-full
+# node answered its own identity and nothing else.
+#
+# The pico guard names `z_put` BESIDE `z_get`: the write legs need both, and a
+# guard on the reader alone would SKIP-green on a machine that has it — the
+# R311y265 masked-skip shape E11's comment describes, and the reason its own guard
+# names the advanced binaries specifically.
+#
+# BUILD FIRST, GUARD SECOND, for the reason Layers E9 and E11 both state: a SKIP is
+# green, so a build sitting behind the guard would leave the preset's adminspace
+# membership ungated on every machine without the foreign CLI — which is exactly
+# how the membership drift this lane exists to catch would reach main invisibly.
+layer_e12_apfull_adminspace_pico() {
+    (cd crates && cargo build -p wz-ap-demo --no-default-features \
+        --features preset-ap-full --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_get || ! -x target/zenoh-pico-cli/z_put ]]; then
+        _pico_cli_unavailable "Layer E12" || return 1
+        return 0
+    fi
+    # Named `--exact` one per invocation, like E9 and E11 and for the same reason:
+    # a rename or a silently-dropped test then fails the lane instead of shrinking
+    # it quietly.
+    for leg in \
+        apfull_adminspace_plane_decoded_by_a_real_pico_z_get \
+        apfull_adminspace_read_gate_denies_every_leg_to_a_real_pico_z_get \
+        apfull_adminspace_write_applied_and_observed_by_a_real_pico \
+        apfull_adminspace_write_gate_refuses_an_unpermitted_pico_put; do
+        (cd crates && cargo test -p wz-integration-tests \
+            --test apfull_adminspace_pico_interop -- --ignored --quiet --test-threads=1 \
+            --exact "$leg" 2>&1 \
+            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    done
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -8616,6 +8663,7 @@ run_layer E8t layer_e8t_router_hat_hlc_stamp_pico || overall=1
 run_layer E9 layer_e9_apfull_preset_pico || overall=1
 run_layer E10 layer_e10_close_frame_on_teardown || overall=1
 run_layer E11 layer_e11_apfull_advanced_pubsub_pico || overall=1
+run_layer E12 layer_e12_apfull_adminspace_pico || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

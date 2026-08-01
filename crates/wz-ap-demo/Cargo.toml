@@ -165,11 +165,32 @@ preset-ap-client = ["wz/preset-ap-client", "switchboard"]
 # advanced plane in and could not reach it from argv — `--advanced-publish`
 # logged INERT and declared no cache — which is the incoherent-kitchen-sink
 # shape this comment's own rule exists to forbid.
+#
+# R311y489 — the `adminspace-*` family leaves the list next, by the same rule
+# again: `wz/preset-ap-full` now carries all eight atoms. The pre-y489 state was
+# the sharper version of the y488 shape, because it was HALF present —
+# `routing-peer` (a member all along) hard-pulls `wz/adminspace-core`, so the
+# AP-full binary already answered `@/<zid>/peer` with its node record while every
+# other admin leg was compiled out. The demo keys below are what let argv reach
+# them; `adminspace-router-linkstate` composes `router-hat-router`, already a
+# member via `routing-token-tables`, so it adds no run-mode this preset lacked.
+#
+# `storage-backend-filesystem` STAYS held back, and that is the rule working
+# rather than an oversight: its atom is still absent from `wz/preset-ap-full`
+# (`storage-backend` is a member, the filesystem VOLUME is not), so including the
+# demo key would make this preset a superset of the contract it is named after.
 preset-ap-full = [
     "wz/preset-ap-full",
     "switchboard",
     "advanced",
     "group",
+    "adminspace-read",
+    "adminspace-write",
+    "adminspace-metrics",
+    "adminspace-introspection-handlers",
+    "adminspace-plugins-handlers",
+    "adminspace-config-hotreload",
+    "adminspace-router-linkstate",
     "tls",
     "quic",
     "quic-datagram",

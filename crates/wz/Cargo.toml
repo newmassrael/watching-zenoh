@@ -1742,6 +1742,31 @@ preset-ap-full = [
     "ext-pubsub-querying-subscriber",
     "ext-pubsub-group-membership",
     "ext-pubsub-serde-codec",
+    # R311y489 — the ADMINSPACE plane, the next whole family this preset omitted,
+    # and the third instance of the same shape (R311y461 routing-token-tables,
+    # R311y488 ext-pubsub-*): a kitchen-sink preset that drops a plane without
+    # recording the drop anywhere.
+    #
+    # The omission was NOT total, and that is what made it incoherent rather than
+    # merely partial: `routing-peer` — a member since this preset existed —
+    # hard-pulls `adminspace-core` (crates/wz-ap-demo/Cargo.toml routing-peer, and
+    # the facade closure), so an AP-full node ALREADY served the `@/<zid>/peer`
+    # node record. What it omitted were every leg that makes that record worth
+    # querying: the per-entity introspection view, metrics, plugins, the read and
+    # write permission gates, config hot-reload, and the router linkstate view. A
+    # node that answers its own identity and nothing else is not an admin space.
+    #
+    # The whole family for the reason the y488 note gives one plane down: the read
+    # gate with nothing to read, or the write gate with no hot-reload behind it,
+    # are each the half of a pair whose other half is what makes it observable.
+    "adminspace-core",
+    "adminspace-read",
+    "adminspace-write",
+    "adminspace-metrics",
+    "adminspace-introspection-handlers",
+    "adminspace-plugins-handlers",
+    "adminspace-config-hotreload",
+    "adminspace-router-linkstate",
     "time-system-clock",
     "time-ntp64",
     "time-timestamp-source",

@@ -441,12 +441,24 @@ fn pico_zput_source_on_wz_capi_declares_and_reaches_real_pico_zsub() {
     // which is precisely the missing half.
     let mut put_out = tempfile::tempfile().expect("z_put drop-in stdout capture");
     let put_writer = put_out.try_clone().expect("dup z_put drop-in handle");
+    // R311y489 — stderr rides the SAME capture as stdout instead of being
+    // discarded. The assertion below names three functions any of which could have
+    // returned the -1, and with `Stdio::null()` here it could never say which:
+    // upstream prints the distinguishing line ("Unable to open session!" vs the
+    // keyexpr complaints) on the stream that was being thrown away. This leg's own
+    // comment above already records that it "fails most often under file-parallel
+    // runs", and it duly failed once in a full local sweep on 2026-08-01 while
+    // passing 18/18 in isolation — with no diagnosis captured, which is the whole
+    // reason the cause is still open. The next occurrence will carry one.
+    let put_err = put_out
+        .try_clone()
+        .expect("dup z_put drop-in stderr handle");
     let put = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(&dropin)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(put_err))
         .status()
         .expect("run the compiled z_put drop-in");
     // A non-zero exit is itself a finding: upstream returns -1 when
@@ -455,7 +467,10 @@ fn pico_zput_source_on_wz_capi_declares_and_reaches_real_pico_zsub() {
     assert!(
         put.success(),
         "upstream z_put.c on wz's C-ABI exited {put:?} — it returns -1 when \
-         z_open, z_view_keyexpr_from_str or z_declare_keyexpr fails"
+         z_open, z_view_keyexpr_from_str or z_declare_keyexpr fails\n\
+         --- z_put drop-in (stdout+stderr) ---\n{}\n--- z_sub ---\n{}",
+        read_captured(&mut put_out),
+        read_captured(&mut sub_out)
     );
 
     let foreign =

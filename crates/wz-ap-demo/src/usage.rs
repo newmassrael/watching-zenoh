@@ -35,54 +35,24 @@ pub(crate) const ABOUT: &str = concat!(
 /// failing fixture needs answered. Deliberately a flat sorted list rather than a
 /// hash: a fixture asserts `contains("advanced")`, and a hash would force every
 /// reader to look up what it meant.
+///
+/// R311y489 — the list is GENERATED (`build.rs`), not hand-maintained. It was a
+/// `push_if!` enumeration until this round measured it against the manifest and
+/// found four declared features it never mentioned — `adminspace-read`,
+/// `routing-router-hat`, `storage-backend-filesystem`, and the `preset-*` keys
+/// that name which binary this is at all. Given the promise the paragraph above
+/// makes, an omission does not read as silence; it reads as "that flag is off".
+/// The generator derives the key set from `[features]` and the on/off answer from
+/// cargo's own `CARGO_FEATURE_*`, and fails the build on any enabled feature it
+/// could not account for — so the two can no longer disagree.
 pub(crate) fn build_features() -> String {
-    let mut on: Vec<&str> = Vec::new();
-    macro_rules! push_if {
-        ($($feat:literal),* $(,)?) => {
-            $(
-                #[cfg(feature = $feat)]
-                on.push($feat);
-            )*
-        };
-    }
-    push_if!(
-        "adminspace-config-hotreload",
-        "adminspace-introspection-handlers",
-        "adminspace-metrics",
-        "adminspace-plugins-handlers",
-        "adminspace-router-linkstate",
-        "adminspace-write",
-        "advanced",
-        "group",
-        "locator-iface",
-        "namespace",
-        "query-attachment",
-        "quic",
-        "quic-datagram",
-        "router-connect-reconcile",
-        "router-hat-router",
-        "router-multicast-faces",
-        "routing-peer",
-        "routing-router",
-        "routing-routes",
-        "routing-token-tables",
-        "scouting-active",
-        "session-extcompression",
-        "storage-backend",
-        "switchboard",
-        "time-hlc",
-        "tls",
-        "transport-link-unixpipe",
-        "transport-lowlatency",
-        "transport-multilink",
-        "transport-qos",
-        "unixsock",
-        "vsock",
-        "ws",
-    );
-    on.sort_unstable();
-    format!("wz-ap-demo: BUILD FEATURES = [{}]", on.join(" "))
+    format!(
+        "wz-ap-demo: BUILD FEATURES = [{}]",
+        BUILD_FEATURES.join(" ")
+    )
 }
+
+include!(concat!(env!("OUT_DIR"), "/build_features.rs"));
 
 pub(crate) fn print_usage() {
     eprintln!("{ABOUT}");

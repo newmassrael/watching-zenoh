@@ -1007,6 +1007,27 @@ jobs:
         # SKIP-green while reporting a fully provisioned pico.
         run: bash scripts/run-ci.sh --layer E11
 
+      - name: Layer E12 — AP-full adminspace plane against a real zenoh-pico
+        # R311y489. Wired in the SAME commit that adds the lane, same reason as E10/E11.
+        #
+        # The adminspace plane COMPOSED. Every §5.23 atom already had a pico witness
+        # (y270 core+introspection, y237 plugins, y275 metrics, y276 read gate, y51
+        # write gate) — what none of them had is the atoms TOGETHER, because each
+        # builds its own narrow feature set into the one shared `--bin` path and
+        # asserts the others are OFF (E6b's test requires `.../metrics` ABSENT, which
+        # is what makes its own cfg-gate argument work). Six proofs of six parts and
+        # none of the whole.
+        #
+        # This lane runs the whole plane on the AP-full binary: one z_get reads the
+        # node record + introspection + metrics + plugins at once, --no-admin-read
+        # suppresses every one of them from the SAME build, and a real z_put
+        # reconfigures the node and reads its own write back through a second z_get.
+        #
+        # SKIPs if the pico CLI is absent, like E9/E10/E11 — its guard names z_get AND
+        # z_put, since the write legs need the writer and a reader-only guard would
+        # SKIP-green on a machine that has it.
+        run: bash scripts/run-ci.sh --layer E12
+
       - name: Cache the unixpipe-enabled zenohd binary (R311y392)
         # A SEPARATE oracle from target/zenohd: zenoh's `default` omits
         # transport_unixpipe (and crates.io cannot add a dependency feature), so the
