@@ -32,6 +32,64 @@ pub mod common {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    /// CROSS-PROCESS half of the port reservation (R311y490).
+    ///
+    /// [`port_lock`] above is a `static` — it is process-global, and that is the
+    /// scope the R216 design got wrong rather than the idea. Cargo runs a crate's
+    /// test BINARIES concurrently: **17 were measured alive at once** during
+    /// Layer E's `cargo test -p wz-integration-tests -- --ignored` sweep. Each is
+    /// its own process with its own `static`, so the mutex serialised one
+    /// seventeenth of the contention and the other sixteen ran the
+    /// `bind(0) -> close -> child bind` window unguarded against each other.
+    ///
+    /// That is precisely the window [`PortReservation`]'s doc dismissed as an
+    /// EXTERNAL process stealing the port, "sub-millisecond ... not observed in
+    /// this workspace's CI history", deferring the fix "until the in-process race
+    /// is confirmed insufficient". It is now confirmed insufficient: 17
+    /// concurrent processes running that window in a loop lose the port 1 time in
+    /// 6800 with a MINIMAL window, and the real window spans a `fork` + `exec` of
+    /// a foreign binary, so it is far wider than the one measured.
+    ///
+    /// `flock` rather than a lock file with a sentinel: the kernel drops it when
+    /// the fd closes, INCLUDING on `SIGKILL`, so a killed test can never strand
+    /// the lock for every later run. FD inheritance — the fix the original doc
+    /// named — cannot be used here: the listener in the leg that surfaced this is
+    /// zenoh-pico's own `z_sub`, a foreign C binary with no `--listen-fd`.
+    ///
+    /// Non-unix returns `None` and the reservation degrades to the intra-process
+    /// mutex, which is what every platform had before this.
+    struct CrossProcessPortLock {
+        #[cfg(unix)]
+        _file: File,
+    }
+
+    impl CrossProcessPortLock {
+        #[cfg(unix)]
+        fn acquire() -> Option<Self> {
+            use std::os::unix::io::AsRawFd;
+
+            let path = project_root().join("crates/target/.wz-port-reservation.lock");
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .ok()?;
+            // SAFETY: `file` owns a valid open fd for the whole call, and
+            // `LOCK_EX` has no memory effects. Blocking is intended — the
+            // critical section is bind-to-child-bound, milliseconds long.
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            (rc == 0).then_some(Self { _file: file })
+        }
+
+        #[cfg(not(unix))]
+        fn acquire() -> Option<Self> {
+            None
+        }
+    }
+
     /// Process-global port reservation guard for the bind → child-spawn
     /// → bind-confirmed window.
     ///
@@ -55,19 +113,37 @@ pub mod common {
     /// `listening on`) so subsequent tests can proceed without
     /// blocking on the long-tail handshake / message-driven phase.
     ///
-    /// The reservation does NOT defend against an external process
-    /// stealing the port between `drop(listener)` and the child's
-    /// `bind` syscall — that race window is sub-millisecond on
-    /// localhost and has not been observed in this workspace's CI
-    /// history. If a future round surfaces it, the textbook fix is
-    /// FD inheritance (parent holds the listener, passes the bound
-    /// socket FD to the child via `Command::pre_exec` + `dup2`); the
-    /// MVP cost of that path is a new `--listen-fd` flag on
-    /// `wz-ap-demo` and is deferred until the in-process race is
-    /// confirmed insufficient.
+    /// R311y490 — THE PARAGRAPH THAT USED TO SIT HERE WAS WRONG ABOUT WHO THE
+    /// COMPETITOR IS, and the deferral it justified expired. It said the
+    /// reservation "does NOT defend against an EXTERNAL process stealing the
+    /// port between `drop(listener)` and the child's `bind`", called that window
+    /// "sub-millisecond ... not observed in this workspace's CI history", and
+    /// deferred FD inheritance "until the in-process race is confirmed
+    /// insufficient".
+    ///
+    /// The in-process race IS confirmed insufficient. The competitor is not an
+    /// exotic external process: cargo runs a crate's test BINARIES concurrently,
+    /// **17 were measured alive at once** in Layer E's `--ignored` sweep, and
+    /// each has its OWN `static` mutex — so sixteen siblings ran that window
+    /// against each other, unguarded, continuously. Reproduced: 17 concurrent
+    /// processes lose the port 1 time in 6800 with a minimal window, and the
+    /// real one spans a `fork` + `exec`.
+    ///
+    /// FD inheritance is NOT the fix available here, either: the listener in the
+    /// leg that surfaced this is zenoh-pico's own `z_sub`, a foreign C binary
+    /// with no `--listen-fd` to give it. [`CrossProcessPortLock`] widens the
+    /// exclusion to the scope the design always intended instead.
+    ///
+    /// What remains undefended is a genuinely unrelated process on the machine
+    /// binding the same ephemeral port inside the window. That one is unchanged,
+    /// and unlike the sibling case it is not something this repo creates.
     pub struct PortReservation {
         port: u16,
         _guard: MutexGuard<'static, ()>,
+        /// R311y490 — held for the SAME window as `_guard`, and released by the
+        /// same drop. See [`CrossProcessPortLock`] for why the mutex alone was
+        /// only one seventeenth of the exclusion this window needs.
+        _cross_process: Option<CrossProcessPortLock>,
     }
 
     impl PortReservation {
@@ -82,11 +158,16 @@ pub mod common {
             let guard = port_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Ordering is fixed: intra-process mutex FIRST, then the file lock.
+            // Both `pick` and `pick_pair` take them in this order, so two threads
+            // of one process can never hold them crosswise.
+            let cross_process = CrossProcessPortLock::acquire();
             let (listener, port) = Self::bind_ephemeral();
             drop(listener);
             Self {
                 port,
                 _guard: guard,
+                _cross_process: cross_process,
             }
         }
 
@@ -110,6 +191,7 @@ pub mod common {
             let guard = port_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let cross_process = CrossProcessPortLock::acquire();
             // Bind BOTH before dropping either: holding l1 while binding l2 is
             // what guarantees p1 != p2 (a bind-then-drop helper called twice
             // could hand back the same port). The shared bind/extract is
@@ -122,6 +204,7 @@ pub mod common {
                 Self {
                     port: p1,
                     _guard: guard,
+                    _cross_process: cross_process,
                 },
                 p2,
             )

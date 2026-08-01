@@ -448,6 +448,20 @@ jobs:
       - name: Layer D — deploy/*.yaml schema validate
         run: bash scripts/run-ci.sh --layer D
 
+      - name: Layer L — every committed Cargo.lock resolves
+        # R311y490. Wired in the SAME commit that adds the lane. Eight independent
+        # cargo workspaces live here (crates/, xtask/, six under deploy/) and NONE
+        # of their locks was checked, so deploy/mcu-multicast-e2e/Cargo.lock rotted
+        # unnoticed: wz-runtime-tokio gained an optional libc and that workspace's
+        # lock was never refreshed, leaving any build in that directory to rewrite
+        # a committed file and dirty an otherwise untouched tree.
+        #
+        # `cargo metadata --locked --offline` per workspace. Only the
+        # lock-would-change error fails; a dependency missing from the local cache
+        # (this tree has a macOS-only io-kit-sys) is reported and skipped, because
+        # a lane that conflates the two is one that gets disabled.
+        run: bash scripts/run-ci.sh --layer L
+
       - name: Build zenoh-pico CLI binaries (Layer E dep)
         # R121c yml sync — Layer E spawns target/zenoh-pico-cli/z_put
         # against the wz-ap-demo binary's TCP --listen endpoint. The

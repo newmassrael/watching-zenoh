@@ -89,12 +89,25 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, graceful_terminate, read_captured, wait_for_exit,
-    wait_for_substring, wait_for_tcp_accept, zenoh_pico_cli_binary, ChildGuard, PortReservation,
+    wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, ChildGuard,
+    PortReservation,
 };
 
 /// How long a compiled drop-in gets to bind its listener. Generous relative to
 /// the sub-100 ms observed path: the gate is a TCP connect, so a slow bind
 /// costs only latency here, never a false PASS.
+///
+/// R311y490 — "never a false PASS" was TRUE OF A SLOW BIND AND FALSE OF A LOST
+/// ONE, and every barrier below now uses the liveness-aware
+/// `wait_for_tcp_accept_alive` because of it. A bare TCP connect proves only
+/// that SOMETHING accepts on that port. If our child lost the ephemeral-port
+/// race and exited, the connect can succeed against whatever won — the barrier
+/// passes, and the failure resurfaces further down as a foreign process
+/// exiting -1, which is exactly the shape this suite's leg 3 showed once under a
+/// full sweep with no diagnosis attached. The alive-aware variant `Err`s the
+/// instant the child we spawned exits, naming its `ExitStatus`, so a lost race
+/// reads as a lost race at the point it happens. See `PortReservation` in
+/// `wz_integration_tests::common` for the race itself and its cross-process fix.
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a leg's exchange gets to complete, ending in the observed process
 /// EXITING.
@@ -192,11 +205,12 @@ fn pico_zsub_source_on_wz_capi_receives_from_real_pico_zput() {
             .expect("spawn the compiled z_sub drop-in"),
     );
 
-    assert!(
-        wait_for_tcp_accept(port, LISTEN_TIMEOUT),
-        "the z_sub.c drop-in never accepted on {endpoint}; capture so far:\n{}",
-        read_captured(&mut sub_out)
-    );
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_sub.c drop-in never accepted on {endpoint} — {why}; capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
     drop(reservation);
 
     // R311y482 — captured even though the exit status is asserted below. A zero
@@ -311,11 +325,12 @@ fn pico_zqueryable_source_on_wz_capi_answers_real_pico_zget() {
             .expect("spawn the compiled z_queryable drop-in"),
     );
 
-    assert!(
-        wait_for_tcp_accept(port, LISTEN_TIMEOUT),
-        "the z_queryable.c drop-in never accepted on {endpoint}; capture so far:\n{}",
-        read_captured(&mut qable_out)
-    );
+    if let Err(why) = wait_for_tcp_accept_alive(qable.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_queryable.c drop-in never accepted on {endpoint} — {why}; capture so far:\n{}",
+            read_captured(&mut qable_out)
+        );
+    }
     drop(reservation);
 
     // A one-shot `z_get`: it prints its replies and the final notification, then
@@ -426,11 +441,12 @@ fn pico_zput_source_on_wz_capi_declares_and_reaches_real_pico_zsub() {
             .expect("spawn the real zenoh-pico z_sub"),
     );
 
-    assert!(
-        wait_for_tcp_accept(port, LISTEN_TIMEOUT),
-        "the real zenoh-pico z_sub never accepted on {endpoint}; capture so far:\n{}",
-        read_captured(&mut sub_out)
-    );
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_sub never accepted on {endpoint} — {why}; capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
     drop(reservation);
 
     // R311y482 — the wz-side DRIVER's stdout is captured. This leg is the one that
@@ -554,10 +570,9 @@ fn pico_zping_source_on_wz_capi_round_trips_through_real_pico_zpong() {
             .spawn()
             .expect("spawn the real zenoh-pico z_pong"),
     );
-    assert!(
-        wait_for_tcp_accept(port, LISTEN_TIMEOUT),
-        "the real zenoh-pico z_pong never accepted on {endpoint}"
-    );
+    if let Err(why) = wait_for_tcp_accept_alive(pong.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!("the real zenoh-pico z_pong never accepted on {endpoint} — {why}");
+    }
     drop(reservation);
 
     let mut ping_out = tempfile::tempfile().expect("z_ping stdout capture");
@@ -697,10 +712,9 @@ fn pico_zliveliness_source_on_wz_capi_is_seen_alive_then_dropped_by_real_pico() 
             .spawn()
             .expect("spawn the real zenoh-pico z_sub_liveliness"),
     );
-    assert!(
-        wait_for_tcp_accept(port, LISTEN_TIMEOUT),
-        "the real zenoh-pico z_sub_liveliness never accepted on {endpoint}"
-    );
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!("the real zenoh-pico z_sub_liveliness never accepted on {endpoint} — {why}");
+    }
     drop(reservation);
 
     // R311y482 — the TOKEN HOLDER's own output is CAPTURED, not discarded. It used
@@ -816,11 +830,12 @@ fn pico_zsubliveliness_source_on_wz_capi_sees_real_pico_token_come_and_go() {
             .spawn()
             .expect("spawn the compiled z_sub_liveliness drop-in"),
     );
-    assert!(
-        wait_for_tcp_accept(port, LISTEN_TIMEOUT),
-        "the z_sub_liveliness.c drop-in never accepted on {endpoint}; capture so far:\n{}",
-        read_captured(&mut sub_out)
-    );
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_sub_liveliness.c drop-in never accepted on {endpoint} — {why}; capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
     drop(reservation);
 
     // R311y482 — captured for the reason leg 5's twin states: this leg is the MIRROR

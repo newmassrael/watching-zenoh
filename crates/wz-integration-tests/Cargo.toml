@@ -39,6 +39,17 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+# R311y490 — the LIB target's only dependency, and it exists for one call:
+# `flock` in `common::CrossProcessPortLock`, which widens the port reservation
+# from process-global (a `static` mutex, which cargo's 17 concurrent test
+# BINARIES each get their own of) to cross-process. `flock` over a lock file with
+# a sentinel because the kernel releases it on fd close INCLUDING `SIGKILL`, so a
+# killed test can never strand it. Test-only crate (`publish = false`, no reverse
+# dependency in the workspace), so this reaches no footprint, MCU or `no_std`
+# lane; `libc` was already in `crates/Cargo.lock` via wz-runtime-tokio.
+[dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # R311nx — `codec-serial` pinned so tests/layer3_serial_framing.rs can
 # build the wz serial framing primitives (`wz_codecs::{cobs_encode,

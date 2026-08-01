@@ -1028,6 +1028,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom",
  "hashbrown 0.15.5",
+ "libc",
  "log",
  "portable-atomic",
  "sce-forge-runtime",

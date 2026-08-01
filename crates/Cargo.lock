@@ -2519,6 +2519,7 @@ dependencies = [
 name = "wz-integration-tests"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "proptest",
  "sce-forge-runtime",
  "sce-rust-runtime",

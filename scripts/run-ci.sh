@@ -5115,6 +5115,50 @@ layer_d_validate_deploy() {
     bash scripts/validate-deploy.sh
 }
 
+# ─── Layer L — every committed Cargo.lock agrees with its manifests ────
+#
+# R311y490. This repo has EIGHT independent cargo workspaces — `crates/`,
+# `xtask/`, and six under `deploy/` — and until this lane NOTHING checked that
+# their committed locks still resolve. `deploy/mcu-multicast-e2e/Cargo.lock` had
+# silently rotted: `wz-runtime-tokio` gained an optional `libc` (via
+# `transport-link-unixpipe` / `link-interfaces`) and that workspace's lock was
+# never refreshed, so any build in that directory rewrote the file and dirtied a
+# tree that had changed nothing. It surfaced only because a full sweep left the
+# working tree dirty and the diff had to be explained.
+#
+# `--locked` is the check: it resolves and FAILS rather than writing when the
+# lock would have to change.
+#
+# `--offline` is deliberate and so is the two-way message split. Offline keeps
+# the lane deterministic and network-free, but it also fails for a reason that is
+# NOT staleness — a dependency absent from the local cache, e.g. this tree's
+# macOS-only `io-kit-sys`, which made `crates/` look stale on a Linux box when it
+# was not. Encoding that distinction is the point: only the lock-would-change
+# message is a failure, a cache miss is reported and skipped. A lane that cannot
+# tell those apart would either cry wolf on every cold cache or be turned off.
+layer_l_lockfile_freshness() {
+    local rc=0 lock dir out
+    while IFS= read -r lock; do
+        dir="$(dirname "$lock")"
+        if out="$( (cd "$dir" && cargo metadata --locked --offline --format-version 1 2>&1 >/dev/null) )"; then
+            echo "  L $lock OK"
+            continue
+        fi
+        if grep -q "because --locked was passed" <<< "$out"; then
+            echo "  L FAIL: $lock is STALE — it no longer resolves against its" >&2
+            echo "     manifests. Refresh it: (cd $dir && cargo update --workspace --offline)" >&2
+            rc=1
+        elif grep -q -- "--offline was specified" <<< "$out"; then
+            echo "  L $lock SKIP (dependency not in the local cache, not staleness)"
+        else
+            echo "  L FAIL: $lock — cargo metadata failed for an unrecognised reason:" >&2
+            echo "$out" | head -5 >&2
+            rc=1
+        fi
+    done < <(find . -name Cargo.lock -not -path "./vendor/*" -not -path "*/target/*" | sort)
+    return "$rc"
+}
+
 # ─── Layer E — wz-ap-demo bidirectional round-trip vs zenoh-pico ────
 # R121c + R121e integration tests. Each test spawns the wz-ap-demo
 # binary, points the matching zenoh-pico CLI at its TCP --listen
@@ -8638,6 +8682,7 @@ run_layer C4c layer_c4c_runtime_tokio_subset_matrix || overall=1
 run_layer C4d layer_c4d_runtime_tokio_subset_clippy || overall=1
 run_layer C4e layer_c4e_transport_axis_matrix || overall=1
 run_layer D layer_d_validate_deploy || overall=1
+run_layer L layer_l_lockfile_freshness || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1
