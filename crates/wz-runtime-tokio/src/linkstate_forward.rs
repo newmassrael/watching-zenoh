@@ -142,6 +142,8 @@ use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
 use crate::future_interest::{FutureQablStore, FutureSubStore};
+#[cfg(feature = "routing-interceptor-hotreload")]
+use crate::interceptor::InterceptorKeyexprCache;
 use crate::interceptor::{InterceptorChain, InterceptorContext};
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{ExpiredQuery, PendingQueries, QueryFan};
@@ -548,6 +550,36 @@ pub struct LinkstateForwarder {
     /// this node's OWN originations (a `publish` never crosses `forward`, only
     /// `fan_out`), so ingress alone could not cover them.
     egress_interceptors: RefCell<InterceptorChain>,
+    /// R311y508 (`routing-interceptor-hotreload`) — the monotonic version every
+    /// [`set_interceptors`](Self::set_interceptors) stamps onto the chains it
+    /// installs, so state precomputed against a previous chain compares unequal
+    /// and is recomputed. zenoh's `Tables.next_interceptor_version`
+    /// (`net/routing/dispatcher/tables.rs:84`), bumped in `regen_interceptors`
+    /// and handed to every face's `set_interceptors_from_factories`.
+    ///
+    /// Kept ungated while the CACHE it invalidates is gated: a counter nothing
+    /// reads costs one `Cell` bump per reconfigure, whereas cfg-ing it would
+    /// fork `set_interceptors` into two bodies for no behavioural difference.
+    interceptor_version: Cell<u64>,
+    /// R311y508 — the per-(face, keyexpr) INGRESS interceptor cache, tagged with
+    /// the chain version that produced each entry. zenoh's per-face
+    /// `SessionContext::in_interceptor_cache`
+    /// (`net/routing/dispatcher/resource.rs:126`), which is likewise per
+    /// (resource, face) and likewise version-tagged.
+    ///
+    /// Entries are dropped with their face in [`unregister`](Self::unregister):
+    /// a face id is reusable, so an entry outliving its face could serve a NEW
+    /// peer a verdict computed for the subject of the old one.
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    ingress_keyexpr_cache: RefCell<hashbrown::HashMap<(FaceId, String), InterceptorKeyexprCache>>,
+    /// R311y508 — how many times a (face, keyexpr) verdict table has been
+    /// COMPUTED: once when the pair is first seen, and once more each time a
+    /// chain swap makes its entry stale. The witness that separates "the cache
+    /// exists" from "the cache is consulted and invalidated" — a verdict
+    /// assertion alone cannot tell the two apart, because bypassing the cache
+    /// entirely also produces the right verdict.
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    interceptor_cache_recomputes: Cell<usize>,
     /// R311tt — count of messages ANY interceptor dropped, on either flow: an ACL
     /// denial, a downsampling rate-limit, or a low-pass size-cap — the shared
     /// interceptor-drop witness, the drop twin of
@@ -771,6 +803,11 @@ impl LinkstateForwarder {
             // message admitted, exactly as zenoh's `AclConfig.enabled = false`.
             ingress_interceptors: RefCell::new(InterceptorChain::new()),
             egress_interceptors: RefCell::new(InterceptorChain::new()),
+            interceptor_version: Cell::new(0),
+            #[cfg(feature = "routing-interceptor-hotreload")]
+            ingress_keyexpr_cache: RefCell::new(hashbrown::HashMap::new()),
+            #[cfg(feature = "routing-interceptor-hotreload")]
+            interceptor_cache_recomputes: Cell::new(0),
             interceptor_dropped: Cell::new(0),
             query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
             timed_out: Cell::new(0),
@@ -871,9 +908,20 @@ impl LinkstateForwarder {
     /// `AclConfig.enabled = false`). A denied / rate-limited / oversized message
     /// is dropped and witnessed by
     /// [`interceptor_dropped`](Self::interceptor_dropped).
+    /// R311y508 — every install takes a FRESH version, which is what makes a
+    /// LIVE reconfigure reach faces that are already busy: their cached
+    /// per-keyexpr verdicts were computed against the previous version, compare
+    /// unequal, and are recomputed against the chain just installed. Without the
+    /// bump the new chain would be in place while every keyexpr already seen
+    /// kept answering out of the OLD policy — a reconfigure that silently does
+    /// nothing for exactly the traffic that is flowing.
     pub fn set_interceptors(&self, config: InterceptorConfig) {
-        *self.ingress_interceptors.borrow_mut() = config.build_chain(InterceptorFlow::Ingress);
-        *self.egress_interceptors.borrow_mut() = config.build_chain(InterceptorFlow::Egress);
+        let version = self.interceptor_version.get().wrapping_add(1);
+        self.interceptor_version.set(version);
+        *self.ingress_interceptors.borrow_mut() =
+            config.build_chain_versioned(InterceptorFlow::Ingress, version);
+        *self.egress_interceptors.borrow_mut() =
+            config.build_chain_versioned(InterceptorFlow::Egress, version);
     }
 
     /// The number of messages ANY interceptor has dropped so far (ACL denial,
@@ -882,6 +930,22 @@ impl LinkstateForwarder {
     /// healthy unrestricted mesh); the e2e/unit tests assert it.
     pub fn interceptor_dropped(&self) -> usize {
         self.interceptor_dropped.get()
+    }
+
+    /// R311y508 — how many (face, keyexpr) verdict tables have been COMPUTED so
+    /// far: one per pair first seen, plus one per pair re-seen after a chain
+    /// swap invalidated it. Rises on a MISS or a stale hit, never on a fresh
+    /// hit, so a run that keeps this flat while messages flow is one where the
+    /// cache is being served.
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    pub fn interceptor_cache_recomputes(&self) -> usize {
+        self.interceptor_cache_recomputes.get()
+    }
+
+    /// R311y508 — how many (face, keyexpr) entries the ingress cache holds.
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    pub fn interceptor_cache_len(&self) -> usize {
+        self.ingress_keyexpr_cache.borrow().len()
     }
 
     /// Whether the INGRESS chain admits this inbound `msg` arriving on face `id`.
@@ -900,7 +964,29 @@ impl LinkstateForwarder {
         let Some(face) = faces.get(&id) else {
             return true;
         };
-        chain.admit(&FaceContext { face }, msg)
+        let ctx = FaceContext { face };
+        // R311y508 (`routing-interceptor-hotreload`) — serve the verdict from
+        // this (face, keyexpr)'s precomputed table when the chain that produced
+        // it is still the installed one, recomputing when it is not. A message
+        // with no governed keyexpr has nothing to key on and takes the direct
+        // path, which is also the whole path when the feature is off.
+        #[cfg(feature = "routing-interceptor-hotreload")]
+        if let Some(keyexpr) = resolve_governed_keyexpr(msg, &face.keyexpr_table) {
+            let mut cache = self.ingress_keyexpr_cache.borrow_mut();
+            let recomputes = &self.interceptor_cache_recomputes;
+            let mut compute = || {
+                recomputes.set(recomputes.get() + 1);
+                chain.compute_keyexpr_cache(&ctx, &keyexpr)
+            };
+            let slot = cache
+                .entry((id, keyexpr.clone()))
+                .or_insert_with(&mut compute);
+            if slot.version() != chain.version() {
+                *slot = compute();
+            }
+            return chain.admit_cached(&ctx, msg, Some(slot));
+        }
+        chain.admit(&ctx, msg)
     }
 
     /// Whether the EGRESS chain admits sending `msg` to the face whose `state`
@@ -5096,6 +5182,14 @@ impl FaceForwarder for LinkstateForwarder {
         // `fan_out`); the hoist frees that borrow before the choke point runs (the
         // router's `deregister` is already `let-else`, so it needs no such hoist).
         let removed_face = self.faces.borrow_mut().remove(&id);
+        // R311y508 — drop this face's precomputed interceptor verdicts with the
+        // face. A FaceId is reusable, so an entry that outlived its face could
+        // serve a NEW peer a verdict computed for the OLD peer's subject, which
+        // is the one way a cache built to save work could change one.
+        #[cfg(feature = "routing-interceptor-hotreload")]
+        self.ingress_keyexpr_cache
+            .borrow_mut()
+            .retain(|(face_id, _), _| *face_id != id);
         let dropped_link = if let Some(state) = removed_face {
             if let Some(link) = state.link {
                 // remove_link drops the self<->neighbour edge and GC-prunes every
@@ -9098,6 +9192,112 @@ mod tests {
         assert!(
             delivered.borrow().is_empty(),
             "after deregister_joined the mapping is gone -> the joined-link Put drops again"
+        );
+    }
+
+    // R311y508 (`routing-interceptor-hotreload`) — the VERSION is what makes a live
+    // reconfigure reach a face that is already busy. The setup is chosen so the
+    // cache is POPULATED WITH AN ADMIT before the swap: the pre-swap policy denies
+    // an UNRELATED keyexpr, so the chain is non-empty (an empty chain short-circuits
+    // before the cache) and demo/data's verdict table is computed and stored. The
+    // swap then denies demo/**, and the same Put must drop.
+    //
+    // Three assertions, and they are not redundant — each fails to a DIFFERENT
+    // defect. `interceptor_cache_len` pins that a table was stored at all;
+    // `interceptor_cache_recomputes` pins that the swap INVALIDATED it (a verdict
+    // assertion alone cannot, because bypassing the cache entirely also yields the
+    // right verdict); and the drop pins that the recomputed table is the one being
+    // served. Drop the version bump in `set_interceptors` and the second and third
+    // both red: recomputes stays at 1 and the stale ADMIT keeps relaying.
+    #[cfg(all(
+        feature = "routing-interceptor-hotreload",
+        feature = "config-mutate-runtime",
+        feature = "access-acl"
+    ))]
+    #[test]
+    fn interceptor_cache_is_invalidated_by_a_live_reconfigure() {
+        use crate::config::WzConfig;
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+
+        // A NON-EMPTY chain that admits demo/data: the pre-swap policy denies an
+        // unrelated keyexpr. An empty chain would return before the cache is ever
+        // consulted, and the round would prove nothing about invalidation.
+        let mut config = WzConfig::new()
+            .with_interceptors(InterceptorConfig::default().with_acl(deny_put_policy("other/**")));
+        config.install_interceptors(&fwd);
+        sink_a.reset();
+        sink_b.reset();
+
+        let put = || DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+
+        // Phase 1 — admitted, and the verdict table for (face 0, demo/data) is
+        // computed once and stored.
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(
+            fwd.data_seen(),
+            1,
+            "phase 1: admitted (only other/** denied)"
+        );
+        assert_eq!(
+            fwd.interceptor_cache_len(),
+            1,
+            "phase 1: one (face, keyexpr) verdict table stored"
+        );
+        assert_eq!(
+            fwd.interceptor_cache_recomputes(),
+            1,
+            "phase 1: computed exactly once"
+        );
+
+        // A SECOND identical Put is served from the cache — no recompute. This is
+        // what makes the count in phase 3 mean "the swap invalidated it" rather
+        // than "every message recomputes anyway".
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(
+            fwd.interceptor_cache_recomputes(),
+            1,
+            "phase 2: a cache HIT does not recompute"
+        );
+        assert_eq!(fwd.interceptor_dropped(), 0, "phase 2: still admitted");
+
+        // The LIVE swap: deny demo/** on the running forwarder.
+        config.reconfigure_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**")),
+            &fwd,
+        );
+
+        // Phase 3 — the stored table is stale, so it is recomputed against the
+        // chain just installed, and the SAME Put now drops.
+        sink_b.reset();
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(
+            fwd.interceptor_cache_recomputes(),
+            2,
+            "phase 3: the swap invalidated the stored table"
+        );
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "phase 3: denied after the LIVE reconfigure"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "phase 3: not relayed after the LIVE reconfigure"
         );
     }
 

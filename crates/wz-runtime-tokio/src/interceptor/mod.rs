@@ -52,8 +52,10 @@ pub mod downsampling;
 #[cfg(feature = "access-quota")]
 pub mod low_pass;
 
+use std::any::Any;
 #[cfg(feature = "access-acl")]
 use wz_access_control::{AclFlow, AclPolicy};
+
 use wz_routing_graph::Zid;
 use wz_session_core::link::LinkSubject;
 use wz_session_core::network_message::NetworkMessage;
@@ -116,6 +118,79 @@ pub trait InterceptorContext {
 pub trait Interceptor {
     /// Whether to admit `msg`, given the per-message `ctx`.
     fn intercept(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool;
+
+    /// R311y508 (`routing-interceptor-hotreload`) — precompute whatever this
+    /// interceptor can derive from a keyexpr ALONE for the given `subject`, so
+    /// the per-message path does not redo it. The wz mirror of zenoh
+    /// `InterceptorTrait::compute_keyexpr_cache`
+    /// (`net/routing/interceptor/mod.rs:102`).
+    ///
+    /// `ctx` is a parameter here where zenoh has none, and the difference is
+    /// structural rather than a divergence: zenoh builds ONE enforcer PER FACE,
+    /// so each instance already closes over that face's subject and link
+    /// properties, while wz runs ONE chain for every face (see
+    /// [`InterceptorContext::link_subject`]'s note on the same asymmetry). Only
+    /// the FACE-derived parts of `ctx` may be read here — [`Self::subject`] and
+    /// [`Self::link_subject`] — never anything message-derived, because the
+    /// result is reused for every later message on the same (face, keyexpr).
+    ///
+    /// `None` (the default) means "nothing to precompute": an interceptor whose
+    /// verdict does not factor through the keyexpr — a rate limiter, a size cap —
+    /// correctly caches nothing, and [`Self::intercept_cached`] falls back to
+    /// [`Self::intercept`] for it.
+    ///
+    /// [`Self::subject`]: InterceptorContext::subject
+    /// [`Self::link_subject`]: InterceptorContext::link_subject
+    fn compute_keyexpr_cache(
+        &self,
+        _ctx: &dyn InterceptorContext,
+        _keyexpr: &str,
+    ) -> Option<Box<dyn Any>> {
+        None
+    }
+
+    /// Whether to admit `msg`, given a cache value this interceptor produced
+    /// earlier from [`Self::compute_keyexpr_cache`] for THIS message's
+    /// (face, keyexpr). The default ignores the cache and asks
+    /// [`Self::intercept`], which is what an interceptor that caches nothing
+    /// wants.
+    ///
+    /// The cache is an OPTIMISATION and must never be a semantic difference: an
+    /// implementation's cached answer has to equal what `intercept` would have
+    /// returned. That equivalence is what makes the invalidation load-bearing
+    /// rather than decorative — a chain swap that failed to invalidate would
+    /// keep answering with the OLD policy, which is exactly the failure the
+    /// version in [`InterceptorChain`] exists to prevent.
+    fn intercept_cached(
+        &self,
+        ctx: &dyn InterceptorContext,
+        msg: &NetworkMessage,
+        _cache: Option<&dyn Any>,
+    ) -> bool {
+        self.intercept(ctx, msg)
+    }
+}
+
+/// R311y508 — the per-(face, keyexpr) precomputed state for ONE chain, tagged
+/// with the version of the chain that produced it. The wz mirror of zenoh's
+/// `InterceptorCache` (`net/routing/dispatcher/resource.rs:91-117`), which
+/// likewise stores the value beside `interceptor.version` and recomputes when
+/// the two disagree.
+///
+/// The version is the whole point. Without it a live
+/// [`InterceptorSink::set_interceptors`] would install a new chain while every
+/// face kept answering out of state compiled against the OLD one — a reconfigure
+/// that silently does nothing for exactly the keyexprs that were already busy.
+pub struct InterceptorKeyexprCache {
+    version: u64,
+    per_interceptor: Vec<Option<Box<dyn Any>>>,
+}
+
+impl InterceptorKeyexprCache {
+    /// The version of the chain this cache was computed against.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
 }
 
 /// The composable interceptor chain — zenoh `InterceptorsChain`. A message is
@@ -125,12 +200,75 @@ pub trait Interceptor {
 #[derive(Default)]
 pub struct InterceptorChain {
     interceptors: Vec<Box<dyn Interceptor>>,
+    /// R311y508 — the chain's identity for cache invalidation, zenoh's
+    /// `InterceptorsChain.version` fed by `Tables.next_interceptor_version`
+    /// (`net/routing/dispatcher/tables.rs:84`). Monotonic per forwarder: every
+    /// `set_interceptors` builds chains at a FRESH version, so every cache
+    /// computed against a previous chain compares unequal and is recomputed.
+    version: u64,
 }
 
 impl InterceptorChain {
     /// An empty chain — access control disabled (admits every message).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The chain's cache-invalidation version. See
+    /// [`InterceptorKeyexprCache`].
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Stamp this chain with `version` — called by
+    /// [`InterceptorConfig::build_chain_versioned`] so both flow chains of one
+    /// install share it.
+    pub fn set_version(&mut self, version: u64) {
+        self.version = version;
+    }
+
+    /// Precompute every interceptor's keyexpr-derived state for
+    /// (`subject`, `keyexpr`), tagged with this chain's version — zenoh's
+    /// `InterceptorsChain::compute_keyexpr_cache`
+    /// (`net/routing/interceptor/mod.rs:167-173`), which likewise collects one
+    /// slot per interceptor so the per-message path can index positionally.
+    pub fn compute_keyexpr_cache(
+        &self,
+        ctx: &dyn InterceptorContext,
+        keyexpr: &str,
+    ) -> InterceptorKeyexprCache {
+        InterceptorKeyexprCache {
+            version: self.version,
+            per_interceptor: self
+                .interceptors
+                .iter()
+                .map(|i| i.compute_keyexpr_cache(ctx, keyexpr))
+                .collect(),
+        }
+    }
+
+    /// Whether to ADMIT `msg` using `cache`, which MUST have been computed by
+    /// this chain (same version) for this message's (face, keyexpr). A cache
+    /// whose version disagrees, or whose slot count does not match, is IGNORED
+    /// and every interceptor is asked directly — so a stale cache can only cost
+    /// time, never change a verdict.
+    pub fn admit_cached(
+        &self,
+        ctx: &dyn InterceptorContext,
+        msg: &NetworkMessage,
+        cache: Option<&InterceptorKeyexprCache>,
+    ) -> bool {
+        let slots = cache.filter(|c| {
+            c.version == self.version && c.per_interceptor.len() == self.interceptors.len()
+        });
+        match slots {
+            Some(c) => self
+                .interceptors
+                .iter()
+                .zip(c.per_interceptor.iter())
+                .all(|(i, slot)| i.intercept_cached(ctx, msg, slot.as_deref())),
+            None => self.admit(ctx, msg),
+        }
     }
 
     /// Whether the chain holds no interceptors (the fast path: a forwarder with
@@ -296,6 +434,19 @@ impl InterceptorConfig {
         if let Some(low_pass) = LowPassInterceptor::for_flow(&self.low_pass, flow) {
             chain.push(Box::new(low_pass));
         }
+        chain
+    }
+
+    /// R311y508 — [`Self::build_chain`], stamped with the install's cache
+    /// version. zenoh does the same in one step
+    /// (`FaceState::set_interceptors_from_factories(&factories, version)`,
+    /// reached from `TablesLock::regen_interceptors`, which bumps
+    /// `next_interceptor_version` first and hands the SAME value to every face);
+    /// wz splits the build from the stamp only because both flow chains come
+    /// from one config and must share the version.
+    pub fn build_chain_versioned(&self, flow: InterceptorFlow, version: u64) -> InterceptorChain {
+        let mut chain = self.build_chain(flow);
+        chain.set_version(version);
         chain
     }
 }

@@ -22,6 +22,8 @@
 //! explicitly-unfiltered arms. Because the per-kind dispatch is a `match`,
 //! adding an action is a new arm, not a new check site.
 
+use std::any::Any;
+
 use wz_access_control::{AclFlow, AclMessage, AclPolicy, Permission};
 use wz_codecs::declare::DeclareOwnedVariant;
 use wz_codecs::push::PushOwnedVariant;
@@ -222,6 +224,108 @@ impl Interceptor for AclInterceptor {
             &keyexpr,
             ctx.link_subject(),
         ) == Permission::Allow
+    }
+
+    /// R311y508 (`routing-interceptor-hotreload`) — precompute this face's
+    /// verdict for `keyexpr` under EVERY governed action, the wz mirror of
+    /// zenoh's per-keyexpr `Cache` of per-`AclMessage` permissions
+    /// (`net/routing/interceptor/access_control.rs:339-368` ingress, `:624`
+    /// egress). Every input the policy reads other than the action is
+    /// face-derived (subject, link subject) or the keyexpr itself, so the whole
+    /// verdict table factors through (face, keyexpr) — which is what makes the
+    /// ACL cacheable at all, and what a rate limiter is not.
+    ///
+    /// A face with no resolved subject caches NOTHING rather than caching
+    /// "admit": the subject can be resolved later on the same face, and a cached
+    /// admit would then outlive the reason for it. That is the one case where a
+    /// cheap-looking cache would change a verdict instead of just saving work.
+    fn compute_keyexpr_cache(
+        &self,
+        ctx: &dyn InterceptorContext,
+        keyexpr: &str,
+    ) -> Option<Box<dyn Any>> {
+        let subject = ctx.subject()?;
+        let link = ctx.link_subject();
+        let allow = |action: AclMessage| {
+            self.policy
+                .decision(&subject, self.flow, action, keyexpr, link)
+                == Permission::Allow
+        };
+        Some(Box::new(AclKeyexprCache {
+            put: allow(AclMessage::Put),
+            delete: allow(AclMessage::Delete),
+            query: allow(AclMessage::Query),
+            reply: allow(AclMessage::Reply),
+            declare_subscriber: allow(AclMessage::DeclareSubscriber),
+            declare_queryable: allow(AclMessage::DeclareQueryable),
+            liveliness_token: allow(AclMessage::LivelinessToken),
+            liveliness_query: allow(AclMessage::LivelinessQuery),
+            declare_liveliness_subscriber: allow(AclMessage::DeclareLivelinessSubscriber),
+        }))
+    }
+
+    /// The cached twin of [`Self::intercept`]. It MUST answer identically — the
+    /// cache is an optimisation, never a semantic — so the two branches that do
+    /// not factor through (face, keyexpr) are taken here exactly as they are
+    /// there: an ungoverned kind admits, and a governed kind whose keyexpr does
+    /// not resolve takes the undeclare-on-ingress branch. Only the final policy
+    /// lookup is served from the table.
+    fn intercept_cached(
+        &self,
+        ctx: &dyn InterceptorContext,
+        msg: &NetworkMessage,
+        cache: Option<&dyn Any>,
+    ) -> bool {
+        let Some(cached) = cache.and_then(|c| c.downcast_ref::<AclKeyexprCache>()) else {
+            return self.intercept(ctx, msg);
+        };
+        let Some(governed) = acl_action(msg) else {
+            return true;
+        };
+        // The cache is only ever built for a face WITH a subject
+        // (`compute_keyexpr_cache` returns None otherwise), so reaching here
+        // means the subject was resolved when it was built. Re-reading it would
+        // be the message-derived read the cache contract forbids.
+        if ctx.full_keyexpr(msg).is_none() {
+            return governed.undeclare && self.flow == AclFlow::Ingress;
+        }
+        cached.allows(governed.action)
+    }
+}
+
+/// R311y508 — one face's precomputed ACL verdicts for one keyexpr: the whole
+/// governed action set, since the policy reads nothing else per message. The wz
+/// analogue of zenoh's per-keyexpr `Cache` struct, which likewise carries one
+/// field per `AclMessage` rather than a map — the action set is closed and
+/// small, so a field read beats a hash.
+struct AclKeyexprCache {
+    put: bool,
+    delete: bool,
+    query: bool,
+    reply: bool,
+    declare_subscriber: bool,
+    declare_queryable: bool,
+    liveliness_token: bool,
+    liveliness_query: bool,
+    declare_liveliness_subscriber: bool,
+}
+
+impl AclKeyexprCache {
+    /// The cached verdict for `action`. Exhaustive on purpose: a new
+    /// [`AclMessage`] variant must fail to compile here rather than silently
+    /// pick a neighbouring action's answer.
+    fn allows(&self, action: AclMessage) -> bool {
+        match action {
+            AclMessage::Put => self.put,
+            AclMessage::Delete => self.delete,
+            AclMessage::Query => self.query,
+            AclMessage::Reply => self.reply,
+            AclMessage::DeclareSubscriber => self.declare_subscriber,
+            AclMessage::DeclareQueryable => self.declare_queryable,
+            AclMessage::LivelinessToken => self.liveliness_token,
+            AclMessage::LivelinessQuery => self.liveliness_query,
+            AclMessage::DeclareLivelinessSubscriber => self.declare_liveliness_subscriber,
+        }
     }
 }
 
@@ -755,6 +859,98 @@ mod tests {
         assert!(
             acl.intercept(&ctx, &allowed),
             "demo/alive liveliness GET is admitted"
+        );
+    }
+
+    /// R311y508 — THE CACHE CONTRACT: a cached answer must equal the answer
+    /// [`AclInterceptor::intercept`] would have given. The cache is an
+    /// optimisation, and the moment the two disagree it is a second, divergent
+    /// policy engine instead.
+    ///
+    /// Every branch of `intercept` is represented, because the ones that do NOT
+    /// factor through (face, keyexpr) are exactly where a cache is easy to get
+    /// wrong: a denied Put, an admitted Put, an admitted Delete under a rule that
+    /// denies it elsewhere, an UNGOVERNED kind that must never consult the table,
+    /// and an ALIASED keyexpr the face never declared — which is denied on this
+    /// flow and must stay denied rather than pick up a neighbouring cached
+    /// verdict. The equality is asserted per message, so a failure names the
+    /// shape that diverged.
+    #[test]
+    fn a_cached_verdict_equals_the_direct_one_on_every_branch() {
+        let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
+        let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
+
+        let cases: Vec<(&str, NetworkMessage)> = vec![
+            (
+                "denied put",
+                NetworkMessage::Push(Box::new(
+                    build_push_literal("admin/secret", b"x").expect("build push"),
+                )),
+            ),
+            (
+                "admitted put",
+                NetworkMessage::Push(Box::new(
+                    build_push_literal("demo/data", b"x").expect("build push"),
+                )),
+            ),
+            (
+                "denied delete",
+                NetworkMessage::Push(Box::new(
+                    build_push_del_literal("admin/secret").expect("build del"),
+                )),
+            ),
+            (
+                "ungoverned interest final",
+                NetworkMessage::Interest(build_interest_final(1)),
+            ),
+            (
+                "governed token declare",
+                NetworkMessage::Declare(Box::new(
+                    build_declare_token(1, 0, Some("admin/tok")).expect("build token"),
+                )),
+            ),
+            (
+                "undeclared alias",
+                NetworkMessage::Push(Box::new(
+                    build_push_aliased(7, Some(""), b"x").expect("build aliased push"),
+                )),
+            ),
+        ];
+
+        for (name, msg) in &cases {
+            // The cache is computed per (face, keyexpr), so each message gets the
+            // table for ITS keyexpr — which is how the forwarder keys it. A message
+            // whose keyexpr does not resolve has no table, exactly as in production.
+            let cache = ctx
+                .full_keyexpr(msg)
+                .and_then(|ke| acl.compute_keyexpr_cache(&ctx, &ke));
+            assert_eq!(
+                acl.intercept_cached(&ctx, msg, cache.as_deref()),
+                acl.intercept(&ctx, msg),
+                "cached and direct verdicts diverged for: {name}"
+            );
+        }
+    }
+
+    /// R311y508 — a face with NO resolved subject must cache nothing. The subject
+    /// can resolve later on the same face, and a table computed while it was
+    /// unknown would then outlive the reason it was admitted under. This is the
+    /// one input that is face-derived but NOT stable for the life of the face.
+    #[test]
+    fn a_subjectless_face_computes_no_cache() {
+        let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
+        let ctx = MockCtx::with_subject(None);
+        assert!(
+            acl.compute_keyexpr_cache(&ctx, "admin/secret").is_none(),
+            "no subject -> no cached verdict table"
+        );
+        // And the fallback is the direct path, which admits for want of a subject.
+        let msg = NetworkMessage::Push(Box::new(
+            build_push_literal("admin/secret", b"x").expect("build push"),
+        ));
+        assert!(
+            acl.intercept_cached(&ctx, &msg, None),
+            "a subject-less face is admitted, cached or not"
         );
     }
 }

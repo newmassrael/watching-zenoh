@@ -552,6 +552,10 @@ session-extqos = ["transport-qos", "wz/session-extqos"]
 # write applies, the pre-y51 path). The run_peer config-write handler holds the
 # cfg(feature="adminspace-write") site. Layer E6 builds the gate-ON binary.
 adminspace-write = ["wz/adminspace-write"]
+# R311y508 — forwards the version-keyed per-(face, keyexpr) interceptor cache.
+# Implies `routing-peer` because the cache lives on the peer forwarder's ingress
+# admit path; a demo built without the peer mode has no path to cache for.
+routing-interceptor-hotreload = ["routing-peer", "wz/routing-interceptor-hotreload"]
 # R311y275 (§5.23 adminspace-metrics) — compiles the metrics leg into the demo
 # host: the `@/<zid>/<whatami>/metrics` OpenMetrics build-info branch lives in
 # wz-session-core `answer_admin_query` (the SSOT the --config-queryable host

@@ -7857,7 +7857,15 @@ layer_e6_peer_mesh() {
     # grant it with `--config-write-permit`, and the deny e2e omits it to witness
     # the gate rejecting a write. The gate-OFF arm stays covered by C1y clippy
     # (`--features routing-peer`, no adminspace-write).
-    (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-write --quiet) || return 1
+    # R311y508 — `routing-interceptor-hotreload` joins the SAME binary so the
+    # config-write legs below exercise the VERSION-KEYED per-(face, keyexpr)
+    # interceptor cache rather than the uncached path. It is additive: the cache
+    # only serves verdicts the direct path would have produced, so no other E6 leg
+    # changes behaviour. Naming it here is also what puts the atom in wz-ap-demo's
+    # feature closure, which A4-5 containment requires before any test may claim
+    # it — an unnamed feature is compiled OUT and the claim would be vacuous.
+    (cd crates && cargo build -p wz-ap-demo \
+        --features routing-peer,adminspace-write,routing-interceptor-hotreload --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_mesh -- --ignored --quiet) || return 1
     # R311rs — the subscription-filtered data-forward e2e (c3c-3) rides the

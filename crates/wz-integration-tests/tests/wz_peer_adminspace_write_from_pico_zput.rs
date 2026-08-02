@@ -69,6 +69,25 @@ use wz_integration_tests::common::{
 /// child + its stderr reader + the `@/<zid>/peer` root. `permit` grants
 /// `adminspace.permissions.write`; omitting it is the default-deny arm.
 fn spawn_write_host(permit: bool) -> (ChildGuard, std::fs::File, String, String) {
+    spawn_write_host_with_acl(permit, None)
+}
+
+/// R311y508 — [`spawn_write_host`] with an optional PRE-EXISTING ACL rule.
+///
+/// The parameter exists for one reason and it is a precondition, not a knob: the
+/// interceptor cache is only consulted when the chain is NON-EMPTY, because
+/// `admit_inbound` short-circuits an empty chain before it. A host that starts
+/// with no ACL therefore has nothing cached when the config write lands, the new
+/// chain computes every verdict fresh, and the run proves nothing about
+/// invalidation — which is exactly what a damage probe measured: deleting the
+/// version bump left this file's live-flip leg GREEN. Passing an UNRELATED deny
+/// makes the chain non-empty from the start, so the foreign publisher's admitted
+/// traffic populates its verdict table BEFORE the swap, and the drop afterwards
+/// can only come from that table being invalidated.
+fn spawn_write_host_with_acl(
+    permit: bool,
+    acl_deny: Option<&str>,
+) -> (ChildGuard, std::fs::File, String, String) {
     let demo = wz_ap_demo_binary();
     let port_res = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port_res.port());
@@ -83,6 +102,9 @@ fn spawn_write_host(permit: bool) -> (ChildGuard, std::fs::File, String, String)
         .arg("--subscribe")
         .arg("mesh/data")
         .arg("--config-writable");
+    if let Some(deny) = acl_deny {
+        cmd.arg("--acl-deny").arg(deny);
+    }
     if permit {
         cmd.arg("--config-write-permit");
     }
@@ -273,11 +295,28 @@ fn spawn_pico_pub(addr: &str, n: u32) -> ChildGuard {
 //      the new ACL. This is the atom: the re-drive reached the live forwarder.
 // The final assertion is the causal order of (2) before (3) in the post-shutdown
 // capture, so a drop that somehow preceded the reconfigure cannot pass.
+// R311y508 — this leg also carries `routing-interceptor-hotreload`, and the barrier
+// ordering above is what makes that claim real rather than incidental. Barrier 1
+// ("received mesh data") is a foreign Put that was ADMITTED, so by the time the
+// config write lands, this face+keyexpr already holds a verdict table computed
+// against the OLD chain. Barrier 3 is a Put from the STILL-RUNNING pico publisher
+// hitting the new one. So the drop can only happen if the swap INVALIDATED that
+// table — a stale hit would keep relaying, which is precisely what removing the
+// version bump in `set_interceptors` produces (it reds the two unit legs in
+// linkstate_forward). The E6 build line names the feature, so the cache is compiled
+// in rather than the atom's name riding an elided path.
 // wz-proves: config-mutate-runtime pico->wz
+// wz-proves: routing-interceptor-hotreload pico->wz
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,adminspace-write + zenoh-pico z_pub/z_put CLIs); Layer E6 runs via --ignored"]
 fn wz_peer_config_write_from_pico_flips_the_live_verdict_for_a_real_pico_publisher() {
-    let (mut a_child, mut a_reader, root, addr) = spawn_write_host(true);
+    // R311y508 — start with a deny on an UNRELATED keyexpr. It changes nothing
+    // about what this leg asserts (mesh/data is admitted either way) and it is
+    // what makes the leg bind the interceptor CACHE: a non-empty chain is the
+    // precondition for a verdict table to exist at all, so the foreign
+    // publisher's admitted Puts leave one behind for the write to invalidate.
+    let (mut a_child, mut a_reader, root, addr) =
+        spawn_write_host_with_acl(true, Some("unrelated/**"));
 
     // 60 s of foreign traffic: long enough to outlive the write + the flip, and
     // the guard kills it either way.

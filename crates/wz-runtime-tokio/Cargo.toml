@@ -1038,6 +1038,12 @@ router-multicast-faces = [
 # `pnet_datalink`.
 link-interfaces = ["dep:libc"]
 access-acl = ["routing-peer", "link-interfaces", "dep:wz-access-control"]
+# R311y508 — the version-keyed per-(face, keyexpr) interceptor cache. Depends on
+# `routing-peer` because the cache lives on the linkstate forwarder's INGRESS
+# admit path, which is that feature's code; it does NOT depend on `access-acl`,
+# because the cache is a property of the CHAIN and stays correct (and empty) for
+# a chain built from the downsampling / low-pass interceptors alone.
+routing-interceptor-hotreload = ["routing-peer"]
 access-downsampling = ["routing-peer", "link-interfaces"]
 # R311y451 — the two session-core reads the low-pass SIZE budget needs, named
 # by the gate rather than inherited by luck. zenoh budgets payload PLUS
