@@ -41,13 +41,27 @@
 //!
 //! ## Non-flakiness ([[feedback-no-flaky-ever]])
 //!
-//! Both bridges' subscriptions are DECLARED before any publish, and each leg
-//! re-publishes on a poll cadence until both streams have delivered the sample,
-//! so `Declare` propagation is absorbed rather than slept through. The
-//! assertions still require the real remote effect within the budget. Each
-//! sample is matched by a key UNIQUE to its leg and class, so a `wait`-style
-//! substring scan cannot be satisfied by a neighbouring event
+//! `Declare` propagation is absorbed by re-publishing on a poll cadence rather
+//! than slept through, and every assertion still requires the real remote
+//! effect within the budget. Each sample is matched by a key UNIQUE to its leg
+//! and class, so a substring scan cannot be satisfied by a neighbouring event
 //! ([[feedback-log-barrier-unique-or-counted]]).
+//!
+//! **Leg 2 needs more than that, and the first version of it was WRONG.** A
+//! differential compares two renderings OF ONE SAMPLE, but every re-publish
+//! mints a NEW sample with a new timestamp — so when one subscriber's `Declare`
+//! landed a round later than the other's, each side's "first event for this
+//! key" was a DIFFERENT publish, and the leg compared two unrelated objects.
+//! It passed repeatedly before a re-run caught it: identical key, value and
+//! encoding, timestamps one publish apart. Retrying was never the fix; the
+//! retry itself was the defect.
+//!
+//! So the retry now targets a WARMUP key whose only job is to establish both
+//! subscriptions, and only once BOTH streams have shown that warmup sample is
+//! each class published — EXACTLY ONCE. Sample identity is then structural
+//! rather than hoped for, and `assert_eq!((wz.len(), foreign.len()), (1, 1))`
+//! makes any recurrence fail loudly instead of silently comparing the wrong
+//! pair.
 //!
 //! `#[ignore]` (binary-dep e2e): needs `target/zenohd/zenohd` +
 //! `target/zenohd/libzenoh_plugin_rest.so`, both from `scripts/build-zenohd.sh`
@@ -176,7 +190,8 @@ fn parse_json_sample(object: &str) -> Option<JsonSample> {
 /// the colon is optional in `text/event-stream` and the two implementations
 /// differ on it (zenoh's `tide` writes `event:PUT`, wz writes `event: PUT`);
 /// an SSE client strips it either way, so it is not a divergence to assert on.
-fn first_event_for(text: &str, key_needle: &str) -> Option<(String, JsonSample)> {
+fn events_for(text: &str, key_needle: &str) -> Vec<(String, JsonSample)> {
+    let mut out = Vec::new();
     for block in text.split("\n\n") {
         let mut name = None;
         let mut data = None;
@@ -187,12 +202,21 @@ fn first_event_for(text: &str, key_needle: &str) -> Option<(String, JsonSample)>
                 data = Some(rest.trim().to_string());
             }
         }
-        let (name, data) = (name?, data?);
+        let (Some(name), Some(data)) = (name, data) else {
+            continue;
+        };
         if data.contains(key_needle) {
-            return Some((name, parse_json_sample(&data)?));
+            if let Some(sample) = parse_json_sample(&data) {
+                out.push((name, sample));
+            }
         }
     }
-    None
+    out
+}
+
+/// The first event for `key_needle`, or `None`.
+fn first_event_for(text: &str, key_needle: &str) -> Option<(String, JsonSample)> {
+    events_for(text, key_needle).into_iter().next()
 }
 
 /// Spawn a zenohd whose REST plugin listens on `rest_port`, and return it with
@@ -475,30 +499,74 @@ async fn wz_rest_sse_renders_the_same_sample_as_the_zenohd_rest_plugin() {
     let mut wz_buf = Vec::new();
     let mut foreign_buf = Vec::new();
 
+    // ── BARRIER: both subscriptions live, before any class is published.
+    //
+    // Re-publishing a class key until both streams show it is NOT sound, and a
+    // green run does not make it so: each PUT mints a NEW sample with a new
+    // timestamp, so if one subscriber's `Declare` propagates a round later, the
+    // "first event for this key" on the two sides are DIFFERENT samples and the
+    // comparison is between two unrelated renderings. That is exactly what a
+    // re-run produced — identical key/value/encoding, timestamps one publish
+    // apart. So the retry moves to a WARMUP key whose only job is to establish
+    // both subscriptions; each class is then published EXACTLY ONCE, and the
+    // single resulting sample is what both sides must render.
+    let warmup_key = format!("{root}/warmup");
+    let mut ready = false;
+    'warmup: for _ in 0..PUBLISH_ROUNDS {
+        let (status, _) = http_put(fx.zenohd_rest, &warmup_key, "text/plain", "warmup").await;
+        assert_eq!(status, 200, "zenoh's REST plugin accepted the warmup PUT");
+        for _ in 0..READ_SLICES {
+            if !pump(&mut wz_sse, &mut wz_buf).await
+                || !pump(&mut foreign_sse, &mut foreign_buf).await
+            {
+                break 'warmup;
+            }
+            if first_event_for(&String::from_utf8_lossy(&wz_buf), &warmup_key).is_some()
+                && first_event_for(&String::from_utf8_lossy(&foreign_buf), &warmup_key).is_some()
+            {
+                ready = true;
+                break 'warmup;
+            }
+        }
+    }
+    assert!(
+        ready,
+        "both SSE subscriptions became live (warmup).\n--- wz ---\n{}\n--- zenohd ---\n{}",
+        String::from_utf8_lossy(&wz_buf),
+        String::from_utf8_lossy(&foreign_buf)
+    );
+
     for (suffix, content_type, body) in CLASSES {
         let key = format!("{root}/{suffix}");
 
+        // Exactly ONE publish per class — see the barrier above.
+        let (status, _) = http_put(fx.zenohd_rest, &key, content_type, body).await;
+        assert_eq!(status, 200, "zenoh's REST plugin accepted the PUT");
+
         let mut pair = None;
-        'outer: for _ in 0..PUBLISH_ROUNDS {
-            // Publish through the FOREIGN bridge, so the sample originates
-            // entirely outside wz and both subscribers are equal observers.
-            let (status, _) = http_put(fx.zenohd_rest, &key, content_type, body).await;
-            assert_eq!(status, 200, "zenoh's REST plugin accepted the PUT");
+        'drain: for _ in 0..PUBLISH_ROUNDS {
             for _ in 0..READ_SLICES {
-                if !pump(&mut wz_sse, &mut wz_buf).await {
-                    break 'outer;
+                if !pump(&mut wz_sse, &mut wz_buf).await
+                    || !pump(&mut foreign_sse, &mut foreign_buf).await
+                {
+                    break 'drain;
                 }
-                if !pump(&mut foreign_sse, &mut foreign_buf).await {
-                    break 'outer;
-                }
-                let wz_text = String::from_utf8_lossy(&wz_buf);
-                let foreign_text = String::from_utf8_lossy(&foreign_buf);
-                if let (Some(w), Some(f)) = (
-                    first_event_for(&wz_text, &key),
-                    first_event_for(&foreign_text, &key),
-                ) {
-                    pair = Some((w, f));
-                    break 'outer;
+                let wz_events = events_for(&String::from_utf8_lossy(&wz_buf), &key);
+                let foreign_events = events_for(&String::from_utf8_lossy(&foreign_buf), &key);
+                if !wz_events.is_empty() && !foreign_events.is_empty() {
+                    // One publish must yield one event per side. A second would
+                    // mean the sample identity is not pinned and the field-for-
+                    // field comparison below is not about ONE sample.
+                    assert_eq!(
+                        (wz_events.len(), foreign_events.len()),
+                        (1, 1),
+                        "{key}: one publish, one event per bridge"
+                    );
+                    pair = Some((
+                        wz_events.into_iter().next().unwrap(),
+                        foreign_events.into_iter().next().unwrap(),
+                    ));
+                    break 'drain;
                 }
             }
         }
