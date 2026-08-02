@@ -2175,11 +2175,19 @@ layer_c1az_cargo_test_rest_sse() {
 # R311y414 — all three test steps were BARE; they now carry anchored count
 # guards with the MEASURED counts (5 ext-codec unit / 3 provider unit / 2 e2e).
 layer_c1af_cargo_test_shm() {
-    _runci_guarded_test C1af 5 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R311y507 — 5 -> 16. The filter `shm` now also selects the challenge-response
+    # wire tests + the four-step FSM driven both ways (the forged-challenge,
+    # unmappable-segment and malformed-InitSyn arms among them). Measured, not
+    # inferred: `cargo test .. --lib shm` reports 16.
+    _runci_guarded_test C1af 16 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
-    _runci_guarded_test C1af 2 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --test shm_e2e --quiet \
+    # R311y507 — 2 -> 5. The target gained the challenge-response over a real
+    # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must
+    # leave BOTH sides without SHM — a session ending with one side believing it
+    # was on would put descriptors on a wire the peer reads as payload bytes).
+    _runci_guarded_test C1af 5 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --test shm_e2e --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features session-extshm,transport-unicast,transport-link-tcp --quiet -- -D warnings \

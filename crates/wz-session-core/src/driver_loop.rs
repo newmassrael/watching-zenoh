@@ -143,6 +143,18 @@ pub enum DriverLoopOutcome {
     /// folding it into `Terminal`.
     #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
     QosLinkRejected(crate::extqos::QosLinkError),
+    /// session-extshm (R311y507) — an initiator's `init::ext::Shm` challenge
+    /// body did not decode. zenoh `recv_init_syn` `bail!`s on exactly this
+    /// (`ext/shm.rs`), aborting establishment, so the dispatcher has injected
+    /// `FramingError` and the FSM tears the session down with
+    /// `CloseReason::Invalid`. Its own variant (the `InitAckCapsRejected`
+    /// pattern) so the open loop can map it to a typed error.
+    ///
+    /// ONLY the acceptor reaches this: the initiator's mirror of the same
+    /// failure degrades to "no shared memory" instead, which is upstream's
+    /// asymmetry and not a wz simplification.
+    #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
+    ShmChallengeRejected,
     /// R3b — a Z_EXT_AUTH method rejected the peer on a handshake recv stage
     /// (a bad usrpwd credential / unknown user / missing required sub-ext, or a
     /// malformed auth ext). The dispatcher has already injected `FramingError`

@@ -281,6 +281,195 @@ pub trait ShmResolver {
     fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>>;
 }
 
+/// Why a SHM challenge-response step refused. Only ONE of zenoh's arms is an
+/// error; every other failure degrades to "no shared memory" and lets the
+/// session continue, which is deliberate and asymmetric upstream.
+#[cfg(feature = "session-extshm")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShmAuthError {
+    /// The initiator's InitSyn carried an `Shm` ext whose body does not decode.
+    /// zenoh `recv_init_syn` `bail!`s here (`ext/shm.rs`), aborting the
+    /// handshake, while the initiator's own `recv_init_ack` merely traces and
+    /// returns `Ok(None)` on the same class of failure. The asymmetry is
+    /// upstream's: a malformed challenge aimed at an ACCEPTOR is an attack
+    /// surface, a malformed answer to an initiator is just a peer that will not
+    /// get SHM.
+    MalformedInitSyn,
+}
+
+/// The SHM establishment challenge-response state machine — zenoh's `ShmFsm`
+/// (`io/zenoh-transport/src/unicast/establishment/ext/shm.rs`) as a plain
+/// dispatch object, so the four steps can be driven and TESTED without a socket
+/// or a session.
+///
+/// The exchange, and what each step actually proves:
+///
+/// 1. **InitSyn** — the initiator publishes its own segment ID.
+/// 2. **InitAck** — the acceptor opens that segment, reads the challenge inside,
+///    and sends it back ALONGSIDE its own segment ID. Echoing the challenge is
+///    the proof it could map the initiator's memory.
+/// 3. **OpenSyn** — the initiator checks the echo against its own challenge,
+///    then opens the acceptor's segment and answers with ITS challenge.
+/// 4. **OpenAck** — the acceptor checks that second echo and confirms with the
+///    literal `1`.
+///
+/// So each side proves map-ability to the other, and neither is taken on trust.
+/// A node with no authenticator installed emits nothing at all (zenoh's
+/// `auth_shm: None` arm), which is byte-identical to a peer that does no SHM.
+#[cfg(feature = "session-extshm")]
+pub struct ShmAuthDispatch {
+    authenticator: Option<alloc::boxed::Box<dyn ShmAuthenticator + Send + Sync>>,
+    /// The challenge read out of the PEER's segment: the value this node echoes
+    /// on OpenSyn (initiator) after mapping the acceptor's segment. `None` until
+    /// a peer segment has been successfully opened.
+    peer_challenge: Option<u64>,
+}
+
+#[cfg(feature = "session-extshm")]
+impl Default for ShmAuthDispatch {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+#[cfg(feature = "session-extshm")]
+impl core::fmt::Debug for ShmAuthDispatch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The trait object has no Debug bound, and its contents are a segment id
+        // plus a secret; report only whether one is installed.
+        f.debug_struct("ShmAuthDispatch")
+            .field("installed", &self.authenticator.is_some())
+            .field("peer_challenge_known", &self.peer_challenge.is_some())
+            .finish()
+    }
+}
+
+#[cfg(feature = "session-extshm")]
+impl ShmAuthDispatch {
+    /// The no-SHM dispatch: emits nothing, accepts nothing. zenoh's
+    /// `auth_shm: None` (`manager.rs:293`), which is what a build without the
+    /// shared-memory feature — or a deploy that did not enable it — carries.
+    pub fn empty() -> Self {
+        Self {
+            authenticator: None,
+            peer_challenge: None,
+        }
+    }
+
+    /// Install this node's authenticator (its own published segment plus the
+    /// ability to map a peer's). Once installed, the four steps below start
+    /// emitting.
+    pub fn install(authenticator: alloc::boxed::Box<dyn ShmAuthenticator + Send + Sync>) -> Self {
+        Self {
+            authenticator: Some(authenticator),
+            peer_challenge: None,
+        }
+    }
+
+    /// Whether an authenticator is installed — i.e. whether this node can take
+    /// part in the exchange at all.
+    pub fn is_installed(&self) -> bool {
+        self.authenticator.is_some()
+    }
+
+    /// Step 1, INITIATOR: publish our segment id. zenoh `send_init_syn`.
+    pub fn send_init_syn(&self) -> Option<ExtEntryOwned> {
+        let a = self.authenticator.as_ref()?;
+        encode_shm_init_ext(&encode_shm_init_syn_body(a.local_segment_id())).ok()
+    }
+
+    /// Step 2a, ACCEPTOR: open the initiator's segment and remember the
+    /// challenge found inside. zenoh `recv_init_syn`.
+    ///
+    /// `Ok(())` with nothing remembered covers both "the peer sent no `Shm`"
+    /// and "its segment could not be mapped" — upstream returns `Ok(None)` for
+    /// both, so the session continues without SHM. A body that does not DECODE
+    /// is the one hard error ([`ShmAuthError::MalformedInitSyn`]).
+    pub fn recv_init_syn(&mut self, extensions: &[ExtEntryOwned]) -> Result<(), ShmAuthError> {
+        self.peer_challenge = None;
+        let Some(a) = self.authenticator.as_ref() else {
+            return Ok(());
+        };
+        let Some(body) = peer_shm_init_body(extensions) else {
+            return Ok(());
+        };
+        let alice_segment = decode_shm_init_syn_body(body).ok_or(ShmAuthError::MalformedInitSyn)?;
+        self.peer_challenge = a.open_peer_challenge(alice_segment);
+        Ok(())
+    }
+
+    /// Step 2b, ACCEPTOR: answer with the initiator's own challenge plus our
+    /// segment id. zenoh `send_init_ack`, which emits NOTHING when
+    /// `recv_init_syn` produced no segment — so a peer whose memory we could not
+    /// map simply never sees an `Shm` ext back.
+    pub fn send_init_ack(&self) -> Option<ExtEntryOwned> {
+        let a = self.authenticator.as_ref()?;
+        let alice_challenge = self.peer_challenge?;
+        encode_shm_init_ext(&encode_shm_init_ack_body(
+            alice_challenge,
+            a.local_segment_id(),
+        ))
+        .ok()
+    }
+
+    /// Step 3a, INITIATOR: check that the acceptor echoed OUR challenge, then
+    /// map ITS segment. zenoh `recv_init_ack`.
+    ///
+    /// `false` — never an error — for every failure: no ext, a body that does
+    /// not decode, a challenge that does not match ours, or a segment we cannot
+    /// map. All four mean the same thing to upstream (`Ok(None)`), and all four
+    /// leave the session up without shared memory.
+    pub fn recv_init_ack(&mut self, extensions: &[ExtEntryOwned]) -> bool {
+        self.peer_challenge = None;
+        let Some(a) = self.authenticator.as_ref() else {
+            return false;
+        };
+        let Some(body) = peer_shm_init_body(extensions) else {
+            return false;
+        };
+        let Some((alice_challenge, bob_segment)) = decode_shm_init_ack_body(body) else {
+            return false;
+        };
+        // THE CHECK: the acceptor could only know this by mapping our segment.
+        if alice_challenge != a.local_challenge() {
+            return false;
+        }
+        self.peer_challenge = a.open_peer_challenge(bob_segment);
+        self.peer_challenge.is_some()
+    }
+
+    /// Step 3b, INITIATOR: answer with the challenge we read out of the
+    /// acceptor's segment. zenoh `send_open_syn`.
+    pub fn send_open_syn(&self) -> Option<ExtEntryOwned> {
+        self.authenticator.as_ref()?;
+        Some(encode_shm_open_ext(self.peer_challenge?))
+    }
+
+    /// Step 4a, ACCEPTOR: check the initiator echoed OUR challenge. zenoh
+    /// `recv_open_syn`; `true` here is what sets `negotiated_to_use_shm` on the
+    /// accept side.
+    pub fn recv_open_syn(&self, extensions: &[ExtEntryOwned]) -> bool {
+        let Some(a) = self.authenticator.as_ref() else {
+            return false;
+        };
+        peer_shm_open_value(extensions) == Some(a.local_challenge())
+    }
+
+    /// Step 4b, ACCEPTOR: confirm with the literal `1`, and only when the
+    /// exchange actually completed. zenoh `send_open_ack`.
+    pub fn send_open_ack(&self, negotiated: bool) -> Option<ExtEntryOwned> {
+        self.authenticator.as_ref()?;
+        negotiated.then(|| encode_shm_open_ext(SHM_OPEN_ACK_VALUE))
+    }
+
+    /// Step 4c, INITIATOR: the acceptor's confirmation. zenoh `recv_open_ack`
+    /// accepts ONLY the literal `1` (`if ext.value != 1`), so this is where the
+    /// open side finally sets its own flag.
+    pub fn recv_open_ack(&self, extensions: &[ExtEntryOwned]) -> bool {
+        self.authenticator.is_some() && peer_shm_open_value(extensions) == Some(SHM_OPEN_ACK_VALUE)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +631,215 @@ mod tests {
                 assert_eq!(peer_shm_open_value(&[encode_shm_open_ext(v)]), Some(v));
             }
             assert_eq!(peer_shm_open_value(&[]), None);
+        }
+    }
+
+    /// A [`ShmAuthenticator`] over an in-memory map of published segments, so
+    /// the FSM can be driven both ways INCLUDING the "peer segment cannot be
+    /// mapped" arm — which a test using the real /dev/shm could only reach by
+    /// racing an unlink.
+    #[cfg(feature = "session-extshm")]
+    #[derive(Clone)]
+    struct FakeAuth {
+        id: u32,
+        challenge: u64,
+        /// What THIS node can see: (segment id -> challenge). A peer's segment
+        /// missing from here is a segment this node cannot map.
+        visible: alloc::vec::Vec<(u32, u64)>,
+    }
+
+    #[cfg(feature = "session-extshm")]
+    impl super::ShmAuthenticator for FakeAuth {
+        fn local_segment_id(&self) -> u32 {
+            self.id
+        }
+        fn local_challenge(&self) -> u64 {
+            self.challenge
+        }
+        fn open_peer_challenge(&self, segment_id: u32) -> Option<u64> {
+            self.visible
+                .iter()
+                .find(|(i, _)| *i == segment_id)
+                .map(|(_, c)| *c)
+        }
+    }
+
+    #[cfg(feature = "session-extshm")]
+    mod fsm {
+        use super::super::*;
+        use super::FakeAuth;
+        use alloc::boxed::Box;
+        use alloc::vec;
+
+        const ALICE_ID: u32 = 11;
+        const ALICE_CHALLENGE: u64 = 0xA11CE_u64;
+        const BOB_ID: u32 = 22;
+        const BOB_CHALLENGE: u64 = 0xB0B_u64;
+
+        /// Both sides can map each other — the mutually-visible case.
+        fn pair() -> (ShmAuthDispatch, ShmAuthDispatch) {
+            let alice = FakeAuth {
+                id: ALICE_ID,
+                challenge: ALICE_CHALLENGE,
+                visible: vec![(BOB_ID, BOB_CHALLENGE)],
+            };
+            let bob = FakeAuth {
+                id: BOB_ID,
+                challenge: BOB_CHALLENGE,
+                visible: vec![(ALICE_ID, ALICE_CHALLENGE)],
+            };
+            (
+                ShmAuthDispatch::install(Box::new(alice)),
+                ShmAuthDispatch::install(Box::new(bob)),
+            )
+        }
+
+        /// Drive the whole four-message exchange between two dispatches, feeding
+        /// each side's emitted ext to the other exactly as the wire would.
+        /// Returns `(initiator_negotiated, acceptor_negotiated)`.
+        fn drive(alice: &mut ShmAuthDispatch, bob: &mut ShmAuthDispatch) -> (bool, bool) {
+            let init_syn: alloc::vec::Vec<_> = alice.send_init_syn().into_iter().collect();
+            bob.recv_init_syn(&init_syn).expect("well-formed InitSyn");
+            let init_ack: alloc::vec::Vec<_> = bob.send_init_ack().into_iter().collect();
+            // The initiator's InitAck result is not the verdict: it only says
+            // it could map bob's segment. Its own flag is set at OpenAck.
+            let _ = alice.recv_init_ack(&init_ack);
+            let open_syn: alloc::vec::Vec<_> = alice.send_open_syn().into_iter().collect();
+            let bob_ok = bob.recv_open_syn(&open_syn);
+            let open_ack: alloc::vec::Vec<_> = bob.send_open_ack(bob_ok).into_iter().collect();
+            (alice.recv_open_ack(&open_ack), bob_ok)
+        }
+
+        /// The happy path: both sides finish NEGOTIATED, and each one's flag was
+        /// set by an echo only the other could have produced.
+        #[test]
+        fn a_mutually_mappable_pair_negotiates_shm() {
+            let (mut alice, mut bob) = pair();
+            assert_eq!(drive(&mut alice, &mut bob), (true, true));
+        }
+
+        /// The ACCEPTOR cannot map the initiator's segment (same-host claim,
+        /// different namespace / already unlinked). It then sends NO `Shm` back
+        /// at all, so the initiator gets nothing to validate and both ends up
+        /// without SHM — with the session otherwise intact.
+        #[test]
+        fn an_unmappable_initiator_segment_yields_no_shm_on_both_sides() {
+            let alice = FakeAuth {
+                id: ALICE_ID,
+                challenge: ALICE_CHALLENGE,
+                visible: vec![(BOB_ID, BOB_CHALLENGE)],
+            };
+            let bob = FakeAuth {
+                id: BOB_ID,
+                challenge: BOB_CHALLENGE,
+                visible: vec![], // cannot see alice
+            };
+            let mut alice = ShmAuthDispatch::install(Box::new(alice));
+            let mut bob = ShmAuthDispatch::install(Box::new(bob));
+            assert!(bob.send_init_ack().is_none(), "nothing to echo");
+            assert_eq!(drive(&mut alice, &mut bob), (false, false));
+        }
+
+        /// The reverse blindness: the ACCEPTOR maps fine, the INITIATOR cannot
+        /// map the acceptor's segment. The initiator has nothing to answer with,
+        /// so the acceptor's own check fails and neither side negotiates.
+        #[test]
+        fn an_unmappable_acceptor_segment_yields_no_shm_on_both_sides() {
+            let alice = FakeAuth {
+                id: ALICE_ID,
+                challenge: ALICE_CHALLENGE,
+                visible: vec![], // cannot see bob
+            };
+            let bob = FakeAuth {
+                id: BOB_ID,
+                challenge: BOB_CHALLENGE,
+                visible: vec![(ALICE_ID, ALICE_CHALLENGE)],
+            };
+            let mut alice = ShmAuthDispatch::install(Box::new(alice));
+            let mut bob = ShmAuthDispatch::install(Box::new(bob));
+            assert_eq!(drive(&mut alice, &mut bob), (false, false));
+            assert!(
+                alice.send_open_syn().is_none(),
+                "no challenge to answer with"
+            );
+        }
+
+        /// THE POINT OF THE WHOLE EXCHANGE: a peer that merely CLAIMS shared
+        /// memory — well-formed messages, plausible ids, but a challenge it did
+        /// not read out of our segment — is refused. Without this, the protocol
+        /// would be a capability flag with extra steps.
+        #[test]
+        fn a_peer_that_guesses_the_challenge_is_refused() {
+            let (mut alice, _) = pair();
+            let init_syn: alloc::vec::Vec<_> = alice.send_init_syn().into_iter().collect();
+            assert!(!init_syn.is_empty());
+
+            // A forged InitAck: correct SHAPE, correct bob segment, WRONG echo.
+            let forged =
+                encode_shm_init_ext(&encode_shm_init_ack_body(ALICE_CHALLENGE ^ 1, BOB_ID))
+                    .expect("fits");
+            assert!(
+                !alice.recv_init_ack(&[forged]),
+                "an echo that is not our challenge proves nothing"
+            );
+            assert!(alice.send_open_syn().is_none());
+
+            // And the acceptor side refuses a forged OpenSyn the same way.
+            let (_, bob) = pair();
+            assert!(
+                !bob.recv_open_syn(&[encode_shm_open_ext(BOB_CHALLENGE ^ 1)]),
+                "a wrong echo on OpenSyn must not negotiate"
+            );
+            assert!(bob.recv_open_syn(&[encode_shm_open_ext(BOB_CHALLENGE)]));
+        }
+
+        /// The acceptor confirms with the literal 1 and the initiator accepts
+        /// ONLY that (zenoh `recv_open_ack`: `if ext.value != 1`). A peer that
+        /// echoes something else — including our own challenge — is refused.
+        #[test]
+        fn the_open_ack_must_be_the_literal_one() {
+            let (alice, bob) = pair();
+            assert!(bob.send_open_ack(false).is_none(), "not negotiated, no ack");
+            let ack = bob.send_open_ack(true).expect("negotiated");
+            assert!(alice.recv_open_ack(core::slice::from_ref(&ack)));
+            assert!(!alice.recv_open_ack(&[encode_shm_open_ext(0)]));
+            assert!(!alice.recv_open_ack(&[encode_shm_open_ext(ALICE_CHALLENGE)]));
+            assert!(!alice.recv_open_ack(&[]));
+        }
+
+        /// A node with no authenticator emits NOTHING and negotiates nothing —
+        /// zenoh's `auth_shm: None` arm, byte-identical to a peer that does no
+        /// SHM at all.
+        #[test]
+        fn an_empty_dispatch_is_inert() {
+            let mut empty = ShmAuthDispatch::empty();
+            assert!(!empty.is_installed());
+            assert!(empty.send_init_syn().is_none());
+            assert!(empty.send_init_ack().is_none());
+            assert!(empty.send_open_syn().is_none());
+            assert!(empty.send_open_ack(true).is_none());
+
+            // ...and it ignores a fully valid peer exchange rather than half-
+            // completing one.
+            let (mut alice, _) = pair();
+            assert_eq!(drive(&mut alice, &mut empty), (false, false));
+        }
+
+        /// A malformed InitSyn body is the ONE hard error: zenoh `bail!`s there
+        /// while every other failure degrades. Pinned so the asymmetry cannot be
+        /// "tidied" into uniform degradation.
+        #[test]
+        fn a_malformed_init_syn_is_the_one_hard_error() {
+            let (_, mut bob) = pair();
+            // An `Shm` ZBuf whose body is an empty (truncated) VLE.
+            let bad = encode_shm_init_ext(&[]).expect("fits");
+            assert_eq!(
+                bob.recv_init_syn(&[bad]),
+                Err(ShmAuthError::MalformedInitSyn)
+            );
+            // Whereas the initiator's mirror of the same class merely says no.
+            let (mut alice, _) = pair();
+            assert!(!alice.recv_init_ack(&[encode_shm_init_ext(&[]).expect("fits")]));
         }
     }
 }

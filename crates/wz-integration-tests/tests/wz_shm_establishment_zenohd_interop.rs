@@ -119,10 +119,11 @@ fn tempfile_pair() -> (std::fs::File, std::fs::File) {
 /// capability resolves to off. What this proves is the zenoh extension format's
 /// own skip contract on a real decoder: an unknown, non-mandatory, UNIT-encoded
 /// extension costs the handshake nothing. The session reaches Established.
-// wz-proves: session-extshm wz->zenohd partial
+// wz-proves: session-extshm wz->zenohd
+// wz-proves: transport-shm wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh + wz-ap-demo --features session-extshm); Layer Z runs via --ignored"]
-fn wz_shm_offer_is_skipped_by_a_shm_enabled_zenohd_and_the_session_survives() {
+fn wz_negotiates_shm_with_a_zenohd_it_dials() {
     let Some(zenohd) = zenohd_shm_binary() else {
         eprintln!(
             "SKIP: no shared-memory zenohd at target/zenohd-shm/zenohd \
@@ -174,14 +175,18 @@ fn wz_shm_offer_is_skipped_by_a_shm_enabled_zenohd_and_the_session_survives() {
     assert_shm_was_built(&captured);
 
     assert!(
-        !negotiated(&captured),
-        "wz negotiated SHM with a zenohd that never offered wz's UNIT@0x2 — the \
-         capability must resolve to OFF\n--- wz ---\n{captured}"
+        negotiated(&captured),
+        "wz must now negotiate SHM with a shared-memory zenohd. R311y505 asserted \
+         the OPPOSITE here and was right at the time: wz then sent a UNIT@0x2 that \
+         zenoh does not recognise, so `false` was the only correct outcome. \
+         R311y507 replaced that with zenoh's real challenge-response, and `true` \
+         is what the exchange completing looks like — the acceptor mapped wz's \
+         auth segment and echoed the challenge from inside it, and wz did the \
+         same to zenohd's.\n--- wz ---\n{captured}"
     );
     assert!(
         captured.contains("session Established"),
-        "the session must still reach Established: wz's extra establishment ext is \
-         non-mandatory and UNIT-encoded, so a zenoh decoder skips it\n--- wz ---\n{captured}"
+        "the session must reach Established\n--- wz ---\n{captured}"
     );
 }
 
@@ -194,9 +199,10 @@ fn wz_shm_offer_is_skipped_by_a_shm_enabled_zenohd_and_the_session_survives() {
 /// starts `true` and a false positive is visible as `true` rather than being
 /// masked by an already-`false` local side.
 // wz-proves: session-extshm zenohd->wz
+// wz-proves: transport-shm zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh + wz-ap-demo --features session-extshm); Layer Z runs via --ignored"]
-fn wz_does_not_read_a_real_zenohd_shm_zbuf_ext_as_its_own_unit_offer() {
+fn wz_answers_a_real_zenohd_shm_challenge_when_zenohd_dials() {
     let Some(zenohd) = zenohd_shm_binary() else {
         eprintln!(
             "SKIP: no shared-memory zenohd at target/zenohd-shm/zenohd \
@@ -254,18 +260,17 @@ fn wz_does_not_read_a_real_zenohd_shm_zbuf_ext_as_its_own_unit_offer() {
     assert_shm_was_built(&captured);
 
     assert!(
-        !negotiated(&captured),
-        "wz read a real zenoh `Shm` ext as its own SHM offer. zenoh's is \
-         `zextzbuf!(0x2, false)` (header 0x42); wz's is a UNIT at the same 4-bit id \
-         (header 0x02), and a zenoh extension's identity is `eid = header & !FLAG_Z` \
-         — encoding bits INCLUDED. Negotiating `true` here means wz would send SHM \
-         descriptors to a peer that issued a challenge wz cannot answer and expects \
-         payload bytes.\n--- wz ---\n{captured}"
+        negotiated(&captured),
+        "wz must ANSWER a real zenoh `Shm` challenge, not merely avoid mistaking it \
+         for its own UNIT offer. R311y505 asserted `false` here and it was the \
+         right assertion then — wz could not answer, so negotiating `true` would \
+         have meant sending descriptors to a peer expecting payload bytes. \
+         R311y507 built the answer: wz maps the segment id in zenohd's ZBuf, reads \
+         the challenge, and echoes it on OpenSyn.\n--- wz ---\n{captured}"
     );
     assert!(
         captured.contains("session Established"),
-        "the session must still reach Established — the correct outcome is SHM off, \
-         not a broken link\n--- wz ---\n{captured}"
+        "the session must reach Established\n--- wz ---\n{captured}"
     );
     let _ = read_captured(&mut wz_log);
 }

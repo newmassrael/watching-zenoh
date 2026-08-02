@@ -505,6 +505,17 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// anticipated).
     #[cfg(feature = "session-extauth")]
     pub auth: R::Mutex<AuthDispatch>,
+    /// session-extshm (R311y507) — the SHM establishment CHALLENGE-RESPONSE
+    /// state (`crate::extshm::ShmAuthDispatch`): this node's published auth
+    /// segment plus the challenge read out of the peer's. Behind its own mutex
+    /// for the same reason `auth` is — a send stage advances it without blocking
+    /// the role ext slots.
+    ///
+    /// Default EMPTY, which emits nothing at all: a deploy opts in by installing
+    /// an authenticator ([`SessionLinkActions::install_shm_auth`]), exactly as
+    /// zenoh's `auth_shm` is `None` unless the manager was configured with SHM.
+    #[cfg(feature = "session-extshm")]
+    pub shm_auth: R::Mutex<crate::extshm::ShmAuthDispatch>,
     /// transport-lowlatency — the negotiated lowlatency capability for THIS
     /// session (zenoh `TransportConfigUnicast::is_lowlatency`). Seeded with the
     /// local offer ([`Self::set_lowlatency_offer`]) at bring-up, then ANDed
@@ -1380,6 +1391,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 is_compression: R::new_mutex(false),
                 #[cfg(feature = "transport-shm")]
                 is_shm: R::new_mutex(false),
+                // session-extshm — no authenticator until the AP installs one.
+                #[cfg(feature = "session-extshm")]
+                shm_auth: R::new_mutex(crate::extshm::ShmAuthDispatch::empty()),
                 inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 rx_sn: R::new_mutex(crate::sn::RxConduits::default()),
@@ -2685,6 +2699,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-init-body",
         any(feature = "session-unicast-open", feature = "session-unicast-accept")
     ))]
+    /// session-extshm (R311y507) — stage the CHALLENGE form of the SHM
+    /// establishment ext for `role`.
+    ///
+    /// Only the challenge: the legacy UNIT branch stays at the two Init call
+    /// sites, visible there rather than hidden behind a helper that silently
+    /// does one of two different things. That also keeps `stage_capability`'s
+    /// caller set exactly what it was before this round.
+    ///
+    /// Self-clearing on the id, so a re-handshake REPLACES rather than
+    /// accumulates — and since the two forms share id 0x2, that is also what
+    /// stops a challenge and a UNIT marker ever riding one chain together.
+    #[cfg(feature = "session-extshm")]
+    fn stage_shm_challenge(
+        &self,
+        role: ExtChainRole,
+        produce: impl Fn(&Self) -> Option<ExtEntryOwned>,
+    ) {
+        let produced = self.is_shm().then(|| produce(self)).flatten();
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            chain.retain(|e| e.ext_id() != crate::extshm::SHM_ESTABLISHMENT_EXT_ID);
+            if let Some(ext) = produced {
+                chain.push(ext);
+            }
+        });
+    }
+
     /// R311y506 — the parameter widened from a bare `fn` pointer to
     /// `impl Fn`, so a capability whose encoded FORM depends on session state
     /// can use the same self-clearing stage seam instead of growing a parallel
@@ -2697,6 +2737,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// share id `0x1` and zenoh forbids emitting both at once
     /// ("Extensions QoS and QoSOptimized cannot both be enabled at once"), so
     /// clearing by id is what makes a re-stage REPLACE rather than accumulate.
+    ///
+    /// R311y507 — gated on the exact condition under which it has a CALLER.
+    /// Every call site is a capability stage inside the Init send blocks, so the
+    /// condition is "some capability feature" AND the enclosing block's own cfg
+    /// (`codec-init-body` plus one of the two unicast roles). Without this the
+    /// helper is dead in any build lacking those, and `-D dead-code` refuses it
+    /// — which is the right refusal: an `allow` here would also hide a helper
+    /// that had genuinely lost its last caller.
+    #[cfg(all(
+        any(
+            feature = "transport-lowlatency",
+            feature = "transport-qos",
+            feature = "session-extcompression",
+            feature = "session-extshm",
+        ),
+        feature = "codec-init-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept",),
+    ))]
     fn stage_capability(&self, role: ExtChainRole, offer: bool, build: impl Fn() -> ExtEntryOwned) {
         let ext_id = build().ext_id();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
@@ -2802,9 +2860,145 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// capability (zenoh `is_shm &= other.is_some()`), called from the
     /// establishment demux on every inbound Init frame; the result is
     /// `local_offer && peer_offer`, finalized at the Init exchange.
+    ///
+    /// R311y507 — this is the CAPABILITY half only. With an authenticator
+    /// installed the capability is no longer sufficient: `is_shm` is additionally
+    /// gated on the CHALLENGE-RESPONSE completing
+    /// ([`Self::shm_recv_open_syn`] / [`Self::shm_recv_open_ack`]), so a peer
+    /// that offers SHM but cannot map our memory ends up with `is_shm = false`.
     #[cfg(feature = "session-extshm")]
     pub fn negotiate_shm_against_peer(&self, peer_offered: bool) {
         R::with_mutex_mut(&self.is_shm, |s| *s &= peer_offered);
+    }
+
+    /// session-extshm (R311y507) — what counts as "the peer offered SHM" on an
+    /// inbound Init chain, which depends on WHICH mechanism this node is running.
+    ///
+    /// With an authenticator installed the peer's offer is the presence of
+    /// zenoh's real `init::ext::Shm` (a ZBuf), because that is the only SHM
+    /// extension a conforming peer sends — there is no separate capability
+    /// marker upstream, the challenge IS the offer. Without one, it is the
+    /// pre-R311y507 UNIT marker.
+    ///
+    /// Keeping the UNIT predicate for both would clear the capability the moment
+    /// a peer spoke the real protocol: the acceptor's `&=` would drive `is_shm`
+    /// false on the initiator's challenge and it would then stage no answer at
+    /// all. Measured — that is exactly what happened before this existed, and it
+    /// presented as "the challenge-response never completes".
+    #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
+    pub fn shm_peer_offered(&self, extensions: &[ExtEntryOwned]) -> bool {
+        if self.shm_auth_installed() {
+            crate::extshm::peer_shm_init_body(extensions).is_some()
+        } else {
+            crate::extshm::peer_offered_shm(extensions)
+        }
+    }
+
+    /// session-extshm (R311y507) — install this node's SHM authenticator at
+    /// bring-up, BEFORE the handshake drives (the `set_shm_offer`
+    /// config-at-bringup discipline). Until this is called the dispatch is empty
+    /// and wz emits no `init::ext::Shm` at all, which is byte-identical to a
+    /// peer that does no SHM (zenoh's `auth_shm: None`).
+    ///
+    /// The authenticator is the `std` half — a real POSIX segment — so it is
+    /// injected from the AP runtime rather than constructed here.
+    #[cfg(feature = "session-extshm")]
+    pub fn install_shm_auth(
+        &self,
+        authenticator: alloc::boxed::Box<dyn crate::extshm::ShmAuthenticator + Send + Sync>,
+    ) {
+        R::with_mutex_mut(&self.shm_auth, |d| {
+            *d = crate::extshm::ShmAuthDispatch::install(authenticator)
+        });
+    }
+
+    /// Whether a SHM authenticator is installed — i.e. whether this session can
+    /// take part in the challenge-response at all. Read by the stage seams so a
+    /// deploy without one keeps the pre-R311y507 wire.
+    #[cfg(feature = "session-extshm")]
+    pub fn shm_auth_installed(&self) -> bool {
+        R::with_mutex_mut(&self.shm_auth, |d| d.is_installed())
+    }
+
+    /// Step 1 (INITIATOR) — the `init::ext::Shm` for our InitSyn: our segment id.
+    #[cfg(feature = "session-extshm")]
+    pub fn shm_send_init_syn(&self) -> Option<ExtEntryOwned> {
+        R::with_mutex_mut(&self.shm_auth, |d| d.send_init_syn())
+    }
+
+    /// Step 2a (ACCEPTOR) — map the initiator's segment and remember its
+    /// challenge. `Err` only for a malformed body, which zenoh aborts on.
+    #[cfg(feature = "session-extshm")]
+    pub fn shm_recv_init_syn(
+        &self,
+        extensions: &[ExtEntryOwned],
+    ) -> Result<(), crate::extshm::ShmAuthError> {
+        R::with_mutex_mut(&self.shm_auth, |d| d.recv_init_syn(extensions))
+    }
+
+    /// Step 2b (ACCEPTOR) — echo the initiator's challenge plus our segment id.
+    #[cfg(feature = "session-extshm")]
+    pub fn shm_send_init_ack(&self) -> Option<ExtEntryOwned> {
+        R::with_mutex_mut(&self.shm_auth, |d| d.send_init_ack())
+    }
+
+    /// Step 3a (INITIATOR) — validate the echo against our own challenge, then
+    /// map the acceptor's segment. A failure here is not an error: it clears the
+    /// SHM capability and the session continues without shared memory.
+    #[cfg(feature = "session-extshm")]
+    pub fn shm_recv_init_ack(&self, extensions: &[ExtEntryOwned]) {
+        // The `installed` guard is NOT optional: without an authenticator
+        // `recv_init_ack` reports `false` because there is no exchange to
+        // complete, and clearing on that would tear the SHM capability off every
+        // deploy still using the UNIT offer/reflect. Measured — it broke the
+        // pre-R311y507 wz<->wz SHM e2e, which is what the guard is here for.
+        let (installed, proved) = R::with_mutex_mut(&self.shm_auth, |d| {
+            (d.is_installed(), d.recv_init_ack(extensions))
+        });
+        if installed && !proved {
+            R::with_mutex_mut(&self.is_shm, |s| *s = false);
+        }
+    }
+
+    /// Step 3b (INITIATOR) — the `open::ext::Shm` for our OpenSyn: the challenge
+    /// we read out of the acceptor's segment.
+    #[cfg(feature = "session-extshm")]
+    pub fn shm_send_open_syn(&self) -> Option<ExtEntryOwned> {
+        R::with_mutex_mut(&self.shm_auth, |d| d.send_open_syn())
+    }
+
+    /// Step 4a (ACCEPTOR) — the initiator's echo of OUR challenge. This is where
+    /// the ACCEPT side's `is_shm` is finally decided (zenoh sets
+    /// `negotiated_to_use_shm` in `recv_open_syn`), so an installed
+    /// authenticator turns the capability flag into a proof-gated one.
+    #[cfg(feature = "session-extshm")]
+    pub fn shm_recv_open_syn(&self, extensions: &[ExtEntryOwned]) {
+        let (installed, proved) = R::with_mutex_mut(&self.shm_auth, |d| {
+            (d.is_installed(), d.recv_open_syn(extensions))
+        });
+        if installed && !proved {
+            R::with_mutex_mut(&self.is_shm, |s| *s = false);
+        }
+    }
+
+    /// Step 4b (ACCEPTOR) — confirm with the literal `1`, and only when the
+    /// exchange completed.
+    #[cfg(feature = "session-extshm")]
+    pub fn shm_send_open_ack(&self) -> Option<ExtEntryOwned> {
+        let negotiated = self.is_shm();
+        R::with_mutex_mut(&self.shm_auth, |d| d.send_open_ack(negotiated))
+    }
+
+    /// Step 4c (INITIATOR) — the acceptor's confirmation, which is where the
+    /// OPEN side's `is_shm` is decided (zenoh `recv_open_ack`).
+    #[cfg(feature = "session-extshm")]
+    pub fn shm_recv_open_ack(&self, extensions: &[ExtEntryOwned]) {
+        let (installed, confirmed) = R::with_mutex_mut(&self.shm_auth, |d| {
+            (d.is_installed(), d.recv_open_ack(extensions))
+        });
+        if installed && !confirmed {
+            R::with_mutex_mut(&self.is_shm, |s| *s = false);
+        }
     }
 
     pub fn trace_snapshot(&self) -> ActionTrace {
@@ -6102,12 +6296,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 a.is_compression(),
                 crate::extcompression::encode_compression_ext,
             );
+            // session-extshm — the SHM establishment ext on InitSyn. With an
+            // authenticator installed this is zenoh's real `init::ext::Shm`
+            // CHALLENGE (a ZBuf carrying our segment id); without one it stays
+            // the pre-R311y507 UNIT capability marker, so a deploy that never
+            // installs one has a byte-identical handshake.
+            // session-extshm — with an authenticator installed this is zenoh's
+            // real `init::ext::Shm` CHALLENGE (a ZBuf carrying our segment id);
+            // without one it stays the pre-R311y507 UNIT capability marker, so a
+            // deploy that installs none has a byte-identical handshake.
             #[cfg(feature = "session-extshm")]
-            a.stage_capability(
-                ExtChainRole::InitSyn,
-                a.is_shm(),
-                crate::extshm::encode_shm_establishment_ext,
-            );
+            if a.shm_auth_installed() {
+                a.stage_shm_challenge(ExtChainRole::InitSyn, |a| a.shm_send_init_syn());
+            } else {
+                a.stage_capability(
+                    ExtChainRole::InitSyn,
+                    a.is_shm(),
+                    crate::extshm::encode_shm_establishment_ext,
+                );
+            }
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ false,
@@ -6132,6 +6339,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // OpenSyn challenge re-encryption, staged iff multilink is negotiated.
             #[cfg(feature = "transport-multilink")]
             a.stage_multilink_send(ExtChainRole::OpenSyn, |d| d.open_open_syn());
+            // session-extshm (R311y507) — step 3b: answer the acceptor with the
+            // challenge we read out of ITS segment. Nothing is staged when no
+            // authenticator is installed (the pre-R311y507 Open chain) or when
+            // the acceptor's segment could not be mapped, which is what makes
+            // the acceptor's own check below fail closed.
+            #[cfg(feature = "session-extshm")]
+            a.stage_shm_challenge(ExtChainRole::OpenSyn, |a| a.shm_send_open_syn());
             // RFC §5.M echo contract: prefer the cookie captured from a
             // peer InitAck via handle_inbound; fall back to params.cookie
             // for tests that drive OpenSyn without an inbound parse cycle.
@@ -6203,12 +6417,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 a.is_compression(),
                 crate::extcompression::encode_compression_ext,
             );
+            // session-extshm — the ACCEPTOR's answer: the initiator's own
+            // challenge echoed back beside our segment id (the InitSyn demux ran
+            // before this send, so the echo is already known), else the UNIT
+            // reflect when no authenticator is installed.
+            // session-extshm — the ACCEPTOR's answer: the initiator's own
+            // challenge echoed back beside our segment id (the InitSyn demux ran
+            // before this send, so the echo is already known), else the UNIT
+            // reflect when no authenticator is installed.
             #[cfg(feature = "session-extshm")]
-            a.stage_capability(
-                ExtChainRole::InitAck,
-                a.is_shm(),
-                crate::extshm::encode_shm_establishment_ext,
-            );
+            if a.shm_auth_installed() {
+                a.stage_shm_challenge(ExtChainRole::InitAck, |a| a.shm_send_init_ack());
+            } else {
+                a.stage_capability(
+                    ExtChainRole::InitAck,
+                    a.is_shm(),
+                    crate::extshm::encode_shm_establishment_ext,
+                );
+            }
             // R86 — Accepting-side cookie binding per RFC §5.M
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),
@@ -6250,6 +6476,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // OpenAck Unit confirmation, staged iff multilink is negotiated.
             #[cfg(feature = "transport-multilink")]
             a.stage_multilink_send(ExtChainRole::OpenAck, |d| d.accept_open_ack());
+            // session-extshm (R311y507) — step 4b: the acceptor's confirmation,
+            // the literal 1, emitted only once its own check passed (the OpenSyn
+            // demux ran before this send).
+            #[cfg(feature = "session-extshm")]
+            a.stage_shm_challenge(ExtChainRole::OpenAck, |a| a.shm_send_open_ack());
             // Accepting side OpenAck: cookie is consumed by the time we
             // get here (it travelled inbound on OpenSyn and was already
             // MAC-verified); the OpenAck shape omits it (parent.A=1

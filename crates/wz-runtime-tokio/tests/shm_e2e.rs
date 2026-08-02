@@ -207,3 +207,91 @@ async fn shm_negotiation_and_merge() {
         "the responder never offered, so it stays off"
     );
 }
+
+/// R311y507 — the CHALLENGE-RESPONSE over a real driven handshake, not just the
+/// dispatch in isolation: both sides publish a POSIX auth segment, and `is_shm`
+/// survives only because each one mapped the other's memory and echoed the
+/// challenge it found there.
+///
+/// The four messages all have to land for this to pass — the initiator's segment
+/// id on InitSyn, the acceptor's echo plus its own id on InitAck, the
+/// initiator's answer on OpenSyn, the acceptor's literal `1` on OpenAck — so a
+/// break anywhere in the chain shows up here as `is_shm() == false` rather than
+/// as a passing session that negotiated nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_challenge_response_negotiates_shm_over_a_driven_handshake() {
+    let pair = establish_capability_pair(true, true, |a| {
+        a.set_shm_offer(true);
+        a.install_shm_auth(Box::new(
+            wz_runtime_tokio::shm_auth_segment::PosixShmAuthenticator::new()
+                .expect("publish an auth segment"),
+        ));
+    })
+    .await;
+    assert!(
+        pair.init_actions.is_shm(),
+        "the initiator's flag is set at OpenAck, so this is the whole exchange"
+    );
+    assert!(
+        pair.resp_actions.is_shm(),
+        "the acceptor's flag is set at OpenSyn, on the initiator's echo"
+    );
+}
+
+/// The two mechanisms do NOT half-mix. When only one side has an authenticator
+/// installed, that side emits zenoh's ZBuf challenge while the other emits (and
+/// looks for) the pre-R311y507 UNIT marker — neither recognises the other, and
+/// BOTH end up without SHM.
+///
+/// This is the arm that matters for safety: a session that ended with one side
+/// believing SHM was on would put descriptors on a wire the peer reads as
+/// payload bytes. It is also why the challenge REPLACES the UNIT ext at the
+/// stage seam rather than riding alongside it.
+///
+/// Driven through `establish_capability_pair`'s `resp_offer = false` arm so the
+/// asymmetry comes from the HARNESS, not from a counter inside the closure — a
+/// first-call-only latch would make the result depend on which test ran first
+/// in the shared binary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_one_sided_authenticator_leaves_both_sides_without_shm() {
+    let init_only = establish_capability_pair(true, false, |a| {
+        a.set_shm_offer(true);
+        a.install_shm_auth(Box::new(
+            wz_runtime_tokio::shm_auth_segment::PosixShmAuthenticator::new()
+                .expect("publish an auth segment"),
+        ));
+    })
+    .await;
+    assert!(
+        !init_only.init_actions.is_shm(),
+        "the initiator sent a challenge and got nothing back, which proves \
+         nothing about mapping — it must not negotiate SHM"
+    );
+    assert!(
+        !init_only.resp_actions.is_shm(),
+        "the responder never offered at all, so it stays off"
+    );
+}
+
+/// The acceptor's side of the same asymmetry: it offers SHM the OLD way (the
+/// UNIT marker, no authenticator) while the initiator speaks the real protocol.
+/// The acceptor sees a ZBuf where it looks for a UNIT and clears; the initiator
+/// sees a UNIT where it looks for a ZBuf echo and clears. Neither half-completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_unit_only_acceptor_does_not_half_complete_the_challenge() {
+    let pair = establish_capability_pair(true, true, |a| {
+        a.set_shm_offer(true);
+    })
+    .await;
+    // Baseline: with NEITHER side authenticated, the legacy UNIT path still
+    // negotiates — so the clearing below is about the mechanism mismatch, not
+    // about `set_shm_offer` having stopped working.
+    assert!(pair.init_actions.is_shm() && pair.resp_actions.is_shm());
+
+    let mixed = establish_capability_pair(true, false, |a| {
+        a.set_shm_offer(true);
+    })
+    .await;
+    assert!(!mixed.init_actions.is_shm());
+    assert!(!mixed.resp_actions.is_shm());
+}

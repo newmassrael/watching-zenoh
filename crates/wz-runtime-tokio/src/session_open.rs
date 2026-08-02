@@ -2622,6 +2622,17 @@ pub enum OpenError {
     /// folding into [`Self::Terminal`].
     #[cfg(feature = "session-extqos")]
     QosLinkRejected(wz_session_core::extqos::QosLinkError),
+    /// session-extshm (R311y507) — the peer's `init::ext::Shm` challenge body
+    /// did not decode. zenoh `bail!`s on this in `recv_init_syn`, aborting
+    /// establishment; the dispatcher took the `framing.error` arm and the typed
+    /// reason surfaces here. Acceptor-only, per that method's asymmetry.
+    #[cfg(feature = "session-extshm")]
+    ShmChallengeRejected,
+    /// session-extshm (R311y507) — the SHM offer was accepted but this node
+    /// could not publish its own POSIX auth segment (`/dev/shm` full, not
+    /// mounted, permissions). A hard error rather than a silent downgrade.
+    #[cfg(feature = "session-extshm")]
+    ShmAuthSegment(std::io::Error),
     /// R4a — the accept-side auth seam could not draw a fresh per-handshake
     /// challenge nonce from OS entropy (a sandbox without `/dev/urandom`). The
     /// handshake is aborted rather than reused with a stale nonce (the usrpwd /
@@ -2806,6 +2817,12 @@ pub(crate) async fn drive_open_loop(
                     #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
                     DriverLoopOutcome::QosLinkRejected(e) => {
                         return Err(OpenError::QosLinkRejected(e));
+                    }
+                    // session-extshm — a malformed SHM challenge from an
+                    // initiator; the FSM is already Closing(Invalid).
+                    #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
+                    DriverLoopOutcome::ShmChallengeRejected => {
+                        return Err(OpenError::ShmChallengeRejected);
                     }
                     _ => {}
                 }
@@ -3000,6 +3017,31 @@ pub async fn connect_and_open_session_with_compression(
         tick_interval_ms,
     )
     .await
+}
+
+/// session-extshm (R311y507) — create this session's POSIX AUTH SEGMENT and
+/// install it, when the offer asks for SHM.
+///
+/// zenoh builds ONE `AuthUnicast` per transport MANAGER (`manager.rs:295`,
+/// under `is_shm`); wz builds one per SESSION, which is a superset in the same
+/// direction the per-session `set_qos_offer` already is — one SHM session and
+/// one non-SHM session can coexist under one node, and each carries its own
+/// challenge. The segment is unlinked when the session's actions drop.
+///
+/// A failure to create it is a hard error, NOT a silent downgrade: the caller
+/// asked for shared memory, and a session that quietly negotiated it away would
+/// look identical to one that got it.
+fn install_shm_authenticator(
+    #[allow(unused_variables)] actions: &SessionLinkActions,
+    #[allow(unused_variables)] offer: &SessionOffer,
+) -> Result<(), OpenError> {
+    #[cfg(feature = "session-extshm")]
+    if offer.shm {
+        let auth = crate::shm_auth_segment::PosixShmAuthenticator::new()
+            .map_err(OpenError::ShmAuthSegment)?;
+        actions.install_shm_auth(Box::new(auth));
+    }
+    Ok(())
 }
 
 /// session-extshm — [`connect_and_open_session`] that OFFERS SHM: dials the
@@ -3261,6 +3303,7 @@ pub async fn initiate_and_open_session_with_offer(
     actions
         .apply_offer(&offer)
         .map_err(OpenError::UnsupportedCapability)?;
+    install_shm_authenticator(&actions, &offer)?;
     let opened = initiator_open(
         inbound,
         actions,
@@ -3636,6 +3679,7 @@ pub async fn accept_and_open_session_with_offer(
     actions
         .apply_offer(&offer)
         .map_err(OpenError::UnsupportedCapability)?;
+    install_shm_authenticator(&actions, &offer)?;
 
     engine.process_event(E::InboundStart);
     let opened = drive_open_loop(

@@ -289,9 +289,53 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                         // admitted Init frame, BEFORE the InitAck reflect.
                         #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
                         if let InboundFrame::Init { extensions, .. } = &frame {
-                            actions.negotiate_shm_against_peer(crate::extshm::peer_offered_shm(
-                                extensions,
-                            ));
+                            actions
+                                .negotiate_shm_against_peer(actions.shm_peer_offered(extensions));
+                        }
+                        // session-extshm (R311y507) — the CHALLENGE-RESPONSE,
+                        // which supersedes the capability `&=` above whenever an
+                        // authenticator is installed. Init phase: the ACCEPTOR
+                        // maps the initiator's segment on InitSyn (before its
+                        // InitAck echoes the challenge back); the INITIATOR
+                        // validates that echo against its own challenge on
+                        // InitAck and maps the acceptor's segment.
+                        //
+                        // Only the acceptor's arm can ABORT: zenoh `bail!`s on a
+                        // malformed InitSyn body while the initiator's mirror
+                        // degrades to "no SHM", and that asymmetry is upstream's
+                        // — a malformed challenge aimed at an acceptor is an
+                        // attack surface, a malformed answer is just a peer that
+                        // will not get shared memory.
+                        #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
+                        if let InboundFrame::Init {
+                            is_ack, extensions, ..
+                        } = &frame
+                        {
+                            if *is_ack {
+                                actions.shm_recv_init_ack(extensions);
+                            } else if actions.shm_recv_init_syn(extensions).is_err() {
+                                engine.process_event(E::FramingError);
+                                return DriverLoopOutcome::ShmChallengeRejected;
+                            }
+                        }
+                        // session-extshm (R311y507) — the Open phase, where BOTH
+                        // roles finally decide `is_shm`: the acceptor on the
+                        // initiator's echo (OpenSyn), the initiator on the
+                        // acceptor's literal `1` (OpenAck). A peer that offered
+                        // SHM but never proved it can map our memory lands on
+                        // `is_shm = false` here rather than at the capability
+                        // merge — which is the whole difference between a
+                        // capability flag and a proof.
+                        #[cfg(all(feature = "session-extshm", feature = "codec-open-body"))]
+                        if let InboundFrame::Open {
+                            is_ack, extensions, ..
+                        } = &frame
+                        {
+                            if *is_ack {
+                                actions.shm_recv_open_ack(extensions);
+                            } else {
+                                actions.shm_recv_open_syn(extensions);
+                            }
                         }
                         // R3b — feed the admitted handshake frame's ext chain into
                         // the matching Z_EXT_AUTH demux stage BEFORE advancing the
