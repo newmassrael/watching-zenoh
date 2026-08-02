@@ -667,7 +667,12 @@ transport-shm = ["wz-session-core/transport-shm", "dep:memmap2"]
 # session-extshm — the scoped Z_EXT_SHM establishment handshake (a UNIT capability
 # offer/`&=`, NOT zenoh's full challenge-response); forwards the session-core
 # negotiation + transport-shm (the data path it enables). AP-only.
-session-extshm = ["wz-session-core/session-extshm", "transport-shm"]
+# R311y507 — `dep:libc` joins for the SHM AUTH SEGMENT's shared advisory
+# `flock`, which is the one part of zenoh's segment protocol memmap2 does not
+# cover. `getrandom` is already an unconditional dep (the handshake nonce
+# source), and the auth challenge draws from the same one deliberately: a
+# guessable challenge would make the whole exchange decorative.
+session-extshm = ["wz-session-core/session-extshm", "transport-shm", "dep:libc"]
 # R311h — codec-push forwards wz-codecs and pulls codec-frame as a
 # hard imply (Frame envelope is the wire carrier for every Push). When
 # the feature is off the wz-runtime-tokio Push import + N_MID_PUSH +

@@ -1013,6 +1013,14 @@ pub mod quic_config;
 #[cfg(feature = "transport-shm")]
 pub mod shm_provider;
 
+/// session-extshm (R311y507) — the POSIX AUTH SEGMENT behind zenoh's SHM
+/// establishment challenge-response: a `/dev/shm/{id}.zenoh` object holding a
+/// random challenge, which a peer can only answer by mapping it. The `std` half
+/// of the split whose wire format lives in `wz_session_core::extshm`; the
+/// module doc explains why the layout and the object NAME are both wire format.
+#[cfg(feature = "session-extshm")]
+pub mod shm_auth_segment;
+
 /// R311xk — host QUIC backend. The STREAM sibling of [`tls_pipeline`]: zenoh
 /// carries a batch over ONE bidirectional QUIC stream (uni rejected, bidi=1)
 /// with the SAME StreamEnvelope length-prefix as TCP/TLS (`is_streamed = true`,
