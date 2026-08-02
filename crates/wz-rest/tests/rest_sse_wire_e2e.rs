@@ -38,6 +38,7 @@ use wz_runtime_tokio::session_open::{
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
+use wz_session_core::sample::EncodingHint;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 64;
@@ -144,7 +145,17 @@ async fn rest_sse_streams_a_remote_publish_as_an_event() {
         let mut found = false;
         let payload_str = std::str::from_utf8(PAYLOAD).unwrap();
         'outer: for _ in 0..200 {
-            let _ = publisher.publish(SSE_KEY, PAYLOAD, PublishOptions::put());
+            // R311y501 — publish WITH an encoding. The rendered `value` is
+            // encoding-driven now (zenoh's rule), so an unencoded publish is
+            // `zenoh/bytes` and renders base64; `text/plain` is what makes the
+            // bare-string assertion below the right expectation rather than a
+            // stale one. The unencoded/base64 branch is covered by
+            // `sse_event_for_an_unencoded_publish_is_base64` below.
+            let _ = publisher.publish(
+                SSE_KEY,
+                PAYLOAD,
+                PublishOptions::put().with_encoding(EncodingHint::TEXT_PLAIN),
+            );
             for _ in 0..4 {
                 match tokio::time::timeout(Duration::from_millis(50), stream.read(&mut tmp)).await {
                     Ok(Ok(0)) => break 'outer, // server closed
@@ -176,6 +187,16 @@ async fn rest_sse_streams_a_remote_publish_as_an_event() {
         assert!(
             text.contains(SSE_KEY),
             "the SSE data carries the sample keyexpr: {text}"
+        );
+        // R311y501 — the published encoding travelled the wire and selected the
+        // bare-string rendering branch.
+        assert!(
+            text.contains("\"encoding\":\"text/plain\""),
+            "the SSE data carries the wire encoding: {text}"
+        );
+        assert!(
+            text.contains(&format!("\"value\":\"{payload_str}\"")),
+            "text/plain renders the value as a bare JSON string: {text}"
         );
     };
 

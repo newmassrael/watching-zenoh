@@ -10,7 +10,9 @@
 //! an SSE event (`event: <PUT|DELETE>\ndata: <json-sample>\n\n`) until the
 //! client disconnects, at which point the [`Subscriber`] handle drops and
 //! undeclares. The subscriber callback fires on the session drive loop and
-//! hands each sample to this task through an unbounded channel; a periodic SSE
+//! hands each sample to this task through a BOUNDED channel ([`CHANNEL_CAP`]
+//! — R311y501 corrects this line, which said "unbounded" and contradicted the
+//! code it documents ever since the bound was added); a periodic SSE
 //! comment (`:\n\n`) keeps an idle stream alive AND detects a vanished client
 //! (the write errors) so the subscriber is torn down promptly.
 //!
@@ -24,7 +26,7 @@ use tokio::time::{interval, timeout, Duration};
 
 use wz_runtime_tokio::sample::SampleKind;
 use wz_runtime_tokio::session::{SubscribeOptions, TokioSession};
-use wz_session_core::encoding::encoding_to_mime;
+use wz_session_core::sample::TimestampHint;
 use wz_session_core::sink::SampleView;
 
 use crate::http::Response;
@@ -58,6 +60,15 @@ struct SseSample {
     key: String,
     payload: Vec<u8>,
     encoding: String,
+    /// The decoded encoding as `(id, has_schema)` — what selects zenoh's
+    /// `value` rendering branch. Carried ALONGSIDE the MIME string rather than
+    /// re-derived from it: `encoding_to_mime` is lossy for the base-vs-schema
+    /// split (`"application/json;charset=utf-8"` and a custom-id encoding whose
+    /// whole MIME is the schema both render as one string), and that split is
+    /// exactly what decides embed-vs-base64.
+    encoding_id: Option<(u16, bool)>,
+    /// Inline body timestamp, if the sample carried one.
+    timestamp: Option<TimestampHint>,
 }
 
 /// Stream `declare_subscriber(keyexpr)` samples to `wr` as SSE events until the
@@ -68,7 +79,9 @@ pub async fn stream<W: AsyncWriteExt + Unpin>(session: &TokioSession, keyexpr: S
         keyexpr,
         SubscribeOptions::default(),
         move |sample: &dyn SampleView| {
-            let encoding = sample.encoding().map(encoding_to_mime).unwrap_or_default();
+            let encoding = json::mime_or_default(sample.encoding());
+            let encoding_id = sample.encoding().map(|e| (e.id(), e.schema.is_some()));
+            let timestamp = sample.timestamp().cloned();
             // Non-blocking bounded send: a full queue (slow client) or a closed
             // receiver (client gone, this task returned) drops the sample — the
             // callback runs on the drive loop and must not block it, and SSE is
@@ -78,6 +91,8 @@ pub async fn stream<W: AsyncWriteExt + Unpin>(session: &TokioSession, keyexpr: S
                 key: sample.keyexpr().to_string(),
                 payload: sample.payload().to_vec(),
                 encoding,
+                encoding_id,
+                timestamp,
             });
         },
     ) {
@@ -131,8 +146,9 @@ fn format_event(sample: &SseSample) -> String {
         SampleKind::Put => "PUT",
         SampleKind::Del => "DELETE",
     };
-    let value = json::value_string(&sample.payload);
-    let object = json::sample_object(&sample.key, &value, &sample.encoding);
+    let value = json::payload_to_json(&sample.payload, sample.encoding_id);
+    let timestamp = json::timestamp_json(sample.timestamp.as_ref());
+    let object = json::sample_object(&sample.key, &value, &sample.encoding, &timestamp);
     format!("event: {name}\ndata: {object}\n\n")
 }
 
@@ -162,6 +178,8 @@ mod tests {
             key: "demo/k".to_string(),
             payload: b"v".to_vec(),
             encoding: "text/plain".to_string(),
+            encoding_id: Some((4, false)),
+            timestamp: None,
         };
         assert_eq!(
             format_event(&sample),
@@ -175,11 +193,40 @@ mod tests {
             kind: SampleKind::Del,
             key: "demo/k".to_string(),
             payload: Vec::new(),
-            encoding: String::new(),
+            // An unencoded sample renders zenoh's default, NOT the empty
+            // string — measured against a real zenohd DELETE event.
+            encoding: json::mime_or_default(None),
+            encoding_id: None,
+            timestamp: None,
         };
         assert_eq!(
             format_event(&sample),
-            "event: DELETE\ndata: {\"key\":\"demo/k\",\"value\":null,\"encoding\":\"\",\"timestamp\":null}\n\n"
+            "event: DELETE\ndata: {\"key\":\"demo/k\",\"value\":null,\"encoding\":\"zenoh/bytes\",\"timestamp\":null}\n\n"
         );
+    }
+
+    /// A stamped JSON sample renders BOTH the embedded value and the zenoh
+    /// `<ntp64>/<zid-hex>` timestamp — and the event stays ONE `data:` line
+    /// even though the source payload was pretty-printed across newlines.
+    #[test]
+    fn format_event_embeds_json_and_stamps() {
+        let sample = SseSample {
+            kind: SampleKind::Put,
+            key: "demo/k".to_string(),
+            payload: b"{\n  \"a\": 1\n}".to_vec(),
+            encoding: "application/json".to_string(),
+            encoding_id: Some((5, false)),
+            timestamp: Some(TimestampHint {
+                time: 42,
+                zid: vec![0x1a, 0x2b, 0x3c],
+            }),
+        };
+        let event = format_event(&sample);
+        assert_eq!(
+            event,
+            "event: PUT\ndata: {\"key\":\"demo/k\",\"value\":{\"a\":1},\"encoding\":\"application/json\",\"timestamp\":\"42/3c2b1a\"}\n\n"
+        );
+        // Exactly two newlines beyond the event/data split: the SSE terminator.
+        assert_eq!(event.matches('\n').count(), 3);
     }
 }

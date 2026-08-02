@@ -106,6 +106,32 @@ wz-session-core = { path = "../wz-session-core", features = [
     # in-process test binary's feature closure (audit A4-5 containment) and is
     # what compiles the qos ext path in reach at all (it is opt-in, in no preset).
     "transport-qos", "session-multicast", "codec-join"] }
+# R311y501 — the §5.26 REST bridge, driven IN-PROCESS by the wz<->zenohd REST
+# interop leg (tests/wz_rest_zenohd_interop.rs). The leg runs wz's bridge and
+# the real `libzenoh_plugin_rest.so` against ONE zenohd and differentials their
+# renderings, so it must link the bridge rather than shell to a binary — there
+# is no wz REST binary to shell to.
+#
+# Reached through the UMBRELLA crate (`wz::rest`), NOT as a direct `wz-rest`
+# path dep, and the difference is load-bearing rather than stylistic:
+# `rest-http-bridge`'s ONLY cfg site is the re-export gate at `wz/src/lib.rs:90`
+# — the atom's A3 composition toggle — so a direct dep compiles the bridge
+# while leaving that feature name out of this package's closure entirely. The
+# A4-5 containment invariant then (correctly) refuses the `rest-http-bridge`
+# claim as "not compiled into the binary under test". Depending on `wz` with the
+# feature ON is what makes the leg actually traverse the atom's own gate.
+# `rest-sse-subscribe` is the second atom under test and pulls `rest-http-bridge`
+# transitively; both are named so neither can be dropped silently.
+#
+# CLOSURE IMPACT, MEASURED (`scripts/lib/feature_closure.py wz-integration-tests`,
+# with and without this line): distinct wz features 92 -> 95, and the three added
+# are exactly `rest-http-bridge`, `rest-sse-subscribe`, `runtime-tokio`. NOTHING
+# is removed and nothing else is added — the umbrella enables no default of its
+# own here, and every wz-runtime-tokio feature wz-rest pins was already pinned
+# below. So the `cargo test --workspace` unification this table warns about
+# elsewhere is bounded to those three names, all of which are the subject of the
+# leg rather than incidental.
+wz = { path = "../wz", features = ["rest-http-bridge", "rest-sse-subscribe"] }
 zenoh-pico-sys = { path = "../zenoh-pico-sys" }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 # R116b — `hal_timer_routing.rs` declares an in-test TimerProbePolicy

@@ -50,6 +50,18 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "query-consolidation",
     "query-selector-parameters",
 ] }
+# R311y501 NOTE — the two features the round's new renderings need,
+# `pubsub-timestamp` (the JSON `timestamp` field) and `query-value` (the
+# request BODY forwarded as the query VALUE), are DELIBERATELY ABSENT from the
+# list above. Both are already in wz-runtime-tokio's `default` set
+# (Cargo.toml's `default = [...]`, verified by removing them here and re-reading
+# `cargo tree -p wz-rest -e features` — they still resolve), and this crate
+# leaves defaults ON, so pinning them would be a no-op that reads as
+# load-bearing. Recorded rather than silently omitted because BOTH are
+# silent-no-op shapes if they ever leave the default set: the accessors
+# (`ReplyView`/`SampleView::timestamp`) and the setter
+# (`QueryOptions::with_payload`, ungated for signature stability) all still
+# compile with the feature off and simply carry nothing.
 # The keyexpr canonicaliser (path -> validated keyexpr, the 400-on-invalid gate)
 # + the encoding <-> MIME tables (Content-Type mapping + the JSON `encoding`
 # field). Not re-exported through wz-runtime-tokio's encoding path, so depended

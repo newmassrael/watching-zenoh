@@ -868,6 +868,30 @@ pub mod common {
         path
     }
 
+    /// R311y501 — locate `libzenoh_plugin_rest.so`, the foreign oracle for the
+    /// §5.26 REST bridge: the `WZ_REST_PLUGIN_SO` env override, else
+    /// `scripts/build-zenohd.sh`'s `target/zenohd/` install.
+    ///
+    /// zenohd accepts `--rest-http-port` whether or not this file exists — the
+    /// flag is a CLI option, not a capability probe — and then dies at startup
+    /// with `Plugin load failure: Library file 'libzenoh_plugin_rest.so' not
+    /// found`. So a leg must assert on THIS path, not on the flag being
+    /// accepted, or it reads a provisioning gap as a wz failure. Only a SOURCE
+    /// build produces it (`cargo install` yields binaries, not plugin cdylibs),
+    /// exactly as for the storage-manager plugin above.
+    pub fn rest_plugin() -> PathBuf {
+        if let Ok(p) = std::env::var("WZ_REST_PLUGIN_SO") {
+            return PathBuf::from(p);
+        }
+        let path = project_root().join("target/zenohd/libzenoh_plugin_rest.so");
+        assert!(
+            path.is_file(),
+            "REST plugin missing at {}; set WZ_REST_PLUGIN_SO or run scripts/build-zenohd.sh first",
+            path.display()
+        );
+        path
+    }
+
     /// Rewind the file to the start and slurp the entire current
     /// contents into a UTF-8 string, replacing any non-UTF-8 byte
     /// sequence with the U+FFFD replacement character. Used to

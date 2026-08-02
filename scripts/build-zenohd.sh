@@ -173,6 +173,19 @@ if [[ -n "$ZH" ]]; then
         CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
             -p zenoh-plugin-storage-manager --release --manifest-path "$ZH/Cargo.toml"
         SO_SRC="$BUILD_DIR/release/libzenoh_plugin_storage_manager.so"
+        # R311y501 — and the REST plugin cdylib, the foreign oracle for §5.26
+        # (rest-http-bridge / rest-sse-subscribe). zenohd accepts
+        # `--rest-http-port` UNCONDITIONALLY — the flag is a zenohd CLI option,
+        # not a capability probe — but without this `.so` it dies at startup with
+        # "Plugin load failure: Library file 'libzenoh_plugin_rest.so' not found".
+        # So the flag's presence in `--help` is NOT evidence the oracle exists;
+        # only this build is. Same source tree as zenohd itself, so its
+        # ABI-compat hash matches and the auto-load (search_dirs includes
+        # `current_exe_parent`) resolves it beside the installed binary.
+        echo "build-zenohd: building zenoh-plugin-rest (release) ..." >&2
+        CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
+            -p zenoh-plugin-rest --release --manifest-path "$ZH/Cargo.toml"
+        REST_SO_SRC="$BUILD_DIR/release/libzenoh_plugin_rest.so"
         # R311y442 — also build the zenoh-ext ADVANCED-PUBSUB example binaries from
         # the SAME checkout. They are the only foreign counterparty the `@adv` legs
         # can have: zenohd is a router and holds no AdvancedCache, and zenoh-pico

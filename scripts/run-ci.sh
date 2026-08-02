@@ -7605,6 +7605,27 @@ layer_z_zenohd_interop() {
         _z_unavailable "vsock zenohd absent ($zenohd_vsock; build it with \
 ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     fi
+    # R311y501 (§5.26) — wz's REST bridge vs the REAL zenoh-plugin-rest. Needs
+    # the REST plugin cdylib, which only a SOURCE build produces (as for the
+    # storage-manager plugin below). MUST precede that leg: its plugin-absent
+    # branch `return 0`s out of the whole lane, so anything after it is dead on
+    # a crates.io-only zenohd.
+    #
+    # Count-guarded (`2 passed`) rather than bare exit-0: both legs are
+    # `#[ignore]`d, so a dropped attribute would select 0 tests and STILL exit
+    # 0 — the lane would report green having proven nothing
+    # ([[feedback-a-skip-is-green]]). --test-threads=1 for per-zenohd isolation,
+    # as every other leg in this lane.
+    local rest_plugin="${WZ_REST_PLUGIN_SO:-$PWD/target/zenohd/libzenoh_plugin_rest.so}"
+    if [[ -f "$rest_plugin" ]]; then
+        (cd crates && WZ_ZENOHD_BIN="$zenohd" WZ_REST_PLUGIN_SO="$rest_plugin" \
+            cargo test -p wz-integration-tests \
+            --test wz_rest_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
+            | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed') || return 1
+    else
+        _z_unavailable "REST plugin not built ($rest_plugin; build it with \
+scripts/build-zenohd.sh from a source checkout)" || return 1
+    fi
     # R311wo (A10) — wz<->zenohd storage-manager REPLICATION interop. Needs the
     # storage-manager plugin cdylib (built + installed by build-zenohd.sh from a
     # checkout); SKIP if absent (a crates.io-only zenohd has no plugin .so).

@@ -18,7 +18,9 @@ use tokio::time::{timeout, Duration};
 use wz_runtime_tokio::reply_sink::{ReplyKind, ReplyView};
 use wz_runtime_tokio::session::{PublishOptions, QueryOptions, TokioSession};
 use wz_runtime_tokio::session_glue::ConsolidationMode;
-use wz_session_core::encoding::{encoding_from_mime, mime_for_id};
+use wz_session_core::encoding::encoding_from_mime;
+use wz_session_core::sample::{EncodingHint, TimestampHint};
+
 use wz_session_core::keyexpr_canon::canonize_keyexpr;
 use wz_session_core::selector_params::has_param;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
@@ -39,20 +41,26 @@ struct ReplyRow {
     key: String,
     kind: ReplyKind,
     payload: Vec<u8>,
-    /// The reply's packed encoding id (`id << 1 | has_schema`), if any.
-    packed_encoding: Option<u32>,
+    /// The reply's decoded encoding hint, if any. R311y501 — the WHOLE hint,
+    /// where this used to keep only the packed id and drop the schema string.
+    /// Dropping it was two divergences at once: the rendered `encoding` lost
+    /// its `;schema` suffix (zenoh emits `application/json;charset=utf-8`), and
+    /// the schema-vs-no-schema split is what selects zenoh's `value` branch.
+    encoding: Option<EncodingHint>,
+    /// R311y501 — the reply's inline body timestamp, if it carried one.
+    timestamp: Option<TimestampHint>,
 }
 
 impl ReplyRow {
+    /// The MIME rendering, through the SAME SSOT the SSE path uses (an absent
+    /// hint renders zenoh's `zenoh/bytes` default, not the empty string).
     fn encoding_mime(&self) -> String {
-        mime_for_packed(self.packed_encoding)
+        json::mime_or_default(self.encoding.as_ref())
     }
-}
 
-fn mime_for_packed(packed: Option<u32>) -> String {
-    match packed {
-        Some(p) => mime_for_id((p >> 1) as u16).unwrap_or("").to_string(),
-        None => String::new(),
+    /// `(id, has_schema)` — what selects the `value` rendering branch.
+    fn encoding_id(&self) -> Option<(u16, bool)> {
+        self.encoding.as_ref().map(|e| (e.id(), e.schema.is_some()))
     }
 }
 
@@ -71,6 +79,55 @@ fn is_event_stream(req: &Request) -> bool {
     req.headers
         .get("accept")
         .is_some_and(|a| a.contains("text/event-stream"))
+}
+
+/// R311y501 — does this request ask for the HTML rendering?
+///
+/// Upstream reads the FIRST media type of `Accept` and compares it for equality
+/// with `text/html` (`plugin-rest/src/lib.rs:362-376`: split on `;`, then on
+/// `,`, take `[0]`), so `Accept: text/html, application/json` is HTML while
+/// `application/json, text/html` is JSON. A `contains` test — which is what
+/// [`is_event_stream`] can afford, `text/event-stream` never being a secondary
+/// preference in practice — would get that backwards.
+/// Takes the header VALUE rather than the `Request` so the preference-order
+/// rule is directly unit-testable (`Headers` has no cross-module constructor,
+/// and a test-only one would be a worse trade than this signature).
+fn wants_html(accept: Option<&str>) -> bool {
+    accept.is_some_and(|a| {
+        a.split(';')
+            .next()
+            .unwrap_or_default()
+            .split(',')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            == "text/html"
+    })
+}
+
+/// Escape a value for HTML text content.
+///
+/// A DELIBERATE, DOCUMENTED divergence from the reference, which interpolates
+/// the keyexpr and the payload into its `<dt>`/`<dd>` RAW
+/// (`plugin-rest/src/lib.rs:185-191`). Reproducing that would make any client
+/// that can publish a sample able to inject script into any browser that later
+/// GETs the key as HTML — a stored-XSS vector, in a surface whose whole purpose
+/// is to be opened in a browser. wz is a superset of the reference, not a mirror
+/// of its defects, so the escaping stays and the divergence is named here rather
+/// than discovered later. The escaped set is the standard five.
+fn html_escape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Dispatch one parsed request to a session op and build the outcome.
@@ -130,16 +187,20 @@ async fn handle_query(session: &TokioSession, zid: &[u8], req: &Request) -> Resp
 
     let on_reply = move |rv: &dyn ReplyView| {
         let kind = rv.kind();
-        let packed_encoding = match kind {
+        let encoding = match kind {
             ReplyKind::Err => rv.err_encoding(),
             _ => rv.put_encoding(),
         }
-        .map(|(id, _schema)| id);
+        .map(|(packed_id, schema)| EncodingHint {
+            packed_id,
+            schema: schema.map(str::to_string),
+        });
         rows_cb.lock().unwrap().push(ReplyRow {
             key: rv.keyexpr().to_string(),
             kind,
             payload: rv.payload().to_vec(),
-            packed_encoding,
+            encoding,
+            timestamp: rv.timestamp().cloned(),
         });
     };
     let on_final = move |_rid: u64| {
@@ -166,6 +227,24 @@ async fn handle_query(session: &TokioSession, zid: &[u8], req: &Request) -> Resp
     if !query.is_empty() {
         opts = opts.with_parameters(query.as_bytes().to_vec());
     }
+    // R311y501 — forward the request BODY as the query's VALUE, with its
+    // Content-Type as the encoding. Upstream does exactly this
+    // (`plugin-rest/src/lib.rs:448-453`: a non-empty body becomes
+    // `.payload(body).encoding(content_type)`), and its absence here was a
+    // named residual — a `GET`/`POST` carrying a body reached the queryable
+    // stripped, so a value-driven queryable could not be addressed through wz's
+    // bridge at all. An ABSENT Content-Type takes zenoh's `Encoding::default()`
+    // (`zenoh/bytes`) — spelled out rather than routed through
+    // `encoding_from_mime("")`, which does NOT yield that: an unknown MIME falls
+    // to the custom-id arm and the empty string would become a custom encoding
+    // carrying an empty schema.
+    if !req.body.is_empty() {
+        let encoding = match req.headers.get("content-type") {
+            Some(ct) => encoding_from_mime(ct),
+            None => EncodingHint::ZENOH_BYTES,
+        };
+        opts = opts.with_payload(req.body.clone()).with_encoding(encoding);
+    }
 
     // `Session::query` returns an inert rid token (`ReplyHandle` is a `Copy`
     // u64 with no Drop) — nothing to hold. Replies + the terminal final are
@@ -184,17 +263,37 @@ async fn handle_query(session: &TokioSession, zid: &[u8], req: &Request) -> Resp
     let rows = rows.lock().unwrap();
     if raw {
         match rows.first() {
-            Some(r) => {
-                let mime = r.encoding_mime();
-                let ct = if mime.is_empty() {
-                    "application/octet-stream".to_string()
-                } else {
-                    mime
-                };
-                Response::raw(ct, r.payload.clone())
-            }
+            // R311y501 — the Content-Type is the sample's encoding, exactly as
+            // upstream's `to_raw_response` takes it (an absent hint is already
+            // `zenoh/bytes` via `mime_or_default`, so the former
+            // `application/octet-stream` empty-string fallback is unreachable
+            // and gone rather than left as dead cover).
+            Some(r) => Response::raw(r.encoding_mime(), r.payload.clone()),
             None => Response::empty(200, "OK"),
         }
+    } else if wants_html(req.headers.get("accept")) {
+        // R311y501 — the `Accept: text/html` rendering, a named residual
+        // ("wz having zero text/html handling, where upstream renders a
+        // definition list"). Upstream's shape, `to_html` / `sample_to_html`
+        // (`plugin-rest/src/lib.rs:185-217`): one `<dt>key</dt>\n<dd>value</dd>`
+        // per reply, joined by a newline, wrapped in `<dl>`.
+        let mut items = Vec::with_capacity(rows.len());
+        for r in rows.iter() {
+            let key = if matches!(r.kind, ReplyKind::Err) {
+                "ERROR"
+            } else {
+                r.key.as_str()
+            };
+            items.push(format!(
+                "<dt>{}</dt>\n<dd>{}</dd>\n",
+                html_escape(key),
+                html_escape(&String::from_utf8_lossy(&r.payload))
+            ));
+        }
+        Response::raw(
+            "text/html".to_string(),
+            format!("<dl>\n{}\n</dl>\n", items.join("\n")).into_bytes(),
+        )
     } else {
         let mut items = Vec::with_capacity(rows.len());
         for r in rows.iter() {
@@ -203,8 +302,14 @@ async fn handle_query(session: &TokioSession, zid: &[u8], req: &Request) -> Resp
             } else {
                 r.key.as_str()
             };
-            let value = json::value_string(&r.payload);
-            items.push(json::sample_object(key, &value, &r.encoding_mime()));
+            let value = json::payload_to_json(&r.payload, r.encoding_id());
+            let timestamp = json::timestamp_json(r.timestamp.as_ref());
+            items.push(json::sample_object(
+                key,
+                &value,
+                &r.encoding_mime(),
+                &timestamp,
+            ));
         }
         Response::json(format!("[{}]", items.join(",")).into_bytes())
     }
@@ -268,6 +373,32 @@ fn path_to_keyexpr(path: &str, zid: &[u8]) -> Result<String, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Upstream reads the FIRST media type of `Accept`, so preference ORDER
+    /// decides — a `contains` test would call the second row HTML too.
+    #[test]
+    fn wants_html_reads_the_first_accepted_media_type() {
+        assert!(wants_html(Some("text/html")));
+        assert!(wants_html(Some("text/html, application/json")));
+        assert!(wants_html(Some("text/html;charset=utf-8")));
+        assert!(wants_html(Some(" text/html ")));
+        // Order decides: HTML as a SECOND preference is not the chosen type.
+        assert!(!wants_html(Some("application/json, text/html")));
+        assert!(!wants_html(Some("application/json")));
+        assert!(!wants_html(None));
+    }
+
+    /// wz ESCAPES where the reference interpolates raw — the documented,
+    /// deliberate divergence. A payload that would inject script must not.
+    #[test]
+    fn html_escape_neutralises_injection() {
+        assert_eq!(
+            html_escape("<script>alert('x')</script>"),
+            "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;"
+        );
+        assert_eq!(html_escape("a & b \"q\""), "a &amp; b &quot;q&quot;");
+        assert_eq!(html_escape("plain"), "plain");
+    }
 
     #[test]
     fn split_target_splits_on_question() {

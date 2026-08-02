@@ -44,8 +44,10 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_session_core::encoding::encoding_to_mime;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
+use wz_session_core::sample::{EncodingHint, TimestampHint};
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 64;
@@ -53,6 +55,22 @@ const DATA_KEY: &str = "demo/rest/data";
 const QUERY_KEY: &str = "demo/rest/query";
 const PUT_BODY: &[u8] = b"hello-from-rest";
 const REPLY_PAYLOAD: &[u8] = b"rest-bridge-reply";
+/// R311y501 — the NTP64 word + zid the queryable stamps its reply with. Read
+/// back out of the rendered JSON as zenoh's `<ntp64>/<zid-hex>` Display, so the
+/// literal below is the wire-round-tripped expectation, not a re-derivation.
+const REPLY_TS_TIME: u64 = 7669276098242084704;
+const REPLY_TS_ZID: &[u8] = &[0x1a, 0x2b, 0x3c];
+/// `zid_to_zenoh_hex(REPLY_TS_ZID)` — LITTLE-ENDIAN, so the bytes read back
+/// reversed. Spelled out rather than computed so a change in the zid rendering
+/// fails here instead of silently agreeing with itself.
+const REPLY_TS_JSON: &str = "\"7669276098242084704/3c2b1a\"";
+
+/// R311y501 — what an inbound query CARRIED, copied out of the queryable
+/// callback: the forwarded request body and its encoding.
+struct SeenQuery {
+    payload: Option<Vec<u8>>,
+    encoding: Option<String>,
+}
 
 /// A sample the answerer's subscriber received, copied out of the callback.
 #[derive(Clone)]
@@ -156,12 +174,37 @@ async fn rest_bridge_put_get_delete_traverse_the_wire() {
             });
         })
         .expect("acceptor declares the subscriber");
+    let seen_queries: Arc<StdMutex<Vec<SeenQuery>>> = Arc::new(StdMutex::new(Vec::new()));
+    let seen_query_cb = Arc::clone(&seen_queries);
     let _queryable = session_acc
         .declare_queryable(
             QUERY_KEY,
             QueryableOptions::default(),
-            |_view: &dyn QueryView, out: &mut dyn ReplyOut| {
-                out.reply(REPLY_PAYLOAD);
+            move |_view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                // R311y501 — record what the query CARRIED, so the body ->
+                // query-value forwarding can be asserted on the far side of a
+                // real wire hop rather than at the builder.
+                seen_query_cb.lock().unwrap().push(SeenQuery {
+                    payload: _view.payload().map(<[u8]>::to_vec),
+                    encoding: _view.encoding().map(encoding_to_mime),
+                });
+                // R311y501 — reply with the FULL stored-value metadata rather
+                // than a bare payload, so the GET exercises the whole rendering
+                // path the zenoh REST plugin has: the encoding selects the
+                // `value` branch (`text/plain` -> a bare JSON string, where the
+                // default `zenoh/bytes` would render base64), and the timestamp
+                // must come back as zenoh's `<ntp64>/<zid-hex>`. Both travel the
+                // real wire (inner MsgPut E- and T-flags), so this is an
+                // end-to-end proof of the decode, not just of the renderer.
+                out.reply_keyed_stamped(
+                    QUERY_KEY,
+                    REPLY_PAYLOAD,
+                    Some(&EncodingHint::TEXT_PLAIN),
+                    &TimestampHint {
+                        time: REPLY_TS_TIME,
+                        zid: REPLY_TS_ZID.to_vec(),
+                    },
+                );
             },
         )
         .expect("acceptor declares the queryable");
@@ -257,6 +300,21 @@ async fn rest_bridge_put_get_delete_traverse_the_wire() {
             body.contains(QUERY_KEY),
             "the reply JSON carries the reply keyexpr: {body}"
         );
+        // R311y501 — the encoding travelled the wire and selected the string
+        // branch (a `zenoh/bytes` reply would have rendered base64 here).
+        assert!(
+            body.contains("\"encoding\":\"text/plain\""),
+            "the reply JSON carries the wire encoding: {body}"
+        );
+        assert!(
+            body.contains(&format!("\"value\":\"{reply_str}\"")),
+            "text/plain renders the value as a bare JSON string: {body}"
+        );
+        // ...and so did the timestamp, rendered as zenoh's uhlc Display.
+        assert!(
+            body.contains(&format!("\"timestamp\":{REPLY_TS_JSON}")),
+            "the reply JSON carries the wire timestamp as <ntp64>/<zid-hex>: {body}"
+        );
 
         // 3. DELETE, then poll for the remote subscriber's Del.
         let del_req = format!("DELETE /{DATA_KEY} HTTP/1.1\r\nHost: x\r\n\r\n");
@@ -278,6 +336,62 @@ async fn rest_bridge_put_get_delete_traverse_the_wire() {
         assert!(
             del_ok,
             "the DELETE reached the remote subscriber as a Del over the wire"
+        );
+
+        // 4. R311y501 — `Accept: text/html` renders the definition list.
+        let html_req = format!("GET /{QUERY_KEY} HTTP/1.1\r\nHost: x\r\nAccept: text/html\r\n\r\n");
+        let (status, html_body) = http(http_addr, html_req.as_bytes()).await;
+        assert_eq!(status, 200, "the HTML GET returns 200");
+        let html = String::from_utf8_lossy(&html_body).into_owned();
+        assert_eq!(
+            html,
+            format!("<dl>\n<dt>{QUERY_KEY}</dt>\n<dd>{reply_str}</dd>\n\n</dl>\n"),
+            "the HTML rendering is upstream's <dl>/<dt>/<dd> shape"
+        );
+
+        // 5. R311y501 — a GET BODY is forwarded to the queryable as the query
+        //    VALUE, with its Content-Type as the encoding. Asserted on what the
+        //    REMOTE queryable saw, so a builder-only capture (the `query-value`
+        //    wire gate being off would elide it) cannot satisfy this.
+        const QUERY_BODY: &str = "selector-body-payload";
+        let body_req = format!(
+            "GET /{QUERY_KEY} HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\n\
+             Content-Length: {}\r\n\r\n{QUERY_BODY}",
+            QUERY_BODY.len()
+        );
+        let mut carried = false;
+        for _ in 0..80 {
+            let (status, _) = http(http_addr, body_req.as_bytes()).await;
+            assert_eq!(status, 200, "the body-carrying GET returns 200");
+            if seen_queries.lock().unwrap().iter().any(|q| {
+                q.payload.as_deref() == Some(QUERY_BODY.as_bytes())
+                    && q.encoding.as_deref() == Some("text/plain")
+            }) {
+                carried = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let seen = seen_queries.lock().unwrap();
+        assert!(
+            carried,
+            "the GET body reached the remote queryable as the query value with \
+             its Content-Type encoding; saw {:?}",
+            seen.iter()
+                .map(|q| (
+                    q.payload
+                        .as_ref()
+                        .map(|p| String::from_utf8_lossy(p).into_owned()),
+                    q.encoding.clone()
+                ))
+                .collect::<Vec<_>>()
+        );
+        // Guard the discrimination: the EARLIER bodyless GETs must have carried
+        // no value, or "the body arrived" would be indistinguishable from "the
+        // bridge always sends one".
+        assert!(
+            seen.iter().any(|q| q.payload.is_none()),
+            "a bodyless GET forwards NO query value"
         );
     };
 
