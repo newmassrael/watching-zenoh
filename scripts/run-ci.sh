@@ -7833,11 +7833,17 @@ layer_e6_peer_mesh() {
     # adminspace-write compiled out, the apply arm still passes (the write plumbing is
     # unguarded) while the deny arm fails, which is why the claim rests on the deny arm.
     # Guarded on the FOREIGN binary only (R311y265); WZ_PICO_REQUIRE escalates the skip.
-    if [[ -x target/zenoh-pico-cli/z_put ]]; then
+    # R311y503 — `z_pub` joins the guard because the config-mutate-runtime leg
+    # added to this file drives a LIVE foreign publisher (the verdict has to flip
+    # under traffic, not between two one-shots). `zenoh_pico_cli_binary` PANICS on
+    # a missing binary while this guard SKIPs, so a partial pico build would red
+    # the lane as a test failure instead of skipping it — the same shape the
+    # R311y443 review hit on Layer Z.
+    if [[ -x target/zenoh-pico-cli/z_put && -x target/zenoh-pico-cli/z_pub ]]; then
         (cd crates && cargo test -p wz-integration-tests \
             --test wz_peer_adminspace_write_from_pico_zput -- --ignored --quiet) || return 1
     else
-        _pico_cli_unavailable "Layer E6 (pico adminspace config-write z_put)" || return 1
+        _pico_cli_unavailable "Layer E6 (pico adminspace config-write z_put/z_pub)" || return 1
     fi
     # R311y368 — pico ACCESS-CONTROL cross-impl (§5.16): a pico z_put to a wz
     # peer's DENIED keyexpr (secret/**, via --acl-deny) is dropped by the ACL
@@ -8881,7 +8887,8 @@ layer_e13_apfull_storage_plane_pico() {
         apfull_storage_plane_serves_a_pico_write_to_a_later_pico_read \
         apfull_storage_plane_survives_a_host_restart_on_a_durable_volume \
         apfull_storage_plane_is_volatile_across_a_restart_without_the_durable_volume \
-        apfull_storage_del_stops_serving_a_real_pico_get; do
+        apfull_storage_del_stops_serving_a_real_pico_get \
+        apfull_storage_gc_sweeps_a_wildcard_update_a_real_pico_registered; do
         (cd crates && cargo test -p wz-integration-tests \
             --test apfull_storage_plane_pico_interop -- --ignored --quiet --test-threads=1 \
             --exact "$leg" 2>&1 \

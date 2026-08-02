@@ -153,6 +153,34 @@ pub(crate) enum PushOperation {
 /// i-th path by argv order is an operator interface that misfires silently. One
 /// loaded volume is the honest MVP bound; N is a mechanical follow-up that needs a
 /// pairing syntax, not a second `Vec`.
+/// R311y503 — `--storage-gc-period-ms <ms>` / `--storage-gc-lifespan-ms <ms>`:
+/// the per-storage garbage-collection policy every storage this host spawns is
+/// created with.
+///
+/// In zenoh this is per-storage CONFIG FILE state
+/// (`garbage_collection: { period_s, lifespan_s }`, `backend-traits/config.rs`),
+/// read by the host when it spawns the storage — NOT something a remote client
+/// writes. The demo has no config file, so its flags are that surface, and they
+/// are deliberately host-side for the same reason: the `storage-add` wire intent
+/// carries a name and a keyexpr, and letting a remote peer choose how long this
+/// node retains metadata would be a policy decision on the wrong side of the
+/// admin gate.
+///
+/// Absent flags mean zenoh's defaults (30 s period, 86400 s lifespan), which is
+/// what [`GarbageCollectionConfig::default`] already supplies — so the struct
+/// carries only the OVERRIDES and an un-flagged host is byte-identical to the
+/// pre-R311y503 one.
+#[cfg(feature = "adminspace-config-hotreload")]
+#[derive(Default, Clone, Copy)]
+pub(crate) struct StorageGcArgs {
+    /// Sweep interval override, in milliseconds.
+    pub(crate) period_ms: Option<u64>,
+    /// Metadata-age cutoff override, in milliseconds. `0` collects every entry
+    /// on the next sweep, which is how a test makes a 24-hour default observable
+    /// without waiting a day.
+    pub(crate) lifespan_ms: Option<u64>,
+}
+
 #[cfg(feature = "adminspace-config-hotreload")]
 pub(crate) struct DynamicVolumeArgs {
     /// The `.so` to `dlopen`. The volume's registry id is NOT taken from here —

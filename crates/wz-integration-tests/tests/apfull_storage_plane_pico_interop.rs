@@ -202,6 +202,19 @@ impl StorageHost {
 /// emitted ahead of every mode branch, so a wrong binary is named in milliseconds
 /// instead of spending the full readiness timeout to report the same cause.
 fn spawn_storage_host(addr: &str, dir: Option<&Path>, role: &str) -> StorageHost {
+    spawn_storage_host_with(addr, dir, role, &[])
+}
+
+/// [`spawn_storage_host`] plus `extra` argv — the host-side policy flags a leg
+/// needs (R311y503: the garbage-collection period / lifespan). Kept as one
+/// spawner rather than a second copy so every leg shares the same BUILD FEATURES
+/// assertion and the same readiness barrier.
+fn spawn_storage_host_with(
+    addr: &str,
+    dir: Option<&Path>,
+    role: &str,
+    extra: &[&str],
+) -> StorageHost {
     let stderr = tempfile::tempfile().expect("tempfile for storage-host stderr");
     let writer = stderr.try_clone().expect("dup storage-host stderr handle");
     let mut reader = stderr;
@@ -211,6 +224,7 @@ fn spawn_storage_host(addr: &str, dir: Option<&Path>, role: &str) -> StorageHost
     if let Some(d) = dir {
         cmd.arg("--storage-host-dir").arg(d);
     }
+    cmd.args(extra);
     cmd.env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::from(writer));
@@ -616,5 +630,98 @@ fn apfull_storage_del_stops_serving_a_real_pico_get() {
         "a real zenoh-pico z_get still read the stored value AFTER `storage-del` \
          despawned the storage, so the despawn did not undeclare the answering \
          queryable\n--- z_get ---\n{out}"
+    );
+}
+
+/// R311y503 leg 5 — the storage's periodic GARBAGE COLLECTOR, sweeping a
+/// wildcard-update entry that a REAL zenoh-pico put there.
+///
+/// ## What was missing, and why nothing caught it
+///
+/// `storage-mgr-garbage-collection` had a faithful sweep
+/// (`StorageState::collect_garbage`) and a faithful tokio driver
+/// (`GarbageCollector`), both unit-tested — and NO production caller. `spawn`
+/// was invoked only under `#[cfg(test)]`, so every deployed storage grew its
+/// wildcard registries forever. The inventory recorded that as a named residual
+/// rather than a bug, and no gate could see it: A3 asks whether a cfg site
+/// exists (it did), the unit tests drive the collector directly (they passed),
+/// and no e2e went near it. R311y503 wired the spawn into
+/// `RuntimeStorageManager::add_storage` — the storage's lifetime owner, and the
+/// same place zenoh registers its `GarbageCollectionEvent` — and this leg is
+/// what holds it there.
+///
+/// ## The chain, all of it foreign-driven
+///
+/// 1. a real pico `z_put` on `.../config/storage-add` spawns the live storage —
+///    so the collector under test is one created by the production path, not by
+///    the test;
+/// 2. a real pico `z_put` on the WILDCARD `demo/store/**` registers a
+///    wildcard-update entry. pico encodes the wildcard keyexpr and the payload;
+///    wz decodes them and files the entry in `wildcard_puts`;
+/// 3. the collector sweeps it, and says so.
+///
+/// The host runs `--storage-gc-lifespan-ms 0`, which is what makes a 24-hour
+/// default observable inside a test: every entry is stale at the next sweep.
+/// That the lifespan is genuinely THREADED (rather than everything always being
+/// swept) is pinned deterministically by the driver's own unit test
+/// `a_within_lifespan_entry_is_retained_proving_lifespan_is_threaded`; asserting
+/// the retention here would mean waiting for a log NOT to appear, which is a
+/// flake wearing a proof's clothes.
+///
+/// The sweep line is emitted only when entries were actually REMOVED, so it
+/// cannot fire on an idle storage — it witnesses the collection, not the timer.
+/// And the counts in it (`puts 1->0`) are asserted, not just the verb: a line
+/// reporting `puts 0->0` would mean the sweep ran on an empty registry and the
+/// foreign wildcard never landed.
+// wz-proves: storage-mgr-garbage-collection pico->wz
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features preset-ap-full + zenoh-pico z_put); Layer E13 runs via --ignored"]
+fn apfull_storage_gc_sweeps_a_wildcard_update_a_real_pico_registered() {
+    let z_put = zenoh_pico_cli_binary("z_put");
+    let port = PortReservation::pick();
+    let addr = format!("127.0.0.1:{}", port.port());
+    // period 200 ms so a sweep lands inside the barrier budget; lifespan 0 so the
+    // entry pico registers is stale by the time the first sweep sees it.
+    let mut host = spawn_storage_host_with(
+        &addr,
+        None,
+        "gc",
+        &[
+            "--storage-gc-period-ms",
+            "200",
+            "--storage-gc-lifespan-ms",
+            "0",
+        ],
+    );
+    drop(port);
+
+    // (1) the storage exists because a foreign client asked for it.
+    pico_adds_storage(&z_put, &mut host, &addr);
+
+    // (2) a foreign WILDCARD put — the thing the registry holds. `MOUNT` is the
+    //     storage's own keyexpr, so the entry lands in this storage's registry
+    //     and not somewhere the sweep would never look.
+    pico_put(&z_put, MOUNT, "wildcard-written-by-pico", &addr);
+    host.wait_session_ended("pico wildcard-put session driven to terminal");
+
+    // (3) the sweep, with its counts.
+    let captured = host.wait(
+        "garbage collected",
+        "the periodic collector swept the wildcard-update registry",
+    );
+    let line = captured
+        .lines()
+        .find(|l| l.contains("garbage collected"))
+        .expect("the sweep line is present (the wait above returned it)");
+    assert!(
+        line.contains(&format!("wz storage '{STORAGE_NAME}'")),
+        "the sweep names the storage a real pico created, so it cannot be some \
+         other storage's collector\n  got: {line}"
+    );
+    assert!(
+        line.contains("puts 1->0"),
+        "the sweep removed the wildcard-update entry the real pico registered — a \
+         `puts 0->0` would mean the collector ran on an empty registry and the \
+         foreign wildcard never landed\n  got: {line}"
     );
 }

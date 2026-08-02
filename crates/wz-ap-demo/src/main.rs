@@ -555,11 +555,31 @@ fn main() -> ExitCode {
                     None
                 }
             };
+            // R311y503 — the per-storage GC policy this host spawns storages
+            // with. A malformed number is REPORTED and the default kept, rather
+            // than parsed as `None` and silently ignored: an operator who typed
+            // a retention policy must not get the 24-hour default in silence.
+            let gc_ms = |flag: &str| -> Option<u64> {
+                parse_pair(rest, flag).and_then(|v| match v.parse::<u64>() {
+                    Ok(n) => Some(n),
+                    Err(e) => {
+                        eprintln!(
+                            "wz-ap-demo: {flag} {v:?} is not a number ({e}); using the default"
+                        );
+                        None
+                    }
+                })
+            };
+            let storage_gc = crate::args::StorageGcArgs {
+                period_ms: gc_ms("--storage-gc-period-ms"),
+                lifespan_ms: gc_ms("--storage-gc-lifespan-ms"),
+            };
             run_storage_host_mode(
                 storage_host_listen,
                 parse_pair(rest, "--storage-host-dir"),
                 parse_repeated(rest, "--plugin"),
                 dynamic_volume,
+                storage_gc,
             )
         };
         #[cfg(not(feature = "adminspace-config-hotreload"))]
@@ -1842,6 +1862,7 @@ fn run_storage_host_mode(
     storage_dir: Option<String>,
     plugins: Vec<String>,
     dynamic_volume: Option<crate::args::DynamicVolumeArgs>,
+    storage_gc: crate::args::StorageGcArgs,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -1856,6 +1877,7 @@ fn run_storage_host_mode(
         storage_dir,
         &plugins,
         dynamic_volume.as_ref(),
+        storage_gc,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

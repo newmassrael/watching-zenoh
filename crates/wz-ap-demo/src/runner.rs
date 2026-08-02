@@ -4403,6 +4403,7 @@ pub(crate) async fn run_storage_host(
     storage_dir: Option<String>,
     plugin_paths: &[String],
     dynamic_volume: Option<&crate::args::DynamicVolumeArgs>,
+    storage_gc: crate::args::StorageGcArgs,
 ) -> io::Result<()> {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -4817,6 +4818,21 @@ pub(crate) async fn run_storage_host(
                                     // a durable-looking storage volatile.
                                     if named_volume.is_none() {
                                         cfg.volume_id = dispatch_volume_id.to_string();
+                                    }
+                                    // R311y503 — the HOST's garbage-collection
+                                    // policy, applied to every storage it spawns.
+                                    // Host-side by design (see `StorageGcArgs`):
+                                    // the wire intent carries a name and a
+                                    // keyexpr, never a retention policy. Absent
+                                    // flags leave `GarbageCollectionConfig`'s
+                                    // zenoh defaults untouched.
+                                    if let Some(ms) = storage_gc.period_ms {
+                                        cfg.garbage_collection.period =
+                                            core::time::Duration::from_millis(ms);
+                                    }
+                                    if let Some(ms) = storage_gc.lifespan_ms {
+                                        cfg.garbage_collection.lifespan =
+                                            core::time::Duration::from_millis(ms);
                                     }
                                     match manager.add_storage(
                                         &session_for_dispatch,

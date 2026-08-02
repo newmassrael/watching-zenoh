@@ -92,6 +92,7 @@ impl GarbageCollector {
         session: &Session<R, T, Unicast>,
         state: Arc<Mutex<StorageState<B>>>,
         gc: GarbageCollectionConfig,
+        storage_name: &str,
     ) -> Self
     where
         R: SessionRuntime + 'static,
@@ -112,14 +113,35 @@ impl GarbageCollector {
             .unwrap_or(u64::MAX)
             .max(1);
         let lifespan = gc.lifespan;
+        let label = storage_name.to_string();
         let task = tokio::spawn(async move {
             loop {
                 // PERIOD: monotonic ms sleep (interval, held OUTSIDE the lock).
                 clock.sleep(period_ms).await;
                 // CUTOFF: wall-clock NTP64 now (the entries' stamp basis). A
                 // poisoned mutex defers this sweep to the next tick.
+                //
+                // R311y503 — the sweep's POSITIVE EDGE is logged, and it is the
+                // only thing outside this process that can tell a wired collector
+                // from an unwired one. `collect_garbage` is a `retain`: it returns
+                // nothing and a swept registry looks exactly like a registry that
+                // never held anything. So the lens is read either side of the
+                // sweep and a line is emitted only when entries were actually
+                // REMOVED -- never per tick, which would fire on an idle storage
+                // and witness the timer rather than the collection.
                 if let Ok(mut guard) = state.lock() {
+                    let (puts_before, dels_before) = guard.wildcard_registry_lens();
                     guard.collect_garbage(wall_clock_ntp64(), lifespan);
+                    let (puts_after, dels_after) = guard.wildcard_registry_lens();
+                    let swept = (puts_before - puts_after) + (dels_before - dels_after);
+                    if swept > 0 {
+                        log::info!(
+                            "wz storage '{label}': garbage collected {swept} stale \
+                             wildcard-update entr{} (puts {puts_before}->{puts_after}, \
+                             deletes {dels_before}->{dels_after})",
+                            if swept == 1 { "y" } else { "ies" }
+                        );
+                    }
                 }
             }
         });
@@ -182,7 +204,7 @@ mod tests {
             period: Duration::from_millis(10),
             lifespan: Duration::from_secs(0),
         };
-        let _collector = GarbageCollector::spawn(&session, Arc::clone(&state), gc);
+        let _collector = GarbageCollector::spawn(&session, Arc::clone(&state), gc, "test");
 
         // Wait a few periods for at least one sweep.
         for _ in 0..50 {
@@ -224,7 +246,7 @@ mod tests {
             period: Duration::from_millis(10),
             lifespan: Duration::from_secs(3600), // 1 hour: the entry is in-window
         };
-        let _collector = GarbageCollector::spawn(&session, Arc::clone(&state), gc);
+        let _collector = GarbageCollector::spawn(&session, Arc::clone(&state), gc, "test");
         // Let several sweeps run; the fresh entry must survive them all.
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert_eq!(
@@ -249,7 +271,7 @@ mod tests {
             period: Duration::from_millis(10),
             lifespan: Duration::from_secs(0),
         };
-        let collector = GarbageCollector::spawn(&session, Arc::clone(&state), gc);
+        let collector = GarbageCollector::spawn(&session, Arc::clone(&state), gc, "test");
         let handle = collector.task.abort_handle();
         drop(collector); // Drop aborts the task (RAII teardown).
                          // `abort()` schedules cancellation; yield so the runtime

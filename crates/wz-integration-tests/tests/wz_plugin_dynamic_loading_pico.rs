@@ -194,8 +194,37 @@ fn pico_get_plugins(root: &str, addr: &str) -> Result<String, String> {
     done
 }
 
+// R311y503 — three more of the §5.22 atoms are claimed here, and this REOPENS a
+// caveat R311y492 wrote into their inventory reasons: "none of the four is
+// claimed on the pico transcript, which would be per-compiled-feature claiming".
+// That caution is right about the failure it names -- four atoms riding ONE cargo
+// key must not all be credited because the key was compiled in -- but it does not
+// apply to a claim bound by its OWN damage. Each of the three below was damaged
+// separately, and each damage changes a DIFFERENT field of the record the real
+// pico decodes, so the wire transcript itself distinguishes them:
+//
+//   `plugin-abi-compat` — `PluginEntry::compatibility`. Forced to return
+//   MajorMismatch, the load is refused and this leg reds with no `wz_example`
+//   record at all, while the CONTROL leg below (which expects a refusal) stays
+//   green. The gate is what admits the plugin the pico then reads.
+//
+//   `plugin-host-trait` — `PluginVTable`, the repr(C) call table. Reading
+//   `version` from the `name` slot instead of the `version` slot leaves the load
+//   and the lifecycle intact and reds only the version assertion: the pico
+//   decodes `"version":"wz_example"`. The foreign process sees the slot layout
+//   the host and the plugin agreed on, which is the atom.
+//
+//   `plugin-lifecycle` — Declared->Loaded->Started. Suppressing only the final
+//   transition (`start` still calls the plugin, still returns Ok) reds the state
+//   assertion alone: the pico decodes `"state":"Loaded"`. The FSM, not the load.
+//
+// All three are wz->pico: wz produces the admin record, a real zenoh-pico z_get
+// decodes it.
 // wz-proves: plugin-dynamic-loading wz->pico
 // wz-proves: plugin-manager wz->pico
+// wz-proves: plugin-abi-compat wz->pico
+// wz-proves: plugin-host-trait wz->pico
+// wz-proves: plugin-lifecycle wz->pico
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features preset-ap-full + wz-plugin-example cdylib + zenoh-pico z_get CLI); Layer C1bp runs via --ignored"]
 fn wz_plugin_dlopened_is_read_by_a_real_pico_beside_the_static_one() {

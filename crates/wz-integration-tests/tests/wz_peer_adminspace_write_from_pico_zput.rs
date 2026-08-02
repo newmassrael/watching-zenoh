@@ -216,3 +216,132 @@ fn wz_peer_admin_config_write_denied_from_pico_z_put_without_permit() {
         "a DENIED config write must not also reconfigure the forwarder\n--- A ---\n{all}"
     );
 }
+
+/// Drive pico's `z_pub` CLI at the keyexpr peer A subscribes to. Returned ALIVE:
+/// the point of the leg below is to watch the verdict change UNDER a foreign
+/// publisher that never stops, so the caller owns the guard. pico publishes once
+/// a second for `n` seconds.
+fn spawn_pico_pub(addr: &str, n: u32) -> ChildGuard {
+    let z_pub = zenoh_pico_cli_binary("z_pub");
+    ChildGuard::wrap(
+        "z_pub client (zenoh-pico)",
+        Command::new(&z_pub)
+            .args([
+                "-k",
+                "mesh/data",
+                "-v",
+                "flip-probe",
+                "-e",
+                &format!("tcp/{addr}"),
+                "-m",
+                "client",
+                "-n",
+                &n.to_string(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn z_pub"),
+    )
+}
+
+// R311y503 — `config-mutate-runtime`'s cross-impl witness, and it exists because
+// this file's own header ruled the APPLY arm above OUT of claiming it: "its real
+// observable is the DATA-PLANE flip (`interceptor dropped`), which the wz<->wz
+// twin asserts and this test does not". That was correct, and this leg is that
+// sentence answered rather than argued.
+//
+// `WzConfig::reconfigure_interceptors` STORES the new config unconditionally and
+// gates only the `sink.set_interceptors` RE-DRIVE behind
+// `#[cfg(feature = "config-mutate-runtime")]` (wz-runtime-tokio/src/config.rs).
+// So the atom is not "a config write is accepted" -- that is `adminspace-write`,
+// proven one leg up -- it is "the live forwarder actually picks the new config
+// up". The only way to see that from outside the process is to watch a verdict
+// CHANGE on data that is already flowing.
+//
+// Both ends of that are foreign here: a real zenoh-pico `z_pub` is the publisher
+// whose Puts get admitted and then dropped, and a real zenoh-pico `z_put` is what
+// carries the new ACL in. wz is the only thing in the middle.
+//
+// The ordering is OWNED, never slept (three positive-edge barriers, each waiting
+// for an event that can only happen after the previous one):
+//   1. `received mesh data` -- A admitted foreign Puts. Without this barrier the
+//      config write could land before pico's first Put and the run would prove a
+//      denied-from-the-start node, not a FLIP.
+//   2. `config reconfigured — now denying mesh/data` -- the write was applied.
+//   3. `interceptor dropped` -- a Put from the STILL-RUNNING pico publisher hit
+//      the new ACL. This is the atom: the re-drive reached the live forwarder.
+// The final assertion is the causal order of (2) before (3) in the post-shutdown
+// capture, so a drop that somehow preceded the reconfigure cannot pass.
+// wz-proves: config-mutate-runtime pico->wz
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,adminspace-write + zenoh-pico z_pub/z_put CLIs); Layer E6 runs via --ignored"]
+fn wz_peer_config_write_from_pico_flips_the_live_verdict_for_a_real_pico_publisher() {
+    let (mut a_child, mut a_reader, root, addr) = spawn_write_host(true);
+
+    // 60 s of foreign traffic: long enough to outlive the write + the flip, and
+    // the guard kills it either way.
+    let mut pico_pub = spawn_pico_pub(&addr, 60);
+
+    let kill_all = |a: &mut ChildGuard, p: &mut ChildGuard| {
+        let _ = p.child_mut().kill();
+        let _ = p.child_mut().wait();
+        let _ = a.child_mut().kill();
+        let _ = a.child_mut().wait();
+    };
+
+    // Barrier 1 — the ADMIT edge.
+    if let Err(c) = wait_for_substring(&mut a_reader, "received mesh data", Duration::from_secs(30))
+    {
+        kill_all(&mut a_child, &mut pico_pub);
+        panic!(
+            "peer A never admitted a Put from the real pico publisher within 30s — \
+             there is no admit edge to flip away from\n--- A ---\n{c}"
+        );
+    }
+
+    // The foreign config write.
+    pico_put_acl_deny(&root, &addr);
+
+    // Barrier 2 — the write was APPLIED.
+    if let Err(c) = wait_for_substring(
+        &mut a_reader,
+        "config reconfigured — now denying mesh/data",
+        Duration::from_secs(15),
+    ) {
+        kill_all(&mut a_child, &mut pico_pub);
+        panic!("peer A never applied pico's config write within 15s\n--- A ---\n{c}");
+    }
+
+    // Barrier 3 — the LIVE verdict flipped for the foreign publisher.
+    let flipped = wait_for_substring(
+        &mut a_reader,
+        "interceptor dropped",
+        Duration::from_secs(30),
+    );
+    kill_all(&mut a_child, &mut pico_pub);
+    let captured = match flipped {
+        Ok(c) => c,
+        Err(c) => panic!(
+            "peer A dropped nothing from the real pico publisher within 30s of \
+             applying the config write — the new ACL was STORED but never re-driven \
+             into the live forwarder, which is exactly the half `adminspace-write` \
+             does not cover\n--- A ---\n{c}"
+        ),
+    };
+
+    // Causal order: the drop must FOLLOW the reconfigure. A drop that preceded it
+    // would mean the node was denying already, and the leg would be proving
+    // nothing about the runtime mutation.
+    let reconfig_at = captured
+        .find("config reconfigured")
+        .expect("reconfigure line present (barrier 2 passed)");
+    let dropped_at = captured
+        .find("interceptor dropped")
+        .expect("drop line present (barrier 3 passed)");
+    assert!(
+        reconfig_at < dropped_at,
+        "peer A dropped a foreign Put BEFORE it applied the config write — the \
+         verdict did not flip, it was already deny\n--- A ---\n{captured}"
+    );
+}

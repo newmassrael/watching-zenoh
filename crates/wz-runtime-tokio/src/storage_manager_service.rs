@@ -79,6 +79,18 @@ type HostedStorage<R, T> = StorageService<R, T, Box<dyn StorageBackend + Send>>;
 struct HostedEntry<R: SessionRuntime, T: TimeSource> {
     config: StorageConfig,
     service: HostedStorage<R, T>,
+    /// R311y503 — this storage's periodic garbage collector, held for the
+    /// storage's lifetime because [`GarbageCollector`] is RAII: dropping the
+    /// handle aborts the sweep task, so `remove_storage` tears the collector down
+    /// with the service it belongs to. This field IS the production spawn site
+    /// the `storage-mgr-garbage-collection` atom was missing — before it, the
+    /// collector existed and was unit-tested but nothing in the live storage
+    /// lifecycle ever constructed one, so a deployed storage never GC'd its
+    /// wildcard registries. zenoh registers its `GarbageCollectionEvent` at the
+    /// same point: inside the storage's own start, next to the subscriber and
+    /// queryable it declares (`storages_mgt/service.rs:117-137`).
+    #[cfg(feature = "storage-mgr-garbage-collection")]
+    _gc: crate::storage_gc_service::GarbageCollector,
 }
 
 /// Why [`RuntimeStorageManager::add_storage`] failed.
@@ -200,12 +212,22 @@ where
     /// ([`Volume`](RuntimeStorageManagerError::Volume)), or the service
     /// declaration is rejected ([`Service`](RuntimeStorageManagerError::Service)).
     /// `local_zid` is the storage's fallback-stamp identity (must be non-empty).
+    /// R311y503 — the extra bounds sit on the METHOD, not on the impl block, so
+    /// only the path that now spawns a task carries them: the collector is a
+    /// `tokio::spawn`, which needs the session's runtime and clock to be `Send`
+    /// and `'static`. Every production caller (the `TokioSession` storage host)
+    /// already satisfies them.
     pub fn add_storage(
         &mut self,
         session: &Session<R, T, Unicast>,
         config: &StorageConfig,
         local_zid: Vec<u8>,
-    ) -> Result<(), RuntimeStorageManagerError> {
+    ) -> Result<(), RuntimeStorageManagerError>
+    where
+        R: 'static,
+        T: Send + Sync,
+        Session<R, T, Unicast>: Clone + Send + 'static,
+    {
         if self.services.contains_key(&config.name) {
             return Err(RuntimeStorageManagerError::DuplicateStorage(
                 config.name.clone(),
@@ -219,11 +241,25 @@ where
             .map_err(RuntimeStorageManagerError::Volume)?;
         let service = StorageService::declare_with_backend(session, config, local_zid, backend)
             .map_err(RuntimeStorageManagerError::Service)?;
+        // The storage's periodic GC, started WITH the storage and torn down with
+        // it (the handle lives in the entry). zenoh does this inside the storage's
+        // own start; wz's equivalent lifetime owner is this manager, which is what
+        // `remove_storage` drops. Spawned AFTER the declaration succeeds, so a
+        // rejected storage leaves no orphan task behind.
+        #[cfg(feature = "storage-mgr-garbage-collection")]
+        let gc = crate::storage_gc_service::GarbageCollector::spawn(
+            session,
+            service.shared_state(),
+            config.garbage_collection.clone(),
+            &config.name,
+        );
         self.services.insert(
             config.name.clone(),
             HostedEntry {
                 config: config.clone(),
                 service,
+                #[cfg(feature = "storage-mgr-garbage-collection")]
+                _gc: gc,
             },
         );
         Ok(())
@@ -308,8 +344,11 @@ mod tests {
         assert!(mgr.is_empty());
     }
 
-    #[test]
-    fn add_storage_duplicate_name_errs() {
+    // R311y503 — a live storage now starts its periodic garbage collector
+    // (`tokio::spawn`), so a test that hosts one must run inside a runtime,
+    // exactly as production does. Nothing about the assertions changed.
+    #[tokio::test]
+    async fn add_storage_duplicate_name_errs() {
         let session = make_session();
         let mut mgr = RuntimeStorageManager::new();
         mgr.register_volume("mem", Box::new(MemoryVolume));
@@ -341,8 +380,11 @@ mod tests {
     // answer_admin_query reply path (no shipping host feeds a live slice yet; that is the
     // deferred storage-hosting host, see the compiled_plugins_dyn WIRING STATUS note).
     #[cfg(feature = "adminspace-config-hotreload")]
-    #[test]
-    fn config_hotreload_spawns_despawns_storage_and_reflects_plugin_state() {
+    // R311y503 — a live storage now starts its periodic garbage collector
+    // (`tokio::spawn`), so a test that hosts one must run inside a runtime,
+    // exactly as production does. Nothing about the assertions changed.
+    #[tokio::test]
+    async fn config_hotreload_spawns_despawns_storage_and_reflects_plugin_state() {
         use crate::compiled_plugins_dyn;
         use wz_session_core::adminspace::{
             parse_admin_config_write, AdminConfigWrite, AdminConfigWriteOutcome, AdminPluginState,
@@ -398,8 +440,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remove_storage_undeclares_and_frees_the_name() {
+    // R311y503 — a live storage now starts its periodic garbage collector
+    // (`tokio::spawn`), so a test that hosts one must run inside a runtime,
+    // exactly as production does. Nothing about the assertions changed.
+    #[tokio::test]
+    async fn remove_storage_undeclares_and_frees_the_name() {
         let session = make_session();
         let mut mgr = RuntimeStorageManager::new();
         mgr.register_volume("mem", Box::new(MemoryVolume));
@@ -430,8 +475,11 @@ mod tests {
         assert_eq!(mgr.len(), 1);
     }
 
-    #[test]
-    fn remove_storage_drops_the_capture_subscriber_no_more_loopback_fires() {
+    // R311y503 — a live storage now starts its periodic garbage collector
+    // (`tokio::spawn`), so a test that hosts one must run inside a runtime,
+    // exactly as production does. Nothing about the assertions changed.
+    #[tokio::test]
+    async fn remove_storage_drops_the_capture_subscriber_no_more_loopback_fires() {
         use crate::session::PublishOptions;
         use wz_session_core::locality::Locality;
 
@@ -484,8 +532,11 @@ mod tests {
     // strip on the live capture + restore on a query — driven entirely by the
     // per-storage StorageConfig.
     #[cfg(feature = "storage-mgr-strip-prefix")]
-    #[test]
-    fn manager_hosts_two_strip_configured_storages_each_isolated() {
+    // R311y503 — a live storage now starts its periodic garbage collector
+    // (`tokio::spawn`), so a test that hosts one must run inside a runtime,
+    // exactly as production does. Nothing about the assertions changed.
+    #[tokio::test]
+    async fn manager_hosts_two_strip_configured_storages_each_isolated() {
         use crate::reply_sink::ReplyView;
         use crate::session::{PublishOptions, QueryOptions};
         use wz_session_core::locality::Locality;
@@ -606,8 +657,11 @@ mod tests {
     // backend round-trips on disk; THIS proves the composed live service serves the
     // persisted value after a fresh manager re-hosts it (per composition-over-isolated-atoms).
     #[cfg(feature = "storage-backend-filesystem")]
-    #[test]
-    fn filesystem_volume_composes_durably_across_a_manager_restart() {
+    // R311y503 — a live storage now starts its periodic garbage collector
+    // (`tokio::spawn`), so a test that hosts one must run inside a runtime,
+    // exactly as production does. Nothing about the assertions changed.
+    #[tokio::test]
+    async fn filesystem_volume_composes_durably_across_a_manager_restart() {
         use crate::filesystem_storage::FilesystemVolume;
         use crate::session::PublishOptions;
         use wz_session_core::locality::Locality;
@@ -658,8 +712,11 @@ mod tests {
     // (Volatile) MemoryVolume LOSES the value across the restart, so the fs test
     // proves persistence, not merely that a value round-trips within one session.
     #[cfg(feature = "storage-backend-filesystem")]
-    #[test]
-    fn memory_volume_does_not_survive_a_manager_restart() {
+    // R311y503 — a live storage now starts its periodic garbage collector
+    // (`tokio::spawn`), so a test that hosts one must run inside a runtime,
+    // exactly as production does. Nothing about the assertions changed.
+    #[tokio::test]
+    async fn memory_volume_does_not_survive_a_manager_restart() {
         use crate::session::PublishOptions;
         use wz_session_core::locality::Locality;
 

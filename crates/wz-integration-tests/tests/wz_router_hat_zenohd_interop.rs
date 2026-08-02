@@ -220,9 +220,20 @@ fn spawn_router_hat_dialing(
 // reaching zenohd is not asserted here, so no wz->zenohd claim is made.
 // A4-5 containment is exempt (FOUNDATIONAL names no cfg site), so this rests on
 // that reading -- verified by hand at R311y423.
+// R311y503 — and this leg is `router-orchestration`'s cross-impl witness. The
+// atom is the ROUTER-SCOPED BOOTSTRAP, which R311y238 recorded as subsumed into
+// this run-mode: `run_router_hat_until` binds the listen endpoint and then dials
+// every `--connect` target as a router-tier face (runner.rs, the `dials` vector
+// feeding `peer_loop`'s `FaceSources`). The dial half is what this leg turns on
+// -- wz is the DIALER here, zenohd only accepts -- so the claim is wz->zenohd.
+// Bound by damage, not by reading: clearing `dials` after the parse loop (so the
+// bind and every other bootstrap step still runs) reds THIS leg and no other
+// targeted leg. `routers-net converged (2 node(s))` cannot be reached without
+// the router-scoped dial that the atom names.
 // wz-proves: router-hat-router zenohd->wz
 // wz-proves: router-hat-router wz->zenohd partial
 // wz-proves: scouting-gossip zenohd->wz
+// wz-proves: router-orchestration wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_federates_with_zenohd_at_router_tier() {
@@ -282,6 +293,16 @@ fn wz_router_hat_federates_with_zenohd_at_router_tier() {
 // wz-proves: codec-declare pico->wz
 // wz-proves: codec-frame wz->pico
 // wz-proves: codec-push wz->pico
+// R311y503 — and this leg is `routing-data-route-compute`'s cross-impl witness.
+// The atom is the router `compute_data_route` fan (route_push's three blocks over
+// the two mesh tiers plus the local client faces). This leg drives block 3 on a
+// ROUTER-sourced Push: the Put enters wz over the zenohd link-state face and
+// leaves through `deliver_to_client_subscribers` to a real pico z_sub, so the
+// whole fan is cross-impl on both sides. Bound by damage: an early `return` at
+// the head of `deliver_to_client_subscribers` -- leaving blocks 1/2 and the
+// cross-mesh bridge intact -- reds THIS leg. Claimed `full` for wz->pico: the
+// asserted receipt IS the computed route's egress.
+// wz-proves: routing-data-route-compute wz->pico
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_pub/z_sub + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_and_zenohd_federate_pico_data_across_the_backbone() {
@@ -425,6 +446,27 @@ fn wz_router_hat_and_zenohd_federate_pico_data_across_the_backbone() {
 // wz-proves: codec-push pico->wz
 // wz-proves: declare-subscriber wz->pico
 // wz-proves: codec-declare wz->pico
+// R311y503 — this leg carries TWO further cross-impl witnesses, each bound by its
+// own damage rather than by reading:
+//
+//   `routing-interest-broker` (wz->pico). The atom is the router's interest
+//   handshake -- the CURRENT-mode snapshot of matching remote declarations plus
+//   the terminating DeclFinal, emitted by `respond_to_interest`. This leg is the
+//   one that cannot proceed without it: the real pico publisher holds a WRITE
+//   FILTER that emits zero wire bytes until wz answers its declare-Interest, so
+//   the foreign process's own behaviour is the assertion. An early `return` at
+//   the head of `respond_to_interest` reds exactly this leg.
+//
+//   `router-face-management` (pico->wz). The atom is the router-grade per-face
+//   state; the part no sibling atom owns is `RouterFaceState`'s link-local
+//   keyexpr-alias table (zenoh's FaceState `remote_mappings`, face.rs:63), fed by
+//   `absorb_keyexpr_declaration` and read back by every `resolve_wireexpr` on the
+//   inbound face. Damage attributed by TIER, which is what fixes the direction:
+//   voiding the absorb for CLIENT-tier faces ONLY -- so zenohd's router-tier
+//   aliases keep resolving -- still reds this leg, so the aliases that carry it
+//   are the real pico's. wz DECODES a foreign alias table, hence pico->wz.
+// wz-proves: routing-interest-broker wz->pico
+// wz-proves: router-face-management pico->wz
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_pub/z_sub + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_and_zenohd_federate_pico_data_in_reverse() {
@@ -568,6 +610,16 @@ fn wz_router_hat_and_zenohd_federate_pico_data_in_reverse() {
 // wz-proves: declare-queryable wz->pico
 // wz-proves: codec-response wz->pico
 // wz-proves: query-reply wz->pico
+// R311y503 — and this leg is `routing-query-route-compute`'s cross-impl witness.
+// The atom is the router's `compute_query_route` half: `route_request` picking the
+// mesh block and the out-faces, with `PendingQueries` holding the reverse path the
+// Response returns along. Here a real pico's Get enters wz, is routed onto the
+// zenohd backbone, and the reply comes back down the recorded reverse path -- so
+// both the forward decision and the reverse path are foreign-witnessed. Bound by
+// damage: an early `return` at the head of `route_request` reds this leg (and the
+// two sibling query legs) while every pubsub leg stays green, which is what
+// distinguishes the query-route compute from the data-route compute above.
+// wz-proves: routing-query-route-compute wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_and_zenohd_federate_a_pico_query() {
@@ -1508,7 +1560,23 @@ fn wz_router_hat_token_lifecycle_reaches_a_pico_liveliness_subscriber() {
 /// passes — so this witnesses the C4 bridge specifically. Barrier-gated on wz's
 /// `learned a mesh sub` (wz provably holds zenohd's router-native sub) before the
 /// peer publisher spawns, so a Put burst cannot outrun the mesh subscription.
+// R311y503 — and this leg is `router-master-election`'s cross-impl witness, but
+// only PARTIALLY, and the partial is measured rather than hedged. The atom is the
+// HRW route-master election (`elect_router` / `shared_nodes` / `is_master`) that
+// dedups delivery across routers. What this leg proves is that the master GATE is
+// live and load-bearing on a foreign path: forcing `is_master` to `false` reds
+// this leg (the peer->router bridge is the master-gated one) plus four others,
+// against a real zenohd sub and a real pico sub. What it does NOT prove is the
+// ELECTION discriminating between candidates -- inverting `elect_router`'s HRW
+// comparison from MAX to MIN leaves all ten legs GREEN, because `shared_nodes` is
+// `{self}` here and a one-candidate election has no order to invert. That matches
+// zenoh: `shared_nodes` is only recomputed under `router_full_linkstate &&
+// peer_full_linkstate` (hat/router/mod.rs:384) and a stock zenohd runs peers in
+// gossip mode, so no foreign router joins wz's linkstatepeers_net. A `full` claim
+// needs a topology where a foreign zid sits in BOTH nets; until then this stays
+// partial.
 // wz-proves: router-hat-router wz->zenohd partial
+// wz-proves: router-master-election wz->zenohd partial
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_sub + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_bridges_a_peer_publish_to_a_zenohd_router_native_sub() {
