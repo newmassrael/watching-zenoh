@@ -7047,6 +7047,30 @@ layer_z_zenohd_interop() {
     # compiled into the wz-ap-demo build above, not into the test.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_compression_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R311y505 — the SHM ESTABLISHMENT interop, and it needs its OWN oracle: zenoh's
+    # `default` feature set omits `shared-memory` (zenoh/Cargo.toml:34-46) and
+    # zenohd's default is `zenoh/default`, so the stock binary above has no
+    # `init::ext::Shm` compiled in and can neither send the challenge nor react to
+    # wz's offer. Built by `ZENOHD_SHM=1 scripts/build-zenohd.sh` into
+    # target/zenohd-shm/; ABSENT is a SKIP inside the test (the vsock precedent —
+    # hosted CI does not provision a source build for this).
+    #
+    # The demo is rebuilt with `session-extshm` for these two legs alone, and the
+    # test asserts the BUILD FEATURES line rather than trusting this invocation
+    # (the one-shared-artifact-path discipline).
+    #
+    # Leg 2 is the one that earned the lane: it caught wz reading a real zenoh
+    # `Shm` ZBuf (header 0x42) as its own UNIT offer at the same 4-bit id, which
+    # negotiated SHM with a peer that had issued a challenge wz cannot answer.
+    (cd crates && cargo build -p wz-ap-demo --features session-extshm --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_shm_establishment_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
+    # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one
+    # bin to one path), and every leg after this point expects the big feature set
+    # this lane opened with. Restated verbatim rather than referenced, because a
+    # drift between the two lines would be silent.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of

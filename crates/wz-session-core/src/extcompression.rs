@@ -26,7 +26,7 @@
 
 use wz_codecs::ext_entry::ExtEntryOwned;
 
-use crate::unit_ext::{chain_has_ext_id, encode_unit_ext};
+use crate::unit_ext::{chain_has_ext_eid, encode_unit_ext};
 
 /// Z_EXT_COMPRESSION ext id on the Init / Open establishment messages -- zenoh
 /// `init.rs:168` / `open.rs:134` `zextunit!(0x6, false)`. The establishment
@@ -47,7 +47,7 @@ pub fn encode_compression_ext() -> ExtEntryOwned {
 /// (`negotiate_compression_against_peer`) ANDs this against the local offer,
 /// reproducing zenoh `is_compression &= other_ext.is_some()`.
 pub fn peer_offered_compression(extensions: &[ExtEntryOwned]) -> bool {
-    chain_has_ext_id(extensions, COMPRESSION_EXT_ID)
+    chain_has_ext_eid(extensions, COMPRESSION_EXT_ID)
 }
 
 #[cfg(test)]

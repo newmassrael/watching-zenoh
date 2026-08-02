@@ -45,7 +45,7 @@
 
 use wz_codecs::ext_entry::ExtEntryOwned;
 
-use crate::unit_ext::{chain_has_ext_id, encode_unit_ext};
+use crate::unit_ext::{chain_has_ext_eid, encode_unit_ext};
 
 /// Z_EXT_QOS ext id on the Init establishment message — zenoh
 /// `init.rs:146-147` `zextunit!(0x1, false)` (unit) XOR `zextz64!(0x1, false)`
@@ -65,13 +65,26 @@ pub fn encode_qos_ext() -> ExtEntryOwned {
 }
 
 /// Project the peer's QoS capability from an establishment ext chain: `true`
-/// iff the chain carries an ext at id `0x1` in EITHER the unit or the z64
-/// `QoSLink` form (`ext_id()` masks the encoding nibble + M bit, so both
-/// match). The merge side (`SessionLinkActions::negotiate_qos_against_peer`)
-/// ANDs this against the local offer, reproducing zenoh's "both sides QoS or
-/// NoQoS" (`is_qos &= peer_offered`).
+/// iff the chain carries EITHER `zextunit!(0x1)` (header `0x01`) or
+/// `zextz64!(0x1)` (`QoSLink`, header `0x21`). The merge side
+/// (`SessionLinkActions::negotiate_qos_against_peer`) ANDs this against the local
+/// offer, reproducing zenoh's "both sides QoS or NoQoS" (`is_qos &= peer_offered`).
+///
+/// R311y505 — the two forms are now named EXPLICITLY. They used to be accepted as
+/// a side effect of matching on the 4-bit id field alone, which is a different
+/// claim: it accepts anything at id 0x1 in any encoding, present or future. Here
+/// the acceptance is deliberate and bounded, because zenoh's QoS genuinely IS a
+/// dual ext whose two forms both mean "this peer does QoS"
+/// (`transport/init.rs:147-148`, unit XOR z64 with superset/subset containment).
+///
+/// That reasoning does NOT generalise, which is why the loose match had to go:
+/// zenoh's `Shm` at id 0x2 is a ZBuf CHALLENGE, not a second spelling of a
+/// capability marker, and reading it as one made wz negotiate SHM with a peer
+/// that had issued a challenge wz cannot answer (measured against a real
+/// `zenohd --features shared-memory`).
 pub fn peer_offered_qos(extensions: &[ExtEntryOwned]) -> bool {
-    chain_has_ext_id(extensions, QOS_EXT_ID)
+    chain_has_ext_eid(extensions, QOS_EXT_ID)
+        || chain_has_ext_eid(extensions, QOS_EXT_ID | crate::ext_header::EXT_ENC_Z64)
 }
 
 #[cfg(test)]

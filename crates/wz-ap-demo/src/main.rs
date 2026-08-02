@@ -727,6 +727,9 @@ fn main() -> ExitCode {
     // builds the offer.
     let lowlatency = rest.iter().any(|a| a == "--lowlatency");
     let compression = rest.iter().any(|a| a == "--compression");
+    // R311y505 — `--shm` presence flag: offer the SHM establishment UNIT ext
+    // (id 0x2) on the InitSyn. Presence-parsed like its two siblings.
+    let shm = rest.iter().any(|a| a == "--shm");
     let role: Role = match (listen_opt, connect_opt) {
         (Some(_), None) if reconnect => {
             eprintln!(
@@ -752,6 +755,11 @@ fn main() -> ExitCode {
             // accept path; `None` for a non-quic listen.
             quic_cert: parse_pair(rest, "--quic-cert"),
             quic_key: parse_pair(rest, "--quic-key"),
+            // R311y505 — the accept-side SHM offer. Same presence flag as the dial
+            // side; on this side it is what makes a false positive VISIBLE, because
+            // only a zenohd that DIALS puts a real zenoh `Shm` ext in front of wz's
+            // decoder.
+            shm,
         },
         (None, Some(addr)) => Role::Initiator {
             connect: addr,
@@ -772,6 +780,12 @@ fn main() -> ExitCode {
             // (0x6) on the InitSyn, so a peer that also offers it negotiates the
             // per-batch lz4 wrap. Exclusive with `--lowlatency` (guard arm above).
             compression,
+            // R311y505 — `--shm` presence flag: offer the SHM establishment UNIT
+            // ext (0x2). A peer that does not reflect it leaves SHM off, which is
+            // exactly what a real zenohd does (its Shm is a ZBuf ext, a different
+            // eid), so the capability resolves to disabled and the link is
+            // unaffected.
+            shm,
         },
         (Some(_), Some(_)) => {
             eprintln!("wz-ap-demo: --listen and --connect are mutually exclusive");
@@ -1423,6 +1437,7 @@ fn main() -> ExitCode {
             tls_key,
             quic_cert,
             quic_key,
+            shm,
         } => {
             log::info!("listen  = {listen}");
             if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
@@ -1433,6 +1448,9 @@ fn main() -> ExitCode {
                 log::info!("quic-cert = {cert}");
                 log::info!("quic-key  = {key}");
             }
+            if *shm {
+                log::info!("shm = on (offers the SHM establishment UNIT ext 0x2 on the InitAck)");
+            }
         }
         Role::Initiator {
             connect,
@@ -1442,6 +1460,7 @@ fn main() -> ExitCode {
             namespace,
             lowlatency,
             compression,
+            shm,
         } => {
             log::info!("connect = {connect}");
             if *reconnect {
@@ -1461,6 +1480,9 @@ fn main() -> ExitCode {
             }
             if *compression {
                 log::info!("compression = on (offers Z_EXT_COMPRESSION on the InitSyn)");
+            }
+            if *shm {
+                log::info!("shm = on (offers the SHM establishment UNIT ext 0x2 on the InitSyn)");
             }
         }
     }

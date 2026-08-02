@@ -78,6 +78,28 @@ elif [[ "${ZENOHD_VSOCK:-0}" -eq 1 ]]; then
     BUILD_DIR="$ROOT/target/zenohd-vsock-build"
     VARIANT_FEATURE="--features zenoh/transport_vsock"
     VARIANT_NAME="transport_vsock"
+# R311y505 — the SHARED-MEMORY-enabled variant, the same pattern a third time, and
+# the reason it is needed is a measurement that could not be made without it.
+#
+# wz puts a UNIT ext at establishment id 0x2 (`extshm::SHM_ESTABLISHMENT_EXT_ID`)
+# while zenoh declares `Shm = zextzbuf!(0x2, false)` (`transport/init.rs:152`), and
+# the inventory called that WIRE-INCOMPATIBLE. Whether the two actually collide
+# turns on zenoh's extension identity being `eid = header & !FLAG_Z` — encoding
+# bits INCLUDED — which makes wz's 0x02 and zenoh's 0x42 different extensions.
+# zenoh relies on that itself (`QoS = zextunit!(0x1)` beside
+# `QoSLink = zextz64!(0x1)`).
+#
+# The STOCK oracle cannot decide it: `shared-memory` is absent from zenoh's
+# `default` set (zenoh/Cargo.toml:34-46) and zenohd's default is `zenoh/default`,
+# so the stock binary has no `Shm` ext compiled in AT ALL. Pointing wz at it proves
+# only that an unknown UNIT is skippable — a real result, but not the collision
+# question, and reading it as such would be the "a foreign CLI can hide the
+# property" trap. This variant is the oracle that HAS the extension.
+elif [[ "${ZENOHD_SHM:-0}" -eq 1 ]]; then
+    INSTALL_DIR="$ROOT/target/zenohd-shm"
+    BUILD_DIR="$ROOT/target/zenohd-shm-build"
+    VARIANT_FEATURE="--features zenoh/shared-memory"
+    VARIANT_NAME="shared-memory"
 fi
 
 if ! rustup toolchain list 2>/dev/null | grep -q "^$TOOLCHAIN"; then

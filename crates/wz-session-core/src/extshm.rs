@@ -95,7 +95,7 @@ pub fn encode_shm_marker_ext() -> ExtEntryOwned {
 /// that the payload field is a descriptor to resolve (not raw bytes). Detects by
 /// id (the [`crate::unit_ext`] mechanism), so the marker's M bit is ignored.
 pub fn body_has_shm_marker(extensions: &[ExtEntryOwned]) -> bool {
-    crate::unit_ext::chain_has_ext_id(extensions, SHM_BODY_EXT_ID)
+    crate::unit_ext::chain_has_ext_eid(extensions, SHM_BODY_EXT_ID | EXT_FLAG_M)
 }
 
 /// The Z_EXT_SHM ESTABLISHMENT ext id (on Init / Open) — a DISTINCT carrier from
@@ -121,7 +121,7 @@ pub fn encode_shm_establishment_ext() -> ExtEntryOwned {
 /// the local offer to finalize `is_shm` (zenoh `is_shm &= other.is_some()`).
 #[cfg(feature = "session-extshm")]
 pub fn peer_offered_shm(extensions: &[ExtEntryOwned]) -> bool {
-    crate::unit_ext::chain_has_ext_id(extensions, SHM_ESTABLISHMENT_EXT_ID)
+    crate::unit_ext::chain_has_ext_eid(extensions, SHM_ESTABLISHMENT_EXT_ID)
 }
 
 /// The no_std/std seam: an SHM-backed Put's descriptor is resolved to its bytes

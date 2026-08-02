@@ -43,7 +43,7 @@
 
 use wz_codecs::ext_entry::ExtEntryOwned;
 
-use crate::unit_ext::{chain_has_ext_id, encode_unit_ext};
+use crate::unit_ext::{chain_has_ext_eid, encode_unit_ext};
 
 /// Z_EXT_LOWLATENCY ext id on the Init / Open establishment messages — zenoh
 /// `init.rs:162` / `open.rs:128` `zextunit!(0x5, false)`. The establishment
@@ -64,7 +64,7 @@ pub fn encode_lowlatency_ext() -> ExtEntryOwned {
 /// (`SessionLinkActions::negotiate_lowlatency_against_peer`) ANDs this against the
 /// local offer, reproducing zenoh `is_lowlatency &= other_ext.is_some()`.
 pub fn peer_offered_lowlatency(extensions: &[ExtEntryOwned]) -> bool {
-    chain_has_ext_id(extensions, LOWLATENCY_EXT_ID)
+    chain_has_ext_eid(extensions, LOWLATENCY_EXT_ID)
 }
 
 #[cfg(test)]

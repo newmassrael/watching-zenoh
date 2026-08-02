@@ -84,9 +84,9 @@ use wz::runtime_tokio::session_glue::{
     SessionTimeouts,
 };
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session_with_offer,
-    AcceptConfig, DialConfig, DialedLink, OpenError, OpenedSession, SessionOffer,
-    DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session_with_offer, accept_endpoint, dial_endpoint,
+    initiate_and_open_session_with_offer, AcceptConfig, DialConfig, DialedLink, OpenError,
+    OpenedSession, SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 
@@ -573,6 +573,8 @@ async fn establish_link(role: &Role) -> io::Result<DialedLink> {
             tls_key,
             quic_cert,
             quic_key,
+            // The SHM offer is staged at the OPEN, not at the link accept.
+            shm: _,
         } => {
             // R311pu/pv — delegate to the library accept seam (symmetric to the
             // Initiator's dial_endpoint), dissolving the inline TcpListener::bind.
@@ -1322,6 +1324,7 @@ async fn race_against_shutdown<O>(
 fn initiator_offer(
     #[allow(unused)] lowlatency: bool,
     #[allow(unused)] compression: bool,
+    #[allow(unused)] shm: bool,
 ) -> SessionOffer {
     #[allow(unused_mut)]
     let mut offer = SessionOffer::universal();
@@ -1332,6 +1335,29 @@ fn initiator_offer(
     #[cfg(feature = "session-extcompression")]
     if compression {
         offer = offer.with_compression(true);
+    }
+    // R311y505 — the SHM establishment capability (UNIT ext 0x2), staged on the
+    // same seam as its two siblings so all three compose.
+    #[cfg(feature = "session-extshm")]
+    if shm {
+        offer = offer.with_shm(true);
+    }
+    offer
+}
+
+/// R311y505 — the ACCEPT-side offer. Only SHM is staged here: `lowlatency` and
+/// `compression` are initiator-only in this demo (their doc comments say so), and
+/// widening them would change what every existing acceptor lane puts on the wire.
+///
+/// Returns `SessionOffer::universal()` when the flag is off or `session-extshm` is
+/// unbuilt, which is exactly what `accept_and_open_session` passes — so the
+/// acceptor path is unchanged for every caller that does not ask for SHM.
+fn acceptor_offer(#[allow(unused)] shm: bool) -> SessionOffer {
+    #[allow(unused_mut)]
+    let mut offer = SessionOffer::universal();
+    #[cfg(feature = "session-extshm")]
+    if shm {
+        offer = offer.with_shm(true);
     }
     offer
 }
@@ -1480,10 +1506,18 @@ pub(crate) async fn run_demo(
         _ => {
             let dialed = establish_link(&role).await?;
             let opened = match &role {
-                Role::Acceptor { .. } => {
-                    accept_and_open_session(
+                // R311y505 — the accept side now goes through the OFFER seam too,
+                // so `--shm` stages the establishment capability before the
+                // handshake drives. `acceptor_offer` yields
+                // `SessionOffer::universal()` when the flag is absent or the atom
+                // is unbuilt, so every existing acceptor lane is byte-identical to
+                // the `accept_and_open_session` call this replaces (that helper is
+                // itself a thin wrapper over the same `_with_offer` entrypoint).
+                Role::Acceptor { shm, .. } => {
+                    accept_and_open_session_with_offer(
                         dialed,
                         params,
+                        acceptor_offer(*shm),
                         session_clock,
                         None,
                         DEFAULT_OPEN_TICK_MS,
@@ -1504,8 +1538,9 @@ pub(crate) async fn run_demo(
                         Role::Initiator {
                             lowlatency,
                             compression,
+                            shm,
                             ..
-                        } => initiator_offer(*lowlatency, *compression),
+                        } => initiator_offer(*lowlatency, *compression, *shm),
                         _ => SessionOffer::universal(),
                     };
                     open_initiator_with_offer(offer, dialed, params, session_clock).await
@@ -1582,6 +1617,28 @@ pub(crate) async fn run_demo(
                     "wz-ap-demo: batch compression active = {}",
                     opened.actions.compresses_batches()
                 );
+            }
+            // R311y505 — WITNESS the negotiated SHM capability, and it is the line
+            // the cross-impl leg reads. `is_shm()` is `local_offer && peer_offer`,
+            // so against a real zenohd it must come back FALSE: zenoh's `Shm` is
+            // `zextzbuf!(0x2, false)` (header 0x42) while wz offers a UNIT at the
+            // same numeric id (header 0x02), and a zenoh extension's identity is
+            // `eid = header & !FLAG_Z` — encoding bits included. zenoh reuses that
+            // pattern itself (`QoS = zextunit!(0x1)` beside
+            // `QoSLink = zextz64!(0x1)`), so the two are DIFFERENT extensions in
+            // one TLV space, not one extension read two ways. A `false` here with
+            // the session still Established is the fail-safe outcome; a `true`
+            // would mean wz believed a peer that cannot map its segments.
+            // BOTH roles, unlike the compression witness above: the accept side is
+            // the only one a real zenoh `Shm` ext ever reaches (zenoh replies with
+            // one only to an offer it understood), so an initiator-only witness
+            // would report on the arm that cannot fail.
+            #[cfg(feature = "session-extshm")]
+            if matches!(
+                &role,
+                Role::Initiator { shm: true, .. } | Role::Acceptor { shm: true, .. }
+            ) {
+                log::info!("wz-ap-demo: shm negotiated = {}", opened.actions.is_shm());
             }
             log::info!("wz-ap-demo: session Established; entering steady state");
             DriveSource::OneShot(Box::new(opened))

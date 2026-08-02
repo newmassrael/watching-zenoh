@@ -495,6 +495,19 @@ transport-lowlatency = ["wz/transport-lowlatency"]
 # `transport/unicast/compression/enabled` is on. The atom is active <=> its cfg
 # site in runner.rs (the `--compression` open branch).
 session-extcompression = ["wz/session-extcompression"]
+# R311y505 (session-extshm) — opt-in SHM establishment CAPABILITY, forwarding the
+# wz facade's `session-extshm` (which pulls `transport-shm`, so one demo feature
+# carries both: the UNIT ext at establishment id 0x2 on the InitSyn and the
+# descriptor-on-the-wire data path a negotiated session would then use).
+#
+# The exact mirror of `session-extcompression` above, and it exists for the same
+# reason that one does: the library seam has been complete since R3b
+# (`SessionOffer::with_shm`, `connect_and_open_session_with_shm`) and NO spawnable
+# binary ever set it, so wz's one occupant of zenoh's establishment ext space had
+# never faced a foreign decoder. NOT in `default`; only the Layer Z leg builds it,
+# to dial `--connect <zenohd> --shm` and witness the negotiation resolving to OFF
+# with the session still Established.
+session-extshm = ["wz/session-extshm"]
 # R311y218 (transport-qos) — opt-in QoS transport on the `--peer` mesh mode: `--qos`
 # offers it, routed through `WzConfig.qos` into `FaceSources.qos` and staged by the
 # `_with_multilink` entrypoints. Pulls `routing-peer` (the run-mode that hosts the

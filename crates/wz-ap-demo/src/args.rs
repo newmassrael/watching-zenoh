@@ -59,6 +59,18 @@ pub(crate) enum Role {
         /// by `establish_link`'s Acceptor arm (`build_accept_config`, runner.rs).
         quic_cert: Option<String>,
         quic_key: Option<String>,
+        /// R311y505 — `--shm` on the ACCEPT side, and it is the arm that matters.
+        ///
+        /// zenoh sends its `Shm` challenge on the InitSyn unconditionally when the
+        /// feature is built (`establishment/open.rs:152`), but on the InitAck only
+        /// in REPLY to one it understood (`ext/shm.rs:455` returns `None` for an
+        /// absent input). So a wz that only DIALS never receives a real zenoh
+        /// `Shm` ext, and the question that matters — does wz's
+        /// `peer_offered_shm` mistake zenoh's ZBuf@0x2 for its own UNIT@0x2 —
+        /// stays untested. Only a wz ACCEPTOR that a zenohd dials gets that ext
+        /// on the wire, and only one that OFFERS starts from `is_shm = true`, so
+        /// a false positive is visible as `true` instead of `false`.
+        shm: bool,
     },
     /// R311y365 — `tls_ca` is the `--tls-ca <path>` root-CA PEM a `tls/...`
     /// --connect verifies zenoh's/the peer's server cert against (server name
@@ -120,6 +132,21 @@ pub(crate) enum Role {
         /// is gone and the guard went with it. On a lean link the negotiated wrap
         /// is INERT in wz exactly as in zenoh.
         compression: bool,
+        /// R311y505 — `--shm` offers the SHM establishment capability on the
+        /// InitSyn: a UNIT ext at id 0x2 (`extshm::SHM_ESTABLISHMENT_EXT_ID`),
+        /// ANDed against whatever the peer reflects.
+        ///
+        /// It exists to put that offer in front of a FOREIGN peer, which nothing
+        /// could do before: the library has carried
+        /// `SessionOffer::with_shm` and `connect_and_open_session_with_shm` since
+        /// R3b, but no spawnable binary ever set them, so the one extension wz
+        /// places in zenoh's establishment ext space had never been on a wire a
+        /// real zenohd read.
+        ///
+        /// Same `initiator_offer` seam as `lowlatency` / `compression`:
+        /// feature-uniform, inert when `session-extshm` is unbuilt,
+        /// initiator-only and one-shot-only. Combinable with both.
+        shm: bool,
     },
 }
 

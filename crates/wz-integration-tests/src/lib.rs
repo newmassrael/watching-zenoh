@@ -819,6 +819,32 @@ pub mod common {
         path
     }
 
+    /// Locate the SHARED-MEMORY-enabled `zenohd` (R311y505): the
+    /// `WZ_ZENOHD_SHM_BIN` env override, else `scripts/build-zenohd.sh
+    /// ZENOHD_SHM=1`'s `target/zenohd-shm/zenohd` install.
+    ///
+    /// A SEPARATE binary for the same reason as its two siblings — `shared-memory`
+    /// is absent from zenoh's `default` set (`zenoh/Cargo.toml:34-46`) and
+    /// zenohd's default is `zenoh/default` — but here the separation is what makes
+    /// a whole question ASKABLE rather than merely convenient. The stock oracle has
+    /// no `init::ext::Shm` compiled in at all, so it can neither send zenoh's SHM
+    /// challenge nor react to wz's offer; pointing wz at it proves only that an
+    /// unknown UNIT ext is skippable. Every SHM interop claim needs THIS binary,
+    /// and R311y505's defect (wz reading zenoh's `Shm` ZBuf as its own UNIT offer)
+    /// is invisible without it.
+    ///
+    /// Returns `None` rather than panicking: unlike the unixpipe oracle this one
+    /// is not provisioned in hosted CI, so its legs SKIP where it is absent (the
+    /// vsock precedent).
+    pub fn zenohd_shm_binary() -> Option<PathBuf> {
+        if let Ok(p) = std::env::var("WZ_ZENOHD_SHM_BIN") {
+            let p = PathBuf::from(p);
+            return p.is_file().then_some(p);
+        }
+        let path = project_root().join("target/zenohd-shm/zenohd");
+        path.is_file().then_some(path)
+    }
+
     /// Locate the VSOCK-enabled `zenohd` (R311y400): the `WZ_ZENOHD_VSOCK_BIN`
     /// env override, else `scripts/build-zenohd.sh ZENOHD_VSOCK=1`'s
     /// `target/zenohd-vsock/zenohd` install. A SEPARATE binary from

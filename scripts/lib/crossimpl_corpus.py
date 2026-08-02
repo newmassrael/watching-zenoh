@@ -74,6 +74,11 @@ FOREIGN_ROOTS = {
     "zenohd_binary": "zenohd",
     "zenohd_unixpipe_binary": "zenohd",
     "zenohd_vsock_binary": "zenohd",
+    # R311y505 — the shared-memory-enabled variant, the third of the same shape.
+    # It is the ONLY oracle that carries `init::ext::Shm` at all (zenoh's `default`
+    # omits `shared-memory`), so every §5.1/§5.13 SHM establishment claim rests on
+    # it and a test that spawns it IS a foreign zenohd witness.
+    "zenohd_shm_binary": "zenohd",
     # R311y442 — the zenoh-ext EXAMPLE applications (`z_advanced_pub` /
     # `z_advanced_sub`), a class of their own rather than more `zenohd` roots.
     # They are the real zenoh-full Rust stack at the pinned version, but they are
