@@ -48,12 +48,26 @@
 //! ABIs, one model; see that crate's docs for why duplicating it was the worse
 //! option.
 
+// zenoh-c's type names are snake_case (`z_sample_kind_t`,
+// `z_closure_sample_callback_t`); reproducing the ABI names VERBATIM is the
+// whole claim of this crate, so the camel-case convention does not apply to its
+// surface. Its sibling `wz-capi-pico` carries the same allow for the same
+// reason. Until R311y500 the crate compiled without it by accident — every
+// snake_case name it had came out of `define_opaque!`, and the lint does not
+// fire on macro-generated identifiers — so this is not a relaxation of what was
+// being enforced.
+#![allow(non_camel_case_types)]
+
 pub mod abi;
 pub mod bytes;
 pub mod config;
 mod ffi;
 pub mod keyexpr;
 pub mod log;
+pub mod platform;
 pub mod put;
 pub mod result;
+pub mod sample;
 pub mod session;
+pub mod string;
+pub mod sub;

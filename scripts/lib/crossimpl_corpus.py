@@ -106,6 +106,15 @@ WZ_BINARY_ROOTS = {
     # that PRODUCES the .so, not against this test crate's own dev-dep graph
     # (which cannot contain the atom -- see feature_closure.binary_closure).
     "wz_capi_pico_cdylib": "wz-capi-pico",
+    # R311y500 — the §5.27 `api-compat-c` artifact, the zenoh-c ABI twin of the
+    # entry above and here for the identical reason: a foreign C program linked
+    # against WZ's cdylib is external-but-not-foreign, because the implementation
+    # answering every `z_*` call is wz's. Its foreignness has to come from the
+    # counterparty, which for both legs of the interop file is a real pico CLI.
+    # Omitting this maps the file to IN_PROCESS_PKG and A4-5 then checks
+    # `api-compat-c` against this test crate's dev-dep graph, which cannot contain
+    # it — a true claim refuted by a missing dict entry.
+    "wz_capi_c_cdylib": "wz-capi-c",
 }
 # A test that spawns no wz binary exercises the library in-process, i.e. the test
 # crate's own (dev-dependency) feature graph.

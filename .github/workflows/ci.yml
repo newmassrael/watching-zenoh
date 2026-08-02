@@ -337,6 +337,25 @@ jobs:
       - name: Layer C1 — cargo test --workspace
         run: bash scripts/run-ci.sh --layer C1
 
+      - name: Build zenoh-pico CLI binaries (Layers C1cc + E dep)
+        # R121c yml sync — Layer E spawns target/zenoh-pico-cli/z_put
+        # against the wz-ap-demo binary's TCP --listen endpoint. The
+        # CLI binaries are built from the vendored zenoh-pico
+        # submodule via scripts/build-zenoh-pico-cli.sh; local
+        # developers run this on demand, CI builds them every run
+        # since the Swatinem cache covers `crates -> target` +
+        # `vendor/sce -> target` only.
+        #
+        # R311y500 MOVED IT UP, from just above Layer E to here. C1cc gained two
+        # legs that put a REAL pico CLI opposite the zenoh-c ABI, and it runs ~170
+        # lines before this step used to. Provisioning a lane's oracle AFTER the
+        # lane is not a slow oracle, it is an absent one: `zenoh_pico_cli_binary`
+        # panics, and C1cc runs under WZ_C1CC_REQUIRE=1, so it would have redded
+        # hosted CI on the first push. Nothing between here and the old position
+        # ordered against it — every step in between is an independent lane
+        # invocation and this one is pure provisioning.
+        run: bash scripts/build-zenoh-pico-cli.sh
+
       - name: Cache the zenoh-c oracle (pinned 1.5.0)
         # zenoh-c 1.5.0 is a FIXED upstream release, so headers + libzenohc.so +
         # the example clone are a pure function of the version — cache the
@@ -522,16 +541,6 @@ jobs:
         # (this tree has a macOS-only io-kit-sys) is reported and skipped, because
         # a lane that conflates the two is one that gets disabled.
         run: bash scripts/run-ci.sh --layer L
-
-      - name: Build zenoh-pico CLI binaries (Layer E dep)
-        # R121c yml sync — Layer E spawns target/zenoh-pico-cli/z_put
-        # against the wz-ap-demo binary's TCP --listen endpoint. The
-        # CLI binaries are built from the vendored zenoh-pico
-        # submodule via scripts/build-zenoh-pico-cli.sh; local
-        # developers run this on demand, CI builds them every run
-        # since the Swatinem cache covers `crates -> target` +
-        # `vendor/sce -> target` only.
-        run: bash scripts/build-zenoh-pico-cli.sh
 
       - name: Build wz-ap-demo binary (Layer E dep)
         run: (cd crates && cargo build -p wz-ap-demo)
@@ -961,6 +970,39 @@ jobs:
 
       - name: Build zenoh-pico CLI binaries
         run: bash scripts/build-zenoh-pico-cli.sh
+
+      - name: Cache the zenoh-c oracle (pinned 1.5.0)
+        # A SECOND copy of the `ci` job's cache step, on purpose: this job is where
+        # zenohd lives, and Layer C1cd needs the zenoh-c headers + examples AND
+        # zenohd AND the pico CLIs at once. The key is identical to the other
+        # job's, so the two share one cache entry rather than populating two.
+        id: zenoh-c-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/include
+            ~/.local/lib/libzenohc.so
+            ~/zenoh-c-ref
+          key: zenoh-c-1.5.0-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh') }}
+
+      - name: Provision the zenoh-c oracle (cache miss only)
+        if: steps.zenoh-c-cache.outputs.cache-hit != 'true'
+        run: bash scripts/install-zenoh-c.sh
+
+      - name: Layer C1cd — §5.27 api-compat-c attachment, pico + zenohd
+        # R311y500. HERE and not beside C1cc, and the placement is the whole
+        # reason the lane is separate: the leg needs a real zenohd, which ci.yml
+        # builds on THIS job only. In the `ci` job it would skip forever, and a
+        # skip is green.
+        #
+        # WZ_C1CD_REQUIRE=1 because this job provisions all three oracles above.
+        # The leg is the only cross-impl witness `z_sample_attachment`'s PRESENT
+        # arm has: pico's attachment publisher goes through a declared publisher,
+        # which needs a router in the path, so the C1cc legs structurally cannot
+        # carry it.
+        env:
+          WZ_C1CD_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer C1cd
 
       - name: Layer E2 — facade-subset e2e vs zenoh-pico CLIs
         # The six wz-e2e-* SUBSET binaries: each pins an explicit atom list and

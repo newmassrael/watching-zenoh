@@ -135,6 +135,15 @@ def binary_closure(binary: str) -> frozenset[str]:
         # that pulls it in belongs to the facade above it. So the closure of the
         # artifact is the closure of the build that emits it.
         return closure("wz", ("api-compat-pico",))
+    if binary == "wz-capi-c":
+        # Same shape and same reason as its pico twin above: `api-compat-c`'s only
+        # cfg site is the facade's (`crates/wz/src/lib.rs`), and the wz-capi-c
+        # package declares no feature by that name. The two ABIs are mutually
+        # exclusive (the facade `compile_error!`s on both), so this is a SECOND
+        # single-feature build rather than a wider one — asking for both at once
+        # would not compile, which is exactly why each artifact gets its own
+        # closure here instead of one union.
+        return closure("wz", ("api-compat-c",))
     return closure(binary)
 
 

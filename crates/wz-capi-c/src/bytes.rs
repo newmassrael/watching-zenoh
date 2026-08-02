@@ -12,13 +12,37 @@
 
 use std::ffi::{c_char, CStr};
 
-use crate::abi::{z_moved_bytes_t, z_owned_bytes_t, Handle};
+use crate::abi::{z_loaned_bytes_t, z_moved_bytes_t, z_owned_bytes_t, z_owned_string_t, Handle};
 use crate::ffi::guarded;
 use crate::result::{ZResult, Z_ENULL, Z_EPARSE, Z_OK};
+use crate::string::owned_string_from;
 
 /// The owned payload behind a bytes handle.
 pub(crate) struct BytesState {
     pub(crate) payload: Vec<u8>,
+}
+
+/// Read the bytes behind a LOANED handle.
+///
+/// Every loaned bytes in this crate — the one `z_sample_payload` hands out and
+/// the one `z_sample_attachment` does — points at a [`BytesState`], so there is
+/// one meaning for the handle slot and this one reader serves all of them.
+///
+/// # Safety
+/// `this_` must be null, or a valid loaned bytes whose handle slot holds a live
+/// `BytesState` pointer.
+pub(crate) unsafe fn bytes_slice<'a>(this_: *const z_loaned_bytes_t) -> Option<&'a [u8]> {
+    if this_.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let handle = unsafe { (*this_).handle };
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: as above — a live `BytesState`, either leaked by this crate or
+    // borrowed from a `SampleMarshal` that outlives the callback.
+    Some(&unsafe { &*(handle as *const BytesState) }.payload)
 }
 
 /// Take the payload out of a MOVED bytes, leaving a gravestone.
@@ -66,6 +90,37 @@ pub unsafe extern "C" fn z_bytes_from_static_str(
             payload: text.as_bytes().to_vec(),
         })) as Handle;
         unsafe { *this_ = z_owned_bytes_t::from_handle(handle) };
+        Z_OK
+    })
+}
+
+/// Copy the payload into an owned string (zenoh-c `z_bytes_to_string`).
+///
+/// The bytes are NOT validated as UTF-8, deliberately: upstream converts a byte
+/// run to a *non-null-terminated* string and prints it with `%.*s`, so rejecting
+/// a non-UTF-8 payload here would make wz refuse a sample zenoh-c delivers. wz's
+/// string carries bytes and a length for the same reason.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned bytes; `dst` must be valid and
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_to_string(
+    this_: *const z_loaned_bytes_t,
+    dst: *mut z_owned_string_t,
+) -> ZResult {
+    guarded(|| {
+        if dst.is_null() {
+            return Z_ENULL;
+        }
+        // Initialised before any fallible work, so a caller that ignores the code
+        // sees an empty string rather than a stale stack value.
+        unsafe { *dst = z_owned_string_t::null_value() };
+        // SAFETY: the caller's contract.
+        let Some(bytes) = (unsafe { bytes_slice(this_) }) else {
+            return Z_ENULL;
+        };
+        unsafe { *dst = owned_string_from(bytes) };
         Z_OK
     })
 }

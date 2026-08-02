@@ -251,21 +251,30 @@ fn upstream_z_put_links_against_wz_capi_c_and_a_real_wz_subscriber_receives_it()
 #[test]
 #[ignore = "compiles a C probe against the machine-local zenoh-c headers; run-ci \
             Layer C1cc drives it"]
-fn the_wz_type_footprints_equal_upstreams_on_this_installation() {
+fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
     let Some((include, _libdir_ref, _examples)) = oracle_or_note() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir for the layout probe");
     let src = dir.path().join("layout.c");
+    // R311y500 widened this probe by three. The subscriber slice added types the
+    // C side STACK-ALLOCATES — `z_sub.c` declares a `z_owned_subscriber_t`, a
+    // `z_owned_closure_sample_t`, a `z_view_string_t` and a `z_owned_string_t` as
+    // locals — and a stack-allocated type whose size wz gets wrong corrupts the
+    // caller's frame rather than failing anything. The closure is the sharpest of
+    // them: it is TRANSPARENT in upstream's header, so it must match field for
+    // field and not merely in total.
     std::fs::write(
         &src,
         r#"#include <stdio.h>
 #include "zenoh.h"
 int main(void) {
-    printf("%zu %zu %zu %zu %zu\n",
+    printf("%zu %zu %zu %zu %zu %zu %zu %zu\n",
         sizeof(z_owned_session_t), sizeof(z_owned_bytes_t),
         sizeof(z_view_keyexpr_t), sizeof(z_owned_config_t),
-        _Alignof(z_owned_session_t));
+        _Alignof(z_owned_session_t),
+        sizeof(z_owned_subscriber_t), sizeof(z_owned_string_t),
+        sizeof(z_owned_closure_sample_t));
     return 0;
 }
 "#,
@@ -291,12 +300,17 @@ int main(void) {
     let text = String::from_utf8_lossy(&out.stdout);
     let upstream: Vec<usize> = text
         .split_whitespace()
-        .map(|t| t.parse().expect("the probe prints five integers"))
+        .map(|t| t.parse().expect("the probe prints eight integers"))
         .collect();
-    assert_eq!(upstream.len(), 5, "probe output: {text:?}");
+    assert_eq!(upstream.len(), 8, "probe output: {text:?}");
 
     // What the SHIPPED cdylib says about itself, read through its own export
     // rather than re-transcribed here.
+    // Kept field-for-field in step with `wz_capi_c::abi::wz_capi_c_layout_t`. It
+    // MUST NOT be narrower than the exported struct: the cdylib writes through
+    // this pointer, so a stale copy here is a stack overwrite in the test process
+    // — silent, and worse than the drift it would be standing in for. Widening
+    // that struct means widening this one in the same commit.
     #[repr(C)]
     struct Layout {
         session: usize,
@@ -304,6 +318,9 @@ int main(void) {
         keyexpr: usize,
         config: usize,
         align: usize,
+        subscriber: usize,
+        string: usize,
+        closure_sample: usize,
     }
     let lib = wz_capi_c_cdylib();
     // SAFETY: loading wz's own freshly built cdylib and calling its documented
@@ -319,9 +336,21 @@ int main(void) {
             keyexpr: 0,
             config: 0,
             align: 0,
+            subscriber: 0,
+            string: 0,
+            closure_sample: 0,
         };
         f(&mut out);
-        [out.session, out.bytes, out.keyexpr, out.config, out.align]
+        [
+            out.session,
+            out.bytes,
+            out.keyexpr,
+            out.config,
+            out.align,
+            out.subscriber,
+            out.string,
+            out.closure_sample,
+        ]
     };
 
     // WHICH zenoh-c build this is. `Z_FEATURE_UNSTABLE_API` changes type SIZES,
@@ -346,6 +375,9 @@ int main(void) {
         "z_view_keyexpr_t",
         "z_owned_config_t",
         "align",
+        "z_owned_subscriber_t",
+        "z_owned_string_t",
+        "z_owned_closure_sample_t",
     ];
     for (i, name) in names.iter().enumerate() {
         assert_eq!(

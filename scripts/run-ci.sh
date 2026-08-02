@@ -1267,7 +1267,7 @@ import pathlib, re, sys
 # check has to fail LOUD if the two drift, and the drift itself is caught by the
 # self-check below, which requires every token to appear in that skip block.
 TOKENS = ["wz_e2e_", "multicast", "zenohd", "wz_router", "wz_peer",
-          "wz_storage_host", "zenoh_ext", "inert"]
+          "wz_storage_host", "zenoh_ext", "inert", "capi_c"]
 
 runci = pathlib.Path("scripts/run-ci.sh").read_text()
 missing = [t for t in TOKENS if f"--skip {t}" not in runci]
@@ -5504,10 +5504,23 @@ layer_e_ap_demo_round_trip() {
     # querier legs die at argv (no `--query-params` / `--query-attachment` key) and the
     # reply-err leg silently answers nothing. Measured, not assumed: dropping
     # `--skip apfull` takes this sweep 59 -> 64 and names exactly those five.
+    # R311y500 — `capi_c`, and this one excludes for an ARTIFACT reason rather than
+    # an argv one. The §5.27 zenoh-c legs run against `libwz_capi_c.so`, and WHICH
+    # ABI that file holds depends on the last lane that built it: Layer C1cc picks
+    # the arm by reading `Z_FEATURE_UNSTABLE_API` out of the installed header, and
+    # Layer C4's preset matrix later rebuilds the same path with DEFAULT features.
+    # C4 sits between C1cc and this sweep in ci.yml, so without this token Layer E
+    # would compile upstream's examples against a header whose `z_owned_bytes_t` is
+    # 32 bytes and link them to a cdylib built for 40 — a stack-layout mismatch,
+    # reported as whatever it happened to corrupt. C1cc owns these four legs and
+    # owns the arm selection with them. The token is the same NAMING OBLIGATION the
+    # families above carry, and R311y500 renamed both fixtures and one test fn so
+    # every fn in the family contains `capi_c`; Layer C0's naming gate lists the
+    # token, so a future leg that omits it fails there rather than here.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
-        --skip wz_plugin)
+        --skip wz_plugin --skip capi_c)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -8649,20 +8662,31 @@ layer_e12_apfull_adminspace_pico() {
 # ways, requiring the same wz subscriber to observe both; and the COVERAGE report
 # prints how many of upstream's examples link, so a slice stays a measured
 # fraction rather than a declared milestone.
-layer_c1cc_api_compat_c() {
-    # WHICH ABI to build. zenoh-c's own `Z_FEATURE_UNSTABLE_API` changes type
-    # SIZES (`z_owned_bytes_t` is 40 with it, 32 without), so "wz is a zenoh-c
-    # drop-in" is incomplete until the build is named. The lane reads the INSTALLED
-    # header and selects the matching arm rather than making every developer know
-    # which oracle they have — and the layout leg still checks the result, so a
-    # wrong selection here is caught rather than trusted.
+# Build the `wz-capi-c` cdylib for the ABI arm THIS MACHINE's oracle actually is.
+#
+# zenoh-c's own `Z_FEATURE_UNSTABLE_API` changes type SIZES (`z_owned_bytes_t` is
+# 40 with it, 32 without), so "wz is a zenoh-c drop-in" is incomplete until the
+# build is named. Reading the INSTALLED header beats making every developer know
+# which oracle they have — and C1cc's layout leg still checks the result, so a
+# wrong selection here is caught rather than trusted.
+#
+# A FUNCTION rather than a copy in each lane: R311y500 added a second consumer
+# (C1cd, on the job that has zenohd), and two copies of an arm selection is two
+# places for the cdylib to be built for the wrong header. `$1` is the lane name,
+# for the message only.
+_runci_build_capi_c_for_oracle() {
+    local lane="$1"
     local capi_c_features=()
     local zc_configure="${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include/zenoh_configure.h"
     if [[ -f "$zc_configure" ]] && ! grep -q '^#define Z_FEATURE_UNSTABLE_API' "$zc_configure"; then
         capi_c_features=(--features zenoh-c-no-unstable-api)
-        echo "  Layer C1cc: oracle has no Z_FEATURE_UNSTABLE_API -> building wz-capi-c with zenoh-c-no-unstable-api"
+        echo "  Layer $lane: oracle has no Z_FEATURE_UNSTABLE_API -> building wz-capi-c with zenoh-c-no-unstable-api"
     fi
-    (cd crates && cargo build -p wz-capi-c "${capi_c_features[@]}" --quiet) || return 1
+    (cd crates && cargo build -p wz-capi-c "${capi_c_features[@]}" --quiet)
+}
+
+layer_c1cc_api_compat_c() {
+    _runci_build_capi_c_for_oracle C1cc || return 1
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
     (cd crates && cargo clippy -p wz-capi-core --all-targets --quiet -- -D warnings) || return 1
     # BOTH ABI arms are clippy-gated, not just the one this oracle selects: the
@@ -8690,16 +8714,78 @@ layer_c1cc_api_compat_c() {
     # Named --exact one per invocation, like the E lanes: a rename or a silently
     # dropped test then fails the lane instead of shrinking it.
     for leg in \
-        the_wz_type_footprints_equal_upstreams_on_this_installation \
+        the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation \
         upstream_z_put_links_against_wz_capi_c_and_a_real_wz_subscriber_receives_it; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test zenoh_c_examples_on_wz_capi_dropin -- --ignored --quiet --test-threads=1 \
+            --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
+            --exact "$leg" || return 1
+    done
+    # R311y500 — the CROSS-IMPL half, and it is a different question from the
+    # three legs above. Those establish that upstream's program LINKS wz and that
+    # wz's answers match the real `libzenohc.so`; every byte on their wire was
+    # still produced and consumed by wz, which is why Layer A4 refused a proof
+    # annotation on that file and `api-compat-c` sat UNPROVEN. These two put a
+    # REAL zenoh-pico CLI on the far side, so the counterparty is a foreign
+    # implementation that shares no code with either end.
+    #
+    # They need the pico CLIs as well as the zenoh-c oracle; ci.yml builds them
+    # ahead of this lane (moved there in this same commit for exactly that
+    # reason). The oracle guard above covers the zenoh-c half and returns before
+    # reaching here when it is absent.
+    for leg in \
+        upstream_z_sub_on_wz_capi_c_receives_from_a_real_pico_zput \
+        upstream_z_put_on_wz_capi_c_reaches_a_real_pico_zsub \
+        upstream_z_delete_on_wz_capi_c_is_decoded_by_a_real_pico_zsub; do
+        _runci_guarded_test "C1cc $leg" 1 \
+            cargo test -p wz-integration-tests \
+            --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
     # REPORTED, never enforced — see the script's own header for why a ratchet
     # needs a committed baseline and is a separate decision.
     python3 scripts/lib/capi_c_coverage.py || return 1
+}
+
+# ─── Layer C1cd — §5.27 api-compat-c ATTACHMENT, pico + zenohd ──────
+#
+# R311y500. A SEPARATE lane from C1cc, and the split is about PROVISIONING, not
+# about tidiness: this leg needs a real zenohd as well as the zenoh-c oracle and
+# the pico CLIs, and ci.yml builds zenohd on the `interop` job only. Putting it in
+# C1cc — which runs on `ci` — would make it skip there forever, and a skip is
+# green.
+#
+# WHY THE ROUTER IS IN THE TOPOLOGY AT ALL. `z_sample_attachment`'s PRESENT arm
+# needs a foreign publisher that attaches, and the only pico example that does is
+# `z_pub_attachment`, which publishes through a DECLARED PUBLISHER. That path
+# delivers nothing in the client-to-listening-peer topology C1cc's legs use — not
+# to wz, and not pico-to-pico either. Measuring all four arms with a real zenohd
+# in the middle is what settled why: pico `z_pub` reaches a pico subscriber
+# through zenohd (3 of 3) AND through wz's own `--router-hat` (3 of 3), so the
+# declared-publisher path works and wz forwards it as the reference router does.
+# The earlier failures were the ABSENT ROUTER — a fact about the harness, not
+# about either implementation.
+#
+# The leg gains what C1cc's cannot have: TWO foreign implementations on the path.
+# pico encodes the attachment, zenohd routes it, and only the rendering is wz's.
+layer_c1cd_api_compat_c_attachment() {
+    if [[ ! -f "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include/zenoh.h" \
+       || ! -f "${WZ_ZENOH_C_EXAMPLES:-$HOME/zenoh-c-ref/examples}/z_sub.c" \
+       || ! -x target/zenohd/zenohd \
+       || ! -x target/zenoh-pico-cli/z_pub_attachment ]]; then
+        if [[ -n "${WZ_C1CD_REQUIRE:-}" ]]; then
+            echo "  Layer C1cd FAIL — required (WZ_C1CD_REQUIRE set) but an oracle is absent (zenoh-c headers+examples / zenohd / pico z_pub_attachment)" >&2
+            return 1
+        fi
+        echo "  Layer C1cd SKIP (needs the zenoh-c oracle AND zenohd AND the pico CLIs)"
+        return 0
+    fi
+    _runci_build_capi_c_for_oracle C1cd || return 1
+    _runci_guarded_test "C1cd attachment through zenohd" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \
+        --exact upstream_z_sub_on_wz_capi_c_renders_a_pico_attachment_through_zenohd \
+        || return 1
 }
 
 layer_c1bv_dynamic_volume_loading() {
@@ -9026,6 +9112,7 @@ run_layer L layer_l_lockfile_freshness || overall=1
 run_layer C1bp layer_c1bp_plugin_dynamic_loading || overall=1
 run_layer C1bv layer_c1bv_dynamic_volume_loading || overall=1
 run_layer C1cc layer_c1cc_api_compat_c || overall=1
+run_layer C1cd layer_c1cd_api_compat_c_attachment || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1
