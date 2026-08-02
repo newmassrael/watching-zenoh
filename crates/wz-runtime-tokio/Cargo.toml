@@ -639,6 +639,12 @@ transport-lowlatency = ["wz-session-core/transport-lowlatency"]
 # (per-priority SN conduits + is_qos Init negotiation + Frame ext_qos wire).
 transport-qos = ["wz-session-core/transport-qos"]
 
+# session-extqos (R311y506) — forwards the z64 `init::ext::QoSLink` half of the
+# dual QoS establishment ext (priority-range + reliability metadata + the
+# directional containment). Pulls `transport-qos`, which is what the band
+# refines.
+session-extqos = ["transport-qos", "wz-session-core/session-extqos"]
+
 # transport-compression / session-extcompression — forward the session-core
 # lz4 batch wrap + the Z_EXT_COMPRESSION (0x6) handshake. AP/unicast (no MCU
 # forward, as session-extauth / transport-lowlatency are AP-only). NO new dep

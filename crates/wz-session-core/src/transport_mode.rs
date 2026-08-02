@@ -139,6 +139,18 @@ pub struct SessionOffer {
     /// upstream maps SHM on the lean path in both directions
     /// (`unicast/lowlatency/tx.rs:33`, `rx.rs:40`).
     pub shm: bool,
+    /// session-extqos (R311y506) — the link's QoS METADATA (priority band +
+    /// reliability class), zenoh's endpoint `prio=` / `rel=` metadata read into
+    /// `State::QoS { .. }` at `StateOpen::new` / `StateAccept::new`.
+    ///
+    /// `None` (the default) keeps the presence-only UNIT `QoS` ext on the wire;
+    /// `Some` switches the emit to the z64 `QoSLink` form and arms the
+    /// directional containment. It is a REFINEMENT of
+    /// [`TransportMode::Qos`], not an alternative to it: the ext is emitted only
+    /// on a session that also offers QoS, exactly as zenoh reaches the metadata
+    /// only inside the `is_qos` arm of `State::new`.
+    #[cfg(feature = "session-extqos")]
+    pub qos_link: Option<crate::extqos::QosLinkState>,
 }
 
 impl SessionOffer {
@@ -150,6 +162,8 @@ impl SessionOffer {
             mode: TransportMode::Universal,
             compression: false,
             shm: false,
+            #[cfg(feature = "session-extqos")]
+            qos_link: None,
         }
     }
 
@@ -173,6 +187,17 @@ impl SessionOffer {
     #[must_use]
     pub const fn with_shm(mut self, shm: bool) -> Self {
         self.shm = shm;
+        self
+    }
+
+    /// session-extqos — declare this link's QoS priority band / reliability
+    /// class, switching the QoS ext from the presence-only UNIT form to the z64
+    /// `QoSLink`. Pair it with [`TransportMode::Qos`]: the metadata refines a
+    /// QoS transport rather than creating one.
+    #[cfg(feature = "session-extqos")]
+    #[must_use]
+    pub const fn with_qos_link(mut self, qos_link: crate::extqos::QosLinkState) -> Self {
+        self.qos_link = Some(qos_link);
         self
     }
 }

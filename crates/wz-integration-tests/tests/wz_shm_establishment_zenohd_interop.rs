@@ -196,7 +196,7 @@ fn wz_shm_offer_is_skipped_by_a_shm_enabled_zenohd_and_the_session_survives() {
 // wz-proves: session-extshm zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh + wz-ap-demo --features session-extshm); Layer Z runs via --ignored"]
-fn wz_does_not_read_a_real_zenoh_shm_zbuf_ext_as_its_own_unit_offer() {
+fn wz_does_not_read_a_real_zenohd_shm_zbuf_ext_as_its_own_unit_offer() {
     let Some(zenohd) = zenohd_shm_binary() else {
         eprintln!(
             "SKIP: no shared-memory zenohd at target/zenohd-shm/zenohd \

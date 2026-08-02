@@ -127,6 +127,25 @@ pub struct WzConfig {
     /// `max_links`), as the node's OFFER rather than the negotiated outcome.
     #[cfg(feature = "transport-qos")]
     pub qos: bool,
+    /// session-extqos (R311y506) — the QoS METADATA this node declares for its
+    /// links: the priority band it serves and/or the reliability class, zenoh's
+    /// endpoint `prio=` / `rel=` metadata (`Metadata::PRIORITIES` /
+    /// `Metadata::RELIABILITY`, `core/endpoint.rs:196-197`) read into
+    /// `State::QoS { .. }` by `StateOpen::new` / `StateAccept::new`.
+    ///
+    /// `None` (the default) keeps the presence-only UNIT `QoS` ext on the wire —
+    /// byte-identical to a `transport-qos`-only node. `Some` switches the emit to
+    /// the z64 `QoSLink` and arms the DIRECTIONAL containment, which can REFUSE a
+    /// peer: an acceptor demands the initiator's band be a subset of its own, an
+    /// initiator demands the acceptor's be a superset of its own. That refusal is
+    /// zenoh's, not a wz addition, and it is what makes the band an interop
+    /// contract rather than a hint.
+    ///
+    /// Meaningful only alongside [`Self::qos`] — zenoh reaches the endpoint
+    /// metadata only inside the `is_qos` arm of `State::new`, and the wz emit seam
+    /// applies the same guard, so metadata on a non-QoS node is inert.
+    #[cfg(feature = "session-extqos")]
+    pub qos_link: Option<wz_session_core::extqos::QosLinkState>,
 }
 
 impl Default for WzConfig {
@@ -148,6 +167,8 @@ impl Default for WzConfig {
             max_links: 1,
             #[cfg(feature = "transport-qos")]
             qos: false,
+            #[cfg(feature = "session-extqos")]
+            qos_link: None,
         }
     }
 }
@@ -173,10 +194,13 @@ pub use wz_session_core::session_actions::LinkReliabilityPref;
 /// zenoh's per-channel `select`). Re-exported from the no_std session kernel where
 /// [`LinkState`](wz_session_core::session_actions::LinkState) stores it, so the AP
 /// config surface and the kernel agree by construction (ONE type, no conversion at
-/// the `set_link_priority_range` seam). Gated `all(transport-multilink,
-/// transport-qos)` — the band is meaningful only when QoS negotiates a non-DEFAULT
-/// priority (else the reliability-only `select_link` applies).
-#[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
+/// the `set_link_priority_range` seam).
+///
+/// R311y506 — the gate WIDENED to `transport-qos` alone, following the kernel
+/// type it re-exports. The band has a SECOND consumer now: it is also the body of
+/// the `init::ext::QoSLink` establishment ext (`session-extqos`), which needs no
+/// multilink. Upstream uses one `PriorityRange` for both, and so does wz.
+#[cfg(feature = "transport-qos")]
 pub use wz_session_core::session_actions::LinkPriorityRange;
 
 impl WzConfig {
@@ -380,6 +404,31 @@ impl WzConfig {
         #[cfg(feature = "transport-qos")]
         fields.push(("qos", self.qos.to_string()));
 
+        // session-extqos (R311y506) — the declared QoS link metadata, rendered as
+        // zenoh's own endpoint-metadata spelling (`prio=start-end`, `rel=0|1`) so
+        // an operator reading the adminspace sees the SAME string they would put
+        // on a zenoh endpoint. Absent when nothing is declared, which is the
+        // UNIT-ext-on-the-wire case.
+        #[cfg(feature = "session-extqos")]
+        let qos_link_rendered = self.qos_link.map(|s| {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(p) = s.priorities {
+                parts.push(format!(
+                    "prio={}-{}",
+                    p.start().wire_byte(),
+                    p.end().wire_byte()
+                ));
+            }
+            if let Some(r) = s.reliability {
+                parts.push(format!("rel={}", r as u8));
+            }
+            format!("\"{}\"", parts.join(";"))
+        });
+        #[cfg(feature = "session-extqos")]
+        if let Some(rendered) = qos_link_rendered.as_deref() {
+            fields.push(("qos_link", rendered.to_string()));
+        }
+
         // serde_json-BTreeMap alphabetical key order. R311y53 — an explicit sort (vs
         // the prior push-in-order assumption) so a new field is just "push it" with no
         // position bookkeeping (downsampling/low_pass sort MID-object, between
@@ -429,6 +478,21 @@ impl WzConfig {
     #[cfg(feature = "transport-qos")]
     pub fn with_qos(mut self, qos: bool) -> Self {
         self.qos = qos;
+        self
+    }
+
+    /// session-extqos (R311y506) — declare this node's QoS link metadata (the
+    /// priority band / reliability class it serves), the builder twin of the
+    /// `pub qos_link` field. Also turns [`Self::qos`] ON, because the metadata is
+    /// meaningless without the offer that carries it: zenoh reads the endpoint
+    /// metadata only inside the `is_qos` arm of `State::new`, so a band declared
+    /// on a NoQoS node would be silently dropped rather than negotiated. Making
+    /// the implication structural here means a caller cannot express that
+    /// no-op combination by accident.
+    #[cfg(feature = "session-extqos")]
+    pub fn with_qos_link(mut self, qos_link: wz_session_core::extqos::QosLinkState) -> Self {
+        self.qos_link = Some(qos_link);
+        self.qos = true;
         self
     }
 

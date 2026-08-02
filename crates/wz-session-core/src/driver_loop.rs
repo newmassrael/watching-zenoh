@@ -130,6 +130,19 @@ pub enum DriverLoopOutcome {
     /// a typed open error instead of folding it into `Terminal`.
     #[cfg(feature = "codec-init-body")]
     InitAckCapsRejected,
+    /// session-extqos (R311y506) — the peer's `init::ext::QoSLink` body could
+    /// not be reconciled with ours: its priority band is not on the required
+    /// side of the containment, its reliability contradicts ours, it carried
+    /// both QoS forms at once, or its z64 body is not a valid state encoding.
+    /// Every one of those is a `zerror!` bail-out inside zenoh's
+    /// `QoSFsm::recv_init_syn` / `recv_init_ack`, which `?`s out of the
+    /// establishment FSM and aborts the handshake — so the dispatcher has
+    /// already injected `FramingError` and the FSM tears the session down with
+    /// `CloseReason::Invalid`. Its own variant (the `InitAckCapsRejected`
+    /// pattern) so the open loop can map it to a typed open error rather than
+    /// folding it into `Terminal`.
+    #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
+    QosLinkRejected(crate::extqos::QosLinkError),
     /// R3b — a Z_EXT_AUTH method rejected the peer on a handshake recv stage
     /// (a bad usrpwd credential / unknown user / missing required sub-ext, or a
     /// malformed auth ext). The dispatcher has already injected `FramingError`

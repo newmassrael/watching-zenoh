@@ -248,6 +248,28 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                                 extensions,
                             ));
                         }
+                        // session-extqos — the z64 `QoSLink` half: merge the
+                        // peer's priority band / reliability into ours under
+                        // the DIRECTIONAL containment (acceptor on InitSyn
+                        // demands a subset, initiator on InitAck demands a
+                        // superset). Runs right after the `&=` above, so the
+                        // acceptor's InitAck reflects the MERGED band. A refusal
+                        // is a handshake abort upstream (zenoh `?`s the
+                        // `zerror!` out of the establishment FSM), so wz injects
+                        // `FramingError` — the `InitAckCapsRejected` pattern —
+                        // instead of degrading to a band neither side agreed to.
+                        #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
+                        if let InboundFrame::Init {
+                            is_ack, extensions, ..
+                        } = &frame
+                        {
+                            if let Err(err) =
+                                actions.negotiate_qos_link_against_peer(*is_ack, extensions)
+                            {
+                                engine.process_event(E::FramingError);
+                                return DriverLoopOutcome::QosLinkRejected(err);
+                            }
+                        }
                         // session-extcompression — the same `&=` merge for the
                         // Z_EXT_COMPRESSION offer on every admitted Init frame
                         // (zenoh `is_compression &= other_ext.is_some()`, both

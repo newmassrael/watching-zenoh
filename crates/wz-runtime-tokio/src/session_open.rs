@@ -2612,6 +2612,16 @@ pub enum OpenError {
     /// establishment FSM `?`-propagating the usrpwd verify error into a close.
     #[cfg(feature = "session-extauth")]
     AuthRejected(wz_session_core::auth_dispatch::AuthError),
+    /// session-extqos (R311y506) — the peer's `init::ext::QoSLink` could not be
+    /// reconciled with ours: a priority band on the wrong side of the
+    /// containment, a contradicting reliability, both QoS forms at once, or an
+    /// invalid z64 body. Every one is a `zerror!` bail-out inside zenoh's
+    /// `QoSFsm::recv_init_syn` / `recv_init_ack` that aborts establishment, so
+    /// the dispatcher took the `framing.error` arm (Closing with
+    /// `CloseReason::Invalid`) and the typed reason surfaces here rather than
+    /// folding into [`Self::Terminal`].
+    #[cfg(feature = "session-extqos")]
+    QosLinkRejected(wz_session_core::extqos::QosLinkError),
     /// R4a — the accept-side auth seam could not draw a fresh per-handshake
     /// challenge nonce from OS entropy (a sandbox without `/dev/urandom`). The
     /// handshake is aborted rather than reused with a stale nonce (the usrpwd /
@@ -2789,6 +2799,13 @@ pub(crate) async fn drive_open_loop(
                     #[cfg(feature = "session-extauth")]
                     DriverLoopOutcome::AuthRejected(e) => {
                         return Err(OpenError::AuthRejected(e));
+                    }
+                    // session-extqos — the QoSLink containment refused the peer;
+                    // the FSM is already Closing(Invalid). Same shape as the two
+                    // arms above, for both roles (they share this loop).
+                    #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
+                    DriverLoopOutcome::QosLinkRejected(e) => {
+                        return Err(OpenError::QosLinkRejected(e));
                     }
                     _ => {}
                 }

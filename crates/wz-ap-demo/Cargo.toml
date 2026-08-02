@@ -241,6 +241,21 @@ preset-ap-full = [
     "namespace",
     "transport-multilink",
     "transport-qos",
+    # R311y506 — the `--qos-band` / `--qos-rel` CLI surface. `wz/preset-ap-full`
+    # already listed `session-extqos`, so the AP-full BINARY compiles the z64
+    # `QoSLink` in; without this key the flags would be unreachable from argv on
+    # exactly the build that carries the atom, which is what Layer A5's
+    # apfull-membership rule refuses. NB `--qos-band` is refused at startup when
+    # combined with `--max-links > 1` (the multilink open path stages no
+    # SessionOffer), so on this preset the two are an either/or.
+    "session-extqos",
+    # R311y506 — `--shm`, for the identical reason and by the identical rule.
+    # `wz/preset-ap-full` has listed `session-extshm` (and `transport-shm`) since
+    # R311y505 added the demo key, but the demo's own preset never gained it, so
+    # Layer A5's apfull-membership arm has been RED on main since that round. It
+    # is one line and the same decision, so it lands here rather than being left
+    # for the SHM build round to trip over.
+    "session-extshm",
     "routing-router",
     "routing-routes",
     "routing-peer",
@@ -519,6 +534,17 @@ session-extshm = ["wz/session-extshm"]
 # demo arms do not offer it (the y218 scope boundary; priority segregation is y219).
 # NOT in `default`; active <=> its cfg sites in run_peer + main.rs.
 transport-qos = ["routing-peer", "wz/transport-qos"]
+# R311y506 (session-extqos) — `--qos-band START-END` / `--qos-rel 0|1` declare
+# this node's QoS link metadata (zenoh's endpoint `prio=` / `rel=`), which rides
+# the Init as the z64 `QoSLink` and arms the DIRECTIONAL containment. Unlike
+# `--qos`, it reaches the wire on the SINGLE-link path too: a declared band routes
+# both the dial and the accept side through the `_with_offer` entrypoints. Pulls
+# `transport-qos` for the same reason that feature pulls `routing-peer` — the flag
+# is read in `run_peer`'s wiring, so a bare facade passthrough could enable the
+# feature with the run-mode compiled out (a silent NOP).
+# NOT in `default`; only the Layer Z leg builds it, to face a real zenohd whose
+# listen endpoint carries `?prio=`.
+session-extqos = ["transport-qos", "wz/session-extqos"]
 # R311y51 (§5.23 adminspace-write) — the permissions.write GATE on the config-write
 # host. SEPARATE from routing-peer (a distinct toggle) so both gate arms stay
 # compiled: `--features routing-peer,adminspace-write` = gate ON (run_peer consults

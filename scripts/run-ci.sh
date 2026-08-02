@@ -2228,7 +2228,12 @@ layer_c1af_cargo_test_shm() {
 # unaffected: neither shares the compose target's filter, so this pin did not
 # invalidate in a cluster (the R311y432 failure mode).
 layer_c1ag_cargo_test_transport_compose() {
-    _runci_guarded_test C1ag 1 cargo test -p wz-session-core --features transport-lowlatency,session-extcompression,session-extshm --lib unit_ext --quiet \
+    # R311y506 — the pin moved 1 -> 2. R311y505 added a SECOND test to
+    # `unit_ext` (`a_shared_id_with_another_encoding_is_a_different_extension`,
+    # the regression guard for reading a zenoh ZBuf@0x2 as wz's UNIT@0x2) without
+    # moving the count, which is precisely the drift this anchored guard exists to
+    # catch -- it has been red on main since that round.
+    _runci_guarded_test C1ag 2 cargo test -p wz-session-core --features transport-lowlatency,session-extcompression,session-extshm --lib unit_ext --quiet \
         || return 1
     _runci_guarded_test C1ag 1 cargo test -p wz-session-core --features transport-shm,codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --lib shm_put_with_no_resolver --quiet \
         || return 1
@@ -7062,6 +7067,25 @@ layer_z_zenohd_interop() {
     # Leg 2 is the one that earned the lane: it caught wz reading a real zenoh
     # `Shm` ZBuf (header 0x42) as its own UNIT offer at the same 4-bit id, which
     # negotiated SHM with a peer that had issued a challenge wz cannot answer.
+    # R311y506 — the `init::ext::QoSLink` interop (the z64 half of zenoh's dual QoS
+    # establishment ext: the link's priority band + reliability class, and the
+    # DIRECTIONAL containment that negotiates it). Four legs against the STOCK
+    # oracle above — `QoSLink` is not feature-gated in zenoh and its default config
+    # has `transport.unicast.qos.enabled = true`, so no variant build is needed.
+    #
+    # Three legs have zenohd DIAL wz, which is not a stylistic choice: zenoh seeds
+    # its QoS state from an ENDPOINT's `prio=`/`rel=` metadata, and on the ACCEPT
+    # side that endpoint is the accepted link's src locator, which zenoh-link-tcp
+    # builds with a hard-coded EMPTY metadata string (unicast.rs:103). A listening
+    # zenohd therefore has no band at all, and pointing wz at one witnesses nothing
+    # — measured first, and it accepted a deliberately non-subset band.
+    #
+    # The demo is rebuilt with `session-extqos` for these legs alone (the same
+    # one-shared-artifact-path treatment as the SHM lane above), and the test
+    # asserts the BUILD FEATURES line rather than trusting this invocation.
+    (cd crates && cargo build -p wz-ap-demo --features session-extqos --quiet) || return 1
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_qos_link_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     (cd crates && cargo build -p wz-ap-demo --features session-extshm --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_shm_establishment_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1

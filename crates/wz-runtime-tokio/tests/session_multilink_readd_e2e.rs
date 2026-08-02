@@ -37,7 +37,9 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceForwarder, FaceId, FaceSources};
+use wz_runtime_tokio::accept_loop::{
+    peer_loop, AcceptEvent, FaceForwarder, FaceId, FaceQosLink, FaceSources,
+};
 use wz_runtime_tokio::config::LinkReliabilityPref;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
@@ -226,6 +228,7 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
             mcast_members: None,
             mcast_group_subs: None,
             reconcile: None,
+            qos_link: FaceQosLink::default(),
             max_links: 2,
             qos: false,
         },

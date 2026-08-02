@@ -225,6 +225,17 @@ transport-compression = ["alloc", "dep:lz4_flex"]
 # refused at offer-injection (zenoh `manager.rs:264`).
 transport-qos = ["alloc", "codec-frame", "session-unicast"]
 
+# session-extqos (R311y506, extqos) — the z64 `init::ext::QoSLink` half of
+# zenoh's DUAL QoS establishment ext. `transport-qos` builds the presence-only
+# UNIT form (`zextunit!(0x1)`: "this peer does QoS"); this feature adds the z64
+# form (`zextz64!(0x1)`) that carries the link's PRIORITY RANGE + RELIABILITY
+# metadata, plus the directional containment that negotiates them (acceptor:
+# the initiator's band must be a SUBSET of mine; initiator: the acceptor's must
+# be a SUPERSET of mine; a mismatch ABORTS the handshake, as it does upstream).
+# Depends on `transport-qos` because zenoh emits `QoSLink` only from the
+# `State::QoS` arm — the band refines a QoS transport, it does not create one.
+session-extqos = ["transport-qos"]
+
 # R311y9 — per-session transport byte/message counters. Additive instrumentation
 # (4 AtomicUsize + 2 single-site increments at the send_wire/dispatch_link_event
 # seams + a public snapshot accessor); zero extra deps. Off by default; the

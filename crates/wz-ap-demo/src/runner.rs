@@ -2068,13 +2068,30 @@ fn log_face_event(node_label: &str, event: &wz::runtime_tokio::accept_loop::Acce
         // `peer` and `zid` fixed three while still stranding the fourth. Appending
         // after the group strands none, which is why the field sits there and not
         // where it would read more naturally.
-        AcceptEvent::FaceUp(face) => log::info!(
-            "wz-ap-demo {node_label}: face {} UP (peer {}, zid {}) whatami {:?}",
-            face.id.0,
-            face.peer,
-            zid_hex(face.peer_zid.as_deref()),
-            face.peer_whatami
-        ),
+        AcceptEvent::FaceUp(face) => {
+            log::info!(
+                "wz-ap-demo {node_label}: face {} UP (peer {}, zid {}) whatami {:?}",
+                face.id.0,
+                face.peer,
+                zid_hex(face.peer_zid.as_deref()),
+                face.peer_whatami
+            );
+            // R311y506 (session-extqos) — the NEGOTIATED QoS link metadata, in
+            // zenoh's endpoint-metadata spelling. Its own line, appended after the
+            // face line rather than folded into it, so a fixture pinning the
+            // existing UP line through its tail is unaffected.
+            //
+            // On a node that declared NOTHING this reports the PEER's band
+            // verbatim (the merge adopts an undeclared side's counterpart), which
+            // is what makes it a witness of the foreign wire: the values can only
+            // have come out of the peer's z64 `QoSLink` body.
+            #[cfg(feature = "session-extqos")]
+            log::info!(
+                "wz-ap-demo {node_label}: face {} qos link negotiated = {}",
+                face.id.0,
+                render_qos_link(&face.qos_link)
+            );
+        }
         AcceptEvent::FaceDown(face, outcome) => log::info!(
             "wz-ap-demo {node_label}: face {} DOWN (peer {}, {outcome:?})",
             face.id.0,
@@ -2261,6 +2278,32 @@ async fn run_router_until(
 /// parameter so the peer entry points stay within the argument-count limit
 /// (Introduce-Parameter-Object; the repo's `SessionDriveConfig` retired the same
 /// `clippy::too_many_arguments` allow). Consistent with [`crate::InterceptorOpts`].
+/// R311y506 (session-extqos) — render QoS link metadata in zenoh's OWN endpoint
+/// spelling (`prio=start-end;rel=0|1`, `Metadata::PRIORITIES` / `RELIABILITY`),
+/// so the declared-at-startup line and the negotiated-at-face-up line are
+/// directly comparable and an operator can paste either onto a zenoh endpoint.
+/// `none` when nothing is set — which is also what a presence-only UNIT ext
+/// negotiates to.
+#[cfg(feature = "session-extqos")]
+fn render_qos_link(state: &wz::runtime_tokio::extqos::QosLinkState) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(p) = state.priorities {
+        parts.push(format!(
+            "prio={}-{}",
+            p.start().wire_byte(),
+            p.end().wire_byte()
+        ));
+    }
+    if let Some(r) = state.reliability {
+        parts.push(format!("rel={}", r as u8));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(";")
+    }
+}
+
 /// R311y220 (transport-qos) — the QoS band a `--publish` peer originates its data
 /// Puts at, selected by `--express-high` / `--low`. Maps to the `(priority, express)`
 /// pair [`LinkstateForwarder::publish_qos`](wz::runtime_tokio::linkstate_forward)
@@ -2366,6 +2409,13 @@ pub(crate) struct PeerOpts {
     /// links (`--qos`). Routed through [`WzConfig::with_qos`] into `FaceSources.qos`.
     #[cfg(feature = "transport-qos")]
     pub qos: bool,
+    /// R311y506 (session-extqos) — the QoS link METADATA this peer declares
+    /// (`--qos-band` / `--qos-rel`). Routed through [`WzConfig::with_qos_link`]
+    /// into `FaceSources.qos_link`, which switches BOTH the dial and the accept
+    /// side onto the `_with_offer` entrypoints so the z64 `QoSLink` rides the Init.
+    /// `None` = undeclared (the presence-only UNIT ext, byte-identical to `--qos`).
+    #[cfg(feature = "session-extqos")]
+    pub qos_link: Option<wz::runtime_tokio::extqos::QosLinkState>,
     /// R311y220 (transport-qos) — the QoS band `--express-high` / `--low` select for
     /// the `--publish` origination (`None` = plain DEFAULT publish). Effective only on
     /// an aggregated QoS multilink session; a no-op band otherwise (the `is_qos()`
@@ -2425,6 +2475,8 @@ async fn run_peer_until(
     let max_links = opts.max_links;
     #[cfg(feature = "transport-qos")]
     let qos = opts.qos;
+    #[cfg(feature = "session-extqos")]
+    let qos_link = opts.qos_link;
     #[cfg(feature = "transport-qos")]
     let publish_band = opts.publish_band;
     use crate::args::NodeKind;
@@ -2801,6 +2853,14 @@ async fn run_peer_until(
     let cfg = cfg.with_max_links(max_links);
     #[cfg(feature = "transport-qos")]
     let cfg = cfg.with_qos(qos);
+    // R311y506 (session-extqos) — a declared band also turns the QoS offer ON
+    // (`with_qos_link` makes that implication structural), so it is applied AFTER
+    // `with_qos` and deliberately overrides a bare `--qos false`.
+    #[cfg(feature = "session-extqos")]
+    let cfg = match qos_link {
+        Some(state) => cfg.with_qos_link(state),
+        None => cfg,
+    };
     let wz_config = std::rc::Rc::new(std::cell::RefCell::new(cfg));
     {
         let cfg = wz_config.borrow();
@@ -2810,6 +2870,19 @@ async fn run_peer_until(
         );
         cfg.install_interceptors(&forwarder);
     }
+    // R311y506 (session-extqos) — echo the DECLARED QoS band in zenoh's own
+    // endpoint-metadata spelling, so a fixture can confirm the flag took effect
+    // (a band silently dropped would still open a healthy-looking session while
+    // proving nothing about the band asked for). `none` when undeclared, which is
+    // the presence-only UNIT ext on the wire.
+    #[cfg(feature = "session-extqos")]
+    log::info!(
+        "wz-ap-demo peer: qos link declared = {}",
+        match wz_config.borrow().qos_link {
+            None => "none".to_string(),
+            Some(state) => render_qos_link(&state),
+        }
+    );
     // R311y213 — echo the effective aggregation budget. `to_admin_json` above omits
     // max_links (it renders acl/read-at-open fields only), so this is the operator's
     // confirmation that --max-links took effect: `> 1` aggregates N links per peer
@@ -3106,6 +3179,23 @@ async fn run_peer_until(
                 {
                     false
                 }
+            },
+            // R311y506 (session-extqos) — the declared QoS band / reliability
+            // class, routed from `--qos-band` / `--qos-reliability` through the
+            // same shared WzConfig. Unconditional field (empty without the
+            // feature), so this bridge needs no outer cfg.
+            qos_link: wz::runtime_tokio::accept_loop::FaceQosLink {
+                // `Some` iff this node offers QoS at all (zenoh `State::QoS`),
+                // carrying whatever metadata `--qos-band` / `--qos-rel` declared
+                // — empty metadata is the presence-only UNIT ext. So under
+                // `session-extqos` a bare `--qos` reaches the wire on the SINGLE
+                // link too, which it could not before (the y218 scope boundary:
+                // `FaceSources.qos` is a multilink-path field).
+                #[cfg(feature = "session-extqos")]
+                state: {
+                    let cfg = wz_config.borrow();
+                    cfg.qos.then(|| cfg.qos_link.unwrap_or_default())
+                },
             },
         },
         params,
@@ -4025,6 +4115,12 @@ async fn run_router_hat_until(
             max_links: 1,
             #[cfg(feature = "transport-multilink")]
             qos: false,
+            // R311y506 (session-extqos) — a router-hat declares no QoS band. The
+            // `--qos-band` flags belong to the `--peer` mesh mode (run_peer),
+            // which is where the config lives; this run-mode has no reader for
+            // them, so the empty default is the honest value rather than a
+            // silently-dropped one.
+            qos_link: wz::runtime_tokio::accept_loop::FaceQosLink::default(),
         },
         params,
         TokioTime::new(),
@@ -4692,7 +4788,14 @@ pub(crate) async fn run_storage_host(
                 }
                 None => break, // graceful shutdown while idle
             };
-        let opened = match accept_and_open_session(
+        // R311y506 — FULLY QUALIFIED, not imported. This run mode is the only
+        // caller of the bare accept helper and it compiles only under
+        // `adminspace-config-hotreload`, so an unconditional `use` would be an
+        // unused import (denied) in every other build. The name was never
+        // imported at all, which is why `--features
+        // routing-peer,adminspace-write,adminspace-config-hotreload` (run-ci
+        // Layer C1am, arm 2) has been failing to compile on main.
+        let opened = match wz::runtime_tokio::session_open::accept_and_open_session(
             dialed,
             params.clone(),
             session_clock,
@@ -5290,6 +5393,8 @@ mod peer_quic_cert_tests {
             max_links: 1,
             #[cfg(feature = "transport-qos")]
             qos: false,
+            #[cfg(feature = "session-extqos")]
+            qos_link: None,
             #[cfg(feature = "transport-qos")]
             publish_band: None,
             tls_cert: None,
@@ -5376,6 +5481,8 @@ mod peer_failfast_tests {
             max_links: 1,
             #[cfg(feature = "transport-qos")]
             qos: false,
+            #[cfg(feature = "session-extqos")]
+            qos_link: None,
             #[cfg(feature = "transport-qos")]
             publish_band: None,
             tls_cert: None,

@@ -189,6 +189,7 @@ if [[ -n "$ZH" ]]; then
     # oracle), so skip the extra cdylib build for it.
     if [[ -n "$VARIANT_FEATURE" ]]; then
         SO_SRC=""
+        REST_SO_SRC=""
         EXT_EXAMPLES_SRC=""
     else
         echo "build-zenohd: building zenoh-plugin-storage-manager (release) ..." >&2
@@ -253,6 +254,7 @@ else
     SRC_BIN="$BUILD_DIR/cargo-install/bin/zenohd"
     # No plugin cdylib from `cargo install`; the A10 interop test SKIPs without it.
     SO_SRC=""
+    REST_SO_SRC=""
     # Nor the zenoh-ext examples: `cargo install` publishes zenohd's binaries only.
     EXT_EXAMPLES_SRC=""
 fi
@@ -267,6 +269,21 @@ if [[ -n "$SO_SRC" && -f "$SO_SRC" ]]; then
 else
     echo "build-zenohd: storage-manager plugin NOT provisioned (source B / crates.io);" >&2
     echo "  the wz<->zenohd storage replication interop test will SKIP." >&2
+fi
+# R311y506 — INSTALL the REST plugin cdylib. R311y501 built it and assigned
+# `REST_SO_SRC`, but no install step was ever written, so the variable was dead
+# (shellcheck SC2034, a Layer 0 red that had been reported as a lint) and the
+# `.so` never reached the oracle directory. The copy present on this machine was
+# placed there by hand, which is why the §5.26 legs passed while a FRESH clone
+# would have paid for the build and then had zenohd die at startup with exactly
+# the "Library file 'libzenoh_plugin_rest.so' not found" the build comment above
+# warns about. The lint was pointing at the defect, not at style.
+if [[ -n "$REST_SO_SRC" && -f "$REST_SO_SRC" ]]; then
+    install -m 0755 "$REST_SO_SRC" "$INSTALL_DIR/libzenoh_plugin_rest.so"
+    echo "build-zenohd: installed -> $INSTALL_DIR/libzenoh_plugin_rest.so" >&2
+else
+    echo "build-zenohd: REST plugin NOT provisioned (variant / source B);" >&2
+    echo "  a zenohd started with --rest-http-port will fail to load it." >&2
 fi
 if [[ -n "$EXT_EXAMPLES_SRC" ]]; then
     for ex in z_advanced_pub z_advanced_sub z_view_size; do

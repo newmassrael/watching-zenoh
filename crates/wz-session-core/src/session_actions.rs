@@ -526,6 +526,18 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`Self::set_qos_offer`]).
     #[cfg(feature = "transport-qos")]
     pub is_qos: R::Mutex<bool>,
+    /// session-extqos (R311y506) — the per-link QoS METADATA half of the
+    /// establishment state (zenoh `State::QoS { priorities, reliability }`,
+    /// seeded from the endpoint's `prio=` / `rel=` metadata by
+    /// `StateOpen::new` / `StateAccept::new`). Seeded locally by
+    /// [`SessionLinkActions::set_qos_link_metadata`] at bring-up, then REPLACED
+    /// by the directional merge against the peer's `QoSLink` body
+    /// ([`SessionLinkActions::negotiate_qos_link_against_peer`]). Both fields
+    /// `None` — the default — is exactly the state the presence-only UNIT ext
+    /// encodes, so an un-configured `session-extqos` build is byte-identical on
+    /// the wire to a bare `transport-qos` one.
+    #[cfg(feature = "session-extqos")]
+    pub qos_link: R::Mutex<crate::extqos::QosLinkState>,
     /// transport-compression — the negotiated compression capability for THIS
     /// session (zenoh `TransportConfigUnicast::is_compression`). Seeded with the
     /// local offer ([`Self::set_compression_offer`]) at bring-up, then ANDed
@@ -957,14 +969,24 @@ pub enum LinkReliabilityPref {
 /// containment / width semantics), and [`Self::new`] orders its args so
 /// `start <= end` always holds (zenoh's `len()` underflow-panics on a malformed
 /// `start > end`; wz precludes it by construction).
-#[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
+///
+/// R311y506 — the cfg gate WIDENED from `all(transport-multilink, transport-qos)`
+/// to `transport-qos` alone. The band is zenoh's `PriorityRange`, and upstream
+/// uses that ONE type for two consumers: per-link selection (the multilink tier)
+/// AND the `init::ext::QoSLink` establishment body ([`crate::extqos`]). Gating it
+/// on multilink made a `session-extqos` build without multilink unable to name
+/// the range it negotiates — the widening keeps ONE range type rather than
+/// growing a second, parallel definition. Pure widening: no build that had the
+/// type loses it. The per-link `LinkState::priority_range` FIELD stays
+/// multilink-gated (that one IS a link-selection input).
+#[cfg(feature = "transport-qos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkPriorityRange {
     start: crate::qos::Priority,
     end: crate::qos::Priority,
 }
 
-#[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
+#[cfg(feature = "transport-qos")]
 impl LinkPriorityRange {
     /// The inclusive band `[min(a,b) ..= max(a,b)]` — the two endpoints are
     /// ordered so the band is always valid regardless of which the caller passes
@@ -989,6 +1011,34 @@ impl LinkPriorityRange {
     /// `len_without_is_empty` lint — a band is never empty, `width >= 1`).
     pub fn width(&self) -> usize {
         (self.end.wire_byte() as usize) - (self.start.wire_byte() as usize) + 1
+    }
+
+    /// The inclusive lower bound (the numerically SMALLEST wire priority, i.e.
+    /// the highest-urgency end of the band). Needed by [`crate::extqos`] to pack
+    /// the band into the `QoSLink` z64 body, where zenoh writes
+    /// `*priorities.start()` at bit 3.
+    #[cfg(feature = "session-extqos")]
+    pub fn start(&self) -> crate::qos::Priority {
+        self.start
+    }
+
+    /// The inclusive upper bound (the numerically LARGEST wire priority).
+    /// zenoh writes `*priorities.end()` at bit 11 of the `QoSLink` body.
+    #[cfg(feature = "session-extqos")]
+    pub fn end(&self) -> crate::qos::Priority {
+        self.end
+    }
+
+    /// `true` iff `self` is a SUPERSET of `other` — zenoh
+    /// `PriorityRange::includes` (`commons/zenoh-protocol/src/core/mod.rs:331`,
+    /// `self.start() <= other.start() && other.end() <= self.end()`). This is the
+    /// containment the `QoSLink` negotiation applies in BOTH directions: the
+    /// acceptor requires its own band to include the initiator's
+    /// (`recv_init_syn`), the initiator requires the acceptor's to include its
+    /// own (`recv_init_ack`).
+    #[cfg(feature = "session-extqos")]
+    pub fn includes(&self, other: &LinkPriorityRange) -> bool {
+        self.start <= other.start && other.end <= self.end
     }
 }
 
@@ -1322,6 +1372,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // (`set_qos_offer`) and the peer's Init ext_qos offer is ANDed in.
                 #[cfg(feature = "transport-qos")]
                 is_qos: R::new_mutex(false),
+                // session-extqos — no band / no reliability declared until the
+                // AP config stages one (the wire stays the UNIT form).
+                #[cfg(feature = "session-extqos")]
+                qos_link: R::new_mutex(crate::extqos::QosLinkState::default()),
                 #[cfg(feature = "transport-compression")]
                 is_compression: R::new_mutex(false),
                 #[cfg(feature = "transport-shm")]
@@ -2344,6 +2398,74 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.is_qos, |s| *s)
     }
 
+    /// session-extqos (R311y506) — stage this link's QoS metadata (its priority
+    /// band and/or reliability class) at bring-up, BEFORE the handshake drives:
+    /// the wz counterpart of zenoh reading `prio=` / `rel=` off the endpoint's
+    /// metadata in `StateOpen::new` / `StateAccept::new`
+    /// (`establishment/ext/qos.rs` `State::new`).
+    ///
+    /// Both fields `None` (the default) keeps the presence-only UNIT ext on the
+    /// wire; setting EITHER switches the emit to the z64 `QoSLink` form, because
+    /// [`crate::extqos::encode_qos_ext_for`] owns that choice.
+    ///
+    /// The metadata is meaningful only on a session that also OFFERS QoS
+    /// ([`Self::set_qos_offer`]) — zenoh reaches the metadata only inside the
+    /// `is_qos` arm of `State::new`, and the stage seam honours the same
+    /// condition, so a metadata-without-offer misconfiguration emits nothing
+    /// rather than a `QoSLink` on a NoQoS link.
+    #[cfg(feature = "session-extqos")]
+    pub fn set_qos_link_metadata(&self, state: crate::extqos::QosLinkState) {
+        R::with_mutex_mut(&self.qos_link, |s| *s = state);
+    }
+
+    /// session-extqos — the QoS metadata currently negotiated for this session:
+    /// the staged local value before the handshake, the merged value after.
+    #[cfg(feature = "session-extqos")]
+    pub fn qos_link_metadata(&self) -> crate::extqos::QosLinkState {
+        R::with_mutex_mut(&self.qos_link, |s| *s)
+    }
+
+    /// session-extqos (R311y506) — run the directional `QoSLink` merge against
+    /// an inbound Init ext chain, the wz mirror of zenoh's
+    /// `QoSFsm::recv_init_syn` (acceptor) / `recv_init_ack` (initiator).
+    ///
+    /// `is_ack` selects the direction, because the containment is NOT symmetric:
+    /// the acceptor demands the initiator's band be a SUBSET of its own and
+    /// adopts the initiator's; the initiator demands the acceptor's be a
+    /// SUPERSET of its own and keeps its own. Both keep the narrower band — the
+    /// asymmetry is only in which side that is.
+    ///
+    /// `Ok(())` also covers "the peer does no QoS": the caller's `&=` merge
+    /// ([`Self::negotiate_qos_against_peer`]) has already driven `is_qos` false
+    /// there, and zenoh likewise falls to `State::NoQoS` without an error. An
+    /// `Err` is a handshake ABORT upstream (`?` out of the establishment FSM),
+    /// so the caller tears the session down rather than degrading silently.
+    #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
+    pub fn negotiate_qos_link_against_peer(
+        &self,
+        is_ack: bool,
+        extensions: &[ExtEntryOwned],
+    ) -> Result<(), crate::extqos::QosLinkError> {
+        use crate::extqos::PeerQos;
+        let peer = crate::extqos::peer_qos_ext_state(extensions)?;
+        // Either side NoQoS drops the whole state (zenoh's `else { NoQoS }`
+        // arm), and a NoQoS session carries no band to negotiate.
+        let PeerQos::QoS(peer_state) = peer else {
+            return Ok(());
+        };
+        if !self.is_qos() {
+            return Ok(());
+        }
+        let mine = self.qos_link_metadata();
+        let merged = if is_ack {
+            crate::extqos::merge_qos_link_init_ack(&mine, &peer_state)?
+        } else {
+            crate::extqos::merge_qos_link_init_syn(&mine, &peer_state)?
+        };
+        self.set_qos_link_metadata(merged);
+        Ok(())
+    }
+
     /// R311y435 — stage a whole [`SessionOffer`] on FRESH actions: the single
     /// composition seam every deploy-facing open routes through.
     ///
@@ -2433,6 +2555,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 capability: "shm",
                 feature: "session-extshm",
             });
+        }
+        // session-extqos — stage the link's QoS metadata. Unconditional on the
+        // mode: the emit seam is already gated on `is_qos()`, so metadata staged
+        // on a non-QoS session is inert rather than a second place to re-derive
+        // the same condition (zenoh reaches the metadata only inside the
+        // `is_qos` arm of `State::new`, which is the same guard).
+        #[cfg(feature = "session-extqos")]
+        if let Some(qos_link) = offer.qos_link {
+            self.set_qos_link_metadata(qos_link);
         }
 
         Ok(())
@@ -2554,7 +2685,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-init-body",
         any(feature = "session-unicast-open", feature = "session-unicast-accept")
     ))]
-    fn stage_capability(&self, role: ExtChainRole, offer: bool, build: fn() -> ExtEntryOwned) {
+    /// R311y506 — the parameter widened from a bare `fn` pointer to
+    /// `impl Fn`, so a capability whose encoded FORM depends on session state
+    /// can use the same self-clearing stage seam instead of growing a parallel
+    /// one. `session-extqos` is the case that needs it: the QoS ext is the UNIT
+    /// form or the z64 `QoSLink` form depending on the staged metadata. Every
+    /// pre-existing caller passes a `fn` item, which coerces unchanged.
+    ///
+    /// The `retain` keys on `ext_id()` (the 4-bit id FIELD), not on the full
+    /// header, which is load-bearing here: the unit `QoS` and the z64 `QoSLink`
+    /// share id `0x1` and zenoh forbids emitting both at once
+    /// ("Extensions QoS and QoSOptimized cannot both be enabled at once"), so
+    /// clearing by id is what makes a re-stage REPLACE rather than accumulate.
+    fn stage_capability(&self, role: ExtChainRole, offer: bool, build: impl Fn() -> ExtEntryOwned) {
         let ext_id = build().ext_id();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
             chain.retain(|e| e.ext_id() != ext_id);
@@ -5937,15 +6080,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 a.is_lowlatency(),
                 crate::extlowlatency::encode_lowlatency_ext,
             );
-            // transport-qos — the initiator offers the QoS unit ext (id 0x1) in
+            // transport-qos — the initiator offers the QoS ext (id 0x1) in
             // InitSyn iff this deploy enabled it (zenoh `send_init_syn` emits
-            // `ext_qos` only when the QoS transport is configured).
-            #[cfg(feature = "transport-qos")]
+            // `ext_qos` only when the QoS transport is configured). Under
+            // `session-extqos` the FORM follows the staged link metadata (unit
+            // when none, z64 `QoSLink` when a band / reliability is declared) —
+            // zenoh `State::to_exts`.
+            #[cfg(all(feature = "transport-qos", not(feature = "session-extqos")))]
             a.stage_capability(
                 ExtChainRole::InitSyn,
                 a.is_qos(),
                 crate::extqos::encode_qos_ext,
             );
+            #[cfg(feature = "session-extqos")]
+            a.stage_capability(ExtChainRole::InitSyn, a.is_qos(), || {
+                crate::extqos::encode_qos_ext_for(&a.qos_link_metadata())
+            });
             #[cfg(feature = "session-extcompression")]
             a.stage_capability(
                 ExtChainRole::InitSyn,
@@ -6031,14 +6181,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 a.is_lowlatency(),
                 crate::extlowlatency::encode_lowlatency_ext,
             );
-            // transport-qos — reflect the QoS unit ext in InitAck iff STILL
-            // offering after the InitSyn `&=` merge (both sides agreed).
-            #[cfg(feature = "transport-qos")]
+            // transport-qos — reflect the QoS ext in InitAck iff STILL offering
+            // after the InitSyn `&=` merge (both sides agreed). Under
+            // `session-extqos` the reflected metadata is the MERGED band (the
+            // InitSyn containment ran before this send), so the initiator reads
+            // back the band actually negotiated — zenoh `send_init_ack` calls
+            // `to_exts` on the post-`recv_init_syn` state.
+            #[cfg(all(feature = "transport-qos", not(feature = "session-extqos")))]
             a.stage_capability(
                 ExtChainRole::InitAck,
                 a.is_qos(),
                 crate::extqos::encode_qos_ext,
             );
+            #[cfg(feature = "session-extqos")]
+            a.stage_capability(ExtChainRole::InitAck, a.is_qos(), || {
+                crate::extqos::encode_qos_ext_for(&a.qos_link_metadata())
+            });
             #[cfg(feature = "session-extcompression")]
             a.stage_capability(
                 ExtChainRole::InitAck,

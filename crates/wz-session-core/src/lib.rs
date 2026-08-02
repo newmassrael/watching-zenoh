@@ -800,6 +800,10 @@ pub mod extlowlatency;
 /// form a priority-configured zenohd sends); the per-session `is_qos` state, the
 /// `&=` negotiation, the per-priority SN conduits, and the Frame ext_qos wire
 /// live in `session_actions` / `drive` / `inbound` / `frame_encode`.
+///
+/// Under `session-extqos` (R311y506) the module also owns the z64 `QoSLink`
+/// half — the packed priority-range + reliability body and the DIRECTIONAL
+/// containment that negotiates it (acceptor: subset; initiator: superset).
 #[cfg(feature = "transport-qos")]
 pub mod extqos;
 

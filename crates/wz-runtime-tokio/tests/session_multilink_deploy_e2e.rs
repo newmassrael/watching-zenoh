@@ -41,7 +41,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 use wz_runtime_core::Runtime;
-use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceForwarder, FaceId, FaceSources};
+use wz_runtime_tokio::accept_loop::{
+    peer_loop, AcceptEvent, FaceForwarder, FaceId, FaceQosLink, FaceSources,
+};
 use wz_runtime_tokio::config::LinkReliabilityPref;
 use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
@@ -248,6 +250,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
             mcast_members: None,
             mcast_group_subs: None,
             reconcile: None,
+            qos_link: FaceQosLink::default(),
             max_links: 2,
             qos: false,
         },
@@ -459,6 +462,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             mcast_members: None,
             mcast_group_subs: None,
             reconcile: None,
+            qos_link: FaceQosLink::default(),
             max_links: 2,
             qos: false,
         },
@@ -487,6 +491,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             mcast_members: None,
             mcast_group_subs: None,
             reconcile: None,
+            qos_link: FaceQosLink::default(),
             max_links: 2,
             qos: false,
         },
@@ -584,6 +589,7 @@ async fn deploy_active_qos_priority_segregates_across_links() {
             mcast_members: None,
             mcast_group_subs: None,
             reconcile: None,
+            qos_link: FaceQosLink::default(),
             max_links: 2,
             qos: true,
         },

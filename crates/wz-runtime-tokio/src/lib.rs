@@ -197,6 +197,15 @@ pub use wz_session_core::locator;
 /// used on every build), and a `pub use` never warns unused.
 pub use wz_session_core::qos;
 
+/// session-extqos (R311y506) — the `init::ext::QoSLink` establishment codec:
+/// [`extqos::QosLinkState`] (the priority band + reliability a link declares),
+/// its z64 packing, and [`extqos::QosLinkError`], which
+/// [`session_open::OpenError::QosLinkRejected`] carries. Re-exported so an AP
+/// caller can BUILD the metadata it stages through
+/// `SessionOffer::with_qos_link` without depending on wz-session-core directly.
+#[cfg(feature = "session-extqos")]
+pub use wz_session_core::extqos;
+
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. R222 introduced the
 /// three load-bearing fields (`keyexpr` / `kind` / `payload`); R225
