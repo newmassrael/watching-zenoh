@@ -312,6 +312,32 @@ to = "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-fe
 reason = "R311y328 scope correction — Round 311y327 impact_refs typo. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub (it exists; the `-advanced` suffix is the feature family's, not the section's). Round 311y328 re-cites the intended section."
 since = "Round 311y328"
 
+# R311y503 impact_refs typos — the same class a THIRD time (Round 193,
+# Round 311y327, here). Both ids were written from memory off the atom
+# names rather than read out of the store: the §5.22 section is singular
+# `plugin` while its atoms are `plugin-*`, and the `storage-manager`
+# atoms live under `5-24-storage-backend`, not under a section of their
+# own. Round 311y503 is frozen, so its impact_refs stay as authored and
+# the two dangling refs are absorbed here; Round 311y504 records the
+# correction and re-cites both intended sections. NOT a scope shift:
+# nothing left workspace.docs, and 5-22-plugin / 5-24-storage-backend
+# are both alive.
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 311y503"
+to = "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugins"
+reason = "R311y504 scope correction — Round 311y503 impact_refs typo. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin (singular; the plural belongs to the `plugin-*` feature family, not to the section). Round 311y504 re-cites the intended section."
+since = "Round 311y504"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 311y503"
+to = "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-manager"
+reason = "R311y504 scope correction — Round 311y503 impact_refs typo. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend (the `storage-mgr-*` atoms live there; there is no `-storage-manager` section). Round 311y504 re-cites the intended section."
+since = "Round 311y504"
+
 # ── R408 markdown-doc model retirement (2026-06-04) ──
 # R400 retired the ParsedDoc validator; store-prose §N citations that
 # previously resolved against parsed markdown headings now surface as
