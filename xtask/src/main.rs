@@ -189,8 +189,10 @@ fn regen_statecharts_and_pools(root: &Path) {
     // `Codegen::from_manifest` derives the SCE workspace as
     // <manifest>/../../vendor/sce; any crates/* dir resolves to repo/vendor/sce.
     let codegen = wz_codegen_build::Codegen::from_manifest(&root.join("crates/wz-session-core"));
-    let network = root.join("sources/network");
-    let session = root.join("sources/session");
+    // R311y517 — REPO-RELATIVE: these dirs are handed to SCE, which stamps the
+    // path verbatim into the `// From:` header. See [`repo_relative`].
+    let network = repo_relative(root, &root.join("sources/network"));
+    let session = repo_relative(root, &root.join("sources/session"));
 
     // wz-session-core statecharts. reassembly_slot lives under sources/network;
     // the session FSMs under sources/session (mirrors build.rs resource_dirs).
@@ -240,6 +242,28 @@ fn regen_statecharts_and_pools(root: &Path) {
 
 fn mkdir(p: &Path) {
     std::fs::create_dir_all(p).unwrap_or_else(|e| panic!("create {}: {e}", p.display()));
+}
+
+/// R311y517 — hand SCE a REPO-RELATIVE SCXML source dir, so the `// From:`
+/// provenance line it stamps into `out/**` is machine-independent.
+///
+/// Under SCE 43695e572 the header path is emitted **verbatim as the caller
+/// named it**: `header_source_path` returns the argument unchanged when
+/// `source_root` is `None` (`vendor/sce/sce-build/src/lib.rs:330-334`), and the
+/// in-tree call site passes `None` (`:229`). The pre-bump SCE stripped the
+/// process CWD instead — which is what R311y22e's CWD pin was built against.
+/// That pin is still necessary (relative paths must resolve) but it is no
+/// longer SUFFICIENT, and the y510 pin bump silently reverted every `// From:`
+/// line to an absolute path. Two consequences, both shipped: the author's home
+/// directory was committed into 8 generated files, and Layer B2 (committed
+/// `out/**` == regenerated) went permanently red on any checkout whose path
+/// differs from the one that last regenerated — i.e. every hosted CI run.
+///
+/// Safe because [`main`] pins the process CWD to the repo root before any
+/// codegen runs; a path outside the root is passed through unchanged.
+fn repo_relative(root: &Path, p: &Path) -> PathBuf {
+    p.strip_prefix(root)
+        .map_or_else(|_| p.to_path_buf(), Path::to_path_buf)
 }
 
 /// One switchboard 2-stage codegen target (R311y22c), mirroring each
@@ -305,7 +329,10 @@ fn regen_switchboards(root: &Path) {
 
     for sb in SWITCHBOARDS {
         let manifest = root.join(sb.manifest);
-        let src = manifest.join("sources");
+        // R311y517 — REPO-RELATIVE for the same reason as the statechart leg:
+        // `emit_ast` passes this straight to sce-codegen, which stamps it
+        // verbatim into the `// From:` header. See [`repo_relative`].
+        let src = repo_relative(root, &manifest.join("sources"));
         let sidecar = manifest.join("wz-switchboard.yaml");
         // Intermediates land in a temp dir so only the consumed files reach out/.
         let tmp = std::env::temp_dir().join(format!("wz-xtask-sb-{}", sb.krate));
