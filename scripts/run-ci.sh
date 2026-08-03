@@ -9011,6 +9011,21 @@ layer_c1cd_api_compat_c_attachment() {
         return 0
     fi
     _runci_build_capi_c_for_oracle C1cd || return 1
+    # R311y519 — the lane's OWN dependency, and it is not the subject under test.
+    # `spawn_zenohd` gates readiness by driving a real wz open against the router
+    # (`wait_for_zenohd_handshake_ready`), and that probe is the wz-ap-demo
+    # binary. Nothing else in this leg touches the demo — the subject is the C
+    # ABI — which is exactly why the lane never learned to build it: every OTHER
+    # zenohd lane drives the demo directly and so provisions it as its subject.
+    #
+    # Absent, the probe panics "wz-ap-demo binary not found" before a single
+    # attachment byte moves. That was invisible on any developer machine, where
+    # some earlier lane has always left the binary in `target/debug`, and red on
+    # every hosted run: the `interop` job builds zenohd, the pico CLIs and the
+    # zenoh-c oracle, but never the demo. Provisioned HERE rather than as a
+    # workflow step so the lane behaves identically hosted and locally, and so a
+    # clean checkout cannot reintroduce it.
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
     _runci_guarded_test "C1cd attachment through zenohd" 1 \
         cargo test -p wz-integration-tests \
         --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \
