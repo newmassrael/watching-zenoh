@@ -3325,7 +3325,12 @@ layer_c1y_cargo_test_routing_peer() {
     # lane's feature set is unchanged.
     _runci_guarded_test "C1y interceptor" 36 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
-    _runci_guarded_test "C1y linkstate+access" 211 \
+    # R311y509 — 211 -> 213: the peer's CURRENT liveliness-TOKEN dump, in its two
+    # tiers. Each test is bound by a damage that reds it ALONE: disabling the client
+    # ingest or the dump arm reds the client-leaf test, and disabling the mesh
+    # ingest reds only the mesh-sourced one. So the pair cannot rot as a unit, and
+    # a count that moves names which tier moved.
+    _runci_guarded_test "C1y linkstate+access" 213 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     _runci_guarded_test "C1y extauth" 10 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet || return 1
