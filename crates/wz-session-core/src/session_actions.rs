@@ -79,9 +79,14 @@ use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError};
 use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
 #[cfg(feature = "routing-namespace")]
 use crate::namespace::NamespaceIngress;
+// R311y516 — the establishment codecs enter this union ROLE-CONJOINED, not
+// bare: see the `send_wire` seam below for why `codec-init-body` /
+// `codec-open-body` alone carry no emit.
 #[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
+    all(
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ),
     feature = "codec-close",
     feature = "codec-push",
     feature = "codec-request",
@@ -1534,9 +1539,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     // bare `transport-multicast` MCU lane) has no `send_wire` caller and must
     // not compile the dead seam. `emit_on_link` keeps the full union (both
     // send_wire and send_wire_this_link funnel through it).
+    //
+    // R311y516 — the establishment codecs are ROLE-CONJOINED here for the same
+    // reason one level over: `codec-init-body` / `codec-open-body` describe a
+    // CODEC, not an emit. The four senders that route INIT/OPEN through this
+    // seam — `send_init_syn` / `send_open_syn` (`session-unicast-open`) and
+    // `send_init_ack_with_cookie` / `send_open_ack`
+    // (`session-unicast-accept`) — each carry a role conjunct of their own, so
+    // a build with an establishment codec and NEITHER role encodes nothing and
+    // must not compile the dead seam (`--features session-extqos,
+    // codec-init-body` was the combination that reded `-D warnings`).
     #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
+        all(
+            any(feature = "codec-init-body", feature = "codec-open-body"),
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ),
         feature = "codec-push",
         feature = "codec-request",
         feature = "codec-response",
@@ -1583,9 +1600,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (data) and the per-link [`Self::send_wire_this_link`] (keepalive / close)
     /// funnel through, so every TX path stamps the link it actually used. At N=1
     /// `link` is always `&self.link`, byte-identical to the pre-split emit.
+    ///
+    /// R311y516 — the establishment codecs are ROLE-CONJOINED (see
+    /// [`Self::send_wire`]): both funnels into this seam are themselves
+    /// role-gated, so an establishment codec with neither unicast role reaches
+    /// it from nowhere.
     #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
+        all(
+            any(feature = "codec-init-body", feature = "codec-open-body"),
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ),
         feature = "codec-close",
         feature = "codec-push",
         feature = "codec-request",

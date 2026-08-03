@@ -1533,6 +1533,22 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         SessionLinkActions<R, T>: Send + Sync + 'static,
     {
         R::with_mutex_mut(&self.observer, |obs| {
+            // R311y516 (transport-shm) — restamp the LIVE negotiated SHM
+            // capability onto the subscriber registry BEFORE the un-swap can
+            // run. This is wz's counterpart of the zenoh boundary that carries
+            // the same guard: `TransportUnicastUniversal::trigger_callback`
+            // wraps its `map_zmsg_to_shmbuf` in `if self.config.shm.is_some()`
+            // (io/zenoh-transport/src/unicast/universal/rx.rs:50-51) before the
+            // message reaches the app callback. Reading it here, per iteration,
+            // rather than snapshotting at construction, is load-bearing:
+            // `negotiate_shm_against_peer` is a monotonic `&=`, so a reconnect
+            // can only drive the capability DOWN and a stale snapshot would
+            // fail OPEN. The multicast dispatch path
+            // ([`Self::dispatch_multicast_iteration_event`]) deliberately does
+            // NOT stamp — a multicast registry has no SHM negotiation and stays
+            // fail-closed at the field default.
+            #[cfg(feature = "transport-shm")]
+            obs.subscribers.set_shm_negotiated(self.actions().is_shm());
             obs.dispatch_event(event);
             // R311nf — the unicast reply flush + ResponseFinal staging run
             // UNCONDITIONALLY now: this method lives on `Session<R, T, Unicast>`,

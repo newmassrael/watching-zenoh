@@ -290,6 +290,34 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// ([`shm_unresolved_drops`](Self::shm_unresolved_drops)).
     #[cfg(feature = "transport-shm")]
     shm_unresolved_drops: u64,
+    /// R311y516 (transport-shm) — the LIVE negotiated SHM capability for the
+    /// session that feeds this registry, restamped on every dispatch iteration
+    /// by [`set_shm_negotiated`](Self::set_shm_negotiated).
+    ///
+    /// This is the RX-side enforcement gate, and it is the wz counterpart of
+    /// zenoh's `if self.config.shm.is_some()` guard around
+    /// `map_zmsg_to_shmbuf` (`io/zenoh-transport/src/unicast/universal/rx.rs`
+    /// :50-51, the same expression as its `is_shm()` at
+    /// `unicast/universal/transport.rs:349-350`). Before R311y516 the wz
+    /// un-swap consulted only the body's 0x2 marker, so a peer that had NOT
+    /// negotiated SHM could still name a `/dev/shm` segment and have this node
+    /// map it — the negotiation was decorative on the receive side.
+    ///
+    /// Defaults to `false` and is restamped rather than snapshotted on
+    /// purpose: `negotiate_shm_against_peer` is a monotonic `&=`, so a
+    /// reconnect can only drive the capability DOWN, and a construction-time
+    /// snapshot would therefore go stale in the fail-OPEN direction. A
+    /// multicast registry is never stamped and so stays fail-closed.
+    #[cfg(feature = "transport-shm")]
+    shm_negotiated: bool,
+    /// transport-shm — count of SHM Puts dropped because the 0x2 marker
+    /// arrived on a session that never NEGOTIATED SHM. Distinct from
+    /// [`shm_unresolved_drops`](Self::shm_unresolved_drops), which counts a
+    /// negotiated-but-unmappable descriptor: this one means the peer sent a
+    /// descriptor it had no right to send (or the registry was never stamped),
+    /// and the segment was deliberately not opened.
+    #[cfg(feature = "transport-shm")]
+    shm_unnegotiated_drops: u64,
 }
 
 impl<C: SampleSink> Default for SubscriberRegistry<C> {
@@ -322,6 +350,10 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             shm_resolver: None,
             #[cfg(feature = "transport-shm")]
             shm_unresolved_drops: 0,
+            #[cfg(feature = "transport-shm")]
+            shm_negotiated: false,
+            #[cfg(feature = "transport-shm")]
+            shm_unnegotiated_drops: 0,
         }
     }
 
@@ -369,6 +401,36 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     #[cfg(feature = "transport-shm")]
     pub fn shm_unresolved_drops(&self) -> u64 {
         self.shm_unresolved_drops
+    }
+
+    /// R311y516 (transport-shm) — restamp the LIVE negotiated SHM capability of
+    /// the session feeding this registry. Called once per dispatch iteration
+    /// from the unicast dispatch SSOT
+    /// (`wz-runtime-tokio::Session::dispatch_iteration_event_with`), which is
+    /// wz's counterpart of the zenoh boundary that carries the same guard
+    /// (`TransportUnicastUniversal::trigger_callback`).
+    ///
+    /// Restamped, not snapshotted — see the [`shm_negotiated`](Self#structfield.shm_negotiated)
+    /// field doc for why a snapshot fails OPEN across a reconnect.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_negotiated(&mut self, negotiated: bool) {
+        self.shm_negotiated = negotiated;
+    }
+
+    /// R311y516 (transport-shm) — whether the RX un-swap will currently honour
+    /// an inbound 0x2 SHM marker on this registry.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_negotiated(&self) -> bool {
+        self.shm_negotiated
+    }
+
+    /// R311y516 (transport-shm) — the number of SHM Puts dropped because the
+    /// 0x2 marker arrived on a session that never NEGOTIATED SHM. A non-zero
+    /// value means a peer named a segment it had no right to name (or, on a
+    /// custom drive loop, that the registry is never stamped).
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unnegotiated_drops(&self) -> u64 {
+        self.shm_unnegotiated_drops
     }
 
     /// R231 — release the previously-installed own zid (e.g. on
@@ -710,6 +772,24 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     // Absent the marker, the inline-bytes path is byte-identical.
                     #[cfg(feature = "transport-shm")]
                     let put_payload = if crate::extshm::body_has_shm_marker(body_exts) {
+                        // R311y516 — ENFORCE the negotiation before opening
+                        // anything. zenoh gates its whole RX un-swap on the
+                        // negotiated per-transport capability
+                        // (`if self.config.shm.is_some() {
+                        // map_zmsg_to_shmbuf(..) }`,
+                        // io/zenoh-transport/src/unicast/universal/rx.rs:50-51 —
+                        // literally the expression behind its `is_shm()`,
+                        // unicast/universal/transport.rs:349-350). wz honoured
+                        // only the body's 0x2 marker, so a peer that never
+                        // negotiated SHM could name a /dev/shm segment and have
+                        // this node map it. Drop + COUNT instead: delivering the
+                        // raw descriptor bytes as if they were the payload would
+                        // hand the application 8 bytes of struct in place of its
+                        // data, which is worse than a counted drop.
+                        if !self.shm_negotiated {
+                            self.shm_unnegotiated_drops += 1;
+                            return;
+                        }
                         match crate::extshm::decode_shm_descriptor(put.payload.as_slice())
                             .and_then(|d| self.shm_resolver.as_ref().and_then(|r| r.resolve(&d)))
                         {
@@ -2944,6 +3024,12 @@ mod tests {
         registry.register("demo/shm", move |_s| {
             f.fetch_add(1, Ordering::SeqCst);
         });
+        // R311y516 — negotiate FIRST so this test still measures what it is
+        // named for. The negotiation gate added in R311y516 runs BEFORE the
+        // resolve and would otherwise absorb this Put into
+        // `shm_unnegotiated_drops`, leaving the missing-resolver precondition
+        // untested behind a green assertion.
+        registry.set_shm_negotiated(true);
         // No resolver installed -> the descriptor is unresolvable.
         let descriptor = crate::extshm::ShmDescriptor {
             segment_id: 0x1234,

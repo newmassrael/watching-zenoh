@@ -95,6 +95,9 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
         .expect("initiator reaches Established with SHM offered")
     };
     let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+    // R311y516 — a live handle for the drive closure's negotiated-SHM stamp
+    // (`&opened_acc.actions` is borrowed by the driver itself).
+    let acc_actions_for_stamp = opened_acc.actions.clone();
 
     assert!(opened_init.actions.is_shm(), "initiator negotiated SHM on");
     assert!(opened_acc.actions.is_shm(), "acceptor negotiated SHM on");
@@ -139,7 +142,20 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
         None,
         &opened_acc.clock,
         &timeouts,
-        |event| observer.dispatch_event(event),
+        |event| {
+            // R311y516 — a custom drive closure owes the subscriber registry the
+            // same LIVE negotiated-SHM stamp the production dispatch SSOT
+            // (`Session::dispatch_iteration_event_with`) applies, because the RX
+            // un-swap now ENFORCES it (zenoh's
+            // `if self.config.shm.is_some() { map_zmsg_to_shmbuf(..) }`,
+            // io/zenoh-transport/src/unicast/universal/rx.rs:50-51). Read off the
+            // live actions rather than hard-coded `true`, so this stays a
+            // measurement of the negotiation and not an assertion about itself.
+            observer
+                .subscribers
+                .set_shm_negotiated(acc_actions_for_stamp.is_shm());
+            observer.dispatch_event(event)
+        },
     );
     let drive_init = drive_session_until_terminal(
         &mut opened_init.inbound,
@@ -294,4 +310,104 @@ async fn a_unit_only_acceptor_does_not_half_complete_the_challenge() {
     .await;
     assert!(!mixed.init_actions.is_shm());
     assert!(!mixed.resp_actions.is_shm());
+}
+
+/// R311y516 — the RX un-swap ENFORCES the negotiation, not just the 0x2 marker.
+///
+/// Before R311y516 the receive path consulted `body_has_shm_marker` alone, so a
+/// peer that had never negotiated SHM could name a `/dev/shm` segment and this
+/// node would map it and deliver its contents: the negotiation was decorative on
+/// the receive side. zenoh gates the whole un-swap on the negotiated per-transport
+/// capability — `if self.config.shm.is_some() { map_zmsg_to_shmbuf(..) }`
+/// (`io/zenoh-transport/src/unicast/universal/rx.rs:50-51`, the same expression
+/// as its `is_shm()` at `unicast/universal/transport.rs:349-350`) — and wz now
+/// carries the counterpart guard.
+///
+/// The two arms differ in EXACTLY ONE bit — `set_shm_negotiated`. Everything the
+/// resolve needs is real and identical in both: the same live `/dev/shm` segment
+/// written with the same bytes, the same installed `PosixShmResolver`, the same
+/// valid descriptor, the same registered subscriber, the same Push. So the
+/// NOT-negotiated arm cannot pass for a boring reason (missing segment, missing
+/// resolver, malformed descriptor) — the negotiated arm proves each of those
+/// preconditions holds by delivering the bytes.
+#[test]
+fn an_unnegotiated_peer_cannot_make_this_node_map_its_segment() {
+    let data = b"the-payload-a-stranger-must-not-reach".to_vec();
+    let mut payload = ShmBackedPayload::alloc(data.len()).expect("alloc /dev/shm segment");
+    payload.write(&data);
+    let descriptor = payload.descriptor();
+
+    let build_push = || {
+        wz_session_core::push_build::build_push_shm_literal(
+            "demo/shm/enforce",
+            &descriptor,
+            &wz_session_core::metadata::PushMetadata::default(),
+        )
+        .expect("build the SHM Put")
+    };
+
+    let mut observer = ApplicationLayerObserver::new();
+    observer
+        .subscribers
+        .set_shm_resolver(Box::new(PosixShmResolver));
+    let seen: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let seen = seen.clone();
+        observer
+            .subscribers
+            .register("demo/shm/enforce", move |sample| {
+                seen.lock().unwrap().push(sample.payload().to_vec());
+            });
+    }
+
+    // ── Arm A: SHM was NOT negotiated with this peer ──────────────────────
+    // The registry default is false; nothing stamps it. The segment exists and
+    // the resolver is installed, so the ONLY thing standing between the peer and
+    // this node's memory is the gate.
+    assert!(
+        !observer.subscribers.shm_negotiated(),
+        "precondition: this registry has not been stamped as negotiated"
+    );
+    observer.subscribers.dispatch(
+        &wz_session_core::network_message::NetworkMessage::Push(Box::new(build_push())),
+        wz_session_core::reliability::Reliability::Reliable,
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "an un-negotiated peer's SHM descriptor must deliver NOTHING"
+    );
+    assert_eq!(
+        observer.subscribers.shm_unnegotiated_drops(),
+        1,
+        "and the refusal is COUNTED, so it is observable rather than a vanished sample"
+    );
+    assert_eq!(
+        observer.subscribers.shm_unresolved_drops(),
+        0,
+        "the drop is attributed to the NEGOTIATION, not to an unresolvable segment — \
+         the segment is live and the resolver is installed"
+    );
+
+    // ── Arm B: same everything, negotiation ON ────────────────────────────
+    // Proves Arm A measured the gate and not a broken fixture.
+    observer.subscribers.set_shm_negotiated(true);
+    observer.subscribers.dispatch(
+        &wz_session_core::network_message::NetworkMessage::Push(Box::new(build_push())),
+        wz_session_core::reliability::Reliability::Reliable,
+    );
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        std::slice::from_ref(&data),
+        "with SHM negotiated the SAME descriptor resolves to the owner's bytes"
+    );
+    assert_eq!(
+        observer.subscribers.shm_unnegotiated_drops(),
+        1,
+        "the negotiated delivery adds no refusal"
+    );
+    assert_eq!(
+        observer.subscribers.shm_unresolved_drops(),
+        0,
+        "and no resolve failed in either arm"
+    );
 }

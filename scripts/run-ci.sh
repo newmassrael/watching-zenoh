@@ -2200,7 +2200,13 @@ layer_c1af_cargo_test_shm() {
     # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must
     # leave BOTH sides without SHM — a session ending with one side believing it
     # was on would put descriptors on a wire the peer reads as payload bytes).
-    _runci_guarded_test C1af 5 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --test shm_e2e --quiet \
+    # R311y516 — 5 -> 6. The target gained the RX ENFORCEMENT arm: an SHM
+    # descriptor arriving from a peer that never NEGOTIATED SHM must not make
+    # this node map the segment. Before y516 the un-swap consulted only the 0x2
+    # body marker, so the negotiation was decorative on the receive side; zenoh
+    # gates the whole un-swap on the negotiated capability
+    # (io/zenoh-transport/src/unicast/universal/rx.rs:50-51).
+    _runci_guarded_test C1af 6 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --test shm_e2e --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features session-extshm,transport-unicast,transport-link-tcp --quiet -- -D warnings \
@@ -3999,6 +4005,22 @@ layer_c1g_cargo_test_observer() {
 #   11. no-alloc query       +codec-request +query-queryable +query-*
 #   12. no-alloc reply       +codec-response(+final) +query-reply
 #   13. no-alloc FULL surface (every codec + consumer feature, zero heap)
+#
+# R311y516 (Track 3) — the ESTABLISHMENT-CODEC-WITHOUT-ROLE subsets 14-16.
+# `codec-init-body` / `codec-open-body` name a CODEC, not an emit: the four
+# senders that route INIT/OPEN through the `send_wire` seam are each
+# additionally role-gated (`session-unicast-open` / `session-unicast-accept`).
+# A build carrying an establishment codec and NEITHER role therefore has no
+# `send_wire` / `emit_on_link` caller, and before R311y516 compiled both as
+# dead code — `-D warnings` reject. It survived because no lane named the
+# combination (the y513/y514 lesson, third instance). These are CLIPPY arms,
+# not `cargo build`: dead code is a WARNING, so a `build` arm cannot see it.
+#   14. session-extqos +codec-init-body    (the exact combination that reded)
+#   15. codec-open-body bare               (the open-side twin)
+#   16. codec-init-body +session-unicast-open  (POSITIVE arm — the seam MUST
+#                                               still compile when a role is
+#                                               present, so 14/15 cannot pass
+#                                               by deleting the seam)
 layer_c1h_arbitrary_subset_matrix() {
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc --quiet \
@@ -4015,7 +4037,10 @@ layer_c1h_arbitrary_subset_matrix() {
         && cargo build -p wz-session-core --no-default-features --features codec-push,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet \
         && cargo build -p wz-session-core --no-default-features --features codec-request,query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-source-info --quiet \
         && cargo build -p wz-session-core --no-default-features --features codec-response,codec-response-final,query-reply --quiet \
-        && cargo build -p wz-session-core --no-default-features --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,query-reply,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-source-info,query-attachment,query-selector-parameters,query-reply-err,query-source-info --quiet)
+        && cargo build -p wz-session-core --no-default-features --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,query-reply,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-source-info,query-attachment,query-selector-parameters,query-reply-err,query-source-info --quiet \
+        && cargo clippy -p wz-session-core --no-default-features --features session-extqos,codec-init-body --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features codec-open-body --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features codec-init-body,session-unicast-open --quiet -- -D warnings)
 }
 
 # ─── Layer C1i — cargo test -p wz-runtime-tokio --features scouting-active ─
