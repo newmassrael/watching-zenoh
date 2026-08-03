@@ -3281,7 +3281,11 @@ layer_c1y_cargo_test_routing_peer() {
     local access="routing-peer,access-acl,access-downsampling,access-quota"
     _runci_guarded_test "C1y accept_loop" 11 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
-    _runci_guarded_test "C1y linkstate" 200 \
+    # R311y509 — 200 -> 202: the peer's two liveliness-TOKEN tier tests. They land
+    # in BOTH linkstate pins because the plane is ungated, so it compiles under bare
+    # `routing-peer` as well as the access set below. Two pins for one plane is not
+    # redundancy: this one proves the tests are not silently access-feature-gated.
+    _runci_guarded_test "C1y linkstate" 202 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
     # budget, checked-add overflow, minimum-across-overlapping-rules, the
