@@ -82996,6 +82996,54 @@
         "STILL OPEN in bucket P: scouting-static (needs a production multi-locator caller), api-compat-pico's other residuals, scouting-active's SCXML residual, session-reconnect's remaining three (multi-locator failover, exponential backoff, multicast reconnect)."
       ]
     },
+    "Round 311y526": {
+      "decision_summary": "R311y526 -- session-reconnect gains zenoh's configurable retry backoff (period_max_ms + period_increase_factor beside the existing delay, which becomes period_init_ms in meaning) with the formula transcribed from ConnectionRetryState::next_duration by direct read: return the CURRENT delay, then multiply, then clamp when the ceiling is > 0. That ordering is why the first retry after a loss waits the initial period rather than an already-multiplied value, and it has its own test. The DEFAULT deliberately does not move: this atom's parity target is pico's Z_FEATURE_AUTO_RECONNECT, whose retry is constant, so factor 1.0 reproduces today's behaviour exactly and is pinned so that acquiring zenoh's knobs cannot silently acquire zenoh's shape. Superset, not mirror. Two damage probes (multiply-before-return, and dropping zenoh's period_max_ms > 0 guard) each red 3 of the 4 unit tests. Widening the public policy struct broke five test literals and reded C1/C2 until they were switched to ..Default::default().",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/reconnect.rs: ReconnectPolicy gains period_max_ms and period_increase_factor (zenoh's names and semantics), plus a private BackoffState transcribing ConnectionRetryState::next_duration -- return the CURRENT delay, then multiply, then clamp when period_max_ms > 0. retry_delay_ms keeps its name and becomes period_init_ms in meaning; with the default factor 1.0 it is the same constant delay it always was. The state is built PER LOSS, so a later outage restarts at the initial period.",
+        "wz-runtime-tokio/src/reconnect.rs tests: a backoff_tests module pinning the default (constant), the growth ordering, the ceiling including its 0-means-unbounded guard, and degenerate f64 factors.",
+        "wz-runtime-tokio/tests/session_reconnect_e2e.rs: the five ReconnectPolicy literals take ..ReconnectPolicy::default() so a future field cannot break them again."
+      ],
+      "verification_bullets": [
+        "ZENOH'S FORMULA READ DIRECTLY, not paraphrased: next_duration returns self.duration() and only THEN applies self.delay = delay * period_increase_factor, clamping when period_max_ms > 0 (commons/zenoh-config/src/connection_retry.rs:96-105). The return-before-multiply ordering is why the first retry waits period_init_ms, and it has its own test.",
+        "THE DEFAULT DOES NOT MOVE, and that is deliberate: this atom's parity target is pico's Z_FEATURE_AUTO_RECONNECT, whose retry is a constant. factor 1.0 reproduces it exactly and is pinned by its own test, so acquiring the knobs cannot silently acquire zenoh's exponential shape too. Superset, not mirror.",
+        "DAMAGE PROBES: multiplying BEFORE returning reds 3 of 4; treating period_max_ms == 0 as a real ceiling (dropping zenoh's > 0 guard) also reds 3 of 4. Both compile.",
+        "A DEGENERATE f64 IS TESTED because the field is deploy-settable and  on a negative or NaN value is the one operation here with a surprising answer: it saturates to 0 rather than wrapping or panicking.",
+        "LANES: C1 pass (51s), C2 pass (10s) -- both went RED first on the five struct literals the new fields broke, which is the cost of widening a public config struct and was fixed with ..Default::default() rather than by re-listing fields."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311y526 gave session-reconnect zenoh's configurable backoff while KEEPING pico's constant default.",
+        "WIDENING A PUBLIC CONFIG STRUCT BREAKS ITS LITERALS, and the lanes are where that surfaces -- C1/C2 went red on five test literals immediately after the fields landed. Patch them with ..Default::default(), not by re-listing fields, so the next widening is free.",
+        "THE DEFAULT IS PART OF THE PARITY CLAIM. An atom whose target is pico must not acquire zenoh's behaviour just because it acquired zenoh's knobs; the constant-delay default has its own test for exactly that reason.",
+        "STILL OPEN in bucket P: scouting-static (needs a production multi-locator caller), api-compat-pico's other residuals, scouting-active's SCXML residual, session-reconnect's remaining TWO (multi-locator failover, multicast reconnect)."
+      ],
+      "publishable_decision_summary": "R311y526 -- session-reconnect gains zenoh's configurable retry backoff (period_max_ms + period_increase_factor beside the existing delay, which becomes period_init_ms in meaning) with the formula transcribed from ConnectionRetryState::next_duration by direct read: return the CURRENT delay, then multiply, then clamp when the ceiling is > 0. That ordering is why the first retry after a loss waits the initial period rather than an already-multiplied value, and it has its own test. The DEFAULT deliberately does not move: this atom's parity target is pico's Z_FEATURE_AUTO_RECONNECT, whose retry is constant, so factor 1.0 reproduces today's behaviour exactly and is pinned so that acquiring zenoh's knobs cannot silently acquire zenoh's shape. Superset, not mirror. Two damage probes (multiply-before-return, and dropping zenoh's period_max_ms > 0 guard) each red 3 of the 4 unit tests. Widening the public policy struct broke five test literals and reded C1/C2 until they were switched to ..Default::default().",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/reconnect.rs: ReconnectPolicy gains period_max_ms and period_increase_factor (zenoh's names and semantics), plus a private BackoffState transcribing ConnectionRetryState::next_duration -- return the CURRENT delay, then multiply, then clamp when period_max_ms > 0. retry_delay_ms keeps its name and becomes period_init_ms in meaning; with the default factor 1.0 it is the same constant delay it always was. The state is built PER LOSS, so a later outage restarts at the initial period.",
+        "wz-runtime-tokio/src/reconnect.rs tests: a backoff_tests module pinning the default (constant), the growth ordering, the ceiling including its 0-means-unbounded guard, and degenerate f64 factors.",
+        "wz-runtime-tokio/tests/session_reconnect_e2e.rs: the five ReconnectPolicy literals take ..ReconnectPolicy::default() so a future field cannot break them again."
+      ],
+      "publishable_verification_bullets": [
+        "ZENOH'S FORMULA READ DIRECTLY, not paraphrased: next_duration returns self.duration() and only THEN applies self.delay = delay * period_increase_factor, clamping when period_max_ms > 0 (commons/zenoh-config/src/connection_retry.rs:96-105). The return-before-multiply ordering is why the first retry waits period_init_ms, and it has its own test.",
+        "THE DEFAULT DOES NOT MOVE, and that is deliberate: this atom's parity target is pico's Z_FEATURE_AUTO_RECONNECT, whose retry is a constant. factor 1.0 reproduces it exactly and is pinned by its own test, so acquiring the knobs cannot silently acquire zenoh's exponential shape too. Superset, not mirror.",
+        "DAMAGE PROBES: multiplying BEFORE returning reds 3 of 4; treating period_max_ms == 0 as a real ceiling (dropping zenoh's > 0 guard) also reds 3 of 4. Both compile.",
+        "A DEGENERATE f64 IS TESTED because the field is deploy-settable and  on a negative or NaN value is the one operation here with a surprising answer: it saturates to 0 rather than wrapping or panicking.",
+        "LANES: C1 pass (51s), C2 pass (10s) -- both went RED first on the five struct literals the new fields broke, which is the cost of widening a public config struct and was fixed with ..Default::default() rather than by re-listing fields."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y526 gave session-reconnect zenoh's configurable backoff while KEEPING pico's constant default.",
+        "WIDENING A PUBLIC CONFIG STRUCT BREAKS ITS LITERALS, and the lanes are where that surfaces -- C1/C2 went red on five test literals immediately after the fields landed. Patch them with ..Default::default(), not by re-listing fields, so the next widening is free.",
+        "THE DEFAULT IS PART OF THE PARITY CLAIM. An atom whose target is pico must not acquire zenoh's behaviour just because it acquired zenoh's knobs; the constant-delay default has its own test for exactly that reason.",
+        "STILL OPEN in bucket P: scouting-static (needs a production multi-locator caller), api-compat-pico's other residuals, scouting-active's SCXML residual, session-reconnect's remaining TWO (multi-locator failover, multicast reconnect)."
+      ]
+    },
     "Round 311y53": {
       "decision_summary": "R311y53 -- richer adminspace config-GET view: to_admin_json now emits the LIVE downsampling + low_pass interceptor rules ({key_exprs, min_interval_ms} / {key_exprs, max_payload_size}) under access-downsampling / access-quota, completing the rate/size axes of the §5.23 config introspection (the deferred downsampling/low-pass view; the full per-rule ACL dump stays a follow-up). Field emission is now an explicit alphabetical sort (mid-object downsampling/low_pass need no manual position bookkeeping). Byte-exact tests split per access combo (base/acl-only/full-access, each cfg-gated to exactly its build) + a populated-rule test; C1ao gains the full-access to_admin_json combo so the new branches run (never-run guard). NO inventory/atom change (beyond-zenoh read view on adminspace-core + access-*). validate_workspace orphan new=+0.",
       "changes_bullets": [
