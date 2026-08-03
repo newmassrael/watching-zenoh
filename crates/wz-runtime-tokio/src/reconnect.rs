@@ -54,13 +54,13 @@ use wz_session_core::driver_loop::IterationEvent;
 // R311pw — re-export the reconnectable-locator type (and its narrowing
 // rejection) so a caller gets `open_session_with_reconnect` and its parameter
 // type from one path; the supervisor module is where the reconnect API lives.
-use wz_session_core::observer::ApplicationLayerObserver;
 pub use wz_session_core::reconnect::{NotReconnectable, ReconnectLocator};
 use wz_session_core::reconnect::{ReplayDeclarationsError, SwappableLink};
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 use crate::runtime_impl::{TokioRuntime, TokioTime};
+use crate::session::TokioSession;
 use crate::session_glue::{
     drive_session_until_terminal, new_session_actions, BoxedLinkDriver, DriverOutcome,
     SessionLinkActions,
@@ -69,7 +69,6 @@ use crate::session_open::{
     dial_locator, initiator_open, plan_endpoint, wire_dialed_link, DialConfig, OpenError,
     OpenedSession,
 };
-use crate::sync::Mutex as WzMutex;
 use crate::writer_queue::WriterHandle;
 
 /// Reconnect retry policy. The defaults are the pico literals:
@@ -144,16 +143,16 @@ pub struct ReconnectingSession {
     tick_interval_ms: u64,
     opened: OpenedSession,
     reconnects: u32,
-    /// R311y521 — the observer whose liveliness registry must be flushed when
+    /// R311y521 — the session whose liveliness registry must be flushed when
     /// the link dies, if the caller opted in via
-    /// [`ReconnectingSession::with_liveliness_flush`].
+    /// [`ReconnectingSession::set_liveliness_flush`].
     ///
     /// `Option`, and set by a builder rather than a constructor parameter, on
     /// purpose: `open_session_with_reconnect` and its string-taking sibling are
     /// pinned public entry points, and a session with no liveliness subscriber
     /// has nothing to flush. Widening beside them keeps every existing caller
     /// compiling unchanged.
-    liveliness_observer: Option<Arc<WzMutex<ApplicationLayerObserver>>>,
+    liveliness_session: Option<TokioSession>,
 }
 
 /// R311py — the handles [`ReconnectingSession::into_teardown`] hands back: the
@@ -177,13 +176,19 @@ impl ReconnectingSession {
     /// `Session` over the same actions bundle. A caller that skips this keeps
     /// the pre-R311y521 behaviour, which is why the production path
     /// (`wz-ap-demo`) calls it.
-    /// A SETTER, not a consuming builder, because the observer is typically
-    /// built AFTER the supervisor: the session is opened first and the
-    /// observer is constructed alongside the `Session` over the resulting
-    /// actions bundle (that is the order `wz-ap-demo` has). A `mut self`
-    /// builder would force the caller to unbox and rebuild.
-    pub fn set_liveliness_flush(&mut self, observer: Arc<WzMutex<ApplicationLayerObserver>>) {
-        self.liveliness_observer = Some(observer);
+    /// A SETTER, not a consuming builder, because the session is typically
+    /// built AFTER the supervisor: the link is opened first and the `Session`
+    /// is constructed over the resulting actions bundle (that is the order
+    /// `wz-ap-demo` has). A `mut self` builder would force the caller to unbox
+    /// and rebuild.
+    ///
+    /// Takes the SESSION, not the observer, and R311y522 is why: flushing the
+    /// registry only STAGES the Deletes on the session's deferred-fire queue
+    /// (R311lg), and delivering them needs
+    /// [`TokioSession::drain_deferred_fires`], which lives on the session. The
+    /// observer alone cannot deliver anything.
+    pub fn set_liveliness_flush(&mut self, session: TokioSession) {
+        self.liveliness_session = Some(session);
     }
 
     /// The shared actions bundle — the surviving half across reconnects.
@@ -352,8 +357,8 @@ impl ReconnectingSession {
                         // BEFORE the reset, mirroring pico's ordering: the
                         // flush rides transport failure
                         // (`_zp_unicast_failed_result`), ahead of any reopen.
-                        if let Some(observer) = &self.liveliness_observer {
-                            let flushed = match observer.lock() {
+                        if let Some(session) = &self.liveliness_session {
+                            let staged = match session.observer().lock() {
                                 Ok(mut o) => o.flush_liveliness_on_link_loss(),
                                 // A panicking sink poisons the mutex; recover
                                 // rather than leak the whole registry, matching
@@ -362,9 +367,17 @@ impl ReconnectingSession {
                                     poisoned.into_inner().flush_liveliness_on_link_loss()
                                 }
                             };
-                            if flushed > 0 {
+                            if staged > 0 {
+                                // R311y522 — the flush only STAGES on the
+                                // deferred-fire queue; the drive loop is what
+                                // normally drains it, and it has just returned.
+                                // Without this the Deletes reach the
+                                // application late (only if some other periodic
+                                // sweeper happens to exist) or never.
+                                session.drain_deferred_fires();
                                 log::info!(
-                                    "wz reconnect: link lost; flushed {flushed} remote                                      liveliness token(s) as Delete"
+                                    "wz reconnect: link lost; delivered {staged} remote \
+                                     liveliness token(s) as Delete"
                                 );
                             }
                         }
@@ -492,7 +505,7 @@ pub async fn open_session_with_reconnect(
         tick_interval_ms,
         opened,
         reconnects: 0,
-        liveliness_observer: None,
+        liveliness_session: None,
     })
 }
 
