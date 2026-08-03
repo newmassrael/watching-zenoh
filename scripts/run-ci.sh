@@ -3287,6 +3287,20 @@ layer_c1y_cargo_test_routing_peer() {
     # redundancy: this one proves the tests are not silently access-feature-gated.
     _runci_guarded_test "C1y linkstate" 202 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
+    # R311y513 — the BARE routing peer, and the pin that would have caught the
+    # defect this round fixed. Every arm above passes `--features routing-peer`
+    # WITHOUT `--no-default-features`, so what they actually measure is
+    # "default + routing-peer" — and the default set carries the declare-*
+    # origination features. A deploy that builds a routing-only node does NOT,
+    # and on that build the send seam routed every Declare a linkstate forwarder
+    # originated to its no-emit catch arm: 50 of the tests below failed, for
+    # months, in a configuration no lane ran. A lane named for a feature must
+    # compile that feature ALONE at least once, or it is measuring the default
+    # set and reporting the feature's name. 200 not 202: two access-tier tests
+    # need the access set, which bare routing-peer does not pull.
+    _runci_guarded_test "C1y linkstate bare" 200 \
+        cargo test -p wz-runtime-tokio --no-default-features --features routing-peer \
+        --lib linkstate --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
     # budget, checked-add overflow, minimum-across-overlapping-rules, the
     # `messages` selector, the `flows` selector + no-interceptor-on-an-ungoverned-

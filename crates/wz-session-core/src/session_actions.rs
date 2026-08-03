@@ -3927,13 +3927,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // the arm exists exactly where it can dispatch, so a build that turns
             // `codec-declare` on with no origination feature routes a Declare to
             // the no-emit catch arm instead of referencing an absent dispatch.
+            //
+            // R311y513 — the ROUTING originator, added because the union above is an
+            // APP-SURFACE union and a routing peer is not an app. A `routing-peer`
+            // build pulls `codec-declare` (its own manifest calls the Declare wire
+            // surface "part of a routing peer's contract") but NONE of the declare-*
+            // features, which in this crate also switch on the `observer.rs`
+            // session-declaration surface a mesh node never uses. So every Declare a
+            // linkstate forwarder originated — the sub / qabl / token floods, the
+            // tree-change re-advertise, and the terminating DeclareFinal that closes
+            // a client's CURRENT interest — fell to the no-emit catch arm and
+            // returned `FeatureDisabled`, silently. The condition mirrors the OAM arm
+            // below EXACTLY and for the same reason: `codec-linkstate` + `codec-push`
+            // is what a routing peer IS inside this crate. It compiles the send
+            // dispatch and nothing else — no app surface follows it.
             #[cfg(any(
                 feature = "declare-keyexpr",
                 feature = "declare-subscriber",
                 feature = "declare-queryable",
                 feature = "declare-token",
                 feature = "declare-final",
-                feature = "liveliness-token"
+                feature = "liveliness-token",
+                all(
+                    feature = "codec-declare",
+                    feature = "codec-linkstate",
+                    feature = "codec-push"
+                )
             ))]
             crate::network_message::NetworkMessage::Declare(declare) => {
                 let _ = express;
@@ -3947,7 +3966,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Interest is the unconditional `NetworkMessage` variant, so this
             // arm gates on `declare-interest` (the feature that authors the
             // liveliness interest path), not a `codec-*` feature.
-            #[cfg(feature = "declare-interest")]
+            // R311y513 — the routing originator here too, and it is NOT theoretical:
+            // the `routing-interest-pending-gc` broker (R311y512) PROPAGATES a
+            // downstream client's CURRENT interest upstream through this very seam.
+            // On a build without `declare-interest` every propagated copy would
+            // return `FeatureDisabled`, the broker would count 0 copies sent, and it
+            // would degrade — silently — into the inline answer it exists to replace.
+            // Same `codec-linkstate` + `codec-push` routing marker as the Declare and
+            // OAM arms; `interest_body` carries no feature gate at all, so nothing
+            // else follows.
+            #[cfg(any(
+                feature = "declare-interest",
+                all(feature = "codec-linkstate", feature = "codec-push")
+            ))]
             crate::network_message::NetworkMessage::Interest(interest) => {
                 let _ = express;
                 self.dispatch_interest(interest, reliable)
@@ -4007,6 +4038,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-token",
         feature = "declare-final",
         feature = "liveliness-token",
+        // R311y513 — the ROUTING originator. Kept character-identical to the send
+        // seam's arm gate: the arm must exist exactly where this fn does, and the
+        // two drifting apart is the failure mode the R311mx note above describes.
+        all(
+            feature = "codec-declare",
+            feature = "codec-linkstate",
+            feature = "codec-push"
+        ),
     ))]
     fn dispatch_declare(
         &self,
@@ -4097,7 +4136,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// See [`Self::dispatch_push`].
-    #[cfg(feature = "declare-interest")]
+    ///
+    /// R311y513 — same routing-originator widening as the send seam's Interest arm
+    /// (the `routing-interest-pending-gc` broker propagates through it); the two
+    /// gates are kept identical so the arm exists exactly where this fn does.
+    #[cfg(any(
+        feature = "declare-interest",
+        all(feature = "codec-linkstate", feature = "codec-push")
+    ))]
     fn dispatch_interest(
         &self,
         interest: wz_codecs::interest::InterestOwned,

@@ -4383,6 +4383,22 @@ impl LinkstateForwarder {
             let Ok(msg) = built else {
                 continue; // a keyexpr this node cannot re-encode is not brokered
             };
+            // R311y513 — SEND FIRST, and record the pending entry only for a copy
+            // that actually left. `send_one_to_face` discards the fan-out's count,
+            // so this takes the counted seam: a copy that never reached the wire
+            // must not create a pending entry, or the client's final would be
+            // withheld for a whole GC window on account of an upstream that was
+            // never asked. Discovered by the R311y513 send-seam damage probe, which
+            // left this at "1 pending, 0 on the wire".
+            let mut carrier = Some(NetworkMessage::Interest(msg));
+            let placed = self
+                .fan_out(true, None, |id, _zid| {
+                    Ok((id == up).then(|| carrier.take().expect("built once")))
+                })
+                .unwrap_or(0);
+            if placed == 0 {
+                continue;
+            }
             self.pending_interests.borrow_mut().insert(
                 up,
                 up_id,
@@ -4393,7 +4409,6 @@ impl LinkstateForwarder {
                 },
                 deadline,
             );
-            self.send_one_to_face(up, NetworkMessage::Interest(msg));
             sent += 1;
         }
         sent
@@ -9823,6 +9838,72 @@ mod tests {
             tokens, 1,
             "the peer must answer a CURRENT token interest with the matching \
              DeclareToken (zenoh hat/linkstate_peer/token.rs:659); got {bodies:?}"
+        );
+    }
+
+    /// R311y513 — the BROKER's propagation reaches the WIRE on a bare routing
+    /// build, and the client's final is withheld.
+    ///
+    /// This pins the second half of the R311y513 send-seam fix. The R311y512 e2e
+    /// drives a demo whose default preset carries `declare-interest`, so it could
+    /// never have caught this: on a build without it, the seam's Interest arm was
+    /// gated out, every propagated copy returned `FeatureDisabled`,
+    /// `propagate_current_interest` counted 0, and the broker degraded — silently —
+    /// into the inline answer it exists to replace. The assertions are therefore
+    /// BOTH halves of the observable, not just the count: an `Interest` must reach
+    /// the upstream, and the client must have received NOTHING yet.
+    ///
+    /// MEASURED with the seam's routing condition reverted: the PENDING assertion
+    /// reds first (0, not 1). That is the R311y513 send-first ordering doing its
+    /// job — a copy that never reached the wire no longer creates a pending entry,
+    /// so the failure names the real cause instead of leaving a phantom entry that
+    /// would have wedged the client for a whole GC window.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_brokered_interest_reaches_the_upstream_and_withholds_the_clients_final() {
+        use wz_session_core::interest_build::build_interest_liveliness_get;
+
+        // Line UP(peer) - S(self) - C(client).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (upstream, sink_up) = peer_face(zid(0x0B));
+        let (client, sink_client) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &upstream);
+        fwd.register(FaceId(1), &client);
+        sink_up.reset();
+        sink_client.reset();
+
+        let get = build_interest_liveliness_get(7, 0, Some("demo/**")).expect("build get");
+        fwd.forward(
+            FaceId(1),
+            IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                priority: wz_session_core::qos::Priority::DEFAULT,
+                reliable: true,
+                sn: 0,
+                messages: vec![NetworkMessage::Interest(get)],
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+
+        assert_eq!(
+            fwd.pending_interests_len(),
+            1,
+            "the client's CURRENT token interest must be held pending against the \
+             one upstream face"
+        );
+        assert_eq!(
+            sink_up.frame_count(),
+            1,
+            "the propagated Interest must reach the WIRE — a send seam that routes \
+             it to the no-emit catch arm leaves this at 0 while every other \
+             assertion still passes"
+        );
+        assert_eq!(
+            sink_client.frame_count(),
+            0,
+            "the client's terminating DeclareFinal is OWED BY THE UNWIND while an \
+             upstream copy is outstanding; sending it here would close the get \
+             before the upstream could answer"
         );
     }
 
