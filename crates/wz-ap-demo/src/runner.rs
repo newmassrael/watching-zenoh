@@ -522,9 +522,29 @@ pub(crate) async fn scout_for_peer_locator(zid: Vec<u8>, budget_ms: u64) -> io::
                 // `Discovered`, so the line cannot be printed by a build that
                 // merely parsed the flag. Logging the dispatch counters beside
                 // it binds the claim to the FSM's own actions.
+                // R311y520 — the peer's own metadata, APPENDED at the end so
+                // every existing matcher on this line (the zenohd scout interop
+                // asserts the locator and `record_hello=1` substrings) keeps
+                // matching. Before this round these three fields were decoded
+                // and thrown away, so no consumer could tell a router from a
+                // client it had just discovered.
+                let peers = actions.scouted_hellos();
+                let meta = peers
+                    .iter()
+                    .map(|h| {
+                        format!(
+                            "v{} {} zid={} locators=[{}]",
+                            h.version,
+                            h.whatami.map(|w| w.to_str()).unwrap_or("unknown"),
+                            h.zid.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                            h.locators.join(","),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
                 log::info!(
                     "wz-ap-demo: scouted peer locator {locator} \
-                     (scout_emit={}, record_hello={})",
+                     (scout_emit={}, record_hello={}) hellos=[{meta}]",
                     trace.scout_emit,
                     trace.record_hello
                 );

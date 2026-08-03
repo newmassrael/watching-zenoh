@@ -149,6 +149,38 @@ fn wz_scout_discovers_zenohd_over_multicast_and_opens_the_advertised_locator() {
          locator did not come from one decoded Hello dispatch.\nline: {scouted_line}"
     );
 
+    // Assertion 2b (R311y520) — zenohd's OWN metadata survived the decode.
+    //
+    // This is the cross-impl half of the residual the round closed: before it,
+    // `record_hello_and_emit` kept `locators[0]` and dropped version, whatami
+    // and zid, so a consumer could not tell what it had just discovered. The
+    // role asserted here is not a value this test chose — zenohd picked it and
+    // put it in the low 2 bits of its Hello cbyte, and the only way `router`
+    // reaches this line is a wz decode of those bits (pico's own mapping,
+    // `src/protocol/codec/transport.c:35-37`, verified against
+    // `WhatAmI::from_wire`).
+    assert!(
+        scouted_line.contains("hellos=[") && scouted_line.contains(" router zid="),
+        "the scouted line does not carry zenohd's decoded role — wz either dropped \
+         the Hello metadata again or read the cbyte with the wrong mask. zenohd is \
+         a ROUTER and says so in its Hello.\nline: {scouted_line}\n\
+         --- captured wz-ap-demo stderr ---\n{demo_captured}"
+    );
+    // And the zid is a real 16-byte zenoh id, not an empty or truncated read.
+    let zid_hex = scouted_line
+        .split("zid=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or("");
+    assert_eq!(
+        zid_hex.len(),
+        32,
+        "zenohd's zid decoded to {} hex chars, not the 32 of a 16-byte zid — the \
+         cbyte high nibble carries its length (pico message.c:676), so a wrong \
+         length means the length field was misread.\nline: {scouted_line}",
+        zid_hex.len()
+    );
+
     // Assertion 3 — the discovered locator carried a real session. This is also
     // the `wz->zenohd` leg: zenohd answers a Scout only after decoding it and
     // matching its `what` mask, and it then accepted the handshake on the

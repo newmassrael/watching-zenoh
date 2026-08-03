@@ -61,6 +61,7 @@ use sce_rust_runtime::Engine;
 
 use wz_codecs::hello::Hello;
 use wz_codecs::scout::Scout;
+use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
 use wz_session_core::reliability::Reliability;
@@ -123,7 +124,63 @@ pub struct ScoutingActions<R: Runtime = TokioRuntime> {
     /// exit-on-first, so a single locator is captured;
     /// `deploy.scouting.hello_max_peers` bounds the deferred passive
     /// multi-peer accumulator, Phase D+ / OQ-W23).
+    ///
+    /// R311y520 — kept EXACTLY as it was. It is the pre-existing consumer
+    /// surface (`ScoutOutcome::Discovered`, `open_session_at`), and the
+    /// complete record now lives beside it in [`Self::hellos`]; widening this
+    /// field would have been a signature change for every caller that only
+    /// ever wanted a dial target.
     pub discovered: R::Mutex<Option<String>>,
+    /// R311y520 — every Hello decoded in the window, in arrival order, as
+    /// zenoh-pico's `_z_hello_slist_t` carries them.
+    ///
+    /// The pre-R311y520 code decoded a Hello, took `locators[0]`, and dropped
+    /// the rest on the floor: version, whatami and zid never reached the
+    /// caller, a multi-locator Hello lost every locator but the first, and a
+    /// LOCATOR-LESS Hello was indistinguishable from no discovery at all —
+    /// where pico pushes it to the list with an empty locator vector
+    /// (`src/session/scout.c:104-110`). A consumer cannot choose a peer by
+    /// role or identity if it never sees either, so this is the field that
+    /// makes the decoded Hello usable rather than merely sufficient to dial.
+    ///
+    /// Still ONE entry in practice on the active path, because the FSM leaves
+    /// `AwaitingHello` on the first `hello.received`
+    /// (`sources/session/scouting.scxml:128`); collecting the whole window is
+    /// pico's `exit_on_first == false` arm and needs that transition to become
+    /// a self-transition, which is a statechart change and deliberately not in
+    /// this round. The accumulator is a `Vec` so that change is additive here.
+    pub hellos: R::Mutex<Vec<ScoutedHello>>,
+}
+
+/// One decoded Hello, carrying what zenoh-pico's `_z_hello_t` carries:
+/// protocol version, the peer's role, its zid, and ALL of its locators.
+///
+/// Mirrors `_z_hello_t` (`include/zenoh-pico/api/types.h`) field for field;
+/// pico builds it in `_z_scout_inner`'s HELLO arm (`src/session/scout.c:88-110`),
+/// including the `else` branch that clears the locator vector rather than
+/// dropping the hello.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScoutedHello {
+    /// Protocol version byte, verbatim from the wire.
+    pub version: u8,
+    /// The peer's role, decoded from the low 2 bits of the Hello `cbyte`.
+    /// `None` when those bits carry a value no role maps to — kept DISTINCT
+    /// from a role rather than defaulted, so "the peer said something we do
+    /// not understand" cannot read as "the peer said peer".
+    ///
+    /// The layout is verified against both references rather than assumed:
+    /// pico decodes `_whatami = _z_whatami_from_uint8(cbyte)` with
+    /// `1 << (b & 0x03)` (`src/protocol/codec/{message.c:675,transport.c:35-37}`),
+    /// and wz's own [`WhatAmI::from_wire`] masks the same two bits.
+    pub whatami: Option<WhatAmI>,
+    /// The peer's zid, verbatim. Its length rides the `cbyte` high nibble
+    /// (`zidlen = ((cbyte & 0xF0) >> 4) + 1`, pico `message.c:676`); the codec
+    /// has already applied that, so this is the id bytes alone.
+    pub zid: Vec<u8>,
+    /// EVERY locator the Hello advertised, in wire order. Empty for a
+    /// locator-less Hello — which is a real peer that simply advertised no
+    /// address, not an absence of discovery.
+    pub locators: Vec<String>,
 }
 
 impl ScoutingActions<TokioRuntime> {
@@ -136,6 +193,7 @@ impl ScoutingActions<TokioRuntime> {
             pending_scout: Mutex::new(None),
             pending_hello: Mutex::new(None),
             discovered: Mutex::new(None),
+            hellos: Mutex::new(Vec::new()),
         })
     }
 
@@ -148,6 +206,17 @@ impl ScoutingActions<TokioRuntime> {
     /// The discovered locator, if a Hello locator was captured.
     pub fn discovered_locator(&self) -> Option<String> {
         self.discovered.lock().unwrap().clone()
+    }
+
+    /// R311y520 — every Hello decoded in this scouting cycle, in arrival
+    /// order, complete with role / zid / all locators. The pico-shaped read;
+    /// [`Self::discovered_locator`] stays the dial-target read.
+    ///
+    /// A non-empty result with an EMPTY `locators` is meaningful: a peer
+    /// answered and advertised no address. Before R311y520 that was
+    /// indistinguishable from silence.
+    pub fn scouted_hellos(&self) -> Vec<ScoutedHello> {
+        self.hellos.lock().unwrap().clone()
     }
 }
 
@@ -194,7 +263,19 @@ impl ScoutingActionsTrait for ScoutActionsBinding<TokioRuntime> {
     }
 
     /// AwaitingHello -> Idle on hello.received — decode the staged Hello
-    /// datagram and capture its first locator (exit-on-first MVP).
+    /// datagram and record it whole.
+    ///
+    /// R311y520 — this used to project the decode down to
+    /// `locators[0]` and discard everything else. It now keeps the complete
+    /// [`ScoutedHello`] (version / whatami / zid / every locator) and appends
+    /// it to `hellos`, which is what pico's HELLO arm does
+    /// (`src/session/scout.c:88-110`). `discovered` keeps its exact former
+    /// meaning — the first locator, for callers that only want a dial target.
+    ///
+    /// A Hello that carries NO locator is recorded too. Pico's `else` branch
+    /// clears the locator vector and keeps the hello (`scout.c:104-110`);
+    /// dropping it here made a peer that answered indistinguishable from a
+    /// window that timed out.
     fn record_hello_and_emit(&mut self) {
         let a = &self.inner;
         a.trace.lock().unwrap().record_hello += 1;
@@ -209,22 +290,36 @@ impl ScoutingActionsTrait for ScoutActionsBinding<TokioRuntime> {
         // HELLO by the loop) and the locators-present flag in bit 5; the
         // hello body codec wants that flag projected to its 1-bit `l`.
         // The decode borrows `bytes`, so confine it to an inner scope that
-        // yields an owned locator string before `bytes` drops.
-        let locator: Option<String> = {
+        // yields an OWNED record before `bytes` drops.
+        let scouted: Option<ScoutedHello> = {
             let l = (bytes[0] >> 5) & 1;
             let mut cursor = SceCursor::new(&bytes[1..]);
             match Hello::decode(&mut cursor, l) {
-                Ok(hello) => hello
-                    .locators
-                    .as_ref()
-                    .and_then(|locs| locs.iter().next())
-                    .map(|first| first.locator.to_string()),
+                Ok(hello) => Some(ScoutedHello {
+                    version: hello.version,
+                    // Low 2 bits of the cbyte; `None` when they name no role,
+                    // rather than defaulting to one.
+                    whatami: WhatAmI::from_wire(hello.cbyte),
+                    zid: hello.zid.to_vec(),
+                    // EVERY locator, in wire order. `None` (the L flag clear)
+                    // and an empty list both mean "advertised no address" and
+                    // both keep the hello.
+                    locators: hello
+                        .locators
+                        .as_ref()
+                        .map(|locs| locs.iter().map(|l| l.locator.to_string()).collect())
+                        .unwrap_or_default(),
+                }),
                 Err(_) => None,
             }
         };
-        if let Some(loc) = locator {
-            *a.discovered.lock().unwrap() = Some(loc);
+        let Some(scouted) = scouted else {
+            return;
+        };
+        if let Some(first) = scouted.locators.first() {
+            *a.discovered.lock().unwrap() = Some(first.clone());
         }
+        a.hellos.lock().unwrap().push(scouted);
     }
 
     /// AwaitingHello -> Idle on scout.timer.elapsed — the window expired
@@ -448,30 +543,163 @@ mod tests {
     /// n][locator...]` carrying a single locator. Mirrors the
     /// `layer3_hello` wire shape.
     fn craft_hello_datagram(locator: &str) -> Vec<u8> {
+        craft_hello_with(0x01, &[0x01, 0x02, 0x03], &[locator])
+    }
+
+    /// R311y520 — the general builder: an explicit `whatami` wire value, an
+    /// explicit zid, and ZERO OR MORE locators.
+    ///
+    /// The single-locator helper above delegates here so both shapes stay one
+    /// encoder. `locators` empty emits the Hello with the L flag CLEAR, which
+    /// is the locator-less shape pico still surfaces (`scout.c:104-110`) —
+    /// crafting it required this generalisation, which is why the residual
+    /// went unmeasured for as long as it did.
+    fn craft_hello_with(whatami: u8, zid: &[u8], locators: &[&str]) -> Vec<u8> {
         use wz_codecs::hello::HelloOwned;
         use wz_codecs::locator::LocatorOwned;
 
-        let zid = vec![0x01, 0x02, 0x03];
-        // cbyte: whatami wire-form (low 2 bits) | zid_len_m1 << 4.
-        let cbyte = 0x01 | (((zid.len() as u8) - 1) << 4);
+        // cbyte: whatami wire-form (low 2 bits) | zid_len_m1 << 4. Verified
+        // against pico `message.c:675-676` + `transport.c:35-37`.
+        let cbyte = (whatami & 0x03) | (((zid.len() as u8) - 1) << 4);
+        let l_flag: u8 = u8::from(!locators.is_empty());
         let owned: HelloOwned = HelloOwned {
             version: 0x09,
             cbyte,
-            zid: wz_session_core::codec_owned::owned_bytes(&zid).unwrap(),
-            num_locators: Some(1),
-            locators: Some(vec![LocatorOwned {
-                locator_len: locator.len() as u64,
-                locator: wz_session_core::codec_owned::owned_string(locator).unwrap(),
-            }]),
+            zid: wz_session_core::codec_owned::owned_bytes(zid).unwrap(),
+            num_locators: (!locators.is_empty()).then_some(locators.len() as u64),
+            locators: (!locators.is_empty()).then(|| {
+                locators
+                    .iter()
+                    .map(|l| LocatorOwned {
+                        locator_len: l.len() as u64,
+                        locator: wz_session_core::codec_owned::owned_string(l).unwrap(),
+                    })
+                    .collect()
+            }),
         };
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection of owned Hello")
-            .encode_to_vec(1 /* L flag projected */);
+            .encode_to_vec(l_flag);
 
         let mut dgram = Vec::with_capacity(1 + body.len());
-        dgram.push(wire_const::S_MID_HELLO | wire_const::FLAG_S_HELLO_L);
+        let mut header = wire_const::S_MID_HELLO;
+        if l_flag == 1 {
+            header |= wire_const::FLAG_S_HELLO_L;
+        }
+        dgram.push(header);
         dgram.extend_from_slice(&body);
         dgram
+    }
+
+    /// Drive one staged Hello through the FSM and hand back the recorded set.
+    fn scout_one(dgram: Vec<u8>) -> (Arc<ScoutingActions>, Vec<ScoutedHello>) {
+        let actions = fixture_actions();
+        let mut engine = new_scouting_engine(&actions);
+        engine.initialize();
+        engine.process_event(ScoutingEvent::SessionOpenRequested);
+        engine.process_event(ScoutingEvent::ScoutTxDone);
+        assert_eq!(engine.get_current_state(), ScoutingState::AwaitingHello);
+        *actions.pending_hello.lock().unwrap() = Some(dgram);
+        engine.process_event(ScoutingEvent::HelloReceived);
+        assert_eq!(engine.get_current_state(), ScoutingState::Idle);
+        let hellos = actions.scouted_hellos();
+        (actions, hellos)
+    }
+
+    /// R311y520 residual 4 — EVERY locator of a multi-locator Hello survives.
+    ///
+    /// Pre-R311y520 the decode took `locators[0]` and dropped the rest, so a
+    /// peer advertising a reachable address behind an unreachable one was
+    /// undialable through wz while pico could reach it (`scout.c:94-103` copies
+    /// the whole array).
+    #[test]
+    fn a_multi_locator_hello_surfaces_every_locator() {
+        let (actions, hellos) = scout_one(craft_hello_with(
+            0x01,
+            &[0x01, 0x02, 0x03],
+            &["udp/127.0.0.1:7447", "tcp/127.0.0.1:7448", "tcp/[::1]:7449"],
+        ));
+        assert_eq!(hellos.len(), 1, "one Hello in, one record out");
+        assert_eq!(
+            hellos[0].locators,
+            vec![
+                "udp/127.0.0.1:7447".to_string(),
+                "tcp/127.0.0.1:7448".to_string(),
+                "tcp/[::1]:7449".to_string(),
+            ],
+            "all three locators must survive in wire order"
+        );
+        // The pre-existing dial-target read is unchanged: still the first.
+        assert_eq!(
+            actions.discovered_locator().as_deref(),
+            Some("udp/127.0.0.1:7447")
+        );
+    }
+
+    /// R311y520 residual 2 — version / whatami / zid reach the caller.
+    ///
+    /// A consumer cannot pick a peer by ROLE if the role never leaves the
+    /// decoder. The whatami here is the CLIENT wire value (0b10), chosen
+    /// because it is neither the fixture's previous value nor the
+    /// default-on-failure one, so a decode that quietly defaults fails this.
+    #[test]
+    fn a_hello_surfaces_its_version_role_and_zid() {
+        let zid = [0xDE, 0xAD, 0xBE, 0xEF, 0x01];
+        let (_actions, hellos) = scout_one(craft_hello_with(0x02, &zid, &["udp/127.0.0.1:7447"]));
+        assert_eq!(hellos.len(), 1);
+        assert_eq!(hellos[0].version, 0x09);
+        assert_eq!(
+            hellos[0].whatami,
+            Some(WhatAmI::Client),
+            "the role rides the low 2 bits of the cbyte (pico transport.c:35-37)"
+        );
+        assert_eq!(
+            hellos[0].zid, zid,
+            "the zid must survive whole; its length rides the cbyte high nibble"
+        );
+    }
+
+    /// R311y520 residual 3 — a LOCATOR-LESS Hello is a discovered peer, not
+    /// silence.
+    ///
+    /// This is the sharpest of the three, because the old code and a timed-out
+    /// window were indistinguishable to every caller: both left `discovered`
+    /// at `None`. Pico clears the locator vector and KEEPS the hello
+    /// (`scout.c:104-110`). The assertion pairs the two reads deliberately —
+    /// a recorded peer WITH no dial target.
+    #[test]
+    fn a_locator_less_hello_is_still_a_discovered_peer() {
+        let (actions, hellos) = scout_one(craft_hello_with(0x00, &[0x07, 0x08], &[]));
+        assert_eq!(
+            hellos.len(),
+            1,
+            "a Hello with no locator is still a peer that answered"
+        );
+        assert!(
+            hellos[0].locators.is_empty(),
+            "and it advertised no address, which is what empty means"
+        );
+        assert_eq!(hellos[0].whatami, Some(WhatAmI::Router));
+        assert_eq!(hellos[0].zid, vec![0x07, 0x08]);
+        assert!(
+            actions.discovered_locator().is_none(),
+            "no locator to dial — the old read stays honest"
+        );
+    }
+
+    /// The negative arm that keeps the three above from being tautologies: a
+    /// window that really did time out records NOTHING, so "one record" above
+    /// cannot be satisfied by an unconditional push.
+    #[test]
+    fn a_timed_out_window_records_no_hello() {
+        let actions = fixture_actions();
+        let mut engine = new_scouting_engine(&actions);
+        engine.initialize();
+        engine.process_event(ScoutingEvent::SessionOpenRequested);
+        engine.process_event(ScoutingEvent::ScoutTxDone);
+        engine.process_event(ScoutingEvent::ScoutTimerElapsed);
+        assert!(actions.scouted_hellos().is_empty());
+        assert!(actions.discovered_locator().is_none());
     }
 }
