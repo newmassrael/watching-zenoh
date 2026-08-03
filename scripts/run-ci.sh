@@ -1142,7 +1142,31 @@ layer_b2_regen_diff() {
         echo "$dirty" >&2
         return 1
     fi
-    echo "Layer B2 pass (committed out/** == regenerated)"
+    # R311y517 — the regen-diff above CANNOT catch a machine-dependent emit on
+    # the machine that produced it: whoever last regenerated sees
+    # `committed == regenerated` by construction, and only a checkout at a
+    # DIFFERENT path reds. That is exactly how the y510 SCE pin bump shipped the
+    # author's home directory into 8 `// From:` headers and left hosted Layer B2
+    # red for five consecutive runs while every local run was green — the gate
+    # was structurally blind on the one machine that could have fixed it.
+    #
+    # This assertion is the machine-INDEPENDENT half, and it is cheap: no
+    # committed generated file may carry an ABSOLUTE source path, because an
+    # absolute path is by definition the thing that differs across checkouts.
+    # (SCE 43695e572 emits the `// From:` line verbatim as the caller named it —
+    # `header_source_path`, vendor/sce/sce-build/src/lib.rs:330-334 — so keeping
+    # the path relative is the emitter contract, enforced here.)
+    local abs_src
+    abs_src="$(grep -rn '^// From: /' out/ 2>/dev/null || true)"
+    if [[ -n "$abs_src" ]]; then
+        echo "Layer B2 FAIL: committed out/** carries an ABSOLUTE source path —" >&2
+        echo "  the emit is machine-dependent, so hosted CI reds on EVERY run" >&2
+        echo "  while this box stays green. Fix the xtask path hand-off" >&2
+        echo "  (xtask/src/main.rs \`repo_relative\`), regen, and commit out/:" >&2
+        echo "$abs_src" >&2
+        return 1
+    fi
+    echo "Layer B2 pass (committed out/** == regenerated, no absolute source path)"
     return 0
 }
 
