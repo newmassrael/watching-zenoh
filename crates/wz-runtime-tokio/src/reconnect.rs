@@ -336,6 +336,35 @@ impl ReconnectingSession {
             match outcome {
                 DriverOutcome::IterationLimit => return ReconnectDriveOutcome::IterationLimit,
                 DriverOutcome::Terminated => {
+                    // R311y525 — the flush runs BEFORE the stop check, and the
+                    // ordering is the faithful one: pico fires
+                    // `_z_liveliness_subscription_undeclare_all` from TRANSPORT
+                    // FAILURE (`unicast/lease.c:74-78`), not from the decision
+                    // to reopen. A link that died took its peer's tokens with
+                    // it whether or not this supervisor is about to stop, so a
+                    // caller that stops during a loss must still be told.
+                    if let Some(session) = &self.liveliness_session {
+                        let staged = match session.observer().lock() {
+                            Ok(mut o) => o.flush_liveliness_on_link_loss(),
+                            // A panicking sink poisons the mutex; recover
+                            // rather than leak the whole registry, matching
+                            // every other shutdown path in this crate.
+                            Err(poisoned) => poisoned.into_inner().flush_liveliness_on_link_loss(),
+                        };
+                        if staged > 0 {
+                            // R311y522 — the flush only STAGES on the
+                            // deferred-fire queue; the drive loop is what
+                            // normally drains it, and it has just returned.
+                            // Without this the Deletes reach the
+                            // application late (only if some other periodic
+                            // sweeper happens to exist) or never.
+                            session.drain_deferred_fires();
+                            log::info!(
+                                "wz reconnect: link lost; delivered {staged} remote \
+                                 liveliness token(s) as Delete"
+                            );
+                        }
+                    }
                     if stop.load(Ordering::Acquire) {
                         return ReconnectDriveOutcome::Stopped;
                     }
@@ -357,30 +386,6 @@ impl ReconnectingSession {
                         // BEFORE the reset, mirroring pico's ordering: the
                         // flush rides transport failure
                         // (`_zp_unicast_failed_result`), ahead of any reopen.
-                        if let Some(session) = &self.liveliness_session {
-                            let staged = match session.observer().lock() {
-                                Ok(mut o) => o.flush_liveliness_on_link_loss(),
-                                // A panicking sink poisons the mutex; recover
-                                // rather than leak the whole registry, matching
-                                // every other shutdown path in this crate.
-                                Err(poisoned) => {
-                                    poisoned.into_inner().flush_liveliness_on_link_loss()
-                                }
-                            };
-                            if staged > 0 {
-                                // R311y522 — the flush only STAGES on the
-                                // deferred-fire queue; the drive loop is what
-                                // normally drains it, and it has just returned.
-                                // Without this the Deletes reach the
-                                // application late (only if some other periodic
-                                // sweeper happens to exist) or never.
-                                session.drain_deferred_fires();
-                                log::info!(
-                                    "wz reconnect: link lost; delivered {staged} remote \
-                                     liveliness token(s) as Delete"
-                                );
-                            }
-                        }
                         self.actions.reset_for_reopen();
                         match self.open_attempt(clock).await {
                             Ok(reopened) => break reopened,

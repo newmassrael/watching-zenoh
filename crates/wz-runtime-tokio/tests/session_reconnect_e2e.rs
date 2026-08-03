@@ -247,6 +247,151 @@ async fn assert_declare_replays_after_link_loss(
     );
 }
 
+/// R311y525 — THE DIAL-PATH DELIVERY GATE for the link-loss liveliness flush.
+///
+/// R311y521 built that flush and R311y523 corrected it, but neither shipped an
+/// end-to-end test: R311y521's unit tests drive `LivelinessSubscriberRegistry`
+/// directly with a plain sink, so they never cross the DEFERRED-FIRE seam that
+/// turned out to be the whole defect. This is the missing evidence, and it is
+/// written to fail on either half.
+///
+/// The shape: a reconnect-supervised client declares a liveliness subscriber,
+/// the acceptor declares a token so the client's registry learns it, and then
+/// the acceptor VANISHES. No `UndeclToken` can arrive — the link that would
+/// carry one is what died — so the only thing that can tell the application is
+/// the supervisor's own flush.
+///
+/// The PUT is asserted first. Without it the Delete leg could pass on a run
+/// where the token never reached the client at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dying_link_delivers_remote_liveliness_deletes_to_the_dialer() {
+    use std::sync::Mutex as StdMutex;
+    use wz_runtime_tokio::declare::LivelinessSampleKind;
+    use wz_runtime_tokio::observer::ApplicationLayerObserver;
+    use wz_runtime_tokio::session::{LivelinessSubscriberOptions, TokioSession};
+    use wz_runtime_tokio::sync::Mutex as WzMutex;
+
+    const KEYEXPR: &str = "wz/live/dialgate";
+
+    let (listener, locator) = ip_loopback().await;
+    let mut params = fixture_session_init_params();
+    params.zid = vec![0x07; 4];
+
+    let policy = ReconnectPolicy {
+        retry_delay_ms: 50,
+        max_attempts: Some(100),
+    };
+
+    // Connection #1: the client opens under the supervisor; the acceptor
+    // handshakes and declares ONE liveliness token.
+    let (client, server) = tokio::join!(
+        async {
+            open_session_with_reconnect(
+                locator,
+                params,
+                DialConfig::default(),
+                TokioTime::new(),
+                policy,
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("client reaches Established")
+        },
+        async {
+            let (stream, _peer) = listener.accept().await.expect("accept");
+            accept_and_open_session(
+                DialedLink::Tcp(stream),
+                fixture_session_init_params(),
+                TokioTime::new(),
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("acceptor reaches Established")
+        },
+    );
+    let mut client = client;
+
+    // The application: a liveliness subscriber over the supervised session,
+    // capturing every sample kind + keyexpr it is handed.
+    let captured: Arc<StdMutex<Vec<(LivelinessSampleKind, String)>>> =
+        Arc::new(StdMutex::new(Vec::new()));
+    let sink = captured.clone();
+    let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(
+        client.actions().clone(),
+        observer,
+        Arc::new(TokioTime::new()),
+    );
+    let _sub = session
+        .declare_liveliness_subscriber(
+            "wz/live/**".to_owned(),
+            LivelinessSubscriberOptions::default(),
+            move |s| {
+                sink.lock().unwrap().push((s.kind, s.keyexpr.to_owned()));
+            },
+        )
+        .expect("declare the liveliness subscriber");
+    client.set_liveliness_flush(session.clone());
+
+    // The acceptor announces a token, then the client drives until it lands.
+    server
+        .actions
+        .send_declare_token(21, 0, Some(KEYEXPR))
+        .expect("acceptor declares a liveliness token");
+    let dispatch_session = session.clone();
+    let mut dispatch = |e: IterationEvent<'_>| dispatch_session.dispatch_iteration_event(e);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_killer = stop.clone();
+    let captured_for_killer = captured.clone();
+
+    let timeouts = timeouts_for_gate();
+    let (drive_outcome, _) = tokio::join!(
+        client.drive(&timeouts, &stop, Some(ITER_CAP), &mut dispatch),
+        async {
+            // Wait for the PUT, then VANISH. Raising `stop` first makes the
+            // supervisor return Stopped at its next loop boundary instead of
+            // reconnecting, so the flush is the last thing it does.
+            for _ in 0..400 {
+                if captured_for_killer
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(k, ke)| *k == LivelinessSampleKind::Put && ke == KEYEXPR)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            stop_for_killer.store(true, Ordering::Release);
+            drop(server);
+        },
+    );
+
+    let seen = captured.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|(k, ke)| *k == LivelinessSampleKind::Put && ke == KEYEXPR),
+        "the acceptor's token never reached the dialer as a PUT, so the Delete \
+         leg below would be testing nothing. seen: {seen:?} (outcome {drive_outcome:?})"
+    );
+    assert!(
+        seen.iter()
+            .any(|(k, ke)| *k == LivelinessSampleKind::Delete && ke == KEYEXPR),
+        "the peer holding {KEYEXPR} vanished and the application was never told: \
+         no DELETE was delivered. No UndeclToken can arrive either — the link \
+         that would carry one is what died. This fails if the supervisor skips \
+         the flush (R311y521) OR stages it without draining the deferred-fire \
+         queue (R311y523). seen: {seen:?} (outcome {drive_outcome:?})"
+    );
+}
+
+/// The timeouts every gate in this file shares.
+fn timeouts_for_gate() -> SessionTimeouts {
+    SessionTimeouts::spec_defaults()
+}
+
 /// Bind a numeric loopback listener and the matching numeric
 /// [`ReconnectLocator::Ip`] — the IP-leg setup shared by the subscriber and
 /// queryable reconnect-replay tests (R311pw lifted it out of the driver so the
