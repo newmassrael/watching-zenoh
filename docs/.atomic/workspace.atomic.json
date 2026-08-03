@@ -82412,6 +82412,44 @@
         "LOCAL: R311y514 atop R311y513 (cd1c8e4b) atop origin/main=33ceabb7. 6 commits ahead after this ledger commits. NOT pushed without explicit consent. Hosted CI remains unchecked for 33ceabb7, y512, y513 and now y514."
       ]
     },
+    "Round 311y515": {
+      "decision_summary": "R311y515 -- a one-line correction to Round 311y514, appended rather than edited because the ledger is frozen. y514s carry_forward asserts \"atop origin/main=33ceabb7. 6 commits ahead\" and that origin lacks y512 and y513. Measured after the fact: origin/main is cd1c8e4b, the y513 ledger commit, and only the two y514 commits are unpushed. The claim was copied from an agent-memory note instead of read from the repository -- the same quoted-not-checked failure CLAUDE.md documents for machine-local reference paths, here applied to git state. Every technical claim in y514 stands; the error is confined to the push-state sentence, and its practical consequence is that y512 and y513 have been ON origin all along, so the outstanding item is READING their hosted CI runs rather than pushing them.",
+      "changes_bullets": [
+        "No code, script or catalog change. This entry exists solely to correct a factual claim in Round 311y514's carry_forward, which is frozen."
+      ],
+      "verification_bullets": [
+        "MEASURED, after Round 311y514 was already committed: git rev-parse origin/main = cd1c8e4b4b92db4919f4458e3f8b7399be8fd21e, which is the Round 311y513 ledger commit. git log origin/main..HEAD lists exactly two commits, b5804557 (the y514 code) and 3e6e895b (the y514 ledger).",
+        "THE ERROR AND ITS SOURCE: y514's carry says \"atop origin/main=33ceabb7. 6 commits ahead\". Both halves are wrong. It was copied from a prior session's note rather than read from the repository, which is the exact failure CLAUDE.md's External-references rule names -- a machine-local fact quoted instead of checked. The y512 and y513 commits had already reached origin.",
+        "CONSEQUENCE FOR ANY READER: y514's \"Hosted CI remains unchecked for 33ceabb7, y512, y513 and now y514\" is also wrong about which commits lack a hosted run. y512 and y513 ARE on origin, so hosted CI has had the opportunity to run them; whether it did, and with what result, is still unread. Only y514 is genuinely unpushed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "CORRECTION to Round 311y514: origin/main is cd1c8e4b (the y513 ledger commit), not 33ceabb7, and only the two y514 commits are unpushed -- not six. y512 and y513 had already been pushed.",
+        "THE LESSON, and it is the one CLAUDE.md already states for reference paths, now demonstrated on git state: NEVER write a repository fact into the ledger from an agent-memory note. Read it. Push state, branch position and commit counts are machine-local and change between sessions; a stale note reads exactly like a fresh measurement and nothing gates it.",
+        "STILL TRUE and unchanged by this correction: every technical claim in y514 stands -- the defect, the fix, the three damage probes, the lane pin move 8 -> 11, and the 4/4 zenohd cross-impl re-run. The error is confined to the push-state sentence.",
+        "UNREAD, and now the honest statement: hosted CI results for 33ceabb7, y512 and y513 have not been LOOKED AT, though those commits are on origin. y514 is not pushed at all. Reading the hosted runs is the outstanding verification item."
+      ],
+      "publishable_decision_summary": "R311y515 -- a one-line correction to Round 311y514, appended rather than edited because the ledger is frozen. y514s carry_forward asserts \"atop origin/main=33ceabb7. 6 commits ahead\" and that origin lacks y512 and y513. Measured after the fact: origin/main is cd1c8e4b, the y513 ledger commit, and only the two y514 commits are unpushed. The claim was copied from an agent-memory note instead of read from the repository -- the same quoted-not-checked failure CLAUDE.md documents for machine-local reference paths, here applied to git state. Every technical claim in y514 stands; the error is confined to the push-state sentence, and its practical consequence is that y512 and y513 have been ON origin all along, so the outstanding item is READING their hosted CI runs rather than pushing them.",
+      "publishable_changes_bullets": [
+        "No code, script or catalog change. This entry exists solely to correct a factual claim in Round 311y514's carry_forward, which is frozen."
+      ],
+      "publishable_verification_bullets": [
+        "MEASURED, after Round 311y514 was already committed: git rev-parse origin/main = cd1c8e4b4b92db4919f4458e3f8b7399be8fd21e, which is the Round 311y513 ledger commit. git log origin/main..HEAD lists exactly two commits, b5804557 (the y514 code) and 3e6e895b (the y514 ledger).",
+        "THE ERROR AND ITS SOURCE: y514's carry says \"atop origin/main=33ceabb7. 6 commits ahead\". Both halves are wrong. It was copied from a prior session's note rather than read from the repository, which is the exact failure CLAUDE.md's External-references rule names -- a machine-local fact quoted instead of checked. The y512 and y513 commits had already reached origin.",
+        "CONSEQUENCE FOR ANY READER: y514's \"Hosted CI remains unchecked for 33ceabb7, y512, y513 and now y514\" is also wrong about which commits lack a hosted run. y512 and y513 ARE on origin, so hosted CI has had the opportunity to run them; whether it did, and with what result, is still unread. Only y514 is genuinely unpushed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "CORRECTION to Round 311y514: origin/main is cd1c8e4b (the y513 ledger commit), not 33ceabb7, and only the two y514 commits are unpushed -- not six. y512 and y513 had already been pushed.",
+        "THE LESSON, and it is the one CLAUDE.md already states for reference paths, now demonstrated on git state: NEVER write a repository fact into the ledger from an agent-memory note. Read it. Push state, branch position and commit counts are machine-local and change between sessions; a stale note reads exactly like a fresh measurement and nothing gates it.",
+        "STILL TRUE and unchanged by this correction: every technical claim in y514 stands -- the defect, the fix, the three damage probes, the lane pin move 8 -> 11, and the 4/4 zenohd cross-impl re-run. The error is confined to the push-state sentence.",
+        "UNREAD, and now the honest statement: hosted CI results for 33ceabb7, y512 and y513 have not been LOOKED AT, though those commits are on origin. y514 is not pushed at all. Reading the hosted runs is the outstanding verification item."
+      ]
+    },
     "Round 311y52": {
       "decision_summary": "R311y52 -- R311y51 session-review remediation (3 independent agents security/architect/quality + direct-read arbitration; verdict gate SOUND + fidelity-honest + no-never-run, NO HIGH). Acted on the architect MEDIUM: the write facade forwarded but gated ZERO library code (only cfg site was the demo, asymmetric with the lib-resident adminspace-read gate) and AdminSpacePermissions.write was a dead field. Fix: new wz-runtime-tokio admin_write_permit(&AdminSpacePermissions) -> bool is the adminspace-write cfg site (write-side mirror of declare_adminspace_with_permissions' read gate), called by the wz-ap-demo host which builds AdminSpacePermissions{write: --config-write-permit} -- .write is now LIVE + the facade chain gates real lib code; parse_admin_config_write stays the gate-first decode SSOT. + RefMut-across-body hardening; facade comments de-overclaimed; C1am runs admin_write_permit on both gate arms. validate_workspace orphan new=+0; A3 active=102.",
       "changes_bullets": [
