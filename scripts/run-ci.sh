@@ -3316,7 +3316,14 @@ layer_c1y_cargo_test_routing_peer() {
     # Interest mode arms, or ignoring the body's TOKENS bit, reds only the mode
     # one. The undeclare pair also proves the enforcer reads the OPTIONAL
     # ext_wire_expr, which is the only place an undeclare's keyexpr lives.
-    _runci_guarded_test "C1y interceptor" 34 \
+    # R311y508 — 34 -> 36: the interceptor CACHE contract's two tests. One walks
+    # six message shapes asserting the cached verdict EQUALS the direct one,
+    # including the branches that do not factor through (face, keyexpr) -- an
+    # ungoverned kind and an undeclared alias -- which is where a cache is easy to
+    # get wrong; the other pins that a subject-less face caches nothing. Neither
+    # needs the hotreload feature: they exercise the trait pair directly, so this
+    # lane's feature set is unchanged.
+    _runci_guarded_test "C1y interceptor" 36 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     _runci_guarded_test "C1y linkstate+access" 211 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1

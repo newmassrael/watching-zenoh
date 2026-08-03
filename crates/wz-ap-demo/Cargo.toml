@@ -220,6 +220,12 @@ preset-ap-full = [
     # this key the flag would exist as an INERT warning: the atom would be in the
     # library preset while the binary that hosts storages could not load one.
     "storage-mgr-dynamic-volume-loading",
+    # R311y508 — the version-keyed interceptor cache. It has no CLI flag of its
+    # own (it changes how the ACL chain is consulted, not what a deploy can ask
+    # for), but Layer A5's rule is about the BINARY reaching the capability: with
+    # the key declared here and absent from the preset, the AP-full build would
+    # compile the cache in with no path that turns it on.
+    "routing-interceptor-hotreload",
     "tls",
     "quic",
     "quic-datagram",
