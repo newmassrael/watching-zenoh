@@ -59,7 +59,7 @@ use wz_session_core::reconnect::{ReplayDeclarationsError, SwappableLink};
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime, TokioTime};
+use crate::runtime_impl::{TokioRuntime, TokioTime};
 use crate::session_glue::{
     drive_session_until_terminal, new_session_actions, BoxedLinkDriver, DriverOutcome,
     SessionLinkActions,
@@ -68,6 +68,7 @@ use crate::session_open::{
     dial_locator, initiator_open, plan_endpoint, wire_dialed_link, DialConfig, OpenError,
     OpenedSession,
 };
+use crate::writer_queue::WriterHandle;
 
 /// Reconnect retry policy. The defaults are the pico literals:
 /// `_z_client_reopen_task_fn` re-arms itself with
@@ -151,7 +152,7 @@ pub struct ReconnectingSession {
 /// its own clone) reads self-documenting at the destructure.
 pub struct ReconnectTeardown {
     pub actions: Arc<SessionLinkActions>,
-    pub writer_handle: TokioJoinHandle<()>,
+    pub writer_handle: WriterHandle,
 }
 
 impl ReconnectingSession {

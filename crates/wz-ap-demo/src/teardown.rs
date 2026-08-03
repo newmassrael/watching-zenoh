@@ -46,7 +46,7 @@ use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
 use wz::runtime_tokio::session::LivelinessToken;
 use wz::runtime_tokio::session_glue::{CloseReason, SessionLinkActions};
-use wz::runtime_tokio::session_open::WRITER_DRAIN_MS;
+use wz::runtime_tokio::writer_queue::WriterHandle;
 
 /// Initial state. Every teardown input is owned by this struct;
 /// no step has run yet. `was_cancelled` distinguishes the
@@ -65,7 +65,7 @@ pub(crate) struct TeardownInitial {
     /// (UndeclToken before Close) is unchanged.
     pub token: Option<LivelinessToken>,
     pub actions: Arc<SessionLinkActions>,
-    pub writer_handle: TokioJoinHandle<()>,
+    pub writer_handle: WriterHandle,
     pub was_cancelled: bool,
     /// R311ad — clock used by every timeout-bounded step in the
     /// chain. Passing it in (instead of letting each step construct
@@ -103,12 +103,16 @@ impl TeardownInitial {
         if let Some(h) = self.liveliness_get_handle {
             let _ = self.clock.timeout(200, h).await;
         }
+        // R311y519 — the clock stops here. Steps 2-3 above are the last
+        // wall-clock bounded ones; the terminal drain (step 7) now ends when
+        // the sealed queue is empty rather than on a timeout, so threading a
+        // TimeSource through the remaining states would carry an input no step
+        // reads.
         TasksJoined {
             token: self.token,
             actions: self.actions,
             writer_handle: self.writer_handle,
             was_cancelled: self.was_cancelled,
-            clock: self.clock,
         }
     }
 }
@@ -124,9 +128,8 @@ impl TeardownInitial {
 pub(crate) struct TasksJoined {
     token: Option<LivelinessToken>,
     actions: Arc<SessionLinkActions>,
-    writer_handle: TokioJoinHandle<()>,
+    writer_handle: WriterHandle,
     was_cancelled: bool,
-    clock: TokioTime,
 }
 
 impl TasksJoined {
@@ -139,7 +142,6 @@ impl TasksJoined {
             actions: self.actions,
             writer_handle: self.writer_handle,
             was_cancelled: self.was_cancelled,
-            clock: self.clock,
         }
     }
 }
@@ -153,9 +155,8 @@ impl TasksJoined {
 /// double-send. `was_cancelled` is the discriminator.
 pub(crate) struct TokenDropped {
     actions: Arc<SessionLinkActions>,
-    writer_handle: TokioJoinHandle<()>,
+    writer_handle: WriterHandle,
     was_cancelled: bool,
-    clock: TokioTime,
 }
 
 impl TokenDropped {
@@ -174,7 +175,6 @@ impl TokenDropped {
         CloseEmitted {
             actions: self.actions,
             writer_handle: self.writer_handle,
-            clock: self.clock,
         }
     }
 }
@@ -189,8 +189,7 @@ impl TokenDropped {
 /// last sender by construction.
 pub(crate) struct CloseEmitted {
     actions: Arc<SessionLinkActions>,
-    writer_handle: TokioJoinHandle<()>,
-    clock: TokioTime,
+    writer_handle: WriterHandle,
 }
 
 impl CloseEmitted {
@@ -198,31 +197,30 @@ impl CloseEmitted {
         drop(self.actions);
         ActionsDropped {
             writer_handle: self.writer_handle,
-            clock: self.clock,
         }
     }
 }
 
-/// Local `actions` dropped. Step 7 gives the writer task a
-/// [`WRITER_DRAIN_MS`] drain window to push any tail frame (e.g. a Close
-/// the FSM enqueued during the final transition, an UndeclToken from a
-/// late RAII Drop) to the peer before `run_demo` returns and the
-/// runtime shuts down. The timeout is intentionally short — the
-/// writer is a length-prefixed shim, not a blocking flush, so the
-/// window is generous on every link we test; the figure is the single
-/// [`WRITER_DRAIN_MS`] the library `OpenedSession::drain_to_close`
-/// (the multi-peer face drain) shares.
+/// Local `actions` dropped. Step 7 SEALS the writer's queue and awaits it to
+/// completion, so any tail frame (e.g. a Close the FSM enqueued during the
+/// final transition, an UndeclToken from a late RAII Drop) reaches the peer
+/// before `run_demo` returns and the runtime shuts down.
+///
+/// R311y519 — this used to be a wall-clock `WRITER_DRAIN_MS` window, and the
+/// window was the defect: it could not tell a wedged peer from a slow one, so
+/// on a loaded host it expired while the writer was still making progress and
+/// dropped the tail it exists to deliver. The seal is now the termination
+/// signal and
+/// [`WRITER_STALL_MS`](wz::runtime_tokio::writer_queue::WRITER_STALL_MS)
+/// bounds the one write a wedged peer can stall on — the same primitive the
+/// library `OpenedSession::drain_to_close` (the multi-peer face drain) uses.
 pub(crate) struct ActionsDropped {
-    writer_handle: TokioJoinHandle<()>,
-    clock: TokioTime,
+    writer_handle: WriterHandle,
 }
 
 impl ActionsDropped {
     pub(crate) async fn drain_writer(self) -> WriterDrained {
-        let _ = self
-            .clock
-            .timeout(WRITER_DRAIN_MS, self.writer_handle)
-            .await;
+        self.writer_handle.drain().await;
         WriterDrained
     }
 }

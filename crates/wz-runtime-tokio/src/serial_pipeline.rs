@@ -62,10 +62,8 @@ use tokio::io::{split, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 use tokio_serial::SerialStream;
 
-use wz_runtime_core::Runtime;
-
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
+use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
@@ -223,15 +221,11 @@ where
 pub fn wire_serial_stream(
     stream: SerialStream,
     endpoint: &SerialEndpoint,
-) -> (
-    SerialReadDriver,
-    Arc<SerialWriteDriver>,
-    TokioJoinHandle<()>,
-) {
+) -> (SerialReadDriver, Arc<SerialWriteDriver>, WriterHandle) {
     let (reader, writer) = split(stream);
     let inbound = SerialReadDriver::new(reader);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(serial_writer_task(writer, rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| serial_writer_task(writer, queue));
     // R311y474 — the adminspace `{src,dst}` pair. BOTH ends are this tty's own
     // locator, which is upstream's DIAL-side behaviour verbatim: zenoh passes its
     // one `path` as both `src_path` and `dst_path`
@@ -447,14 +441,14 @@ impl BoxedLinkDriver for SerialWriteDriver {
 /// Async writer task. Owns the [`WriteHalf`] and drains the outbound channel
 /// one payload at a time, COBS-framing each through [`encode_frame`] (header
 /// [`SERIAL_DATA_HEADER`] + len + payload + crc32 -> COBS -> `0x00` EOP) and
-/// writing + flushing. Exits when every [`SerialWriteDriver`] clone has
-/// dropped (receiver returns `None`) or a write fails (logged + bail),
-/// shutting the write half so the peer observes EOF.
-pub async fn serial_writer_task(
-    mut writer: WriteHalf<SerialStream>,
-    mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
-) {
-    while let Some(payload) = rx.recv().await {
+/// writing + flushing. Exits when the queue is SEALED and drained, when every
+/// [`SerialWriteDriver`] clone has dropped, or when a write fails / stalls past
+/// [`WRITER_STALL_MS`](crate::writer_queue::WRITER_STALL_MS) on a sealed queue
+/// (logged + bail) — see [`crate::writer_queue`] for why the seal, and not
+/// sender liveness alone, is the teardown signal. The first two shut the write
+/// half so the peer observes EOF.
+pub async fn serial_writer_task(mut writer: WriteHalf<SerialStream>, mut queue: OutboundQueue) {
+    while let Some(payload) = queue.next().await {
         // Defensive: send_blocking already rejects oversize, but a future
         // caller could bypass it. encode_frame rejects > SERIAL_MTU.
         let wire = match encode_frame(SERIAL_DATA_HEADER, &payload) {
@@ -467,16 +461,27 @@ pub async fn serial_writer_task(
                 continue;
             }
         };
-        if let Err(e) = writer.write_all(&wire).await {
-            log::warn!("wz-runtime-tokio: serial_writer_task write failed: {e}; closing");
-            return;
-        }
-        if let Err(e) = writer.flush().await {
-            log::warn!("wz-runtime-tokio: serial_writer_task flush failed: {e}; closing");
-            return;
+        let write = async {
+            writer.write_all(&wire).await?;
+            writer.flush().await
+        };
+        match queue.guarded(write).await {
+            Some(Ok(())) => {}
+            Some(Err(e)) => {
+                log::warn!("wz-runtime-tokio: serial_writer_task write failed: {e}; closing");
+                return;
+            }
+            None => {
+                log::warn!(
+                    "wz-runtime-tokio: serial_writer_task stalled past {} ms draining a \
+                     sealed queue; closing with frames undelivered",
+                    crate::writer_queue::WRITER_STALL_MS
+                );
+                return;
+            }
         }
     }
-    // Channel closed -> shut the write half cleanly (peer sees EOF).
+    // Queue finished -> shut the write half cleanly (peer sees EOF).
     let _ = writer.shutdown().await;
 }
 
@@ -562,6 +567,6 @@ mod tests {
         }
 
         drop(a_out);
-        let _ = a_writer.await;
+        let _ = a_writer.into_join().await;
     }
 }

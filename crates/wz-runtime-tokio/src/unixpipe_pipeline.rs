@@ -83,6 +83,7 @@ use wz_runtime_core::Runtime;
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
+use crate::writer_queue::WriterHandle;
 use wz_session_core::link::InterceptorLink;
 
 /// The dialer-writes / acceptor-reads FIFO suffix (zenoh `_uplink` parity).
@@ -646,11 +647,7 @@ pub async fn bind_unixpipe(path: &str) -> io::Result<UnixpipeAcceptor> {
 /// [`crate::stream_link`] code as TCP/unixsock.
 pub fn wire_unixpipe_stream(
     link: UnixpipeLink,
-) -> (
-    UnixpipeReadDriver,
-    Arc<StreamWriteDriver>,
-    TokioJoinHandle<()>,
-) {
+) -> (UnixpipeReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     let UnixpipeLink {
         read,
         sender,
@@ -674,7 +671,7 @@ pub fn wire_unixpipe_stream(
         .map(|src| addressless_link_endpoints(InterceptorLink::Unixpipe, src, write_node.as_str()));
     let inbound = StreamReadDriver::new(read, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(writer_task(sender, rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(sender, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
     // universal u16 prefix (an always-false flag on the write driver).
     let outbound = Arc::new(StreamWriteDriver::new(

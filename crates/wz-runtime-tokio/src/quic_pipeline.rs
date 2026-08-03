@@ -48,11 +48,9 @@ use tokio_rustls::rustls::{
     ClientConfig as RustlsClientConfig, ServerConfig as RustlsServerConfig,
 };
 
-use wz_runtime_core::Runtime;
-
 use crate::link_interfaces::ip_link_subject;
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
+use crate::writer_queue::WriterHandle;
 use crate::{LinkDriver, LinkEvent, Reliability, TxFrame};
 use wz_session_core::link::InterceptorLink;
 
@@ -220,9 +218,11 @@ pub(crate) fn quic_server_endpoint(
     match iface {
         // No `#iface=`: quinn binds its own socket (the original path).
         None => Endpoint::server(sc, addr),
-        // A device-bound listener. `quinn::TokioRuntime` is spelled out because
-        // this module also imports wz's OWN `TokioRuntime` (the
-        // `wz_runtime_core::Runtime` impl) — two unrelated types, one name.
+        // A device-bound listener. `quinn::TokioRuntime` stays fully qualified:
+        // wz has its OWN `TokioRuntime` (the `wz_runtime_core::Runtime` impl),
+        // and although R311y519 removed this module's import of it — the writer
+        // is spawned through `WriterHandle::spawn` now — two unrelated types
+        // sharing one name is exactly the collision a bare name would re-open.
         Some(iface) => {
             let sock = std::net::UdpSocket::bind(addr)?;
             crate::iface_bind::bind_socket_to_device(&sock, iface)?;
@@ -359,9 +359,7 @@ pub async fn accept_quic_on(endpoint: &Endpoint) -> io::Result<QuicLink> {
 /// `tokio::io::split`); the endpoint + connection ride into the read driver as
 /// the link keep-alive (module doc). StreamEnvelope framing + write driver are
 /// the SAME shared [`crate::stream_link`] code as TCP/TLS.
-pub fn wire_quic_stream(
-    link: QuicLink,
-) -> (QuicReadDriver, Arc<StreamWriteDriver>, TokioJoinHandle<()>) {
+pub fn wire_quic_stream(link: QuicLink) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     let QuicLink {
         endpoint,
         connection,
@@ -378,7 +376,7 @@ pub fn wire_quic_stream(
         Some(connection.remote_address()),
     );
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(writer_task(send, rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(send, queue));
     // transport-lowlatency is a TCP-path negotiation; QUIC keeps the universal
     // u16 prefix (an always-false flag on the write driver).
     let outbound = Arc::new(StreamWriteDriver::new(

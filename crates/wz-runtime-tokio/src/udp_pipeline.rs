@@ -85,6 +85,7 @@ use tokio::sync::mpsc;
 use wz_runtime_core::Runtime;
 
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
+use crate::writer_queue::{OutboundQueue, WriterHandle};
 // R311mk — import `BoxedLinkDriver` from its SSOT home (the shared
 // `wz_session_core::link` tier) rather than via the `crate::session_glue`
 // re-export hop. The link pipeline is transport-agnostic (a multicast deploy
@@ -407,7 +408,7 @@ async fn udp_demux_task(socket: Arc<UdpSocket>, new_face_tx: mpsc::UnboundedSend
 pub fn wire_udp_socket(
     socket: UdpSocket,
     peer: SocketAddr,
-) -> (UdpReadDriver, Arc<UdpWriteDriver>, TokioJoinHandle<()>) {
+) -> (UdpReadDriver, Arc<UdpWriteDriver>, WriterHandle) {
     let socket = Arc::new(socket);
     // R311y453 — the §5.16 subject, off the socket this face owns.
     let subject = ip_link_subject(InterceptorLink::Udp, socket.local_addr().ok());
@@ -418,7 +419,7 @@ pub fn wire_udp_socket(
     let endpoints = ip_link_endpoints(InterceptorLink::Udp, socket.local_addr().ok(), Some(peer));
     let inbound = UdpReadDriver::from_socket(socket.clone());
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(udp_writer_task(socket, peer, rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| udp_writer_task(socket, peer, queue));
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
@@ -435,7 +436,7 @@ pub fn wire_udp_socket(
 pub fn wire_udp_demuxed(
     inputs: UdpAcceptedInputs,
     peer: SocketAddr,
-) -> (UdpReadDriver, Arc<UdpWriteDriver>, TokioJoinHandle<()>) {
+) -> (UdpReadDriver, Arc<UdpWriteDriver>, WriterHandle) {
     let UdpAcceptedInputs {
         inbound_rx,
         send_socket,
@@ -454,7 +455,7 @@ pub fn wire_udp_demuxed(
     );
     let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(udp_writer_task(send_socket, peer, rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| udp_writer_task(send_socket, peer, queue));
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
@@ -660,14 +661,13 @@ impl BoxedLinkDriver for UdpWriteDriver {
 /// as one datagram via `send_to`. No envelope encode — UDP datagram
 /// boundaries are the framing (contrast [`crate::link_pipeline::writer_task`],
 /// which length-prefixes each payload through `StreamEnvelope`). Exits when
-/// every [`UdpWriteDriver`] clone has dropped (receiver returns `None`) or a
-/// `send_to` fails (logged + bail). UDP has no write-half shutdown, so the
-/// task just returns.
-pub async fn udp_writer_task(
-    socket: Arc<UdpSocket>,
-    peer: SocketAddr,
-    mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
-) {
+/// the queue is SEALED and drained, when every [`UdpWriteDriver`] clone has
+/// dropped, or when a `send_to` fails / stalls past
+/// [`WRITER_STALL_MS`](crate::writer_queue::WRITER_STALL_MS) on a sealed queue
+/// (logged + bail) — see [`crate::writer_queue`] for why the seal, and not
+/// sender liveness alone, is the teardown signal. UDP has no write-half
+/// shutdown, so the task just returns.
+pub async fn udp_writer_task(socket: Arc<UdpSocket>, peer: SocketAddr, mut queue: OutboundQueue) {
     // R311y474 — a DIAL socket is `connect`ed to its one peer, so it emits with
     // `send`; the shared LISTENER socket serves N peers and must address each
     // datagram, so it emits with `send_to`. Reading the socket's own connectedness
@@ -678,15 +678,28 @@ pub async fn udp_writer_task(
     // but returns EISCONN on macOS/BSD, so an unconditional `send_to` would make
     // every udp dial fail on a platform §5.20 carries as an atom.
     let connected = socket.peer_addr().is_ok();
-    while let Some(payload) = rx.recv().await {
-        let sent = if connected {
-            socket.send(&payload).await
-        } else {
-            socket.send_to(&payload, peer).await
+    while let Some(payload) = queue.next().await {
+        let send = async {
+            if connected {
+                socket.send(&payload).await
+            } else {
+                socket.send_to(&payload, peer).await
+            }
         };
-        if let Err(e) = sent {
-            log::warn!("wz-runtime-tokio: udp_writer_task send failed: {e}; closing");
-            return;
+        match queue.guarded(send).await {
+            Some(Ok(_)) => {}
+            Some(Err(e)) => {
+                log::warn!("wz-runtime-tokio: udp_writer_task send failed: {e}; closing");
+                return;
+            }
+            None => {
+                log::warn!(
+                    "wz-runtime-tokio: udp_writer_task stalled past {} ms draining a sealed \
+                     queue; closing with frames undelivered",
+                    crate::writer_queue::WRITER_STALL_MS
+                );
+                return;
+            }
         }
     }
 }
@@ -760,7 +773,7 @@ mod tests {
             other => panic!("expected Rx, got {other:?}"),
         }
         drop(a_out);
-        let _ = a_writer.await;
+        let _ = a_writer.into_join().await;
     }
 
     /// R311y382 — the F1 DISCRIMINATOR: the demux keys faces by SOURCE, so two

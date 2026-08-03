@@ -62,12 +62,13 @@ use crate::link_pipeline::{
     accept_tcp_on, bind_tcp, bind_tcp_host, dial_tcp, dial_tcp_host,
     wire_tcp_stream_with_lowlatency, TcpReadDriver,
 };
-use crate::runtime_impl::{TokioJoinHandle, TokioTime};
+use crate::runtime_impl::TokioTime;
 use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
 use crate::session_glue::{
     new_session_actions, new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, CloseReason,
     DriverLoopOutcome, SessionActionsBinding, SessionInitParams, SessionLinkActions,
 };
+use crate::writer_queue::WriterHandle;
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
 #[cfg(feature = "transport-link-udp")]
@@ -2369,7 +2370,7 @@ pub fn wire_dialed_link(
 ) -> (
     InboundLink,
     Arc<dyn BoxedLinkDriver + Send + Sync>,
-    TokioJoinHandle<()>,
+    WriterHandle,
 ) {
     // Universal framing (u16 prefix). The lowlatency open helpers call
     // `wire_dialed_link_with_lowlatency` with a flag they flip at Established.
@@ -2388,7 +2389,7 @@ pub fn wire_dialed_link_with_lowlatency(
 ) -> (
     InboundLink,
     Arc<dyn BoxedLinkDriver + Send + Sync>,
-    TokioJoinHandle<()>,
+    WriterHandle,
 ) {
     match dialed {
         DialedLink::Tcp(stream) => {
@@ -2463,16 +2464,16 @@ pub struct OpenedSession {
     pub engine: Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
     pub actions: Arc<SessionLinkActions>,
     pub inbound: InboundLink,
-    pub writer_handle: TokioJoinHandle<()>,
+    pub writer_handle: WriterHandle,
     pub clock: TokioTime,
 }
 
-/// Wall-clock budget for the terminal writer-drain — a wedged writer task
-/// (stalled peer, full kernel send buffer) is dropped via timeout rather than
-/// blocking teardown indefinitely. The single source for the figure the demo
-/// R292 [`teardown::drain_writer`](../../wz-ap-demo/src/teardown.rs) and the
-/// library [`OpenedSession::drain_to_close`] both apply.
-pub const WRITER_DRAIN_MS: u64 = 50;
+// R311y519 — the wall-clock drain budget that used to live here
+// (`WRITER_DRAIN_MS`) is GONE, not relocated. It could not tell a wedged peer
+// from a slow one, so it expired mid-progress on a loaded host and discarded
+// frames `z_put` had already answered `Z_OK` for. Its wedged-peer half moved
+// onto ONE write as `writer_queue::WRITER_STALL_MS`, and its termination half
+// became the queue SEAL — see `crate::writer_queue` for the full argument.
 
 impl OpenedSession {
     /// Terminal drain after the steady-state drive loop returns: drop the two
@@ -2549,12 +2550,20 @@ impl OpenedSession {
             actions,
             inbound,
             writer_handle,
-            clock,
+            clock: _,
         } = self;
         drop(inbound);
         drop(engine);
         drop(actions);
-        let _ = clock.timeout(WRITER_DRAIN_MS, writer_handle).await;
+        // R311y519 — SEAL, then await to completion. The two local drops above
+        // stay: releasing them first is what lets the writer finish a queue no
+        // one is still adding to, and the seal is what makes termination
+        // independent of whoever ELSE still holds a clone (on the accept path
+        // the forwarder's `FaceEntry` does, and under `transport-multilink` it
+        // cannot simply be released earlier). The previous wall-clock budget
+        // could not distinguish a wedged peer from a slow one and discarded
+        // acknowledged frames; that defence now lives on one write.
+        writer_handle.drain().await;
     }
 }
 
@@ -2724,7 +2733,7 @@ pub(crate) async fn drive_open_loop(
     mut inbound: InboundLink,
     actions: Arc<SessionLinkActions>,
     mut engine: Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
-    writer_handle: TokioJoinHandle<()>,
+    writer_handle: WriterHandle,
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
@@ -3442,7 +3451,7 @@ pub async fn initiate_and_open_session_with_namespace(
 pub(crate) async fn initiator_open(
     inbound: InboundLink,
     actions: Arc<SessionLinkActions>,
-    writer_handle: TokioJoinHandle<()>,
+    writer_handle: WriterHandle,
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,

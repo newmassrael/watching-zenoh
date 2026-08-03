@@ -48,11 +48,9 @@ use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
-use wz_runtime_core::Runtime;
-
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
+use crate::writer_queue::WriterHandle;
 use wz_session_core::link::InterceptorLink;
 
 /// Inbound read driver of a split [`UnixStream`] — the unixsock instantiation
@@ -125,11 +123,7 @@ pub async fn accept_unixsock_on(listener: &UnixListener) -> io::Result<UnixStrea
 /// framing + write driver are the SAME shared [`crate::stream_link`] code.
 pub fn wire_unixsock_stream(
     stream: UnixStream,
-) -> (
-    UnixsockReadDriver,
-    Arc<StreamWriteDriver>,
-    TokioJoinHandle<()>,
-) {
+) -> (UnixsockReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y473 — the adminspace `{src,dst}` pair. A unix stream is addressed by a
     // PATH, and only a BOUND end has one: an accepted server-side peer, and the
     // client end of any connection, are `unnamed`. Both ends are required (the
@@ -156,7 +150,7 @@ pub fn wire_unixsock_stream(
     let inbound =
         StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(writer_task(writer, rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
     // universal u16 prefix (an always-false flag on the write driver).
     let outbound = Arc::new(StreamWriteDriver::new(

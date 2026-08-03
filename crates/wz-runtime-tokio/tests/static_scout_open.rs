@@ -40,7 +40,7 @@ use tokio::net::TcpListener;
 use tokio::net::UdpSocket;
 
 use wz_runtime_tokio::link_pipeline::wire_tcp_stream;
-use wz_runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, new_session_engine, poll_and_dispatch_one, DriverLoopOutcome,
@@ -49,6 +49,7 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::session_open::{
     open_session_at, DialConfig, OpenError, DEFAULT_OPEN_TICK_MS,
 };
+use wz_runtime_tokio::writer_queue::WriterHandle;
 // R311if — the static-mode open path is gated on `scouting-static`; the
 // mode-agnostic `open_session_at` tests stay in the default run.
 #[cfg(feature = "scouting-static")]
@@ -98,7 +99,7 @@ fn refused_locator() -> (Socket, SocketAddr) {
 /// Inline wz acceptor: accept -> wire -> InboundStart -> drive to Established.
 /// Returns (established count, writer handle) — the handle in a tuple (not a
 /// bare future) keeps it alive across `join!`.
-async fn drive_acceptor_to_established(listener: TcpListener) -> (u32, TokioJoinHandle<()>) {
+async fn drive_acceptor_to_established(listener: TcpListener) -> (u32, WriterHandle) {
     let (stream, _peer) = listener.accept().await.expect("accept");
     let (mut inbound, outbound, writer_handle) = wire_tcp_stream(stream);
 
@@ -167,7 +168,7 @@ async fn open_session_at_tcp_reaches_established() {
 /// the first `poll_event` re-reads it). Then it wires the socket and drives
 /// the InboundStart handshake to Established, mirroring the TCP acceptor.
 #[cfg(feature = "transport-link-udp")]
-async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, TokioJoinHandle<()>) {
+async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, WriterHandle) {
     let mut probe = [0u8; 64];
     let (_n, src) = socket
         .peek_from(&mut probe)

@@ -780,6 +780,28 @@ pub use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
 /// [`stream_link`]; `link_pipeline` (TCP) and [`tls_pipeline`] (TLS) carry
 /// only their dial/split and instantiate the shared drivers, so a TLS link
 /// frames identically to a TCP link with no duplicated impl.
+// R311y519 — the outbound writer's lifecycle (the sealable queue + the handle
+// that seals it), shared by EVERY pipeline that spawns a writer task. Gated on
+// the union of those pipelines' own keys rather than on `transport-link-tcp`,
+// for the same reason `iface_bind` above is: a udp-only or serial-only build
+// spawns a writer and must still reach the seal, and tcp is not implied by
+// either. Each arm is named explicitly instead of relying on the tls->tcp /
+// quic-datagram->quic implications, so a change to those does not silently
+// remove a pipeline's queue.
+#[cfg(any(
+    feature = "transport-link-tcp",
+    feature = "transport-link-tls",
+    feature = "transport-link-udp",
+    feature = "transport-link-serial",
+    feature = "transport-link-ws",
+    feature = "transport-link-unixsock",
+    feature = "transport-link-vsock",
+    feature = "transport-link-unixpipe",
+    feature = "transport-link-quic",
+    feature = "transport-link-quic-datagram",
+))]
+pub mod writer_queue;
+
 #[cfg(feature = "transport-link-tcp")]
 pub mod stream_link;
 

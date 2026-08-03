@@ -44,11 +44,9 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, ServerConfig};
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 
-use wz_runtime_core::Runtime;
-
 use crate::link_interfaces::ip_link_subject;
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
+use crate::writer_queue::WriterHandle;
 use wz_session_core::link::InterceptorLink;
 
 /// Inbound read driver of a split [`TlsStream`] — the TLS instantiation of the
@@ -104,7 +102,7 @@ pub async fn accept_tls(
 /// [`crate::stream_link`] code.
 pub fn wire_tls_stream(
     stream: TlsStream<TcpStream>,
-) -> (TlsReadDriver, Arc<StreamWriteDriver>, TokioJoinHandle<()>) {
+) -> (TlsReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject: a TLS link is a TCP socket underneath, so
     // its local address comes from the wrapped stream.
     let subject = ip_link_subject(InterceptorLink::Tls, stream.get_ref().0.local_addr().ok());
@@ -121,7 +119,7 @@ pub fn wire_tls_stream(
     let inbound =
         StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(writer_task(writer, rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; TLS keeps the universal
     // u16 prefix (an always-false flag on the write driver).
     let outbound = Arc::new(StreamWriteDriver::new(

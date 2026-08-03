@@ -1711,7 +1711,13 @@ libc = { version = "0.2", optional = true }
 libloading = { version = "0.8", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+# R311y519 — `test-util` is NOT part of tokio's `full`, and the writer_queue
+# unit tests need it: the sealed-write bound is WRITER_STALL_MS, so asserting
+# that it fires under real time would cost that wall-clock in every run. Paused
+# time auto-advances once the runtime is idle, which is exactly the state those
+# tests reach (their "write" is `future::pending`, not I/O). Dev-only, and
+# enabling it changes no behaviour unless a test asks for `start_paused`.
+tokio = { version = "1", features = ["full", "test-util"] }
 # R311gg — tests/static_scout_open.rs holds a bound-but-not-listening
 # loopback socket to synthesize a deterministically connection-refused
 # locator. std's TcpListener always `listen()`s; socket2 is the portable

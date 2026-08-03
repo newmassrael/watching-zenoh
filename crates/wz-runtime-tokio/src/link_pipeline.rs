@@ -37,11 +37,9 @@ use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{lookup_host, TcpListener, TcpSocket, TcpStream};
 use tokio::sync::mpsc;
 
-use wz_runtime_core::Runtime;
-
 use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
+use crate::writer_queue::WriterHandle;
 use wz_session_core::link::InterceptorLink;
 
 /// Inbound read driver of a split `TcpStream` — the TCP instantiation of the
@@ -274,9 +272,7 @@ fn configure_tcp_stream(stream: &TcpStream) {
 /// while the writer task drains the channel; the handle is awaited during
 /// teardown so a tail frame the FSM enqueued during its final transition still
 /// reaches the peer before the socket closes.
-pub fn wire_tcp_stream(
-    stream: TcpStream,
-) -> (TcpReadDriver, Arc<StreamWriteDriver>, TokioJoinHandle<()>) {
+pub fn wire_tcp_stream(stream: TcpStream) -> (TcpReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // Universal framing: a fresh always-false lowlatency flag (the u16 batch
     // prefix). The lowlatency open helpers instead use the _with_lowlatency
     // variant to share a flag they flip at Established.
@@ -291,7 +287,7 @@ pub fn wire_tcp_stream(
 pub fn wire_tcp_stream_with_lowlatency(
     stream: TcpStream,
     lowlatency: Arc<AtomicBool>,
-) -> (TcpReadDriver, Arc<StreamWriteDriver>, TokioJoinHandle<()>) {
+) -> (TcpReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject is resolved BEFORE the split, while the
     // stream still owns its socket and can report its local address.
     let subject = ip_link_subject(InterceptorLink::Tcp, stream.local_addr().ok());
@@ -306,7 +302,7 @@ pub fn wire_tcp_stream_with_lowlatency(
     let (reader, writer) = stream.into_split();
     let inbound = StreamReadDriver::new(reader, lowlatency.clone());
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(writer_task(writer, rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     let outbound = Arc::new(StreamWriteDriver::new(tx, lowlatency, subject, endpoints));
     (inbound, outbound, writer_handle)
 }

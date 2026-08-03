@@ -42,11 +42,9 @@ use tokio::io::{split, ReadHalf};
 use tokio::sync::mpsc;
 use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 
-use wz_runtime_core::Runtime;
-
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
+use crate::writer_queue::WriterHandle;
 use wz_session_core::link::InterceptorLink;
 
 /// Inbound read driver of a split [`VsockStream`] — the vsock instantiation of
@@ -109,7 +107,7 @@ pub async fn accept_vsock_on(listener: &mut VsockListener) -> io::Result<VsockSt
 /// [`crate::stream_link`] code.
 pub fn wire_vsock_stream(
     stream: VsockStream,
-) -> (VsockReadDriver, Arc<StreamWriteDriver>, TokioJoinHandle<()>) {
+) -> (VsockReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y473 — the adminspace `{src,dst}` pair, rendered in wz's OWN vsock
     // locator form `vsock/<CID>:<PORT>` (module doc) so an admin client reads back
     // a string it could dial, not a Debug rendering of the address struct.
@@ -125,7 +123,7 @@ pub fn wire_vsock_stream(
     let inbound =
         StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(writer_task(writer, rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
     // universal u16 prefix (an always-false flag on the write driver).
     let outbound = Arc::new(StreamWriteDriver::new(

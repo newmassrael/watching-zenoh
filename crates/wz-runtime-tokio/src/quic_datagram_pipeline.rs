@@ -56,14 +56,12 @@ use tokio_rustls::rustls::{
     ClientConfig as RustlsClientConfig, ServerConfig as RustlsServerConfig,
 };
 
-use wz_runtime_core::Runtime;
-
 // R311y13 — the QUIC handshake SSOT (client connect / server endpoint / accept)
 // is shared from quic_pipeline; this module owns only the datagram-vs-stream
 // delta (no open_bi/accept_bi, max_bidi=0, the datagram read/write drivers).
 use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
 use crate::quic_pipeline::{accept_quic_connection, connect_quic_client, quic_server_endpoint};
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
+use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
@@ -217,14 +215,14 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
 /// `send_datagram` (no envelope encode — datagram boundaries are the framing,
 /// contrast [`crate::quic_pipeline`]'s StreamEnvelope writer). `send_datagram`
 /// is non-blocking (it queues into the connection's datagram buffer; the
-/// endpoint driver flushes it). Exits when every [`QuicDatagramWriteDriver`]
-/// clone has dropped (receiver returns `None`) or a `send_datagram` fails
-/// (logged + bail).
-pub async fn quic_datagram_writer_task(
-    connection: Connection,
-    mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
-) {
-    while let Some(payload) = rx.recv().await {
+/// endpoint driver flushes it). Exits when the queue is SEALED and drained,
+/// when every [`QuicDatagramWriteDriver`] clone has dropped, or when a
+/// `send_datagram` fails (logged + bail) — see [`crate::writer_queue`] for why
+/// the seal, and not sender liveness alone, is the teardown signal. This is the
+/// one writer with no per-write bound to arm, because `send_datagram` queues
+/// synchronously and cannot block on the peer.
+pub async fn quic_datagram_writer_task(connection: Connection, mut queue: OutboundQueue) {
+    while let Some(payload) = queue.next().await {
         if let Err(e) = connection.send_datagram(Bytes::from(payload)) {
             log::warn!(
                 "wz-runtime-tokio: quic_datagram_writer_task send_datagram failed: {e}; closing"
@@ -336,7 +334,7 @@ pub fn wire_quic_datagram(
 ) -> (
     QuicDatagramReadDriver,
     Arc<QuicDatagramWriteDriver>,
-    TokioJoinHandle<()>,
+    WriterHandle,
 ) {
     let QuicDatagramLink {
         endpoint,
@@ -346,7 +344,9 @@ pub fn wire_quic_datagram(
         .max_datagram_size()
         .unwrap_or(QUIC_DATAGRAM_LINK_MTU);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(quic_datagram_writer_task(connection.clone(), rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| {
+        quic_datagram_writer_task(connection.clone(), queue)
+    });
     // R311y453 — the §5.16 subject, off the quinn endpoint's bound address.
     let subject = ip_link_subject(InterceptorLink::QuicDatagram, endpoint.local_addr().ok());
     // R311y474 — the adminspace `{src,dst}` pair. `Connection::remote_address` is

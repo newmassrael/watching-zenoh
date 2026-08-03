@@ -140,7 +140,7 @@ mod round2 {
     use tokio::net::{TcpListener, UdpSocket};
 
     use wz_runtime_tokio::link_pipeline::wire_tcp_stream;
-    use wz_runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
+    use wz_runtime_tokio::runtime_impl::TokioTime;
     use wz_runtime_tokio::scouting_glue::{
         drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutingActions,
     };
@@ -150,6 +150,7 @@ mod round2 {
         SessionInitParams,
     };
     use wz_runtime_tokio::session_open::{open_session_at, DialConfig, DEFAULT_OPEN_TICK_MS};
+    use wz_runtime_tokio::writer_queue::WriterHandle;
     use wz_runtime_tokio::UdpDriver;
     use wz_runtime_tokio_test_support::fixture_session_init_params;
     use wz_session_core::scout_params::ScoutParams;
@@ -171,7 +172,7 @@ mod round2 {
     /// Established. Returns (established count, writer handle) — the handle in
     /// a tuple (not a bare future) keeps the writer task alive across `join!`.
     /// Mirror of the helper in `tests/static_scout_open.rs`.
-    async fn drive_acceptor_to_established(listener: TcpListener) -> (u32, TokioJoinHandle<()>) {
+    async fn drive_acceptor_to_established(listener: TcpListener) -> (u32, WriterHandle) {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let (mut inbound, outbound, writer_handle) = wire_tcp_stream(stream);
 

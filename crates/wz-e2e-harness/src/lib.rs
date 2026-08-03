@@ -20,7 +20,6 @@
 use std::future::Future;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
 
 use wz::runtime_tokio::link_pipeline::{accept_tcp, bind_tcp_host};
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
@@ -209,7 +208,10 @@ pub async fn run_acceptor_e2e<H>(
     drop(opened);
     drop(actions_for_loop);
     drop(actions);
-    let _ = tokio::time::timeout(Duration::from_millis(50), writer_handle).await;
+    // R311y519 — SEAL + await to completion. The wall-clock tail window this
+    // replaces could cut a writer that was still making progress; the seal makes
+    // the queue finite and the per-write bound covers a wedged peer.
+    writer_handle.drain().await;
     Ok(())
 }
 
@@ -292,7 +294,10 @@ pub async fn run_silent_acceptor_e2e(
 
     drop(actions_for_loop);
     drop(actions);
-    let _ = tokio::time::timeout(Duration::from_millis(50), writer_handle).await;
+    // R311y519 — SEAL + await to completion. The wall-clock tail window this
+    // replaces could cut a writer that was still making progress; the seal makes
+    // the queue finite and the per-write bound covers a wedged peer.
+    writer_handle.drain().await;
     Ok(())
 }
 

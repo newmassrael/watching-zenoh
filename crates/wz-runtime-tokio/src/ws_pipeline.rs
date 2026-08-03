@@ -47,10 +47,8 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{accept_async, client_async, WebSocketStream};
 
-use wz_runtime_core::Runtime;
-
 use crate::link_interfaces::ip_link_subject;
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
+use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{InterceptorLink, LinkSubject};
@@ -91,7 +89,7 @@ pub async fn accept_ws(tcp: TcpStream) -> io::Result<WebSocketStream<TcpStream>>
 /// transition still reaches the peer before the socket closes.
 pub fn wire_ws_stream(
     ws: WebSocketStream<TcpStream>,
-) -> (WsReadDriver, Arc<WsWriteDriver>, TokioJoinHandle<()>) {
+) -> (WsReadDriver, Arc<WsWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject, off the TCP socket the WebSocket wraps,
     // read BEFORE the split takes ownership of the halves.
     let subject = ip_link_subject(InterceptorLink::Ws, ws.get_ref().local_addr().ok());
@@ -105,7 +103,7 @@ pub fn wire_ws_stream(
     let (sink, stream) = ws.split();
     let inbound = WsReadDriver::new(stream);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(ws_writer_task(sink, rx));
+    let writer_handle = WriterHandle::spawn(rx, |queue| ws_writer_task(sink, queue));
     let outbound = Arc::new(WsWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
@@ -243,19 +241,33 @@ impl BoxedLinkDriver for WsWriteDriver {
 /// drains the outbound channel one frame at a time, sending each payload as one
 /// `Message::Binary` (no envelope encode — the WS message boundary IS the
 /// framing, contrast [`crate::stream_link::writer_task`]'s StreamEnvelope).
-/// Exits when every [`WsWriteDriver`] clone has dropped (receiver returns
-/// `None`) or a send fails (logged + bail), closing the sink so the peer
-/// observes a clean WebSocket Close.
+/// Exits when the queue is SEALED and drained, when every [`WsWriteDriver`]
+/// clone has dropped, or when a send fails / stalls past
+/// [`WRITER_STALL_MS`](crate::writer_queue::WRITER_STALL_MS) on a sealed queue
+/// (logged + bail) — see [`crate::writer_queue`] for why the seal, and not
+/// sender liveness alone, is the teardown signal. The first two close the sink
+/// so the peer observes a clean WebSocket Close.
 pub async fn ws_writer_task(
     mut sink: SplitSink<WebSocketStream<TcpStream>, Message>,
-    mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut queue: OutboundQueue,
 ) {
-    while let Some(payload) = rx.recv().await {
-        if let Err(e) = sink.send(Message::Binary(payload)).await {
-            log::warn!("wz-runtime-tokio: ws_writer_task send failed: {e}; closing");
-            return;
+    while let Some(payload) = queue.next().await {
+        match queue.guarded(sink.send(Message::Binary(payload))).await {
+            Some(Ok(())) => {}
+            Some(Err(e)) => {
+                log::warn!("wz-runtime-tokio: ws_writer_task send failed: {e}; closing");
+                return;
+            }
+            None => {
+                log::warn!(
+                    "wz-runtime-tokio: ws_writer_task stalled past {} ms draining a sealed \
+                     queue; closing with frames undelivered",
+                    crate::writer_queue::WRITER_STALL_MS
+                );
+                return;
+            }
         }
     }
-    // Channel closed -> send a WS Close frame so the peer sees a clean close.
+    // Queue finished -> send a WS Close frame so the peer sees a clean close.
     let _ = sink.close().await;
 }

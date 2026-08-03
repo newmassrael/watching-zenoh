@@ -57,6 +57,11 @@ async fn pipeline_round_trips_both_directions_through_codec_envelope() {
 
     // Dropping the outbound Arc closes the channel; the writer task drains
     // and shuts the write half, then the join completes.
+    //
+    // R311y519 — deliberately joined through `into_join`, NOT `drain`: this leg
+    // asserts that sender liveness still terminates a writer whose handle never
+    // sealed, which is the detached-writer contract the seal must not have
+    // replaced.
     drop(outbound);
-    writer_handle.await.expect("writer task join");
+    writer_handle.into_join().await.expect("writer task join");
 }

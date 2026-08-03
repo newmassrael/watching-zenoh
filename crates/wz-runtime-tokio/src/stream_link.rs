@@ -34,6 +34,7 @@ use tokio::sync::mpsc;
 
 use wz_codecs::stream_envelope::StreamEnvelope;
 
+use crate::writer_queue::OutboundQueue;
 use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::LinkEndpoints;
@@ -226,29 +227,46 @@ impl BoxedLinkDriver for StreamWriteDriver {
 
 /// Async writer task. Owns a stream write half `W` (any `AsyncWrite` — TCP's
 /// `OwnedWriteHalf` or a rustls `WriteHalf<TlsStream<TcpStream>>`) and drains the
-/// outbound channel one PRE-FRAMED wire at a time, writing + flushing each. The
+/// outbound queue one PRE-FRAMED wire at a time, writing + flushing each. The
 /// length-prefix framing is applied by [`StreamWriteDriver::send_blocking`] at
 /// enqueue time (synchronous with the FSM's emit), so a handshake frame enqueued
 /// before a lowlatency flag flip stays u16-framed regardless of when it drains —
 /// the writer never re-decides framing. Generic over the write half so it is the
-/// single home for every byte-stream link. Exits when every write-driver clone
-/// has dropped (receiver returns `None`) or a write fails (logged + bail),
-/// shutting the write half so the peer observes EOF rather than RST.
-pub async fn writer_task<W>(mut writer: W, mut rx: mpsc::UnboundedReceiver<Vec<u8>>)
+/// single home for every byte-stream link.
+///
+/// R311y519 — exits on ANY of three signals, and the middle one is the new
+/// teardown contract: the queue was SEALED and its remaining frames have been
+/// handed over ([`OutboundQueue::next`]); every write-driver clone has dropped;
+/// or a write failed / stalled past [`WRITER_STALL_MS`](crate::writer_queue::WRITER_STALL_MS)
+/// on a sealed queue (logged + bail). The first two shut the write half so the
+/// peer observes EOF rather than RST; a bail does not, because a peer that is
+/// not reading will not read a shutdown either.
+pub async fn writer_task<W>(mut writer: W, mut queue: OutboundQueue)
 where
     W: AsyncWrite + Unpin,
 {
-    while let Some(wire) = rx.recv().await {
-        if let Err(e) = writer.write_all(&wire).await {
-            log::warn!("wz-runtime-tokio: writer_task write failed: {e}; closing");
-            return;
-        }
-        if let Err(e) = writer.flush().await {
-            log::warn!("wz-runtime-tokio: writer_task flush failed: {e}; closing");
-            return;
+    while let Some(wire) = queue.next().await {
+        let write = async {
+            writer.write_all(&wire).await?;
+            writer.flush().await
+        };
+        match queue.guarded(write).await {
+            Some(Ok(())) => {}
+            Some(Err(e)) => {
+                log::warn!("wz-runtime-tokio: writer_task write failed: {e}; closing");
+                return;
+            }
+            None => {
+                log::warn!(
+                    "wz-runtime-tokio: writer_task stalled past {} ms draining a sealed \
+                     queue; the peer has stopped reading. Closing with frames undelivered",
+                    crate::writer_queue::WRITER_STALL_MS
+                );
+                return;
+            }
         }
     }
-    // Channel closed -> shut the write half cleanly (peer sees EOF, not RST).
+    // Queue finished -> shut the write half cleanly (peer sees EOF, not RST).
     let _ = writer.shutdown().await;
 }
 

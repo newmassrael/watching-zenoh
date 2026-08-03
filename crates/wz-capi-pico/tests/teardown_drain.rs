@@ -24,9 +24,12 @@
 //! next line (`open_blocking`'s driver thread), which ABORTS it wherever it
 //! stands — including with encoded frames still sitting in its channel. The
 //! library already owns the correct terminal sequence for this
-//! (`OpenedSession::drain_to_close`: drop the two `Arc<SessionLinkActions>`
-//! holders so the channel closes, then await the task bounded by
-//! `WRITER_DRAIN_MS`); the dial role simply did not run it.
+//! (`OpenedSession::drain_to_close`: release the two `Arc<SessionLinkActions>`
+//! holders, then SEAL the writer's queue and await the task to completion); the
+//! dial role simply did not run it. R311y519 replaced that primitive's original
+//! wall-clock budget with the seal — see `wz_runtime_tokio::writer_queue` — and
+//! this file's `STALL_MS` was raised to 200 ms in the same round precisely
+//! because the budget could not have survived it.
 //!
 //! Both peers are the exported C ABI, so this is the drop-in program's own view:
 //! a pico C program that publishes and then closes.
@@ -50,7 +53,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use wz_runtime_tokio::session_open::WRITER_DRAIN_MS;
+use wz_runtime_tokio::writer_queue::WRITER_STALL_MS;
 
 use wz_capi_pico::{
     z_bytes_copy_from_buf, z_bytes_to_slice, z_close, z_closure_sample, z_config_default,
@@ -98,11 +101,34 @@ const STALL_TRIGGER_BYTES: usize = 8192;
 
 /// How long that closure sleeps.
 ///
-/// Bounded BELOW `WRITER_DRAIN_MS` (50) on purpose. R311y484's fifth fixture
-/// stalled for 400 ms and so demanded what no bounded best-effort drain can
-/// deliver; a stall the drain window can outlast is the difference between
-/// testing the drain and testing the timeout.
-const STALL_MS: u64 = 25;
+/// R311y519 RAISED this 25 -> 200, and the raise is the point. While the drain
+/// was a 50 ms wall-clock budget, this constant had to stay BELOW it or the test
+/// would have been measuring the timeout instead of the drain — which is exactly
+/// the admission that the shipped drain could not deliver to a peer that stalls
+/// longer than one window. That was not a fixture limitation; it was the defect,
+/// and it is what made this test red on hosted CI, where a loaded host stretches
+/// the same drain past the same budget.
+///
+/// At 200 ms the fixture demands what only a drain with NO wall-clock budget can
+/// deliver: the pre-R311y519 design fails it by construction, four times over,
+/// with no dependence on host speed. The bound that remains is per-write and an
+/// order of magnitude above this
+/// ([`WRITER_STALL_MS`]), so the headroom does not depend on winning a race
+/// either.
+const STALL_MS: u64 = 200;
+
+/// The fixture owns its own precondition rather than assuming it.
+///
+/// A peer-side stall this test induces must stay well UNDER the per-write bound,
+/// or the writer bails on the bound and the test silently starts measuring the
+/// wedged-peer defence instead of the drain — green for the wrong reason, which
+/// is the failure mode five earlier fixtures for this defect died of. Checked at
+/// compile time so raising either constant without the other cannot ship.
+const _: () = assert!(
+    STALL_MS * 4 <= WRITER_STALL_MS,
+    "STALL_MS must stay well under WRITER_STALL_MS, or this fixture measures the \
+     per-write wedged-peer bound instead of the teardown drain"
+);
 
 /// The calibration payload, published and confirmed BEFORE the tail.
 ///
@@ -453,24 +479,27 @@ fn a_put_immediately_before_z_close_is_drained_not_discarded() {
     }
 }
 
-/// The drain must END when the writer is done, not sit out its whole window.
+/// An idle `z_close` must return at once, not sit out a drain window.
 ///
-/// This guards the ONE thing the delivery test above cannot see. The drain ends
-/// when the writer task's channel closes, and the channel closes only when the
-/// last `Arc<SessionLinkActions>` drops — one of which is held by the registry's
-/// `FaceEntry`. So `face_down` has to precede the drain.
+/// This guards the ONE thing the delivery test above cannot see. Delivery is
+/// insensitive to WHEN the writer exits — a writer that drains its queue and
+/// then lingers has still delivered everything — so only a latency assertion can
+/// catch a drain that ends on a clock rather than on the work being done. The
+/// original defect was exactly that shape: the channel closed only when the last
+/// `Arc<SessionLinkActions>` dropped, one clone lived in the registry's
+/// `FaceEntry`, and every idle `z_close` therefore burned the whole 50 ms budget
+/// — measured at 51.5 ms against 0.1-0.5 ms, five rounds each.
 ///
-/// Getting that order wrong does not lose a single byte: the writer still drains
-/// its channel during the window and only the task's EXIT is missed, so the
-/// delivery test stays green. What it costs is the whole `WRITER_DRAIN_MS` on
-/// every `z_close`, forever, for a session with nothing pending — measured at
-/// 51.5 ms against 0.1-0.5 ms, five rounds each. A latency regression that no
-/// correctness assertion can see is exactly the kind that ships.
+/// R311y519 removed the budget rather than re-ordering around it, because the
+/// ordering fix was never available on the accept path (see
+/// `wz_runtime_tokio::writer_queue`): the seal now ends the writer no matter who
+/// still holds a sender. So the assertion is no longer "faster than the window"
+/// but an ABSOLUTE ceiling — a drain that ends on any clock at all fails it.
 ///
 /// The bound is the MINIMUM over several closes rather than any single one: a
-/// loaded host can stretch one teardown, but the ordering defect stretches EVERY
-/// one to the full window, so the minimum separates the two without depending on
-/// the host being quiet.
+/// loaded host can stretch one teardown, but a clock-terminated drain stretches
+/// EVERY one, so the minimum separates the two without depending on the host
+/// being quiet.
 #[test]
 fn an_idle_z_close_does_not_burn_the_whole_drain_window() {
     const ROUNDS: usize = 5;
@@ -552,13 +581,18 @@ fn an_idle_z_close_does_not_burn_the_whole_drain_window() {
     done.store(true, Ordering::SeqCst);
     acceptor.join().expect("acceptor thread panicked");
 
-    let budget = Duration::from_millis(WRITER_DRAIN_MS * 4 / 5);
+    // ABSOLUTE, and deliberately not derived from any drain constant: the
+    // property is "an idle close does no waiting at all", and a ceiling computed
+    // from a timeout would silently relax if that timeout ever grew. 25 ms is
+    // two orders of magnitude above the measured 0.1 ms and half of the 51.5 ms
+    // the pre-R311y519 defect produced, so it separates them without a race.
+    const IDLE_CLOSE_CEILING: Duration = Duration::from_millis(25);
     assert!(
-        fastest < budget,
+        fastest < IDLE_CLOSE_CEILING,
         "the fastest of {ROUNDS} idle z_close calls took {fastest:?}, which is \
-         not below {budget:?} — the drain is running to its {WRITER_DRAIN_MS} ms \
-         timeout instead of ending when the writer does. The usual cause is a \
-         surviving Arc<SessionLinkActions> holding the outbound channel open: \
-         `face_down` must run BEFORE the drain, not after."
+         not below {IDLE_CLOSE_CEILING:?} — the drain is ending on a clock \
+         instead of when the writer is done. A session with nothing pending has \
+         nothing to drain, so the seal should close its queue and the writer \
+         should exit immediately, whoever else still holds a sender."
     );
 }
