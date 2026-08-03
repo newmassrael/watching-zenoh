@@ -7958,6 +7958,20 @@ layer_e6_peer_mesh() {
     else
         _pico_cli_unavailable "E6 leg wz_peer_acl_liveliness_pico_interop" || return 1
     fi
+    # R311y509 — the PEER's liveliness-TOKEN plane, foreign-witnessed on both ends.
+    # Four legs: the client-leaf tier and the mesh tier, each with its `-h`-off twin
+    # that isolates the CURRENT bit. Rides the SAME E6 binary; the plane is UNGATED
+    # under routing-peer, so unlike the router-hat liveliness file this needs no
+    # routing-token-tables and cannot pass vacuously on a build that omits it.
+    # --test-threads=1 because the mesh legs bind two demo listeners plus two pico
+    # processes each, and the twins hold an 8s absence window.
+    if [[ -x target/zenoh-pico-cli/z_liveliness && -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_liveliness_token_pico_interop -- --ignored --quiet --test-threads=1) \
+            || return 1
+    else
+        _pico_cli_unavailable "E6 leg wz_peer_liveliness_token_pico_interop" || return 1
+    fi
     # R311y451 — pico LOW-PASS cross-impl (§5.16 access-quota), the size-budget
     # sibling of the ACL leg above and on the SAME E6 binary (routing-peer pulls
     # access-quota). A pico z_pub_attachment Put whose PAYLOAD ALONE exactly fills
