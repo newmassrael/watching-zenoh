@@ -386,6 +386,44 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         }
     }
 
+    /// R311y521 — flush EVERY remote token, firing a `Delete` to each matching
+    /// subscriber slot. Returns how many tokens were flushed.
+    ///
+    /// This is the link-loss path, and it is a direct transcription of
+    /// zenoh-pico's `_z_liveliness_subscription_undeclare_all`
+    /// (`src/session/liveliness.c:99-120`), which pico calls from
+    /// `_zp_unicast_failed_result` (`src/transport/unicast/lease.c:74-78`) the
+    /// moment a unicast transport fails.
+    ///
+    /// Without it a remote token outlives the link that announced it: the peer
+    /// is gone, no `UndeclToken` will ever arrive for it (the link that would
+    /// have carried it is what died), and every liveliness subscriber goes on
+    /// believing the token is alive. wz's `reset_for_reopen` rebuilds link and
+    /// handshake state and touches no registry, so before this the stale entry
+    /// also survived the RE-open — and a re-declared token then fired a second
+    /// `Put` for something the application was never told had gone.
+    ///
+    /// The table is DRAINED BEFORE any sink runs, mirroring pico's own move
+    /// ("it is safe to just move the data" — `liveliness.c:103-106`): a sink
+    /// that re-declares during the fan-out then lands in the fresh table
+    /// instead of an entry being iterated. Here the drain is also what makes
+    /// the `&mut self` fan-out borrow legal, so the two reasons agree.
+    ///
+    /// Delete order is by token id, which is a TEST-determinism choice and not
+    /// a wire property — pico's intmap order is its own, and no correct
+    /// consumer may depend on either.
+    pub fn flush_peer_tokens_on_link_loss(&mut self) -> usize {
+        if self.peer_token_table.is_empty() {
+            return 0;
+        }
+        let mut drained: alloc::vec::Vec<(u64, String)> = self.peer_token_table.drain().collect();
+        drained.sort_by_key(|(id, _)| *id);
+        for (id, keyexpr) in &drained {
+            self.fan_to_matching_slots(LivelinessSampleKind::Delete, keyexpr, *id);
+        }
+        drained.len()
+    }
+
     /// Internal fan-out helper (the no-heap match SSOT). Walks every slot
     /// and invokes its sink when the slot's pattern matches the resolved
     /// keyexpr. R311gb (Track 2) — splits the slot's [`BoundedString`]
@@ -636,6 +674,87 @@ mod tests {
         assert_eq!(captured[0].1, "liveliness/dev42");
         assert_eq!(captured[0].2, 42);
         assert_eq!(reg.peer_token_count(), 1);
+    }
+
+    /// R311y521 — link loss fires a Delete for EVERY remote token and empties
+    /// the table, as pico's `_z_liveliness_subscription_undeclare_all` does.
+    ///
+    /// The keyexprs are asserted by NAME, not just counted: a flush that fired
+    /// the right number of Deletes with a wrong or empty keyexpr would tell a
+    /// subscriber the wrong token died.
+    #[test]
+    fn link_loss_flushes_every_remote_token_as_a_delete() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+        for (id, ke) in [
+            (7u64, "liveliness/a"),
+            (3, "liveliness/b"),
+            (9, "liveliness/c"),
+        ] {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(ke))),
+                &HashMap::new(),
+            );
+        }
+        assert_eq!(reg.peer_token_count(), 3);
+        sink.lock().unwrap().clear();
+
+        assert_eq!(reg.flush_peer_tokens_on_link_loss(), 3);
+
+        let captured = sink.lock().unwrap().clone();
+        assert_eq!(captured.len(), 3, "one Delete per remote token");
+        assert!(
+            captured.iter().all(|c| c.0 == LivelinessSampleKind::Delete),
+            "link loss produces Deletes, never Puts: {captured:?}"
+        );
+        // Ordered by token id, which is this impl's determinism choice.
+        assert_eq!(
+            captured.iter().map(|c| c.1.as_str()).collect::<Vec<_>>(),
+            vec!["liveliness/b", "liveliness/a", "liveliness/c"],
+            "each Delete must name the token that actually died"
+        );
+        assert_eq!(
+            reg.peer_token_count(),
+            0,
+            "the table is emptied, so a re-declare after reopen is a fresh Put \
+             rather than a second one for a token the app was never told died"
+        );
+    }
+
+    /// The negative arm: a flush with nothing registered is a no-op that fires
+    /// no sample. Without it, "3 Deletes" above could be satisfied by a flush
+    /// that fabricates one per SLOT rather than per TOKEN.
+    #[test]
+    fn link_loss_with_no_remote_tokens_fires_nothing() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+        assert_eq!(reg.flush_peer_tokens_on_link_loss(), 0);
+        assert!(sink.lock().unwrap().is_empty());
+    }
+
+    /// A token the subscriber's pattern does NOT match is still flushed from
+    /// the table, but fires no sample — the same asymmetry `dispatch_declare`
+    /// already has, kept explicit so a future "fan to every slot" shortcut
+    /// cannot pass silently.
+    #[test]
+    fn link_loss_flushes_an_unmatched_token_without_firing_it() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(4, 0, Some("other/thing"))),
+            &HashMap::new(),
+        );
+        sink.lock().unwrap().clear();
+
+        assert_eq!(reg.flush_peer_tokens_on_link_loss(), 1);
+        assert!(sink.lock().unwrap().is_empty());
+        assert_eq!(reg.peer_token_count(), 0);
     }
 
     #[test]

@@ -479,6 +479,28 @@ impl ApplicationLayerObserver {
         self.replies.dispatch_iteration_event(event, peer_table);
     }
 
+    /// R311y521 — the LINK-LOSS hook: flush every remote liveliness token,
+    /// delivering a `Delete` to each matching subscriber. Returns the count.
+    ///
+    /// zenoh-pico fires this from `_zp_unicast_failed_result` the instant a
+    /// unicast transport fails (`src/transport/unicast/lease.c:74-78` into
+    /// `src/session/liveliness.c:99-120`). It is NOT part of the ordinary
+    /// dispatch fan above: no inbound message announces a dead link, so the
+    /// supervisor that observed the loss has to say so.
+    ///
+    /// A no-op when `liveliness-subscriber` is compiled out — there is no
+    /// registry to flush and no subscriber to tell.
+    pub fn flush_liveliness_on_link_loss(&mut self) -> usize {
+        #[cfg(feature = "liveliness-subscriber")]
+        {
+            self.liveliness_subscribers.flush_peer_tokens_on_link_loss()
+        }
+        #[cfg(not(feature = "liveliness-subscriber"))]
+        {
+            0
+        }
+    }
+
     /// R311gi gc-2c — fan an [`IterationEvent`] into the statechart
     /// switchboard, injecting the mapped SCXML domain event through
     /// `injector` for each inbound `FramePayload` Push whose resolved

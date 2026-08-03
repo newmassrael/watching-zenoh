@@ -1955,6 +1955,14 @@ pub(crate) async fn run_demo(
         // select!-drop, the same cancel path the one-shot uses). A `GaveUp`
         // (reconnect retries exhausted) also surfaces here as a natural end.
         DriveSource::Reconnect(mut recon) => {
+            // R311y521 — THE PRODUCTION CALLER of the link-loss liveliness
+            // flush. Wired here, not at the supervisor's construction, because
+            // the observer does not exist yet at that point: the session is
+            // opened first and the observer is built over the resulting actions
+            // bundle. Without this line the flush would be a library primitive
+            // no shipped binary reaches — the exact shape R311y503 caught in
+            // `storage-mgr-garbage-collection`.
+            recon.set_liveliness_flush(observer.clone());
             // `stop` stays false: the demo's reconnect lifecycle ends only via
             // the shutdown select!-drop (below) or a GaveUp; it never sets the
             // stop flag (that is the in-process caller-stop path the library

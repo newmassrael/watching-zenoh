@@ -54,6 +54,7 @@ use wz_session_core::driver_loop::IterationEvent;
 // R311pw — re-export the reconnectable-locator type (and its narrowing
 // rejection) so a caller gets `open_session_with_reconnect` and its parameter
 // type from one path; the supervisor module is where the reconnect API lives.
+use wz_session_core::observer::ApplicationLayerObserver;
 pub use wz_session_core::reconnect::{NotReconnectable, ReconnectLocator};
 use wz_session_core::reconnect::{ReplayDeclarationsError, SwappableLink};
 use wz_session_core::session_init_params::SessionInitParams;
@@ -68,6 +69,7 @@ use crate::session_open::{
     dial_locator, initiator_open, plan_endpoint, wire_dialed_link, DialConfig, OpenError,
     OpenedSession,
 };
+use crate::sync::Mutex as WzMutex;
 use crate::writer_queue::WriterHandle;
 
 /// Reconnect retry policy. The defaults are the pico literals:
@@ -142,6 +144,16 @@ pub struct ReconnectingSession {
     tick_interval_ms: u64,
     opened: OpenedSession,
     reconnects: u32,
+    /// R311y521 — the observer whose liveliness registry must be flushed when
+    /// the link dies, if the caller opted in via
+    /// [`ReconnectingSession::with_liveliness_flush`].
+    ///
+    /// `Option`, and set by a builder rather than a constructor parameter, on
+    /// purpose: `open_session_with_reconnect` and its string-taking sibling are
+    /// pinned public entry points, and a session with no liveliness subscriber
+    /// has nothing to flush. Widening beside them keeps every existing caller
+    /// compiling unchanged.
+    liveliness_observer: Option<Arc<WzMutex<ApplicationLayerObserver>>>,
 }
 
 /// R311py — the handles [`ReconnectingSession::into_teardown`] hands back: the
@@ -156,6 +168,24 @@ pub struct ReconnectTeardown {
 }
 
 impl ReconnectingSession {
+    /// R311y521 — opt in to the pico link-loss liveliness flush: when the
+    /// supervised link dies, every remote token this observer learned is
+    /// flushed and each matching subscriber gets a `Delete`.
+    ///
+    /// Opt-IN rather than automatic because the supervisor cannot reach the
+    /// observer on its own — the observer is the caller's, built alongside the
+    /// `Session` over the same actions bundle. A caller that skips this keeps
+    /// the pre-R311y521 behaviour, which is why the production path
+    /// (`wz-ap-demo`) calls it.
+    /// A SETTER, not a consuming builder, because the observer is typically
+    /// built AFTER the supervisor: the session is opened first and the
+    /// observer is constructed alongside the `Session` over the resulting
+    /// actions bundle (that is the order `wz-ap-demo` has). A `mut self`
+    /// builder would force the caller to unbox and rebuild.
+    pub fn set_liveliness_flush(&mut self, observer: Arc<WzMutex<ApplicationLayerObserver>>) {
+        self.liveliness_observer = Some(observer);
+    }
+
     /// The shared actions bundle — the surviving half across reconnects.
     /// Callers build their `Session` / handles over this exactly as with a
     /// plain [`crate::session_open::connect_and_open_session`] result.
@@ -315,6 +345,29 @@ impl ReconnectingSession {
                             return ReconnectDriveOutcome::Stopped;
                         }
                         attempts += 1;
+                        // R311y521 — the link is gone, so every remote
+                        // liveliness token it announced is gone with it and no
+                        // UndeclToken can ever arrive for one (the link that
+                        // would carry it is what died). Tell the subscribers
+                        // BEFORE the reset, mirroring pico's ordering: the
+                        // flush rides transport failure
+                        // (`_zp_unicast_failed_result`), ahead of any reopen.
+                        if let Some(observer) = &self.liveliness_observer {
+                            let flushed = match observer.lock() {
+                                Ok(mut o) => o.flush_liveliness_on_link_loss(),
+                                // A panicking sink poisons the mutex; recover
+                                // rather than leak the whole registry, matching
+                                // every other shutdown path in this crate.
+                                Err(poisoned) => {
+                                    poisoned.into_inner().flush_liveliness_on_link_loss()
+                                }
+                            };
+                            if flushed > 0 {
+                                log::info!(
+                                    "wz reconnect: link lost; flushed {flushed} remote                                      liveliness token(s) as Delete"
+                                );
+                            }
+                        }
                         self.actions.reset_for_reopen();
                         match self.open_attempt(clock).await {
                             Ok(reopened) => break reopened,
@@ -439,6 +492,7 @@ pub async fn open_session_with_reconnect(
         tick_interval_ms,
         opened,
         reconnects: 0,
+        liveliness_observer: None,
     })
 }
 
