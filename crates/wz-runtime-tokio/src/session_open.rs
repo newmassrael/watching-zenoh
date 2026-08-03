@@ -73,8 +73,8 @@ use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
 #[cfg(feature = "transport-link-udp")]
 use crate::udp_pipeline::{
-    bind_udp_demux, dial_udp, wire_udp_demuxed, wire_udp_socket, NewUdpFace, UdpAcceptedInputs,
-    UdpDemux, UdpReadDriver,
+    bind_udp_demux, dial_udp, dial_udp_host, wire_udp_demuxed, wire_udp_socket, NewUdpFace,
+    UdpAcceptedInputs, UdpDemux, UdpReadDriver,
 };
 #[cfg(feature = "transport-link-udp")]
 use std::net::SocketAddr;
@@ -1690,11 +1690,30 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::Tcp => Ok(DialedLink::Tcp(
                 dial_tcp_host(&format!("{host}:{port}"), iface.as_deref()).await?,
             )),
+            // R311y524 — a `udp/<name>:<port>` dial resolves like tcp's. pico
+            // treats a named UDP endpoint as ordinary, resolving it through
+            // `getaddrinfo(.., SOCK_DGRAM, IPPROTO_UDP)`
+            // (`src/link/transport/udp/udp_posix.c:32-40`), so rejecting one was
+            // a parity gap rather than a deliberate narrowing. The resolved
+            // address is carried out of the dial because `DialedLink::Udp` needs
+            // the concrete peer, which a name cannot supply.
+            #[cfg(feature = "transport-link-udp")]
+            Proto::Udp => {
+                let (socket, peer) =
+                    dial_udp_host(&format!("{host}:{port}"), iface.as_deref()).await?;
+                Ok(DialedLink::Udp { socket, peer })
+            }
+            #[cfg(not(feature = "transport-link-udp"))]
+            Proto::Udp => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "udp session-open requires the transport-link-udp feature",
+            )),
             other => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
-                    "DNS-name dial is wired only for tcp; {other:?} needs a numeric \
-                     address (name resolution for this transport is not yet implemented)"
+                    "DNS-name dial is wired only for tcp and udp; {other:?} needs a \
+                     numeric address (name resolution for this transport is not yet \
+                     implemented)"
                 ),
             )),
         },
@@ -3987,26 +4006,55 @@ mod tests {
         ));
     }
 
-    // ── dial-side contract: only `tcp` dials a NAME. A udp/ws/tls name is a
-    //    typed `Unsupported` returned BEFORE any I/O (no resolver, no socket) —
-    //    a clean extension point, not a silent fallback.
+    // ── dial-side contract: `tcp` and (R311y524) `udp` dial a NAME; ws/tls
+    //    still surface a typed `Unsupported` BEFORE any I/O (no resolver, no
+    //    socket) — a clean extension point, not a silent fallback.
+    //
+    //    `udp` LEFT this list at R311y524 because pico resolves a named UDP
+    //    endpoint through `getaddrinfo(.., SOCK_DGRAM, IPPROTO_UDP)`
+    //    (`src/link/transport/udp/udp_posix.c:32-40`), so refusing one was a
+    //    parity gap. The positive arm is the test below.
     #[tokio::test]
-    async fn non_tcp_named_dial_is_unsupported_without_io() {
-        for s in [
-            "udp/example.org:7447",
-            "ws/example.org:7447",
-            "tls/example.org:7447",
-        ] {
+    async fn ws_and_tls_named_dial_is_unsupported_without_io() {
+        for s in ["ws/example.org:7447", "tls/example.org:7447"] {
             // DialedLink holds live streams (not Debug), so match rather than
-            // expect_err; a non-tcp name must surface Unsupported before any I/O.
+            // expect_err; these must surface Unsupported before any I/O.
             match dial_endpoint(s, &DialConfig::default()).await {
                 Err(e) => assert_eq!(
                     e.kind(),
                     io::ErrorKind::Unsupported,
-                    "{s} should be Unsupported (name dial only wired for tcp)"
+                    "{s} should be Unsupported (name dial not wired for it)"
                 ),
-                Ok(_) => panic!("{s} must not dial (name dial only wired for tcp)"),
+                Ok(_) => panic!("{s} must not dial (name dial not wired for it)"),
             }
+        }
+    }
+
+    /// R311y524 — a `udp/<name>:<port>` locator RESOLVES and dials.
+    ///
+    /// `localhost` rather than a public name on purpose: the property under
+    /// test is that the udp arm reaches the resolver at all, and a name that
+    /// needs the network would make this a connectivity test. The assertion is
+    /// on the RESOLVED peer, not merely on success — a UDP dial is a bind plus
+    /// `connect` and would succeed against a bogus address too, so checking the
+    /// port and loopback-ness is what proves the name actually turned into the
+    /// endpoint asked for.
+    #[cfg(feature = "transport-link-udp")]
+    #[tokio::test]
+    async fn a_named_udp_locator_resolves_and_dials() {
+        match dial_endpoint("udp/localhost:17457", &DialConfig::default()).await {
+            Ok(DialedLink::Udp { peer, .. }) => {
+                assert_eq!(peer.port(), 17457, "the resolved peer kept the port");
+                assert!(
+                    peer.ip().is_loopback(),
+                    "localhost must resolve to a loopback address, got {peer}"
+                );
+            }
+            Ok(_) => panic!("a udp/ locator must dial to DialedLink::Udp"),
+            Err(e) => panic!(
+                "udp/localhost:17457 did not dial ({e}); pico resolves a named UDP \
+                 endpoint through getaddrinfo, so this is the parity arm"
+            ),
         }
     }
 

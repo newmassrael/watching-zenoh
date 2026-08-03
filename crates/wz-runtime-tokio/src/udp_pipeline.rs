@@ -140,6 +140,38 @@ pub const UDP_LINK_MTU: usize = 1450;
 /// this one peer. See the body for the upstream citation and the consequences.
 /// [`crate::UdpDriver::connect`] performs the SAME bind but NOT the connect — it
 /// is a separate unified-driver seam, so the two paths diverge here.
+/// R311y524 — dial a UDP peer named by a DNS `host:port`, returning the
+/// connected socket AND the address it resolved to (the caller needs the
+/// concrete peer for `DialedLink::Udp`).
+///
+/// The named sibling of [`dial_udp`], and pico parity rather than a
+/// convenience: pico resolves a UDP endpoint through
+/// `getaddrinfo(s_address, s_port, ..)` with `SOCK_DGRAM` / `IPPROTO_UDP`
+/// (`src/link/transport/udp/udp_posix.c:32-40`), so a `udp/hostname:port`
+/// locator is an ordinary endpoint there. wz rejected it with a typed
+/// `Unsupported` until this existed.
+///
+/// Walks the resolved addresses in order and keeps the first that dials,
+/// mirroring [`crate::link_pipeline::dial_tcp_host`]'s walk and
+/// `getaddrinfo`'s own ordered list. A UDP "dial" is a bind + `connect`, so a
+/// failure here is a local socket error rather than a peer refusal — the walk
+/// still matters, because the family of the resolved address decides the bind.
+pub async fn dial_udp_host(host: &str, iface: Option<&str>) -> io::Result<(UdpSocket, SocketAddr)> {
+    let mut last_err: Option<io::Error> = None;
+    for addr in tokio::net::lookup_host(host).await? {
+        match dial_udp(addr, iface).await {
+            Ok(socket) => return Ok((socket, addr)),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("no addresses resolved for {host}"),
+        )
+    }))
+}
+
 pub async fn dial_udp(peer: SocketAddr, iface: Option<&str>) -> io::Result<UdpSocket> {
     let bind_addr: SocketAddr = match peer {
         SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
