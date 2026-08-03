@@ -366,11 +366,58 @@ impl SharedSession {
     }
 
     /// A face left the live set (peer Close / link loss).
+    ///
+    /// R311y522 — before the entry is dropped, every remote liveliness token
+    /// that face announced is delivered to the C application as a `Delete`.
+    /// This is the ACCEPT-side half of the R311y521 flush, and pico draws no
+    /// dial/accept distinction: it fires
+    /// `_z_liveliness_subscription_undeclare_all` from unicast transport
+    /// FAILURE generally (`src/transport/unicast/lease.c:74-78`).
+    ///
+    /// Without it, dropping the entry silently discarded the whole per-face
+    /// observer — registry cleaned, application never told. A C program that
+    /// declared `z_liveliness_declare_subscriber` therefore kept believing a
+    /// token was alive after the peer that announced it was gone, and no
+    /// `UndeclToken` can rescue that: the link that would carry one is exactly
+    /// what died.
+    ///
+    /// ## The drain is not optional, and it is the whole reason this was hard
+    ///
+    /// `flush_liveliness_on_link_loss` does NOT run the C callback. The
+    /// registry's slot holds a DEFERRED-FIRE staging sink (R311lg): it copies
+    /// each matched sample onto the session's fire queue so the callback runs
+    /// after the observer lock drops, which is what lets a C callback re-enter
+    /// the session without self-deadlocking. The drive loop normally drains
+    /// that queue — but this runs AFTER the drive loop has returned, so
+    /// nothing else ever will. Flushing without draining stages Deletes that
+    /// no one delivers, which measures as "1 slot fired" and reaches the
+    /// application as silence.
+    ///
+    /// Flushing the WHOLE observer is correct HERE, where it would not be on a
+    /// node with one shared observer: `face_up` builds a fresh
+    /// `ApplicationLayerObserver` per face, so this observer's remote tokens
+    /// all came from THIS face. That per-face scoping is what lets pico's
+    /// single-session "flush everything" transcribe without attribution.
     pub fn face_down(&self, id: u64) {
         // Drop OUTSIDE the lock: dropping the entry drops its subscribers,
         // and the last one may release the final `Arc<CClosure>` and run the
         // C `drop(context)`.
         let removed = self.lock().faces.remove(&id);
+        if let Some(entry) = &removed {
+            // Both steps run BEFORE the drop: the sinks that must receive the
+            // Deletes are owned by the entry being dropped.
+            let observer = entry.session.observer();
+            let staged = match observer.lock() {
+                Ok(mut o) => o.flush_liveliness_on_link_loss(),
+                // A panicking C callback poisons the mutex; recover rather
+                // than skip the flush, matching this file's other `lock()`.
+                Err(poisoned) => poisoned.into_inner().flush_liveliness_on_link_loss(),
+            };
+            if staged > 0 {
+                // Runs the C callbacks, with the observer lock released.
+                entry.session.drain_deferred_fires();
+            }
+        }
         drop(removed);
     }
 
