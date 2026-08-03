@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: 99260466e63c238c521b53a49c2d24ed893cd4da2faa8f8e2153cc050b338ba0
-// template-hash: d43b22670550c67cebe189489d0fdc39f585b0c09803917dea05e0ded254e31e
+// template-hash: 566d82cde8067d5a043ddb08a09857bfebb8c9df80a7d6c2995a193c1455a335
 // generated-at: 0
 // SCE-MAP: temp_reading_codec.scxml:16
 
@@ -11,7 +11,7 @@
 use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
 // RFC §synth-5-B: `VecSink` and the heap-backed `encode_to_vec` facade
 // are gated on the `alloc` feature (see
-// `sce-forge-runtime/rust/src/codec.rs`). MCU / `no_std` consumers see
+// `backends/rust/forge-runtime/src/codec.rs`). MCU / `no_std` consumers see
 // only the sink-based primary `encode` + `SliceSink` paths.
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -78,7 +78,7 @@ impl TempReadingCodec {
     /// against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
-    /// same gate (see `sce-forge-runtime/rust/src/codec.rs`). MCU /
+    /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]

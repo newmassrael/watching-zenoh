@@ -216,13 +216,13 @@ codec-linkstate = []
 # sce-forge-runtime supplies CodecError + SceCursor + per-language
 # runtime primitives that the generated codec code references
 # (e.g., `use sce_forge_runtime::codec::{CodecError, SceCursor};`).
-sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false }
+sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", default-features = false }
 # R311ns — algorithm-kind byte-buffer-build codegen (cobs_encode /
 # cobs_decode) imports `sce_portable_bytes::{SceBytes, CapacityExceeded}`
 # directly (codec-kind output reaches SceBytes via the sce-forge-runtime
 # re-export; algorithm-kind emits the crate path). `alloc` is forwarded
 # so the owned bytes form is unbounded Vec on AP and heapless<N> on MCU.
-sce-portable-bytes = { path = "../../vendor/sce/sce-portable-bytes", default-features = false }
+sce-portable-bytes = { path = "../../vendor/sce/backends/rust/portable-bytes", default-features = false }
 
 # R311y22 — no [build-dependencies]. Codegen moved to `xtask` (the codegen
 # SSOT); the committed `out/wz-codecs/*.rs` is `include!`-ed directly, so this

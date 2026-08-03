@@ -92,7 +92,7 @@ pub fn encode_init(
     } else {
         None
     };
-    let body = InitBodyOwned {
+    let body: InitBodyOwned = InitBodyOwned {
         version: params.version,
         cbyte,
         // zid is the protocol-bounded peer id (1..=16); init_cbyte
@@ -166,7 +166,7 @@ pub fn encode_open(
     } else {
         &[]
     };
-    let body = OpenBodyOwned {
+    let body: OpenBodyOwned = OpenBodyOwned {
         lease: wire_lease,
         initial_sn: params.initial_sn,
         cookie_len: if !is_ack {

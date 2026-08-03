@@ -47,7 +47,7 @@ wz-session-core = { path = "../wz-session-core", default-features = false }
 # default-features = false drops http-send so the no_std preset can select
 # the bare-metal engine; the AP wz-runtime-tokio edge keeps the std default
 # and unification turns it back on for AP builds.
-sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", default-features = false }
+sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime", default-features = false }
 
 [lints]
 workspace = true

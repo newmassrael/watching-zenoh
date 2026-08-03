@@ -5,7 +5,8 @@
 //!
 //! SCE's codec owned projection stores declared-`max-size` `String` / `Bytes`
 //! fields via the profile-aware, N-preserving newtypes `SceString<N>` /
-//! `SceBytes<N>` (`vendor/sce/sce-forge-runtime/rust/src/codec.rs`): under
+//! `SceBytes<N>` (`vendor/sce/backends/rust/forge-runtime/src/storage.rs` and
+//! `vendor/sce/backends/rust/portable-bytes/src/lib.rs` respectively): under
 //! `alloc` they wrap an UNBOUNDED `String` / `Vec<u8>` (the `N` is advisory —
 //! the heap backs the carrier), under no-alloc they wrap `heapless::String<N>`
 //! / `heapless::Vec<u8, N>`, where an over-`N` input is UNREPRESENTABLE and

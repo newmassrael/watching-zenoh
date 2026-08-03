@@ -68,7 +68,7 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
     "codec-close",
     "keyexpr-canon",
 ] }
-sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
+sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # R311of — the loopback TLS cert fixture (loopback_tls_configs) is the SSOT
 # for the three wz-runtime-tokio TLS e2e tests (tls_e2e, scouting round3_tls,
 # session_reconnect_e2e tls_reconnect); the 26-line cert-generation block was

@@ -893,7 +893,7 @@ wz-runtime-core = { path = "../wz-runtime-core" }
 # profile selects no_std via the crate's `no_std` feature
 # (`sce-rust-runtime?/no_std`); forcing either on this line would break
 # Cargo feature unification on the other profile.
-sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true, default-features = false }
+sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime", optional = true, default-features = false }
 # R311im — software-atomic backend for the no_std sce-rust-runtime Engine
 # host on CAS-less MCU targets (Cortex-M0+ `thumbv6m`). Optional + pulled
 # only by the `no_std` feature; the `critical-section` feature routes the
@@ -917,7 +917,7 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # `alloc` is implied via wz-codecs's transitive enable but the dep is
 # declared direct so the import path `sce_forge_runtime::codec::CodecError`
 # resolves without going through wz-codecs's namespace.
-sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false }
+sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", default-features = false }
 # R311di-13 — hashbrown for the resolve_wireexpr peer-keyexpr-table
 # lookup (HashMap<u64, String>). default-features = false stays
 # no_std-clean; the wz-runtime-tokio side already depends on hashbrown

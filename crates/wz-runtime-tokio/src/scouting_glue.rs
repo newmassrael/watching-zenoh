@@ -454,7 +454,7 @@ mod tests {
         let zid = vec![0x01, 0x02, 0x03];
         // cbyte: whatami wire-form (low 2 bits) | zid_len_m1 << 4.
         let cbyte = 0x01 | (((zid.len() as u8) - 1) << 4);
-        let body = HelloOwned {
+        let owned: HelloOwned = HelloOwned {
             version: 0x09,
             cbyte,
             zid: wz_session_core::codec_owned::owned_bytes(&zid).unwrap(),
@@ -463,10 +463,11 @@ mod tests {
                 locator_len: locator.len() as u64,
                 locator: wz_session_core::codec_owned::owned_string(locator).unwrap(),
             }]),
-        }
-        .try_as_borrowed()
-        .expect("borrowed projection of owned Hello")
-        .encode_to_vec(1 /* L flag projected */);
+        };
+        let body = owned
+            .try_as_borrowed()
+            .expect("borrowed projection of owned Hello")
+            .encode_to_vec(1 /* L flag projected */);
 
         let mut dgram = Vec::with_capacity(1 + body.len());
         dgram.push(wire_const::S_MID_HELLO | wire_const::FLAG_S_HELLO_L);

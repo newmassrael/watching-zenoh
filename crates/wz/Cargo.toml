@@ -130,7 +130,7 @@ wz-session-lwip = { path = "../wz-session-lwip", optional = true, default-featur
 # var), and the facade would have to re-derive the WZ_LWIP_PORT +
 # TARGET logic — a second source of truth, anti-pattern.
 lwip-sys = { path = "../lwip-sys", optional = true }
-sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true }
+sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime", optional = true }
 # R311il — sce-rust-lua removed: no wz statechart is Lua-bound any more
 # (the session FSM went engine-free), so the facade pulls no Lua engine.
 

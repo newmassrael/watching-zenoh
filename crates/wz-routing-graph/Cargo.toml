@@ -43,7 +43,7 @@ wz-codecs = { path = "../wz-codecs", default-features = false, features = [
 # Supplies `SceBytes` — the codec byte type the built LinkState's `zid`
 # field is (c3b `build_linkstate_list`). The same crate wz-codecs's
 # generated owned types are built from. `alloc` for the Vec-backed bytes.
-sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false, features = [
+sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", default-features = false, features = [
     "alloc",
 ] }
 # Drop observability (E2): the `log` facade so an unresolvable psid / link /

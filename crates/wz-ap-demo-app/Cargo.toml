@@ -45,9 +45,9 @@ alloc = ["sce-forge-runtime/alloc"]
 # port the generated SensorMonitorInjector impls (alloc is on by default).
 wz-session-core = { path = "../wz-session-core", features = ["switchboard"] }
 # Engine<SensorMonitorPolicy> + the generated SensorMonitorInject seam.
-sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
+sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # SceCursor / codec runtime for the generated temp_payload decoder + encoder.
-sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
+sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime" }
 
 # R311y22c — no [build-dependencies]: the switchboard 2-stage codegen
 # (sce-codegen --emit-ast + wz-switchboard-codegen) moved to the committed

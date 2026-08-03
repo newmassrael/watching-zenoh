@@ -1590,8 +1590,8 @@ wz-codecs = { path = "../wz-codecs", default-features = false, features = ["allo
 # no_std (std is available at the binary linker level for AP).
 wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire"] }
-sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
-sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
+sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime" }
+sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # R311il — sce-rust-lua dropped: the session FSM (the last Lua-bound
 # statechart) is now engine-free (`<sce:action>` native host-trait
 # dispatch, codegen'd in wz-session-core), so no `IScriptEngine` /

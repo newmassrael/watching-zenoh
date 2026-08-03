@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: e812b8b9426089658c190b079d72f4505398532fde65fe2c41c3ec6148939d1b
-// template-hash: d43b22670550c67cebe189489d0fdc39f585b0c09803917dea05e0ded254e31e
+// template-hash: 566d82cde8067d5a043ddb08a09857bfebb8c9df80a7d6c2995a193c1455a335
 // generated-at: 0
 // SCE-MAP: session_rx_pool_mcu.scxml:44
 
@@ -8,7 +8,7 @@
 // Runtime: self-contained on (rust, std) — no SCE-side helper crate.
 // Do not edit — regenerate from the source SCXML file.
 //
-// watching-zenoh RFC §synth-5-E DMA-aligned slot table with the seven-state
+// SCE Protocol-Synthesis RFC §synth-5-E DMA-aligned slot table with the seven-state
 // lifecycle FSM (free/cpu-mut/dma-armed-{tx,rx}/dma-busy-{tx,rx}/
 // cpu-ref) and phantom-typed `Slot<S>` author API per spec lines
 // 1116-1180 + 1232-1237. The eleven legal transitions are pinned in
@@ -73,7 +73,7 @@ pub const TRANSITION_COUNT: usize = 11;
 /// One of the seven slot ownership states. Discriminants match the
 /// C11 backend's `sce_slot_state_t` enum so cross-language tracing
 /// over a single binary representation stays consistent.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SlotState {
     Free = 0,

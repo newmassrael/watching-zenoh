@@ -115,16 +115,17 @@ fn layer3_hello_l1_empty_locator_array() {
     // Owned builder: the empty locator chain is an alloc `Vec` of
     // `LocatorOwned` (vs the borrowed heapless `Vec<_, 64>`); encode via
     // the `try_as_borrowed` projection.
-    let wz = HelloOwned {
+    let wz_owned: HelloOwned = HelloOwned {
         version,
         cbyte,
         zid: wz_session_core::codec_owned::owned_bytes(&zid).unwrap(),
         num_locators: Some(0),
         locators: Some(vec![]),
-    }
-    .try_as_borrowed()
-    .expect("test: empty locator chain")
-    .encode_to_vec(((FLAG_HELLO_L) >> 5) & 1);
+    };
+    let wz = wz_owned
+        .try_as_borrowed()
+        .expect("test: empty locator chain")
+        .encode_to_vec(((FLAG_HELLO_L) >> 5) & 1);
 
     let pico = zenoh_pico_encode_hello(FLAG_HELLO_L, version, whatami, &zid);
     assert_eq!(wz, pico);
