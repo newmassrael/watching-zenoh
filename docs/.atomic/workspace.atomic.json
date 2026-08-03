@@ -82118,6 +82118,90 @@
         "gate's job per CLAUDE.md:194-201."
       ]
     },
+    "Round 311y511": {
+      "decision_summary": "Repair the MCU reassembly fixture rotted by two renames, and close the C1l gap that let it rot: no lane ran cargo test on wz-runtime-coop.",
+      "changes_bullets": [
+        "crates/wz-runtime-coop/src/reassembly_rx.rs:104 built a Fragment with a",
+        "field named zid, renamed to peer_key at R311kp, and omitted the priority",
+        "field added at R311y215. The fixture therefore had not compiled since",
+        "either change landed. Repaired both: peer_key: ZID plus",
+        "priority: Priority::DEFAULT, which is the documented value for a pre-QoS",
+        "unicast chain (reassembly_dispatch.rs:188-195) and collapses the section",
+        "2.3 chain key back to the (peer, reliable) form the two tests assert on.",
+        "Root cause is the gate, not the code: layer_c1l_reassembly ran",
+        "cargo test for wz-session-core and the AP-side wz-runtime-tokio but never",
+        "for wz-runtime-coop, the MCU sibling named in that module's own header.",
+        "The C1k precedent uses cargo build for this crate, and build does not",
+        "compile cfg(test) bodies, so no lane could have caught it. Added",
+        "cargo test -p wz-runtime-coop --features reassembly to C1l."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-coop --features reassembly: 3 passed. Default",
+        "features unchanged at 0 failures. cargo fmt clean. run-ci --layer C1l",
+        "pass (28s) and --layer 0 pass (41s; shellcheck 21 files + actionlint),",
+        "the latter because this round edits run-ci.sh itself. The new lane is",
+        "damage-bound in both directions: reverting ONLY the fixture repair and",
+        "re-running --layer C1l reds it (E0560, rc=101, 28s), restoring the repair",
+        "re-greens it, so the added line is what closes the hole rather than",
+        "decorating it. The restored tests are not vacuous either: multiplying the",
+        "sourced REASSEMBLY_TIMEOUT_MS by 1000 fails 2 of the 3",
+        "(mcu_dims_come_from_the_buffer_pool_ssot and",
+        "mcu_seam_sweep_times_out_a_stale_chain), so they assert on the buffer-pool",
+        "SSOT and the deadline sweep, not merely on compilation."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "Found while sweeping wide feature sets during the Round 311y510 SCE pin",
+        "bump; it is unrelated to SCE and predates that bump. The class is worth a",
+        "sweep of its own: a cfg(test) module behind a non-default feature that no",
+        "lane runs is invisible to every gate, and this one survived two separate",
+        "upstream renames. Other capability features whose only consumer coverage",
+        "is a cargo build lane have the same shape and were not audited here."
+      ],
+      "publishable_decision_summary": "Repair the MCU reassembly fixture rotted by two renames, and close the C1l gap that let it rot: no lane ran cargo test on wz-runtime-coop.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-coop/src/reassembly_rx.rs:104 built a Fragment with a",
+        "field named zid, renamed to peer_key at R311kp, and omitted the priority",
+        "field added at R311y215. The fixture therefore had not compiled since",
+        "either change landed. Repaired both: peer_key: ZID plus",
+        "priority: Priority::DEFAULT, which is the documented value for a pre-QoS",
+        "unicast chain (reassembly_dispatch.rs:188-195) and collapses the section",
+        "2.3 chain key back to the (peer, reliable) form the two tests assert on.",
+        "Root cause is the gate, not the code: layer_c1l_reassembly ran",
+        "cargo test for wz-session-core and the AP-side wz-runtime-tokio but never",
+        "for wz-runtime-coop, the MCU sibling named in that module's own header.",
+        "The C1k precedent uses cargo build for this crate, and build does not",
+        "compile cfg(test) bodies, so no lane could have caught it. Added",
+        "cargo test -p wz-runtime-coop --features reassembly to C1l."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-coop --features reassembly: 3 passed. Default",
+        "features unchanged at 0 failures. cargo fmt clean. run-ci --layer C1l",
+        "pass (28s) and --layer 0 pass (41s; shellcheck 21 files + actionlint),",
+        "the latter because this round edits run-ci.sh itself. The new lane is",
+        "damage-bound in both directions: reverting ONLY the fixture repair and",
+        "re-running --layer C1l reds it (E0560, rc=101, 28s), restoring the repair",
+        "re-greens it, so the added line is what closes the hole rather than",
+        "decorating it. The restored tests are not vacuous either: multiplying the",
+        "sourced REASSEMBLY_TIMEOUT_MS by 1000 fails 2 of the 3",
+        "(mcu_dims_come_from_the_buffer_pool_ssot and",
+        "mcu_seam_sweep_times_out_a_stale_chain), so they assert on the buffer-pool",
+        "SSOT and the deadline sweep, not merely on compilation."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Found while sweeping wide feature sets during the Round 311y510 SCE pin",
+        "bump; it is unrelated to SCE and predates that bump. The class is worth a",
+        "sweep of its own: a cfg(test) module behind a non-default feature that no",
+        "lane runs is invisible to every gate, and this one survived two separate",
+        "upstream renames. Other capability features whose only consumer coverage",
+        "is a cargo build lane have the same shape and were not audited here."
+      ]
+    },
     "Round 311y52": {
       "decision_summary": "R311y52 -- R311y51 session-review remediation (3 independent agents security/architect/quality + direct-read arbitration; verdict gate SOUND + fidelity-honest + no-never-run, NO HIGH). Acted on the architect MEDIUM: the write facade forwarded but gated ZERO library code (only cfg site was the demo, asymmetric with the lib-resident adminspace-read gate) and AdminSpacePermissions.write was a dead field. Fix: new wz-runtime-tokio admin_write_permit(&AdminSpacePermissions) -> bool is the adminspace-write cfg site (write-side mirror of declare_adminspace_with_permissions' read gate), called by the wz-ap-demo host which builds AdminSpacePermissions{write: --config-write-permit} -- .write is now LIVE + the facade chain gates real lib code; parse_admin_config_write stays the gate-first decode SSOT. + RefMut-across-body hardening; facade comments de-overclaimed; C1am runs admin_write_permit on both gate arms. validate_workspace orphan new=+0; A3 active=102.",
       "changes_bullets": [
