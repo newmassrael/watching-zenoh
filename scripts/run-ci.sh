@@ -4168,9 +4168,17 @@ layer_c1l_reassembly() {
     # the quic-datagram lane, the unixpipe lane) rather than all in one place.
     _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation --test link_endpoints_pairing --quiet \
         || return 1
+    # R311y511 — wz-runtime-coop is the MCU sibling of the wz-runtime-tokio
+    # drive above, and it was the one reassembly consumer this lane never
+    # built. Its reassembly_rx tests are `#[cfg(test)]` behind
+    # `--features reassembly`, so neither Layer C1 (default features) nor a
+    # `cargo build` lane compiles them; the R311kp `zid` -> `peer_key` rename
+    # and the R311y215 `Fragment.priority` addition both rotted the fixture
+    # undetected. `test`, not `build`, is the load-bearing verb here.
     (cd crates \
         && cargo test -p wz-session-core --features reassembly --quiet \
         && cargo test -p wz-runtime-tokio --features reassembly --quiet \
+        && cargo test -p wz-runtime-coop --features reassembly --quiet \
         && cargo test -p wz-session-core --features transport-fragmentation --quiet \
         && cargo test -p wz-runtime-tokio --features transport-fragmentation --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-fragmentation --quiet -- -D warnings)

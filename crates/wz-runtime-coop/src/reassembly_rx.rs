@@ -93,6 +93,7 @@ pub fn mcu_reassembly() -> CoopReassembly {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::qos::Priority;
 
     const ZID: &[u8] = &[0x11; 16];
 
@@ -101,11 +102,14 @@ mod tests {
 
     fn frag<'a>(sn: u64, more: u8, payload: &'a [u8]) -> Fragment<'a> {
         Fragment {
-            zid: ZID,
+            peer_key: ZID,
             reliable: true,
             sn,
             more,
             payload,
+            // Pre-QoS MCU unicast chain: DEFAULT collapses the §2.3 key
+            // back to the (peer, reliable) form these tests assert on.
+            priority: Priority::DEFAULT,
         }
     }
 
