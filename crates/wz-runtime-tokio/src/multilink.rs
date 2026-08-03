@@ -648,4 +648,274 @@ mod tests {
             "the wide-band link did NOT win despite also covering the priority"
         );
     }
+
+    /// R311y514 — the band that routes egress is the NEGOTIATED one, not the
+    /// staged offer. zenoh rebuilds the link config from the handshake outcome on
+    /// BOTH sides (`establishment/open.rs:703-704` and `accept.rs:826-827`,
+    /// `priorities: state.transport.ext_qos.priorities()` into
+    /// `link.reconfigure`), and that same `link.config.priorities` is the input to
+    /// the egress `select` (`unicast/universal/tx.rs:81-90`). So a band the
+    /// containment narrowed must stop attracting the priorities it gave up.
+    ///
+    /// The discriminator is the WIDTH tie-break: the secondary here covers every
+    /// priority, so it wins Background only once the primary stops covering it.
+    /// Without the write-back the primary keeps its pre-handshake band, still
+    /// covers Background, and — being the narrower of the two — still wins.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "session-extqos",
+        feature = "codec-init-body"
+    ))]
+    #[test]
+    fn the_negotiated_band_narrows_egress_selection() {
+        use wz_session_core::extqos::{encode_qos_link_ext, qos_state_to_u64, QosLinkState};
+        use wz_session_core::qos::Priority;
+        use wz_session_core::session_actions::LinkPriorityRange;
+
+        let (primary, secondary, primary_driver, secondary_driver) = joined_qos_pair();
+
+        // The primary declares [DataHigh..=Background] (width 4) as BOTH its wire
+        // offer and its egress band — the way a zenoh endpoint's `prio=` metadata
+        // is one field feeding both halves.
+        let offered = LinkPriorityRange::new(Priority::DataHigh, Priority::Background);
+        primary.set_qos_link_metadata(QosLinkState {
+            priorities: Some(offered),
+            reliability: None,
+        });
+        primary.set_link_priority_range(Some(offered));
+        // The secondary covers EVERYTHING (width 8), so it loses every width
+        // tie-break the primary is still in.
+        secondary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::Control,
+            Priority::Background,
+        )));
+
+        // CALIBRATION — before the merge, Background rides the PRIMARY (it covers,
+        // and is narrower). Without this leg the post-merge assertion could hold
+        // for a reason that has nothing to do with the negotiation.
+        primary
+            .send_push_literal_qos("band/pre", b"p", true, Priority::Background)
+            .expect("pre-negotiation send");
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "pre-merge, the offered band covers Background and is the narrower link"
+        );
+        assert_eq!(secondary_driver.frame_count(), 0, "not the wide link yet");
+
+        // The ACCEPTOR merge (`is_ack = false`, zenoh `recv_init_syn`): the
+        // initiator declares [DataHigh..=Data], a SUBSET, so the negotiated band
+        // becomes the initiator's.
+        let theirs = QosLinkState {
+            priorities: Some(LinkPriorityRange::new(Priority::DataHigh, Priority::Data)),
+            reliability: None,
+        };
+        primary
+            .negotiate_qos_link_against_peer(
+                false,
+                &[encode_qos_link_ext(qos_state_to_u64(&theirs))],
+            )
+            .expect("a subset band negotiates");
+        assert_eq!(
+            primary.qos_link_metadata().priorities,
+            theirs.priorities,
+            "the acceptor adopts the initiator's narrower band"
+        );
+
+        // Background is now OUTSIDE the negotiated band: the primary must stop
+        // taking it, leaving the secondary as the only covering link.
+        primary
+            .send_push_literal_qos("band/out", b"o", true, Priority::Background)
+            .expect("out-of-band send");
+        assert_eq!(
+            secondary_driver.frame_count(),
+            1,
+            "a priority the negotiated band gave up routes to the other link"
+        );
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "the primary took no second frame — its band no longer covers Background"
+        );
+
+        // ...and a priority still INSIDE the negotiated band stays on the primary:
+        // the band was NARROWED, not cleared.
+        primary
+            .send_push_literal_qos("band/in", b"i", true, Priority::Data)
+            .expect("in-band send");
+        assert_eq!(
+            primary_driver.frame_count(),
+            2,
+            "a priority inside the negotiated band still rides the primary"
+        );
+        assert_eq!(
+            secondary_driver.frame_count(),
+            1,
+            "the wide link is untouched by the in-band send"
+        );
+    }
+
+    /// R311y514 — the RELIABILITY half of the same write-back. zenoh reconfigures
+    /// the link with `reliability: state.transport.ext_qos.reliability()` in the
+    /// same struct literal as the band, and `select` matches on it BEFORE any
+    /// band comparison (`tx.rs:85-87`). So an undeclared side that inherits the
+    /// peer's reliability class must change which conduit the link serves.
+    ///
+    /// Isolated from the band half on purpose: the peer here declares reliability
+    /// ONLY, so the merged band stays `None` and the links keep the bands set
+    /// directly. What moves the traffic is the reliability class, nothing else.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "session-extqos",
+        feature = "codec-init-body"
+    ))]
+    #[test]
+    fn the_negotiated_reliability_reclasses_the_link() {
+        use wz_session_core::extqos::{encode_qos_link_ext, qos_state_to_u64, QosLinkState};
+        use wz_session_core::qos::Priority;
+        use wz_session_core::reliability::Reliability;
+        use wz_session_core::session_actions::LinkPriorityRange;
+
+        let (primary, secondary, primary_driver, secondary_driver) = joined_qos_pair();
+        // Both links start in the RELIABLE class (`joined_qos_pair`); the primary
+        // carries the narrower band so it wins every full-tier tie-break it enters.
+        primary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::DataHigh,
+            Priority::Background,
+        )));
+        secondary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::Control,
+            Priority::Background,
+        )));
+
+        // CALIBRATION — a RELIABLE Put rides the primary today.
+        primary
+            .send_push_literal_qos("rel/pre", b"p", true, Priority::Background)
+            .expect("pre-negotiation reliable send");
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "reliable Put on the primary"
+        );
+        assert_eq!(secondary_driver.frame_count(), 0, "not the wide link");
+
+        // The peer declares BEST-EFFORT and no band; this side declared neither,
+        // so it INHERITS both — merged reliability = BestEffort, band still None.
+        let theirs = QosLinkState {
+            priorities: None,
+            reliability: Some(Reliability::BestEffort),
+        };
+        primary
+            .negotiate_qos_link_against_peer(
+                false,
+                &[encode_qos_link_ext(qos_state_to_u64(&theirs))],
+            )
+            .expect("an undeclared side inherits the peer's reliability");
+        assert_eq!(
+            primary.qos_link_metadata().reliability,
+            Some(Reliability::BestEffort),
+            "the merge inherited the peer's class"
+        );
+
+        // The primary now serves the BEST-EFFORT conduit, so a reliable Put must
+        // leave it for the secondary, which is still in the reliable class.
+        primary
+            .send_push_literal_qos("rel/post", b"o", true, Priority::Background)
+            .expect("post-negotiation reliable send");
+        assert_eq!(
+            secondary_driver.frame_count(),
+            1,
+            "the reliable conduit moved to the link still in that class"
+        );
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "the primary took no second reliable frame"
+        );
+
+        // ...and the best-effort conduit is now the primary's: the class was
+        // REASSIGNED, not disabled.
+        primary
+            .send_push_literal_qos("rel/be", b"b", false, Priority::Background)
+            .expect("best-effort send");
+        assert_eq!(
+            primary_driver.frame_count(),
+            2,
+            "the primary serves the class it negotiated into"
+        );
+        assert_eq!(
+            secondary_driver.frame_count(),
+            1,
+            "the secondary is untouched"
+        );
+    }
+
+    /// R311y514 (the negative arm) — a merged `None` must NOT clear the band the
+    /// deploy installed. Upstream this case cannot be observed: zenoh's offer and
+    /// its selection input are one endpoint-metadata field, so a merged `None`
+    /// means the config was already `None`. wz reaches the seam with a second band
+    /// source that never sees the wire (`set_link_priority_range` at bring-up), so
+    /// a literal transcription of `link.reconfigure` would clear a band no peer
+    /// ever contradicted — and the y217 multilink deploy split would silently stop
+    /// routing the moment a bare-QoS peer completed a handshake.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "session-extqos",
+        feature = "codec-init-body"
+    ))]
+    #[test]
+    fn a_metadata_less_peer_does_not_clear_the_deploy_band() {
+        use wz_session_core::extqos::encode_qos_ext;
+        use wz_session_core::qos::Priority;
+        use wz_session_core::session_actions::LinkPriorityRange;
+
+        let (primary, secondary, primary_driver, secondary_driver) = joined_qos_pair();
+        // The deploy split: the primary owns the LOW band, the secondary the whole
+        // scale. Neither is staged as wire metadata — that is the point.
+        primary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::DataHigh,
+            Priority::Background,
+        )));
+        secondary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::Control,
+            Priority::Background,
+        )));
+        assert_eq!(
+            primary.qos_link_metadata().priorities,
+            None,
+            "nothing staged for the wire"
+        );
+
+        // The peer sends the presence-only UNIT form: QoS on, no metadata at all.
+        primary
+            .negotiate_qos_link_against_peer(false, &[encode_qos_ext()])
+            .expect("a metadata-less QoS peer negotiates");
+        assert_eq!(
+            primary.qos_link_metadata().priorities,
+            None,
+            "and the merge produced no band"
+        );
+
+        // The deploy band still routes: Background rides the primary, exactly as
+        // it did before any handshake.
+        primary
+            .send_push_literal_qos("keep/band", b"k", true, Priority::Background)
+            .expect("post-negotiation send");
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "the deploy band survived a negotiation that never mentioned a band"
+        );
+        assert_eq!(
+            secondary_driver.frame_count(),
+            0,
+            "the wide link did not take over"
+        );
+    }
 }

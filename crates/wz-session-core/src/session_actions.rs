@@ -2477,7 +2477,72 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             crate::extqos::merge_qos_link_init_syn(&mine, &peer_state)?
         };
         self.set_qos_link_metadata(merged);
+        self.apply_negotiated_qos_to_link(&merged);
         Ok(())
+    }
+
+    /// R311y514 — push the NEGOTIATED QoS metadata down onto this physical link's
+    /// egress-selection inputs: the wz counterpart of zenoh's
+    /// `link.reconfigure(TransportLinkUnicastConfig { priorities:
+    /// state.transport.ext_qos.priorities(), reliability:
+    /// state.transport.ext_qos.reliability(), .. })`, which BOTH sides run once
+    /// establishment settles (`unicast/establishment/open.rs:694-706`,
+    /// `accept.rs:818-830`). That reconfigured `link.config` is precisely what the
+    /// egress `select` reads (`unicast/universal/tx.rs:81-90`), so upstream the
+    /// handshake outcome — not the pre-handshake offer — is what routes traffic.
+    ///
+    /// Without this, wz negotiated a band faithfully and then ignored it: a link
+    /// whose band the containment NARROWED kept attracting the priorities it had
+    /// just given up, and [`Self::select_link`] could hand a message to a link the
+    /// peer does not serve on that conduit.
+    ///
+    /// Only a `Some` outcome is applied, and that is not a shortcut — it is what
+    /// makes this faithful. Upstream both the offer and the selection input come
+    /// from ONE endpoint-metadata field, so a merged `None` implies the local side
+    /// declared nothing, which implies `config.priorities` was ALREADY `None`
+    /// before the reconfigure: the `None` arm is a no-op in zenoh too. wz reaches
+    /// this seam with a second band source that never sees the wire (the deploy
+    /// split [`Self::set_link_priority_range`] installs at bring-up), so writing
+    /// `None` through would clear a band no negotiation ever contradicted —
+    /// divergence dressed up as fidelity.
+    ///
+    /// The reliability half carries the same rule and one further limit: wz's
+    /// [`LinkReliabilityPref::Any`] is "no preference", whereas zenoh's undeclared
+    /// case falls back to the link's INTRINSIC class
+    /// (`config.reliability.unwrap_or(Reliability::from(link.is_reliable()))`).
+    /// That fallback difference is pre-existing and independent of the handshake;
+    /// it is not silently folded in here.
+    #[cfg(all(
+        feature = "session-extqos",
+        feature = "codec-init-body",
+        feature = "transport-multilink"
+    ))]
+    fn apply_negotiated_qos_to_link(&self, merged: &crate::extqos::QosLinkState) {
+        if let Some(band) = merged.priorities {
+            self.set_link_priority_range(Some(band));
+        }
+        if let Some(reliability) = merged.reliability {
+            self.set_link_reliability_pref(match reliability {
+                crate::reliability::Reliability::Reliable => LinkReliabilityPref::Reliable,
+                crate::reliability::Reliability::BestEffort => LinkReliabilityPref::BestEffort,
+            });
+        }
+    }
+
+    /// Non-multilink twin of [`Self::apply_negotiated_qos_to_link`]. A session
+    /// with no aggregation set never runs [`Self::select_link`] — `send_wire`
+    /// takes `self.link` directly — so there is no per-link selection input to
+    /// reconfigure, and the negotiated metadata stays where
+    /// [`Self::qos_link_metadata`] reports it. The arm exists so the call site
+    /// stays unconditional, the discipline the R311mx note on the send seam's
+    /// cfg arms already imposes in this file.
+    #[cfg(all(
+        feature = "session-extqos",
+        feature = "codec-init-body",
+        not(feature = "transport-multilink")
+    ))]
+    fn apply_negotiated_qos_to_link(&self, merged: &crate::extqos::QosLinkState) {
+        let _ = merged;
     }
 
     /// R311y435 — stage a whole [`SessionOffer`] on FRESH actions: the single

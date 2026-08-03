@@ -1785,10 +1785,23 @@ layer_c1bb_cargo_test_qos() {
         || return 1
     _runci_guarded_test C1bb 1 cargo test -p wz-runtime-tokio --features transport-qos,transport-lowlatency,transport-unicast --lib is_qos_negotiates_by_and_and_is_lowlatency_exclusive --quiet \
         || return 1
-    _runci_guarded_test C1bb 8 cargo test -p wz-runtime-tokio --features transport-qos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
+    # R311y514 — `session-extqos` JOINED this lane's feature set and the pin moved
+    # 8 -> 11. The three tests it admits are the ones that pin the negotiated
+    # metadata onto the link's egress-selection inputs (zenoh's
+    # `link.reconfigure` at the end of establishment). Without the key they are
+    # compiled out, and the lane reports 8 green while the seam it is named for
+    # goes unexercised — the R311y513 shape, one feature key over.
+    _runci_guarded_test C1bb 11 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
         || return 1
     (cd crates \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --quiet -- -D warnings) \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --quiet -- -D warnings) \
+        || return 1
+    # R311y514 — the `cfg(not(transport-multilink))` twin of the write-back seam.
+    # A session with no aggregation set never runs `select_link`, so there is no
+    # per-link selection input to reconfigure; the arm must still COMPILE, and
+    # only a build that omits multilink while keeping `session-extqos` proves it.
+    (cd crates \
+        && cargo clippy -p wz-session-core --all-targets --no-default-features --features session-extqos,codec-init-body,codec-push,codec-close --quiet -- -D warnings) \
         || return 1
     _runci_guarded_test C1bb + cargo test -p wz-runtime-tokio --features routing-peer,transport-qos --lib linkstate --quiet \
         || return 1
