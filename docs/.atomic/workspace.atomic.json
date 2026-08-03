@@ -82010,6 +82010,114 @@
         "LOCAL: R311y51 atop origin/main=816d011 (R311y50). NOT pushed without explicit consent; full run-ci before push."
       ]
     },
+    "Round 311y510": {
+      "decision_summary": "Bump vendor/sce a51b5e7e1 -> 43695e572 for the storage-profile codec owned form; the SCE notice's 37-site impact estimate measured 5.",
+      "changes_bullets": [
+        "vendor/sce pin a51b5e7e1 -> 43695e572 (145 commits). SCE b054af933 makes",
+        "{Codec}Owned generic over CodecStorage with DefaultStorage as the default",
+        "profile; SCE 1eb145107 moves the Rust crate roots under backends/rust/.",
+        "Path deps rewritten on 18 lines across 11 manifests: 16 in crates/ member",
+        "manifests (NOT crates/Cargo.toml, which holds none) plus 2 in",
+        "deploy/mcu-noheap-probe/Cargo.toml, which the SCE notice omitted by",
+        "scoping its scan to crates/. out/** regenerated via the xtask codegen",
+        "SSOT: 66 files, +3651/-1951; all 41 owned mirrors are now storage-generic.",
+        "Five literals needed S pinned: handshake_encode.rs:95 (InitBodyOwned) and",
+        ":169 (OpenBodyOwned) take a binding annotation; layer3_hello.rs:118,",
+        "scouting_glue.rs:457 and scouting_multicast_loopback.rs:47 are method",
+        "chains whose binding is Vec<u8>, so each needed a new intermediate owned",
+        "binding instead. codec_owned.rs:8 re-cited: SceString now lives in",
+        "backends/rust/forge-runtime/src/storage.rs, SceBytes in",
+        "backends/rust/portable-bytes/src/lib.rs."
+      ],
+      "verification_bullets": [
+        "Layer B2 pass (committed out/** == regenerated, 7s) after the commit;",
+        "Layer C1 workspace tests. Per-crate cargo check swept all 44 buildable",
+        "members with each member's full non-no_std feature set: 40 pass. The four",
+        "reds resolved to two annotation crates (fixed, now 0) plus two artefacts",
+        "of the synthetic all-features combination, both pre-existing and not",
+        "bump-caused: the sce-rust-runtime no_std x http-send compile_error, whose",
+        "guard is present at BOTH pins (a51b5e7e1 and 43695e572, lib.rs:81 each),",
+        "and wz-runtime-coop/src/reassembly_rx.rs:104 naming Fragment.zid, a field",
+        "renamed to peer_key at R311kp in wz's own reassembly_dispatch.rs:175. Both",
+        "crates pass at default features. The wide-feature green was damage-bound:",
+        "corrupting the type name at linkstate_oam.rs:106 reds the lane (E0422),",
+        "reverting re-greens it, so the lane genuinely compiles the sites the SCE",
+        "notice predicted would break."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "The SCE notice's impact table is wrong and the correction is reportable",
+        "upstream. It predicted 37 annotation sites; the measured count is 5. Its",
+        "classifier read only the binding statement's syntax, but rustc also infers",
+        "a let binding's type from its LATER uses: declare_ext_keyexpr.rs:190 needs",
+        "nothing because read_ext_keyexpr(:121) takes Option<&Vec<ExtEntryOwned>>",
+        "and pins S there. Breakage needs BOTH a projection field (zid: S::Bytes<16>)",
+        "and no later use that pins S (as_borrowed holds for every S). The notice",
+        "also predicted the wrong shape: 3 of the 5 are method chains where the",
+        "documented binding-annotation fix does not apply. And its section 2 claim",
+        "that N inference stays intact is false — 3 of the 5 root errors were E0284",
+        "on owned_bytes' const N, which only resolves once S is pinned; the section",
+        "3 claim that one outermost annotation suffices is correct and was measured.",
+        "Not yet run locally: the feature-subset matrix, C2 clippy, and the",
+        "F/G/Q/Z footprint / cross-compile / interop lanes, which are the hosted",
+        "gate's job per CLAUDE.md:194-201."
+      ],
+      "publishable_decision_summary": "Bump vendor/sce a51b5e7e1 -> 43695e572 for the storage-profile codec owned form; the SCE notice's 37-site impact estimate measured 5.",
+      "publishable_changes_bullets": [
+        "vendor/sce pin a51b5e7e1 -> 43695e572 (145 commits). SCE b054af933 makes",
+        "{Codec}Owned generic over CodecStorage with DefaultStorage as the default",
+        "profile; SCE 1eb145107 moves the Rust crate roots under backends/rust/.",
+        "Path deps rewritten on 18 lines across 11 manifests: 16 in crates/ member",
+        "manifests (NOT crates/Cargo.toml, which holds none) plus 2 in",
+        "deploy/mcu-noheap-probe/Cargo.toml, which the SCE notice omitted by",
+        "scoping its scan to crates/. out/** regenerated via the xtask codegen",
+        "SSOT: 66 files, +3651/-1951; all 41 owned mirrors are now storage-generic.",
+        "Five literals needed S pinned: handshake_encode.rs:95 (InitBodyOwned) and",
+        ":169 (OpenBodyOwned) take a binding annotation; layer3_hello.rs:118,",
+        "scouting_glue.rs:457 and scouting_multicast_loopback.rs:47 are method",
+        "chains whose binding is Vec<u8>, so each needed a new intermediate owned",
+        "binding instead. codec_owned.rs:8 re-cited: SceString now lives in",
+        "backends/rust/forge-runtime/src/storage.rs, SceBytes in",
+        "backends/rust/portable-bytes/src/lib.rs."
+      ],
+      "publishable_verification_bullets": [
+        "Layer B2 pass (committed out/** == regenerated, 7s) after the commit;",
+        "Layer C1 workspace tests. Per-crate cargo check swept all 44 buildable",
+        "members with each member's full non-no_std feature set: 40 pass. The four",
+        "reds resolved to two annotation crates (fixed, now 0) plus two artefacts",
+        "of the synthetic all-features combination, both pre-existing and not",
+        "bump-caused: the sce-rust-runtime no_std x http-send compile_error, whose",
+        "guard is present at BOTH pins (a51b5e7e1 and 43695e572, lib.rs:81 each),",
+        "and wz-runtime-coop/src/reassembly_rx.rs:104 naming Fragment.zid, a field",
+        "renamed to peer_key at R311kp in wz's own reassembly_dispatch.rs:175. Both",
+        "crates pass at default features. The wide-feature green was damage-bound:",
+        "corrupting the type name at linkstate_oam.rs:106 reds the lane (E0422),",
+        "reverting re-greens it, so the lane genuinely compiles the sites the SCE",
+        "notice predicted would break."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The SCE notice's impact table is wrong and the correction is reportable",
+        "upstream. It predicted 37 annotation sites; the measured count is 5. Its",
+        "classifier read only the binding statement's syntax, but rustc also infers",
+        "a let binding's type from its LATER uses: declare_ext_keyexpr.rs:190 needs",
+        "nothing because read_ext_keyexpr(:121) takes Option<&Vec<ExtEntryOwned>>",
+        "and pins S there. Breakage needs BOTH a projection field (zid: S::Bytes<16>)",
+        "and no later use that pins S (as_borrowed holds for every S). The notice",
+        "also predicted the wrong shape: 3 of the 5 are method chains where the",
+        "documented binding-annotation fix does not apply. And its section 2 claim",
+        "that N inference stays intact is false — 3 of the 5 root errors were E0284",
+        "on owned_bytes' const N, which only resolves once S is pinned; the section",
+        "3 claim that one outermost annotation suffices is correct and was measured.",
+        "Not yet run locally: the feature-subset matrix, C2 clippy, and the",
+        "F/G/Q/Z footprint / cross-compile / interop lanes, which are the hosted",
+        "gate's job per CLAUDE.md:194-201."
+      ]
+    },
     "Round 311y52": {
       "decision_summary": "R311y52 -- R311y51 session-review remediation (3 independent agents security/architect/quality + direct-read arbitration; verdict gate SOUND + fidelity-honest + no-never-run, NO HIGH). Acted on the architect MEDIUM: the write facade forwarded but gated ZERO library code (only cfg site was the demo, asymmetric with the lib-resident adminspace-read gate) and AdminSpacePermissions.write was a dead field. Fix: new wz-runtime-tokio admin_write_permit(&AdminSpacePermissions) -> bool is the adminspace-write cfg site (write-side mirror of declare_adminspace_with_permissions' read gate), called by the wz-ap-demo host which builds AdminSpacePermissions{write: --config-write-permit} -- .write is now LIVE + the facade chain gates real lib code; parse_admin_config_write stays the gate-first decode SSOT. + RefMut-across-body hardening; facade comments de-overclaimed; C1am runs admin_write_permit on both gate arms. validate_workspace orphan new=+0; A3 active=102.",
       "changes_bullets": [
