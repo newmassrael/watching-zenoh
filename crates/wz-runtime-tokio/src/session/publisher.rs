@@ -140,9 +140,19 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     /// TRANSITION of this publisher's keyexpr against the remote
     /// subscriber set — a remote `DeclSubscriber` whose keyexpr starts
     /// intersecting flips it `true`, the matching `UndeclSubscriber`
-    /// flips it back. Registration itself never fires (pico
-    /// transition-only; poll [`Self::get_matching_status`] for the
-    /// current value, which also seeds the watch baseline).
+    /// flips it back.
+    ///
+    /// Registration fires `true` IMMEDIATELY when the publisher is
+    /// already matching, and is silent otherwise — pico's
+    /// `_z_write_filter_ctx_add_callback` arm
+    /// (`vendor/zenoh-pico/src/net/filtering.c:341-357`). Earlier
+    /// rounds documented the opposite here ("registration itself never
+    /// fires (pico transition-only)"), which misread pico; see
+    /// [`wz_session_core::declare::matching::MatchingWatchList::register`]
+    /// for the corrected reading and why it matters (a publisher joining
+    /// an established session would otherwise never learn about the
+    /// subscribers already there). [`Self::get_matching_status`] remains
+    /// the poll, and still seeds the watch baseline.
     ///
     /// R311kz — DEFERRED FIRE (the F-6 fix; supersedes the R311kj
     /// callback constraint): the registry-installed sink only STAGES
@@ -182,12 +192,30 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 obs.remote_subscribers
                     .declare_matching_listener(&self.keyexpr, sink)
             });
-            Ok(MatchingListener {
+            let listener = MatchingListener {
                 session: self.session.clone(),
                 id,
                 scope: MatchingScope::RemoteSubscribers,
                 cell,
-            })
+            };
+            // An already-matching registration STAGED a `true` fire inside the
+            // registry (pico's fire-before-insert), and a staged fire that
+            // nothing drains reaches the application as silence. pico invokes
+            // the callback SYNCHRONOUSLY inside
+            // `_z_write_filter_ctx_add_callback`, so the parity contract is
+            // "the callback has run by the time registration returns" — drain
+            // here to deliver it on the registering thread. The lock is
+            // already released, so the callback is unconstrained; and the
+            // drain is placed AFTER the handle is built so a callback that
+            // reaches for session APIs sees a fully-formed listener.
+            //
+            // Unconditional rather than gated on the initial verdict: this
+            // thread may also drain fires staged by the drive loop, which is
+            // harmless (that is the drive loop's own contract) and keeps the
+            // call from having to re-derive a verdict the registry already
+            // consumed.
+            self.session.drain_deferred_fires();
+            Ok(listener)
         }
         #[cfg(not(all(feature = "session-matching", feature = "declare-subscriber")))]
         {

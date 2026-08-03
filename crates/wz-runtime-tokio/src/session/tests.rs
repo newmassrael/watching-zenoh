@@ -6581,7 +6581,11 @@ fn publisher_matching_listener_fires_on_transitions_only() {
     let listener = pubr
         .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
         .expect("session-matching is on in this lane");
-    assert!(log.lock().unwrap().is_empty(), "registration never fires");
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "registration on a session with NO matching subscriber is silent \
+         (pico fires the `true` arm only)"
+    );
 
     let dispatch = |body: &wz_codecs::declare::DeclareOwnedVariant| {
         session
@@ -6622,6 +6626,113 @@ fn publisher_matching_listener_fires_on_transitions_only() {
         vec![true, false],
         "no fire after undeclare"
     );
+}
+
+/// Registering a listener when a matching remote subscriber is ALREADY
+/// declared DELIVERS `true` before the call returns — pico's
+/// `_z_write_filter_ctx_add_callback` fire-before-insert
+/// (`vendor/zenoh-pico/src/net/filtering.c:341-357`).
+///
+/// This is the SESSION-tier half of the fix and it is a separate test on
+/// purpose. `MatchingWatchList::register`'s own unit test proves the registry
+/// FIRES; it cannot prove the application is TOLD, because the Session tier
+/// installs a deferred sink that only STAGES onto `session.fires`. Between the
+/// two lies exactly the seam that has bitten this tree before: a stage that
+/// nothing drains reaches the application as silence, and reads as "the
+/// feature does not work" while every registry test stays green. So the
+/// assertion here is made WITHOUT any `dispatch` / `drain_deferred_fires` of
+/// the test's own — if `declare_matching_listener` did not drain on return,
+/// the log would be empty at this point.
+///
+/// The ordering — subscriber declared FIRST, listener registered SECOND — is
+/// what makes it the already-matching case, and it is the ordinary one for a
+/// publisher joining an established session.
+#[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
+#[test]
+fn publisher_matching_listener_delivers_true_at_registration_when_already_matching() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+
+    // A matching remote subscriber declares BEFORE any listener exists.
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_subscribers
+        .dispatch_declare(&make_decl_subscriber(7, "home/temp"), &HashMap::new());
+    session.drain_deferred_fires();
+
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    assert_eq!(
+        pubr.get_matching_status(),
+        MatchingStatus { matching: true },
+        "precondition: the publisher IS already matching"
+    );
+
+    let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = pubr
+        .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true],
+        "an already-matching registration must have DELIVERED `true` by the \
+         time it returned; an empty log here means the fire was staged and \
+         never drained"
+    );
+
+    // And the watch is seeded, so the next flip is the real `false` — not a
+    // duplicate `true`.
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_subscribers
+        .dispatch_declare(&make_undecl_subscriber(7), &HashMap::new());
+    session.drain_deferred_fires();
+    assert_eq!(*log.lock().unwrap(), vec![true, false]);
+    assert!(listener.undeclare());
+}
+
+/// Q-side mirror of the registration-fire: an already-matching QUERIER is told
+/// at registration too, so the pub/query halves cannot drift apart.
+#[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
+#[test]
+fn querier_matching_listener_delivers_true_at_registration_when_already_matching() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_queryables
+        .dispatch_declare(&make_decl_queryable(9, "home/**"), &HashMap::new());
+    session.drain_deferred_fires();
+
+    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    assert_eq!(
+        querier.get_matching_status(),
+        MatchingStatus { matching: true },
+        "precondition: the querier IS already matching"
+    );
+
+    let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = querier
+        .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true],
+        "already-matching querier registration must DELIVER `true`"
+    );
+    assert!(listener.undeclare());
 }
 
 /// Q-side mirror: the querier listener watches the remote QUERYABLE set.
@@ -6735,8 +6846,18 @@ fn matching_listener_callback_may_reenter_session_apis() {
     );
 
     // Flip true -> false: the outer listener self-undeclared, so only
-    // the inner listener (registered during the previous fire, seeded
-    // with the then-current `true` verdict) observes the flip.
+    // the inner listener observes the flip. The inner log therefore reads
+    // `[true, false]`, not `[false]`: the inner listener was registered
+    // from inside the outer callback, i.e. at a moment when the verdict was
+    // ALREADY `true`, and pico fires an already-matching registration
+    // immediately (`src/net/filtering.c:341-357`). Its `true` is the
+    // registration fire; the `false` is this flip. Before that parity fix
+    // this assertion read `[false]` — the seeded-but-silent shape.
+    //
+    // This also witnesses the fire being DELIVERED from a NESTED drain: the
+    // inner registration stages while the outer callback is itself running
+    // out of `drain_deferred_fires`, and the drain that
+    // `declare_matching_listener` performs on return is what delivers it.
     dispatch(&make_undecl_subscriber(2));
     assert_eq!(
         *observed.lock().unwrap(),
@@ -6745,7 +6866,7 @@ fn matching_listener_callback_may_reenter_session_apis() {
     );
     assert_eq!(
         *inner_log.lock().unwrap(),
-        vec![false],
+        vec![true, false],
         "the listener registered from inside a callback is live"
     );
 }

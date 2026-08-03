@@ -895,3 +895,278 @@ fn pico_zsubliveliness_source_on_wz_capi_sees_real_pico_token_come_and_go() {
 
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
 }
+
+/// LEG 7 (`wz->pico`) — upstream's `z_get.c`, running on wz, queries a REAL
+/// zenoh-pico `z_queryable` and decodes its reply.
+///
+/// This is the QUERIER direction of leg 2, and it is a distinct claim rather
+/// than its mirror: leg 2 proves wz can ANSWER a foreign query, this proves wz
+/// can ASK one and render a foreign answer. The payload asserted on
+/// (`Queryable from Pico!`) is upstream's own default reply string, produced by
+/// the foreign process — a wz-side fabrication could not choose it.
+///
+/// The program links at all only because of the `z_mutex_*` / `z_condvar_*`
+/// family: measured against the 32 upstream examples, those ten symbols were
+/// `z_get.c`'s COMPLETE missing set. They carry no zenoh semantics, which is
+/// exactly why their absence was easy to miss and why it kept the canonical
+/// querier from being a drop-in. What makes them load-bearing HERE is that
+/// upstream's `z_get.c` blocks on the condvar until its reply closure signals:
+/// a `z_condvar_wait` that returned immediately would race the reply and this
+/// leg would flake, and one that never woke would hang it. Neither is possible
+/// against a real pthread pair, which is what the module's sync unit tests pin.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_queryable CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zget_source_on_wz_capi_queries_real_pico_zqueryable() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_get", dir.path());
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    // Upstream's z_get.c hard-codes its selector default and takes `-k`; the
+    // real pico queryable must cover it. Both sides are upstream text, so the
+    // key is the only thing this test chooses.
+    let selector = "demo/dropin/leg7";
+
+    // The FOREIGN queryable listens; the drop-in dials in. That direction puts
+    // the reply bytes on wz's INBOUND path, where a mis-framed reply payload
+    // could not print the string pico chose.
+    let mut qbl_out = tempfile::tempfile().expect("queryable stdout capture");
+    let qbl_writer = qbl_out.try_clone().expect("dup queryable stdout handle");
+    let mut qbl = ChildGuard::wrap(
+        "real zenoh-pico z_queryable",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_queryable)
+            .args(["-l", &endpoint, "-m", "peer", "-k", "demo/dropin/**"])
+            .stdout(Stdio::from(qbl_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_queryable"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(qbl.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the REAL pico z_queryable never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut qbl_out)
+        );
+    }
+    drop(reservation);
+
+    // `z_get.c` is a one-shot: it waits on its condvar for the final
+    // notification, then exits — which is what flushes its capture.
+    let mut get_out = tempfile::tempfile().expect("z_get stdout capture");
+    let get_writer = get_out.try_clone().expect("dup z_get stdout handle");
+    let get = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args(["-e", &endpoint, "-m", "client", "-k", selector])
+        .stdout(Stdio::from(get_writer))
+        .stderr(Stdio::null())
+        .status()
+        .expect("run upstream z_get.c on wz's C ABI");
+    assert!(
+        get.success(),
+        "upstream z_get.c on wz's C ABI exited {get:?}\n--- its stdout ---\n{}",
+        read_captured(&mut get_out)
+    );
+
+    let local = read_captured(&mut get_out);
+    // The REPLY is the verdict and is asserted FIRST. "Received query final
+    // notification" prints even when no reply arrived, so asserting the final
+    // first would let a silent path pass as green.
+    assert!(
+        local.contains("Queryable from Pico!"),
+        "upstream z_get.c on wz never decoded the REAL pico queryable's reply \
+         payload.\n--- z_get.c (on wz) stdout ---\n{local}\n\
+         --- REAL pico z_queryable stdout ---\n{}",
+        read_captured(&mut qbl_out)
+    );
+    assert!(
+        local.contains(selector),
+        "the reply arrived on the wrong key (expected {selector}).\n\
+         --- z_get.c (on wz) stdout ---\n{local}"
+    );
+    assert!(
+        local.contains("Received query final notification"),
+        "the reply arrived but the query never finalised, so wz's condvar wake \
+         did not come from the FINAL.\n--- z_get.c (on wz) stdout ---\n{local}"
+    );
+
+    graceful_terminate(qbl.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 8 (`pico->wz`) — upstream's `z_pub.c -a`, running on wz, is told by wz's
+/// MATCHING plane when a REAL zenoh-pico `z_sub` appears and when it goes away.
+///
+/// Both edges are driven by the foreign process, which is what makes this a
+/// cross-impl proof rather than a wz-internal one: the `true` edge is caused by
+/// real pico's `DeclSubscriber` and the `false` edge by real pico EXITING
+/// (`-n 2`, so it undeclares after two samples). wz is only the reporter.
+///
+/// ## Why this leg exists at the C level at all
+///
+/// `z_pub.c` is upstream's canonical publisher, and it was missing exactly two
+/// exports — `z_closure_matching_status_move` and
+/// `z_publisher_declare_background_matching_listener`. Both live in the `-a`
+/// arm, which the program links unconditionally and calls only under the flag,
+/// so the whole canonical publisher failed to link over an optional feature.
+///
+/// ## What separates this from a leg that would pass on a lie
+///
+/// A build that reported `matching = true` unconditionally would print the
+/// first line and never the second, so the NO-MORE assertion is the
+/// discriminator and it is deliberately not merely a `contains`: it is
+/// asserted to arrive AFTER the first, in order, because the aggregate is
+/// flip-only and a fixed `false` would print the second line and never the
+/// first.
+///
+/// The delivery window cross-checks the verdict window independently: the
+/// foreign subscriber's own capture must show it received samples, and the
+/// samples it received are the ones published between the two edges. A matching
+/// verdict that had nothing to do with the real subscriber set could satisfy
+/// the two edges and would not line up with the payloads pico printed.
+// wz-proves: api-compat-pico pico->wz partial
+// wz-proves: session-matching pico->wz partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_sub CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zpub_source_on_wz_capi_is_told_about_a_real_pico_zsub_arriving_and_leaving() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_pub", dir.path());
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/dropin/leg8";
+
+    // The drop-in LISTENS so the foreign subscriber's declaration arrives on an
+    // accepted face — the direction that exercises wz's remote-subscriber
+    // registry, which is what the matching verdict is read from.
+    //
+    // `-n` is generous relative to the ~4 s exchange: the publisher must still
+    // be alive after the subscriber has come AND gone, since the `false` edge
+    // is only observable in the publisher's own output.
+    let mut pub_out = tempfile::tempfile().expect("publisher stdout capture");
+    let pub_writer = pub_out.try_clone().expect("dup publisher stdout handle");
+    let mut publisher = ChildGuard::wrap(
+        "z_pub.c -a on wz-capi-pico",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key, "-a", "-n", "60"])
+            .stdout(Stdio::from(pub_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the compiled z_pub drop-in"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(publisher.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_pub.c drop-in never accepted on {endpoint} — {why}; capture \
+             so far:\n{}",
+            read_captured(&mut pub_out)
+        );
+    }
+    drop(reservation);
+
+    // A self-terminating foreign subscriber: `-n 2` exits after two samples,
+    // and that EXIT is the `false` edge's cause. Its own capture is read for
+    // the delivery cross-check.
+    let mut sub_out = tempfile::tempfile().expect("subscriber stdout capture");
+    let sub_writer = sub_out.try_clone().expect("dup subscriber stdout handle");
+    let sub = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&z_sub)
+        .args([
+            "-e",
+            &endpoint,
+            "-m",
+            "client",
+            "-k",
+            "demo/dropin/**",
+            "-n",
+            "2",
+        ])
+        .stdout(Stdio::from(sub_writer))
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the real zenoh-pico z_sub");
+    assert!(
+        sub.success(),
+        "real zenoh-pico z_sub exited {sub:?}\n--- its stdout ---\n{}",
+        read_captured(&mut sub_out)
+    );
+
+    // Edge 1: the foreign subscriber's declaration reached wz's matching plane.
+    let after_arrival = wait_for_substring(
+        &mut pub_out,
+        "Publisher has matching subscribers.",
+        EXCHANGE_TIMEOUT,
+    )
+    .unwrap_or_else(|captured| {
+        panic!(
+            "upstream z_pub.c -a on wz was never told that a REAL pico \
+             subscriber matched.\n--- z_pub.c (on wz) stdout ---\n{captured}\n\
+             --- REAL pico z_sub stdout ---\n{}",
+            read_captured(&mut sub_out)
+        )
+    });
+
+    // Edge 2: the foreign subscriber going away. This is the discriminator — a
+    // build that answered `true` unconditionally passes edge 1 and cannot pass
+    // this one.
+    let both = wait_for_substring(
+        &mut pub_out,
+        "Publisher has NO MORE matching subscribers.",
+        EXCHANGE_TIMEOUT,
+    )
+    .unwrap_or_else(|captured| {
+        panic!(
+            "the arriving edge fired but the DEPARTING one never did, so wz \
+             reports matching without retracting it.\n\
+             --- z_pub.c (on wz) stdout ---\n{captured}"
+        )
+    });
+
+    // ORDER, not just presence: the aggregate is flip-only, so a build stuck on
+    // `false` would print the NO-MORE line and never the first, and one stuck
+    // on `true` the reverse. Requiring arrival to be observable BEFORE
+    // departure is what excludes both.
+    let arrival_at = both
+        .find("Publisher has matching subscribers.")
+        .expect("edge 1 is in the capture that contains edge 2");
+    let departure_at = both
+        .find("Publisher has NO MORE matching subscribers.")
+        .expect("edge 2 was just matched");
+    assert!(
+        arrival_at < departure_at,
+        "the two edges arrived out of order (arrival at {arrival_at}, \
+         departure at {departure_at}), so the verdict is not tracking the \
+         foreign subscriber's lifetime.\n--- z_pub.c (on wz) stdout ---\n{both}"
+    );
+    assert!(
+        after_arrival.len() <= both.len(),
+        "capture shrank between reads, which means the harness is not \
+         accumulating the child's output"
+    );
+
+    // Independent cross-check: the foreign subscriber actually RECEIVED data,
+    // so the window the two edges bracket is the window in which delivery
+    // happened. A verdict unrelated to the real subscriber set could satisfy
+    // both edges and would not line up with this.
+    let foreign = read_captured(&mut sub_out);
+    assert!(
+        foreign.contains(key),
+        "the matching edges fired but the REAL pico subscriber never received \
+         anything on {key}, so the verdict was not about a live subscription.\n\
+         --- REAL pico z_sub stdout ---\n{foreign}"
+    );
+
+    graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+}

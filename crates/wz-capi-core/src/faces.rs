@@ -63,7 +63,7 @@
 //! is a supported pattern, and this crate's own round-trip test does it), so
 //! holding the lock across a C call would deadlock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use tokio::sync::Notify;
@@ -78,8 +78,8 @@ use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
 };
 use wz_runtime_tokio::session::{
-    PublishAliasError, PublishError, PublishOptions, Queryable, QueryableOptions, SubscribeOptions,
-    Subscriber, TokioSession,
+    MatchingListener, MatchingStatus, PublishAliasError, PublishError, PublishOptions, Queryable,
+    QueryableOptions, SubscribeOptions, Subscriber, TokioSession,
 };
 use wz_runtime_tokio::session_glue::{IterationEvent, SessionLinkActions};
 use wz_runtime_tokio::sink::SampleView;
@@ -118,6 +118,19 @@ pub type LivelinessSink =
 pub type QueryableSink = Arc<
     dyn Fn() -> Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static> + Send + Sync,
 >;
+
+/// Delivers ONE aggregated matching verdict to C.
+///
+/// Unlike the four sinks above this is NOT a per-face factory, and the
+/// difference is the whole design of the matching plane: a C program holds one
+/// matching listener and must be told about the SESSION's verdict, not about
+/// each face's. See [`SharedSession::declare_matching_listener`] for why a
+/// per-face pass-through would report the opposite of the truth.
+pub type MatchingSink = Arc<dyn Fn(bool) + Send + Sync>;
+
+/// A C-level matching-listener id, keying the per-face wz listeners one C
+/// declaration spawned.
+pub type MatchId = u64;
 
 /// Why a fan-out publish could not be delivered to ANY face.
 ///
@@ -167,6 +180,10 @@ struct FaceEntry {
     /// share `SubId` space with the ordinary ones — a C `z_owned_subscriber_t`
     /// is the same type either way, so its undeclare must find both.
     live_subs: BTreeMap<SubId, LivelinessSubscriber<TokioRuntime>>,
+    /// Per-face matching listeners, keyed by the C listener id. Holding the
+    /// handle is what keeps the watch installed; dropping it undeclares that
+    /// face's half of one C listener.
+    matches: BTreeMap<MatchId, MatchingListener<TokioRuntime>>,
     /// R311y296 — the signal that this face's drive loop should re-arm its wake
     /// because a `z_get` just registered a pending query with a nearer deadline
     /// than whatever the loop is currently parked on. Owned per face because
@@ -235,6 +252,100 @@ struct LiveSubEntry {
 /// declaration spawned.
 pub type TokenId = u64;
 
+/// The cross-face aggregate behind ONE C matching listener.
+///
+/// `faces` is the set of face ids whose own wz listener currently reports a
+/// match; the session verdict is `!faces.is_empty()`. `last` is the verdict
+/// already DELIVERED to C, so a change that does not move the aggregate stays
+/// silent — pico's transition semantics, applied at the level the C program
+/// observes.
+///
+/// It carries its own mutex rather than living in [`Inner`] on purpose. The
+/// per-face wz callback runs on the drive thread from
+/// `Session::drain_deferred_fires`, and it must both update this state and
+/// invoke the C closure; routing that through the registry lock would put a C
+/// callback under the lock a re-entrant `z_declare_*` needs, which is the
+/// deadlock the whole file's snapshot-then-call discipline exists to avoid.
+/// This mutex is held only across the set update and never across the C call.
+#[derive(Default)]
+struct MatchAggregate {
+    faces: BTreeSet<u64>,
+    last: bool,
+}
+
+impl MatchAggregate {
+    /// Record face `id`'s verdict and return `Some(new_aggregate)` when the
+    /// SESSION verdict changed, `None` when it did not.
+    fn apply(&mut self, id: u64, matching: bool) -> Option<bool> {
+        if matching {
+            self.faces.insert(id);
+        } else {
+            self.faces.remove(&id);
+        }
+        self.settle()
+    }
+
+    /// Drop face `id` entirely — a face that went DOWN can no longer be the
+    /// reason C believes a subscriber exists. Same flip-only return.
+    fn forget(&mut self, id: u64) -> Option<bool> {
+        self.faces.remove(&id);
+        self.settle()
+    }
+
+    fn settle(&mut self) -> Option<bool> {
+        let now = !self.faces.is_empty();
+        if now == self.last {
+            return None;
+        }
+        self.last = now;
+        Some(now)
+    }
+}
+
+/// A C-declared matching listener — the SIXTH SSOT, replayed onto every face
+/// exactly as [`SubEntry`] and [`QblEntry`] are.
+///
+/// `state` is shared with every per-face callback this entry spawned; the entry
+/// holds the per-face wz listener handles inside [`FaceEntry::matches`].
+struct MatchEntry {
+    id: MatchId,
+    keyexpr: String,
+    sink: MatchingSink,
+    state: Arc<StdMutex<MatchAggregate>>,
+}
+
+/// The per-face callback one [`MatchEntry`] installs on face `face_id`: fold
+/// this face's verdict into the aggregate and deliver to C only on a SESSION
+/// flip.
+///
+/// One function rather than the closure written twice, because the two call
+/// sites are the declare path and the `face_up` replay path and they must not
+/// drift — a replay that folded differently from the original would make the
+/// verdict depend on when a peer happened to connect.
+///
+/// The aggregate mutex is released before `sink` runs. That ordering is the
+/// re-entrancy guarantee: a C callback is free to call back into the session
+/// (including declaring another listener on the same keyexpr) without meeting a
+/// lock this path holds.
+fn face_matching_callback(
+    face_id: u64,
+    entry: &MatchEntry,
+) -> impl FnMut(MatchingStatus) + Send + 'static {
+    let state = entry.state.clone();
+    let sink = entry.sink.clone();
+    move |status| {
+        let flipped = {
+            let mut agg = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            agg.apply(face_id, status.matching)
+        };
+        if let Some(now) = flipped {
+            sink(now);
+        }
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     faces: BTreeMap<u64, FaceEntry>,
@@ -245,6 +356,8 @@ struct Inner {
     tokens: Vec<TokenEntry>,
     next_token_id: TokenId,
     live_subs: Vec<LiveSubEntry>,
+    matches: Vec<MatchEntry>,
+    next_match_id: MatchId,
     kexprs: Vec<KexprEntry>,
     /// Next alias id to hand out. Starts at 0 and is PRE-incremented, so the
     /// first id issued is 1: zero is reserved on the wire
@@ -350,6 +463,28 @@ impl SharedSession {
                 live_subs.insert(entry.id, sub);
             }
         }
+        // Matching-listener replay. A C listener declared before this peer
+        // connected must watch it too, so each entry gets a per-face wz
+        // listener whose callback folds THIS face's verdict into the entry's
+        // cross-face aggregate.
+        //
+        // Registering under the registry lock is safe HERE for a reason worth
+        // stating, because it is not the general rule in this file:
+        // `Publisher::declare_matching_listener` delivers an already-matching
+        // registration synchronously, which would put a C callback under the
+        // lock. It cannot fire here — `session` was constructed a few lines
+        // above with a FRESH `ApplicationLayerObserver`, so its remote-
+        // subscriber registry is empty and the initial verdict is necessarily
+        // `false`. A future refactor that hands `face_up` an already-populated
+        // observer must move this replay out of the lock.
+        let mut matches = BTreeMap::new();
+        for entry in &guard.matches {
+            let pubr = session.declare_publisher(entry.keyexpr.clone(), PublishOptions::put());
+            if let Ok(listener) = pubr.declare_matching_listener(face_matching_callback(id, entry))
+            {
+                matches.insert(entry.id, listener);
+            }
+        }
         let replaced = guard.faces.insert(
             id,
             FaceEntry {
@@ -358,6 +493,7 @@ impl SharedSession {
                 qbls,
                 tokens,
                 live_subs,
+                matches,
                 revised: Arc::new(Notify::new()),
             },
         );
@@ -417,6 +553,37 @@ impl SharedSession {
                 // Runs the C callbacks, with the observer lock released.
                 entry.session.drain_deferred_fires();
             }
+        }
+        // Purge the departed face from every matching aggregate. Same reasoning
+        // as the liveliness flush above and the same failure mode: this face's
+        // subscribers cannot undeclare, because the link that would carry the
+        // UndeclSubscriber is what died. Its per-face wz listener therefore
+        // never fires `false`, so without this the face stays in the aggregate
+        // set forever and a C program is told it still has matching subscribers
+        // after its only subscribing peer vanished — and, worse, the aggregate
+        // never flips again, so a genuine later `true` is suppressed as
+        // "no change".
+        //
+        // Collected under the lock and delivered after it, because the sink is
+        // the C callback.
+        let mut flips = Vec::new();
+        {
+            let guard = self.lock();
+            for entry in &guard.matches {
+                let flipped = {
+                    let mut agg = entry
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    agg.forget(id)
+                };
+                if let Some(now) = flipped {
+                    flips.push((entry.sink.clone(), now));
+                }
+            }
+        }
+        for (sink, now) in flips {
+            sink(now);
         }
         drop(removed);
     }
@@ -779,6 +946,149 @@ impl SharedSession {
         }
         guard.subs.push(SubEntry { id, keyexpr, sink });
         id
+    }
+
+    /// Record a C matching listener in the SSOT and install it on every live
+    /// face, delivering the CURRENT session verdict if it is already `true`.
+    ///
+    /// ## Why the verdict is aggregated instead of passed through
+    ///
+    /// A C program holds ONE `z_owned_matching_listener_t` and asks one
+    /// question: does anybody out there subscribe to what I publish. wz answers
+    /// it per FACE, because the remote-subscriber registry is per-session and a
+    /// session is per-peer. Forwarding each face's verdict straight to C would
+    /// therefore report the opposite of the truth in the ordinary two-peer
+    /// case: peer B undeclaring its subscriber would deliver
+    /// `matching = false` — upstream's `z_pub.c` prints "Publisher has NO MORE
+    /// matching subscribers." — while peer A is still subscribed and every
+    /// subsequent put still reaches it. pico has no such split (one session,
+    /// one write-filter context, `src/net/filtering.c`), so parity here is
+    /// specifically the aggregation: the C verdict is the OR across faces, and
+    /// it is delivered only when that OR moves.
+    ///
+    /// ## Registration happens OUTSIDE the registry lock
+    ///
+    /// Deliberate, and not merely tidy: `Publisher::declare_matching_listener`
+    /// delivers an already-matching registration synchronously (pico's
+    /// fire-before-insert), so installing it under the lock would run a C
+    /// callback while holding the mutex every `z_declare_*` needs — and that
+    /// callback is entitled to declare. So the SSOT entry is pushed under the
+    /// lock, the per-face installs run unlocked, and the handles are filed back
+    /// in a second short critical section. A face that left in between simply
+    /// has no handle filed; its listener handle is dropped after the lock is
+    /// released.
+    pub fn declare_matching_listener(&self, keyexpr: String, sink: MatchingSink) -> MatchId {
+        let state = Arc::new(StdMutex::new(MatchAggregate::default()));
+        // Phase 1 — allocate the id, publish the SSOT entry, snapshot the faces.
+        let (id, faces) = {
+            let mut guard = self.lock();
+            let id = guard.next_match_id;
+            guard.next_match_id = guard.next_match_id.wrapping_add(1);
+            let faces: Vec<(u64, TokioSession)> = guard
+                .faces
+                .iter()
+                .map(|(fid, face)| (*fid, face.session.clone()))
+                .collect();
+            guard.matches.push(MatchEntry {
+                id,
+                keyexpr: keyexpr.clone(),
+                sink,
+                state: state.clone(),
+            });
+            (id, faces)
+        };
+
+        // Phase 2 — install per face with NO lock held, so an already-matching
+        // face may deliver its `true` to C right here.
+        let mut installed = Vec::new();
+        {
+            let guard = self.lock();
+            let entry = guard
+                .matches
+                .iter()
+                .find(|e| e.id == id)
+                .expect("the entry pushed in phase 1 is still present");
+            let callbacks: Vec<_> = faces
+                .iter()
+                .map(|(fid, _)| face_matching_callback(*fid, entry))
+                .collect();
+            drop(guard);
+            for ((fid, session), callback) in faces.into_iter().zip(callbacks) {
+                let pubr = session.declare_publisher(keyexpr.clone(), PublishOptions::put());
+                if let Ok(listener) = pubr.declare_matching_listener(callback) {
+                    installed.push((fid, listener));
+                }
+            }
+        }
+
+        // Phase 3 — file the handles back; a face that left keeps none.
+        let mut orphans = Vec::new();
+        {
+            let mut guard = self.lock();
+            for (fid, listener) in installed {
+                match guard.faces.get_mut(&fid) {
+                    Some(face) => {
+                        face.matches.insert(id, listener);
+                    }
+                    None => orphans.push(listener),
+                }
+            }
+        }
+        drop(orphans);
+        id
+    }
+
+    /// The SESSION's matching verdict for `keyexpr` (pico
+    /// `z_publisher_get_matching_status`): `true` when ANY connected peer has a
+    /// matching subscriber.
+    ///
+    /// The OR across faces is the same aggregation
+    /// [`Self::declare_matching_listener`] delivers, computed fresh here rather
+    /// than read off a listener's cached state — so the poll answers correctly
+    /// for a publisher that never declared a listener at all, and cannot
+    /// disagree with one that did.
+    ///
+    /// Sessions are snapshotted out of the lock before being consulted, the
+    /// same discipline as every other fan-out here: `get_matching_status` takes
+    /// the face's observer mutex, and taking it under the registry lock would
+    /// invert the two locks' order against the drive thread.
+    pub fn has_matching(&self, keyexpr: &str) -> bool {
+        self.face_sessions().into_iter().any(|session| {
+            session
+                .declare_publisher(keyexpr.to_owned(), PublishOptions::put())
+                .get_matching_status()
+                .matching
+        })
+    }
+
+    /// Drop a C matching listener: remove the SSOT entry so no future face
+    /// installs it, and undeclare every face's watch.
+    ///
+    /// The per-face `MatchingListener::undeclare` is called explicitly rather
+    /// than left to the handle's drop, because wz's handle has no `Drop` hook —
+    /// dropping it leaves the watch installed, which would keep firing the
+    /// aggregate for a listener C has already released.
+    pub fn undeclare_matching_listener(&self, id: MatchId) {
+        let mut removed = Vec::new();
+        let mut entry = None;
+        {
+            let mut guard = self.lock();
+            if let Some(pos) = guard.matches.iter().position(|e| e.id == id) {
+                entry = Some(guard.matches.remove(pos));
+            }
+            for face in guard.faces.values_mut() {
+                if let Some(listener) = face.matches.remove(&id) {
+                    removed.push(listener);
+                }
+            }
+        }
+        // OUTSIDE the lock: `undeclare` reaches into the face session's
+        // observer, and releasing the entry may drop the last `MatchingSink`
+        // reference — which for the pico shim runs the C `drop(context)`.
+        for listener in removed {
+            listener.undeclare();
+        }
+        drop(entry);
     }
 
     /// Drop a C subscription: remove it from the SSOT so no future face

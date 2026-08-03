@@ -273,9 +273,24 @@ pub(crate) fn make_subscriber_callback(
 
 /// Behind a `z_owned_publisher_t` handle: a keyexpr bound to the session's
 /// face registry, so a put fans out to every connected peer.
-struct PublisherState {
+pub(crate) struct PublisherState {
     shared: Arc<SharedSession>,
     keyexpr: String,
+}
+
+impl PublisherState {
+    /// The declared keyexpr — what the MATCHING plane watches.
+    pub(crate) fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+
+    /// The session registry this publisher publishes through. Cloned rather
+    /// than borrowed because a matching listener outlives the borrow: its
+    /// handle must reach `undeclare_matching_listener` after the publisher's
+    /// `handle_ref` borrow has ended.
+    pub(crate) fn shared_session(&self) -> Arc<SharedSession> {
+        self.shared.clone()
+    }
 }
 
 /// Owned publisher (pico `z_owned_publisher_t`). Round 1 uses a handle model;

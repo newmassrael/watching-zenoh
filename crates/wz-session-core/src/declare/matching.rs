@@ -15,9 +15,14 @@
 //! backbone of the polling `get_matching_status`), so the listener form is
 //! a [`MatchingWatchList`] layered on those registries: each watch holds a
 //! keyexpr and the last verdict, and every membership mutation re-evaluates
-//! the watches, firing a watch's [`MatchingSink`] only on a VERDICT FLIP —
-//! pico's transition-only semantics (no fire on registration, no fire on a
-//! same-verdict mutation).
+//! the watches, firing a watch's [`MatchingSink`] only on a VERDICT FLIP (no
+//! fire on a same-verdict mutation).
+//!
+//! Registration is NOT silent when the watch is already matching — see
+//! [`MatchingWatchList::register`], which reproduces pico's fire-before-insert
+//! at `src/net/filtering.c:341-357`. Earlier rounds of this module described
+//! wz's silence there as "pico transition-only semantics"; that reading of
+//! pico was wrong, and the doc on `register` carries the corrected one.
 //!
 //! Model B sink shape, the matching sibling of [`crate::decl_sink`]: the
 //! [`MatchingSink`] trait is the DIP seam, [`BoxedMatchingSink`] the AP
@@ -119,14 +124,50 @@ impl<C: MatchingSink> MatchingWatchList<C> {
     }
 
     /// Register a watch over `keyexpr`, seeded with the CURRENT verdict
-    /// (`initial`) so the first fire is a real transition — pico seeds
-    /// the write-filter state at context creation and its callbacks see
-    /// transitions only (`get_matching_status` is the poll for the
-    /// current value). Returns the watch id for
+    /// (`initial`). Returns the watch id for
     /// [`unregister`](Self::unregister).
+    ///
+    /// ## Registration FIRES when already matching (pico parity)
+    ///
+    /// An `initial == true` registration fires the sink once, immediately,
+    /// carrying `true` — and only then records the watch. This is pico's
+    /// literal shape: `_z_write_filter_ctx_add_callback` tests
+    /// `!_z_write_filter_ctx_active(ctx)` and, when the write filter is NOT
+    /// active (i.e. remote targets exist, `WRITE_FILTER_ACTIVE == 0` meaning
+    /// "suppress writes"), calls `ptr->call(&{.matching = true}, ..)` BEFORE
+    /// `_z_closure_matching_status_intmap_insert`
+    /// (`vendor/zenoh-pico/src/net/filtering.c:341-357`,
+    /// `include/zenoh-pico/net/filtering.h:99-101`). The fire-then-insert
+    /// order is reproduced rather than reordered: it costs nothing and it is
+    /// the order pico's own callbacks observe.
+    ///
+    /// An `initial == false` registration stays silent, which is also pico —
+    /// it fires the `true` arm only, never a `false` one, so "no matching
+    /// subscribers yet" is reported by the absence of a call and by
+    /// `get_matching_status`.
+    ///
+    /// This CORRECTS a divergence, and the correction is against a direct
+    /// read: earlier rounds documented wz's silence as "pico transition-only
+    /// semantics", but pico is not transition-only at registration (nor is
+    /// zenoh, `api/session.rs`). A C program following upstream's
+    /// `z_pub.c -a` idiom — declare the publisher, attach the listener, then
+    /// publish — was never told about subscribers that had ALREADY declared,
+    /// which is the ordinary case when the publisher joins an established
+    /// session. Only a subsequent flip would inform it.
+    ///
+    /// The fire runs while the owning registry (and, on the AP profile, the
+    /// whole observer mutex) is held, so it carries the same re-entrancy
+    /// contract as [`MatchingSink::on_matching_changed`] itself: the Session
+    /// tier installs a DEFERRED sink that merely stages, so a user callback
+    /// registered through `Publisher::declare_matching_listener` runs outside
+    /// the lock and is unconstrained.
     pub fn register(&mut self, keyexpr: String, initial: bool, sink: C) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        let mut sink = sink;
+        if initial {
+            sink.on_matching_changed(true);
+        }
         self.watches.push(MatchingWatch {
             id,
             keyexpr,
@@ -207,6 +248,47 @@ mod tests {
         assert!(list.unregister(id));
         assert_eq!(list.reevaluate(|_| true), 0, "unregistered watch is gone");
         assert!(!list.unregister(id), "double unregister reports false");
+    }
+
+    /// Registering an ALREADY-MATCHING watch fires once with `true` and does
+    /// not re-fire on the next same-verdict sweep — pico's
+    /// `_z_write_filter_ctx_add_callback` arm (filtering.c:350-353).
+    ///
+    /// The second half is what makes this more than a doubled fire: the watch
+    /// is seeded to `true`, so the subsequent `reevaluate(|_| true)` must be
+    /// SILENT. An implementation that fired at registration without seeding
+    /// would emit `true` twice, and one that seeded without firing is the
+    /// divergence being corrected. Only asserting the fire AND the following
+    /// silence separates the three.
+    #[test]
+    fn registering_an_already_matching_watch_fires_true_once() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut list = MatchingWatchList::new();
+        list.register("home/temp".into(), true, recording_sink(&log));
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![true],
+            "an already-matching registration must fire true immediately"
+        );
+
+        assert_eq!(list.reevaluate(|_| true), 0, "seeded: no re-fire");
+        assert_eq!(*log.lock().unwrap(), vec![true]);
+
+        // And the flip DOWN still works from the seeded state.
+        assert_eq!(list.reevaluate(|_| false), 1);
+        assert_eq!(*log.lock().unwrap(), vec![true, false]);
+    }
+
+    /// A NON-matching registration stays silent: pico fires the `true` arm
+    /// only. Without this, "fire on registration" could be read as "always
+    /// fire", which would report `false` to a publisher that has simply not
+    /// met a subscriber yet.
+    #[test]
+    fn registering_a_non_matching_watch_stays_silent() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut list = MatchingWatchList::new();
+        list.register("home/temp".into(), false, recording_sink(&log));
+        assert!(log.lock().unwrap().is_empty());
     }
 
     /// Watches re-evaluate per their own keyexpr — one sweep can flip

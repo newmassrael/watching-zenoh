@@ -977,9 +977,15 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
     /// R311kh — callback counterpart of [`Self::get_matching_status`]
     /// (zenoh-pico querier matching listener, `Z_FEATURE_MATCHING`):
     /// `callback` fires on every matching-status TRANSITION of this
-    /// querier's keyexpr against the remote QUERYABLE set. Registration
-    /// itself never fires (pico transition-only semantics; poll
-    /// [`Self::get_matching_status`] for the current value).
+    /// querier's keyexpr against the remote QUERYABLE set.
+    ///
+    /// Registration fires `true` IMMEDIATELY when already matching, and
+    /// is silent otherwise — pico's fire-before-insert at
+    /// `vendor/zenoh-pico/src/net/filtering.c:341-357`, shared with the
+    /// publisher form. The former "registration itself never fires"
+    /// wording here misread pico; see
+    /// [`wz_session_core::declare::matching::MatchingWatchList::register`].
+    /// [`Self::get_matching_status`] remains the poll.
     ///
     /// R311kz — DEFERRED FIRE (the F-6 fix; supersedes the R311kj
     /// callback constraint): the registry sink only stages the
@@ -1013,12 +1019,18 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                 obs.remote_queryables
                     .declare_matching_listener(&self.keyexpr, sink)
             });
-            Ok(MatchingListener {
+            let listener = MatchingListener {
                 session: self.session.clone(),
                 id,
                 scope: MatchingScope::RemoteQueryables,
                 cell,
-            })
+            };
+            // Deliver an already-matching registration's staged fire on the
+            // registering thread; see `Publisher::declare_matching_listener`
+            // for the pico contract this mirrors and why the drain is
+            // unconditional and placed after the handle exists.
+            self.session.drain_deferred_fires();
+            Ok(listener)
         }
         #[cfg(not(all(feature = "session-matching", feature = "declare-queryable")))]
         {

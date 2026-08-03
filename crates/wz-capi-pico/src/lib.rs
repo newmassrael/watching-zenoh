@@ -74,11 +74,13 @@ mod ffi;
 pub mod get;
 pub mod keyexpr;
 pub mod liveliness;
+pub mod matching;
 pub mod platform;
 pub mod pubsub;
 pub mod query;
 pub mod result;
 pub mod session;
+pub mod sync;
 
 // Re-export the ABI types and every exported function at the crate root so the
 // Round-1 gate test (and any Rust consumer of the rlib) can reach them by a
