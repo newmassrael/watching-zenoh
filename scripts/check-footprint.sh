@@ -223,8 +223,33 @@ declare -A BASELINE_MC_TEXT=(
     # 1.5% of the band, so it is carried, not chased. Do NOT read "reproducible"
     # as "bit-identical": the unbounded term is eliminated, a few bytes of layout
     # jitter are not. Old: 50936/51148 (R311y215, path-polluted local figures).
-    ["thumbv7m-none-eabi"]=50956
-    ["thumbv7em-none-eabihf"]=51096
+    # R311y519 — GREW after the R311y510 SCE pin bump to 43695e572, and the
+    # bytes are NAMED rather than absorbed. `18d2d870^` measures 50956 (+0, the
+    # figure below) and `18d2d870` measures 51368; the entire +412 is that one
+    # commit, with nothing since contributing. Per-symbol ELF diff of the two
+    # builds:
+    #   +1020 / -974  MsgPut::try_into_owned -> try_into_owned_in::<Heap>
+    #    +470         wz_session_core::network_message::parse_frame_payload
+    #    -176         the heapless IntoIter collect-shunt it absorbed by inlining
+    #    +286 / -286  WireexprVariant (byte-neutral rename)
+    #    +164 / -142  ExtEntryVariant
+    # So the storage-profile RENAME is near byte-neutral; the real term is the
+    # decode path re-inlining around the new generic seam. Total `t` symbols
+    # 46150 -> 46552 (+402) against a +412 section delta.
+    #
+    # NOT a leak, and the semantic half was checked rather than assumed: the
+    # emit resolves `SceString<128>`/`SceBytes<256>` to `HeapStr`/`HeapBytes`
+    # because the generated `try_into_owned` picks "growable where an allocator
+    # exists, inline on the heap-free tier", and THIS artifact deliberately
+    # carries a `#[global_allocator]` (embedded-alloc, `deploy/mcu-multicast-e2e`
+    # manifest + `main.rs`). bss is unchanged at 272268 on both axes. The
+    # heap-free MCU artifacts do not take this term.
+    #
+    # Both axes are byte-identical to the runner again (thumbv7m 51368, hf
+    # 51288 measured here and on the hosted job), so R311y267's reproducibility
+    # property survives the bump. Old: 50956/51096 (R311y267).
+    ["thumbv7m-none-eabi"]=51368
+    ["thumbv7em-none-eabihf"]=51288
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
