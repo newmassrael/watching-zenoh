@@ -979,6 +979,21 @@ routing-router-hat = ["routing-peer"]
 # routing-peer -> codec-declare already (like build_declare_subscriber under
 # routing-router-hat), so no declare-token app-surface dep is needed.
 routing-token-tables = ["routing-router-hat"]
+# R311y512 — §5.21 routing-interest-pending-gc: the p2p_peer-shaped INTEREST
+# BROKER on the LinkstateForwarder. A CLIENT face's CURRENT token interest is
+# PROPAGATED to each upstream (non-client) face with a freshly minted id, a
+# pending entry is held per propagated copy, and the client's terminating
+# DeclareFinal is withheld until the LAST upstream answers -- zenoh
+# hat/p2p_peer/interests.rs:142-206 + dispatcher/interests.rs. The GC the atom is
+# named for is the timeout sweep on that table (CurrentInterestCleanup), which
+# finalizes the client when an upstream goes silent; zenoh-pico's CURRENT
+# interest carries NO timeout of its own (net/liveliness.c:348), so without the
+# sweep a foreign client waits forever. Composes ONLY routing-peer -- the
+# forwarder that owns the table. The propagated Interest is built with
+# wz-session-core's interest_build, which (like the declare_build reply builders
+# the forwarder already uses) carries no feature gate, so the broker pulls no
+# app-surface declare-interest / liveliness-* dep.
+routing-interest-pending-gc = ["routing-peer"]
 # §5.21 router-connect-reconcile — the runtime dynamic connect-list reconcile
 # (zenoh `net/runtime/orchestrator.rs:413` `update_peers`) + peer auto-reconnect
 # (the `closed_session` 1194 Peer/Router re-dial). The shared `face_drive_loop`

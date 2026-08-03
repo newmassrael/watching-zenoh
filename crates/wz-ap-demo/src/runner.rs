@@ -2431,6 +2431,16 @@ pub(crate) struct PeerOpts {
     pub tls_key: Option<String>,
     pub quic_cert: Option<String>,
     pub quic_key: Option<String>,
+    /// R311y512 (`routing-interest-pending-gc`) — zenoh's
+    /// `routing.interests.timeout` in milliseconds (`--interest-timeout`): how long
+    /// a CLIENT's CURRENT interest, once BROKERED to an upstream face, waits for
+    /// that upstream's `DeclareFinal` before the GC abandons it and finalizes the
+    /// client anyway. `None` keeps
+    /// [`LinkstateForwarder::DEFAULT_INTEREST_TIMEOUT`](wz::runtime_tokio::linkstate_forward::LinkstateForwarder::DEFAULT_INTEREST_TIMEOUT)
+    /// (10s, zenoh's own default). A deploy shortens it for a latency-sensitive
+    /// leaf; a test shortens it so the GC edge is reachable inside a bounded run.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    pub interest_timeout_ms: Option<u64>,
 }
 
 #[cfg(feature = "routing-peer")]
@@ -2616,6 +2626,14 @@ async fn run_peer_until(
     // graph. Default `linkstate` — see the flag's doc for why wz does not adopt
     // zenoh's `peer_to_peer` default here.
     forwarder.set_full_linkstate(opts.full_linkstate);
+    // R311y512 — `--interest-timeout <ms>` (zenoh `routing.interests.timeout`).
+    // Set BEFORE any face registers for the same reason as the mode above: it
+    // stamps the deadline of every brokered interest, and one propagated under a
+    // stale window keeps that window. Absent, the forwarder default (10s) stands.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    if let Some(ms) = opts.interest_timeout_ms {
+        forwarder.set_interest_timeout(Duration::from_millis(ms));
+    }
     // Advertise this peer's listen address as its dial locator BEFORE the first
     // face registers, so self's first FULL flood already carries it. A neighbour
     // then learns where to reach this peer (the discovery data — what a future
@@ -3530,6 +3548,20 @@ async fn run_peer_until(
         peak_nodes.max(forwarder.node_count()),
         peak_edges.max(forwarder.edge_count()),
         forwarder.data_seen()
+    );
+    // R311y512 — the INTEREST-BROKER witness, on its own line rather than
+    // appended to the summary above so the OFF build simply does not print it
+    // (the whole block is compiled out) and a test can tell the two builds apart
+    // by presence, not by parsing a number out of a shared line. `reaped` is the
+    // GC's own counter: it rises only when the tick sweep abandoned a propagated
+    // interest whose upstream never answered, which is the event a foreign client
+    // observes as its `z_liveliness_get` terminating anyway.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    log::info!(
+        "wz-ap-demo peer: interest broker; {} propagated interest(s) still \
+         pending, {} reaped by the GC",
+        forwarder.pending_interests_len(),
+        forwarder.interests_timed_out()
     );
     // Convergence witness the e2e asserts on: emitted ONLY when this peer
     // actually INGESTED a neighbour's link-state flood — proof topology
@@ -5401,6 +5433,8 @@ mod peer_quic_cert_tests {
             tls_key: None,
             quic_cert: Some(cert_path.clone()),
             quic_key: Some(key_path.clone()),
+            #[cfg(feature = "routing-interest-pending-gc")]
+            interest_timeout_ms: None,
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,
@@ -5489,6 +5523,8 @@ mod peer_failfast_tests {
             tls_key: None,
             quic_cert: None,
             quic_key: None,
+            #[cfg(feature = "routing-interest-pending-gc")]
+            interest_timeout_ms: None,
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,

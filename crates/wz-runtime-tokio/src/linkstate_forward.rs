@@ -105,6 +105,10 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
+#[cfg(feature = "routing-interest-pending-gc")]
+use wz_session_core::interest_build::{
+    build_interest_liveliness_get, build_interest_liveliness_subscriber,
+};
 use wz_session_core::keyexpr_match::{
     keyexpr_includes_target, keyexpr_intersects_target, keyexpr_pattern_matches,
 };
@@ -146,6 +150,8 @@ use crate::future_interest::{FutureQablStore, FutureSubStore};
 #[cfg(feature = "routing-interceptor-hotreload")]
 use crate::interceptor::InterceptorKeyexprCache;
 use crate::interceptor::{InterceptorChain, InterceptorContext};
+#[cfg(feature = "routing-interest-pending-gc")]
+use crate::interest_broker::{CurrentInterest, PendingCurrentInterests};
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{ExpiredQuery, PendingQueries, QueryFan};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -613,6 +619,23 @@ pub struct LinkstateForwarder {
     /// witness, since the chain's `admit` returns a single bool and does not
     /// attribute the drop to a specific interceptor.)
     interceptor_dropped: Cell<usize>,
+    /// R311y512 (`routing-interest-pending-gc`) — the PENDING-CURRENT-INTEREST
+    /// table: a downstream CLIENT's CURRENT interest that this node PROPAGATED
+    /// upstream, keyed by `(upstream face, the id minted for it)`. Its presence is
+    /// what withholds the client's terminating `DeclareFinal` until the last
+    /// upstream answers; [`tick`](FaceForwarder::tick) sweeps it so a silent
+    /// upstream cannot wedge the client. zenoh's per-`FaceState`
+    /// `pending_current_interests` (`dispatcher/interests.rs:51`), flattened into
+    /// one map because the forwarder owns every face.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    pending_interests: RefCell<PendingCurrentInterests>,
+    /// R311y512 — how long a PROPAGATED interest waits for its upstream's
+    /// `DeclareFinal` before the sweep abandons it (zenoh's `interests_timeout`,
+    /// `DEFAULT_CONFIG.json5` `routing.interests.timeout` = 10000ms). `Cell`
+    /// because it is `Copy` and set through a `&self` config seam, like
+    /// [`query_timeout`](Self#structfield.query_timeout).
+    #[cfg(feature = "routing-interest-pending-gc")]
+    interest_timeout: Cell<Duration>,
     /// The per-query timeout — how long a forwarded Query's pending return entry
     /// lives before [`tick`](FaceForwarder::tick) abandons it (zenoh's
     /// `queries_default_timeout`, default 10s). `forward_request` stamps each
@@ -749,6 +772,14 @@ impl LinkstateForwarder {
     /// [`set_query_timeout`](Self::set_query_timeout).
     pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_millis(10_000);
 
+    /// R311y512 — the default PROPAGATED-INTEREST timeout: zenoh's
+    /// `routing.interests.timeout` (`DEFAULT_CONFIG.json5`, 10000ms), the window
+    /// `CurrentInterestCleanup` gives an upstream to answer before the sweep
+    /// abandons its pending entry and finalizes the waiting client. A deploy
+    /// overrides via [`set_interest_timeout`](Self::set_interest_timeout).
+    #[cfg(feature = "routing-interest-pending-gc")]
+    pub const DEFAULT_INTEREST_TIMEOUT: Duration = Duration::from_millis(10_000);
+
     /// A driver seeded with the local node (this peer's zid + whatami), using the
     /// default [`DEFAULT_TREES_DELAY`](Self::DEFAULT_TREES_DELAY) recompute window.
     pub fn new(self_zid: Zid, self_whatami: WhatAmI) -> Self {
@@ -809,6 +840,10 @@ impl LinkstateForwarder {
             future_subs: RefCell::new(FutureSubStore::new()),
             future_qabls: RefCell::new(FutureQablStore::new()),
             pending: RefCell::new(PendingQueries::new()),
+            #[cfg(feature = "routing-interest-pending-gc")]
+            pending_interests: RefCell::new(PendingCurrentInterests::new()),
+            #[cfg(feature = "routing-interest-pending-gc")]
+            interest_timeout: Cell::new(Self::DEFAULT_INTEREST_TIMEOUT),
             local_queryables: RefCell::new(Vec::new()),
             local_subscribers: RefCell::new(Vec::new()),
             sub_redelivery: RefCell::new(VecDeque::new()),
@@ -862,6 +897,33 @@ impl LinkstateForwarder {
     /// (already-recorded deadlines are not retroactively changed).
     pub fn set_query_timeout(&self, timeout: Duration) {
         self.query_timeout.set(timeout);
+    }
+
+    /// R311y512 — override the PROPAGATED-INTEREST timeout (zenoh's
+    /// `routing.interests.timeout`): how long a brokered upstream copy waits for
+    /// its `DeclareFinal` before the tick sweep abandons it and finalizes the
+    /// waiting client. Default
+    /// [`DEFAULT_INTEREST_TIMEOUT`](Self::DEFAULT_INTEREST_TIMEOUT) (10s). Takes
+    /// effect on the NEXT propagation; already-stamped deadlines stand.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    pub fn set_interest_timeout(&self, timeout: Duration) {
+        self.interest_timeout.set(timeout);
+    }
+
+    /// R311y512 — propagated interests still awaiting an upstream `DeclareFinal`.
+    /// The state witness a test asserts the broker actually held something,
+    /// rather than inferring it from a downstream silence that an unrelated bug
+    /// could also produce.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    pub fn pending_interests_len(&self) -> usize {
+        self.pending_interests.borrow().len()
+    }
+
+    /// R311y512 — propagated interests the GC has abandoned. The sweep witness,
+    /// the interest twin of [`pending_timed_out`](Self::pending_timed_out).
+    #[cfg(feature = "routing-interest-pending-gc")]
+    pub fn interests_timed_out(&self) -> usize {
+        self.pending_interests.borrow().timed_out()
     }
 
     /// The current instant from the injected clock — the SINGLE read site the
@@ -4239,11 +4301,199 @@ impl LinkstateForwarder {
                     );
                 }
             }
+            // R311y512 (`routing-interest-pending-gc`) — the p2p_peer BROKER leg.
+            // zenoh does not close a CLIENT's CURRENT token interest with what it
+            // already knows: it PROPAGATES the interest upstream and withholds the
+            // terminating DeclareFinal until the last upstream answers
+            // (`hat/p2p_peer/interests.rs:148-227`, where the inline
+            // `Arc::into_inner` FAILS while any propagated copy is outstanding).
+            // `propagate_current_interest` returns the number of copies it placed
+            // on the wire; a non-zero count means the client's final is now OWED
+            // BY THE UNWIND (`finish_brokered_interest`), not by this line.
+            #[cfg(feature = "routing-interest-pending-gc")]
+            if is_client
+                && body.to()
+                && self.propagate_current_interest(inbound, interest_id, interest.f(), &target) > 0
+            {
+                return;
+            }
             self.send_one_to_face(
                 inbound,
                 NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
             );
         }
+    }
+
+    /// R311y512 — PROPAGATE a downstream CLIENT's CURRENT token interest to every
+    /// UPSTREAM face, recording one pending entry per copy. Returns how many
+    /// copies were sent; `0` means there was no upstream and the caller still owes
+    /// the client its `DeclareFinal` inline (zenoh's `Arc::into_inner` succeeding
+    /// immediately when the propagation loop placed no copy).
+    ///
+    /// UPSTREAM here is every non-CLIENT face — the wz shape of zenoh's
+    /// `f.whatami == Router || (Peer && !initial_interest finalized)` filter
+    /// (`hat/p2p_peer/interests.rs:154-160`). The inbound face is excluded (a
+    /// client never brokers to itself), and so is any face that is itself a
+    /// client: a client is a LEAF, and soliciting it would invert the tree.
+    ///
+    /// The propagated copy is a fresh `Interest` with an id THIS node minted, not
+    /// the client's — two clients may legally choose the same id, and the upstream
+    /// answers against the id it was given. The id rewrite back to the client's own
+    /// is [`relay_brokered_declare`]'s job.
+    ///
+    /// A match-all (`target == None`) interest is NOT propagated: the dump legs
+    /// already decline it (`dump_interest_tokens` returns early), so brokering one
+    /// would ask an upstream a question this node cannot itself answer, and the
+    /// client would wait out the GC for a reply it was never going to use.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn propagate_current_interest(
+        &self,
+        inbound: FaceId,
+        src_interest_id: u64,
+        current_future: bool,
+        target: &Option<String>,
+    ) -> usize {
+        let Some(target) = target.as_deref() else {
+            return 0;
+        };
+        let upstreams: Vec<FaceId> = self
+            .faces
+            .borrow()
+            .iter()
+            .filter(|(id, s)| {
+                **id != inbound && peer_whatami_routing(&s.actions) != WhatAmI::Client
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        if upstreams.is_empty() {
+            return 0;
+        }
+        let deadline = self.now() + self.interest_timeout.get();
+        let mut sent = 0usize;
+        for up in upstreams {
+            let up_id = self.pending_interests.borrow_mut().allocate_id();
+            // CurrentFuture is propagated as CurrentFuture, Current as Current —
+            // zenoh's `propagated_mode` (`interests.rs:149-153`), which only ever
+            // WIDENS Future to CurrentFuture and never narrows the CURRENT bit.
+            let built = if current_future {
+                build_interest_liveliness_subscriber(up_id, true, 0, Some(target))
+            } else {
+                build_interest_liveliness_get(up_id, 0, Some(target))
+            };
+            let Ok(msg) = built else {
+                continue; // a keyexpr this node cannot re-encode is not brokered
+            };
+            self.pending_interests.borrow_mut().insert(
+                up,
+                up_id,
+                CurrentInterest {
+                    src_face: inbound,
+                    src_interest_id,
+                    current_future,
+                },
+                deadline,
+            );
+            self.send_one_to_face(up, NetworkMessage::Interest(msg));
+            sent += 1;
+        }
+        sent
+    }
+
+    /// R311y512 — an inbound `Declare` on an UPSTREAM face carrying an interest id
+    /// THIS node minted: relay it DOWN to the client that is waiting, rewriting
+    /// the id to the client's own (zenoh `hat/p2p_peer/token.rs:199-221`).
+    ///
+    /// Returns `true` when the declare was consumed by the broker, so the caller
+    /// does not ALSO run it through the ordinary mesh-ingest path — a solicited
+    /// reply is addressed to one client, not a topology change to re-flood.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn relay_brokered_declare(&self, upstream: FaceId, declare: &DeclareOwned) -> bool {
+        let Some(up_id) = declare.interest_id else {
+            return false;
+        };
+        let Some(interest) = self
+            .pending_interests
+            .borrow()
+            .lookup(upstream, up_id)
+            .cloned()
+        else {
+            return false;
+        };
+        let mut relayed = declare.clone();
+        relayed.interest_id = Some(interest.src_interest_id);
+        self.send_one_to_face(
+            interest.src_face,
+            NetworkMessage::Declare(Box::new(relayed)),
+        );
+        true
+    }
+
+    /// R311y512 — the UNWIND: an upstream answered (or died, or timed out), so
+    /// drop its pending entry and, when it was the last one for that client, send
+    /// the client the single `DeclareFinal` it has been waiting for. zenoh's
+    /// `finalize_pending_interest` (`dispatcher/interests.rs:106-129`).
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn finish_brokered_interest(&self, interest: &CurrentInterest) {
+        self.send_one_to_face(
+            interest.src_face,
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(
+                interest.src_interest_id,
+            ))),
+        );
+    }
+
+    /// R311y512 — THE GC, driven from [`tick`](FaceForwarder::tick): abandon every
+    /// propagated interest past its deadline and finalize the clients that are now
+    /// fully unwound. A cheap empty sweep when nothing is pending.
+    ///
+    /// Without it a foreign client hangs indefinitely, because zenoh-pico's CURRENT
+    /// interest carries NO timeout of its own — `_z_liveliness_query` explicitly
+    /// discards the parameter (`vendor/zenoh-pico/src/net/liveliness.c:348`,
+    /// "Current interest in pico don't support timeout"), so the terminating
+    /// `DeclareFinal` is the only thing that can close its handler.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn reap_timed_out_interests(&self) {
+        let reaped = self.pending_interests.borrow_mut().expired(self.now());
+        for interest in &reaped {
+            self.finish_brokered_interest(interest);
+        }
+    }
+
+    /// R311y512 — the single INGRESS gate for a solicited answer on an upstream
+    /// face. `true` means the broker consumed the `Declare` and the ordinary
+    /// mesh-ingest arms must not also see it.
+    ///
+    /// Two shapes, in the order zenoh takes them:
+    /// - `DeclFinal` stamped with a propagated id — the upstream is DONE. Retire
+    ///   the entry ([`resolve`](PendingCurrentInterests::resolve)); when it was
+    ///   this client's last upstream, send the client its own final.
+    /// - any other `Declare` stamped with a propagated id (in practice
+    ///   `DeclToken`) — relay it down with the client's id.
+    ///
+    /// An id this node never minted falls through to `false`: an unsolicited
+    /// declaration on a mesh face is an ordinary topology change, and a stale
+    /// final for an entry the GC already abandoned must not disturb anything.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn absorb_brokered_declare(&self, upstream: FaceId, declare: &DeclareOwned) -> bool {
+        let Some(up_id) = declare.interest_id else {
+            return false;
+        };
+        if matches!(declare.body, DeclareOwnedVariant::CodecZenohDeclFinal(_)) {
+            if self
+                .pending_interests
+                .borrow()
+                .lookup(upstream, up_id)
+                .is_none()
+            {
+                return false;
+            }
+            let finished = self.pending_interests.borrow_mut().resolve(upstream, up_id);
+            if let Some(interest) = finished {
+                self.finish_brokered_interest(&interest);
+            }
+            return true;
+        }
+        self.relay_brokered_declare(upstream, declare)
     }
 
     /// R311y509 — the CURRENT-dump liveliness-TOKEN leg of
@@ -5382,6 +5632,19 @@ impl FaceForwarder for LinkstateForwarder {
         // nobody left to notify (skipped).
         let drained = self.pending.borrow_mut().remove_face(&id);
         synthesize_drained_fan_finals(&drained, id, |face, msg| self.send_one_to_face(face, msg));
+        // R311y512 — the INTEREST twin of the pending-query drain above (zenoh's
+        // `finalize_pending_interests` on face close): an upstream that dies before
+        // answering finalizes every client whose LAST outstanding copy it held, so
+        // the client terminates now instead of waiting out the whole GC window for
+        // a peer that is already gone. Entries where the DEPARTED face is the
+        // client are dropped silently — there is nobody left to send a final to.
+        #[cfg(feature = "routing-interest-pending-gc")]
+        {
+            let orphaned = self.pending_interests.borrow_mut().drain_face(id);
+            for interest in &orphaned {
+                self.finish_brokered_interest(interest);
+            }
+        }
         // Purge this face's FUTURE-mode interest + pushed-declaration state
         // UNCONDITIONALLY, before the graph teardown below (a client face is
         // `link == None`, so it never reaches that branch) — the peer's analogue of
@@ -5528,6 +5791,12 @@ impl FaceForwarder for LinkstateForwarder {
         // face (zenoh's per-query `QueryCleanup` timeout) on the same coalescing
         // cadence — a cheap empty sweep when nothing timed out.
         self.reap_timed_out_queries();
+        // R311y512 — the INTEREST twin of the sweep above (zenoh's
+        // `CurrentInterestCleanup`): abandon a propagated interest whose upstream
+        // never answered and finalize the client that is waiting on it. Same
+        // coalescing cadence, same cheap-when-empty shape.
+        #[cfg(feature = "routing-interest-pending-gc")]
+        self.reap_timed_out_interests();
     }
 
     /// The linkstate peer's topology graph keys the self-edge on the peer zid, so
@@ -5659,106 +5928,121 @@ impl FaceForwarder for LinkstateForwarder {
                 // DeclareSubscriber registers the source peer's interest, an
                 // UndeclareSubscriber (c3c-3 debt A1) withdraws it; both then
                 // re-flood along the source's tree on a real change.
-                NetworkMessage::Declare(declare) => match &declare.body {
-                    // c3c-3 B1 — a peer keyexpr alias declaration: record/drop it
-                    // in the INBOUND face's link-local table (not re-flooded; each
-                    // link negotiates its own aliases).
-                    DeclareOwnedVariant::CodecZenohDeclKexpr(_)
-                    | DeclareOwnedVariant::CodecZenohUndeclKexpr(_) => {
-                        self.absorb_keyexpr_declaration(id, declare);
+                NetworkMessage::Declare(declare) => {
+                    // R311y512 — the BROKER unwind, ahead of every mesh-ingest arm
+                    // below. A `Declare` on an UPSTREAM face stamped with an
+                    // interest id THIS node minted is a SOLICITED answer addressed
+                    // to one waiting client, not a topology change to re-flood:
+                    // relay it down (rewriting the id to the client's own) or, for
+                    // the terminating `DeclFinal`, retire the pending entry and
+                    // finalize the client when it was the last upstream. Consumed
+                    // either way, so it must not ALSO reach `forward_token` and
+                    // flood the mesh with an answer nobody asked for.
+                    #[cfg(feature = "routing-interest-pending-gc")]
+                    if !self.is_client_face(id) && self.absorb_brokered_declare(id, declare) {
+                        continue;
                     }
-                    DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
-                        // R311y163 (D4) — a CLIENT's graceful UndeclareSubscriber
-                        // withdraws its leaf sub (union-gated mesh forget on the last
-                        // source's departure); a MESH source's retraction withdraws
-                        // its interest + re-floods along its tree.
-                        if self.is_client_face(id) {
-                            self.withdraw_client_subscription(id, declare);
-                        } else {
-                            self.forward_unsubscription(id, *reliable, declare);
+                    match &declare.body {
+                        // c3c-3 B1 — a peer keyexpr alias declaration: record/drop it
+                        // in the INBOUND face's link-local table (not re-flooded; each
+                        // link negotiates its own aliases).
+                        DeclareOwnedVariant::CodecZenohDeclKexpr(_)
+                        | DeclareOwnedVariant::CodecZenohUndeclKexpr(_) => {
+                            self.absorb_keyexpr_declaration(id, declare);
+                        }
+                        DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
+                            // R311y163 (D4) — a CLIENT's graceful UndeclareSubscriber
+                            // withdraws its leaf sub (union-gated mesh forget on the last
+                            // source's departure); a MESH source's retraction withdraws
+                            // its interest + re-floods along its tree.
+                            if self.is_client_face(id) {
+                                self.withdraw_client_subscription(id, declare);
+                            } else {
+                                self.forward_unsubscription(id, *reliable, declare);
+                            }
+                        }
+                        // The query-plane twin of the subscriber declare: a sourced
+                        // DeclareQueryable registers the source peer's queryable
+                        // interest and re-floods along the source's tree, exactly as
+                        // forward_subscription does for subscriptions (zenoh
+                        // `declare_linkstatepeer_queryable`, `queries.rs`). Without
+                        // this explicit arm it fell to the `_` subscriber catch-all
+                        // and was silently dropped (its body is not a subscriber).
+                        DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
+                            // A CLIENT's DeclareQueryable is INGESTED as a co-attached leaf
+                            // queryable (hosted in `client_qabls` + advertised into the mesh
+                            // under SELF's zid); a MESH source's registers its interest +
+                            // re-floods along its tree (the query twin of the DeclareSubscriber
+                            // fork below).
+                            if self.is_client_face(id) {
+                                self.ingest_client_queryable(id, declare);
+                            } else {
+                                self.forward_queryable(id, *reliable, declare);
+                            }
+                        }
+                        // UndeclareQueryable: the query-plane twin of the
+                        // UndeclareSubscriber arm above. A sourced mesh retraction
+                        // identifies the queryable by its keyexpr (id == 0), carried in
+                        // the `ext_wire_expr` extension — now that the wz-codecs
+                        // `UndeclQueryable` body models the ext chain (parity with
+                        // `UndeclSubscriber` + zenoh
+                        // `commons/zenoh-protocol/src/network/declare.rs:520-523`),
+                        // `forward_queryable_undeclare` reads the keyexpr and withdraws
+                        // the source's queryable interest (the whole-peer face-down
+                        // purge stays the safety net for a departed peer). An id-only
+                        // (no-ext) body carries no keyexpr and is a no-op inside the
+                        // shared withdrawal — matched EXPLICITLY so it is not mis-routed
+                        // to the subscriber catch-all below (its body is not a sub).
+                        DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
+                            // A CLIENT's UndeclareQueryable withdraws its hosted queryable
+                            // (downgrade-or-retract the self advert via the shared seam); a
+                            // MESH source's withdraws its interest + re-floods (the query twin
+                            // of the UndeclSubscriber fork above). A client undeclare is ID-ONLY
+                            // (no ext_keyexpr); withdraw_client_queryable resolves the ke BY ID
+                            // (R311y178 id-map — was a no-op that left the advert stale).
+                            if self.is_client_face(id) {
+                                self.withdraw_client_queryable(id, declare);
+                            } else {
+                                self.forward_queryable_undeclare(id, *reliable, declare);
+                            }
+                        }
+                        // R311y509 — the liveliness-TOKEN arms, explicit so they are not
+                        // swallowed by the subscriber catch-all below. Before this they
+                        // WERE: a client's DeclToken reached ingest_client_subscription,
+                        // whose body match rejects a non-subscriber and returns, so the
+                        // token was silently discarded and every CURRENT token interest
+                        // answered empty.
+                        DeclareOwnedVariant::CodecZenohDeclToken(_) => {
+                            // A CLIENT's token is INGESTED as a leaf and advertised into
+                            // the mesh under SELF's zid; a MESH source's registers that
+                            // source and re-floods along its tree. The same client/mesh
+                            // fork the subscriber arms take.
+                            if self.is_client_face(id) {
+                                self.ingest_client_token(id, declare);
+                            } else {
+                                self.forward_token(id, *reliable, declare);
+                            }
+                        }
+                        DeclareOwnedVariant::CodecZenohUndeclToken(_) => {
+                            if self.is_client_face(id) {
+                                self.withdraw_client_token(id, declare);
+                            } else {
+                                self.forward_token_undeclare(id, *reliable, declare);
+                            }
+                        }
+                        // A DeclareSubscriber (the subscriber catch-all): a CLIENT's is
+                        // INGESTED as a co-attached leaf sub (R311y163 / D4 — recorded in
+                        // `client_subs` + advertised into the mesh under SELF's zid); a
+                        // MESH source's registers its interest + re-floods along its tree.
+                        _ => {
+                            if self.is_client_face(id) {
+                                self.ingest_client_subscription(id, declare);
+                            } else {
+                                self.forward_subscription(id, *reliable, declare);
+                            }
                         }
                     }
-                    // The query-plane twin of the subscriber declare: a sourced
-                    // DeclareQueryable registers the source peer's queryable
-                    // interest and re-floods along the source's tree, exactly as
-                    // forward_subscription does for subscriptions (zenoh
-                    // `declare_linkstatepeer_queryable`, `queries.rs`). Without
-                    // this explicit arm it fell to the `_` subscriber catch-all
-                    // and was silently dropped (its body is not a subscriber).
-                    DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
-                        // A CLIENT's DeclareQueryable is INGESTED as a co-attached leaf
-                        // queryable (hosted in `client_qabls` + advertised into the mesh
-                        // under SELF's zid); a MESH source's registers its interest +
-                        // re-floods along its tree (the query twin of the DeclareSubscriber
-                        // fork below).
-                        if self.is_client_face(id) {
-                            self.ingest_client_queryable(id, declare);
-                        } else {
-                            self.forward_queryable(id, *reliable, declare);
-                        }
-                    }
-                    // UndeclareQueryable: the query-plane twin of the
-                    // UndeclareSubscriber arm above. A sourced mesh retraction
-                    // identifies the queryable by its keyexpr (id == 0), carried in
-                    // the `ext_wire_expr` extension — now that the wz-codecs
-                    // `UndeclQueryable` body models the ext chain (parity with
-                    // `UndeclSubscriber` + zenoh
-                    // `commons/zenoh-protocol/src/network/declare.rs:520-523`),
-                    // `forward_queryable_undeclare` reads the keyexpr and withdraws
-                    // the source's queryable interest (the whole-peer face-down
-                    // purge stays the safety net for a departed peer). An id-only
-                    // (no-ext) body carries no keyexpr and is a no-op inside the
-                    // shared withdrawal — matched EXPLICITLY so it is not mis-routed
-                    // to the subscriber catch-all below (its body is not a sub).
-                    DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
-                        // A CLIENT's UndeclareQueryable withdraws its hosted queryable
-                        // (downgrade-or-retract the self advert via the shared seam); a
-                        // MESH source's withdraws its interest + re-floods (the query twin
-                        // of the UndeclSubscriber fork above). A client undeclare is ID-ONLY
-                        // (no ext_keyexpr); withdraw_client_queryable resolves the ke BY ID
-                        // (R311y178 id-map — was a no-op that left the advert stale).
-                        if self.is_client_face(id) {
-                            self.withdraw_client_queryable(id, declare);
-                        } else {
-                            self.forward_queryable_undeclare(id, *reliable, declare);
-                        }
-                    }
-                    // R311y509 — the liveliness-TOKEN arms, explicit so they are not
-                    // swallowed by the subscriber catch-all below. Before this they
-                    // WERE: a client's DeclToken reached ingest_client_subscription,
-                    // whose body match rejects a non-subscriber and returns, so the
-                    // token was silently discarded and every CURRENT token interest
-                    // answered empty.
-                    DeclareOwnedVariant::CodecZenohDeclToken(_) => {
-                        // A CLIENT's token is INGESTED as a leaf and advertised into
-                        // the mesh under SELF's zid; a MESH source's registers that
-                        // source and re-floods along its tree. The same client/mesh
-                        // fork the subscriber arms take.
-                        if self.is_client_face(id) {
-                            self.ingest_client_token(id, declare);
-                        } else {
-                            self.forward_token(id, *reliable, declare);
-                        }
-                    }
-                    DeclareOwnedVariant::CodecZenohUndeclToken(_) => {
-                        if self.is_client_face(id) {
-                            self.withdraw_client_token(id, declare);
-                        } else {
-                            self.forward_token_undeclare(id, *reliable, declare);
-                        }
-                    }
-                    // A DeclareSubscriber (the subscriber catch-all): a CLIENT's is
-                    // INGESTED as a co-attached leaf sub (R311y163 / D4 — recorded in
-                    // `client_subs` + advertised into the mesh under SELF's zid); a
-                    // MESH source's registers its interest + re-floods along its tree.
-                    _ => {
-                        if self.is_client_face(id) {
-                            self.ingest_client_subscription(id, declare);
-                        } else {
-                            self.forward_subscription(id, *reliable, declare);
-                        }
-                    }
-                },
+                }
                 // A routed Query: relay it toward the matching queryables along
                 // the querier's tree (the query-plane twin of the data Push),
                 // recording a pending-query return entry per outbound face.

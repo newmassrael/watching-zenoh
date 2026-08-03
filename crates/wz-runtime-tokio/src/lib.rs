@@ -1318,6 +1318,20 @@ pub mod future_interest;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_pending;
 
+/// R311y512 — §5.21 `routing-interest-pending-gc`: the PENDING-CURRENT-INTEREST
+/// table [`interest_broker::PendingCurrentInterests`] a p2p_peer-shaped broker
+/// keeps while a downstream CLIENT's CURRENT interest is propagated upstream,
+/// plus the GC that abandons a silent upstream and finalizes the client anyway.
+/// The interest twin of [`linkstate_pending`] (which is the QUERY return table):
+/// both exist so a downstream solicitation terminates even when the node it was
+/// forwarded to never answers. zenoh
+/// `dispatcher/interests.rs` (`PendingCurrentInterest` /
+/// `finalize_pending_interest` / `CurrentInterestCleanup`) driven from
+/// `hat/p2p_peer/interests.rs`. Gated on `routing-interest-pending-gc`, which
+/// pulls `routing-peer` (the forwarder that owns the table).
+#[cfg(feature = "routing-interest-pending-gc")]
+pub mod interest_broker;
+
 /// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
 /// [`session_open`]: `open_session_with_reconnect` wires the actions
 /// bundle over a `SwappableLink`, and `ReconnectingSession::drive` re-runs

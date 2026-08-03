@@ -865,7 +865,13 @@ routing-data-route-compute = []
 routing-interceptor-framework = []
 routing-interceptor-hotreload = ["wz-runtime-tokio?/routing-interceptor-hotreload"]
 routing-interest-broker = []
-routing-interest-pending-gc = []
+# R311y512 — was a no-op `= []` facade; now forwards the REAL gate. Pulls
+# `routing-peer` (the LinkstateForwarder owns the pending table) and the
+# runtime-crate feature that carries the cfg sites.
+routing-interest-pending-gc = [
+    "routing-peer",
+    "wz-runtime-tokio?/routing-interest-pending-gc",
+]
 routing-namespace = ["wz-runtime-tokio?/routing-namespace"]
 routing-query-route-compute = []
 routing-route-cache = []

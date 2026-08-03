@@ -266,6 +266,13 @@ preset-ap-full = [
     "routing-routes",
     "routing-peer",
     "routing-token-tables",
+    # R311y512 — the p2p_peer-shaped interest broker + its GC. It was already a
+    # member of the FACADE's preset-ap-full (as a `= []` no-op, alongside the other
+    # routing atoms named there); now that the facade key forwards a real gate, the
+    # demo has to name it too, or the AP-full binary compiles the broker in while
+    # `--interest-timeout` stays unreachable from argv — exactly the held-back
+    # incoherence Layer A5 checks for.
+    "routing-interest-pending-gc",
 ]
 # gc-3 carry #2 — the live application machine + observer switchboard fan-out.
 # Pulls the wz-ap-demo-app crate (the app statechart + generated injector) and
@@ -671,6 +678,13 @@ router-hat-router = ["routing-router-hat"]
 # cross-impl leg exercises the plane; it stays independently toggleable (A3
 # active <=> its own cfg sites, distinct from router-hat-router's).
 routing-token-tables = ["router-hat-router", "wz/routing-token-tables"]
+# R311y512 — §5.21 routing-interest-pending-gc: compiles the p2p_peer-shaped
+# interest broker into the demo AND its `--interest-timeout <ms>` knob, whose
+# parse + PeerOpts field sit inside `#[cfg(feature="routing-interest-pending-gc")]`
+# in this crate. Pulls `routing-peer` (the `run_peer` run-mode the broker lives
+# in) rather than passing the facade key straight through, so the flag can never
+# be compiled in without the run-mode that reads it.
+routing-interest-pending-gc = ["routing-peer", "wz/routing-interest-pending-gc"]
 # §5.21 router-multicast-faces (R311y188, slice-3 EGRESS run-mode) — compiles the
 # router's multicast egress host (spawn_router_mcast_egress + attach_mcast_group)
 # INSIDE the #[cfg(feature="router-hat-router")] run_router_hat fn. Pulls

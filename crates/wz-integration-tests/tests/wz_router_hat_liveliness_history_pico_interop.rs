@@ -25,13 +25,23 @@
 //!   (`vendor/zenoh-pico/src/net/liveliness.c:133-163`).
 //! - A `--peer` node cannot either, and for a reason worth stating plainly because
 //!   R311y461 got it wrong: `--peer` builds a `LinkstateForwarder`
-//!   (`wz-ap-demo/src/runner.rs:2465`), which has NO client-token plane at all —
-//!   its only two mentions of one are comments pointing AT the router's. The
-//!   entire plane (`ingest_client_token`, `dump_interest_tokens`,
-//!   `push_future_token`) belongs to `RouterForwarder`, which only
-//!   `run_router_hat_until` constructs (`runner.rs:3602`). R311y461 read that
-//!   plane, measured zero deliveries against a `--peer` node, and concluded the
-//!   atom "needs code". It does not: it needed the node kind that owns the plane.
+//!   (`wz-ap-demo/src/runner.rs:2465`), which — **when this file was written** —
+//!   had NO client-token plane at all: its only two mentions of one were comments
+//!   pointing AT the router's, and the entire plane (`ingest_client_token`,
+//!   `dump_interest_tokens`, `push_future_token`) belonged to `RouterForwarder`,
+//!   which only `run_router_hat_until` constructs (`runner.rs:3602`). R311y461
+//!   read that plane, measured zero deliveries against a `--peer` node, and
+//!   concluded the atom "needs code". It did not: it needed the node kind that
+//!   owned the plane.
+//!
+//!   **CORRECTION (R311y512): the sentence above is no longer true in the present
+//!   tense, and leaving it would be exactly the stale-prose defect this project
+//!   keeps catching.** R311y509 BUILT the peer's client-token plane in both tiers
+//!   and R311y509a witnessed it with a real pico
+//!   (`wz_peer_liveliness_token_pico_interop.rs`), so a `--peer` node now answers a
+//!   CURRENT token interest too. This file's choice of a `--router-hat` node still
+//!   stands — it is the topology whose client-leaf fold this leg exercises — but
+//!   the JUSTIFICATION above is history, not a live constraint.
 //!
 //! So: a **router-hat** node (its banner says "dual-tier RouterForwarder"), pico A
 //! holding the token, pico B subscribing afterwards. The token is a CLIENT-face

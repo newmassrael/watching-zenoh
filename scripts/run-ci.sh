@@ -7888,8 +7888,18 @@ layer_e6_peer_mesh() {
     # changes behaviour. Naming it here is also what puts the atom in wz-ap-demo's
     # feature closure, which A4-5 containment requires before any test may claim
     # it — an unnamed feature is compiled OUT and the claim would be vacuous.
+    # R311y512 — `routing-interest-pending-gc` joins the SAME binary so the peer's
+    # p2p_peer-shaped INTEREST BROKER (and the GC on its pending table) is compiled
+    # in, which A4-5 containment requires before the new leg below may claim the
+    # atom — an unnamed feature is compiled OUT and the claim would be vacuous.
+    # Additive to every OTHER E6 leg by construction: the broker fires only on a
+    # CLIENT face's CURRENT interest that carries the TOKEN bit AND finds an
+    # upstream face (`is_client && body.to() && propagate.. > 0`), so the sub /
+    # queryable / adminspace legs never reach it. The one family that DOES reach it
+    # is the liveliness-token pair, and both its client-leaf and mesh arms were
+    # re-run under this feature set before it was added here.
     (cd crates && cargo build -p wz-ap-demo \
-        --features routing-peer,adminspace-write,routing-interceptor-hotreload --quiet) || return 1
+        --features routing-peer,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_mesh -- --ignored --quiet) || return 1
     # R311rs — the subscription-filtered data-forward e2e (c3c-3) rides the
@@ -7979,6 +7989,21 @@ layer_e6_peer_mesh() {
             || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_liveliness_token_pico_interop" || return 1
+    fi
+    # R311y512 — §5.21 routing-interest-pending-gc, on the SAME E6 binary. A real
+    # pico `z_get_liveliness` against a wz peer whose upstream is SIGSTOPped: pico
+    # carries NO timeout for a CURRENT interest (`net/liveliness.c:348`), so its
+    # return IS the GC's DeclareFinal arriving. Three arms — frozen upstream (the
+    # atom), live upstream (0 reaped, so the atom arm is not "the broker always
+    # reaps"), and no upstream (inline, so the delay is the pending table). One
+    # arm holds a 2.5s GC window inside an 8s budget, so --test-threads=1 keeps
+    # the three fixtures' ports and frozen processes from overlapping.
+    if [[ -x target/zenoh-pico-cli/z_get_liveliness ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_interest_pending_gc_pico_interop -- --ignored --quiet --test-threads=1) \
+            || return 1
+    else
+        _pico_cli_unavailable "E6 leg wz_peer_interest_pending_gc_pico_interop" || return 1
     fi
     # R311y451 — pico LOW-PASS cross-impl (§5.16 access-quota), the size-budget
     # sibling of the ACL leg above and on the SAME E6 binary (routing-peer pulls

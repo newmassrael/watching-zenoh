@@ -240,6 +240,33 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // R311y512 — `--interest-timeout <ms>`: zenoh's
+            // `routing.interests.timeout`, the window a BROKERED current interest
+            // gives its upstream to answer before the GC finalizes the waiting
+            // client. Parsed unconditionally so an unsupported build REJECTS the
+            // flag rather than silently ignoring it; only the value is cfg-carried.
+            #[cfg(feature = "routing-interest-pending-gc")]
+            let interest_timeout_ms = match parse_pair(rest, "--interest-timeout") {
+                None => None,
+                Some(v) => match v.parse::<u64>() {
+                    Ok(ms) => Some(ms),
+                    Err(_) => {
+                        eprintln!(
+                            "wz-ap-demo: --interest-timeout {v}: expected a \
+                             millisecond count"
+                        );
+                        return ExitCode::from(2);
+                    }
+                },
+            };
+            #[cfg(not(feature = "routing-interest-pending-gc"))]
+            if let Some(v) = parse_pair(rest, "--interest-timeout") {
+                eprintln!(
+                    "wz-ap-demo: --interest-timeout {v} requires the \
+                     `routing-interest-pending-gc` feature"
+                );
+                return ExitCode::from(2);
+            }
             // R311tt (§5.16 access control) — `--acl-deny <keyexpr>` opts this
             // peer into ACL enforcement: an allow-default policy with one ingress
             // Put deny rule on the keyexpr (every peer subject). A Put a neighbour
@@ -439,6 +466,8 @@ fn main() -> ExitCode {
                     tls_key: parse_pair(rest, "--tls-key"),
                     quic_cert: parse_pair(rest, "--quic-cert"),
                     quic_key: parse_pair(rest, "--quic-key"),
+                    #[cfg(feature = "routing-interest-pending-gc")]
+                    interest_timeout_ms,
                 },
                 InterceptorOpts {
                     acl_deny,
