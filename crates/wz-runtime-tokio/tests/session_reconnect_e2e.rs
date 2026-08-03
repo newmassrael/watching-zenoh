@@ -160,6 +160,7 @@ async fn assert_declare_replays_after_link_loss(
     let policy = ReconnectPolicy {
         retry_delay_ms: 50, // test cadence; production default is pico's 1s
         max_attempts: Some(100),
+        ..ReconnectPolicy::default()
     };
     let (mut client, (server_conn1, declares_conn1)) = tokio::join!(
         async {
@@ -280,6 +281,7 @@ async fn a_dying_link_delivers_remote_liveliness_deletes_to_the_dialer() {
     let policy = ReconnectPolicy {
         retry_delay_ms: 50,
         max_attempts: Some(100),
+        ..ReconnectPolicy::default()
     };
 
     // Connection #1: the client opens under the supervisor; the acceptor
@@ -502,6 +504,7 @@ async fn gave_up_supervisor_resumes_on_re_drive() {
     let policy = ReconnectPolicy {
         retry_delay_ms: 10, // test cadence
         max_attempts: Some(2),
+        ..ReconnectPolicy::default()
     };
     let (mut client, (server_conn1, declares_conn1)) = tokio::join!(
         async {
@@ -655,6 +658,7 @@ mod tls_reconnect {
         let policy = ReconnectPolicy {
             retry_delay_ms: 50, // test cadence; production default is pico's 1s
             max_attempts: Some(100),
+            ..ReconnectPolicy::default()
         };
         // The retained dial config: a `tls/...` re-dial reads this on EVERY
         // reconnect, so the supervisor must own it (R311oe).
@@ -806,6 +810,7 @@ mod ws_reconnect {
         let policy = ReconnectPolicy {
             retry_delay_ms: 50, // test cadence; production default is pico's 1s
             max_attempts: Some(100),
+            ..ReconnectPolicy::default()
         };
         // WS carries no cert material, so the retained dial config is the
         // default; the reconnect value under test is the RFC6455 re-handshake,

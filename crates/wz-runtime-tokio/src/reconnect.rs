@@ -77,8 +77,22 @@ use crate::writer_queue::WriterHandle;
 /// counts attempts (the session retries until closed or a permanent error).
 #[derive(Debug, Clone, Copy)]
 pub struct ReconnectPolicy {
-    /// Delay between failed reopen attempts, milliseconds.
+    /// Delay before the FIRST retry after a link loss, milliseconds — zenoh's
+    /// `period_init_ms`. Kept under its original name: with the default
+    /// [`Self::period_increase_factor`] of `1.0` it is still the constant delay
+    /// it always was, so no existing caller changes meaning.
     pub retry_delay_ms: u64,
+    /// R311y526 — ceiling the growing delay is clamped to, milliseconds;
+    /// `0` = no ceiling. zenoh's `period_max_ms`, including its `> 0` guard
+    /// (`commons/zenoh-config/src/connection_retry.rs:100-103`).
+    pub period_max_ms: u64,
+    /// R311y526 — the multiplier applied AFTER each retry — zenoh's
+    /// `period_increase_factor`. `1.0` (the default) reproduces the fixed delay
+    /// exactly, which is pico's behaviour and therefore what this atom's parity
+    /// target prescribes; a deploy that wants zenoh's exponential shape sets it
+    /// above `1.0`. Superset, not mirror: the knob exists, the default does not
+    /// change.
+    pub period_increase_factor: f64,
     /// Attempt cap per link loss; `None` = unbounded (pico default).
     pub max_attempts: Option<u32>,
 }
@@ -87,8 +101,47 @@ impl Default for ReconnectPolicy {
     fn default() -> Self {
         Self {
             retry_delay_ms: 1000,
+            period_max_ms: 0,
+            period_increase_factor: 1.0,
             max_attempts: None,
         }
+    }
+}
+
+/// R311y526 — the per-loss backoff state: the delay to use for the NEXT retry.
+///
+/// Transcribes zenoh's `ConnectionRetryState::next_duration`
+/// (`commons/zenoh-config/src/connection_retry.rs:96-105`): it returns the
+/// CURRENT delay and only then grows it, so the first retry after a loss waits
+/// `period_init_ms` rather than an already-multiplied value. The state is
+/// per-loss — a fresh one is built each time the drive loop terminates, so a
+/// session that reconnects, runs for hours, and loses its link again starts
+/// from the initial period rather than from wherever the last outage left off.
+#[derive(Debug, Clone, Copy)]
+struct BackoffState {
+    delay_ms: u64,
+}
+
+impl BackoffState {
+    fn new(policy: &ReconnectPolicy) -> Self {
+        Self {
+            delay_ms: policy.retry_delay_ms,
+        }
+    }
+
+    /// The delay to sleep now; grows the stored value for the retry after it.
+    fn next_ms(&mut self, policy: &ReconnectPolicy) -> u64 {
+        let now = self.delay_ms;
+        // `as u64` saturates at 0 for a negative/NaN factor, which is the
+        // degenerate config zenoh's own i64 cast also collapses; the cap below
+        // then keeps it bounded either way.
+        let grown = (self.delay_ms as f64 * policy.period_increase_factor) as u64;
+        self.delay_ms = if policy.period_max_ms > 0 {
+            grown.min(policy.period_max_ms)
+        } else {
+            grown
+        };
+        now
     }
 }
 
@@ -374,6 +427,9 @@ impl ReconnectingSession {
                     // on channel close), and the stale inbound half +
                     // engine drop at the reassignment below.
                     let mut attempts: u32 = 0;
+                    // Per-loss, not per-session: a later outage starts from the
+                    // initial period again (zenoh builds its state the same way).
+                    let mut backoff = BackoffState::new(&self.policy);
                     self.opened = loop {
                         if stop.load(Ordering::Acquire) {
                             return ReconnectDriveOutcome::Stopped;
@@ -398,7 +454,7 @@ impl ReconnectingSession {
                                         last: ReconnectError::Open(err),
                                     };
                                 }
-                                clock.sleep(self.policy.retry_delay_ms).await;
+                                clock.sleep(backoff.next_ms(&self.policy)).await;
                             }
                             Err(err) => {
                                 return ReconnectDriveOutcome::GaveUp {
@@ -556,4 +612,85 @@ pub async fn reconnect_endpoint(
         tick_interval_ms,
     )
     .await
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    /// The DEFAULT is pico's constant delay, and this pins it: an atom whose
+    /// parity target is `Z_FEATURE_AUTO_RECONNECT` must not silently acquire
+    /// zenoh's exponential shape just because the knobs now exist.
+    #[test]
+    fn the_default_policy_is_a_constant_delay() {
+        let policy = ReconnectPolicy::default();
+        let mut b = BackoffState::new(&policy);
+        let seen: Vec<u64> = (0..5).map(|_| b.next_ms(&policy)).collect();
+        assert_eq!(seen, vec![1000, 1000, 1000, 1000, 1000]);
+    }
+
+    /// The growth transcribes zenoh's `next_duration`: return the CURRENT delay,
+    /// THEN multiply. The first retry after a loss therefore waits
+    /// `period_init_ms`, not an already-multiplied value.
+    #[test]
+    fn growth_returns_the_current_delay_before_multiplying() {
+        let policy = ReconnectPolicy {
+            retry_delay_ms: 100,
+            period_max_ms: 0,
+            period_increase_factor: 2.0,
+            max_attempts: None,
+        };
+        let mut b = BackoffState::new(&policy);
+        assert_eq!(
+            (0..4).map(|_| b.next_ms(&policy)).collect::<Vec<_>>(),
+            vec![100, 200, 400, 800],
+            "the first wait must be period_init_ms itself"
+        );
+    }
+
+    /// `period_max_ms` clamps, and `0` means NO ceiling — zenoh's own `> 0`
+    /// guard, not a sentinel this port invented.
+    #[test]
+    fn the_ceiling_clamps_and_zero_means_unbounded() {
+        let capped = ReconnectPolicy {
+            retry_delay_ms: 100,
+            period_max_ms: 350,
+            period_increase_factor: 2.0,
+            max_attempts: None,
+        };
+        let mut b = BackoffState::new(&capped);
+        assert_eq!(
+            (0..5).map(|_| b.next_ms(&capped)).collect::<Vec<_>>(),
+            vec![100, 200, 350, 350, 350]
+        );
+
+        let uncapped = ReconnectPolicy {
+            period_max_ms: 0,
+            ..capped
+        };
+        let mut b = BackoffState::new(&uncapped);
+        assert_eq!(
+            (0..4).map(|_| b.next_ms(&uncapped)).collect::<Vec<_>>(),
+            vec![100, 200, 400, 800],
+            "0 must mean unbounded, not an immediate clamp to zero"
+        );
+    }
+
+    /// A degenerate factor collapses to zero rather than panicking or wrapping.
+    /// The field is an `f64` a deploy config can set, and `as u64` on a negative
+    /// or NaN value is the one piece of arithmetic here with a surprising answer.
+    #[test]
+    fn a_degenerate_factor_does_not_panic_or_wrap() {
+        for factor in [0.0, -1.0, f64::NAN] {
+            let policy = ReconnectPolicy {
+                retry_delay_ms: 100,
+                period_max_ms: 0,
+                period_increase_factor: factor,
+                max_attempts: None,
+            };
+            let mut b = BackoffState::new(&policy);
+            assert_eq!(b.next_ms(&policy), 100, "the first wait is always init");
+            assert_eq!(b.next_ms(&policy), 0, "factor {factor} collapses to 0");
+        }
+    }
 }
