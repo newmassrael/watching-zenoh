@@ -37,9 +37,116 @@ pub extern "C" fn _z_zint_len(v: u64) -> u8 {
     9
 }
 
+/// pico `_z_zint64_encode_buf` (`src/protocol/codec.c:132-147`): write the VLE
+/// encoding of `v` into `buf`, returning the byte count.
+///
+/// The ninth byte is the asymmetric one and the reason this is not a plain
+/// seven-bits-per-byte loop: the continuation loop runs while bits above 7
+/// remain, and the FINAL byte is emitted only when fewer than `VLE_LEN` (9)
+/// bytes have been written — so a 9-byte encoding carries a full 8 bits in its
+/// last byte with no continuation flag, and never spills to a tenth.
+///
+/// # Safety
+/// `buf` must be writable for at least 9 bytes — pico's own callers stack a
+/// `uint8_t buf[16]`, and `_z_zint_len` bounds the write at 9.
+#[no_mangle]
+pub unsafe extern "C" fn _z_zint64_encode_buf(buf: *mut u8, v: u64) -> u8 {
+    if buf.is_null() {
+        return 0;
+    }
+    let out = std::slice::from_raw_parts_mut(buf, VLE_LEN);
+    encode_zint(out, v) as u8
+}
+
+/// pico's `VLE_LEN` — the maximum VLE encoding length for a `u64`.
+pub(crate) const VLE_LEN: usize = 9;
+
+/// Write the VLE encoding of `v` into `out`, returning the byte count. The
+/// Rust-side helper the serializer uses; `_z_zint64_encode_buf` is its C export.
+pub(crate) fn encode_zint(out: &mut [u8], v: u64) -> usize {
+    let mut lv = v;
+    let mut len = 0usize;
+    // While bits above the low 7 remain, emit a continuation byte.
+    while lv >> 7 != 0 {
+        out[len] = ((lv & 0x7f) as u8) | 0x80;
+        len += 1;
+        lv >>= 7;
+    }
+    if len != VLE_LEN {
+        out[len] = (lv & 0xff) as u8;
+        len += 1;
+    }
+    len
+}
+
+/// Read a VLE value from `input`, returning `(value, bytes_consumed)` or `None`
+/// when the input ends mid-encoding.
+///
+/// The ninth byte is terminal REGARDLESS of its high bit — the mirror of
+/// [`encode_zint`]'s asymmetry. A decoder that kept honouring the continuation
+/// flag would read a tenth byte that the encoder never writes.
+pub(crate) fn decode_zint(input: &[u8]) -> Option<(u64, usize)> {
+    let mut value: u64 = 0;
+    let mut shift = 0u32;
+    for (i, byte) in input.iter().take(VLE_LEN).enumerate() {
+        let is_last = i + 1 == VLE_LEN;
+        if is_last {
+            value |= u64::from(*byte) << shift;
+            return Some((value, i + 1));
+        }
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, i + 1));
+        }
+        shift += 7;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The encoder and decoder are INVERSES across every rung, including the
+    /// ninth-byte asymmetry where a naive decoder reads one byte too many.
+    #[test]
+    fn zint_round_trips_across_every_rung() {
+        let mut probes: Vec<u64> = vec![0, 1, u64::MAX];
+        for n in 1..9u32 {
+            probes.push((1u64 << (7 * n)) - 1);
+            probes.push(1u64 << (7 * n));
+        }
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..2048 {
+            probes.push(x);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+        }
+        let mut buf = [0u8; VLE_LEN];
+        for v in probes {
+            let n = encode_zint(&mut buf, v);
+            assert_eq!(
+                n as u8,
+                _z_zint_len(v),
+                "encoded length disagrees with _z_zint_len at {v:#x}"
+            );
+            let (decoded, used) = decode_zint(&buf[..n]).expect("decodes what it encoded");
+            assert_eq!(decoded, v, "round trip failed at {v:#x}");
+            assert_eq!(used, n, "decoder consumed a different count at {v:#x}");
+        }
+    }
+
+    /// A truncated encoding is `None`, not a silently wrong value — the shape a
+    /// deserializer needs to report `Z_EDESERIALIZE` rather than invent data.
+    #[test]
+    fn a_truncated_zint_does_not_decode() {
+        let mut buf = [0u8; VLE_LEN];
+        let n = encode_zint(&mut buf, 1 << 40);
+        assert!(n > 1);
+        assert!(decode_zint(&buf[..n - 1]).is_none());
+        assert!(decode_zint(&[]).is_none());
+    }
 
     /// Every boundary in the mask ladder, stated as the two values that
     /// straddle it. The ORACLE test proves agreement with upstream; this one

@@ -1614,3 +1614,122 @@ fn pico_zgetlat_source_on_wz_capi_round_trips_through_real_pico_zqueryable() {
 
     graceful_terminate(qable.child_mut(), Duration::from_secs(5));
 }
+
+/// LEG 13 (`wz->pico`, ATTACHMENT PLANE) — upstream's `z_pub_attachment.c`,
+/// running on wz, is decoded IN FULL by a REAL zenoh-pico `z_sub_attachment`:
+/// the encoding string, the timestamp, and the serialized key/value attachment.
+///
+/// ## This leg is the only thing that can pin the encoding ID
+///
+/// `wz-capi-pico/src/encoding.rs` maps `"zenoh/string;utf8"` to a numeric id
+/// through a 53-entry table, and the id is what goes on the wire. The
+/// `libzenohpico.so` oracle test cannot check that mapping — `from_str` and
+/// `to_string` read the SAME table, so a round trip is invariant under any
+/// permutation of it, demonstrated by a damage probe that swapped two entries
+/// and stayed green. Here a FOREIGN decoder prints the string it recovered from
+/// wz's bytes, so a wrong id shows up as a wrong name.
+///
+/// The attachment does the same job for the serialization format: the kv pairs
+/// are written by wz's `ze_serializer_*` and read back by pico's OWN
+/// `ze_deserializer_*`, so the `<vle len><bytes>` framing is adjudicated by
+/// upstream's parser rather than by wz's.
+///
+/// ## What this caught, which a link check could not
+///
+/// `z_pub_attachment.c` linked and RAN before any of this worked: it printed its
+/// own "Putting Data" lines while the real pico subscriber reported
+/// `encoding: zenoh/bytes` with no attachment and no timestamp, because
+/// `z_publisher_put` took its options as `*const c_void` and dropped all three.
+/// A link is not a pass, and that is what the difference looked like.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_sub_attachment CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zpubattachment_source_on_wz_capi_is_fully_decoded_by_real_pico() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_pub_attachment", dir.path());
+    let z_sub_attachment = zenoh_pico_cli_binary("z_sub_attachment");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    let mut sub_out = tempfile::tempfile().expect("subscriber stdout capture");
+    let sub_writer = sub_out.try_clone().expect("dup subscriber stdout handle");
+    let mut sub = ChildGuard::wrap(
+        "real zenoh-pico z_sub_attachment (listening peer)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub_attachment)
+            .args(["-l", &endpoint, "-m", "peer", "-k", "demo/**", "-n", "2"])
+            .stdout(Stdio::from(sub_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_sub_attachment as a listener"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real pico z_sub_attachment never accepted on {endpoint} — \
+             {why}; capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    let publisher = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args(["-e", &endpoint, "-m", "client", "-n", "2"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the compiled z_pub_attachment drop-in");
+    assert!(
+        publisher.success(),
+        "z_pub_attachment.c on wz exited {publisher:?}"
+    );
+
+    let status = wait_for_exit(sub.child_mut(), EXCHANGE_TIMEOUT).unwrap_or_else(|why| {
+        panic!(
+            "the REAL pico subscriber never received its two samples ({why}).\n\
+             --- pico z_sub_attachment stdout ---\n{}",
+            read_captured(&mut sub_out)
+        )
+    });
+    assert!(
+        status.success(),
+        "the real pico subscriber exited {status:?}\n--- its stdout ---\n{}",
+        read_captured(&mut sub_out)
+    );
+    let foreign = read_captured(&mut sub_out);
+
+    // The ENCODING, named by the foreign decoder. `zenoh/string` is table id 1
+    // and `;utf8` is its schema, so this one line pins both halves of the
+    // packed wire word.
+    assert!(
+        foreign.contains("with encoding: zenoh/string;utf8"),
+        "the REAL pico subscriber did not decode the encoding wz sent — a wrong \
+         table id renders as a different name here.\n\
+         --- pico z_sub_attachment stdout ---\n{foreign}"
+    );
+    // The ATTACHMENT, deserialized by pico's own `ze_deserializer_*`. The kv
+    // content is chosen by the upstream program, not by this test.
+    assert!(
+        foreign.contains("with attachment:"),
+        "no attachment reached the foreign subscriber.\n\
+         --- pico z_sub_attachment stdout ---\n{foreign}"
+    );
+    assert!(
+        foreign.contains("source, C"),
+        "the attachment arrived but its serialized key/value pairs did not \
+         deserialize through pico's own reader — the `<vle len><bytes>` framing \
+         disagrees.\n--- pico z_sub_attachment stdout ---\n{foreign}"
+    );
+    // The TIMESTAMP, which the program stamps from the session and which the
+    // subscriber prints only when present.
+    assert!(
+        foreign.contains("with timestamp:"),
+        "no timestamp reached the foreign subscriber.\n\
+         --- pico z_sub_attachment stdout ---\n{foreign}"
+    );
+}

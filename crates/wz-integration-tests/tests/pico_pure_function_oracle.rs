@@ -60,6 +60,28 @@ use libloading::{Library, Symbol};
 /// pico `ZENOH_ID_SIZE`.
 const ID_SIZE: usize = 16;
 
+/// An 8-byte-aligned stack slot standing in for one of pico's owned values.
+///
+/// A bare `[u8; N]` is only 1-byte aligned, and every one of these structs holds
+/// POINTERS — so handing an unaligned buffer to `z_*` is undefined behaviour. It
+/// is not theoretical: Rust's debug alignment check aborted this file's first
+/// cut with "address must be a multiple of 0x8". The sizes come from pico's own
+/// header (measured), and both implementations agree on them.
+#[repr(C, align(8))]
+struct Slot<const N: usize>([u8; N]);
+
+impl<const N: usize> Slot<N> {
+    fn zeroed() -> Self {
+        Self([0u8; N])
+    }
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr()
+    }
+    fn as_ptr(&self) -> *const u8 {
+        self.0.as_ptr()
+    }
+}
+
 /// The wz cdylib under test.
 fn wz_cdylib() -> PathBuf {
     let path = project_root().join("crates/target/debug/libwz_capi_pico.so");
@@ -230,7 +252,7 @@ unsafe fn render(lib: &Library, id: &[u8; ID_SIZE]) -> String {
     // `z_owned_string_t` is 32 B in pico's header; both implementations agree on
     // that (pinned by `wz-capi-pico`'s own ABI test), so a 32-byte zeroed buffer
     // is a valid out-parameter for either.
-    let mut owned = [0u8; 32];
+    let mut owned = Slot::<32>::zeroed();
     let to_string: Symbol<unsafe extern "C" fn(*const u8, *mut u8) -> i8> = lib
         .get(b"z_id_to_string\0")
         .expect("library does not export z_id_to_string");
@@ -251,4 +273,513 @@ unsafe fn render(lib: &Library, id: &[u8; ID_SIZE]) -> String {
     let n = len(loaned);
     assert!(!ptr.is_null(), "z_string_data returned NULL");
     String::from_utf8(std::slice::from_raw_parts(ptr, n).to_vec()).expect("hex is UTF-8")
+}
+
+/// The encoding table's ORDER, checked against the ids the REAL pico assigns.
+///
+/// ## Why the obvious test does not work, measured rather than assumed
+///
+/// The first cut of this compared `z_encoding_from_str(s)` then
+/// `z_encoding_to_string` across the two libraries. **A damage probe that
+/// swapped two entries in wz's table left it GREEN**, and the reason is
+/// structural, not a gap in the probe list: both directions read the SAME
+/// table, so the round trip is invariant under ANY permutation of it. No
+/// rendering comparison can see the id — and the id is the byte that goes on
+/// the wire.
+///
+/// So this reads the id DIRECTLY out of upstream: pico's `z_owned_encoding_t`
+/// holds a concrete `_z_encoding_t` at offset 0 whose `id` field sits at offset
+/// 32 (measured). For each entry `i` of **wz's** table, the string is handed to
+/// **pico's** `z_encoding_from_str` and pico's own id is read back and compared
+/// with `i`. Nothing circular remains: the left side is wz's constant, the right
+/// is upstream's compiled behaviour.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "dlopens the CMake-built libzenohpico.so oracle; run by run-ci \
+            Layer E"]
+fn encoding_ids_agree_with_the_real_pico_library() {
+    unsafe {
+        let pico = open(pico_library());
+        let from_str: Symbol<unsafe extern "C" fn(*mut u8, *const std::ffi::c_char) -> i8> = pico
+            .get(b"z_encoding_from_str\0")
+            .expect("libzenohpico.so does not export z_encoding_from_str");
+        let drop_encoding: Symbol<unsafe extern "C" fn(*mut u8) -> i8> = pico
+            .get(b"z_encoding_drop\0")
+            .expect("libzenohpico.so does not export z_encoding_drop");
+
+        for (i, entry) in wz_capi_pico::encoding::ENCODING_ID_TO_STR
+            .iter()
+            .enumerate()
+        {
+            let cstr = std::ffi::CString::new(*entry).expect("no interior NUL");
+            let mut encoding = Slot::<40>::zeroed();
+            assert_eq!(
+                from_str(encoding.as_mut_ptr(), cstr.as_ptr()),
+                0,
+                "pico rejected {entry:?}"
+            );
+            // `_z_encoding_t.id` at offset 32 within the 40-byte owned value,
+            // measured against pico's own headers.
+            let id = u16::from_ne_bytes([encoding.0[32], encoding.0[33]]);
+            assert_eq!(
+                usize::from(id),
+                i,
+                "wz's encoding table has {entry:?} at index {i}, but the REAL \
+                 pico assigns it id {id} -- the wire byte would differ"
+            );
+            let _ = drop_encoding(encoding.as_mut_ptr());
+        }
+    }
+}
+
+/// The encoding table's STRING SET and parse semantics, checked against
+/// upstream.
+///
+/// This is the round-trip comparison, and it is kept for what it DOES pin —
+/// the entry count, the `;` split, and the unknown-prefix fallback — with the
+/// explicit note that it does NOT pin the id mapping. That claim belongs to
+/// `encoding_ids_agree_with_the_real_pico_library` above.
+///
+/// R311y529 — `wz-capi-pico/src/encoding.rs` TRANSCRIBES pico's
+/// `ENCODING_VALUES_ID_TO_STR` (`src/api/encoding.c:89`), and the index IS the
+/// wire id. A transcription slip — one entry dropped, two swapped, the list
+/// truncated — round-trips through wz perfectly and puts a different byte on the
+/// wire, which no wz-authored test can see. So the table is not asserted against
+/// a second copy of itself; it is walked through BOTH libraries.
+///
+/// `Z_FEATURE_ENCODING_VALUES` is 1 in the generated config, which is what makes
+/// this a table lookup rather than a store-the-string operation. Read off the
+/// GENERATED header, not a cmake flag.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "dlopens the CMake-built libzenohpico.so oracle; run by run-ci \
+            Layer E"]
+fn encoding_strings_agree_with_the_real_pico_library() {
+    unsafe {
+        let wz = open(wz_cdylib());
+        let pico = open(pico_library());
+
+        // Every id in the table, plus a few past its end: the out-of-range
+        // arm is pico's own bounds check, and an implementation that indexed
+        // blindly would differ exactly there.
+        let mut checked = 0usize;
+        for id in 0..64u32 {
+            let from_wz = encoding_string_for_id(&wz, id);
+            let from_pico = encoding_string_for_id(&pico, id);
+            assert_eq!(
+                from_wz, from_pico,
+                "z_encoding_to_string disagrees with upstream for id {id}"
+            );
+            if !from_wz.is_empty() {
+                checked += 1;
+            }
+        }
+        assert_eq!(
+            checked, 53,
+            "the encoding table should render 53 non-empty ids; a different \
+             count means the transcription dropped or gained entries"
+        );
+
+        // And the round trip BOTH ways for the strings a program actually
+        // writes: `from_str` then `to_string`, compared across libraries. This
+        // is the half that catches a wrong id being chosen for a known prefix.
+        for probe in [
+            "zenoh/bytes",
+            "text/plain",
+            "text/plain;utf8",
+            "application/json",
+            "application/octet-stream",
+            "video/vp9",
+            "application/x-www-form-urlencoded",
+            "application/json-patch+json",
+            // Unknown prefix -> whole string becomes the schema on the default
+            // id. The fallback arm, which is easy to get wrong in the other
+            // direction (rejecting it).
+            "application/x-made-up-thing-entirely",
+            "",
+        ] {
+            let from_wz = encoding_round_trip(&wz, probe);
+            let from_pico = encoding_round_trip(&pico, probe);
+            assert_eq!(
+                from_wz, from_pico,
+                "z_encoding_from_str -> z_encoding_to_string disagrees with \
+                 upstream for {probe:?}"
+            );
+        }
+    }
+}
+
+/// Build an encoding whose id is `id` with no schema, and render it.
+///
+/// There is no exported "encoding from id", so the id is reached the way a
+/// program does: render the id's own table string through `from_str`. That
+/// makes this a round trip rather than a direct index — which is the point,
+/// since the two directions must agree for the same id.
+///
+/// # Safety
+/// `lib` must export pico's encoding + string ABI.
+unsafe fn encoding_string_for_id(lib: &Library, id: u32) -> String {
+    // ids are dense from 0, so the id's canonical string is what `from_str`
+    // maps back to it. For an id past the table there is no such string, and
+    // both libraries render the empty prefix — asserted by the caller.
+    let probe = ENCODING_PROBES.get(id as usize).copied().unwrap_or("");
+    if probe.is_empty() {
+        return String::new();
+    }
+    encoding_round_trip(lib, probe)
+}
+
+/// `z_encoding_from_str(probe)` then `z_encoding_to_string`, read back through
+/// the SAME library's string accessors.
+///
+/// # Safety
+/// `lib` must export pico's encoding + string ABI.
+unsafe fn encoding_round_trip(lib: &Library, probe: &str) -> String {
+    // `z_owned_encoding_t` is 40 B and `z_owned_string_t` 32 B in pico's
+    // header; both implementations agree (pinned by their own ABI tests).
+    let mut encoding = Slot::<40>::zeroed();
+    let mut owned = Slot::<32>::zeroed();
+    let cstr = std::ffi::CString::new(probe).expect("probe has no interior NUL");
+
+    let from_str: Symbol<unsafe extern "C" fn(*mut u8, *const std::ffi::c_char) -> i8> = lib
+        .get(b"z_encoding_from_str\0")
+        .expect("library does not export z_encoding_from_str");
+    let loan: Symbol<unsafe extern "C" fn(*const u8) -> *const u8> = lib
+        .get(b"z_encoding_loan\0")
+        .expect("library does not export z_encoding_loan");
+    let to_string: Symbol<unsafe extern "C" fn(*const u8, *mut u8) -> i8> = lib
+        .get(b"z_encoding_to_string\0")
+        .expect("library does not export z_encoding_to_string");
+    let drop_encoding: Symbol<unsafe extern "C" fn(*mut u8) -> i8> = lib
+        .get(b"z_encoding_drop\0")
+        .expect("library does not export z_encoding_drop");
+    let string_loan: Symbol<unsafe extern "C" fn(*const u8) -> *const u8> =
+        lib.get(b"z_string_loan\0").expect("no z_string_loan");
+    let data: Symbol<unsafe extern "C" fn(*const u8) -> *const u8> =
+        lib.get(b"z_string_data\0").expect("no z_string_data");
+    let len: Symbol<unsafe extern "C" fn(*const u8) -> usize> =
+        lib.get(b"z_string_len\0").expect("no z_string_len");
+
+    assert_eq!(
+        from_str(encoding.as_mut_ptr(), cstr.as_ptr()),
+        0,
+        "z_encoding_from_str failed for {probe:?}"
+    );
+    let loaned = loan(encoding.as_ptr());
+    assert_eq!(
+        to_string(loaned, owned.as_mut_ptr()),
+        0,
+        "z_encoding_to_string failed for {probe:?}"
+    );
+    let ls = string_loan(owned.as_ptr());
+    let ptr = data(ls);
+    let n = len(ls);
+    let rendered = if ptr.is_null() {
+        String::new()
+    } else {
+        String::from_utf8(std::slice::from_raw_parts(ptr, n).to_vec()).expect("UTF-8")
+    };
+    let _ = drop_encoding(encoding.as_mut_ptr());
+    rendered
+}
+
+/// The canonical string for each id, used only to REACH an id through
+/// `from_str`. Deliberately a separate list from the library's own table: if
+/// this list and `encoding.rs`'s table were the same constant, the comparison
+/// would be against itself and prove nothing. These come from pico's source;
+/// the assertion is that BOTH libraries map them to the same rendering.
+const ENCODING_PROBES: [&str; 53] = [
+    "zenoh/bytes",
+    "zenoh/string",
+    "zenoh/serialized",
+    "application/octet-stream",
+    "text/plain",
+    "application/json",
+    "text/json",
+    "application/cdr",
+    "application/cbor",
+    "application/yaml",
+    "text/yaml",
+    "text/json5",
+    "application/python-serialized-object",
+    "application/protobuf",
+    "application/java-serialized-object",
+    "application/openmetrics-text",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/bmp",
+    "image/webp",
+    "application/xml",
+    "application/x-www-form-urlencoded",
+    "text/html",
+    "text/xml",
+    "text/css",
+    "text/javascript",
+    "text/markdown",
+    "text/csv",
+    "application/sql",
+    "application/coap-payload",
+    "application/json-patch+json",
+    "application/json-seq",
+    "application/jsonpath",
+    "application/jwt",
+    "application/mp4",
+    "application/soap+xml",
+    "application/yang",
+    "audio/aac",
+    "audio/flac",
+    "audio/mp4",
+    "audio/ogg",
+    "audio/vorbis",
+    "video/h261",
+    "video/h263",
+    "video/h264",
+    "video/h265",
+    "video/h266",
+    "video/mp4",
+    "video/ogg",
+    "video/raw",
+    "video/vp8",
+    "video/vp9",
+];
+
+/// The SERIALIZED WIRE SHAPE, compared byte-for-byte with upstream.
+///
+/// ## Why reading it back does not count
+///
+/// `wz-capi-pico/src/serde.rs` has unit tests that serialize and then
+/// deserialize through its own reader. Those pin self-consistency and nothing
+/// else: a build that wrote sequence lengths as fixed 8-byte words, or wrote
+/// arithmetic types as VLE instead of fixed-width little-endian, round-trips
+/// through ITSELF perfectly and is unreadable by every real peer. The bytes are
+/// the interop surface, so the bytes are what is compared here — produced by
+/// both libraries from the same calls and diffed.
+///
+/// The two shapes that a from-scratch implementation most plausibly gets wrong,
+/// and which this therefore covers explicitly:
+///
+///   * a sequence length is a **bare VLE**, so `2` is one byte and `200` is two;
+///   * `ze_serialize_uint32` is **4 raw little-endian bytes**, NOT a VLE — a
+///     natural "use the same integer codec everywhere" choice differs from
+///     upstream for every value above 127.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "dlopens the CMake-built libzenohpico.so oracle; run by run-ci \
+            Layer E"]
+fn serialized_bytes_agree_with_the_real_pico_library() {
+    unsafe {
+        let wz = open(wz_cdylib());
+        let pico = open(pico_library());
+
+        // Sequence lengths across the VLE rungs, including the 127/128 boundary
+        // where a one-byte encoding becomes two.
+        for len in [0usize, 1, 2, 126, 127, 128, 129, 16383, 16384, 100_000] {
+            assert_eq!(
+                serialize_sequence_length(&wz, len),
+                serialize_sequence_length(&pico, len),
+                "sequence length {len} serializes differently from upstream"
+            );
+        }
+
+        // Length-prefixed strings, including the empty one and a multi-byte
+        // UTF-8 body (whose LENGTH is in bytes, not characters — an easy slip).
+        for probe in ["", "a", "alpha", "hello world", "日本語テキスト"] {
+            assert_eq!(
+                serialize_str(&wz, probe),
+                serialize_str(&pico, probe),
+                "string {probe:?} serializes differently from upstream"
+            );
+        }
+
+        // The arithmetic pair: fixed-width little-endian, NOT the VLE.
+        for v in [0u32, 1, 127, 128, 255, 256, 0x0403_0201, u32::MAX] {
+            let from_wz = serialize_uint32(&wz, v);
+            let from_pico = serialize_uint32(&pico, v);
+            assert_eq!(
+                from_wz, from_pico,
+                "uint32 {v} serializes differently from upstream"
+            );
+            assert_eq!(
+                from_wz.len(),
+                4,
+                "uint32 must be exactly 4 bytes — a VLE would be shorter for \
+                 small values, which is the shape this catches"
+            );
+        }
+
+        // And CROSS-DESERIALIZATION, which is the property that actually
+        // matters: pico must read what wz wrote. Same-library round trips
+        // cannot show this.
+        for probe in ["alpha", "hello world"] {
+            let wz_bytes = serialize_str(&wz, probe);
+            assert_eq!(
+                deserialize_str(&pico, &wz_bytes),
+                probe,
+                "the REAL pico could not read back a string wz serialized"
+            );
+            let pico_bytes = serialize_str(&pico, probe);
+            assert_eq!(
+                deserialize_str(&wz, &pico_bytes),
+                probe,
+                "wz could not read back a string the REAL pico serialized"
+            );
+        }
+    }
+}
+
+/// `ze_serializer_empty` + `ze_serializer_serialize_sequence_length` + finish,
+/// returning the produced bytes.
+///
+/// # Safety
+/// `lib` must export pico's serializer ABI.
+unsafe fn serialize_sequence_length(lib: &Library, len: usize) -> Vec<u8> {
+    with_serializer(lib, |lib, loaned| {
+        let f: Symbol<unsafe extern "C" fn(*mut u8, usize) -> i8> = lib
+            .get(b"ze_serializer_serialize_sequence_length\0")
+            .expect("no ze_serializer_serialize_sequence_length");
+        assert_eq!(f(loaned, len), 0, "serialize_sequence_length failed");
+    })
+}
+
+/// `ze_serializer_serialize_str` into a fresh payload.
+///
+/// # Safety
+/// `lib` must export pico's serializer ABI.
+unsafe fn serialize_str(lib: &Library, probe: &str) -> Vec<u8> {
+    let cstr = std::ffi::CString::new(probe).expect("no interior NUL");
+    with_serializer(lib, |lib, loaned| {
+        let f: Symbol<unsafe extern "C" fn(*mut u8, *const std::ffi::c_char) -> i8> = lib
+            .get(b"ze_serializer_serialize_str\0")
+            .expect("no ze_serializer_serialize_str");
+        assert_eq!(f(loaned, cstr.as_ptr()), 0, "serialize_str failed");
+    })
+}
+
+/// Drive one serializer through `body` and return the finished bytes.
+///
+/// # Safety
+/// `lib` must export pico's serializer + bytes ABI.
+unsafe fn with_serializer(lib: &Library, body: impl FnOnce(&Library, *mut u8)) -> Vec<u8> {
+    // `ze_owned_serializer_t` is 40 B and `z_owned_bytes_t` 32 B in pico's
+    // header; both implementations agree (pinned by their own ABI tests).
+    let mut serializer = Slot::<40>::zeroed();
+    let mut bytes = Slot::<32>::zeroed();
+
+    let empty: Symbol<unsafe extern "C" fn(*mut u8) -> i8> = lib
+        .get(b"ze_serializer_empty\0")
+        .expect("no ze_serializer_empty");
+    let loan_mut: Symbol<unsafe extern "C" fn(*mut u8) -> *mut u8> = lib
+        .get(b"ze_serializer_loan_mut\0")
+        .expect("no ze_serializer_loan_mut");
+    let finish: Symbol<unsafe extern "C" fn(*mut u8, *mut u8)> = lib
+        .get(b"ze_serializer_finish\0")
+        .expect("no ze_serializer_finish");
+
+    assert_eq!(
+        empty(serializer.as_mut_ptr()),
+        0,
+        "ze_serializer_empty failed"
+    );
+    body(lib, loan_mut(serializer.as_mut_ptr()));
+    finish(serializer.as_mut_ptr(), bytes.as_mut_ptr());
+    read_bytes(lib, &mut bytes)
+}
+
+/// `ze_serialize_uint32` into a fresh payload.
+///
+/// # Safety
+/// `lib` must export pico's serialization ABI.
+unsafe fn serialize_uint32(lib: &Library, v: u32) -> Vec<u8> {
+    let mut bytes = Slot::<32>::zeroed();
+    let f: Symbol<unsafe extern "C" fn(*mut u8, u32) -> i8> = lib
+        .get(b"ze_serialize_uint32\0")
+        .expect("no ze_serialize_uint32");
+    assert_eq!(f(bytes.as_mut_ptr(), v), 0, "ze_serialize_uint32 failed");
+    read_bytes(lib, &mut bytes)
+}
+
+/// Copy an owned payload's octets out through that library's own reader, then
+/// drop it.
+///
+/// # Safety
+/// `lib` must export pico's bytes ABI and `bytes` must hold a live payload.
+unsafe fn read_bytes(lib: &Library, bytes: &mut Slot<32>) -> Vec<u8> {
+    let loan: Symbol<unsafe extern "C" fn(*const u8) -> *const u8> =
+        lib.get(b"z_bytes_loan\0").expect("no z_bytes_loan");
+    // `z_bytes_get_reader` returns a 32-byte struct BY VALUE. On SysV x86-64
+    // anything larger than 16 bytes is class MEMORY, so the caller passes a
+    // hidden pointer to the return slot as the FIRST argument. Declaring it any
+    // other way swaps the two pointers and segfaults — measured, not feared.
+    let get_reader: Symbol<unsafe extern "C" fn(*mut u8, *const u8)> = lib
+        .get(b"z_bytes_get_reader\0")
+        .expect("no z_bytes_get_reader");
+    let read: Symbol<unsafe extern "C" fn(*mut u8, *mut u8, usize) -> usize> = lib
+        .get(b"z_bytes_reader_read\0")
+        .expect("no z_bytes_reader_read");
+    let drop_bytes: Symbol<unsafe extern "C" fn(*mut u8) -> i8> =
+        lib.get(b"z_bytes_drop\0").expect("no z_bytes_drop");
+
+    let mut reader = Slot::<32>::zeroed();
+    get_reader(reader.as_mut_ptr(), loan(bytes.as_ptr()));
+
+    let mut out = vec![0u8; 4096];
+    let n = read(reader.as_mut_ptr(), out.as_mut_ptr(), out.len());
+    out.truncate(n);
+    let _ = drop_bytes(bytes.as_mut_ptr());
+    out
+}
+
+/// Build a payload from raw octets and read one length-prefixed string out of
+/// it through `lib`'s deserializer.
+///
+/// # Safety
+/// `lib` must export pico's bytes + deserializer + string ABI.
+unsafe fn deserialize_str(lib: &Library, raw: &[u8]) -> String {
+    let copy_from_buf: Symbol<unsafe extern "C" fn(*mut u8, *const u8, usize) -> i8> = lib
+        .get(b"z_bytes_copy_from_buf\0")
+        .expect("no z_bytes_copy_from_buf");
+    let loan: Symbol<unsafe extern "C" fn(*const u8) -> *const u8> =
+        lib.get(b"z_bytes_loan\0").expect("no z_bytes_loan");
+    // Hidden return pointer first — see `read_bytes`.
+    let from_bytes: Symbol<unsafe extern "C" fn(*mut u8, *const u8)> = lib
+        .get(b"ze_deserializer_from_bytes\0")
+        .expect("no ze_deserializer_from_bytes");
+    let de_string: Symbol<unsafe extern "C" fn(*mut u8, *mut u8) -> i8> = lib
+        .get(b"ze_deserializer_deserialize_string\0")
+        .expect("no ze_deserializer_deserialize_string");
+    let string_loan: Symbol<unsafe extern "C" fn(*const u8) -> *const u8> =
+        lib.get(b"z_string_loan\0").expect("no z_string_loan");
+    let data: Symbol<unsafe extern "C" fn(*const u8) -> *const u8> =
+        lib.get(b"z_string_data\0").expect("no z_string_data");
+    let len: Symbol<unsafe extern "C" fn(*const u8) -> usize> =
+        lib.get(b"z_string_len\0").expect("no z_string_len");
+    let drop_bytes: Symbol<unsafe extern "C" fn(*mut u8) -> i8> =
+        lib.get(b"z_bytes_drop\0").expect("no z_bytes_drop");
+
+    let mut bytes = Slot::<32>::zeroed();
+    assert_eq!(
+        copy_from_buf(bytes.as_mut_ptr(), raw.as_ptr(), raw.len()),
+        0,
+        "z_bytes_copy_from_buf failed"
+    );
+    let mut deserializer = Slot::<32>::zeroed();
+    from_bytes(deserializer.as_mut_ptr(), loan(bytes.as_ptr()));
+
+    let mut owned = Slot::<32>::zeroed();
+    assert_eq!(
+        de_string(deserializer.as_mut_ptr(), owned.as_mut_ptr()),
+        0,
+        "ze_deserializer_deserialize_string failed"
+    );
+    let ls = string_loan(owned.as_ptr());
+    let ptr = data(ls);
+    let n = len(ls);
+    let out = if ptr.is_null() {
+        String::new()
+    } else {
+        String::from_utf8(std::slice::from_raw_parts(ptr, n).to_vec()).expect("UTF-8")
+    };
+    let _ = drop_bytes(bytes.as_mut_ptr());
+    out
 }

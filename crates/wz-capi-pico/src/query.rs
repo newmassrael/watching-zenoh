@@ -203,6 +203,10 @@ struct QueryMarshal {
     /// [`parameters_has_anyke`]) — the same derivation pico does, and the gate
     /// `z_query_reply` consults.
     anyke: bool,
+    /// The query's ENCODING, if it carried one. Unlike the payload this stays
+    /// an `Option`, because `z_query_encoding` hands back a POINTER and pico
+    /// distinguishes "no encoding" from "the default encoding".
+    encoding: Option<crate::encoding::z_owned_encoding_t>,
     /// The query's value payload, EMPTY when the query carried no value ext.
     ///
     /// There is deliberately no `has_payload` companion. pico's
@@ -255,6 +259,15 @@ impl QueryMarshal {
             // must hand C a pointer either way (see the field docs).
             payload: view.payload().map(<[u8]>::to_vec).unwrap_or_default(),
             attachment: view.attachment().map(<[u8]>::to_vec).unwrap_or_default(),
+            // R311y529 — owned, for the same reason the payload is: the view's
+            // borrow ends when the dispatch returns and the C callback holds
+            // its borrowed query for the whole call.
+            encoding: view.encoding().map(|hint| {
+                let mut owned = crate::encoding::z_owned_encoding_t::null_value();
+                // SAFETY: `owned` is a live slot this call fills.
+                unsafe { crate::encoding::store_encoding(&mut owned, hint.clone()) };
+                owned
+            }),
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
                 handle: std::ptr::null_mut(),
@@ -1112,6 +1125,26 @@ pub unsafe extern "C" fn z_query_reply_err(
         marshal.push_reply(PendingReply::Err { payload: buf });
         Z_OK
     })
+}
+
+/// The query's ENCODING, or NULL when it carried none (pico
+/// `z_query_encoding`).
+///
+/// NULL is reachable and meaningful: pico's `_z_query_t` holds the encoding of
+/// the query's VALUE, and a query with no value has none. `z_queryable_attachment.c`
+/// reads it only after checking the payload, which is the same guard.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_encoding(
+    query: *const z_loaned_query_t,
+) -> *const crate::encoding::z_loaned_encoding_t {
+    if query.is_null() {
+        return std::ptr::null();
+    }
+    let marshal = &*(query as *const QueryMarshal);
+    match marshal.encoding.as_ref() {
+        Some(encoding) => encoding as *const _ as *const crate::encoding::z_loaned_encoding_t,
+        None => std::ptr::null(),
+    }
 }
 
 #[cfg(test)]

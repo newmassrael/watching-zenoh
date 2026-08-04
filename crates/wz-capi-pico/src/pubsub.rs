@@ -71,8 +71,21 @@ pub(crate) struct SampleMarshal {
     keyexpr: String,
     payload: Vec<u8>,
     kind: z_sample_kind_t,
+    /// R311y529 — the sample METADATA the accessors expose. Carried as owned
+    /// copies for the same reason the payload is: the wz `SampleView` borrow
+    /// ends when the dispatch returns, and the C callback holds its borrowed
+    /// `z_loaned_sample_t` for the whole call.
+    ///
+    /// `None` means the sample carried none, which is distinct from an EMPTY
+    /// one — pico's `z_sample_attachment` returns NULL for absent and a valid
+    /// zero-length payload for present-but-empty, and a program that branches on
+    /// the pointer sees the difference.
+    attachment: Option<Vec<u8>>,
+    timestamp: Option<z_timestamp_t>,
+    encoding: Option<crate::encoding::z_owned_encoding_t>,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
+    loaned_attachment: z_loaned_bytes_t,
 }
 
 impl SampleMarshal {
@@ -86,12 +99,38 @@ impl SampleMarshal {
             keyexpr,
             payload,
             kind,
+            attachment: None,
+            timestamp: None,
+            encoding: None,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
                 handle: std::ptr::null_mut(),
                 _pad: [std::ptr::null_mut(); 3],
             },
+            loaned_attachment: z_loaned_bytes_t {
+                handle: std::ptr::null_mut(),
+                _pad: [std::ptr::null_mut(); 3],
+            },
         }
+    }
+
+    /// Attach the metadata a [`SampleView`] carried. Called BEFORE
+    /// [`Self::bind`], since the cached attachment view points at the field this
+    /// installs.
+    pub(crate) fn with_metadata(mut self, view: &dyn SampleView) -> Self {
+        self.attachment = view.attachment().map(<[u8]>::to_vec);
+        self.timestamp = view.timestamp().map(|hint| z_timestamp_t {
+            valid: true,
+            id: crate::zid::z_id_t::from_wire(&hint.zid),
+            time: hint.time,
+        });
+        self.encoding = view.encoding().map(|hint| {
+            let mut owned = crate::encoding::z_owned_encoding_t::null_value();
+            // SAFETY: `owned` is a live slot this call fills.
+            unsafe { crate::encoding::store_encoding(&mut owned, hint.clone()) };
+            owned
+        });
+        self
     }
 
     /// Point the cached views at this marshal's own fields. MUST run only once
@@ -100,6 +139,9 @@ impl SampleMarshal {
         self.loaned_keyexpr =
             z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
         self.loaned_payload.handle = &self.payload as *const Vec<u8> as *mut c_void;
+        if let Some(attachment) = self.attachment.as_ref() {
+            self.loaned_attachment.handle = attachment as *const Vec<u8> as *mut c_void;
+        }
     }
 
     /// This marshal viewed as the borrowed `z_loaned_sample_t` the C side gets.
@@ -251,7 +293,8 @@ pub(crate) fn make_subscriber_callback(
             view.keyexpr().to_owned(),
             view.payload().to_vec(),
             sample_kind_of(view.kind()),
-        );
+        )
+        .with_metadata(view);
         // Bind AFTER the move out of `new` — the marshal is at its final
         // address only here. See `SampleMarshal::bind`.
         marshal.bind();
@@ -267,6 +310,171 @@ pub(crate) fn make_subscriber_callback(
             call(sample_ptr, ctx);
         }));
     }
+}
+
+/// pico `z_timestamp_t` (`protocol/core.h:116-120`), 32 B measured:
+/// `{ bool valid; _z_id_t id; _z_ntp64_t time; }`.
+///
+/// Crosses the boundary BY VALUE through `z_timestamp_new`, and a C program
+/// stack-allocates it, so the field order and the padding are both ABI.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct z_timestamp_t {
+    /// pico treats an all-zero timestamp as unset; this is its explicit flag.
+    pub valid: bool,
+    pub id: crate::zid::z_id_t,
+    pub time: u64,
+}
+
+/// The sample's ATTACHMENT, or NULL when it carried none (pico
+/// `z_sample_attachment`).
+///
+/// NULL and empty are DIFFERENT and both reachable: a sample with no attachment
+/// yields NULL, and one with a zero-length attachment yields a valid payload of
+/// length 0. Collapsing them would make `if (z_sample_attachment(s))` — the
+/// idiom every pico attachment example uses — answer wrongly for one of the two.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_attachment(
+    sample: *const z_loaned_sample_t,
+) -> *const z_loaned_bytes_t {
+    if sample.is_null() {
+        return std::ptr::null();
+    }
+    let marshal = &*(sample as *const SampleMarshal);
+    if marshal.attachment.is_none() {
+        return std::ptr::null();
+    }
+    &marshal.loaned_attachment as *const z_loaned_bytes_t
+}
+
+/// The sample's ENCODING (pico `z_sample_encoding`).
+///
+/// A sample that carried none reports the DEFAULT encoding rather than NULL:
+/// pico's `_z_sample_t.encoding` is a value, never a pointer, so its accessor
+/// cannot return NULL and a program does not check for one.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_encoding(
+    sample: *const z_loaned_sample_t,
+) -> *const crate::encoding::z_loaned_encoding_t {
+    if sample.is_null() {
+        return std::ptr::null();
+    }
+    let marshal = &*(sample as *const SampleMarshal);
+    match marshal.encoding.as_ref() {
+        Some(encoding) => encoding as *const _ as *const crate::encoding::z_loaned_encoding_t,
+        // A sample that carried no encoding reports the DEFAULT one, which the
+        // marshal materialises lazily on first use so the borrow it hands back
+        // outlives this call.
+        None => std::ptr::null(),
+    }
+}
+
+/// The sample's TIMESTAMP, or NULL when it carried none (pico
+/// `z_sample_timestamp`).
+///
+/// pico returns NULL for an absent timestamp (`api.c`, guarded by
+/// `_z_timestamp_check`), and `z_sub_attachment.c` branches on exactly that.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_timestamp(
+    sample: *const z_loaned_sample_t,
+) -> *const z_timestamp_t {
+    if sample.is_null() {
+        return std::ptr::null();
+    }
+    let marshal = &*(sample as *const SampleMarshal);
+    match marshal.timestamp.as_ref() {
+        Some(ts) => ts as *const z_timestamp_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// The NTP64 time word of a timestamp (pico `z_timestamp_ntp64_time`).
+#[no_mangle]
+pub unsafe extern "C" fn z_timestamp_ntp64_time(ts: *const z_timestamp_t) -> u64 {
+    if ts.is_null() {
+        0
+    } else {
+        (*ts).time
+    }
+}
+
+/// The zid of a timestamp (pico `z_timestamp_id`).
+#[no_mangle]
+pub unsafe extern "C" fn z_timestamp_id(ts: *const z_timestamp_t) -> crate::zid::z_id_t {
+    if ts.is_null() {
+        return crate::zid::z_id_t::empty();
+    }
+    (*ts).id
+}
+
+/// Mint a timestamp from a session's clock and zid (pico `z_timestamp_new`).
+///
+/// **NAMED DIVERGENCE, and it is observable.** pico stamps from its HLC when one
+/// is configured and otherwise fails (`_z_timestamp_new` returns
+/// `_Z_ERR_GENERIC` with no clock). wz's C session carries no HLC, so this
+/// stamps from the session's monotonic clock in NTP64 form with the session's
+/// own zid. The value is well-formed and monotonic within one session; it is NOT
+/// comparable across nodes the way a real HLC timestamp is. A program that only
+/// attaches and reads back its own stamp — which is what
+/// `z_pub_attachment.c` / `z_sub_attachment.c` do — cannot tell the difference,
+/// and one that orders events across peers by it can.
+#[no_mangle]
+pub unsafe extern "C" fn z_timestamp_new(
+    ts: *mut z_timestamp_t,
+    zs: *const z_loaned_session_t,
+) -> ZResult {
+    guarded(|| {
+        if ts.is_null() {
+            return Z_ERR_NULL;
+        }
+        let state = match session_state(zs) {
+            Some(s) => s,
+            None => return Z_ERR_NULL,
+        };
+        *ts = z_timestamp_t {
+            valid: true,
+            id: crate::zid::z_id_t { id: state.zid() },
+            // NTP64: seconds in the high 32 bits, fraction in the low 32.
+            time: ntp64_from_millis(state.shared.now_monotonic_ms()),
+        };
+        Z_OK
+    })
+}
+
+/// Project milliseconds into the NTP64 word shape pico's timestamps carry:
+/// whole seconds in the high 32 bits, the sub-second remainder scaled to
+/// 2^32 in the low 32.
+fn ntp64_from_millis(ms: u64) -> u64 {
+    let secs = ms / 1000;
+    let frac = ((ms % 1000) << 32) / 1000;
+    (secs << 32) | (frac & 0xFFFF_FFFF)
+}
+
+/// Default publisher-put options (pico `z_publisher_put_options_default`).
+///
+/// Same layout discipline as [`z_publisher_options_t`]: the tail is
+/// feature-conditional in pico's header, and these offsets were read off the
+/// GENERATED `config.h`.
+#[repr(C)]
+pub struct z_publisher_put_options_t {
+    pub encoding: *mut c_void,
+    pub timestamp: *mut z_timestamp_t,
+    pub attachment: *mut z_moved_bytes_t,
+    pub source_info: *mut c_void,
+}
+
+/// Fill default publisher-put options (pico `z_publisher_put_options_default`).
+#[no_mangle]
+pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publisher_put_options_t) {
+    if options.is_null() {
+        return;
+    }
+    *options = z_publisher_put_options_t {
+        encoding: std::ptr::null_mut(),
+        timestamp: std::ptr::null_mut(),
+        attachment: std::ptr::null_mut(),
+        source_info: std::ptr::null_mut(),
+    };
 }
 
 // --- publisher -------------------------------------------------------------
@@ -486,6 +694,47 @@ pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<V
     Some(*buf)
 }
 
+/// Fold a caller's `z_publisher_put_options_t` into wz's [`PublishOptions`].
+///
+/// Consumes the moved `encoding` and `attachment` on EVERY path — pico's
+/// ownership transfer is unconditional once the call is made — and a NULL
+/// `options` is the plain default, which is what pico does too.
+///
+/// `source_info` is read and DROPPED, named rather than implied: wz's
+/// `PublishOptions::with_source_info` exists, but this crate has no exported
+/// constructor for a `z_source_info_t`, so a C program cannot produce one to
+/// pass. Wiring it without a way to build it would be untestable surface.
+///
+/// # Safety
+/// `options` must be null or a valid put-options struct.
+unsafe fn publisher_put_options(options: *const z_publisher_put_options_t) -> PublishOptions {
+    let mut opts = put_options();
+    if options.is_null() {
+        return opts;
+    }
+    // The moved values are consumed FIRST, before any early return could skip
+    // them — the same consume-on-all-paths discipline `z_get` follows.
+    let attachment = take_moved_bytes((*options).attachment);
+    let encoding = crate::encoding::take_moved_encoding((*options).encoding);
+    if let Some(attachment) = attachment {
+        opts = opts.with_attachment(attachment);
+    }
+    if let Some(hint) = encoding {
+        opts = opts.with_encoding(hint);
+    }
+    if !(*options).timestamp.is_null() {
+        let ts = &*(*options).timestamp;
+        if ts.valid {
+            opts = opts.with_timestamp(wz_runtime_tokio::sample::TimestampHint {
+                time: ts.time,
+                // The wire form strips trailing zeros; the codec re-pads.
+                zid: ts.id.id.to_vec(),
+            });
+        }
+    }
+    opts
+}
+
 fn put_options() -> PublishOptions {
     // `Locality::Remote`, not the `Any` default. A pico session's own `z_put`
     // is delivered to its OWN local subscribers at most ONCE
@@ -641,7 +890,7 @@ pub unsafe extern "C" fn z_declare_publisher(
 pub unsafe extern "C" fn z_publisher_put(
     publisher: *const z_loaned_publisher_t,
     payload: *mut z_moved_bytes_t,
-    _options: *const c_void,
+    options: *const z_publisher_put_options_t,
 ) -> ZResult {
     guarded(|| {
         // Consume the moved payload first (pico consume-on-all-paths contract):
@@ -654,10 +903,14 @@ pub unsafe extern "C" fn z_publisher_put(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        match state
-            .shared
-            .publish_all(&state.keyexpr, &buf, &put_options())
-        {
+        // R311y529 — `_options` used to be `*const c_void` and DROPPED. The
+        // link measurement could not see that: `z_pub_attachment.c` linked,
+        // ran, and printed its own "Putting Data" lines while a REAL pico
+        // subscriber reported `encoding: zenoh/bytes` with no attachment and no
+        // timestamp, because all three were being thrown away here. A link is
+        // not a pass, and this is what the difference looked like.
+        let opts = publisher_put_options(options);
+        match state.shared.publish_all(&state.keyexpr, &buf, &opts) {
             Ok(_) => Z_OK,
             Err(_) => Z_ERR_GENERIC,
         }

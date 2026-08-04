@@ -999,6 +999,16 @@ impl SharedSession {
             .collect()
     }
 
+    /// This registry's monotonic clock reading, in milliseconds.
+    ///
+    /// R311y529 — exposed for `z_timestamp_new`, which needs a time source and
+    /// must use the SAME one the session drives on: two clocks would let a
+    /// stamped sample carry a time the session's own scheduling disagrees with.
+    pub fn now_monotonic_ms(&self) -> u64 {
+        use wz_runtime_core::TimeSource;
+        self.clock.now_monotonic_ms()
+    }
+
     /// Every connected peer's `(zid, whatami)`, as the INIT exchange recorded
     /// them — the input to pico's `z_info_peers_zid` / `z_info_routers_zid`.
     ///

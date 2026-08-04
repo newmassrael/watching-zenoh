@@ -60,6 +60,12 @@ getrandom = "0.2"
 # `routing-accept` is not in the default bundle and gates `accept_loop`, which
 # the listen role needs.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["routing-accept"] }
+# R311y529 — the `TimeSource` trait, so this crate can read the clock it already
+# holds (`SharedSession::now_monotonic_ms`, which `z_timestamp_new` stamps
+# from). Already in the graph via wz-runtime-tokio; named here because a trait
+# method needs the trait in scope, and depending on it implicitly through
+# another crate's re-export would break the moment that re-export moved.
+wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 
 [lints]

@@ -115,6 +115,66 @@ unsafe fn store_slice(dst: *mut z_owned_slice_t, buf: ByteBuf) {
         _pad: [std::ptr::null_mut(); 3],
     };
 }
+/// Build an empty payload (pico `z_bytes_empty`).
+///
+/// Distinct from a NULL one: a program that builds an empty payload and attaches
+/// it gets a present-but-zero-length attachment, which `z_sample_attachment`
+/// reports as non-NULL. See that accessor for why the two must not collapse.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_empty(bytes: *mut z_owned_bytes_t) {
+    if bytes.is_null() {
+        return;
+    }
+    store_bytes(bytes, ByteBuf::new());
+}
+
+/// Adopt a caller-allocated C string into an owned string (pico
+/// `z_string_from_str`).
+///
+/// pico TAKES OWNERSHIP and calls `deleter(value, context)` when the string is
+/// dropped. wz COPIES the bytes into its own `StringState` and runs the deleter
+/// **immediately**, because the copy means the caller's buffer is no longer
+/// referenced.
+///
+/// That is a named divergence with one observable consequence, stated rather
+/// than buried: a program whose deleter has side effects sees them at
+/// construction rather than at drop. Running it immediately is the choice that
+/// keeps the ownership contract honest — the alternative, holding the pointer to
+/// honour the deleter's timing, would make the owned string borrow a buffer wz
+/// does not control for the rest of its life.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_from_str(
+    str_out: *mut z_owned_string_t,
+    value: *mut std::ffi::c_char,
+    deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    context: *mut c_void,
+) -> ZResult {
+    guarded(|| {
+        if str_out.is_null() {
+            return Z_ERR_NULL;
+        }
+        *str_out = z_owned_string_t::null_value();
+        if value.is_null() {
+            return Z_ERR_NULL;
+        }
+        let bytes = std::ffi::CStr::from_ptr(value).to_bytes().to_vec();
+        store_string(str_out, StringState::boxed(&bytes));
+        // The copy is complete, so the caller's buffer is released now.
+        if let Some(free) = deleter {
+            free(value as *mut c_void, context);
+        }
+        Z_OK
+    })
+}
+
+pub(crate) unsafe fn store_owned_bytes(dst: *mut z_owned_bytes_t, buf: ByteBuf) {
+    store_bytes(dst, buf);
+}
+
+pub(crate) unsafe fn store_owned_slice(dst: *mut z_owned_slice_t, buf: ByteBuf) {
+    store_slice(dst, buf);
+}
+
 pub(crate) unsafe fn store_owned_string(dst: *mut z_owned_string_t, bytes: &[u8]) {
     store_string(dst, StringState::boxed(bytes));
 }

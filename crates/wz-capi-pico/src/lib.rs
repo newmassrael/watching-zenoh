@@ -71,6 +71,7 @@ pub mod abi;
 pub mod bytes;
 pub mod codec;
 pub mod config;
+pub mod encoding;
 mod ffi;
 pub mod get;
 pub mod keyexpr;
@@ -81,6 +82,7 @@ pub mod pubsub;
 pub mod querier;
 pub mod query;
 pub mod result;
+pub mod serde;
 pub mod session;
 pub mod sync;
 pub mod zid;
@@ -96,12 +98,14 @@ pub use abi::{
 };
 pub use bytes::*;
 pub use config::*;
+pub use encoding::*;
 pub use get::*;
 pub use keyexpr::*;
 pub use pubsub::*;
 pub use querier::*;
 pub use query::*;
 pub use result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
+pub use serde::*;
 pub use session::*;
 
 // Compile-time byte-compat guard: turn the "byte-match" size claims (see
