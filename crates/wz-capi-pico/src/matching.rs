@@ -139,6 +139,22 @@ pub(crate) struct MatchingListenerState {
     id: MatchId,
 }
 
+impl MatchingListenerState {
+    /// Box this state into the owned C handle. Shared with the QUERIER twin
+    /// (`crate::querier`) so the two declare forms cannot drift in how they
+    /// hand the id back — the asymmetry this family has already paid for once.
+    pub(crate) fn into_handle(
+        shared: Arc<SharedSession>,
+        id: MatchId,
+    ) -> z_owned_matching_listener_t {
+        let boxed = Box::new(MatchingListenerState { shared, id });
+        z_owned_matching_listener_t {
+            handle: Box::into_raw(boxed) as *mut c_void,
+            _pad: [std::ptr::null_mut(); 2],
+        }
+    }
+}
+
 /// Owned matching listener (pico `z_owned_matching_listener_t`, 24 B measured).
 #[repr(C)]
 pub struct z_owned_matching_listener_t {
@@ -161,7 +177,7 @@ pub struct z_moved_matching_listener_t {
 
 impl z_owned_matching_listener_t {
     #[inline]
-    fn null_value() -> Self {
+    pub(crate) fn null_value() -> Self {
         Self {
             handle: std::ptr::null_mut(),
             _pad: [std::ptr::null_mut(); 2],
@@ -400,11 +416,7 @@ pub unsafe extern "C" fn z_publisher_declare_matching_listener(
                 shared.undeclare_matching_listener(id);
                 return Z_ERR_NULL;
             }
-            let boxed = Box::new(MatchingListenerState { shared, id });
-            *listener = z_owned_matching_listener_t {
-                handle: Box::into_raw(boxed) as *mut c_void,
-                _pad: [std::ptr::null_mut(); 2],
-            };
+            *listener = MatchingListenerState::into_handle(shared, id);
             Z_OK
         }
         Err(code) => {
@@ -462,30 +474,13 @@ unsafe fn declare_matching(
     callback: *mut z_moved_closure_matching_status_t,
 ) -> Result<(Arc<SharedSession>, MatchId), ZResult> {
     // Take the closure FIRST, so an invalid publisher still releases it.
-    if callback.is_null() {
-        return Err(Z_ERR_NULL);
-    }
-    let taken = std::mem::replace(
-        &mut (*callback)._this,
-        z_owned_closure_matching_status_t::null_value(),
-    );
-    let owned: Arc<MatchingCClosure> =
-        Arc::new(CClosure::new(taken.context, taken.call, taken.drop));
+    let sink: MatchingSink = consume_matching_closure(callback)?;
 
     let state = match handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) {
         Some(s) => s,
-        // `owned` drops here, running the caller's `drop(context)`.
+        // `sink` drops here, running the caller's `drop(context)`.
         None => return Err(Z_ERR_NULL),
     };
-
-    let sink: MatchingSink = Arc::new(move |matching: bool| {
-        if let Some(call) = owned.call {
-            let status = z_matching_status_t { matching };
-            // SAFETY: `context` is the caller's, alive until `drop` runs, which
-            // cannot overlap this call (the `Arc` is held for its duration).
-            call(&status, owned.context.0);
-        }
-    });
 
     let shared = state.shared_session();
     let id = shared.declare_matching_listener(state.keyexpr().to_owned(), sink);
@@ -495,6 +490,34 @@ unsafe fn declare_matching(
     // `PublisherState::record_matching_listener`.
     state.record_matching_listener(id);
     Ok((shared, id))
+}
+
+/// Consume a moved matching closure and adapt it to a [`MatchingSink`].
+///
+/// Shared by the PUBLISHER and QUERIER declare forms so the ownership contract
+/// — the caller's `drop(context)` runs exactly once, on every path — has one
+/// implementation. The `Arc<MatchingCClosure>` is what carries it: the sink
+/// holds the only clone, so releasing the sink releases the C context.
+pub(crate) unsafe fn consume_matching_closure(
+    callback: *mut z_moved_closure_matching_status_t,
+) -> Result<MatchingSink, ZResult> {
+    if callback.is_null() {
+        return Err(Z_ERR_NULL);
+    }
+    let taken = std::mem::replace(
+        &mut (*callback)._this,
+        z_owned_closure_matching_status_t::null_value(),
+    );
+    let owned: Arc<MatchingCClosure> =
+        Arc::new(CClosure::new(taken.context, taken.call, taken.drop));
+    Ok(Arc::new(move |matching: bool| {
+        if let Some(call) = owned.call {
+            let status = z_matching_status_t { matching };
+            // SAFETY: `context` is the caller's, alive until `drop` runs, which
+            // cannot overlap this call (the `Arc` is held for its duration).
+            call(&status, owned.context.0);
+        }
+    }))
 }
 
 #[cfg(test)]

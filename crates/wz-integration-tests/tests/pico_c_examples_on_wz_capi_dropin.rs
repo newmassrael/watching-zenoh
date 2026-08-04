@@ -1483,3 +1483,134 @@ fn pico_zpubthr_source_on_wz_capi_batches_to_a_real_pico_zsub() {
 
     graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
 }
+
+/// LEG 12 (`wz->pico`, QUERIER) — upstream's `z_get_lat.c`, running on wz,
+/// round-trips through a REAL zenoh-pico queryable.
+///
+/// ## Why this program and not a hand-written querier exercise
+///
+/// `z_get_lat.c` is the canonical querier client, and it uses the family the way
+/// a real program does rather than the way a test author would: it declares ONCE
+/// and gets many times, passes `NULL` options and `NULL` parameters (so the
+/// defaults are the thing under test), and — decisively — it BLOCKS on each
+/// reply before issuing the next. Its `load_loop` spins until the reply counter
+/// increments, so a querier that issued nothing, issued to the wrong keyexpr, or
+/// dropped the reply does not fail an assertion; it hangs, and the leg times out.
+///
+/// That makes the program's own EXIT the witness. Its keyexpr is hard-coded
+/// `"lat"`, so the foreign counterparty is a real pico `z_queryable` on that
+/// key, and the leg additionally reads that queryable's own log — a program that
+/// somehow satisfied its reply counter without the foreign process seeing a
+/// query would fail the cross-check.
+///
+/// The printed body is `ping_nb` microsecond figures, one per round trip, so the
+/// line count is the round-trip count: five requested, five printed, five
+/// answered by a process wz does not own.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_queryable CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zgetlat_source_on_wz_capi_round_trips_through_real_pico_zqueryable() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_get_lat", dir.path());
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    // Hard-coded in the upstream program; the foreign queryable must match it.
+    let key = "lat";
+    let rounds = 5usize;
+
+    let mut qable_out = tempfile::tempfile().expect("queryable stdout capture");
+    let qable_writer = qable_out.try_clone().expect("dup queryable stdout handle");
+    let mut qable = ChildGuard::wrap(
+        "real zenoh-pico z_queryable (listening peer)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_queryable)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key])
+            .stdout(Stdio::from(qable_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_queryable as a listener"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(qable.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real pico z_queryable never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut qable_out)
+        );
+    }
+    drop(reservation);
+
+    let mut lat_out = tempfile::tempfile().expect("z_get_lat stdout capture");
+    let lat_writer = lat_out.try_clone().expect("dup z_get_lat stdout handle");
+    let lat = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args([
+            "-e",
+            &endpoint,
+            "-m",
+            "client",
+            "-n",
+            &rounds.to_string(),
+            "-w",
+            "200",
+        ])
+        .stdout(Stdio::from(lat_writer))
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the compiled z_get_lat drop-in");
+    let printed = read_captured(&mut lat_out);
+    assert!(
+        lat.success(),
+        "z_get_lat.c on wz exited {lat:?} — a querier that never delivered a \
+         reply BLOCKS in its load_loop, so a non-zero exit or a timeout here \
+         means the querier plane did not round-trip.\n--- its stdout ---\n\
+         {printed}\n--- REAL pico z_queryable stdout ---\n{}",
+        read_captured(&mut qable_out)
+    );
+
+    // The body is one microsecond figure per completed round trip.
+    let measurements: Vec<&str> = printed
+        .lines()
+        .filter(|line| !line.trim().is_empty() && line.trim().parse::<u64>().is_ok())
+        .collect();
+    assert_eq!(
+        measurements.len(),
+        rounds,
+        "z_get_lat printed {} measurements, expected {rounds} — each line is \
+         one COMPLETED round trip through the foreign queryable.\n\
+         --- z_get_lat (on wz) stdout ---\n{printed}",
+        measurements.len()
+    );
+    assert!(
+        !printed.contains("Tx failed"),
+        "z_querier_get reported a transmit failure.\n--- stdout ---\n{printed}"
+    );
+
+    // Cross-check against the counterparty: the foreign process must have SEEN
+    // the queries. Without this, a build whose reply counter advanced for some
+    // other reason would satisfy every assertion above.
+    let foreign = wait_for_substring(
+        &mut qable_out,
+        "[Queryable handler] Received Query",
+        EXCHANGE_TIMEOUT,
+    )
+    .unwrap_or_else(|captured| {
+        panic!(
+            "z_get_lat completed its round trips but the REAL pico queryable \
+             never logged a query, so the replies did not come from it.\n\
+             --- REAL pico z_queryable stdout ---\n{captured}"
+        )
+    });
+    assert!(
+        foreign.contains(key),
+        "the foreign queryable logged queries but not on {key}.\n\
+         --- REAL pico z_queryable stdout ---\n{foreign}"
+    );
+
+    graceful_terminate(qable.child_mut(), Duration::from_secs(5));
+}

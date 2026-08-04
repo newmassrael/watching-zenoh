@@ -885,9 +885,7 @@ unsafe fn get_inner(
     // `CReplyClosure` owns the C `drop(context)`, so every early return below
     // frees it — and, because the drop IS the completion signal, an early error
     // also correctly reports "this get is over".
-    let owned = &mut (*callback)._this;
-    let cclosure = Arc::new(CReplyClosure::new(owned.context, owned.call, owned.drop));
-    *owned = z_owned_closure_reply_t::null_value();
+    let cclosure = adopt_reply_closure(callback);
 
     let state = match session_state(zs) {
         Some(s) => s,
@@ -927,6 +925,67 @@ unsafe fn get_inner(
     } else {
         std::slice::from_raw_parts(parameters as *const u8, parameters_len)
     };
+
+    issue_get(
+        &state.shared,
+        ke,
+        params_in,
+        target,
+        consolidation,
+        timeout_ms,
+        accept_replies,
+        payload,
+        attachment,
+        cclosure,
+    )
+}
+
+/// Adopt a moved reply closure and null the source, exactly as pico does
+/// (`_z_closure_reply_t closure = callback->_this._val;
+/// z_internal_closure_reply_null(&callback->_this);`).
+///
+/// From here the returned `Arc` owns the C `drop(context)`, and because that
+/// drop IS the get's completion signal, releasing it on an error path correctly
+/// reports "this get is over". Shared with `z_querier_get`
+/// (`crate::querier`), which has the same contract.
+///
+/// # Safety
+/// `callback` must be a non-null, valid moved reply closure.
+pub(crate) unsafe fn adopt_reply_closure(
+    callback: *mut z_moved_closure_reply_t,
+) -> Arc<CReplyClosure> {
+    let owned = &mut (*callback)._this;
+    let adopted = Arc::new(CReplyClosure::new(owned.context, owned.call, owned.drop));
+    *owned = z_owned_closure_reply_t::null_value();
+    adopted
+}
+
+/// Issue one get on an already-resolved registry — everything `get_inner` does
+/// after it has turned a `z_loaned_session_t` and a `z_loaned_keyexpr_t` into an
+/// `Arc<SharedSession>` and a checked keyexpr string.
+///
+/// Split out at R311y528 so `z_querier_get` shares it rather than restating it.
+/// A querier is exactly "a keyexpr plus get options, bound to a session" in both
+/// pico and wz, so the two entry points differ only in where those three come
+/// from; duplicating the body would have put the `_anyke` normalisation and the
+/// receive-side [`ReplyGate`] in two places, and those two must agree or a
+/// reply is silently dropped.
+///
+/// The caller has already adopted the C closure, so `closure` owns the
+/// `drop(context)` from here: every path below completes the get.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn issue_get(
+    shared: &Arc<SharedSession>,
+    keyexpr: String,
+    params_in: &[u8],
+    target: z_query_target_t,
+    consolidation: z_consolidation_mode_t,
+    timeout_ms: u64,
+    accept_replies: crate::query::z_reply_keyexpr_t,
+    payload: Option<crate::bytes::ByteBuf>,
+    attachment: Option<crate::bytes::ByteBuf>,
+    closure: Arc<CReplyClosure>,
+) -> ZResult {
     let params = transmit_parameters(params_in, accept_replies);
 
     // pico's `pen_qry->_anyke` is the OR of the option and the selector the
@@ -935,7 +994,7 @@ unsafe fn get_inner(
     // `transmit_parameters` has already normalised -- so the receive gate and
     // the transmitted bytes cannot disagree.
     let gate = Arc::new(ReplyGate {
-        query_keyexpr: ke.clone(),
+        query_keyexpr: keyexpr.clone(),
         anyke: parameters_has_anyke(&params),
     });
 
@@ -948,7 +1007,7 @@ unsafe fn get_inner(
         attachment,
     );
 
-    fan_get(&state.shared.clone(), &ke, &opts, cclosure, gate)
+    fan_get(shared, &keyexpr, &opts, closure, gate)
 }
 
 /// Fan one C get across every connected face, returning `Z_OK`.

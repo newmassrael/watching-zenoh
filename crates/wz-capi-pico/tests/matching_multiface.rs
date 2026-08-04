@@ -714,3 +714,160 @@ fn a_vanishing_peer_is_purged_from_the_matching_aggregate() {
         close_session(&mut listener);
     }
 }
+
+// --- the QUERIER half of the matching family --------------------------------
+
+/// R311y528 — the querier matching plane R311y527 left unexported.
+///
+/// The gap was a BINDING gap, not a capability one:
+/// `Querier::declare_matching_listener` had existed all along, and the ranking
+/// that opened R311y527 — programs blocked — could not see the omission because
+/// no upstream example calls the querier form. So the only thing that can
+/// witness it is a test written against the C ABI directly, which is what this
+/// is.
+///
+/// The property is the QUERYABLE scope, and that is what separates this from the
+/// publisher plane: a querier watching remote SUBSCRIBERS would stay silent
+/// here, because the peer below declares a queryable and never a subscriber.
+/// The publisher-scope negative is asserted alongside it in the same session, so
+/// a build that collapsed the two scopes into one fails on whichever half it
+/// chose.
+#[test]
+fn a_querier_matches_on_remote_queryables_not_remote_subscribers() {
+    use wz_capi_pico::querier::{
+        z_declare_querier, z_owned_querier_t, z_querier_declare_matching_listener,
+        z_querier_get_matching_status, z_querier_loan, z_querier_move, z_undeclare_querier,
+    };
+    use wz_capi_pico::query::{
+        z_closure_query, z_closure_query_move, z_declare_queryable, z_loaned_query_t,
+        z_owned_queryable_t, z_queryable_move, z_undeclare_queryable,
+    };
+
+    unsafe extern "C" fn on_query(_query: *const z_loaned_query_t, _ctx: *mut c_void) {}
+    unsafe extern "C" fn on_query_drop(_ctx: *mut c_void) {}
+
+    let port = free_port();
+    let querier_seen = Arc::new(Mutex::new(Vec::new()));
+    let publisher_seen = Arc::new(Mutex::new(Vec::new()));
+    let dropped = Arc::new(AtomicUsize::new(0));
+
+    unsafe {
+        let mut listener = open_listen(port);
+
+        // A QUERIER and a PUBLISHER on the SAME keyexpr, each with its own
+        // matching listener. Same key, different scope — so the two logs
+        // separate the scopes without any other variable moving.
+        let mut querier: z_owned_querier_t = std::mem::zeroed();
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut ke, c"scope/data".as_ptr()),
+            Z_OK
+        );
+        assert_eq!(
+            z_declare_querier(
+                z_session_loan(&listener),
+                &mut querier,
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+        let pubr = declare_publisher(&listener, c"scope/data");
+        let mut pub_listener = declare_matching(&pubr, publisher_seen.clone(), dropped.clone());
+
+        let qctx = Box::into_raw(Box::new(VerdictLog {
+            seen: querier_seen.clone(),
+            dropped: dropped.clone(),
+        })) as *mut c_void;
+        let mut qclosure: z_owned_closure_matching_status_t = std::mem::zeroed();
+        assert_eq!(
+            z_closure_matching_status(
+                &mut qclosure,
+                Some(on_matching),
+                Some(on_matching_drop),
+                qctx
+            ),
+            Z_OK
+        );
+        let mut qmatching: z_owned_matching_listener_t = std::mem::zeroed();
+        assert_eq!(
+            z_querier_declare_matching_listener(
+                z_querier_loan(&querier),
+                &mut qmatching,
+                z_closure_matching_status_move(&mut qclosure),
+            ),
+            Z_OK,
+            "z_querier_declare_matching_listener must exist and succeed -- \
+             R311y527 shipped the publisher family whole and this one not at all"
+        );
+
+        // A peer declaring a QUERYABLE moves the QUERIER's verdict and must
+        // leave the PUBLISHER's alone.
+        let mut peer = open_connect(port);
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_query(
+                &mut closure,
+                Some(on_query),
+                Some(on_query_drop),
+                std::ptr::null_mut()
+            ),
+            Z_OK
+        );
+        let mut qke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut qke, c"scope/**".as_ptr()),
+            Z_OK
+        );
+        let mut queryable: z_owned_queryable_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_queryable(
+                z_session_loan(&peer),
+                &mut queryable,
+                z_view_keyexpr_loan(&qke),
+                z_closure_query_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK
+        );
+
+        await_log(
+            &querier_seen,
+            &[true],
+            "a remote QUERYABLE must move the querier's matching verdict",
+        );
+        // The live poll must agree with the listener, exactly as on the
+        // publisher side.
+        let mut status = z_matching_status_t { matching: false };
+        assert_eq!(
+            z_querier_get_matching_status(z_querier_loan(&querier), &mut status),
+            Z_OK
+        );
+        assert!(
+            status.matching,
+            "z_querier_get_matching_status disagrees with the listener it must \
+             be computed the same way as"
+        );
+        assert_log_settles(
+            &publisher_seen,
+            &[],
+            "a remote QUERYABLE must NOT move a PUBLISHER's verdict -- the two \
+             scopes are being collapsed",
+        );
+
+        // And the departure edge, through the same scope.
+        z_undeclare_queryable(z_queryable_move(&mut queryable));
+        close_session(&mut peer);
+        await_log(
+            &querier_seen,
+            &[true, false],
+            "the querier's verdict must fall when the last remote queryable goes",
+        );
+
+        z_undeclare_matching(&mut qmatching);
+        z_undeclare_matching(&mut pub_listener);
+        z_undeclare_querier(z_querier_move(&mut querier));
+        z_undeclare_publisher(z_publisher_move(&mut { pubr }));
+        close_session(&mut listener);
+    }
+}

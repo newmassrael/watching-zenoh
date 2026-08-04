@@ -78,8 +78,8 @@ use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
 };
 use wz_runtime_tokio::session::{
-    MatchingListener, MatchingStatus, PublishAliasError, PublishError, PublishOptions, Queryable,
-    QueryableOptions, SubscribeOptions, Subscriber, TokioSession,
+    MatchingListener, MatchingStatus, PublishAliasError, PublishError, PublishOptions,
+    QueryOptions, Queryable, QueryableOptions, SubscribeOptions, Subscriber, TokioSession,
 };
 use wz_runtime_tokio::session_glue::{IterationEvent, SessionLinkActions};
 use wz_runtime_tokio::sink::SampleView;
@@ -316,6 +316,48 @@ struct MatchEntry {
     keyexpr: String,
     sink: MatchingSink,
     state: Arc<StdMutex<MatchAggregate>>,
+    scope: MatchScope,
+}
+
+/// Which remote declaration a C matching listener watches.
+///
+/// R311y528 — carried on the SSOT entry rather than passed at the declare call
+/// only, because `face_up` REPLAYS every entry onto each new face and has to
+/// install the same kind of watch the original declare did. A scope that lived
+/// only at the call site would silently degrade every replayed querier watch
+/// into a publisher one, and the failure would appear as "matching works until
+/// a peer reconnects".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MatchScope {
+    /// pico `z_publisher_*_matching_*`: watch remote SUBSCRIBERS.
+    RemoteSubscribers,
+    /// pico `z_querier_*_matching_*`: watch remote QUERYABLES.
+    RemoteQueryables,
+}
+
+impl MatchScope {
+    /// Install this scope's per-face watch on `session` for `keyexpr`.
+    ///
+    /// One function rather than a match at each of the two call sites (declare
+    /// and `face_up` replay) for the same reason `face_matching_callback` is one
+    /// function: the two must not drift.
+    fn install(
+        self,
+        session: &TokioSession,
+        keyexpr: &str,
+        callback: impl FnMut(MatchingStatus) + Send + 'static,
+    ) -> Option<MatchingListener<TokioRuntime>> {
+        match self {
+            MatchScope::RemoteSubscribers => session
+                .declare_publisher(keyexpr.to_owned(), PublishOptions::put())
+                .declare_matching_listener(callback)
+                .ok(),
+            MatchScope::RemoteQueryables => session
+                .declare_querier(keyexpr.to_owned(), QueryOptions::default())
+                .declare_matching_listener(callback)
+                .ok(),
+        }
+    }
 }
 
 /// Fold `update` into one entry's aggregate and, when the SESSION verdict
@@ -540,8 +582,10 @@ impl SharedSession {
         // observer must move this replay out of the lock.
         let mut matches = BTreeMap::new();
         for entry in &guard.matches {
-            let pubr = session.declare_publisher(entry.keyexpr.clone(), PublishOptions::put());
-            if let Ok(listener) = pubr.declare_matching_listener(face_matching_callback(id, entry))
+            if let Some(listener) =
+                entry
+                    .scope
+                    .install(&session, &entry.keyexpr, face_matching_callback(id, entry))
             {
                 matches.insert(entry.id, listener);
             }
@@ -1086,6 +1130,17 @@ impl SharedSession {
     /// has no handle filed; its listener handle is dropped after the lock is
     /// released.
     pub fn declare_matching_listener(&self, keyexpr: String, sink: MatchingSink) -> MatchId {
+        self.declare_matching_listener_scoped(keyexpr, sink, MatchScope::RemoteSubscribers)
+    }
+
+    /// The shared body of the publisher and querier declare forms — see
+    /// [`MatchScope`] for why the scope is recorded on the entry.
+    fn declare_matching_listener_scoped(
+        &self,
+        keyexpr: String,
+        sink: MatchingSink,
+        scope: MatchScope,
+    ) -> MatchId {
         let state = Arc::new(StdMutex::new(MatchAggregate::default()));
         // Phase 1 — allocate the id, publish the SSOT entry, snapshot the faces.
         let (id, faces) = {
@@ -1102,6 +1157,7 @@ impl SharedSession {
                 keyexpr: keyexpr.clone(),
                 sink,
                 state: state.clone(),
+                scope,
             });
             (id, faces)
         };
@@ -1122,8 +1178,7 @@ impl SharedSession {
                 .collect();
             drop(guard);
             for ((fid, session), callback) in faces.into_iter().zip(callbacks) {
-                let pubr = session.declare_publisher(keyexpr.clone(), PublishOptions::put());
-                if let Ok(listener) = pubr.declare_matching_listener(callback) {
+                if let Some(listener) = scope.install(&session, &keyexpr, callback) {
                     installed.push((fid, listener));
                 }
             }
@@ -1144,6 +1199,41 @@ impl SharedSession {
         }
         drop(orphans);
         id
+    }
+
+    /// The QUERIER-side twin of [`Self::declare_matching_listener`]: watch for
+    /// remote QUERYABLES rather than remote subscribers.
+    ///
+    /// R311y528 — the publisher half shipped at R311y527 and this one did not,
+    /// which left `z_querier_get_matching_status` and the two
+    /// `z_querier_declare_*_matching_listener` forms unexported while all 19
+    /// publisher-side names were present. That asymmetry is the exact shape the
+    /// matching module's own header warns about, and it went unnoticed because
+    /// the ranking was by PROGRAMS BLOCKED and no upstream example calls the
+    /// querier form.
+    ///
+    /// Everything else — the cross-face OR, the three-phase install, the
+    /// [`deliver_matching_flip`] serialisation — is shared with the publisher
+    /// path by construction: the only difference is which declaration the
+    /// per-face watch is installed on.
+    pub fn declare_querier_matching_listener(
+        &self,
+        keyexpr: String,
+        sink: MatchingSink,
+    ) -> MatchId {
+        self.declare_matching_listener_scoped(keyexpr, sink, MatchScope::RemoteQueryables)
+    }
+
+    /// The SESSION's matching verdict for a QUERIER's `keyexpr` (pico
+    /// `z_querier_get_matching_status`): `true` when ANY connected peer has a
+    /// matching QUERYABLE. The publisher twin is [`Self::has_matching`].
+    pub fn has_matching_queryable(&self, keyexpr: &str) -> bool {
+        self.face_sessions().into_iter().any(|session| {
+            session
+                .declare_querier(keyexpr.to_owned(), QueryOptions::default())
+                .get_matching_status()
+                .matching
+        })
     }
 
     /// The SESSION's matching verdict for `keyexpr` (pico
