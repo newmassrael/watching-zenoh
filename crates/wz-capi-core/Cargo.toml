@@ -70,8 +70,23 @@ getrandom = "0.2"
 # `-history` is the widest of the subscriber chain (it implies `-recovery`, which
 # implies `-subscriber`), so selecting it composes the whole plane the C option
 # structs can ask for.
+# R311y533 — `liveliness-get` is selected HERE, not only by the C-ABI crates,
+# because this crate's drive loop is now the plane's SWEEPER: `dispatch` calls
+# `sweep_expired_liveliness_gets` and the wake arm folds in
+# `next_liveliness_get_deadline_ms`. It is NOT in wz-runtime-tokio's default set
+# (the defaults carry `liveliness-token` / `-subscriber` / `-history`, not
+# `-get`), and `wz-capi-pico` selecting it made this crate compile only under
+# feature UNIFICATION — `cargo test -p wz-capi-core` alone did not. The pre-push
+# changed-crate gate is what caught that; every earlier check in the round built
+# this crate as a dependency of one that already supplied the feature.
+#
+# Gating the two call sites on a forwarding feature was the alternative and is
+# worse: a build without it would silently lose the sweep, which is precisely the
+# defect R311y533 exists to close (an armed liveliness deadline nobody enforces
+# blocks the C caller in `z_recv` forever). The sweeper must be unconditional.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "routing-accept",
+    "liveliness-get",
     "ext-pubsub-advanced-publisher",
     "ext-pubsub-advanced-history",
     "ext-pubsub-sample-miss-detection",
