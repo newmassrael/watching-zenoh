@@ -40,21 +40,28 @@
 //! in `z_query_payload` (see `crates/wz-capi-pico/src/query.rs`).
 //!
 //! **A link is not a pass, and the difference is measurable.** Six examples
-//! link while calling nothing at all — `z_advanced_pub`, `z_advanced_sub`,
-//! `z_pub_st`, `z_pub_tls`, `z_sub_st`, `z_sub_tls` compile to a `#else` stub
-//! `main` because the CMake-generated feature set disagrees with what they
-//! demand (`z_pub_st` and `z_sub_st` want `Z_FEATURE_MULTI_THREAD == 0`, and
-//! the generated config has it at 1). `nm -u <obj> | grep z_open` separates
-//! them from a real body. That is why this file names its examples explicitly
-//! instead of sweeping a glob: a glob would have counted six vacuous passes.
+//! once linked while calling nothing at all — `z_advanced_pub`,
+//! `z_advanced_sub`, `z_pub_st`, `z_pub_tls`, `z_sub_st`, `z_sub_tls` compiled
+//! to a `#else` stub `main` because the CMake-generated feature set disagreed
+//! with what they demand. `nm -u <obj> | grep z_open` separates a stub from a
+//! real body, which is why this file names its examples explicitly instead of
+//! sweeping a glob: a glob would have counted six vacuous passes.
 //!
-//! Census at this round, measured that way: NINE examples link with a real
-//! body — `z_liveliness`, `z_ping`, `z_pong`, `z_put`, `z_queryable`,
-//! `z_queryable_lat`, `z_sub`, `z_sub_liveliness`, `z_sub_thr` — 6 link as
-//! stubs, 15 are still short of exports, and 2 are both. SIX of the nine are
-//! legs below; `z_pong` is used as this file's own foreign counterparty rather
-//! than as a subject, and `z_queryable_lat` / `z_sub_thr` link but are not yet
-//! driven, which is recorded here rather than rounded up into the leg count.
+//! **Census at R311y534: 32 of 32 upstream examples LINK, and 32 of 32 are
+//! DRIVEN.** The stub set is EMPTY — the six that were stubs were not short of
+//! wz exports, they were short of the CMake flags their `#if` demanded, and each
+//! flag was turned on once someone re-read the exclusion instead of the count:
+//! `Z_FEATURE_ADVANCED_{PUBLICATION,SUBSCRIPTION}` for the advanced pair, a
+//! second `Z_FEATURE_MULTI_THREAD=0` header arm for the `_st` pair, and
+//! `Z_FEATURE_LINK_TLS` plus a pinned Mbed TLS for the `_tls` pair. The
+//! configuration gate at the end of this file is what keeps that set empty: it
+//! runs each program and reds if any of them takes its stub branch again.
+//!
+//! Not every DRIVEN program is a leg SUBJECT. `z_ping`, `z_get_lat`,
+//! `z_pub_thr`, `z_get_attachment` and the foreign `z_sub_tls` / `z_pub_tls`
+//! appear as this file's own counterparties as well, which is a different role:
+//! a subject is compiled against wz's cdylib, a counterparty is upstream's own
+//! binary.
 //!
 //! ## Leg 3 needs a discriminator the other two do not
 //!
@@ -3629,6 +3636,257 @@ fn pico_zpubst_source_on_wz_capi_reaches_real_pico_zsub() {
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
 }
 
+/// The keyexpr / payload / topology the two TLS legs share, plus the reason the
+/// PUBLISHER is the listener in both.
+///
+/// R311y534 — the direction was CALIBRATED against the reference before either
+/// leg was written, and the first arrangement tried was wrong. With the
+/// SUBSCRIBER listening (`-l tls/...`) and a `client` publisher dialing in, the
+/// real zenoh-pico `z_pub_tls` reaches a real zenoh-pico `z_sub_tls` with ZERO
+/// samples — and the identical arrangement over plain TCP with `z_pub`/`z_sub`
+/// is also zero. Reversed, both pairs deliver. So it is not TLS and it is not
+/// wz: a DECLARED publisher (which every `z_*_pub*` example is) dialing OUT as a
+/// client never has its write filter armed by the peer it dialed, and pico drops
+/// the put before the wire. Writing the legs the other way round would have
+/// produced two red tests and a hunt through wz's TLS code for a defect that was
+/// never there.
+///
+/// Both legs therefore run: publisher LISTENS as a peer, subscriber DIALS as a
+/// client. That also puts the wz side on the interesting half of each leg —
+/// LEG 35's wz is the TLS ACCEPTOR, LEG 36's wz is the TLS DIALER, so the pair
+/// covers both halves of the handshake rather than one twice.
+const TLS_KEY: &str = "demo/dropin/tls";
+const TLS_KEY_FILTER: &str = "demo/dropin/**";
+
+/// LEG 35 (`wz->pico`) — upstream's `z_pub_tls.c`, running on wz, ACCEPTS a real
+/// zenoh-pico `z_sub_tls` over TLS and publishes a sample the foreign process
+/// decodes and reports.
+///
+/// This is the leg that makes wz's C ABI a TLS acceptor. Everything the
+/// handshake needs is supplied by upstream's own program: the server cert and
+/// private key are base64 PEM blobs compiled into `z_pub_tls.c` and inserted
+/// under `Z_CONFIG_TLS_LISTEN_{CERTIFICATE,PRIVATE_KEY}_BASE64_KEY`, and wz has
+/// to resolve those keys, build a rustls `ServerConfig` from them, and bind a
+/// `tls/` listener that presents it. Before R311y534 wz read only the PATH forms
+/// of those two keys and fed them exclusively to the QUIC acceptor, so this
+/// program's config produced a cert-free `tls/` bind and a typed `Unsupported`.
+///
+/// The verdict is FOREIGN and it is not merely a payload match: real zenoh-pico
+/// (over mbedtls) completed a TLS handshake against wz (over rustls), decrypted
+/// the record layer, and parsed a zenoh frame out of it. A wz that presented a
+/// wrong cert, a wrong chain, or spoke the zenoh framing in the clear could not
+/// reach that line.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_sub_tls CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zpubtls_source_on_wz_capi_serves_real_pico_zsubtls_over_tls() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_pub_tls", dir.path());
+    let z_sub_tls = zenoh_pico_cli_binary("z_sub_tls");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tls/127.0.0.1:{port}");
+    let payload = "TLS-FROM-DROPIN-PUBLISHER";
+
+    let mut pub_out = tempfile::tempfile().expect("z_pub_tls drop-in stdout capture");
+    let writer = pub_out.try_clone().expect("dup z_pub_tls stdout handle");
+    let pub_err = pub_out.try_clone().expect("dup z_pub_tls stderr handle");
+    // `-n 60`: upstream puts on a one-second timer, so the count is a WINDOW,
+    // not an expectation. The subscriber leaves on its first sample and this
+    // publisher is terminated right after; a small count would make the leg a
+    // race between the dialer's handshake and the publisher's exit.
+    let mut publisher = ChildGuard::wrap(
+        "z_pub_tls.c on wz-capi-pico",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args([
+                "-l", &endpoint, "-m", "peer", "-k", TLS_KEY, "-v", payload, "-n", "60",
+            ])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(pub_err))
+            .spawn()
+            .expect("spawn the compiled z_pub_tls drop-in"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(publisher.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_pub_tls.c drop-in never accepted on {endpoint} — {why}. Its \
+             z_open must resolve the inline base64 listen cert + key and bind a \
+             TLS listener that presents them; capture so far:\n{}",
+            read_captured(&mut pub_out)
+        );
+    }
+    drop(reservation);
+
+    let mut sub_out = tempfile::tempfile().expect("foreign z_sub_tls stdout capture");
+    let sub_writer = sub_out.try_clone().expect("dup foreign z_sub_tls handle");
+    let sub_err = sub_out
+        .try_clone()
+        .expect("dup foreign z_sub_tls stderr handle");
+    let subscriber = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&z_sub_tls)
+        .args([
+            "-e",
+            &endpoint,
+            "-m",
+            "client",
+            "-k",
+            TLS_KEY_FILTER,
+            "-n",
+            "1",
+        ])
+        .stdout(Stdio::from(sub_writer))
+        .stderr(Stdio::from(sub_err))
+        .spawn()
+        .expect("spawn the real zenoh-pico z_sub_tls");
+    let status = bounded_exit("real zenoh-pico z_sub_tls", subscriber, &mut sub_out);
+
+    let foreign = read_captured(&mut sub_out);
+    assert!(
+        status.success(),
+        "the REAL zenoh-pico z_sub_tls exited {status:?} dialing wz's TLS \
+         listener — it returns -1 when z_open fails, which is what a rejected or \
+         absent TLS handshake looks like from the foreign side.\n\
+         --- REAL pico z_sub_tls stdout+stderr ---\n{foreign}\n\
+         --- z_pub_tls.c (on wz) stdout+stderr ---\n{}",
+        read_captured(&mut pub_out)
+    );
+    assert!(
+        foreign.contains(payload),
+        "the REAL zenoh-pico z_sub_tls opened a TLS session against wz but never \
+         reported the sample upstream's z_pub_tls.c published while running on \
+         wz's C-ABI.\nexpected substring: {payload}\n\
+         --- REAL pico z_sub_tls stdout+stderr ---\n{foreign}\n\
+         --- z_pub_tls.c (on wz) stdout+stderr ---\n{}",
+        read_captured(&mut pub_out)
+    );
+    // The KEY as well as the payload, for the same reason as LEG 1: a keyexpr wz
+    // resolved wrongly would still carry the right bytes.
+    assert!(
+        foreign.contains(TLS_KEY),
+        "the payload crossed TLS but not on the key the drop-in published \
+         ({TLS_KEY}).\n--- REAL pico z_sub_tls stdout ---\n{foreign}"
+    );
+
+    graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 36 (`pico->wz`) — upstream's `z_sub_tls.c`, running on wz, DIALS a real
+/// zenoh-pico `z_pub_tls` over TLS and reports the sample the foreign publisher
+/// encrypted.
+///
+/// The mirror of LEG 35, and the half that exercises wz as the TLS CLIENT: here
+/// the foreign process owns the cert and wz has to verify it. The program hands
+/// wz a root CA under `Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_BASE64_KEY` and a
+/// `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY` of `"false"`, and BOTH matter: the
+/// bundled cert names `localhost` while the example dials `tls/127.0.0.1:<port>`,
+/// so a wz that ignored the verify-name key and hard-coded SAN checking would
+/// fail this handshake on a cert the reference accepts. Chain-to-root is still
+/// enforced — only the name match is dropped — so this is not a leg that passes
+/// on an unverified connection.
+///
+/// The witness is the drop-in's own stdout, which is weaker than LEG 35's
+/// foreign verdict; the pair is what makes the claim, since LEG 35's foreign
+/// process cannot say anything about wz's dial path and this one can.
+// wz-proves: api-compat-pico pico->wz partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_pub_tls CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zsubtls_source_on_wz_capi_dials_real_pico_zpubtls_over_tls() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_sub_tls", dir.path());
+    let z_pub_tls = zenoh_pico_cli_binary("z_pub_tls");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tls/127.0.0.1:{port}");
+    let payload = "TLS-FROM-REAL-PICO-PUBLISHER";
+
+    let mut pub_out = tempfile::tempfile().expect("foreign z_pub_tls stdout capture");
+    let writer = pub_out.try_clone().expect("dup foreign z_pub_tls handle");
+    let pub_err = pub_out
+        .try_clone()
+        .expect("dup foreign z_pub_tls stderr handle");
+    let mut publisher = ChildGuard::wrap(
+        "real zenoh-pico z_pub_tls",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_pub_tls)
+            .args([
+                "-l", &endpoint, "-m", "peer", "-k", TLS_KEY, "-v", payload, "-n", "60",
+            ])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(pub_err))
+            .spawn()
+            .expect("spawn the real zenoh-pico z_pub_tls"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(publisher.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_pub_tls never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut pub_out)
+        );
+    }
+    drop(reservation);
+
+    let mut sub_out = tempfile::tempfile().expect("z_sub_tls drop-in stdout capture");
+    let sub_writer = sub_out.try_clone().expect("dup z_sub_tls stdout handle");
+    let sub_err = sub_out.try_clone().expect("dup z_sub_tls stderr handle");
+    let subscriber = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args([
+            "-e",
+            &endpoint,
+            "-m",
+            "client",
+            "-k",
+            TLS_KEY_FILTER,
+            "-n",
+            "1",
+        ])
+        .stdout(Stdio::from(sub_writer))
+        .stderr(Stdio::from(sub_err))
+        .spawn()
+        .expect("spawn the compiled z_sub_tls drop-in");
+    let status = bounded_exit("z_sub_tls.c on wz-capi-pico", subscriber, &mut sub_out);
+
+    let captured = read_captured(&mut sub_out);
+    assert!(
+        status.success(),
+        "upstream z_sub_tls.c on wz's C-ABI exited {status:?} — it returns -1 when \
+         z_open fails, which is what a TLS dial with no trust material, a rejected \
+         chain, or an unsupported `tls/` scheme looks like from inside.\n\
+         --- z_sub_tls.c (on wz) stdout+stderr ---\n{captured}\n\
+         --- REAL pico z_pub_tls stdout+stderr ---\n{}",
+        read_captured(&mut pub_out)
+    );
+    assert!(
+        captured.contains(payload),
+        "upstream z_sub_tls.c running on wz's C-ABI never reported the sample the \
+         REAL zenoh-pico z_pub_tls encrypted onto the TLS link it dialed.\n\
+         expected substring: {payload}\n\
+         the foreign publisher reached its put: {}\n\
+         --- z_sub_tls.c (on wz) stdout+stderr ---\n{captured}\n\
+         --- REAL pico z_pub_tls stdout+stderr ---\n{}",
+        read_captured(&mut pub_out).contains("Putting Data"),
+        read_captured(&mut pub_out),
+    );
+    assert!(
+        captured.contains(TLS_KEY),
+        "the payload arrived over TLS but not on the key the foreign publisher \
+         used ({TLS_KEY}); wz's inbound keyexpr resolution disagrees.\n\
+         --- z_sub_tls.c (on wz) stdout ---\n{captured}"
+    );
+
+    graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+}
+
 /// LEG 32 (`pico->wz`) — upstream's `z_pong.c`, running on wz, echoes for the
 /// REAL zenoh-pico `z_ping`, which reports the round trips it completed.
 ///
@@ -3771,40 +4029,48 @@ fn pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping() {
     graceful_terminate(pong.child_mut(), Duration::from_secs(5));
 }
 
-/// LEG 31 (`configuration gate`) — TWO of the 32 have NO body to drive at this
-/// pin, and this leg exists to say which, and to fire when that stops being
-/// true.
+/// CONFIGURATION GATE — the exclusion list is EMPTY, and this is what holds it
+/// there.
 ///
-/// It used to name FOUR. `z_pub_st.c` and `z_sub_st.c` left it at LEGS 33/34,
-/// and the way they left is the reason this doc is worth reading: the exclusion
-/// that covered them was not wrong about the OBSERVATION (they really did
-/// compile to a one-`printf` stub) but about the CONSEQUENCE (that fixing it
-/// needed "a different pico build" and "a second cdylib arm"). Configuring a
-/// second CMake arm costs no compile at all, and the second cdylib was measured
-/// unnecessary. An exclusion carries two claims, and only the first one was
-/// checked for four rounds.
+/// It has been inverted twice, and the shape of both inversions is the point.
+/// It once named FOUR programs with no body to drive. `z_pub_st.c` /
+/// `z_sub_st.c` left at LEGS 33/34 when their exclusion was re-read: it was
+/// right that they compiled to a one-`printf` stub and wrong that fixing it
+/// needed "a different pico build" AND "a second cdylib arm" — the second CMake
+/// arm costs no compile, and the second cdylib was measured unnecessary.
 ///
-/// What remains is the TLS pair, and its blocker is different in kind. Turning
-/// `Z_FEATURE_LINK_TLS` on does not merely flip a macro: pico's `link.h` then
-/// includes `link/transport/tls_stream.h`, which `#include`s `mbedtls/*.h`. So
-/// the header arm cannot even be CONFIGURED without Mbed TLS development
-/// headers on the box (`pkg_search_module(MBEDTLS REQUIRED ...)`,
-/// `vendor/zenoh-pico/CMakeLists.txt:479`), and compiling an example against it
-/// cannot succeed without them either. Measured on this machine: `libmbedtls.so
-/// .2.28` is installed, `mbedtls/entropy.h` is not, and `cc` stops at that
-/// include. This is a provisioning prerequisite, not a wz export gap — which is
-/// exactly why it is stated rather than silently carried.
+/// `z_pub_tls.c` / `z_sub_tls.c` left at LEGS 35/36 the same way. Their
+/// exclusion's OBSERVATION was exact — `Z_FEATURE_LINK_TLS` on makes `link.h`
+/// pull `tls_stream.h` which `#include`s `mbedtls/*.h`, and this box had the
+/// runtime `.so` without the headers. Its CONSEQUENCE, "a provisioning
+/// prerequisite" left for whoever came next, was the half that went unexamined
+/// for two rounds, and it hid a SECOND fact that no amount of installing the
+/// distro package would have fixed: Ubuntu's `libmbedtls-dev` ships no
+/// pkg-config metadata at all, and pico resolves Mbed TLS exclusively through
+/// `pkg_search_module(MBEDTLS REQUIRED ...)` (`vendor/zenoh-pico/CMakeLists.txt
+/// :479`). So the real prerequisite was a pinned Mbed TLS with its own `.pc`
+/// (`scripts/install-mbedtls.sh`), and the flag then cost one line.
 ///
-/// So this asserts the CONFIGURATION, and it is written to be self-retracting:
-/// the moment the pinned pico build turns TLS on, the header check below reds
-/// and whoever moved the pin is told to write the two real legs. An exclusion
-/// that names its own re-open trigger costs one test and cannot quietly outlive
-/// its reason.
+/// What that flag does NOT cost was measured before it was set: across
+/// `Z_FEATURE_LINK_TLS` 0 and 1, every `z_owned_*` / `z_loaned_*` / `z_view_*` /
+/// `z_moved_*` / `z_*_options_t` type the vendored headers declare — 86 of them
+/// — has identical size and alignment. That is why TLS rides the PRIMARY header
+/// arm rather than a fourth configure, and why one cdylib still serves all 36
+/// legs.
+///
+/// So the gate now asserts the configuration each set of legs DEPENDS on, from
+/// the side that makes a silent regression loud:
+///
+/// - primary arm `Z_FEATURE_LINK_TLS 1` — LEGS 35/36 drive real TLS bodies
+///   through it; a 0 would turn both into stub runs that pass on a `printf`.
+/// - ST arm `Z_FEATURE_MULTI_THREAD 0` — the same for LEGS 33/34.
+/// - and the programs themselves must NOT take a feature-gated stub branch,
+///   which is the direct observation rather than an inference from the header.
 // wz-proves: api-compat-pico pico->wz partial
 #[test]
-#[ignore = "reads the CMake-generated pico config and runs two stub binaries; \
+#[ignore = "reads the CMake-generated pico config and runs the drop-in binaries; \
             run by run-ci Layer E"]
-fn pico_zfeature_gated_examples_are_stub_mains_at_this_pin_and_say_so() {
+fn pico_dropin_header_arms_give_every_example_a_real_body() {
     let dir = tempfile::tempdir().expect("tempdir for the compiled drop-ins");
     // The generated config is the SSOT for what these programs compiled to —
     // not the CMakeLists default, which R311y466 recorded as the trap.
@@ -3812,11 +4078,12 @@ fn pico_zfeature_gated_examples_are_stub_mains_at_this_pin_and_say_so() {
     let config = std::fs::read_to_string(&generated)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", generated.display()));
     assert!(
-        config.contains("#define Z_FEATURE_LINK_TLS 0"),
-        "the pinned zenoh-pico build's Z_FEATURE_LINK_TLS changed, so z_pub_tls.c \
-         / z_sub_tls.c now have a real body and this leg must be replaced by \
-         DRIVEN legs for them (the pattern is LEGS 33/34, which do exactly that \
-         for the single-threaded pair).\n--- {} ---\n{}",
+        config.contains("#define Z_FEATURE_LINK_TLS 1"),
+        "the primary zenoh-pico header arm does NOT have Z_FEATURE_LINK_TLS 1, so \
+         z_pub_tls.c / z_sub_tls.c compile to their `#else` stub main and LEGS \
+         35/36 are driving a printf. Check that scripts/install-mbedtls.sh \
+         provisioned the pinned Mbed TLS (pico's CMake resolves it through \
+         pkg-config and hard-fails the configure without a .pc).\n--- {} ---\n{}",
         generated.display(),
         config
             .lines()
@@ -3844,20 +4111,38 @@ fn pico_zfeature_gated_examples_are_stub_mains_at_this_pin_and_say_so() {
             .join("\n"),
     );
 
+    // Run them. A stub main prints `ERROR: Zenoh pico was compiled without ...`
+    // and exits -2, so its ABSENCE is the direct evidence that the `#if` arm
+    // under test is the real one. Argument-free is deliberate: every one of these
+    // fails its `z_open` (no connect, no listen) and that is fine — the branch is
+    // chosen at COMPILE time, long before the session, so the stub marker is
+    // present or absent regardless of what the run does next.
+    //
+    // The ST pair is checked through the ST header arm and the TLS pair through
+    // the primary one, because that is how their legs compile them; checking
+    // either through the other arm would assert the wrong tree.
     for example in ["z_pub_tls", "z_sub_tls"] {
-        let exe = dropin_binary(example, dir.path());
-        let out = Command::new("stdbuf")
-            .args(["-oL", "-eL"])
-            .arg(&exe)
-            .output()
-            .unwrap_or_else(|e| panic!("run {example} on wz: {e}"));
-        let printed = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            printed.contains("ERROR: Zenoh pico"),
-            "{example} on wz did NOT take its feature-gated stub branch, so it \
-             has a body after all and owes a driven leg.\n--- stdout ---\n{printed}\
-             \n--- stderr ---\n{}",
-            String::from_utf8_lossy(&out.stderr),
-        );
+        assert_not_a_stub_main(example, &dropin_binary(example, dir.path()));
     }
+    for example in ["z_pub_st", "z_sub_st"] {
+        assert_not_a_stub_main(example, &dropin_binary_single_threaded(example, dir.path()));
+    }
+}
+
+/// Assert a compiled drop-in did NOT take an upstream example's feature-gated
+/// `#else` stub branch.
+fn assert_not_a_stub_main(example: &str, exe: &std::path::Path) {
+    let out = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(exe)
+        .output()
+        .unwrap_or_else(|e| panic!("run {example} on wz: {e}"));
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !printed.contains("ERROR: Zenoh pico"),
+        "{example} on wz took its feature-gated STUB branch, so the leg that \
+         drives it is exercising a printf and no wz code at all.\n\
+         --- stdout ---\n{printed}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
 }

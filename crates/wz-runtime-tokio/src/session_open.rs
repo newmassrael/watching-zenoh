@@ -309,11 +309,39 @@ impl TlsDialConfig {
     /// with no IP SAN required on the cert. For a self-signed leaf the cert IS
     /// its own root, so the same PEM serves as `root_ca_pem`.
     pub fn from_ca_pem(root_ca_pem: &[u8], server_name: &str) -> io::Result<Self> {
-        let client_config = crate::tls_config::client_config_from_pem(
+        Self::from_pem(
             root_ca_pem,
+            server_name,
             None,
             crate::tls_config::ServerNameVerification::Verify,
-        )?;
+        )
+    }
+
+    /// [`Self::from_ca_pem`] with both of its policy choices opened up: the mTLS
+    /// client cert the dialer PRESENTS, and whether the peer cert's SAN must
+    /// match the dialed name.
+    ///
+    /// It exists because a C-ABI caller does not get to choose them — the
+    /// zenoh-pico config keys do. `Z_CONFIG_TLS_ENABLE_MTLS_KEY` +
+    /// `Z_CONFIG_TLS_CONNECT_{CERTIFICATE,PRIVATE_KEY}` select the client auth,
+    /// and `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY` selects the name policy,
+    /// with pico's own default being `false` (its `z_pub_tls.c` inserts the key
+    /// unconditionally, `"true"` only under `-V`). A constructor that hard-coded
+    /// [`ServerNameVerification::Verify`](crate::tls_config::ServerNameVerification::Verify)
+    /// could therefore serve the wz demo and NOT the drop-in, since the stock
+    /// example dials `tls/127.0.0.1:<port>` while its bundled cert names
+    /// `localhost` — the exact case `AnyName` exists for.
+    ///
+    /// `server_name` is still required with `AnyName`: rustls sends it as SNI
+    /// regardless of whether the response is name-checked.
+    pub fn from_pem(
+        root_ca_pem: &[u8],
+        server_name: &str,
+        client_auth: Option<crate::tls_config::ClientAuthPem<'_>>,
+        name_verification: crate::tls_config::ServerNameVerification,
+    ) -> io::Result<Self> {
+        let client_config =
+            crate::tls_config::client_config_from_pem(root_ca_pem, client_auth, name_verification)?;
         let server_name = ServerName::try_from(server_name.to_owned()).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -429,11 +457,24 @@ impl TlsAcceptConfig {
     /// authenticate the dialer. mTLS is the `server_config_from_pem` client-CA arm
     /// when a verified caller needs it.
     pub fn from_cert_key_pem(cert_chain_pem: &[u8], private_key_pem: &[u8]) -> io::Result<Self> {
+        Self::from_pem(cert_chain_pem, private_key_pem, None)
+    }
+
+    /// [`Self::from_cert_key_pem`] with the client-auth arm opened up — the
+    /// accept-side mirror of [`TlsDialConfig::from_pem`], and there for the same
+    /// reason: `Z_CONFIG_TLS_ENABLE_MTLS_KEY` is a config value a C caller sets,
+    /// not a policy the acceptor gets to fix. `Some(ca)` REQUIRES a client cert
+    /// chaining to that bundle; `None` is one-way TLS.
+    pub fn from_pem(
+        cert_chain_pem: &[u8],
+        private_key_pem: &[u8],
+        client_ca_pem: Option<&[u8]>,
+    ) -> io::Result<Self> {
         Ok(Self {
             server_config: crate::tls_config::server_config_from_pem(
                 cert_chain_pem,
                 private_key_pem,
-                None,
+                client_ca_pem,
             )?,
         })
     }

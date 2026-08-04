@@ -10,7 +10,7 @@
 
 use std::ffi::c_void;
 
-use wz_capi_core::drive::{open_blocking, OpenError, SessionState};
+use wz_capi_core::drive::{open_blocking, CapiTlsConfig, OpenError, SessionState};
 use wz_runtime_tokio::session_glue::WhatAmI;
 
 use crate::abi::{
@@ -95,7 +95,14 @@ pub unsafe extern "C" fn z_open(
             return Z_EINVAL;
         }
 
-        match open_blocking(connect, listen, None, None, whatami) {
+        // R311y534 — `CapiTlsConfig::default()` is the cert-free tcp/udp/ws open,
+        // which is every open this ABI currently parses: zenoh-c's config is a
+        // JSON5 document whose `transport/link/tls` block this slice does not
+        // read yet. The pico shim resolves its own numeric TLS keys and passes a
+        // populated one; when this ABI grows the JSON path it fills the same
+        // struct, which is why the parameter is typed rather than a pair of
+        // `None`s that only ever meant "no quic cert".
+        match open_blocking(connect, listen, CapiTlsConfig::default(), whatami) {
             Ok(state) => {
                 let h = Box::into_raw(Box::new(state)) as Handle;
                 unsafe { *this_ = z_owned_session_t::from_handle(h) };

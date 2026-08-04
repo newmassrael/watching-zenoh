@@ -36,6 +36,54 @@ pub const Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY: u8 = 0x4D;
 /// [`Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY`]). R311y406, value mirrors zenoh-pico's.
 pub const Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY: u8 = 0x4F;
 
+// --- the rest of pico's TLS key block (R311y534) ---------------------------
+//
+// The two constants above were added when the QUIC acceptor needed a cert, and
+// they are two of TWELVE (`config.h.in:166-177`). The other ten are what the
+// upstream `z_pub_tls.c` / `z_sub_tls.c` examples actually set, and the shape of
+// what was missing is worth stating: every certificate value comes in a PATH
+// form AND a `*_BASE64` inline form, and the stock examples default to the
+// INLINE one — their CA, cert and key are base64 blobs compiled into the
+// program, used unless `-C`/`-P`/`-Q`/`-R`/`-S` overrides them. So a shim that
+// reads only the path forms reads none of the values a stock run supplies.
+//
+// The BASE64 halves decode to exactly the bytes the path halves would have read
+// out of a file, so both forms resolve to the same PEM bytes at `z_open` and
+// nothing downstream can tell them apart.
+
+/// pico `Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY` (config.h.in:166) — FILE PATH of the
+/// trust bundle a `tls/...` dial verifies the peer's server cert against.
+pub const Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY: u8 = 0x4B;
+/// pico `Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_BASE64_KEY` (config.h.in:167) — the same
+/// trust bundle, base64-wrapped inline. What the stock examples use by default.
+pub const Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_BASE64_KEY: u8 = 0x4C;
+/// pico `Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_BASE64_KEY` (config.h.in:169) — inline form
+/// of [`Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY`].
+pub const Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_BASE64_KEY: u8 = 0x4E;
+/// pico `Z_CONFIG_TLS_LISTEN_CERTIFICATE_BASE64_KEY` (config.h.in:171) — inline form
+/// of [`Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY`].
+pub const Z_CONFIG_TLS_LISTEN_CERTIFICATE_BASE64_KEY: u8 = 0x50;
+/// pico `Z_CONFIG_TLS_ENABLE_MTLS_KEY` (config.h.in:172) — `"true"` turns on MUTUAL
+/// TLS: the dialer presents a client cert, and a listener requires one.
+pub const Z_CONFIG_TLS_ENABLE_MTLS_KEY: u8 = 0x51;
+/// pico `Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_KEY` (config.h.in:173) — FILE PATH of the
+/// private key an mTLS DIALER presents.
+pub const Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_KEY: u8 = 0x52;
+/// pico `Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_BASE64_KEY` (config.h.in:174) — inline form
+/// of [`Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_KEY`].
+pub const Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_BASE64_KEY: u8 = 0x53;
+/// pico `Z_CONFIG_TLS_CONNECT_CERTIFICATE_KEY` (config.h.in:175) — FILE PATH of the
+/// cert chain an mTLS DIALER presents.
+pub const Z_CONFIG_TLS_CONNECT_CERTIFICATE_KEY: u8 = 0x54;
+/// pico `Z_CONFIG_TLS_CONNECT_CERTIFICATE_BASE64_KEY` (config.h.in:176) — inline form
+/// of [`Z_CONFIG_TLS_CONNECT_CERTIFICATE_KEY`].
+pub const Z_CONFIG_TLS_CONNECT_CERTIFICATE_BASE64_KEY: u8 = 0x55;
+/// pico `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY` (config.h.in:177) — `"true"`
+/// requires the peer cert's SAN to match the dialed host. pico's DEFAULT is
+/// `false`, and the stock examples depend on it: they dial a numeric
+/// `tls/127.0.0.1:<port>` while their bundled cert names `localhost`.
+pub const Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY: u8 = 0x56;
+
 /// The boxed payload behind a `z_owned_config_t` handle.
 #[derive(Clone, Default)]
 pub(crate) struct ConfigState {

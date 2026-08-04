@@ -46,14 +46,126 @@
 use std::ffi::c_void;
 
 use crate::abi::{z_moved_config_t, z_owned_config_t};
+use crate::config::{ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY};
+// The twelve TLS key constants are consumed ONLY by `resolve_tls_config`, which
+// exists only when a certificate has a backend that could consume it. Importing
+// them at module scope would make the no-backend build carry twelve unused
+// imports, which `-D warnings` rejects — so the import rides the same cfg as its
+// single consumer rather than the consumer being widened to justify the import.
+#[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
 use crate::config::{
-    ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY,
-    Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY, Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY,
+    Z_CONFIG_TLS_CONNECT_CERTIFICATE_BASE64_KEY, Z_CONFIG_TLS_CONNECT_CERTIFICATE_KEY,
+    Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_BASE64_KEY, Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_KEY,
+    Z_CONFIG_TLS_ENABLE_MTLS_KEY, Z_CONFIG_TLS_LISTEN_CERTIFICATE_BASE64_KEY,
+    Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY, Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_BASE64_KEY,
+    Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY, Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_BASE64_KEY,
+    Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY, Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY,
 };
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
-use wz_capi_core::drive::{open_blocking, OpenError, SessionState};
+use wz_capi_core::drive::{open_blocking, CapiTlsConfig, OpenError, SessionState};
 use wz_runtime_tokio::session_glue::WhatAmI;
+
+/// Resolve one certificate value from its PATH key or its `*_BASE64` inline key.
+///
+/// pico offers both forms for every TLS certificate value and they mean the same
+/// thing, so this collapses them at the boundary: the path is read off disk, the
+/// inline blob is base64-decoded, and both yield PEM bytes.
+///
+/// PATH WINS when both are set, matching the examples' own precedence — each of
+/// them inserts the inline blob only in the `else` arm of "did the user pass a
+/// path" (`z_pub_tls.c:150-176`). Encoding the same precedence here means a
+/// caller that sets both by hand gets the answer the example would have given.
+///
+/// A value that is present but unreadable or undecodable is an ERROR, never a
+/// silent `None`: `None` means "the caller configured no such material", and
+/// letting a corrupt one collapse into it would open a session with less
+/// protection than was asked for.
+#[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+fn resolve_pem(
+    cfg: &ConfigState,
+    path_key: u8,
+    base64_key: u8,
+) -> Result<Option<Vec<u8>>, ZResult> {
+    if let Some(path) = cfg.get(path_key) {
+        return wz_runtime_tokio::tls_config::read_pem_file(path)
+            .map(Some)
+            .map_err(|_| crate::result::Z_ERR_INVALID);
+    }
+    if let Some(b64) = cfg.get(base64_key) {
+        return wz_runtime_tokio::tls_config::decode_base64_pem(b64)
+            .map(Some)
+            .map_err(|_| crate::result::Z_ERR_INVALID);
+    }
+    Ok(None)
+}
+
+/// Read pico's twelve TLS config keys into the ABI-neutral [`CapiTlsConfig`].
+///
+/// The boolean keys are compared against `"true"` because that is the literal
+/// the examples insert (`z_pub_tls.c:225` writes `"true"` / `"false"`), and
+/// anything else — including an absent key — is pico's `false` default.
+///
+/// Gated on the two link features because the PEM loaders it calls are: wz's
+/// `tls_config` module is itself `cfg(any(transport-link-tls,
+/// transport-link-quic))`, since without either backend there is nothing that
+/// could consume a certificate. The `not` arm below is not a stub — it is the
+/// correct answer for that build, where a `tls/` or `quic/` endpoint is rejected
+/// at bind/dial as `Unsupported` and the cert keys have no consumer to reach.
+#[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+fn resolve_tls_config(cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
+    let enable_mtls = cfg.get(Z_CONFIG_TLS_ENABLE_MTLS_KEY) == Some("true");
+    // The mTLS material is read only when mTLS is ON. pico gates its own
+    // insertion the same way (`if (enable_mtls)`), so reading it unconditionally
+    // would make wz present a client cert in a configuration where pico does not.
+    let (connect_cert_pem, connect_key_pem) = if enable_mtls {
+        (
+            resolve_pem(
+                cfg,
+                Z_CONFIG_TLS_CONNECT_CERTIFICATE_KEY,
+                Z_CONFIG_TLS_CONNECT_CERTIFICATE_BASE64_KEY,
+            )?,
+            resolve_pem(
+                cfg,
+                Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_KEY,
+                Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_BASE64_KEY,
+            )?,
+        )
+    } else {
+        (None, None)
+    };
+    Ok(CapiTlsConfig {
+        root_ca_pem: resolve_pem(
+            cfg,
+            Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY,
+            Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_BASE64_KEY,
+        )?,
+        verify_name_on_connect: cfg.get(Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY) == Some("true"),
+        connect_cert_pem,
+        connect_key_pem,
+        listen_cert_pem: resolve_pem(
+            cfg,
+            Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY,
+            Z_CONFIG_TLS_LISTEN_CERTIFICATE_BASE64_KEY,
+        )?,
+        listen_key_pem: resolve_pem(
+            cfg,
+            Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY,
+            Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_BASE64_KEY,
+        )?,
+        require_client_auth: enable_mtls,
+    })
+}
+
+/// The no-TLS-backend build: no certificate can reach a consumer, so the
+/// cert-free config is the honest resolution. The keys still PARSE into the
+/// config map (`zp_config_insert` is scheme-agnostic), which is what keeps a
+/// program written against the full key set compiling and running here — it just
+/// cannot open a `tls/` endpoint, and the runtime says so at bind/dial.
+#[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
+fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
+    Ok(CapiTlsConfig::default())
+}
 
 // --- ABI structs (session owned = pico rc `{ void* _val; void* _cnt }`) ----
 
@@ -140,17 +252,15 @@ pub unsafe extern "C" fn z_open(
 
         let connect = cfg.get(Z_CONFIG_CONNECT_KEY).map(str::to_owned);
         let listen = cfg.get(Z_CONFIG_LISTEN_KEY).map(str::to_owned);
-        // R311y406 — the LISTEN server cert (cert-chain + private-key PEM FILE PATHS) a
-        // cert-bearing listener presents, from zenoh-pico's native listen-cert config
-        // keys (the tls-block keys zenoh reuses for quic). pico wires them into the QUIC
-        // acceptor (`transport-link-quic`, no tls acceptor). `None` (cert-free
-        // tcp/ws/udp listen) keeps the default bind.
-        let listen_cert = cfg
-            .get(Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY)
-            .map(str::to_owned);
-        let listen_key = cfg
-            .get(Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY)
-            .map(str::to_owned);
+        // R311y406 / R311y534 — the TLS material, RESOLVED here (path or inline
+        // base64 -> PEM bytes) because the key numbers are this ABI's knowledge.
+        // A malformed value fails the open rather than degrading to a plaintext
+        // or trust-free session: a caller that asked for TLS and silently got
+        // something else is the one outcome worse than a failed z_open.
+        let tls = match resolve_tls_config(&cfg) {
+            Ok(tls) => tls,
+            Err(code) => return code,
+        };
         // The dial role's whatami is config-driven, mirroring pico's
         // `_z_config_get_mode` (`~/zenoh-pico/src/net/session.c:120-140`,
         // default CLIENT): `mode=peer` opens a dialing PEER, otherwise CLIENT.
@@ -175,7 +285,7 @@ pub unsafe extern "C" fn z_open(
             return crate::result::Z_ERR_INVALID;
         }
 
-        match open_blocking(connect, listen, listen_cert, listen_key, dial_whatami) {
+        match open_blocking(connect, listen, tls, dial_whatami) {
             Ok(state) => {
                 *zs = z_owned_session_t {
                     _val: Box::into_raw(Box::new(state)) as *mut c_void,

@@ -201,7 +201,7 @@ async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
 /// The `connect` role: dial, run the outbound handshake, land the one peer in
 /// the registry, then pump it until `z_close`. `tx` unblocks `z_open` only once
 /// the handshake has settled — pico's blocking client open.
-async fn drive_dial(endpoint: String, whatami: WhatAmI, ctx: DriveContext) {
+async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx: DriveContext) {
     let DriveContext {
         zid,
         shared,
@@ -210,7 +210,17 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, ctx: DriveContext) {
         stop,
         clock,
     } = ctx;
-    let dialed = match dial_endpoint(&endpoint, &DialConfig::default()).await {
+    // R311y534 — the dial config is BUILT from the caller's TLS material rather
+    // than defaulted. Everything that can fail it runs before the handshake, so a
+    // bad trust bundle reports an open failure to the C caller.
+    let dial_cfg = match dial_config(&tls, &endpoint) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            let _ = tx.send(false);
+            return;
+        }
+    };
+    let dialed = match dial_endpoint(&endpoint, &dial_cfg).await {
         Ok(link) => link,
         Err(_) => {
             let _ = tx.send(false);
@@ -330,48 +340,199 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, ctx: DriveContext) {
     .await;
 }
 
-/// R311y406 — build the LISTEN [`AcceptConfig`] from the native
-/// `Z_CONFIG_TLS_LISTEN_{CERTIFICATE,PRIVATE_KEY}_KEY` PEM file paths (the peer of the
-/// demo's `build_accept_config`). Both-or-neither. The key name mirrors zenoh-pico's
-/// tls block, which zenoh reuses for quic; pico wires it into the QUIC acceptor slot
-/// (pico has no `transport-link-tls` acceptor). Without `transport-link-quic` the
-/// quic backend is not compiled, so a `quic/` listen surfaces `Unsupported` at bind
-/// regardless — the paths are ignored and the cert-free default is returned.
-#[cfg(feature = "transport-link-quic")]
-fn listen_accept_config(cert: Option<&str>, key: Option<&str>) -> std::io::Result<AcceptConfig> {
-    use wz_runtime_tokio::session_open::QuicAcceptConfig;
-    use wz_runtime_tokio::tls_config::read_pem_file;
-    match (cert, key) {
-        (Some(cert_path), Some(key_path)) => {
-            let cert_pem = read_pem_file(cert_path)?;
-            let key_pem = read_pem_file(key_path)?;
-            let quic = QuicAcceptConfig::from_cert_key_pem(&cert_pem, &key_pem)?;
-            Ok(AcceptConfig::default().with_quic(quic))
+/// The TLS material a C-ABI `z_open` carries, already RESOLVED to PEM bytes.
+///
+/// R311y534 — this replaces the two `Option<String>` listen-cert PATHS the quic
+/// acceptor used to take, and the reason is that the pico key set is wider than
+/// a pair of paths in two independent directions. Each certificate value has a
+/// PATH form and a `*_BASE64` inline form (`Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY`
+/// vs `..._BASE64_KEY`), and the upstream examples use the INLINE one by default
+/// — their PEM blobs are compiled into the program. And the dial side needs
+/// material the listen side never did: a root CA to verify the peer against, a
+/// name-verification policy, and an optional client cert for mTLS.
+///
+/// So the shim resolves "path or base64" ONCE, on the ABI side where the key
+/// numbers live, and hands PEM BYTES across. That keeps this crate free of
+/// key-encoding knowledge and makes the two forms indistinguishable downstream,
+/// which is what they are: `-C ca.pem` and the inline bundle are the same trust
+/// decision written two ways.
+///
+/// All fields default to `None`/`false`, which is the cert-free tcp/udp/ws path
+/// — [`Default`] is what a non-TLS `z_open` passes.
+#[derive(Default, Clone, Debug)]
+pub struct CapiTlsConfig {
+    /// The trust bundle a `tls/...` DIAL verifies the peer's server cert
+    /// against (pico `Z_CONFIG_TLS_ROOT_CA_CERTIFICATE{,_BASE64}_KEY`). `None`
+    /// leaves a `tls/...` dial without TLS material, which the runtime reports
+    /// as an unsupported dial rather than silently dialing in the clear.
+    pub root_ca_pem: Option<Vec<u8>>,
+    /// Whether the peer cert's SAN must match the dialed host (pico
+    /// `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY`). pico's own default is
+    /// `false`, and the stock examples rely on it: they dial a numeric
+    /// `tls/127.0.0.1:<port>` while their bundled cert names `localhost`.
+    pub verify_name_on_connect: bool,
+    /// The client cert a MUTUAL-TLS dial presents (pico
+    /// `Z_CONFIG_TLS_CONNECT_CERTIFICATE{,_BASE64}_KEY` + its private key),
+    /// gated by `Z_CONFIG_TLS_ENABLE_MTLS_KEY`. Both-or-neither.
+    pub connect_cert_pem: Option<Vec<u8>>,
+    pub connect_key_pem: Option<Vec<u8>>,
+    /// The cert chain + private key a `tls/...` or `quic/...` LISTEN presents
+    /// (pico `Z_CONFIG_TLS_LISTEN_{CERTIFICATE,PRIVATE_KEY}{,_BASE64}_KEY`).
+    /// zenoh feeds ONE tls block to both backends, so one pair serves both.
+    pub listen_cert_pem: Option<Vec<u8>>,
+    pub listen_key_pem: Option<Vec<u8>>,
+    /// Require and verify a CLIENT cert on the accept side (pico
+    /// `Z_CONFIG_TLS_ENABLE_MTLS_KEY` read by a listener). The bundle is
+    /// [`Self::root_ca_pem`], mirroring pico, which uses the one CA value for
+    /// both roles.
+    pub require_client_auth: bool,
+}
+
+impl CapiTlsConfig {
+    /// The mTLS client-auth pair, `Some` only when BOTH halves are present.
+    ///
+    /// Separate from the fields because "mTLS enabled" and "the material for it
+    /// arrived" are two conditions, and a half-configured pair must not silently
+    /// degrade to one-way TLS.
+    #[cfg(feature = "transport-link-tls")]
+    fn client_auth(&self) -> Option<wz_runtime_tokio::tls_config::ClientAuthPem<'_>> {
+        match (&self.connect_cert_pem, &self.connect_key_pem) {
+            (Some(cert), Some(key)) => Some(wz_runtime_tokio::tls_config::ClientAuthPem {
+                cert_chain_pem: cert,
+                private_key_pem: key,
+            }),
+            _ => None,
         }
-        (None, None) => Ok(AcceptConfig::default()),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "a quic/... listen needs BOTH the listen certificate and private-key config values",
-        )),
     }
 }
 
-/// The `transport-link-quic`-less build: a `quic/...` listen surfaces the runtime's
-/// typed `Unsupported` at bind, so the listen-cert config values are inert.
-#[cfg(not(feature = "transport-link-quic"))]
-fn listen_accept_config(cert: Option<&str>, key: Option<&str>) -> std::io::Result<AcceptConfig> {
+/// The HOST of a `<scheme>/<host>:<port>` locator, for use as the TLS SNI /
+/// verified name.
+///
+/// rustls takes the name as an explicit value rather than deriving it from the
+/// socket address, so a dial has to say which name it is talking to. pico
+/// derives the same thing from its own locator (`_z_endpoint_t`'s address), so
+/// taking it from the locator here is the faithful reading rather than a
+/// convenience — and it is what makes `verify_name_on_connect=true` mean
+/// something, since a hard-coded name would verify a cert against a constant.
+///
+/// Returns `None` for a locator with no `<scheme>/` prefix or no host.
+fn locator_host(endpoint: &str) -> Option<&str> {
+    let rest = endpoint.split_once('/')?.1;
+    // Strip a query/config suffix (`tcp/1.2.3.4:7447?foo=bar`) before the port,
+    // then the port itself. An IPv6 literal is bracketed, so the LAST colon is
+    // the port separator in every form the locator grammar allows.
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let host = match rest.rsplit_once(':') {
+        Some((host, _port)) => host,
+        None => rest,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    (!host.is_empty()).then_some(host)
+}
+
+/// Build the LISTEN [`AcceptConfig`] from the resolved TLS material.
+///
+/// R311y534 — this now fills BOTH acceptor slots from the one cert pair, which
+/// is what zenoh does (one tls block, two backends) and what pico's key names
+/// already implied. Before, only the quic slot was filled, so a
+/// `z_open(listen="tls/..")` carrying a perfectly good cert still bound to a
+/// typed `Unsupported`: the material was present and the slot it belonged in was
+/// never set. Each slot is independently feature-gated, so a build with one
+/// backend and not the other fills only the slot it has.
+///
+/// Both-or-neither on the pair: a listener told to present a cert with no key is
+/// a configuration error, not a cert-free listener.
+fn listen_accept_config(tls: &CapiTlsConfig) -> std::io::Result<AcceptConfig> {
+    let cfg = AcceptConfig::default();
+    let (cert, key) = match (&tls.listen_cert_pem, &tls.listen_key_pem) {
+        (Some(cert), Some(key)) => (cert, key),
+        (None, None) => return Ok(cfg),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a cert-bearing listen needs BOTH the listen certificate and private-key \
+                 config values",
+            ))
+        }
+    };
+
+    #[cfg(feature = "transport-link-tls")]
+    let cfg = {
+        use wz_runtime_tokio::session_open::TlsAcceptConfig;
+        // The mTLS client-CA bundle is the SAME root-CA value pico uses for the
+        // dial side; pico carries one CA per config, not one per direction.
+        let client_ca = tls
+            .require_client_auth
+            .then_some(tls.root_ca_pem.as_deref())
+            .flatten();
+        cfg.with_tls(TlsAcceptConfig::from_pem(cert, key, client_ca)?)
+    };
+
+    #[cfg(feature = "transport-link-quic")]
+    let cfg = {
+        use wz_runtime_tokio::session_open::QuicAcceptConfig;
+        cfg.with_quic(QuicAcceptConfig::from_cert_key_pem(cert, key)?)
+    };
+
+    // Neither backend compiled in: the cert material is inert because a `tls/` or
+    // `quic/` listen surfaces the runtime's typed `Unsupported` at bind anyway.
+    #[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
     let _ = (cert, key);
-    Ok(AcceptConfig::default())
+
+    Ok(cfg)
+}
+
+/// Build the DIAL [`DialConfig`] from the resolved TLS material — the dial
+/// mirror of [`listen_accept_config`], and new at R311y534.
+///
+/// Before it existed the C ABI dialed with [`DialConfig::default`] unconditionally,
+/// so a `tls/...` connect had no trust bundle and no name to verify and could not
+/// complete a handshake at all, regardless of what the caller had configured. The
+/// root CA is what makes the config non-default: without one there is nothing to
+/// verify the peer against, so the cert-free default is returned and the runtime
+/// reports the unsupported dial rather than this function inventing a trust policy.
+fn dial_config(tls: &CapiTlsConfig, endpoint: &str) -> std::io::Result<DialConfig> {
+    let cfg = DialConfig::default();
+    let Some(root_ca) = tls.root_ca_pem.as_deref() else {
+        return Ok(cfg);
+    };
+    // The dialed host doubles as SNI and, under `Verify`, as the name checked
+    // against the peer cert's SAN.
+    let server_name = locator_host(endpoint).unwrap_or("localhost");
+
+    #[cfg(feature = "transport-link-tls")]
+    let cfg = {
+        use wz_runtime_tokio::session_open::TlsDialConfig;
+        use wz_runtime_tokio::tls_config::ServerNameVerification;
+        let verification = if tls.verify_name_on_connect {
+            ServerNameVerification::Verify
+        } else {
+            ServerNameVerification::AnyName
+        };
+        cfg.with_tls(TlsDialConfig::from_pem(
+            root_ca,
+            server_name,
+            tls.client_auth(),
+            verification,
+        )?)
+    };
+
+    #[cfg(feature = "transport-link-quic")]
+    let cfg = {
+        use wz_runtime_tokio::session_open::QuicDialConfig;
+        cfg.with_quic(QuicDialConfig::from_ca_pem(root_ca, server_name)?)
+    };
+
+    #[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
+    let _ = (root_ca, server_name);
+
+    Ok(cfg)
 }
 
 /// The `listen` role: bind, unblock `z_open` immediately, then hold N
 /// concurrent inbound peers until `z_close` — pico's non-blocking listener.
-async fn drive_listen(
-    endpoint: String,
-    listen_cert: Option<String>,
-    listen_key: Option<String>,
-    ctx: DriveContext,
-) {
+async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     let DriveContext {
         zid,
         shared,
@@ -383,13 +544,14 @@ async fn drive_listen(
     // Everything that can fail the open runs BEFORE the success signal below,
     // so a failure is reported to the C caller rather than silently killing a
     // listener it was told had opened.
-    // R311y406 — thread the LISTEN server cert (native Z_CONFIG_TLS_LISTEN_* keys)
-    // into the bind's AcceptConfig, so a `z_open(listen="quic/..")` carrying the cert
-    // presents it (was a cert-free `bind_endpoint` -> cert-absence reject). Building
-    // the QuicAcceptConfig needs `transport-link-quic`; without that feature the quic
-    // backend is not compiled, so a quic listen surfaces `Unsupported` at bind
-    // regardless -- the cert paths are inert (see `listen_accept_config`).
-    let accept_cfg = match listen_accept_config(listen_cert.as_deref(), listen_key.as_deref()) {
+    // R311y406 / R311y534 — thread the LISTEN server cert (native
+    // Z_CONFIG_TLS_LISTEN_* keys, path or inline base64) into the bind's
+    // AcceptConfig, so a `z_open(listen="tls/..")` or `z_open(listen="quic/..")`
+    // carrying the cert presents it (was a cert-free `bind_endpoint` ->
+    // cert-absence reject). Each backend's slot is filled only when its feature
+    // is compiled in; without it that scheme surfaces `Unsupported` at bind
+    // regardless -- see `listen_accept_config`.
+    let accept_cfg = match listen_accept_config(&tls) {
         Ok(cfg) => cfg,
         Err(_) => {
             let _ = tx.send(false);
@@ -451,8 +613,7 @@ async fn drive_listen(
 pub fn open_blocking(
     connect: Option<String>,
     listen: Option<String>,
-    listen_cert: Option<String>,
-    listen_key: Option<String>,
+    tls: CapiTlsConfig,
     dial_whatami: WhatAmI,
 ) -> Result<SessionState, OpenError> {
     let clock = TokioTime::new();
@@ -502,10 +663,10 @@ pub fn open_blocking(
             rt.block_on(async move {
                 match (connect, listen) {
                     (Some(endpoint), _) => {
-                        drive_dial(endpoint, dial_whatami, ctx).await;
+                        drive_dial(endpoint, dial_whatami, tls, ctx).await;
                     }
                     (None, Some(endpoint)) => {
-                        drive_listen(endpoint, listen_cert, listen_key, ctx).await;
+                        drive_listen(endpoint, tls, ctx).await;
                     }
                     (None, None) => {
                         let _ = ctx.tx.send(false);

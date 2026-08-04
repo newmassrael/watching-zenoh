@@ -5476,7 +5476,16 @@ layer_e_ap_demo_round_trip() {
     # builds it, and on a fresh checkout the helper would panic on a missing .so.
     # Built here under the same rule as the two binaries above: never SKIP (or
     # crash) on a wz artifact we can just build.
-    (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
+    #
+    # R311y534 — with `transport-link-tls`, and that feature is what makes the
+    # TLS drop-in legs POSSIBLE rather than merely nicer. `z_pub_tls.c` /
+    # `z_sub_tls.c` open `tls/` endpoints; without the feature the scheme parses
+    # and then fails at bind/dial with a typed `Unsupported`, so both legs would
+    # red on a wz that is otherwise correct. Selecting it here rather than in the
+    # crate default keeps the no-TLS build a real, tested configuration (the
+    # feature-arm builds in Layer C1bm), while the ONE artifact this lane's legs
+    # link carries every scheme they exercise.
+    (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
     # R121e + R121f + R121f1 + R121g: bundle the integration tests
     # into a single cargo invocation so the compilation/link step
     # runs once and the lane timing stays predictable. `--test`

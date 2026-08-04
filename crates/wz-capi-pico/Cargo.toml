@@ -68,6 +68,14 @@ transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe", "wz-capi-
 # (the --peer/--router/--router-hat demo twin, R311y405/y406); without it the
 # `quic/` scheme still parses but `bind_locator` returns `Unsupported` at bind.
 transport-link-quic = ["wz-runtime-tokio/transport-link-quic", "wz-capi-core/transport-link-quic"]
+# R311y534 — the `tls/` link, dial AND accept. Unlike unixpipe this is
+# zenoh-pico-native on BOTH sides (its `z_pub_tls.c` / `z_sub_tls.c` each take
+# `-e tls/...` and `-l tls/...`), and it is what the §5.27 api-compat-pico
+# drop-in legs for those two programs run on: with it, `z_open` resolves pico's
+# twelve `Z_CONFIG_TLS_*` keys into real dial/accept material; without it the
+# `tls/` scheme still parses but bind and dial return a feature-gated
+# `Unsupported`, so the keys are inert rather than misleading.
+transport-link-tls = ["wz-runtime-tokio/transport-link-tls", "wz-capi-core/transport-link-tls"]
 
 [lints]
 workspace = true

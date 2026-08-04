@@ -134,13 +134,25 @@ jobs:
         # introduced and R311y417 disclosed: actionlint was pinned while
         # shellcheck floated on apt, so its version rode the `runs-on:`
         # image and a runner-OS bump was a silent linter bump.
+        #
+        # R311y534 — `pkg-config` joins the list, and Mbed TLS deliberately does
+        # NOT. zenoh-pico's `Z_FEATURE_LINK_TLS` arm resolves Mbed TLS through
+        # `pkg_search_module(MBEDTLS REQUIRED ...)`, and Ubuntu's own
+        # `libmbedtls-dev` ships headers and a `.so` with NO pkg-config metadata
+        # at all — so installing the distro package would satisfy the compiler
+        # and still fail pico's CONFIGURE step. `scripts/install-mbedtls.sh`
+        # provisions a pinned, checksum-verified upstream Mbed TLS into a
+        # repo-local prefix instead (build-zenoh-pico-cli.sh calls it), which is
+        # the same treatment zenoh-c and shellcheck already get here. What apt
+        # owes is only the TOOL that reads the `.pc` it installs.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake \
             libclang-dev \
             clang \
-            perl
+            perl \
+            pkg-config
 
       - name: Install shellcheck (pinned + checksum-verified)
         # Same contract as the actionlint step below, and for the same reason:

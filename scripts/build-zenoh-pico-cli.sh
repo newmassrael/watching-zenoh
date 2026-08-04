@@ -72,7 +72,21 @@ INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
 # z_get_attachment sends the attachment a wz z_queryable_attachment reads back.
 # None of the four is a SUBJECT here (the wz-linked build of each is what the
 # drop-in suite exercises); they exist so the verdict can come from outside.
-TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong z_queryable_attachment z_advanced_sub z_advanced_pub z_ping z_get_lat z_pub_thr z_get_attachment)
+# R311y534 — z_sub_tls + z_pub_tls join as the FOREIGN half of the TLS pair,
+# BOTH of them, because the pair is directional: a wz-side publisher needs a
+# foreign subscriber to report what it decoded, and a wz-side subscriber needs a
+# foreign publisher to have produced the bytes. Building only one would leave one
+# of the two TLS legs talking to wz on both ends. They are also what CALIBRATES
+# the topology — foreign-to-foreign over the same TLS listen/connect pair, which
+# is the run that says whether a red leg is wz's fault or the topology's.
+# Turning
+# `Z_FEATURE_LINK_TLS` on (see the configure below) gives `z_pub_tls.c` /
+# `z_sub_tls.c` a real body on BOTH sides at once: the drop-in suite compiles
+# them against wz's cdylib, and this builds upstream's own TLS-capable binary so
+# the wz-side publisher has a counterparty that is not wz. Without it the TLS
+# legs could only be wz talking to wz, which is the one topology that cannot
+# distinguish "wz speaks TLS" from "wz and wz agree about something".
+TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong z_queryable_attachment z_advanced_sub z_advanced_pub z_ping z_get_lat z_pub_thr z_get_attachment z_sub_tls z_pub_tls)
 
 if [[ ! -e "$VENDOR_DIR/.git" && ! -f "$VENDOR_DIR/CMakeLists.txt" ]]; then
     echo "build-zenoh-pico-cli: vendor/zenoh-pico/ not initialized." >&2
@@ -332,6 +346,23 @@ fi
 
 mkdir -p "$BUILD_DIR" "$INSTALL_DIR"
 
+# --- Mbed TLS, the prerequisite `Z_FEATURE_LINK_TLS` adds -------------------
+#
+# pico resolves Mbed TLS through `pkg_search_module(MBEDTLS REQUIRED ...)`
+# (CMakeLists.txt:479), which hard-fails the CONFIGURE step when no `.pc` is on
+# the search path. Ubuntu's `libmbedtls-dev` ships headers and a `.so` and NO
+# pkg-config metadata, so "the distro package is installed" is not the same
+# condition — this provisions a pinned upstream Mbed TLS into a repo-local
+# prefix instead, and puts only that prefix on PKG_CONFIG_PATH.
+#
+# Called rather than merely required so there is ONE entry point: run-ci and the
+# hosted CI both reach the pico build through this script, and a separate
+# provisioning step is a thing that can be forgotten in one of them. The
+# installer is idempotent and returns immediately once the pin is in place.
+bash "$ROOT/scripts/install-mbedtls.sh" >&2
+MBEDTLS_PREFIX="${WZ_MBEDTLS_PREFIX:-$ROOT/target/mbedtls}"
+export PKG_CONFIG_PATH="$MBEDTLS_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
 # Configure (idempotent — CMake re-uses the build dir cache).
 # R311y243 — Z_FEATURE_UNSTABLE_API=ON exposes the unstable per-sample
 # getters (z_sample_source_info, primitives.h #ifdef block); the vendor
@@ -379,13 +410,34 @@ mkdir -p "$BUILD_DIR" "$INSTALL_DIR"
 # PUBLICATION and LIVELINESS from the vendor defaults — but a future flag
 # change could break it silently, which is why the generated config.h is
 # ASSERTED below rather than assumed.
+#
+# R311y534 — Z_FEATURE_LINK_TLS=1 compiles pico's TLS-over-TCP link in (vendor
+# default 0, CMakeLists.txt:335) and obeys the same `1`-not-`ON` rule as the
+# serial flag: `z_pub_tls.c:24` guards on `Z_FEATURE_LINK_TLS == 1`, so `ON`
+# would evaluate to 0 in that `#if` and leave both TLS examples as their `#else`
+# stub main.
+#
+# It is set on the PRIMARY arm, not on a fourth configure-only arm, and that is a
+# MEASUREMENT rather than a convenience. Turning it on changes what `link.h`
+# pulls in, so the worry is that it moves a public struct and silently invalidates
+# the other 30 drop-in legs, which link ONE cdylib against these headers. Measured
+# across the two configs over every `z_owned_*` / `z_loaned_*` / `z_view_*` /
+# `z_moved_*` / `z_*_options_t` type the vendored headers declare — 86 of them —
+# size AND alignment are identical in every case. TLS adds a link backend behind
+# its own guard; it reshapes nothing the API surface exposes. So one header tree
+# and one cdylib still serve every leg, and the TLS pair simply stops being the
+# two programs with no body.
+#
+# The cost of the flag is a real dependency, not a macro: see the Mbed TLS
+# provisioning above.
 cmake -B "$BUILD_DIR" -S "$EXAMPLES_DIR" \
     -DCMAKE_C_STANDARD=11 \
     -DCMAKE_BUILD_TYPE=Release \
     -DZ_FEATURE_UNSTABLE_API=ON \
     -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
     -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
-    -DZ_FEATURE_LINK_SERIAL=1 >&2
+    -DZ_FEATURE_LINK_SERIAL=1 \
+    -DZ_FEATURE_LINK_TLS=1 >&2
 
 # Read back what was actually COMPILED, not what was requested. Every
 # mechanism that turns a requested pico feature into a compiled-out one is
@@ -403,7 +455,8 @@ fi
 for expect in \
     "Z_FEATURE_ADVANCED_PUBLICATION 1" \
     "Z_FEATURE_ADVANCED_SUBSCRIPTION 1" \
-    "Z_FEATURE_LINK_SERIAL 1"; do
+    "Z_FEATURE_LINK_SERIAL 1" \
+    "Z_FEATURE_LINK_TLS 1"; do
     if ! grep -qx "#define $expect" "$GENERATED_CONFIG"; then
         echo "build-zenoh-pico-cli: requested '$expect' but the GENERATED config.h says:" >&2
         grep -E "^#define ${expect%% *}( |$)" "$GENERATED_CONFIG" >&2 \
@@ -442,6 +495,7 @@ cmake -B "${BUILD_DIR}-st" -S "$EXAMPLES_DIR" \
     -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
     -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
     -DZ_FEATURE_LINK_SERIAL=1 \
+    -DZ_FEATURE_LINK_TLS=1 \
     -DZ_FEATURE_MULTI_THREAD=0 >&2
 
 # Same read-back discipline as the primary arm, and for a sharper reason: this

@@ -638,7 +638,7 @@ pub mod common {
     /// Panics with the build hint if either dir is missing — the same prereq
     /// discipline as [`zenoh_pico_cli_binary`]; a missing header set must not
     /// degrade into a green run.
-    pub fn zenoh_pico_include_dirs() -> [PathBuf; 2] {
+    pub fn zenoh_pico_include_dirs() -> [PathBuf; 3] {
         let root = project_root();
         let vendored = root.join("vendor/zenoh-pico/include");
         let generated = root.join("target/zenoh-pico-build/zenohpico/include");
@@ -656,7 +656,42 @@ pub mod common {
              built with)",
             generated.display()
         );
-        [generated, vendored]
+        [generated, vendored, mbedtls_include_dir()]
+    }
+
+    /// The Mbed TLS include dir every pico drop-in compile now needs.
+    ///
+    /// R311y534 — this is a consequence of `Z_FEATURE_LINK_TLS 1`, not a TLS-leg
+    /// detail: with TLS on, `zenoh-pico/link/link.h` pulls
+    /// `link/transport/tls_stream.h`, which `#include`s `mbedtls/ssl.h` and
+    /// friends. `link.h` is reached from `zenoh-pico.h`, so EVERY example — the
+    /// 30 that have nothing to do with TLS included — stops compiling without
+    /// these headers on the path.
+    ///
+    /// It resolves the PINNED prefix `scripts/install-mbedtls.sh` provisions,
+    /// deliberately NOT a system include dir. A distro `libmbedtls-dev` would
+    /// often satisfy the compiler by accident, and then the suite would be
+    /// silently coupled to whatever version that box happened to carry — while a
+    /// box without it (Ubuntu 22.04 ships no pkg-config for Mbed TLS, so the
+    /// pico CMake configure fails there regardless) would fail much later with a
+    /// confusing message. Naming the provisioned prefix makes the dependency the
+    /// same fact on every machine.
+    pub fn mbedtls_include_dir() -> PathBuf {
+        let dir = std::env::var("WZ_MBEDTLS_PREFIX")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| project_root().join("target/mbedtls"))
+            .join("include");
+        assert!(
+            dir.join("mbedtls/entropy.h").is_file(),
+            "Mbed TLS headers missing at {}; run scripts/install-mbedtls.sh \
+             (build-zenoh-pico-cli.sh calls it, so this usually means the pico \
+             build has not been run on this checkout). They are required by \
+             EVERY pico drop-in compile, not just the TLS ones: with \
+             Z_FEATURE_LINK_TLS on, zenoh-pico.h reaches mbedtls/*.h through \
+             link.h",
+            dir.display()
+        );
+        dir
     }
 
     /// The same pair as [`zenoh_pico_include_dirs`], but resolving `config.h`
@@ -674,7 +709,7 @@ pub mod common {
     /// `z_owned_mutex_t` and `z_owned_condvar_t`, neither of which either
     /// example names. `scripts/build-zenoh-pico-cli.sh` carries the numbers and
     /// generates this tree.
-    pub fn zenoh_pico_include_dirs_single_threaded() -> [PathBuf; 2] {
+    pub fn zenoh_pico_include_dirs_single_threaded() -> [PathBuf; 3] {
         let root = project_root();
         let vendored = root.join("vendor/zenoh-pico/include");
         let generated = root.join("target/zenoh-pico-build-st/zenohpico/include");
@@ -691,7 +726,7 @@ pub mod common {
              arm whose only delta is -DZ_FEATURE_MULTI_THREAD=0)",
             generated.display()
         );
-        [generated, vendored]
+        [generated, vendored, mbedtls_include_dir()]
     }
 
     /// Compile an UNMODIFIED upstream zenoh-pico example

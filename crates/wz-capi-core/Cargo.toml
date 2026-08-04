@@ -50,6 +50,12 @@ path = "src/lib.rs"
 # arms silently become unknown-cfg (which `-D warnings` rejects, and did).
 transport-link-quic = ["wz-runtime-tokio/transport-link-quic"]
 transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe"]
+# R311y534 — the TLS-over-TCP link, on BOTH sides. It is the third arm of the
+# same accept-config cfg the quic feature above already carries, plus the first
+# consumer of the new DIAL-side config: `dial_config` builds a `TlsDialConfig`
+# under it. Off by default like its siblings — a C ABI that never dials `tls/`
+# should not pull rustls.
+transport-link-tls = ["wz-runtime-tokio/transport-link-tls"]
 
 [dependencies]
 # OS entropy for the per-session zid, as zenoh-pico does at `z_open`
