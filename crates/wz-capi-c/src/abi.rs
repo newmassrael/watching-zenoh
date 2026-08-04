@@ -167,6 +167,31 @@ define_opaque!(
     z_moved_subscriber_t,
     48
 );
+// The liveliness token family — 16 bytes at align 8 (`zenoh_opaque.h:345-347`),
+// and `z_liveliness.c` stack-allocates the owned one.
+define_opaque!(
+    z_owned_liveliness_token_t,
+    z_loaned_liveliness_token_t,
+    z_moved_liveliness_token_t,
+    16
+);
+// The encoding family — 40 bytes at align 8 (`zenoh_opaque.h:232-234`).
+// `z_pub.c` stack-allocates the owned one to hold a clone of a constant.
+define_opaque!(
+    z_owned_encoding_t,
+    z_loaned_encoding_t,
+    z_moved_encoding_t,
+    40
+);
+// The publisher family — 104 bytes at align 8 (`zenoh_opaque.h:226-228`).
+// `z_pub.c` / `z_pong.c` / `z_pub_thr.c` all stack-allocate the owned one, so
+// this is the largest size the C side depends on outside the config.
+define_opaque!(
+    z_owned_publisher_t,
+    z_loaned_publisher_t,
+    z_moved_publisher_t,
+    104
+);
 
 /// The borrowed sample a subscriber callback receives.
 ///
@@ -385,6 +410,33 @@ pub struct wz_capi_c_layout_t {
     pub string: usize,
     /// `size_of::<z_owned_closure_sample_t>()`.
     pub closure_sample: usize,
+    /// `size_of::<z_owned_liveliness_token_t>()`.
+    pub liveliness_token: usize,
+    /// `size_of::<z_owned_publisher_t>()`.
+    pub publisher: usize,
+    /// `size_of::<z_publisher_options_t>()` — FEATURE-DEPENDENT and computed by
+    /// the compiler from a mirrored field list, which is exactly why it is
+    /// measured here rather than trusted.
+    pub publisher_options: usize,
+    /// `size_of::<z_publisher_put_options_t>()`, also feature-dependent.
+    pub publisher_put_options: usize,
+    /// `size_of::<z_owned_encoding_t>()`.
+    pub encoding: usize,
+    /// `size_of::<z_owned_closure_zid_t>()`.
+    pub closure_zid: usize,
+    /// `size_of::<z_owned_closure_matching_status_t>()`.
+    pub closure_matching_status: usize,
+    /// `size_of::<z_id_t>()` — 16 bytes at align 1, and the ALIGNMENT is the
+    /// half that a `u128`-backed implementation would get wrong.
+    pub id: usize,
+    /// `align_of::<z_id_t>()`.
+    pub id_align: usize,
+    /// `size_of::<z_clock_t>()`.
+    pub clock: usize,
+    /// `size_of::<z_liveliness_subscriber_options_t>()`.
+    pub liveliness_subscriber_options: usize,
+    /// `size_of::<z_matching_status_t>()`.
+    pub matching_status: usize,
 }
 
 /// Report this build's owned-type footprints — the drop-in's half of the layout
@@ -409,6 +461,23 @@ pub unsafe extern "C" fn wz_capi_c_layout(out: *mut wz_capi_c_layout_t) {
             subscriber: std::mem::size_of::<z_owned_subscriber_t>(),
             string: std::mem::size_of::<z_owned_string_t>(),
             closure_sample: std::mem::size_of::<z_owned_closure_sample_t>(),
+            liveliness_token: std::mem::size_of::<z_owned_liveliness_token_t>(),
+            publisher: std::mem::size_of::<z_owned_publisher_t>(),
+            publisher_options: std::mem::size_of::<crate::publisher::z_publisher_options_t>(),
+            publisher_put_options: std::mem::size_of::<crate::publisher::z_publisher_put_options_t>(
+            ),
+            encoding: std::mem::size_of::<z_owned_encoding_t>(),
+            closure_zid: std::mem::size_of::<crate::zid::z_owned_closure_zid_t>(),
+            closure_matching_status: std::mem::size_of::<
+                crate::matching::z_owned_closure_matching_status_t,
+            >(),
+            id: std::mem::size_of::<crate::zid::z_id_t>(),
+            id_align: std::mem::align_of::<crate::zid::z_id_t>(),
+            clock: std::mem::size_of::<crate::platform::z_clock_t>(),
+            liveliness_subscriber_options: std::mem::size_of::<
+                crate::liveliness::z_liveliness_subscriber_options_t,
+            >(),
+            matching_status: std::mem::size_of::<crate::matching::z_matching_status_t>(),
         };
     }
 }

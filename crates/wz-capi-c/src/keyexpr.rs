@@ -85,3 +85,41 @@ pub unsafe extern "C" fn z_view_keyexpr_loan(
 ) -> *const z_loaned_keyexpr_t {
     this_ as *const z_loaned_keyexpr_t
 }
+
+/// Construct a view keyexpr WITHOUT canonicity validation (zenoh-c
+/// `z_view_keyexpr_from_str_unchecked`).
+///
+/// Upstream returns `void`: the whole point of the export is that the caller has
+/// asserted the string is already canonical, so there is no verdict to report.
+/// `z_pong.c` uses it for its compile-time literal.
+///
+/// wz still refuses a NULL or non-UTF-8 pointer, because those are not "skipped
+/// validation" but an unreadable argument — there is no keyexpr to alias at all.
+/// The out-param is left in its gravestone state on that path, which is what a
+/// caller's later `z_loan` reads as invalid.
+///
+/// # Safety
+/// `this_` must be null or valid and writable; `s` must be null or
+/// NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_keyexpr_from_str_unchecked(
+    this_: *mut z_view_keyexpr_t,
+    s: *const c_char,
+) {
+    // SAFETY: the caller's contract, delegated. The checked constructor performs
+    // no canonicity check of its own either — this crate's canonicity gate is
+    // applied at DECLARATION and PUBLISH time, where a verdict can be reported —
+    // so the two differ only in upstream's return type.
+    let _ = unsafe { z_view_keyexpr_from_str(this_, s) };
+}
+
+/// Borrow a view keyexpr mutably (zenoh-c `z_view_keyexpr_loan_mut`).
+///
+/// # Safety
+/// `this_` must be null or a valid view keyexpr.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_keyexpr_loan_mut(
+    this_: *mut z_view_keyexpr_t,
+) -> *mut z_loaned_keyexpr_t {
+    this_ as *mut z_loaned_keyexpr_t
+}

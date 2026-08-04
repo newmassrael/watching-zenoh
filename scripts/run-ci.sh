@@ -7344,6 +7344,19 @@ layer_z_zenohd_interop() {
         --test pico_c_examples_on_wz_capi_dropin \
         pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router \
         -- --ignored --quiet --test-threads=1 || return 1
+    # LEG 9z — the same program with zenohd's zid PINNED to one whose leading
+    # nibble is zero. Registered here rather than in Layer E for the identical
+    # reason as the leg above (its name carries the `zenohd` skip token, and it
+    # provisions a router), and it exists because LEG 9 was a 1-in-16 FLAKE from
+    # the day it was written: it asserted its oracle was 32 hex characters, and
+    # `uhlc::ID` renders through `{:x}` over a `u128`, so a zid whose top nibble
+    # is zero logs 31. The C side never trims. LEG 9 cannot discriminate that
+    # rule — measured, by a damage probe: making `z_id_to_string` trim leaves
+    # LEG 9 GREEN and reds this one with the two spellings side by side.
+    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test pico_c_examples_on_wz_capi_dropin \
+        pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32 \
+        -- --ignored --quiet --test-threads=1 || return 1
     # R311y530 — the SCOUTING plane's witness, and the second leg of the drop-in
     # file that needs a router. Upstream's `z_scout.c` is compiled TWICE against
     # the same pico headers -- once linked to wz's cdylib, once to the real
@@ -9078,7 +9091,10 @@ layer_c1cc_api_compat_c() {
     for leg in \
         upstream_z_sub_on_wz_capi_c_receives_from_a_real_pico_zput \
         upstream_z_put_on_wz_capi_c_reaches_a_real_pico_zsub \
-        upstream_z_delete_on_wz_capi_c_is_decoded_by_a_real_pico_zsub; do
+        upstream_z_delete_on_wz_capi_c_is_decoded_by_a_real_pico_zsub \
+        upstream_z_pub_on_wz_capi_c_reaches_a_real_pico_zsub_and_sees_it_match \
+        upstream_z_liveliness_on_wz_capi_c_is_seen_alive_by_real_pico \
+        upstream_z_sub_liveliness_on_wz_capi_c_sees_a_real_pico_token_come_and_go; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \

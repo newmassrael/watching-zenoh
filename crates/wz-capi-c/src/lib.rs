@@ -61,13 +61,18 @@
 pub mod abi;
 pub mod bytes;
 pub mod config;
+pub mod encoding;
 mod ffi;
 pub mod keyexpr;
+pub mod liveliness;
 pub mod log;
+pub mod matching;
 pub mod platform;
+pub mod publisher;
 pub mod put;
 pub mod result;
 pub mod sample;
 pub mod session;
 pub mod string;
 pub mod sub;
+pub mod zid;

@@ -34,6 +34,13 @@ pub const Z_EIO: ZResult = -3;
 pub const Z_ENETWORK: ZResult = -4;
 /// A required argument was null (`Z_ENULL`).
 pub const Z_ENULL: ZResult = -5;
+/// A resource could not be obtained (`Z_EUNAVAILABLE`) — the id space behind a
+/// declaration is exhausted.
+pub const Z_EUNAVAILABLE: ZResult = -6;
+/// An unclassified failure (`Z_EGENERIC` = `INT8_MIN`). zenoh-c spells its
+/// catch-all as the type's minimum rather than as another small negative, so the
+/// value is transcribed rather than chosen.
+pub const Z_EGENERIC: ZResult = i8::MIN;
 
 #[cfg(test)]
 mod tests {
@@ -43,7 +50,15 @@ mod tests {
     /// non-negative one — a C caller's `< 0` test is the whole contract.
     #[test]
     fn the_codes_are_distinct_and_only_ok_is_non_negative() {
-        let errs = [Z_EINVAL, Z_EPARSE, Z_EIO, Z_ENETWORK, Z_ENULL];
+        let errs = [
+            Z_EINVAL,
+            Z_EPARSE,
+            Z_EIO,
+            Z_ENETWORK,
+            Z_ENULL,
+            Z_EUNAVAILABLE,
+            Z_EGENERIC,
+        ];
         for (i, a) in errs.iter().enumerate() {
             assert!(*a < 0, "{a} must be negative to satisfy `if (rc < 0)`");
             for b in &errs[i + 1..] {
@@ -59,9 +74,23 @@ mod tests {
     /// error handling would be reading another ABI's vocabulary.
     #[test]
     fn the_codes_are_not_zenoh_picos() {
-        for code in [Z_EINVAL, Z_EPARSE, Z_EIO, Z_ENETWORK, Z_ENULL] {
+        // `Z_EGENERIC` is deliberately absent from this sweep: zenoh-c's own
+        // catch-all IS `INT8_MIN`, the same number pico spells `_Z_ERR_GENERIC`,
+        // so the two ABIs COINCIDE there. Asserting otherwise would be asserting
+        // a difference upstream does not have. The `-127` half still holds — a
+        // null argument is `Z_ENULL` here and `_Z_ERR_NULL` there, and those
+        // genuinely differ.
+        for code in [
+            Z_EINVAL,
+            Z_EPARSE,
+            Z_EIO,
+            Z_ENETWORK,
+            Z_ENULL,
+            Z_EUNAVAILABLE,
+        ] {
             assert_ne!(code, -128, "that is zenoh-pico's _Z_ERR_GENERIC");
             assert_ne!(code, -127, "that is zenoh-pico's _Z_ERR_NULL");
         }
+        assert_eq!(Z_EGENERIC, i8::MIN, "zenoh-c's Z_EGENERIC is INT8_MIN");
     }
 }

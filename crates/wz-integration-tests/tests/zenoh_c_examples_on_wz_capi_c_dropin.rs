@@ -269,12 +269,20 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         r#"#include <stdio.h>
 #include "zenoh.h"
 int main(void) {
-    printf("%zu %zu %zu %zu %zu %zu %zu %zu\n",
+    printf("%zu %zu %zu %zu %zu %zu %zu %zu "
+           "%zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu\n",
         sizeof(z_owned_session_t), sizeof(z_owned_bytes_t),
         sizeof(z_view_keyexpr_t), sizeof(z_owned_config_t),
         _Alignof(z_owned_session_t),
         sizeof(z_owned_subscriber_t), sizeof(z_owned_string_t),
-        sizeof(z_owned_closure_sample_t));
+        sizeof(z_owned_closure_sample_t),
+        sizeof(z_owned_liveliness_token_t), sizeof(z_owned_publisher_t),
+        sizeof(z_publisher_options_t), sizeof(z_publisher_put_options_t),
+        sizeof(z_owned_encoding_t), sizeof(z_owned_closure_zid_t),
+        sizeof(z_owned_closure_matching_status_t),
+        sizeof(z_id_t), _Alignof(z_id_t), sizeof(z_clock_t),
+        sizeof(z_liveliness_subscriber_options_t),
+        sizeof(z_matching_status_t));
     return 0;
 }
 "#,
@@ -300,9 +308,9 @@ int main(void) {
     let text = String::from_utf8_lossy(&out.stdout);
     let upstream: Vec<usize> = text
         .split_whitespace()
-        .map(|t| t.parse().expect("the probe prints eight integers"))
+        .map(|t| t.parse().expect("the probe prints one integer per field"))
         .collect();
-    assert_eq!(upstream.len(), 8, "probe output: {text:?}");
+    assert_eq!(upstream.len(), 20, "probe output: {text:?}");
 
     // What the SHIPPED cdylib says about itself, read through its own export
     // rather than re-transcribed here.
@@ -321,6 +329,18 @@ int main(void) {
         subscriber: usize,
         string: usize,
         closure_sample: usize,
+        liveliness_token: usize,
+        publisher: usize,
+        publisher_options: usize,
+        publisher_put_options: usize,
+        encoding: usize,
+        closure_zid: usize,
+        closure_matching_status: usize,
+        id: usize,
+        id_align: usize,
+        clock: usize,
+        liveliness_subscriber_options: usize,
+        matching_status: usize,
     }
     let lib = wz_capi_c_cdylib();
     // SAFETY: loading wz's own freshly built cdylib and calling its documented
@@ -339,6 +359,18 @@ int main(void) {
             subscriber: 0,
             string: 0,
             closure_sample: 0,
+            liveliness_token: 0,
+            publisher: 0,
+            publisher_options: 0,
+            publisher_put_options: 0,
+            encoding: 0,
+            closure_zid: 0,
+            closure_matching_status: 0,
+            id: 0,
+            id_align: 0,
+            clock: 0,
+            liveliness_subscriber_options: 0,
+            matching_status: 0,
         };
         f(&mut out);
         [
@@ -350,6 +382,18 @@ int main(void) {
             out.subscriber,
             out.string,
             out.closure_sample,
+            out.liveliness_token,
+            out.publisher,
+            out.publisher_options,
+            out.publisher_put_options,
+            out.encoding,
+            out.closure_zid,
+            out.closure_matching_status,
+            out.id,
+            out.id_align,
+            out.clock,
+            out.liveliness_subscriber_options,
+            out.matching_status,
         ]
     };
 
@@ -378,6 +422,18 @@ int main(void) {
         "z_owned_subscriber_t",
         "z_owned_string_t",
         "z_owned_closure_sample_t",
+        "z_owned_liveliness_token_t",
+        "z_owned_publisher_t",
+        "z_publisher_options_t",
+        "z_publisher_put_options_t",
+        "z_owned_encoding_t",
+        "z_owned_closure_zid_t",
+        "z_owned_closure_matching_status_t",
+        "z_id_t",
+        "_Alignof(z_id_t)",
+        "z_clock_t",
+        "z_liveliness_subscriber_options_t",
+        "z_matching_status_t",
     ];
     for (i, name) in names.iter().enumerate() {
         assert_eq!(

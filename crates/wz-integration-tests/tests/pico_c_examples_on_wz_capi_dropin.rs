@@ -1300,17 +1300,7 @@ fn pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router() {
     // expected string is produced by the foreign process, never by wz.
     let router_log = wait_for_substring(&mut router_out, "ZID:", EXCHANGE_TIMEOUT)
         .unwrap_or_else(|captured| panic!("zenohd never printed its ZID:\n{captured}"));
-    let expected_zid = router_log
-        .split("ZID:")
-        .nth(1)
-        .and_then(|tail| tail.split_whitespace().next())
-        .map(|s| s.trim().to_ascii_lowercase())
-        .expect("zenohd's ZID line carries a value");
-    assert_eq!(
-        expected_zid.len(),
-        32,
-        "zenohd's self-reported zid is not 32 hex characters: {expected_zid:?}"
-    );
+    let expected_zid = canonical_zid_32(&logged_zid(&router_log));
 
     let mut info_out = tempfile::tempfile().expect("z_info stdout capture");
     let info_writer = info_out.try_clone().expect("dup z_info stdout handle");
@@ -1347,6 +1337,129 @@ fn pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router() {
         own, expected_zid,
         "z_info reported its own zid as the router's, so the enumeration is \
          not reading the peer set"
+    );
+
+    graceful_terminate(router.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 9z (`wz->zenohd`, SHORT ZID) — LEG 9 again with zenohd's zid PINNED to a
+/// value whose leading nibble is zero.
+///
+/// ## Why this leg exists
+///
+/// LEG 9 red once, on nothing wz did: zenohd came up with the zid
+/// `9c3a1e13dd2689ece0c232e62887fbc` and the leg asserted its oracle was 32
+/// characters. It is 31. `uhlc::ID` renders through `{:x}` over a `u128`
+/// (`uhlc-0.8.2/src/id.rs:281`), so a leading zero nibble is trimmed, and 1
+/// random zid in 16 is short — the leg was a 6% flake from the day it was
+/// written, and the failure it produced named neither cause nor consequence.
+///
+/// The number was not the defect. The defect was that the two SIDES of this
+/// comparison render the same 16 bytes at different widths, and nothing said so.
+/// `canonical_zid_32` now says it; this leg makes the short case DETERMINISTIC
+/// rather than leaving it to a 1-in-16 draw, which is the only way a rendering
+/// rule stays covered.
+///
+/// ## What is pinned, and what is still the oracle's to choose
+///
+/// Only the VALUE is pinned, through zenohd's own `-i`. Both RENDERINGS remain
+/// foreign-authored: zenohd prints the trimmed 31-character form into its log,
+/// and upstream's `z_info.c` — compiled against pico's headers — prints whatever
+/// wz's `z_id_to_string` produces. The leg asserts the padded 32-character form
+/// appears under `Routers IDs`, i.e. that wz pads where zenoh trims, which is
+/// pico's contract and not a wz preference.
+///
+/// The trimmed-log assertion is the DAMAGE PROBE, and it is what keeps this leg
+/// honest: if a future zenoh stopped trimming, the pin would silently stop
+/// exercising the short case and this leg would still pass on padding alone.
+/// Asserting the log is 31 characters fails loudly instead.
+///
+/// zenoh REFUSES a configured zid with a literal leading `0` ("Leading 0s are
+/// not valid", `commons/zenoh-protocol/src/core/mod.rs:180`), so the pin is
+/// written as the 31-character canonical string — which is exactly the point:
+/// the trimmed form IS zenoh's canonical spelling of a value the C side spells
+/// with 32.
+// wz-proves: api-compat-pico wz->zenohd partial
+#[test]
+#[ignore = "spawns the real zenohd router and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32() {
+    /// 31 hex characters: the canonical spelling of a 16-byte zid whose
+    /// most-significant nibble is zero.
+    const PINNED_ZID_31: &str = "123456789abcdef0123456789abcdef";
+    let padded = format!("0{PINNED_ZID_31}");
+
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_info", dir.path());
+    let zenohd = zenohd_binary();
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    let mut router_out = tempfile::tempfile().expect("zenohd stdout capture");
+    let router_writer = router_out.try_clone().expect("dup zenohd stdout handle");
+    let mut router = ChildGuard::wrap(
+        "zenohd",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&zenohd)
+            .args([
+                "--no-multicast-scouting",
+                "-l",
+                &endpoint,
+                "-i",
+                PINNED_ZID_31,
+            ])
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::from(router_writer.try_clone().expect("dup")))
+            .stderr(Stdio::from(router_writer))
+            .spawn()
+            .expect("spawn zenohd"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(router.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "zenohd never accepted on {endpoint} — {why}; capture so far:\n{}",
+            read_captured(&mut router_out)
+        );
+    }
+    drop(reservation);
+
+    let router_log = wait_for_substring(&mut router_out, "ZID:", EXCHANGE_TIMEOUT)
+        .unwrap_or_else(|captured| panic!("zenohd never printed its ZID:\n{captured}"));
+    let logged = logged_zid(&router_log);
+    // DAMAGE PROBE on the pin: zenoh must still be TRIMMING, or this leg is no
+    // longer driving the short case it exists for.
+    assert_eq!(
+        logged, PINNED_ZID_31,
+        "zenohd did not log the pinned zid in its trimmed 31-character form, so \
+         this leg is no longer exercising the short-oracle case.\n\
+         --- zenohd log ---\n{router_log}"
+    );
+    assert_eq!(canonical_zid_32(&logged), padded);
+
+    let mut info_out = tempfile::tempfile().expect("z_info stdout capture");
+    let info_writer = info_out.try_clone().expect("dup z_info stdout handle");
+    let info = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args(["-e", &endpoint, "-m", "client"])
+        .stdout(Stdio::from(info_writer))
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the compiled z_info drop-in");
+    assert!(info.success(), "z_info.c on wz exited {info:?}");
+    let printed = read_captured(&mut info_out);
+
+    let (routers, _peers) = split_info_sections(&printed);
+    let listed: Vec<&str> = routers.split_whitespace().collect();
+    assert_eq!(
+        listed,
+        vec![padded.as_str()],
+        "upstream z_info.c on wz did not render the pinned zid ZERO-PADDED to 32 \
+         characters under Routers IDs. pico prints two hex digits per byte with \
+         no trimming (vendor/zenoh-pico/src/utils/uuid.c:38-41), so the leading \
+         zero must survive.\n--- z_info (on wz) stdout ---\n{printed}"
     );
 
     graceful_terminate(router.child_mut(), Duration::from_secs(5));
@@ -1448,6 +1561,52 @@ fn split_info_sections(printed: &str) -> (String, String) {
         .unwrap_or("")
         .to_owned();
     (routers, peers)
+}
+
+/// The zid a Rust zenoh node printed about itself, lifted out of its log line.
+fn logged_zid(router_log: &str) -> String {
+    router_log
+        .split("ZID:")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .expect("a zenoh node's ZID line carries a value")
+}
+
+/// Widen a zid as a RUST zenoh node renders it to the form a C program prints.
+///
+/// The two renderings of one 16-byte value do NOT have the same width, and this
+/// leg used to assert they did. `zenohd` logs its zid through `uhlc::ID`'s
+/// `Display`, which is `write!(f, "{:x}", u128::from_le_bytes(self.0))`
+/// (`uhlc-0.8.2/src/id.rs:281`) — a `u128` hex format, so every LEADING ZERO
+/// NIBBLE is trimmed. One random zid in 16 therefore logs as 31 characters, one
+/// in 256 as 30, and so on. The C side never trims: pico's `_z_id_to_string`
+/// hands all 16 bytes to `_z_string_convert_bytes_le`
+/// (`vendor/zenoh-pico/src/utils/uuid.c:38-41`), which emits two hex digits per
+/// byte unconditionally, and wz's `z_id_to_string` matches that
+/// (`crates/wz-capi-pico/src/zid.rs:318-326`).
+///
+/// So the comparison has to be made on a canonical form. Left-padding to 32 is
+/// that form because it is the one the C program prints, which keeps the
+/// assertions below EXACT-WIDTH matches. The alternative — comparing on the
+/// log's literal text — degrades to a suffix match the moment the oracle is
+/// short, and a suffix match is a weaker claim than this leg is making.
+///
+/// The guard that replaces the old `== 32` states what upstream actually
+/// guarantees: a zid renders as 1..=32 lowercase hex characters. `LEG 9z` drives
+/// the short case deterministically rather than waiting 16 runs for it.
+fn canonical_zid_32(logged: &str) -> String {
+    assert!(
+        !logged.is_empty()
+            && logged.len() <= 32
+            && logged
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+        "a zenoh node's self-reported zid must be 1..=32 lowercase hex \
+         characters, got {logged:?} ({} chars)",
+        logged.len(),
+    );
+    format!("{logged:0>32}")
 }
 
 /// LEG 11 (`wz->pico`, THROUGHPUT) — upstream's `z_pub_thr.c`, running on wz

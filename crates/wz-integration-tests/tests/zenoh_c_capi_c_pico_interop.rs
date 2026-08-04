@@ -588,3 +588,355 @@ fn upstream_z_sub_on_wz_capi_c_renders_a_pico_attachment_through_zenohd() {
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
     let _ = router.child_mut().kill();
 }
+
+/// LEG 5 (`wz->pico`, DECLARED PUBLISHER) — upstream's `z_pub.c`, running on WZ's
+/// C ABI, reaches the REAL zenoh-pico `z_sub`, and its MATCHING LISTENER is told
+/// about that foreign subscriber.
+///
+/// ## Why this leg and not another symbol count
+///
+/// `z_pub.c` was blocked on nine exports and every one of them can be present and
+/// wrong in a way `nm` cannot see. It is the first program on this ABI that
+/// exercises FOUR planes at once, and each has a failure mode a link check passes:
+///
+///   * the PUBLISHER plane (`z_declare_publisher` / `z_publisher_put`) — a
+///     declared publisher that dropped its keyexpr, or published on the session's
+///     rather than its own, still links;
+///   * the PUBLISHER OPTIONS struct — it is TRANSPARENT and stack-allocated, and
+///     `z_publisher_put_options_default` writes through a pointer to it. A wrong
+///     SIZE corrupts the caller's frame rather than failing anything, which is why
+///     the sibling footprint gate measures it against the installed header;
+///   * the ENCODING family — `z_encoding_clone(&encoding, z_encoding_text_plain())`
+///     then `z_move(encoding)` into the options. A constant whose pointer was not
+///     `'static`, or a clone that produced a gravestone, faults here;
+///   * the MATCHING plane, which is the half no other leg reaches at all.
+///
+/// ## The matching verdict is caused by the FOREIGN process
+///
+/// wz holds N sessions where zenoh-c holds one, so the registry AGGREGATES the
+/// per-face verdicts and reports the session's. This leg makes a real zenoh-pico
+/// subscriber the cause of the flip: the drop-in prints "Publisher has matching
+/// subscribers." only after a foreign `z_sub` has declared a subscription that
+/// intersects, over a real TCP link. Nothing wz produced is on either side of that
+/// implication.
+///
+/// Both barriers are read from a process that did not compute them: the payload
+/// from the real pico's stdout, the matching line from upstream's own handler
+/// text.
+// wz-proves: api-compat-c wz->pico partial
+#[test]
+#[ignore = "compiles an upstream zenoh-c example with cc and spawns the real \
+            zenoh-pico z_sub CLI; needs the machine-local zenoh-c oracle; \
+            run-ci Layer C1cc drives it"]
+fn upstream_z_pub_on_wz_capi_c_reaches_a_real_pico_zsub_and_sees_it_match() {
+    let Some((include, _libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let (dropin, libdir) = dropin_binary("z_pub", dir.path(), &include, &examples);
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let payload = "PAYLOAD-FROM-UPSTREAM-ZPUB-ON-WZ";
+    let key = "demo/example/leg5";
+
+    let mut sub_out = tempfile::tempfile().expect("foreign subscriber stdout capture");
+    let writer = sub_out.try_clone().expect("dup foreign subscriber handle");
+    let mut sub = ChildGuard::wrap(
+        "real zenoh-pico z_sub",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub)
+            .args(["-l", &endpoint, "-m", "peer", "-k", "demo/example/**"])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_sub"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_sub never accepted on {endpoint} — {why}; capture \
+             so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    // `z_pub.c` never exits on its own — it publishes once a second until killed —
+    // so its stdout is line-buffered and read WHILE it runs, the same shape LEG 1
+    // uses for `z_sub.c`.
+    let mut pub_out = tempfile::tempfile().expect("drop-in stdout capture");
+    let pub_writer = pub_out.try_clone().expect("dup drop-in stdout handle");
+    let mut publisher = ChildGuard::wrap(
+        "upstream z_pub.c on wz",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args([
+                "-e",
+                &endpoint,
+                "-m",
+                "client",
+                "-k",
+                key,
+                "-p",
+                payload,
+                "--add-matching-listener",
+            ])
+            .env("LD_LIBRARY_PATH", &libdir)
+            .stdout(Stdio::from(pub_writer.try_clone().expect("dup")))
+            .stderr(Stdio::from(pub_writer))
+            .spawn()
+            .expect("run upstream z_pub.c on wz's C ABI"),
+    );
+
+    let captured =
+        wait_for_substring(&mut sub_out, payload, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+            panic!(
+                "the REAL zenoh-pico z_sub never reported the payload published by \
+                 upstream's z_pub.c through a DECLARED PUBLISHER on wz's zenoh-c \
+                 ABI.\nexpected substring: {payload}\n\
+                 --- REAL pico z_sub stdout ---\n{captured}\n\
+                 --- z_pub.c (on wz) stdout+stderr ---\n{}",
+                read_captured(&mut pub_out),
+            )
+        });
+    assert!(
+        captured.contains(key),
+        "the foreign subscriber decoded the payload but on a different key than the \
+         publisher was declared on ({key}), so the DECLARED publisher is not \
+         publishing on its own keyexpr.\n--- REAL pico z_sub stdout ---\n{captured}"
+    );
+
+    // The matching half. Asserted AFTER the payload so the failure separates: a
+    // publish that never arrived reds the barrier above, and a publish that
+    // arrived while the listener stayed silent reds only this one.
+    let matched = wait_for_substring(
+        &mut pub_out,
+        "Publisher has matching subscribers.",
+        EXCHANGE_TIMEOUT,
+    )
+    .unwrap_or_else(|captured| {
+        panic!(
+            "a REAL zenoh-pico subscriber is connected and receiving, but wz never \
+             told upstream's matching listener about it, so the aggregated matching \
+             verdict never flipped.\n--- z_pub.c (on wz) stdout+stderr ---\n{captured}"
+        )
+    });
+    assert!(
+        !matched.contains("NO MORE matching subscribers"),
+        "the matching listener reported the subscriber GONE while it is still \
+         connected and receiving — the aggregation is inverted or a per-face \
+         teardown is leaking through as the session verdict.\n\
+         --- z_pub.c (on wz) stdout+stderr ---\n{matched}"
+    );
+
+    graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 6 (`wz->pico`, LIVELINESS DECLARE) — upstream's `z_liveliness.c`, running
+/// on WZ's C ABI, is seen ALIVE by the REAL zenoh-pico `z_sub_liveliness`.
+///
+/// ## What this leg does NOT prove, stated before what it does
+///
+/// It does not witness the RETRACTION, and the reason was MEASURED rather than
+/// assumed. The first draft asserted that killing the token holder makes the
+/// foreign subscriber print "Dropped token"; it red, and the oracle calibration
+/// that followed shows the reference cannot do it either. A real zenoh-pico
+/// `z_liveliness` against a real zenoh-pico `z_sub_liveliness`, in this same
+/// listening-peer topology, produces "New alive token" and then NOTHING when the
+/// holder is SIGTERM'd — the token holder has no signal handler, so the process
+/// dies before any teardown runs, and the observing pico does not synthesize a
+/// deletion from the link death.
+///
+/// That is a property of the OBSERVER and of the signal, not of wz — but "the
+/// reference fails too" is not a defence, so the retraction is not silently
+/// dropped: it is proved in the direction where wz IS the observer, by
+/// [`upstream_z_sub_liveliness_on_wz_capi_c_sees_a_real_pico_token_come_and_go`].
+///
+/// ## What it does prove
+///
+/// That wz's `z_liveliness_declare_token` puts a DeclToken on the wire that a
+/// foreign implementation decodes and resolves to the right keyexpr — and that it
+/// survives the DECLARE-BEFORE-PEER ordering, since `z_liveliness.c` declares and
+/// then sleeps, so the SSOT replay onto the face is what carries it.
+// wz-proves: api-compat-c wz->pico partial
+#[test]
+#[ignore = "compiles an upstream zenoh-c example with cc and spawns the real \
+            zenoh-pico z_sub_liveliness CLI; needs the machine-local zenoh-c \
+            oracle; run-ci Layer C1cc drives it"]
+fn upstream_z_liveliness_on_wz_capi_c_is_seen_alive_by_real_pico() {
+    let Some((include, _libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let (dropin, libdir) = dropin_binary("z_liveliness", dir.path(), &include, &examples);
+    let z_sub_liveliness = zenoh_pico_cli_binary("z_sub_liveliness");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/liveliness/leg6";
+
+    let mut watcher_out = tempfile::tempfile().expect("foreign watcher stdout capture");
+    let writer = watcher_out.try_clone().expect("dup foreign watcher handle");
+    let mut watcher = ChildGuard::wrap(
+        "real zenoh-pico z_sub_liveliness",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub_liveliness)
+            .args(["-l", &endpoint, "-m", "peer", "-k", "demo/liveliness/**"])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_sub_liveliness"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(watcher.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_sub_liveliness never accepted on {endpoint} — \
+             {why}; capture so far:\n{}",
+            read_captured(&mut watcher_out)
+        );
+    }
+    drop(reservation);
+
+    let mut token_out = tempfile::tempfile().expect("drop-in stdout capture");
+    let token_writer = token_out.try_clone().expect("dup drop-in stdout handle");
+    let mut token = ChildGuard::wrap(
+        "upstream z_liveliness.c on wz",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-e", &endpoint, "-m", "client", "-k", key])
+            .env("LD_LIBRARY_PATH", &libdir)
+            .stdout(Stdio::from(token_writer.try_clone().expect("dup")))
+            .stderr(Stdio::from(token_writer))
+            .spawn()
+            .expect("run upstream z_liveliness.c on wz's C ABI"),
+    );
+
+    let alive = format!(">> [LivelinessSubscriber] New alive token ('{key}')");
+    wait_for_substring(&mut watcher_out, &alive, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+        panic!(
+            "the REAL zenoh-pico z_sub_liveliness never saw the token upstream's \
+             z_liveliness.c declared on wz's zenoh-c ABI.\nexpected: {alive}\n\
+             --- REAL pico z_sub_liveliness stdout ---\n{captured}\n\
+             --- z_liveliness.c (on wz) stdout+stderr ---\n{}",
+            read_captured(&mut token_out),
+        )
+    });
+
+    graceful_terminate(token.child_mut(), Duration::from_secs(5));
+    graceful_terminate(watcher.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 7 (`pico->wz`, LIVELINESS RETRACTION) — upstream's `z_sub_liveliness.c`,
+/// running on WZ's C ABI, sees a REAL zenoh-pico token come AND go.
+///
+/// ## This is the leg LEG 6 cannot be
+///
+/// The retraction edge needs wz to be the OBSERVER, because the token holder that
+/// dies cannot report its own death: it is SIGTERM'd with no handler, so nothing
+/// runs in that process. What must happen instead is on the observing side — the
+/// face dies, and the session has to synthesize the DELETE for every token that
+/// face had declared, or a C application is left believing the resource is alive
+/// forever.
+///
+/// That synthesis is `face_down`'s liveliness flush plus its deferred-fire drain
+/// (`wz_capi_core::faces`), shared with the zenoh-pico ABI. The drain is the
+/// load-bearing half: the registry slot holds a DEFERRED-FIRE staging sink, so a
+/// flush alone stages Deletes that nothing delivers — it measures as one slot
+/// fired and reaches the application as silence.
+///
+/// The calibration behind LEG 6 is what makes this leg's verdict meaningful: two
+/// real picos in the mirrored arrangement print NOTHING on the holder's death, so
+/// a "Dropped token" line here is wz doing something the reference does not, not
+/// wz echoing it.
+// wz-proves: api-compat-c pico->wz partial
+#[test]
+#[ignore = "compiles an upstream zenoh-c example with cc and spawns the real \
+            zenoh-pico z_liveliness CLI; needs the machine-local zenoh-c oracle; \
+            run-ci Layer C1cc drives it"]
+fn upstream_z_sub_liveliness_on_wz_capi_c_sees_a_real_pico_token_come_and_go() {
+    let Some((include, _libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let (dropin, libdir) = dropin_binary("z_sub_liveliness", dir.path(), &include, &examples);
+    let z_liveliness = zenoh_pico_cli_binary("z_liveliness");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/liveliness/leg7";
+
+    // The DROP-IN listens and the foreign token holder dials in, so the face whose
+    // death must be noticed is one wz accepted.
+    let mut watcher_out = tempfile::tempfile().expect("drop-in stdout capture");
+    let writer = watcher_out.try_clone().expect("dup drop-in stdout handle");
+    let mut watcher = ChildGuard::wrap(
+        "upstream z_sub_liveliness.c on wz",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-l", &endpoint, "-m", "peer", "-k", "demo/liveliness/**"])
+            .env("LD_LIBRARY_PATH", &libdir)
+            .stdout(Stdio::from(writer.try_clone().expect("dup")))
+            .stderr(Stdio::from(writer))
+            .spawn()
+            .expect("run upstream z_sub_liveliness.c on wz's C ABI"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(watcher.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "upstream z_sub_liveliness.c on wz never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut watcher_out)
+        );
+    }
+    drop(reservation);
+
+    let mut token_out = tempfile::tempfile().expect("foreign token stdout capture");
+    let token_writer = token_out.try_clone().expect("dup foreign token handle");
+    let mut token = ChildGuard::wrap(
+        "real zenoh-pico z_liveliness",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_liveliness)
+            .args(["-e", &endpoint, "-m", "client", "-k", key])
+            .stdout(Stdio::from(token_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_liveliness"),
+    );
+
+    let alive = format!(">> [LivelinessSubscriber] New alive token ('{key}')");
+    wait_for_substring(&mut watcher_out, &alive, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+        panic!(
+            "upstream z_sub_liveliness.c on wz never reported the token a REAL \
+             zenoh-pico declared.\nexpected: {alive}\n\
+             --- z_sub_liveliness.c (on wz) stdout+stderr ---\n{captured}\n\
+             --- REAL pico z_liveliness stdout ---\n{}",
+            read_captured(&mut token_out),
+        )
+    });
+
+    // Kill the FOREIGN holder. Nothing in that process reports the retraction —
+    // the observing side has to produce it.
+    graceful_terminate(token.child_mut(), Duration::from_secs(5));
+
+    let dropped = format!(">> [LivelinessSubscriber] Dropped token ('{key}')");
+    wait_for_substring(&mut watcher_out, &dropped, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+        panic!(
+            "the REAL zenoh-pico token holder died and wz never told upstream's \
+             liveliness callback, so a C application is left believing the resource \
+             is still alive. The face-death flush or its deferred-fire drain did not \
+             reach the C ABI.\nexpected: {dropped}\n\
+             --- z_sub_liveliness.c (on wz) stdout+stderr ---\n{captured}"
+        )
+    });
+
+    graceful_terminate(watcher.child_mut(), Duration::from_secs(5));
+}

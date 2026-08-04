@@ -106,6 +106,22 @@ struct SubscriberState {
     id: SubId,
 }
 
+/// Leak a [`SubscriberState`] and hand back the handle a `z_owned_subscriber_t`
+/// carries.
+///
+/// Shared with the LIVELINESS plane rather than duplicated there, and that is not
+/// tidiness: `z_liveliness_declare_subscriber` hands the C side back the SAME
+/// `z_owned_subscriber_t`, so both kinds must be undeclarable through the one
+/// `z_undeclare_subscriber` below. One state type is what makes that true by
+/// construction — the registry already shares [`SubId`] space between the two for
+/// the same reason.
+pub(crate) fn subscriber_state_handle(shared: &Arc<SharedSession>, id: SubId) -> Handle {
+    Box::into_raw(Box::new(SubscriberState {
+        shared: shared.clone(),
+        id,
+    })) as Handle
+}
+
 impl Drop for SubscriberState {
     fn drop(&mut self) {
         self.shared.undeclare_subscriber(self.id);
@@ -225,13 +241,51 @@ pub unsafe extern "C" fn z_declare_subscriber(
             let closure = Arc::new(cclosure);
             Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
         });
-        let boxed = Box::new(SubscriberState {
-            shared: state.shared.clone(),
-            id,
-        });
-        unsafe { *subscriber = z_owned_subscriber_t::from_handle(Box::into_raw(boxed) as Handle) };
+        unsafe {
+            *subscriber =
+                z_owned_subscriber_t::from_handle(subscriber_state_handle(&state.shared, id))
+        };
         Z_OK
     })
+}
+
+/// Declare a subscriber the C side never holds (zenoh-c
+/// `z_declare_background_subscriber`): it lives until the session is closed.
+///
+/// The difference from [`z_declare_subscriber`] is ownership, not behaviour.
+/// There is no `z_owned_subscriber_t` to hand back, so nothing can undeclare it —
+/// the registry's SSOT entry (and with it the last `Arc<CClosure>`) is released
+/// when the session drops, which is exactly upstream's "background" contract.
+///
+/// Implemented by declaring into a LOCAL owned handle and discarding it, rather
+/// than by a second registry path: a background subscription is an ordinary one
+/// whose handle was thrown away, and giving it its own path is how the two would
+/// drift.
+///
+/// Discarding the local is a genuine leak and that is the intent, not an
+/// oversight to be papered over with `mem::forget`. `z_owned_subscriber_t` is a
+/// plain `#[repr(C)]` struct with NO `Drop` — the retraction lives in the boxed
+/// [`SubscriberState`] behind its handle, and only [`z_undeclare_subscriber`]
+/// reclaims that. With no handle in the C side's hands, nobody can call it, so
+/// the subscription lives until the session's registry is torn down. `mem::forget`
+/// here would be a no-op that merely LOOKED load-bearing.
+///
+/// # Safety
+/// `session` must be a valid loaned session; `key_expr` must be a valid loaned
+/// keyexpr; `callback` must be a valid moved closure. `options` is accepted for
+/// ABI compatibility and ignored, as for [`z_declare_subscriber`].
+#[no_mangle]
+pub unsafe extern "C" fn z_declare_background_subscriber(
+    session: *const z_loaned_session_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut c_void,
+) -> ZResult {
+    let mut sink = z_owned_subscriber_t::null_value();
+    // SAFETY: the caller's contract, delegated — the local sink absorbs the
+    // handle the owned form would have written out, and then goes out of scope
+    // without reclaiming it. See the doc note.
+    unsafe { z_declare_subscriber(session, &mut sink, key_expr, callback, options) }
 }
 
 /// Undeclare a subscriber (zenoh-c `z_undeclare_subscriber`): drops the wz
