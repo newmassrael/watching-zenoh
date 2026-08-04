@@ -314,3 +314,53 @@ pub unsafe extern "C" fn zp_start_lease_task(
 pub unsafe extern "C" fn zp_stop_lease_task(_zs: *mut z_loaned_session_t) -> ZResult {
     Z_OK
 }
+
+// --- TX batching (pico `zp_batch_*`) ---------------------------------------
+
+/// Open a TX batching window (pico `zp_batch_start`).
+///
+/// pico drives ONE transport, so its batch control is a single call
+/// (`src/api/api.c:2444-2450` into `_z_transport_start_batching`). wz holds N
+/// faces, so the window opens on each — the same fan-out every other
+/// session-level export here performs. Upstream's `z_pub_thr.c` brackets its
+/// publish loop with `zp_batch_start` / `zp_batch_stop`, which is what makes it
+/// a THROUGHPUT benchmark rather than a publish loop.
+#[no_mangle]
+pub unsafe extern "C" fn zp_batch_start(zs: *const z_loaned_session_t) -> ZResult {
+    guarded(|| match session_state(zs) {
+        Some(state) => {
+            state.shared.batch_start_all();
+            Z_OK
+        }
+        None => Z_ERR_NULL,
+    })
+}
+
+/// Flush every open batch window without closing it (pico `zp_batch_flush`).
+///
+/// Shipped alongside its two siblings even though no upstream example calls it:
+/// an asymmetric family fails to link for the NEXT program rather than this one,
+/// which is the lesson this crate already paid for once with
+/// `z_put_options_default`.
+#[no_mangle]
+pub unsafe extern "C" fn zp_batch_flush(zs: *const z_loaned_session_t) -> ZResult {
+    guarded(|| match session_state(zs) {
+        Some(state) => {
+            state.shared.batch_flush_all();
+            Z_OK
+        }
+        None => Z_ERR_NULL,
+    })
+}
+
+/// Close every batch window, draining what it holds (pico `zp_batch_stop`).
+#[no_mangle]
+pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult {
+    guarded(|| match session_state(zs) {
+        Some(state) => {
+            state.shared.batch_stop_all();
+            Z_OK
+        }
+        None => Z_ERR_NULL,
+    })
+}

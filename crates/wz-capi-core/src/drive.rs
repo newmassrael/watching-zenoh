@@ -54,12 +54,28 @@ pub enum OpenError {
 /// join handle.
 pub struct SessionState {
     pub shared: Arc<SharedSession>,
+    /// This session's own zid, the 16 bytes it puts on the wire in its INIT.
+    ///
+    /// R311y528 — minted on the CALLING thread in [`open_blocking`] and handed
+    /// to the drive thread, rather than minted inside the drive future. pico's
+    /// `z_info_zid` must report the identity the peer actually sees
+    /// (`~/zenoh-pico/src/api/api.c`, `_z_session_get_zid`), so the id has to
+    /// exist somewhere the C thread can read it. Minting it before the spawn is
+    /// also what makes the two equal by construction instead of by convention:
+    /// there is one `fresh_zid()` call per session and both readers use it.
+    zid: [u8; ZID_LENGTH],
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     driver: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl SessionState {
+    /// This session's own zid (pico `z_info_zid`). Always the id the INIT
+    /// carried — see the field.
+    pub fn zid(&self) -> [u8; ZID_LENGTH] {
+        self.zid
+    }
+
     /// Signal the drive loop to stop and join the driver thread. Idempotent.
     pub fn close(&self) {
         // The latch is set BEFORE the notify, and is what makes the close
@@ -126,8 +142,8 @@ const ZID_LENGTH: usize = 16;
 /// wz-runtime-tokio already makes for signing-key entropy (`OpenError::
 /// AuthEntropy`, `session_open.rs:1241-1246`). Handing back a fixed id instead
 /// would reintroduce exactly the peer-collision this exists to prevent.
-fn fresh_zid() -> Option<Vec<u8>> {
-    let mut zid = vec![0u8; ZID_LENGTH];
+fn fresh_zid() -> Option<[u8; ZID_LENGTH]> {
+    let mut zid = [0u8; ZID_LENGTH];
     getrandom::getrandom(&mut zid).ok()?;
     Some(zid)
 }
@@ -165,6 +181,7 @@ async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
 async fn drive_dial(
     endpoint: String,
     whatami: WhatAmI,
+    zid: [u8; ZID_LENGTH],
     shared: Arc<SharedSession>,
     tx: mpsc::Sender<bool>,
     shutdown: Arc<Notify>,
@@ -178,14 +195,7 @@ async fn drive_dial(
             return;
         }
     };
-    let zid = match fresh_zid() {
-        Some(zid) => zid,
-        None => {
-            let _ = tx.send(false);
-            return;
-        }
-    };
-    let params = init_params(whatami, zid);
+    let params = init_params(whatami, zid.to_vec());
     let opened = initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await;
     let OpenedSession {
         mut engine,
@@ -339,6 +349,7 @@ async fn drive_listen(
     endpoint: String,
     listen_cert: Option<String>,
     listen_key: Option<String>,
+    zid: [u8; ZID_LENGTH],
     shared: Arc<SharedSession>,
     tx: mpsc::Sender<bool>,
     shutdown: Arc<Notify>,
@@ -348,13 +359,6 @@ async fn drive_listen(
     // Everything that can fail the open runs BEFORE the success signal below,
     // so a failure is reported to the C caller rather than silently killing a
     // listener it was told had opened.
-    let zid = match fresh_zid() {
-        Some(zid) => zid,
-        None => {
-            let _ = tx.send(false);
-            return;
-        }
-    };
     // R311y406 — thread the LISTEN server cert (native Z_CONFIG_TLS_LISTEN_* keys)
     // into the bind's AcceptConfig, so a `z_open(listen="quic/..")` carrying the cert
     // presents it (was a cert-free `bind_endpoint` -> cert-absence reject). Building
@@ -404,7 +408,7 @@ async fn drive_listen(
     // a future the loop races, so a `z_close` with NO peer ever connected
     // unwinds a pending `accept()` cleanly.
     let forwarder = CApiForwarder::new(shared);
-    let params = init_params(WhatAmI::Peer, zid);
+    let params = init_params(WhatAmI::Peer, zid.to_vec());
     let _summary = accept_loop(
         listener,
         params,
@@ -428,6 +432,9 @@ pub fn open_blocking(
     dial_whatami: WhatAmI,
 ) -> Result<SessionState, OpenError> {
     let clock = TokioTime::new();
+    // Minted here, on the CALLING thread, so `SessionState` can hand it to
+    // `z_info_zid` and the INIT cannot disagree with it — see the field doc.
+    let zid = fresh_zid().ok_or(OpenError::DriveFailed)?;
     let shared = Arc::new(SharedSession::new(clock));
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
@@ -466,6 +473,7 @@ pub fn open_blocking(
                         drive_dial(
                             endpoint,
                             dial_whatami,
+                            zid,
                             drive_shared,
                             tx,
                             drive_shutdown,
@@ -479,6 +487,7 @@ pub fn open_blocking(
                             endpoint,
                             listen_cert,
                             listen_key,
+                            zid,
                             drive_shared,
                             tx,
                             drive_shutdown,
@@ -499,6 +508,7 @@ pub fn open_blocking(
     match rx.recv() {
         Ok(true) => Ok(SessionState {
             shared,
+            zid,
             shutdown,
             stop,
             driver: StdMutex::new(Some(handle)),

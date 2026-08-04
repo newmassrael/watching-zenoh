@@ -955,6 +955,57 @@ impl SharedSession {
             .collect()
     }
 
+    /// Every connected peer's `(zid, whatami)`, as the INIT exchange recorded
+    /// them — the input to pico's `z_info_peers_zid` / `z_info_routers_zid`.
+    ///
+    /// A face whose INIT has not populated the slots yet is SKIPPED rather than
+    /// reported with a zero id: pico enumerates established transports, and a
+    /// half-open face is not one. `whatami` is the raw 2-bit wire form
+    /// (0 Router, 1 Peer, 2 Client) so the split between the two `z_info_*`
+    /// exports is made at the ABI boundary, where pico makes it, rather than
+    /// here.
+    pub fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
+        self.face_sessions()
+            .into_iter()
+            .filter_map(|session| {
+                let actions = session.actions();
+                Some((actions.peer_zid()?, actions.peer_whatami_wire()?))
+            })
+            .collect()
+    }
+
+    /// Open a TX batching window on every face (pico `zp_batch_start`).
+    ///
+    /// pico has ONE transport, so its batch control is a single call; wz holds N
+    /// faces, so the window is opened on each. Returns the number of faces that
+    /// accepted it — a session with no peer batches nothing and reports 0, which
+    /// is not an error (pico's own `zp_batch_start` on a closed session is the
+    /// error case, and that maps to the handle being invalid, not to zero
+    /// faces).
+    pub fn batch_start_all(&self) -> usize {
+        self.face_sessions()
+            .into_iter()
+            .filter(|session| session.batch_start().is_ok())
+            .count()
+    }
+
+    /// Flush every face's open batch window (pico `zp_batch_flush`).
+    pub fn batch_flush_all(&self) -> usize {
+        self.face_sessions()
+            .into_iter()
+            .filter(|session| session.batch_flush().is_ok())
+            .count()
+    }
+
+    /// Close every face's batch window, draining what it holds (pico
+    /// `zp_batch_stop`).
+    pub fn batch_stop_all(&self) -> usize {
+        self.face_sessions()
+            .into_iter()
+            .filter(|session| session.batch_stop().is_ok())
+            .count()
+    }
+
     /// A snapshot of every connected face's session PAIRED with its re-arm
     /// signal — what [`crate::get::fan_get`] iterates.
     ///

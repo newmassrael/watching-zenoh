@@ -556,6 +556,53 @@ pub unsafe extern "C" fn z_put(
 
 // --- publisher exports -----------------------------------------------------
 
+/// pico `z_publisher_options_t` (`api/types.h:236-247`), 24 B measured against
+/// the CMake-GENERATED config these programs compile with.
+///
+/// The tail of this struct is FEATURE-CONDITIONAL in pico's header, so the
+/// layout is a property of the generated `config.h`, not of the source tree:
+/// `reliability` exists because `Z_FEATURE_UNSTABLE_API` is defined, and
+/// `allowed_destination` is ABSENT because `Z_FEATURE_LOCAL_SUBSCRIBER` is 0.
+/// Reading that off the cmake command line instead of the generated header is
+/// the R311y466 trap; both were read off `config.h`, and the offsets are pinned
+/// in this module's tests.
+///
+/// wz's `z_declare_publisher` does not yet READ these fields (its options
+/// parameter is still `*const c_void`), and that is stated rather than implied:
+/// this type exists so a pico program can stack-allocate and default it, which
+/// is what `z_pub_thr.c` does. Honouring `congestion_control` / `priority` /
+/// `is_express` / `reliability` on the declared publisher is separate surface.
+#[repr(C)]
+pub struct z_publisher_options_t {
+    /// Moved default encoding, or NULL. Typed as an opaque pointer here because
+    /// this crate has no encoding plane yet; the SLOT must exist and be 8 B
+    /// wide or every field after it lands at the wrong offset.
+    pub encoding: *mut c_void,
+    pub congestion_control: c_int,
+    pub priority: c_int,
+    pub is_express: bool,
+    pub reliability: c_int,
+}
+
+/// Default publisher options (pico `z_publisher_options_default`).
+///
+/// pico zeroes the encoding slot and takes the library defaults for the rest;
+/// the numeric defaults are its enum zero values, which is what a
+/// `memset`-style default yields and what `z_pub_thr.c` then publishes with.
+#[no_mangle]
+pub unsafe extern "C" fn z_publisher_options_default(options: *mut z_publisher_options_t) {
+    if options.is_null() {
+        return;
+    }
+    *options = z_publisher_options_t {
+        encoding: std::ptr::null_mut(),
+        congestion_control: 0,
+        priority: 0,
+        is_express: false,
+        reliability: 0,
+    };
+}
+
 /// Declare a publisher (pico `z_declare_publisher`).
 #[no_mangle]
 pub unsafe extern "C" fn z_declare_publisher(

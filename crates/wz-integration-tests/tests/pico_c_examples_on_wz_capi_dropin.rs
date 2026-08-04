@@ -89,8 +89,8 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, graceful_terminate, read_captured, wait_for_exit,
-    wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, ChildGuard,
-    PortReservation,
+    wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenohd_binary,
+    ChildGuard, PortReservation,
 };
 
 /// How long a compiled drop-in gets to bind its listener. Generous relative to
@@ -1166,6 +1166,319 @@ fn pico_zpub_source_on_wz_capi_is_told_about_a_real_pico_zsub_arriving_and_leavi
         "the matching edges fired but the REAL pico subscriber never received \
          anything on {key}, so the verdict was not about a live subscription.\n\
          --- REAL pico z_sub stdout ---\n{foreign}"
+    );
+
+    graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 9 (`wz->foreign ROUTER`) — upstream's `z_info.c`, running on wz, reports
+/// the zid of a REAL `zenohd` under **Routers IDs**, and that zid is the one
+/// zenohd printed about itself.
+///
+/// ## Why this leg is worth more than the symbol count suggests
+///
+/// `z_info.c` cost five exports to link (`z_info_zid`, `z_info_routers_zid`,
+/// `z_info_peers_zid`, `z_id_to_string`, `z_closure_zid_move`), and every one of
+/// them could be present and WRONG in a way no link check sees:
+///
+///   * the id could render big-endian — plausible from the source, and
+///     disagreeing with every id a pico program prints;
+///   * the peers/routers split could be inverted, or collapsed into one bucket;
+///   * the enumeration could report the session's OWN id back, or a zero id.
+///
+/// None of those is a wz-authored assertion here. The VALUE is chosen by
+/// zenohd, which prints its own `ZID:` line at startup, and the leg asserts that
+/// upstream's program — compiled against pico's headers, linked against wz —
+/// prints that same 32-character string. Nothing in wz gets to pick either side
+/// of that comparison.
+///
+/// The BUCKET is the discriminator, and it needs LEG 10 to be one: a build that
+/// reported every peer as a router passes this leg and fails that one, and a
+/// build that reported none as routers fails this one. Neither leg alone
+/// separates the split; the pair does.
+// wz-proves: api-compat-pico wz->zenohd partial
+#[test]
+#[ignore = "spawns the real zenohd router and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_info", dir.path());
+    let zenohd = zenohd_binary();
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    let mut router_out = tempfile::tempfile().expect("zenohd stdout capture");
+    let router_writer = router_out.try_clone().expect("dup zenohd stdout handle");
+    let mut router = ChildGuard::wrap(
+        "zenohd",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&zenohd)
+            .args(["--no-multicast-scouting", "-l", &endpoint])
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::from(router_writer.try_clone().expect("dup")))
+            .stderr(Stdio::from(router_writer))
+            .spawn()
+            .expect("spawn zenohd"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(router.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "zenohd never accepted on {endpoint} — {why}; capture so far:\n{}",
+            read_captured(&mut router_out)
+        );
+    }
+    drop(reservation);
+
+    // The ORACLE value: zenohd naming itself. Read from its own log, so the
+    // expected string is produced by the foreign process, never by wz.
+    let router_log = wait_for_substring(&mut router_out, "ZID:", EXCHANGE_TIMEOUT)
+        .unwrap_or_else(|captured| panic!("zenohd never printed its ZID:\n{captured}"));
+    let expected_zid = router_log
+        .split("ZID:")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .expect("zenohd's ZID line carries a value");
+    assert_eq!(
+        expected_zid.len(),
+        32,
+        "zenohd's self-reported zid is not 32 hex characters: {expected_zid:?}"
+    );
+
+    let mut info_out = tempfile::tempfile().expect("z_info stdout capture");
+    let info_writer = info_out.try_clone().expect("dup z_info stdout handle");
+    let info = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args(["-e", &endpoint, "-m", "client"])
+        .stdout(Stdio::from(info_writer))
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the compiled z_info drop-in");
+    assert!(info.success(), "z_info.c on wz exited {info:?}");
+    let printed = read_captured(&mut info_out);
+
+    let (routers, peers) = split_info_sections(&printed);
+    assert!(
+        routers.contains(&expected_zid),
+        "upstream z_info.c on wz did not report the REAL zenohd's own zid \
+         ({expected_zid}) under Routers IDs.\n--- z_info (on wz) stdout ---\n{printed}"
+    );
+    assert!(
+        !peers.contains(&expected_zid),
+        "the router's zid was reported under Peers IDs as well, so the \
+         whatami split is not being made.\n--- z_info (on wz) stdout ---\n{printed}"
+    );
+    // Non-vacuity: the session's OWN id must not be what got enumerated.
+    let own = printed
+        .split("Own ID:")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .expect("z_info prints its own id first")
+        .to_owned();
+    assert_ne!(
+        own, expected_zid,
+        "z_info reported its own zid as the router's, so the enumeration is \
+         not reading the peer set"
+    );
+
+    graceful_terminate(router.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 10 (`wz->foreign PEER`) — the same program against a REAL zenoh-pico peer
+/// reports it under **Peers IDs** instead.
+///
+/// This is LEG 9's other half. A build that put every connected face in one
+/// bucket satisfies exactly one of the two, whichever bucket it chose, so the
+/// pair is what pins the `whatami` split. See LEG 9 for why neither is
+/// sufficient alone.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_sub CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zinfo_source_on_wz_capi_reports_a_real_pico_peer_as_a_peer() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_info", dir.path());
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    let mut peer_out = tempfile::tempfile().expect("pico z_sub stdout capture");
+    let peer_writer = peer_out.try_clone().expect("dup pico stdout handle");
+    let mut peer = ChildGuard::wrap(
+        "real zenoh-pico z_sub (listening peer)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub)
+            .args(["-l", &endpoint, "-m", "peer", "-k", "demo/dropin/**"])
+            .stdout(Stdio::from(peer_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_sub as a listener"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(peer.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real pico z_sub never accepted on {endpoint} — {why}; capture \
+             so far:\n{}",
+            read_captured(&mut peer_out)
+        );
+    }
+    drop(reservation);
+
+    let mut info_out = tempfile::tempfile().expect("z_info stdout capture");
+    let info_writer = info_out.try_clone().expect("dup z_info stdout handle");
+    let info = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args(["-e", &endpoint, "-m", "client"])
+        .stdout(Stdio::from(info_writer))
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the compiled z_info drop-in");
+    assert!(info.success(), "z_info.c on wz exited {info:?}");
+    let printed = read_captured(&mut info_out);
+
+    let (routers, peers) = split_info_sections(&printed);
+    let listed: Vec<&str> = peers.split_whitespace().collect();
+    assert_eq!(
+        listed.len(),
+        1,
+        "exactly one foreign peer is connected, so exactly one zid must be \
+         listed under Peers IDs.\n--- z_info (on wz) stdout ---\n{printed}"
+    );
+    assert_eq!(
+        listed[0].len(),
+        32,
+        "a zid renders as 32 hex characters.\n--- z_info (on wz) stdout ---\n{printed}"
+    );
+    assert!(
+        routers.split_whitespace().next().is_none(),
+        "a pico PEER was reported under Routers IDs -- the whatami split is \
+         inverted or collapsed.\n--- z_info (on wz) stdout ---\n{printed}"
+    );
+
+    graceful_terminate(peer.child_mut(), Duration::from_secs(5));
+}
+
+/// Split `z_info.c`'s output into its `Routers IDs:` and `Peers IDs:` sections.
+///
+/// The program prints the two as consecutive labelled blocks, so the split is on
+/// the labels themselves rather than on line offsets — a leg that counted lines
+/// would break the moment upstream added a field.
+fn split_info_sections(printed: &str) -> (String, String) {
+    let after_routers = printed.split("Routers IDs:").nth(1).unwrap_or("");
+    let mut halves = after_routers.split("Peers IDs:");
+    let routers = halves.next().unwrap_or("").to_owned();
+    // Everything after `Peers IDs:` up to the next label, if any. With
+    // Z_FEATURE_CONNECTIVITY off there is no next label, so this is the tail.
+    let peers = halves
+        .next()
+        .unwrap_or("")
+        .split("Connected")
+        .next()
+        .unwrap_or("")
+        .to_owned();
+    (routers, peers)
+}
+
+/// LEG 11 (`wz->pico`, THROUGHPUT) — upstream's `z_pub_thr.c`, running on wz
+/// with its `zp_batch_start` / `zp_batch_stop` window, delivers to a REAL
+/// zenoh-pico subscriber.
+///
+/// ## What this proves that the other publish legs do not
+///
+/// LEG 3 and LEG 8 publish a handful of samples. This one drives the batching
+/// path: `z_pub_thr.c` opens a TX batch window, publishes in a tight loop, and
+/// closes it. Three things only this leg exercises:
+///
+///   * `zp_batch_start` / `zp_batch_stop` reaching every face rather than
+///     erroring or silently no-op'ing;
+///   * `_z_zint_len`, which the program calls to SIZE its payload — a wrong
+///     answer changes the message size the benchmark chooses, and the program
+///     links it directly even though it is an internal symbol;
+///   * sustained delivery, where a batching bug that coalesced frames
+///     incorrectly would surface as the foreign subscriber decoding garbage or
+///     stalling, not as a wrong first sample.
+///
+/// The foreign subscriber is self-terminating (`-n`), so its EXIT is the
+/// witness: it exits only once it has decoded that many well-formed samples
+/// from wz's batched frames, and a coalescing bug leaves it waiting.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_sub CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zpubthr_source_on_wz_capi_batches_to_a_real_pico_zsub() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_pub_thr", dir.path());
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/dropin/thr";
+
+    let mut sub_out = tempfile::tempfile().expect("subscriber stdout capture");
+    let sub_writer = sub_out.try_clone().expect("dup subscriber stdout handle");
+    let mut sub = ChildGuard::wrap(
+        "real zenoh-pico z_sub (listening peer)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key, "-n", "50"])
+            .stdout(Stdio::from(sub_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_sub as a listener"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real pico z_sub never accepted on {endpoint} — {why}; capture \
+             so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    // The benchmark never terminates on its own; it is killed once the foreign
+    // subscriber has had its fill, which is the actual assertion.
+    let mut pub_out = tempfile::tempfile().expect("publisher stdout capture");
+    let pub_writer = pub_out.try_clone().expect("dup publisher stdout handle");
+    let mut publisher = ChildGuard::wrap(
+        "z_pub_thr.c on wz-capi-pico",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-e", &endpoint, "-m", "client", "-k", key, "-s", "64"])
+            .stdout(Stdio::from(pub_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the compiled z_pub_thr drop-in"),
+    );
+
+    let status = wait_for_exit(sub.child_mut(), EXCHANGE_TIMEOUT).unwrap_or_else(|why| {
+        panic!(
+            "the REAL pico subscriber never decoded its 50 samples from wz's \
+             BATCHED frames, so the zp_batch_* window is not producing \
+             well-formed output ({why}).\n--- pico z_sub stdout ---\n{}\n\
+             --- z_pub_thr (on wz) stdout ---\n{}",
+            read_captured(&mut sub_out),
+            read_captured(&mut pub_out)
+        )
+    });
+    assert!(
+        status.success(),
+        "the real pico subscriber exited {status:?}\n--- its stdout ---\n{}",
+        read_captured(&mut sub_out)
+    );
+    let foreign = read_captured(&mut sub_out);
+    assert!(
+        foreign.contains(key),
+        "the subscriber exited but never named {key}, so the samples it \
+         counted were not wz's.\n--- pico z_sub stdout ---\n{foreign}"
     );
 
     graceful_terminate(publisher.child_mut(), Duration::from_secs(5));

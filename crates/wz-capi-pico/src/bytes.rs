@@ -115,6 +115,10 @@ unsafe fn store_slice(dst: *mut z_owned_slice_t, buf: ByteBuf) {
         _pad: [std::ptr::null_mut(); 3],
     };
 }
+pub(crate) unsafe fn store_owned_string(dst: *mut z_owned_string_t, bytes: &[u8]) {
+    store_string(dst, StringState::boxed(bytes));
+}
+
 unsafe fn store_string(dst: *mut z_owned_string_t, s: Box<StringState>) {
     *dst = z_owned_string_t {
         handle: Box::into_raw(s) as *mut c_void,
