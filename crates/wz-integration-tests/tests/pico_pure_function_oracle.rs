@@ -56,6 +56,7 @@
 use std::path::PathBuf;
 
 use libloading::{Library, Symbol};
+use wz_integration_tests::common::{wz_capi_pico_cdylib, zenoh_pico_shared_library};
 
 /// pico `ZENOH_ID_SIZE`.
 const ID_SIZE: usize = 16;
@@ -83,37 +84,33 @@ impl<const N: usize> Slot<N> {
 }
 
 /// The wz cdylib under test.
+///
+/// R311y536 — the symmetric half of `pico_library`'s fix, and it failed the
+/// audit a step later for the mirror reason. Layer A4's CONTAINMENT arm checks
+/// that a claimed atom is actually compiled into the binary the test drives, and
+/// it identifies that binary from the resolver the file names. A hand-built path
+/// made this file look like an in-process test of `wz-integration-tests`, whose
+/// feature closure has no `api-compat-pico` — so five true claims about the
+/// cdylib were rejected as claims about a crate that does not carry the atom.
+/// The registered resolver also brings the staleness check the drop-in suite
+/// relies on, which a bare `is_file()` never had.
 fn wz_cdylib() -> PathBuf {
-    let path = project_root().join("crates/target/debug/libwz_capi_pico.so");
-    assert!(
-        path.is_file(),
-        "wz cdylib missing at {}; run `cargo build -p wz-capi-pico`",
-        path.display()
-    );
-    path
+    wz_capi_pico_cdylib()
 }
 
 /// The REAL zenoh-pico shared library — the oracle.
+///
+/// R311y536 — this used to build the path itself, and that is why every claim
+/// in this file was REJECTED by Layer A4 as "spawns/links no foreign
+/// implementation". The classifier derives a file's foreign class from the
+/// RESOLVER FUNCTIONS it names, so an artifact reached through a local
+/// `project_root().join(..)` is one the audit cannot see is foreign — the
+/// strongest proof in the tree read as a wz-vs-wz test. It now delegates to the
+/// shared, REGISTERED resolver; the hard-prereq contract is unchanged (the
+/// oracle is what this file compares against, so its absence is a failure and
+/// never a skip).
 fn pico_library() -> PathBuf {
-    let path = project_root().join("target/zenoh-pico-build/lib/libzenohpico.so");
-    assert!(
-        path.is_file(),
-        "zenoh-pico shared library missing at {}; run \
-         scripts/build-zenoh-pico-cli.sh first (it is the CMake build product, \
-         and it is the ORACLE this file compares against -- without it there is \
-         nothing to compare wz to, so this is a hard prereq, never a skip)",
-        path.display()
-    );
-    path
-}
-
-fn project_root() -> PathBuf {
-    // `CARGO_MANIFEST_DIR` is `<root>/crates/wz-integration-tests`.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("manifest dir has a grandparent")
-        .to_path_buf()
+    zenoh_pico_shared_library()
 }
 
 /// Open a library in its OWN namespace. `libloading`'s default is

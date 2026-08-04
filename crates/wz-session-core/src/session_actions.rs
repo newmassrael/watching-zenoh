@@ -50,7 +50,12 @@ use crate::qos::Priority;
 use sce_forge_runtime::codec::CodecError;
 use wz_runtime_core::TimeSource;
 
-#[cfg(feature = "liveliness-token")]
+// R311y536 — the same union as its ONE consumer, `send_declare`'s signature.
+// `dispatch_declare` names the type through its full path, so this import
+// serves exactly one item and must carry exactly that item's gate; carrying a
+// narrower one is what turned a `declare-subscriber`-without-`liveliness-token`
+// build into E0425 the moment the method's own gate was widened.
+#[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
 use wz_codecs::declare::DeclareOwned;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zint::ExtZint;
@@ -5083,11 +5088,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// envelope from primitives + runs the R300 outbound-keyexpr gate),
     /// this takes a ready `DeclareOwned`: the registry already resolved
     /// the keyexpr from wz's own held-token state, which passed the
-    /// outbound gate at `declare_token` time. Gated on `liveliness-token`
-    /// (the only feature that stages outbound `Declare` through the
-    /// sink); that feature transitively enables `codec-declare`, so
-    /// `encode_frame_with_declare` is in scope.
-    #[cfg(feature = "liveliness-token")]
+    /// outbound gate at `declare_token` time.
+    ///
+    /// R311y536 — the gate is the UNION OF ITS CALLERS, and it used to be
+    /// narrower than them. It read `liveliness-token` alone, described as
+    /// "the only feature that stages outbound `Declare` through the sink",
+    /// and that stopped being true when the routed SUBSCRIBER replies
+    /// arrived: `send_declare_subscriber_reply` is `declare-subscriber`-gated
+    /// and `send_declare_final_reply` is `any(liveliness-token,
+    /// declare-subscriber)`-gated, so a build with `declare-subscriber` ON and
+    /// `liveliness-token` OFF compiled two callers of a method that did not
+    /// exist (E0599). R311y530 fixed the BUILDER half of exactly this — it
+    /// routed the final reply through the ungated `declare_build` twin
+    /// precisely so the arm would compile without `liveliness-token` — and
+    /// left the SINK it calls still gated on the old feature. Fixing the
+    /// producer and not auditing the consumer is the recurring shape; the rule
+    /// this now follows is that a helper's cfg must be the OR of every arm
+    /// that calls it, computed from the call sites rather than from the
+    /// feature that happened to introduce it.
+    ///
+    /// The body needs `codec-declare` for `encode_frame_with_declare`, and
+    /// BOTH gate features supply it (`liveliness-token = ["codec-declare"]`,
+    /// `declare-subscriber = ["codec-declare"]`), so the widened gate keeps
+    /// that dependency satisfied by construction rather than by coincidence.
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
     pub fn send_declare(&self, declare: DeclareOwned) {
         // F2 — this surface has no error channel; a transport-down
         // reject drops the emit exactly as the dead link would.

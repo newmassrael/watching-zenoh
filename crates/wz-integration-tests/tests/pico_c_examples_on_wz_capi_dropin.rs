@@ -99,7 +99,8 @@ use wz_integration_tests::common::{
     graceful_terminate, project_root, read_captured,
     spawn_zenohd_multicast_scouting_on_ephemeral_tcp, wait_for_capture_alive, wait_for_exit,
     wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenoh_pico_include_dirs,
-    zenoh_pico_include_dirs_single_threaded, zenohd_binary, ChildGuard, PortReservation,
+    zenoh_pico_include_dirs_single_threaded, zenoh_pico_library_dir, zenohd_binary, ChildGuard,
+    PortReservation,
 };
 
 /// How long a compiled drop-in gets to bind its listener. Generous relative to
@@ -1933,14 +1934,12 @@ fn oracle_binary(example: &str, dir: &std::path::Path) -> std::path::PathBuf {
     let src = root
         .join("vendor/zenoh-pico/examples/unix/c11")
         .join(format!("{example}.c"));
-    let libdir = root.join("target/zenoh-pico-build/lib");
-    assert!(
-        libdir.join("libzenohpico.so").is_file(),
-        "the REAL zenoh-pico shared library is missing at {}; run \
-         scripts/build-zenoh-pico-cli.sh first (it is the CMake build product \
-         this oracle compares against)",
-        libdir.display()
-    );
+    // R311y536 — through the REGISTERED resolver, not a local `join`. Layer A4
+    // reads a file's foreign class off the resolver functions it names, so a
+    // hand-built path makes the reference arm invisible to the audit even
+    // though it links real pico. `zenoh_pico_library_dir` carries the same
+    // hard-prereq assert this used to inline.
+    let libdir = zenoh_pico_library_dir();
     let exe = dir.join(format!("{example}_oracle"));
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let mut cmd = Command::new(&cc);
@@ -2003,7 +2002,22 @@ fn hello_line_for_port(printed: &str, port: u16) -> Option<&str> {
 /// because it provisions no router, so this leg is registered by exact name in
 /// Layer Z, which does. Renaming to dodge the token would make Layer E red on
 /// every machine without zenohd.
-// wz-proves: api-compat-pico wz-vs-pico full
+// R311y536 — `wz-vs-pico` was never a KIND. The grammar admits
+// codec-parity / pico->wz / wz->pico / wz->zenoh-ext / wz->zenohd /
+// zenoh-ext->wz / zenohd->wz, so Layer A4 rejected this line as malformed and
+// then, because a rejected claim leaves the test declaring nothing, counted the
+// test a second time under A4-4. One bad token, two findings, and the lane red
+// on every hosted run.
+//
+// `wz->zenohd` is what this leg actually is and is the same kind its sibling at
+// the z_info leg already uses: wz's C ABI emits the Scout and a REAL zenohd
+// answers it. The pico-compiled twin is the RENDERING oracle, not the
+// counterparty — it scouts the same router independently and its stdout is the
+// thing wz's is diffed against. `partial`, not `full`, because this file's
+// header states that every claim here is partial deliberately (the atom covers
+// a fraction of pico's declared functions), and one `full` among them was that
+// discipline being contradicted in passing.
+// wz-proves: api-compat-pico wz->zenohd partial
 #[test]
 #[ignore = "spawns a real zenohd and two cc-compiled binaries; run by run-ci Layer Z"]
 fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {

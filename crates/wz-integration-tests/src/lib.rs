@@ -824,6 +824,49 @@ pub mod common {
         Ok(exe)
     }
 
+    /// Locate the CMake-built real `libzenohpico.so` — the foreign
+    /// implementation as a LIBRARY rather than as a spawned CLI.
+    ///
+    /// R311y536 — this exists because two corpus files were reaching that
+    /// artifact through resolvers of their own: `pico_pure_function_oracle.rs`
+    /// `dlopen`ed a `project_root().join(..)` path inline, and this file's
+    /// drop-in suite linked `target/zenoh-pico-build/lib` through a local
+    /// `oracle_binary` helper. Both are genuine foreign witnesses, and Layer
+    /// A4's classifier could see NEITHER: it derives a file's foreign class
+    /// from the RESOLVER FUNCTIONS the file names ([`FOREIGN_ROOTS`] in
+    /// `scripts/lib/crossimpl_corpus.py`), so an artifact resolved by hand is
+    /// an artifact the audit does not know is foreign. Five `wz->pico` claims
+    /// were therefore rejected as "this file spawns/links no foreign
+    /// implementation" and the lane was red.
+    ///
+    /// The fix is the one the corpus module's own header prescribes — reach the
+    /// foreign artifact through a NAMED helper — rather than teaching the
+    /// classifier about `dlopen`, because the next hand-rolled resolver would
+    /// be invisible again.
+    pub fn zenoh_pico_shared_library() -> PathBuf {
+        let path = zenoh_pico_library_dir().join("libzenohpico.so");
+        assert!(
+            path.is_file(),
+            "libzenohpico.so missing at {}; run scripts/build-zenoh-pico-cli.sh first",
+            path.display()
+        );
+        path
+    }
+
+    /// The directory [`zenoh_pico_shared_library`] lives in — what a `cc -L`
+    /// needs when an upstream example is linked against REAL pico as the
+    /// reference arm of a compile-twice differential.
+    pub fn zenoh_pico_library_dir() -> PathBuf {
+        let dir = project_root().join("target/zenoh-pico-build/lib");
+        assert!(
+            dir.is_dir(),
+            "zenoh-pico build lib dir missing at {}; run \
+             scripts/build-zenoh-pico-cli.sh first",
+            dir.display()
+        );
+        dir
+    }
+
     /// Locate a zenoh-pico CLI binary under `target/zenoh-pico-cli/`.
     /// `scripts/build-zenoh-pico-cli.sh` produces `z_put`, `z_sub`,
     /// `z_get`, `z_queryable`; pass the bare name and this helper

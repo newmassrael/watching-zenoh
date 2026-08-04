@@ -412,16 +412,41 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// Delete order is by token id, which is a TEST-determinism choice and not
     /// a wire property — pico's intmap order is its own, and no correct
     /// consumer may depend on either.
+    /// R311y536 — the BODY is `alloc`-gated, not the function, and the
+    /// asymmetry is the defect this closes. `peer_token_table` is itself
+    /// `#[cfg(feature = "alloc")]` (it is the wire-side resolution state; the
+    /// no-alloc control plane takes the keyexpr directly through
+    /// `dispatch_sample_borrowed`), and this method reached that field, plus
+    /// `alloc::vec::Vec` and `String`, with no gate at all. So every no-alloc
+    /// build of this crate failed with four errors — E0433 on `alloc`, E0425
+    /// on `String`, and E0609 twice on the absent field — which is why the
+    /// hosted `no_std` cross-compile (Layer G) and the `wz-runtime-coop` arm of
+    /// Layer C1l were both red while every host lane stayed green.
+    ///
+    /// Gating the BODY rather than the function keeps the signature stable
+    /// (`feedback_signature_stability`), mirroring the sole caller
+    /// `Observer::flush_liveliness_on_link_loss`, which has the identical
+    /// shape one level up: a body-level cfg with a `0` fallback. `0` is the
+    /// honest answer without `alloc` — there is no peer-token table, so
+    /// nothing was flushed.
     pub fn flush_peer_tokens_on_link_loss(&mut self) -> usize {
-        if self.peer_token_table.is_empty() {
-            return 0;
+        #[cfg(feature = "alloc")]
+        {
+            if self.peer_token_table.is_empty() {
+                return 0;
+            }
+            let mut drained: alloc::vec::Vec<(u64, String)> =
+                self.peer_token_table.drain().collect();
+            drained.sort_by_key(|(id, _)| *id);
+            for (id, keyexpr) in &drained {
+                self.fan_to_matching_slots(LivelinessSampleKind::Delete, keyexpr, *id);
+            }
+            drained.len()
         }
-        let mut drained: alloc::vec::Vec<(u64, String)> = self.peer_token_table.drain().collect();
-        drained.sort_by_key(|(id, _)| *id);
-        for (id, keyexpr) in &drained {
-            self.fan_to_matching_slots(LivelinessSampleKind::Delete, keyexpr, *id);
+        #[cfg(not(feature = "alloc"))]
+        {
+            0
         }
-        drained.len()
     }
 
     /// Internal fan-out helper (the no-heap match SSOT). Walks every slot

@@ -39,6 +39,18 @@ the very artifact it exists to constrain.
           parity. These are NOT #[ignore]d -- they run in Layer C1 on every push, which
           makes them the only foreign proof hosted CI executes unconditionally.
   pico    the test spawns a real zenoh-pico C CLI binary (live wire).
+  pico-lib  the test reaches the real vendored zenoh-pico as a LIBRARY in its own
+          process -- `dlopen`ing `libzenohpico.so` and calling its functions, or
+          linking an upstream example against it as the reference arm of a
+          compile-twice differential. R311y536. It is a class of its own rather
+          than more `pico` or more `codec`, for the reason FOREIGN_ROOTS gives
+          about zenoh-ext: `pico` says SPAWNS A CLI (this spawns nothing, or
+          spawns a binary that IS pico), and `codec` says statically linked via
+          crates/zenoh-pico-sys AND not `#[ignore]`d, which is load-bearing --
+          the codec class is documented as the only foreign proof hosted CI runs
+          unconditionally, and these need the CMake build product so they are
+          `#[ignore]`d. Folding them into either would have made a true record
+          mildly false.
   zenohd  the test spawns the real zenoh-full router binary (live wire).
   zenoh-ext  the test spawns a real zenoh-ext EXAMPLE application (live wire).
              Distinct from `zenohd` because the advanced-pubsub plane lives in
@@ -88,6 +100,16 @@ FOREIGN_ROOTS = {
     # family read `wz->zenohd` against a counterparty that is not zenohd — a
     # record that is mildly false to whoever reads it next.
     "zenoh_ext_example_binary": "zenoh-ext",
+    # R311y536 — the real pico as a LIBRARY. Both resolvers were previously
+    # inlined in the test files (a `project_root().join(..)` for the dlopen
+    # oracle, a local `libdir` for the compile-twice reference arm), so this
+    # classifier saw NO foreign artifact in either and Layer A4 rejected five
+    # true `wz->pico` claims as wz-vs-wz. The lesson is the one this dict's
+    # header already states in the other direction: a foreign artifact reached
+    # WITHOUT a registered resolver is a foreign artifact the audit cannot see,
+    # so the resolver is the thing that must be shared, not the path.
+    "zenoh_pico_shared_library": "pico-lib",
+    "zenoh_pico_library_dir": "pico-lib",
 }
 # A wz binary is EXTERNAL (needs #[ignore]) but not FOREIGN (cannot witness parity).
 # The package each root resolves to is what Layer A4's containment arm needs: the
@@ -155,8 +177,12 @@ KINDS = {
 # linked C encoder) is exclusive to the linked class, and only zenohd can witness a
 # zenohd kind.
 KIND_CLASS = {
-    "wz->pico": {"pico", "codec"},
-    "pico->wz": {"pico", "codec"},
+    # R311y536 — `pico-lib` joins both directional pico kinds on the same
+    # reasoning the note above gives for `codec`: linking or dlopening the real
+    # implementation is a STRONGER witness than spawning it, so a kind that
+    # accepts the spawned CLI must accept the library.
+    "wz->pico": {"pico", "codec", "pico-lib"},
+    "pico->wz": {"pico", "codec", "pico-lib"},
     "wz->zenohd": {"zenohd"},
     "zenohd->wz": {"zenohd"},
     # R311y488 corrected the second half of this note. It used to read "the router

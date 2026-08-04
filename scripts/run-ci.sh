@@ -7008,6 +7008,26 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenoh-pico z_querier not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
+    # R311y536 — BUILD the C-ABI cdylib here, with the same features Layer E
+    # selects. This lane runs the three zenohd-named drop-in legs that Layer E's
+    # `--skip zenohd` deliberately hands to it, and every one of them links
+    # `libwz_capi_pico.so`. Layer E built that artifact and Z did not, which is
+    # invisible locally (one checkout, one target dir, E ran first) and is the
+    # whole failure on hosted CI, where E and Z are SEPARATE JOBS on separate
+    # machines: Z reached `assert_capi_cdylib_is_not_stale` with whatever the
+    # cache happened to restore and the lane red on a staleness check rather
+    # than on anything about zenoh.
+    #
+    # `--features transport-link-tls` is not optional and must not drift from
+    # Layer E's line: two lanes building ONE artifact path at different feature
+    # sets is the misdiagnosis shape this file has paid for before — the second
+    # build silently replaces the first, and the legs that needed the missing
+    # feature fail as if wz were wrong.
+    #
+    # A build, never a SKIP: the same rule Layer E states for the demo and the
+    # silent peer. Skipping green on a wz artifact we can produce would let the
+    # lane report success having linked nothing.
+    (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
     # §5.21 token cross-impl leg — the router-hat token lifecycle leg spawns the
     # pico z_sub_liveliness (the liveliness SUBSCRIBER that prints "New alive
     # token" on the future push + "Dropped token" on the undeclare; z_get_liveliness
