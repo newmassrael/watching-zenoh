@@ -4146,6 +4146,59 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             Err(LivelinessSubscriberAliasError::FeatureDisabled)
         }
     }
+    /// R311y533 — the LIVELINESS-GET twin of [`Self::sweep_expired_queries`].
+    ///
+    /// `Session::liveliness_get` arms every snapshot with a deadline
+    /// (`timeout_ms == 0` resolves to `DEFAULT_QUERY_TIMEOUT_MS`, mirroring
+    /// pico's `api/liveliness.c:131-133`), and its own doc says the host sweeps
+    /// it. Until this method existed the only host that did was `wz-ap-demo`'s
+    /// `sweep_task`, reaching INTO the observer to do it by hand — so every
+    /// other host, the C ABI included, armed a deadline nothing enforced. The
+    /// measured consequence: upstream's `z_get_liveliness.c` on wz blocked in
+    /// `z_recv` indefinitely whenever the peer's snapshot never terminated,
+    /// because the C reply closure's `drop` — which is what closes the channel —
+    /// only runs when the pending entry's sink is dropped.
+    ///
+    /// The prune drain runs in the SAME lock window as the sweep, which is the
+    /// registry's airtight-capacity contract (every staging site drains where it
+    /// stages); the deferred `on_timeout` / `on_final` fires are drained after
+    /// the lock is released, which is the standing drain-after-dispatch pairing.
+    /// Both halves are the `sweep_task` body, moved to where every host can
+    /// reach them rather than reproduced per host.
+    ///
+    /// Idempotent and cheap when nothing is expired. Returns entries swept.
+    #[cfg(feature = "liveliness-get")]
+    pub fn sweep_expired_liveliness_gets(&self) -> usize {
+        let now_ms = self.clock.now_monotonic_ms();
+        let actions = self.actions();
+        let swept = R::with_mutex_mut(&self.observer, |observer| {
+            let swept = observer.liveliness_gets.sweep_timed_out(now_ms);
+            for interest_id in observer.liveliness_gets.take_finalized() {
+                wz_session_core::response_sink::LivelinessGetPrune::prune_liveliness_get_interest(
+                    &actions,
+                    interest_id,
+                );
+            }
+            swept
+        });
+        self.drain_deferred_fires();
+        swept
+    }
+
+    /// R311y533 — when the earliest pending liveliness snapshot is due, or
+    /// `None` when none carries a deadline.
+    ///
+    /// The wake-arm companion to [`Self::sweep_expired_liveliness_gets`], and
+    /// the exact mirror of [`Self::next_reply_deadline_ms`]. A driver folds both
+    /// into its deadline `min`, so a snapshot expires on its own deadline rather
+    /// than on whatever unrelated cadence the driver's other wakes impose —
+    /// which for a silent face is no cadence at all.
+    #[cfg(feature = "liveliness-get")]
+    pub fn next_liveliness_get_deadline_ms(&self) -> Option<u64> {
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.liveliness_gets.next_deadline_ms()
+        })
+    }
 
     /// liveliness-get — one-shot snapshot of the peer's currently-alive
     /// liveliness tokens matching `keyexpr`. Emits a single CURRENT

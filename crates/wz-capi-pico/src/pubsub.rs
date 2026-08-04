@@ -49,14 +49,38 @@ use wz_capi_core::faces::{MatchId, SharedSession, SubId};
 
 // --- opaque loaned sample --------------------------------------------------
 
-/// Opaque loaned sample (pico `z_loaned_sample_t`). The C callback only ever
-/// holds a pointer to it and passes it back to `z_sample_keyexpr` /
-/// `z_sample_payload`, so Round 1 keeps it opaque rather than reproducing
-/// pico's ~224 B concrete `_z_sample_t` layout.
+/// Opaque loaned sample (pico `z_loaned_sample_t`). Most C callbacks only ever
+/// hold a pointer to it and pass it back to `z_sample_keyexpr` /
+/// `z_sample_payload`, so this stays opaque rather than reproducing all ~224 B
+/// of pico's concrete `_z_sample_t`.
+///
+/// The exception is upstream's `z_pong.c`, which reads `sample->payload` as a
+/// struct field. [`SampleMarshal`] therefore reproduces the layout PREFIX up to
+/// and including that member; see its docs.
 #[repr(C)]
 pub struct z_loaned_sample_t {
     _opaque: [u8; 0],
 }
+
+/// `offsetof(_z_sample_t, payload)` in upstream's headers, LP64.
+///
+/// MEASURED against `vendor/zenoh-pico`: `_z_sample_t` opens with a
+/// `_z_declared_keyexpr_t keyexpr` of exactly 48 bytes, and `payload` follows it
+/// (`include/zenoh-pico/net/sample.h:38-47`). It is a plain `const` rather than
+/// a bindgen import because this crate deliberately does not build pico — the
+/// number is pinned by the assertion below plus, ultimately, by the drop-in leg
+/// that fails if the two layouts disagree.
+const PICO_SAMPLE_PAYLOAD_OFFSET: usize = 48;
+
+/// The marshal's pico-layout prefix must land `pico_payload` exactly where
+/// upstream's header puts `_z_sample_t.payload`, or `z_pong.c` reads the wrong
+/// 32 bytes. A field reorder, a padding surprise, or a lost `#[repr(C)]` fails
+/// the BUILD here rather than producing a leg that mysteriously publishes
+/// garbage.
+const _: () = assert!(
+    std::mem::offset_of!(SampleMarshal, pico_payload) == PICO_SAMPLE_PAYLOAD_OFFSET,
+    "SampleMarshal.pico_payload must sit at offsetof(_z_sample_t, payload)"
+);
 
 /// The owned marshal behind a borrowed `z_loaned_sample_t` during one
 /// callback. Owns copies of the keyexpr + payload so they outlive the wz
@@ -67,7 +91,41 @@ pub struct z_loaned_sample_t {
 /// than a parallel one — the accessors below then serve both planes, which is
 /// what keeps `z_sample_keyexpr` / `z_sample_payload` / `z_sample_kind` a single
 /// definition instead of two that can drift.
+///
+/// ## The pico-layout prefix
+///
+/// `#[repr(C)]` plus the two leading fields are not decoration: they make the
+/// first 80 bytes of this marshal agree with pico's concrete `_z_sample_t`
+/// through its `payload` member, so a C program that reads `sample->payload` as
+/// a STRUCT FIELD gets something meaningful instead of whatever happened to sit
+/// there. Exactly one upstream program does that — `z_pong.c`'s callback is
+/// `z_owned_bytes_t payload = {._val = sample->payload}` followed by a
+/// `z_publisher_put` of the copy — and without the prefix it was the one program
+/// of the 32 that linked, had a body, and still could not be driven.
+///
+/// The offsets are MEASURED from upstream's headers, not guessed:
+/// `offsetof(_z_sample_t, payload) == 48` and `sizeof(_z_bytes_t) == 32` on
+/// LP64, and the `const _` assertion below fails the build if this struct ever
+/// stops matching. wz's own accessors are unaffected — they reach the marshal
+/// through its Rust fields, which simply start after the prefix.
+///
+/// The copied value is BORROWED, and that is what makes the copy sound. See
+/// [`crate::abi::HandleOwnership`]: the sample still owns `payload`, the C side
+/// takes a bitwise copy of the slot, and `_pad[0]` carries the tag that stops
+/// `z_publisher_put` / `z_bytes_drop` from freeing memory this marshal will free
+/// itself. pico solves the identical problem with the `_aliased` flag inside its
+/// arc-slice vector header; this is that flag, in the handle model.
+#[repr(C)]
 pub(crate) struct SampleMarshal {
+    /// pico `_z_sample_t.keyexpr` (`_z_declared_keyexpr_t`, 48 B). INERT — wz
+    /// never reads or writes it, and a C program that dereferences it gets
+    /// zeroes. It exists so `pico_payload` lands at upstream's offset; the
+    /// keyexpr a C program is supposed to use comes from `z_sample_keyexpr`,
+    /// which reads the Rust `keyexpr` field below.
+    _pico_keyexpr: [u8; PICO_SAMPLE_PAYLOAD_OFFSET],
+    /// pico `_z_sample_t.payload` — a BORROWED view of `payload` below, bound by
+    /// [`SampleMarshal::bind`] once the marshal is at its final address.
+    pico_payload: z_owned_bytes_t,
     keyexpr: String,
     payload: ByteBuf,
     kind: z_sample_kind_t,
@@ -96,6 +154,8 @@ impl SampleMarshal {
     /// pointer into the dead constructor frame).
     pub(crate) fn new(keyexpr: String, payload: ByteBuf, kind: z_sample_kind_t) -> Self {
         Self {
+            _pico_keyexpr: [0u8; PICO_SAMPLE_PAYLOAD_OFFSET],
+            pico_payload: z_owned_bytes_t::null_value(),
             keyexpr,
             payload,
             kind,
@@ -156,6 +216,10 @@ impl SampleMarshal {
         self.loaned_keyexpr =
             z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
         self.loaned_payload.handle = &self.payload as *const ByteBuf as *mut c_void;
+        // The pico-layout slot binds here for the same reason the cached views
+        // do: it points into THIS marshal, so it can only be written once the
+        // value has stopped moving.
+        self.pico_payload = z_owned_bytes_t::borrowed(&self.payload as *const ByteBuf as *const _);
         if let Some(attachment) = self.attachment.as_ref() {
             self.loaned_attachment.handle = attachment as *const ByteBuf as *mut c_void;
         }
@@ -177,6 +241,11 @@ impl SampleMarshal {
     /// is [`Self::bind`]'s whole contract.
     pub(crate) fn deep_copy(&self) -> Self {
         Self {
+            _pico_keyexpr: [0u8; PICO_SAMPLE_PAYLOAD_OFFSET],
+            // Left UNBOUND for the same reason the cached views below are: it
+            // borrows the COPY's `payload`, an address that does not exist until
+            // the copy has landed and `bind` runs.
+            pico_payload: z_owned_bytes_t::null_value(),
             keyexpr: self.keyexpr.clone(),
             payload: self.payload.clone(),
             kind: self.kind,
@@ -788,11 +857,22 @@ impl_handle_ownership7!(
 
 // --- helpers ---------------------------------------------------------------
 
-/// Take ownership of a moved payload's bytes, nulling the source.
+/// Take a moved payload's bytes, nulling the source.
+///
+/// Ownership is decided by the value's own borrow tag rather than assumed. An
+/// ORDINARY owned bytes — everything a wz constructor produces — is reclaimed
+/// from its `Box`. A BORROWED one is COPIED and its storage left alone, because
+/// the only way a C program obtains one is by reading `sample->payload` out of a
+/// marshal that still owns it, and that marshal frees it when the callback
+/// returns. Freeing it here is the double free this tag exists to prevent; see
+/// [`crate::abi::HandleOwnership`].
+///
+/// Both arms null the source, so pico's consume-on-all-paths contract holds
+/// either way: after this call the caller's `z_owned_bytes_t` is spent.
 ///
 /// # Safety
 /// `payload` must be null or a valid `z_moved_bytes_t` whose handle is a live
-/// `Box::into_raw::<ByteBuf>` pointer.
+/// `Box::into_raw::<ByteBuf>` pointer, or a BORROW of a live `ByteBuf`.
 pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<ByteBuf> {
     if payload.is_null() {
         return None;
@@ -801,9 +881,13 @@ pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<B
     if handle.is_null() {
         return None;
     }
-    let buf = Box::from_raw(handle as *mut ByteBuf);
+    let buf = if crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this) {
+        (*(handle as *const ByteBuf)).clone()
+    } else {
+        *Box::from_raw(handle as *mut ByteBuf)
+    };
     (*payload)._this = z_owned_bytes_t::null_value();
-    Some(*buf)
+    Some(buf)
 }
 
 /// Fold a caller's `z_publisher_put_options_t` into wz's [`PublishOptions`].

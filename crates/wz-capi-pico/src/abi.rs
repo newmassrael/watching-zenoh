@@ -39,6 +39,41 @@ use std::ffi::c_void;
 // A raw pointer used as an FFI handle slot. Zeroed = "null / not present".
 type Handle = *mut c_void;
 
+/// The sentinel a handle value type parks in `_pad[0]` to say "slot 0 is a
+/// BORROW, not an owned `Box`".
+///
+/// `1` is chosen because it is not a valid `Box::into_raw` result for any type
+/// this crate boxes (all are over-aligned relative to 1) and because every
+/// producer of an owned struct already zeroes the padding — so the tag is
+/// unforgeable by accident, and its absence is the pre-existing default rather
+/// than something each constructor has to opt into.
+pub(crate) const HANDLE_BORROWED_TAG: usize = 1;
+
+/// Whether an owned handle struct's slot 0 is a BORROW that its `drop` must not
+/// free.
+///
+/// wz's owned value types normally carry a `Box::into_raw` handle that their
+/// `z_*_drop` reclaims. One case breaks that rule, and it comes from upstream
+/// rather than from wz: a C program is entitled to read a CONCRETE pico struct
+/// field — `z_pong.c` does `z_owned_bytes_t payload = {._val = sample->payload}`
+/// — which bitwise-copies a value the sample still owns. pico survives this
+/// because its `_z_bytes_t` is an `_z_arc_slice_svec_t` carrying an `_aliased`
+/// flag, and its `_z_svec_clear` skips the free when that flag is set. This
+/// trait is the same discipline in wz's handle model: the flag lives in
+/// `_pad[0]` instead of inside a vector header, and the ownership family reads
+/// it in exactly the two places ownership transfers — `drop` and the
+/// take-the-payload path.
+///
+/// The default is `false`, which is the right answer for every type whose
+/// values only ever come from a wz constructor. A type overrides it when a C
+/// program can obtain one of its values by reading pico's own struct layout.
+pub(crate) trait HandleOwnership {
+    /// `true` iff slot 0 is borrowed and `z_*_drop` must leave it alone.
+    fn handle_is_borrowed(&self) -> bool {
+        false
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 32-byte handle value types: config, bytes, slice, string.
 // ---------------------------------------------------------------------------
@@ -80,6 +115,50 @@ macro_rules! define_handle_type {
 
 define_handle_type!(z_owned_config_t, z_loaned_config_t, z_moved_config_t, 3);
 define_handle_type!(z_owned_bytes_t, z_loaned_bytes_t, z_moved_bytes_t, 3);
+
+// The NO-BORROWED-FORM census. Every handle value type in this crate is listed
+// here or overrides below, so "does this type have a borrowed form?" is answered
+// by one readable block rather than by seven scattered impls. A new type that
+// forgets to answer does not compile: the ownership macro's `drop` calls the
+// trait, so the compiler enumerates the omissions.
+//
+// Each of these is `false` for the same reason: a C program can only obtain one
+// of their values from a wz constructor, never by reading a field of one of
+// pico's concrete structs.
+impl HandleOwnership for z_owned_config_t {}
+impl HandleOwnership for crate::encoding::z_owned_encoding_t {}
+impl HandleOwnership for crate::pubsub::z_owned_publisher_t {}
+impl HandleOwnership for crate::pubsub::z_owned_subscriber_t {}
+impl HandleOwnership for crate::querier::z_owned_querier_t {}
+impl HandleOwnership for crate::query::z_owned_queryable_t {}
+impl HandleOwnership for crate::serde::z_owned_bytes_writer_t {}
+impl HandleOwnership for crate::serde::ze_owned_serializer_t {}
+
+/// bytes is the ONE type with a borrowed form, and the reason is upstream's:
+/// `z_pong.c` builds a `z_owned_bytes_t` by copying `sample->payload` — a field
+/// of pico's concrete `_z_sample_t` — out of a sample that still owns it. See
+/// [`HandleOwnership`] and `SampleMarshal`'s pico-layout prefix.
+impl HandleOwnership for z_owned_bytes_t {
+    fn handle_is_borrowed(&self) -> bool {
+        self._pad[0] as usize == HANDLE_BORROWED_TAG
+    }
+}
+
+impl z_owned_bytes_t {
+    /// A BORROWED bytes value over `buf`, the shape `SampleMarshal` parks at
+    /// pico's `offsetof(_z_sample_t, payload)` so a C program reading that field
+    /// gets something wz can recognise on the way back in.
+    pub(crate) fn borrowed(buf: *const c_void) -> Self {
+        Self {
+            handle: buf as *mut c_void,
+            _pad: [
+                HANDLE_BORROWED_TAG as *mut c_void,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ],
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // slice: the BORROWED-VIEW model (the shape string already uses).
@@ -357,7 +436,8 @@ macro_rules! impl_handle_ownership7 {
         }
 
         /// Drop the owned value (pico `z_*_drop`). Idempotent on a null
-        /// handle. Guarded because the payload's `Drop` runs here.
+        /// handle, and a NO-OP on a BORROWED one (see [`HandleOwnership`]).
+        /// Guarded because the payload's `Drop` runs here.
         #[no_mangle]
         pub unsafe extern "C" fn $drop(obj: *mut $Moved) {
             let _ = $crate::ffi::guarded(|| {
@@ -366,7 +446,9 @@ macro_rules! impl_handle_ownership7 {
                 }
                 let h = (*obj)._this.handle;
                 if !h.is_null() {
-                    $free(h);
+                    if !$crate::abi::HandleOwnership::handle_is_borrowed(&(*obj)._this) {
+                        $free(h);
+                    }
                     (*obj)._this = <$Owned>::null_value();
                 }
                 $crate::result::Z_OK

@@ -293,6 +293,27 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     /// faithful shape here: a liveliness get has no consolidation, so there is
     /// no cache to flush first — exactly why zenoh's liveliness timeout arm has
     /// no flush while its z_get arm does.
+    /// When the earliest pending snapshot get is due, or `None` when no pending
+    /// entry carries a deadline.
+    ///
+    /// The wake-arm companion to [`Self::sweep_timed_out`], and the exact mirror
+    /// of `ReplyRegistry::next_deadline_ms`. A sweep only runs when something
+    /// calls it, so a registry with a deadline and no wake is a registry whose
+    /// deadline is decorative — which is what this plane was under the C ABI
+    /// until R311y533: `z_liveliness_get` armed a 10 s default and the host had
+    /// no way to ask when to come back, so a peer that never sent `DeclFinal`
+    /// left the C caller blocked in `z_recv` indefinitely.
+    ///
+    /// Entries with `deadline_ms == None` are skipped, exactly as the sweep
+    /// skips them: they impose no wake. `O(n)` over a table bounded by
+    /// [`caps::MAX_PENDING_LIVELINESS_GETS`], read once per wake-arm.
+    pub fn next_deadline_ms(&self) -> Option<u64> {
+        self.pending
+            .iter()
+            .filter_map(|entry| entry.deadline_ms)
+            .min()
+    }
+
     pub fn sweep_timed_out(&mut self, now_ms: u64) -> usize {
         // R311ig — no-alloc drain-partition via the shared
         // `BoundedVec::drain_partition` seam (mirror of

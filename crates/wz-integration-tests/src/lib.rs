@@ -659,6 +659,41 @@ pub mod common {
         [generated, vendored]
     }
 
+    /// The same pair as [`zenoh_pico_include_dirs`], but resolving `config.h`
+    /// from the SINGLE-THREADED CMake arm (`Z_FEATURE_MULTI_THREAD 0`).
+    ///
+    /// Two upstream examples — `z_pub_st.c` and `z_sub_st.c` — guard their whole
+    /// `main` on that macro being 0, so against the primary header tree they
+    /// compile to a one-`printf` stub and a leg driving them would exercise no wz
+    /// code at all. This is the header set that gives them a body.
+    ///
+    /// Only the config header differs; the API headers are the same vendored
+    /// tree, and the LIBRARY is wz's cdylib either way. That the one cdylib
+    /// serves both arms is a measurement, not a convenience: across the two
+    /// configs the only public owned types whose size moves are
+    /// `z_owned_mutex_t` and `z_owned_condvar_t`, neither of which either
+    /// example names. `scripts/build-zenoh-pico-cli.sh` carries the numbers and
+    /// generates this tree.
+    pub fn zenoh_pico_include_dirs_single_threaded() -> [PathBuf; 2] {
+        let root = project_root();
+        let vendored = root.join("vendor/zenoh-pico/include");
+        let generated = root.join("target/zenoh-pico-build-st/zenohpico/include");
+        assert!(
+            vendored.is_dir(),
+            "vendored zenoh-pico headers missing at {}; run \
+             `git submodule update --init vendor/zenoh-pico`",
+            vendored.display()
+        );
+        assert!(
+            generated.is_dir(),
+            "SINGLE-THREADED zenoh-pico config.h dir missing at {}; run \
+             scripts/build-zenoh-pico-cli.sh first (it configures a second CMake \
+             arm whose only delta is -DZ_FEATURE_MULTI_THREAD=0)",
+            generated.display()
+        );
+        [generated, vendored]
+    }
+
     /// Compile an UNMODIFIED upstream zenoh-pico example
     /// (`vendor/zenoh-pico/examples/unix/c11/<example>.c`) against the REAL
     /// zenoh-pico headers and link it against wz's C-ABI `cdylib`, returning
@@ -690,6 +725,27 @@ pub mod common {
         example: &str,
         out_dir: &Path,
     ) -> Result<PathBuf, String> {
+        compile_pico_example_against_wz_capi_with_includes(
+            example,
+            out_dir,
+            &zenoh_pico_include_dirs(),
+        )
+    }
+
+    /// [`compile_pico_example_against_wz_capi`] against a caller-chosen header
+    /// set — the SINGLE-THREADED arm
+    /// ([`zenoh_pico_include_dirs_single_threaded`]) being the reason it exists.
+    ///
+    /// The header set is the only knob a drop-in has for selecting which
+    /// `#if Z_FEATURE_*` branch of an upstream example gets compiled, and two of
+    /// them have no body under the primary arm. Everything else — upstream's own
+    /// program text, wz's cdylib as the sole library, the baked rpath — is
+    /// identical, so a leg built this way is the same witness as any other.
+    pub fn compile_pico_example_against_wz_capi_with_includes(
+        example: &str,
+        out_dir: &Path,
+        includes: &[PathBuf],
+    ) -> Result<PathBuf, String> {
         let root = project_root();
         let src = root
             .join("vendor/zenoh-pico/examples/unix/c11")
@@ -705,13 +761,12 @@ pub mod common {
             .parent()
             .expect("cdylib path has a parent directory")
             .to_path_buf();
-        let includes = zenoh_pico_include_dirs();
         let exe = out_dir.join(format!("{example}_on_wz"));
 
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
         let mut cmd = Command::new(&cc);
         cmd.arg(&src).arg("-DZENOH_LINUX");
-        for inc in &includes {
+        for inc in includes {
             cmd.arg(format!("-I{}", inc.display()));
         }
         cmd.arg("-o")

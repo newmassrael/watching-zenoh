@@ -315,6 +315,41 @@ pub unsafe extern "C" fn zp_stop_lease_task(_zs: *mut z_loaned_session_t) -> ZRe
     Z_OK
 }
 
+/// pico `zp_spin_once` — no-op (the drive loop IS the executor this pumps).
+///
+/// This is the export the SINGLE-THREADED example pair is built around.
+/// `z_pub_st.c` / `z_sub_st.c` compile only under `Z_FEATURE_MULTI_THREAD == 0`,
+/// where pico has no background executor thread and the application is
+/// responsible for advancing the session by hand: each loop iteration sleeps and
+/// then calls this to run ONE pending task (read, lease, keep-alive, accept,
+/// connect) off pico's task queue
+/// (`vendor/zenoh-pico/include/zenoh-pico/api/primitives.h:3336-3345`).
+///
+/// wz has no such queue to drain. Its session SELF-DRIVES — the face's drive
+/// loop performs the read / lease / keep-alive work on its own runtime whether
+/// or not the C thread ever calls in — so the faithful shim is to return
+/// immediately, exactly as the `zp_start_read_task` / `zp_start_lease_task`
+/// family above already does for the multi-threaded build.
+///
+/// The divergence is deliberate and one-directional: wz makes progress the
+/// caller did not ask for, never less. A program written against the
+/// single-threaded contract therefore behaves as its author intended (its
+/// samples flow, its lease is held), while one that never called this would ALSO
+/// work here — which is the honest statement of what wz's runtime model gives
+/// up, not a claim that the call is meaningless.
+///
+/// `void` return: pico reports no status here, so a null or dead session cannot
+/// be signalled to the caller. The state lookup is still performed so the
+/// argument is dereferenced under [`guarded`] rather than by the C caller's next
+/// unrelated call.
+#[no_mangle]
+pub unsafe extern "C" fn zp_spin_once(zs: *const z_loaned_session_t) {
+    let _ = guarded(|| {
+        let _ = session_state(zs);
+        Z_OK
+    });
+}
+
 // --- TX batching (pico `zp_batch_*`) ---------------------------------------
 
 /// Open a TX batching window (pico `zp_batch_start`).

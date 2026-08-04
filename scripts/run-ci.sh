@@ -7290,6 +7290,22 @@ layer_z_zenohd_interop() {
         --test pico_c_examples_on_wz_capi_dropin \
         pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd \
         -- --ignored --quiet --test-threads=1 || return 1
+    # R311y533 -- the LIVELINESS SNAPSHOT leg, moved here from Layer E because
+    # its old topology was one the REFERENCE cannot serve. Measured: the real
+    # zenoh-pico z_get_liveliness against the real zenoh-pico z_liveliness, wired
+    # peer-to-client with no router, reports ZERO tokens and hangs, 6 runs of 6;
+    # with a zenohd between them the same foreign pair answers at once. The leg
+    # was passing about one run in three on wz for that reason, not because wz
+    # was at fault -- wz was being MORE permissive than pico. It now uses the
+    # topology the oracle actually serves, which needs a router, which is this
+    # lane. The flakiness also exposed a real wz defect, fixed separately:
+    # `Session::sweep_expired_liveliness_gets` (the C ABI armed a liveliness-get
+    # deadline that no host ever swept, so an unanswered snapshot blocked the C
+    # caller in `z_recv` forever).
+    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test pico_c_examples_on_wz_capi_dropin \
+        pico_zgetliveliness_source_on_wz_capi_sees_a_real_pico_token_through_zenohd \
+        -- --ignored --quiet --test-threads=1 || return 1
     # R311y442 — wz<->zenoh-ext ADVANCED-PUBSUB cross-impl, the FIRST foreign
     # witness the `@adv` plane has ever had. Every advanced-pubsub test before
     # this was wz<->wz, which cannot see a selector-dialect divergence: the same

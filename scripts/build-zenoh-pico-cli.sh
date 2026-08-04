@@ -412,6 +412,54 @@ for expect in \
     fi
 done
 
+# --- the SINGLE-THREADED header arm ----------------------------------------
+#
+# A second CONFIGURE (no build) whose only delta is `Z_FEATURE_MULTI_THREAD=0`.
+# It exists for `z_pub_st.c` / `z_sub_st.c`, the two upstream examples whose
+# whole `main` is guarded on `Z_FEATURE_MULTI_THREAD == 0`: against the primary
+# header tree above they compile to a one-`printf` stub, so a leg driving them
+# would exercise zero wz code.
+#
+# Only the HEADERS are produced here, and that is the whole point. A drop-in leg
+# compiles upstream's source against these includes and links wz's cdylib — pico
+# 's library is never involved — so the single-threaded arm needs no second
+# libzenohpico and no second cdylib. That last clause was MEASURED rather than
+# assumed: of every public owned type an upstream example stack-allocates, the
+# only two whose size moves between the two configs are `z_owned_mutex_t`
+# (40 -> 8) and `z_owned_condvar_t` (48 -> 8), and neither example names either
+# type. Session, publisher, subscriber, bytes, sample, closure and handler are
+# byte-identical across the arms, so ONE cdylib serves both. The counterparties
+# stay the multi-threaded binaries installed above — `Z_FEATURE_MULTI_THREAD` is
+# a host threading model, not a wire feature.
+#
+# Configure-only is deliberate: `cmake -B` writes the generated config.h during
+# the configure step, and building the arm would cost a second full pico compile
+# for headers we already have.
+cmake -B "${BUILD_DIR}-st" -S "$EXAMPLES_DIR" \
+    -DCMAKE_C_STANDARD=11 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DZ_FEATURE_UNSTABLE_API=ON \
+    -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
+    -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
+    -DZ_FEATURE_LINK_SERIAL=1 \
+    -DZ_FEATURE_MULTI_THREAD=0 >&2
+
+# Same read-back discipline as the primary arm, and for a sharper reason: this
+# arm's ENTIRE purpose is one `#define`, so a request that silently failed to
+# take would leave the legs compiling the stub `#else` branch and passing on a
+# program that never calls into wz at all.
+GENERATED_CONFIG_ST="${BUILD_DIR}-st/zenohpico/include/zenoh-pico/config.h"
+if [[ ! -f "$GENERATED_CONFIG_ST" ]]; then
+    echo "build-zenoh-pico-cli: single-threaded config.h missing: $GENERATED_CONFIG_ST" >&2
+    exit 1
+fi
+if ! grep -qx "#define Z_FEATURE_MULTI_THREAD 0" "$GENERATED_CONFIG_ST"; then
+    echo "build-zenoh-pico-cli: single-threaded arm did NOT take; its config.h says:" >&2
+    grep -E "^#define Z_FEATURE_MULTI_THREAD( |$)" "$GENERATED_CONFIG_ST" >&2 \
+        || echo "  (not defined at all)" >&2
+    exit 1
+fi
+
 # Build only the curated CLI targets (avoids the full examples target
 # set; faster + smaller install surface).
 cmake --build "$BUILD_DIR" --target "${TARGETS[@]}" -j"$(nproc)" >&2

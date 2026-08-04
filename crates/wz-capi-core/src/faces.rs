@@ -890,6 +890,21 @@ impl SharedSession {
         if let Some(session) = session {
             session.dispatch_iteration_event(event);
             session.sweep_expired_queries();
+            // R311y533 — the LIVELINESS-GET table has the same deadline
+            // contract and, until this line, no enforcer under the C ABI.
+            // `z_liveliness_get` arms a 10 s default (pico's own rule for
+            // `timeout_ms == 0`), but the only host that ever swept the table
+            // was `wz-ap-demo`'s sweep ticker. Measured: upstream's
+            // `z_get_liveliness.c` on wz blocked in `z_recv` forever whenever
+            // the peer's snapshot did not terminate, because the C reply
+            // closure's `drop` — the thing that closes the channel — runs only
+            // when the pending entry's sink is dropped.
+            //
+            // Same thread and the same soundness argument as the query sweep
+            // directly above: firing a snapshot's synthetic timeout reply and
+            // its final invokes C callbacks, and this is the one thread on
+            // which that is allowed.
+            session.sweep_expired_liveliness_gets();
         }
     }
 
@@ -902,7 +917,20 @@ impl SharedSession {
     /// nothing, so an idle session's cadence is unchanged.
     pub fn next_reply_deadline_ms(&self, id: u64) -> Option<u64> {
         let session = self.lock().faces.get(&id).map(|face| face.session.clone());
-        session.and_then(|session| session.next_reply_deadline_ms())
+        session.and_then(|session| {
+            // R311y533 — the EARLIER of the two pending tables that carry
+            // deadlines. Sweeping on every event (above) bounds a snapshot's
+            // overrun to the next inbound message or keepalive tick; arming the
+            // wake is what makes it expire ON its deadline instead, and on a
+            // face with no other traffic it is the only thing that gets the
+            // drive loop back at all.
+            let reply = session.next_reply_deadline_ms();
+            let liveliness = session.next_liveliness_get_deadline_ms();
+            match (reply, liveliness) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (only, None) | (None, only) => only,
+            }
+        })
     }
 
     /// Publish to every connected peer (pico `z_put` / `z_publisher_put`
