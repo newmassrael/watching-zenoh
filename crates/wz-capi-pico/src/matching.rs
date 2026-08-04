@@ -98,20 +98,38 @@ impl z_owned_closure_matching_status_t {
 /// The Rust-side owner of one C matching closure.
 ///
 /// `Sync` is required because the [`MatchingSink`] is an
-/// `Arc<dyn Fn(bool) + Send + Sync>` shared with every face's callback. The
-/// soundness argument is the same as the sample plane's and rests on the same
-/// fact: `call` is only ever reached from ONE thread. Every face of a session
-/// is driven on one drive task, the per-face matching callback runs from that
-/// task's `drain_deferred_fires`, and the aggregate mutex serialises the fold
-/// that decides whether `call` runs at all — so two faces flipping at once
-/// cannot produce two concurrent `call`s. The remaining caller is the C
-/// application thread inside `z_publisher_declare_matching_listener`, which
-/// delivers an already-matching registration; that runs before any per-face
-/// listener for this id exists, so it cannot overlap either.
+/// `Arc<dyn Fn(bool) + Send + Sync>` shared with every face's callback.
+///
+/// ## The soundness argument, corrected at R311y528
+///
+/// Unlike the sample plane, `call` here is NOT reached from a single thread.
+/// Two threads reach it:
+///
+/// * the drive task, through the per-face matching callback and through
+///   `SharedSession::face_down`'s aggregate purge; and
+/// * the C application thread, inside
+///   `z_publisher_declare_matching_listener`, where an already-matching per-face
+///   registration delivers its `true` synchronously.
+///
+/// R311y527 shipped this type asserting those two "cannot overlap", on the
+/// grounds that the C-thread registration "runs before any per-face listener for
+/// this id exists". That is true of the id's OWN per-face listeners and
+/// irrelevant to `face_down`, which reaches the same sink down a different path
+/// — the registry entry is published in phase 1, before phase 2 installs, so a
+/// peer dropping in that window ran two concurrent `call(context)` on one C
+/// context. The argument was wrong, not merely incomplete.
+///
+/// What actually holds is MUTUAL EXCLUSION, not single-threadedness:
+/// `wz_capi_core::faces::deliver_matching_flip` is the only route to this sink,
+/// and it folds the aggregate and invokes `call` under ONE acquisition of that
+/// entry's aggregate mutex. Both threads above go through it, so the C context
+/// sees strictly serialised calls, in the order the aggregate computed them.
 type MatchingCClosure = CClosure<z_closure_matching_status_callback_t>;
 
-// SAFETY: see [`MatchingCClosure`] — `call` is reached from the single drive
-// task, or from the registering C thread before any drive-side listener exists.
+// SAFETY: see [`MatchingCClosure`] — every route to `call` runs inside
+// `wz_capi_core::faces::deliver_matching_flip`, which holds the entry's
+// aggregate mutex across the invocation, so calls on one C context are
+// serialised even though two threads can originate them.
 unsafe impl Sync for MatchingCClosure {}
 
 /// Behind a `z_owned_matching_listener_t`: the C listener's id in the session
@@ -471,6 +489,11 @@ unsafe fn declare_matching(
 
     let shared = state.shared_session();
     let id = shared.declare_matching_listener(state.keyexpr().to_owned(), sink);
+    // R311y528 — the publisher owns the retraction. Without this the entry
+    // outlives `z_undeclare_publisher` / `z_publisher_drop` and the C closure
+    // keeps firing for a publisher the program has released; see
+    // `PublisherState::record_matching_listener`.
+    state.record_matching_listener(id);
     Ok((shared, id))
 }
 

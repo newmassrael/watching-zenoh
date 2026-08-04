@@ -266,7 +266,11 @@ pub type TokenId = u64;
 /// invoke the C closure; routing that through the registry lock would put a C
 /// callback under the lock a re-entrant `z_declare_*` needs, which is the
 /// deadlock the whole file's snapshot-then-call discipline exists to avoid.
-/// This mutex is held only across the set update and never across the C call.
+///
+/// R311y528 — this mutex is held ACROSS the C call, and the earlier "held only
+/// across the set update, never across the C call" discipline was the bug. See
+/// [`deliver_matching_flip`] for why it has to be, and the MATCHING LOCK ORDER
+/// rule in that same doc comment for the invariant that makes it safe.
 #[derive(Default)]
 struct MatchAggregate {
     faces: BTreeSet<u64>,
@@ -314,6 +318,72 @@ struct MatchEntry {
     state: Arc<StdMutex<MatchAggregate>>,
 }
 
+/// Fold `update` into one entry's aggregate and, when the SESSION verdict
+/// flipped, deliver it to C — **both under the same aggregate mutex**.
+///
+/// ## MATCHING LOCK ORDER — the one rule this plane rests on
+///
+/// **A [`MatchAggregate`] mutex is never acquired while the registry lock is
+/// held.** Every path that needs both snapshots what it needs out of the
+/// registry first: `declare_matching_listener` phase 2 drops its guard before
+/// installing, and [`SharedSession::face_down`] collects `(state, sink)` pairs
+/// and releases before folding. So the only order that exists is
+/// `aggregate -> registry` — the one a C callback re-entering `z_declare_*` from
+/// inside this function takes — and no thread takes it backwards.
+///
+/// Reaching an aggregate any other way is what a future call site would have to
+/// do to break this, so a new one belongs here rather than open-coding the fold.
+/// The two existing callers are [`face_matching_callback`] and
+/// [`SharedSession::face_down`].
+///
+/// ## Why the C call is inside the lock (R311y528 — this was a real defect)
+///
+/// Two threads reach one entry's `sink`: the drive thread, through
+/// [`face_matching_callback`] and through [`SharedSession::face_down`]'s purge;
+/// and the C application thread, through `declare_matching_listener` phase 2,
+/// where an already-matching per-face registration fires `true` synchronously.
+/// Phase 1 publishes the [`MatchEntry`] under the registry lock BEFORE phase 2
+/// installs, so `face_down` can already see an entry whose C-thread registration
+/// is still running. A peer dropping in that window produced two concurrent
+/// `call(context)` on one C context — exactly the data race pico's
+/// single-threaded-callback contract forbids, and the same class R311y288 fixed
+/// on the publish plane.
+///
+/// Releasing the mutex before `sink` (what this code did until R311y528) also
+/// lost ORDERING even when the calls did not overlap: two threads could compute
+/// `true` then `false` and deliver them in the opposite order, leaving C with a
+/// verdict the aggregate disagrees with. Folding and delivering under one
+/// acquisition makes the pair atomic, so C observes exactly the sequence of
+/// flips the aggregate computed.
+///
+/// ## Why holding it is deadlock-free
+///
+/// By the lock order above: no caller holds the registry lock when it gets
+/// here, so a C callback that re-enters the session — `z_put`,
+/// `z_declare_subscriber`, `z_publisher_get_matching_status`, even
+/// `z_publisher_declare_matching_listener` on the same keyexpr — takes the
+/// registry lock with only this aggregate held, and nothing takes them the other
+/// way round. A re-entrant declare allocates a NEW entry with a NEW aggregate,
+/// so it cannot block on this one; `z_undeclare_matching_listener` for this very
+/// id takes the registry lock, removes the entry and calls
+/// `MatchingListener::undeclare`, which retracts the watch without firing
+/// (`wz-runtime-tokio/src/session/matching_listener.rs`), so it never re-enters
+/// this function. The `state` and `sink` handles are `Arc` clones held by the
+/// caller, so that undeclare cannot free what this call is using.
+fn deliver_matching_flip(
+    state: &StdMutex<MatchAggregate>,
+    sink: &MatchingSink,
+    update: impl FnOnce(&mut MatchAggregate) -> Option<bool>,
+) {
+    let mut agg = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(now) = update(&mut agg) {
+        sink(now);
+    }
+    // `agg` is dropped HERE, after the C call — see the doc comment.
+}
+
 /// The per-face callback one [`MatchEntry`] installs on face `face_id`: fold
 /// this face's verdict into the aggregate and deliver to C only on a SESSION
 /// flip.
@@ -323,10 +393,9 @@ struct MatchEntry {
 /// drift — a replay that folded differently from the original would make the
 /// verdict depend on when a peer happened to connect.
 ///
-/// The aggregate mutex is released before `sink` runs. That ordering is the
-/// re-entrancy guarantee: a C callback is free to call back into the session
-/// (including declaring another listener on the same keyexpr) without meeting a
-/// lock this path holds.
+/// Runs from `Session::drain_deferred_fires`, which is called with the observer
+/// lock released and — per the lock order in [`deliver_matching_flip`] — never with the registry
+/// lock held.
 fn face_matching_callback(
     face_id: u64,
     entry: &MatchEntry,
@@ -334,15 +403,7 @@ fn face_matching_callback(
     let state = entry.state.clone();
     let sink = entry.sink.clone();
     move |status| {
-        let flipped = {
-            let mut agg = state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            agg.apply(face_id, status.matching)
-        };
-        if let Some(now) = flipped {
-            sink(now);
-        }
+        deliver_matching_flip(&state, &sink, |agg| agg.apply(face_id, status.matching));
     }
 }
 
@@ -564,26 +625,22 @@ impl SharedSession {
         // never flips again, so a genuine later `true` is suppressed as
         // "no change".
         //
-        // Collected under the lock and delivered after it, because the sink is
-        // the C callback.
-        let mut flips = Vec::new();
-        {
+        // R311y528 — the `(state, sink)` pairs are snapshotted out of the
+        // registry lock BEFORE either is touched, and the fold + C delivery then
+        // run under the aggregate mutex alone. Folding under the registry lock
+        // (what this did until R311y528) established a `registry -> aggregate`
+        // order, which is the half of the ABBA pair that made holding the
+        // aggregate across the C call unsafe. See `deliver_matching_flip`.
+        let watches: Vec<(Arc<StdMutex<MatchAggregate>>, MatchingSink)> = {
             let guard = self.lock();
-            for entry in &guard.matches {
-                let flipped = {
-                    let mut agg = entry
-                        .state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    agg.forget(id)
-                };
-                if let Some(now) = flipped {
-                    flips.push((entry.sink.clone(), now));
-                }
-            }
-        }
-        for (sink, now) in flips {
-            sink(now);
+            guard
+                .matches
+                .iter()
+                .map(|entry| (entry.state.clone(), entry.sink.clone()))
+                .collect()
+        };
+        for (state, sink) in watches {
+            deliver_matching_flip(&state, &sink, |agg| agg.forget(id));
         }
         drop(removed);
     }
@@ -1275,5 +1332,160 @@ impl FaceForwarder for CApiForwarder {
     /// and every get issued into an idle session would be that late.
     fn deadline_revised(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
         self.shared.deadline_revised(id.0)
+    }
+}
+
+#[cfg(test)]
+mod matching_aggregate_tests {
+    use super::*;
+
+    /// R311y528 — THE defect this round closed, asserted at the mechanism.
+    ///
+    /// Two threads reach one C matching closure: the drive thread (per-face
+    /// callback, and `face_down`'s purge) and the C application thread (an
+    /// already-matching registration delivering synchronously). What makes that
+    /// sound is that [`deliver_matching_flip`] holds the entry's aggregate mutex
+    /// ACROSS the call, so the two cannot overlap.
+    ///
+    /// The assertion is a `try_lock` from INSIDE the sink and is fully
+    /// deterministic — no threads, no sleeps, no window to get unlucky in.
+    /// `std::sync::Mutex::try_lock` reports `WouldBlock` for a lock already held
+    /// by the calling thread, so "the mutex is held right now" is directly
+    /// observable at the one instant that matters. R311y527's code released the
+    /// mutex before the sink; against that build this reads `Ok` and reds.
+    #[test]
+    fn the_aggregate_mutex_is_held_across_the_c_call() {
+        let state = Arc::new(StdMutex::new(MatchAggregate::default()));
+        let probe = state.clone();
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+        let log = observed.clone();
+
+        let sink: MatchingSink = Arc::new(move |now| {
+            log.lock().unwrap().push(now);
+            assert!(
+                probe.try_lock().is_err(),
+                "the aggregate mutex was NOT held across the C call -- two \
+                 threads can then invoke one C context concurrently"
+            );
+        });
+
+        deliver_matching_flip(&state, &sink, |agg| agg.apply(7, true));
+        assert_eq!(*observed.lock().unwrap(), vec![true], "the flip delivered");
+    }
+
+    /// The OR across faces, at the fold: a second matching face is NOT a second
+    /// `true`, one face leaving while another still matches is SILENT, and only
+    /// the last one leaving delivers `false`.
+    ///
+    /// This is the aggregation `MatchAggregate` exists for. A build that
+    /// forwarded each face's verdict straight through would deliver
+    /// `[true, true, false, false]` here.
+    #[test]
+    fn the_verdict_is_the_or_across_faces() {
+        let state = Arc::new(StdMutex::new(MatchAggregate::default()));
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+        let log = observed.clone();
+        let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+
+        deliver_matching_flip(&state, &sink, |agg| agg.apply(1, true));
+        deliver_matching_flip(&state, &sink, |agg| agg.apply(2, true));
+        deliver_matching_flip(&state, &sink, |agg| agg.apply(1, false));
+        deliver_matching_flip(&state, &sink, |agg| agg.apply(2, false));
+
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![true, false],
+            "the C side must see the SESSION verdict flip twice, not once per face"
+        );
+    }
+
+    /// `face_down`'s purge and an ordinary `false` from the same face must not
+    /// both flip: whichever lands first owns the transition.
+    ///
+    /// This is why the purge uses `forget` (idempotent removal) rather than
+    /// `apply(id, false)` — but both settle through the same `settle()`, so the
+    /// property to pin is that the second one is silent.
+    #[test]
+    fn a_purge_after_an_ordinary_false_is_silent() {
+        let state = Arc::new(StdMutex::new(MatchAggregate::default()));
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+        let log = observed.clone();
+        let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+
+        deliver_matching_flip(&state, &sink, |agg| agg.apply(3, true));
+        deliver_matching_flip(&state, &sink, |agg| agg.apply(3, false));
+        deliver_matching_flip(&state, &sink, |agg| agg.forget(3));
+
+        assert_eq!(*observed.lock().unwrap(), vec![true, false]);
+    }
+
+    /// Two threads folding into ONE entry deliver strictly serialised, ordered
+    /// calls — never overlapping, and never `false` before the `true` that the
+    /// aggregate computed first.
+    ///
+    /// The in-flight counter can only under-report (a scheduler that never
+    /// overlaps the two threads passes trivially), so this CORROBORATES
+    /// [`the_aggregate_mutex_is_held_across_the_c_call`] rather than replacing
+    /// it — that one is the deterministic proof. What this adds is the ORDER
+    /// property, which the single-threaded probe cannot see: releasing the mutex
+    /// before the sink lost ordering even when the calls did not overlap.
+    #[test]
+    fn concurrent_folds_deliver_serialised_and_in_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let state = Arc::new(StdMutex::new(MatchAggregate::default()));
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let overlaps = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+
+        let sink: MatchingSink = {
+            let inflight = inflight.clone();
+            let overlaps = overlaps.clone();
+            let log = observed.clone();
+            Arc::new(move |now| {
+                if inflight.fetch_add(1, Ordering::SeqCst) != 0 {
+                    overlaps.fetch_add(1, Ordering::SeqCst);
+                }
+                log.lock().unwrap().push(now);
+                std::thread::yield_now();
+                inflight.fetch_sub(1, Ordering::SeqCst);
+            })
+        };
+
+        // Face 1 arrives and stays; then two threads race the arrival of face 2
+        // against the departure of face 1. Whatever the interleaving, the
+        // aggregate is non-empty throughout, so the CORRECT observation is that
+        // nothing further is delivered at all.
+        deliver_matching_flip(&state, &sink, |agg| agg.apply(1, true));
+
+        let a = {
+            let (state, sink) = (state.clone(), sink.clone());
+            std::thread::spawn(move || {
+                for _ in 0..200 {
+                    deliver_matching_flip(&state, &sink, |agg| agg.apply(2, true));
+                }
+            })
+        };
+        let b = {
+            let (state, sink) = (state.clone(), sink.clone());
+            std::thread::spawn(move || {
+                for _ in 0..200 {
+                    deliver_matching_flip(&state, &sink, |agg| agg.forget(2));
+                }
+            })
+        };
+        a.join().unwrap();
+        b.join().unwrap();
+
+        assert_eq!(
+            overlaps.load(Ordering::SeqCst),
+            0,
+            "two threads were inside the C sink at once"
+        );
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![true],
+            "face 1 never left, so the session verdict never moved off true"
+        );
     }
 }
