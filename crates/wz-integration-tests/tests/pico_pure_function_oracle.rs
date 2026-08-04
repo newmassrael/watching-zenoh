@@ -7,6 +7,14 @@
 //!
 //! ## Why these two get a stronger gate than the rest of the ABI
 //!
+//! Both tests are `#[ignore]` and run in Layer E, not in the workspace lane.
+//! The oracle is a CMake BUILD PRODUCT (`scripts/build-zenoh-pico-cli.sh`), and
+//! its absence is a hard FAIL here rather than a skip — a comparison with
+//! nothing to compare against must not report green. A hard prereq in a lane
+//! that does not provision it is a red on a fresh checkout, which is exactly the
+//! discipline Layer C0 exists to enforce, so the `#[ignore]` is load-bearing
+//! rather than decorative.
+//!
 //! Most of this crate's parity is behavioural and needs a running peer, so the
 //! witness is a foreign process on the wire. `_z_zint_len` and `z_id_to_string`
 //! are different: they are total functions of their argument with no session,
@@ -96,7 +104,10 @@ unsafe fn open(path: PathBuf) -> Library {
     Library::new(&path).unwrap_or_else(|e| panic!("dlopen {} failed: {e}", path.display()))
 }
 
+// wz-proves: api-compat-pico wz->pico partial
 #[test]
+#[ignore = "dlopens the CMake-built libzenohpico.so oracle; run by run-ci \
+            Layer E"]
 fn zint_len_agrees_with_the_real_pico_library() {
     unsafe {
         let wz = open(wz_cdylib());
@@ -143,7 +154,10 @@ fn zint_len_agrees_with_the_real_pico_library() {
     }
 }
 
+// wz-proves: api-compat-pico wz->pico partial
 #[test]
+#[ignore = "dlopens the CMake-built libzenohpico.so oracle; run by run-ci \
+            Layer E"]
 fn id_to_string_agrees_with_the_real_pico_library() {
     // `z_id_to_string(const z_id_t*, z_owned_string_t*)` — the id is 16 bytes by
     // value-address, and the output is an owned string read back through each

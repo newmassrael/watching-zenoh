@@ -166,6 +166,29 @@ fn init_params(whatami: WhatAmI, zid: Vec<u8>) -> SessionInitParams {
     }
 }
 
+/// Everything both drive roles need that is not the endpoint itself.
+///
+/// R311y528 — introduced when threading the session zid through pushed
+/// `drive_dial` to eight parameters. Grouping is the right answer rather than a
+/// second `#[allow(clippy::too_many_arguments)]`: these six travel TOGETHER by
+/// construction — they are exactly the per-session state `open_blocking` mints
+/// and hands to whichever role runs — and passing them as one value also removes
+/// the argument-order hazard six same-shaped `Arc`s otherwise carry. The
+/// pre-existing allow on `drive_listen` came off with it.
+struct DriveContext {
+    /// This session's own zid, minted on the calling thread so
+    /// [`SessionState::zid`] and the INIT cannot disagree.
+    zid: [u8; ZID_LENGTH],
+    shared: Arc<SharedSession>,
+    /// Unblocks `z_open`: `true` once the role has reached its ready point
+    /// (handshake settled for dial, bind complete for listen), `false` on any
+    /// failure before it.
+    tx: mpsc::Sender<bool>,
+    shutdown: Arc<Notify>,
+    stop: Arc<AtomicBool>,
+    clock: TokioTime,
+}
+
 /// The shutdown signal both roles race their drive against. See
 /// [`SessionState::close`] for why the latch and the notify are both needed.
 async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
@@ -178,16 +201,15 @@ async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
 /// The `connect` role: dial, run the outbound handshake, land the one peer in
 /// the registry, then pump it until `z_close`. `tx` unblocks `z_open` only once
 /// the handshake has settled — pico's blocking client open.
-async fn drive_dial(
-    endpoint: String,
-    whatami: WhatAmI,
-    zid: [u8; ZID_LENGTH],
-    shared: Arc<SharedSession>,
-    tx: mpsc::Sender<bool>,
-    shutdown: Arc<Notify>,
-    stop: Arc<AtomicBool>,
-    clock: TokioTime,
-) {
+async fn drive_dial(endpoint: String, whatami: WhatAmI, ctx: DriveContext) {
+    let DriveContext {
+        zid,
+        shared,
+        tx,
+        shutdown,
+        stop,
+        clock,
+    } = ctx;
     let dialed = match dial_endpoint(&endpoint, &DialConfig::default()).await {
         Ok(link) => link,
         Err(_) => {
@@ -344,18 +366,20 @@ fn listen_accept_config(cert: Option<&str>, key: Option<&str>) -> std::io::Resul
 
 /// The `listen` role: bind, unblock `z_open` immediately, then hold N
 /// concurrent inbound peers until `z_close` — pico's non-blocking listener.
-#[allow(clippy::too_many_arguments)]
 async fn drive_listen(
     endpoint: String,
     listen_cert: Option<String>,
     listen_key: Option<String>,
-    zid: [u8; ZID_LENGTH],
-    shared: Arc<SharedSession>,
-    tx: mpsc::Sender<bool>,
-    shutdown: Arc<Notify>,
-    stop: Arc<AtomicBool>,
-    clock: TokioTime,
+    ctx: DriveContext,
 ) {
+    let DriveContext {
+        zid,
+        shared,
+        tx,
+        shutdown,
+        stop,
+        clock,
+    } = ctx;
     // Everything that can fail the open runs BEFORE the success signal below,
     // so a failure is reported to the C caller rather than silently killing a
     // listener it was told had opened.
@@ -467,37 +491,24 @@ pub fn open_blocking(
                     return;
                 }
             };
+            let ctx = DriveContext {
+                zid,
+                shared: drive_shared,
+                tx,
+                shutdown: drive_shutdown,
+                stop: drive_stop,
+                clock,
+            };
             rt.block_on(async move {
                 match (connect, listen) {
                     (Some(endpoint), _) => {
-                        drive_dial(
-                            endpoint,
-                            dial_whatami,
-                            zid,
-                            drive_shared,
-                            tx,
-                            drive_shutdown,
-                            drive_stop,
-                            clock,
-                        )
-                        .await;
+                        drive_dial(endpoint, dial_whatami, ctx).await;
                     }
                     (None, Some(endpoint)) => {
-                        drive_listen(
-                            endpoint,
-                            listen_cert,
-                            listen_key,
-                            zid,
-                            drive_shared,
-                            tx,
-                            drive_shutdown,
-                            drive_stop,
-                            clock,
-                        )
-                        .await;
+                        drive_listen(endpoint, listen_cert, listen_key, ctx).await;
                     }
                     (None, None) => {
-                        let _ = tx.send(false);
+                        let _ = ctx.tx.send(false);
                     }
                 }
             });

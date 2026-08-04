@@ -7261,6 +7261,22 @@ layer_z_zenohd_interop() {
     # pins transport-fragmentation.
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_fragment_rx_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+    # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
+    # against wz's cdylib, must report a REAL zenohd's zid under "Routers IDs".
+    #
+    # It lives in the DROP-IN test file, whose other eleven legs run in Layer E,
+    # and it is registered HERE by exact test name for one reason: Layer E's
+    # sweep carries `--skip zenohd` because Layer E does not provision the
+    # router. The leg was written, registered, and NOT RUN — measured, by reading
+    # the lane's own log and finding "11 passed; 1 filtered out" against a
+    # twelve-leg file. Renaming the test to dodge the skip token would have made
+    # Layer E red on any machine without zenohd; naming it in the lane that DOES
+    # provision one is the fix. The whatami split it pins needs both halves, and
+    # its peer-side twin (LEG 10) runs in Layer E.
+    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test pico_c_examples_on_wz_capi_dropin \
+        pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router \
+        -- --ignored --quiet --test-threads=1 || return 1
     # R311y442 — wz<->zenoh-ext ADVANCED-PUBSUB cross-impl, the FIRST foreign
     # witness the `@adv` plane has ever had. Every advanced-pubsub test before
     # this was wz<->wz, which cannot see a selector-dialect divergence: the same

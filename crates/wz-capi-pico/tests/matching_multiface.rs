@@ -413,9 +413,13 @@ fn undeclaring_a_publisher_retracts_its_matching_listeners() {
         let witness = declare_publisher(&listener, c"drop/data");
         let mut subject = declare_publisher(&listener, c"drop/data");
         let listener_handle = declare_matching(&subject, seen.clone(), dropped.clone());
-        // The handle is deliberately LEAKED to C's view: this test undeclares the
-        // PUBLISHER and never the listener, which is the path under test.
-        std::mem::forget(listener_handle);
+        // ABANDONED, not undeclared: this test releases the PUBLISHER and never
+        // calls `z_undeclare_matching_listener`, which is the path under test.
+        // `z_owned_matching_listener_t` is a plain `repr(C)` handle with no
+        // `Drop` — pico's ownership is explicit, not RAII — so letting the
+        // binding fall out of scope retracts nothing, which is exactly the
+        // situation being set up.
+        let _abandoned = listener_handle;
 
         let mut dialer = open_connect(port);
         let mut sub = declare_flag_sub(&dialer, c"drop/**", &flag);
