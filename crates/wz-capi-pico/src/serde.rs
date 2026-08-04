@@ -57,7 +57,12 @@ use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
 
 /// Behind a `z_owned_bytes_writer_t` / `ze_owned_serializer_t`: the accumulating
 /// buffer. One type for both, because pico's serializer is literally a writer.
-pub(crate) type WriterState = Vec<u8>;
+///
+/// A [`ByteBuf`] rather than a bare `Vec<u8>` so the SEGMENT boundaries a
+/// `z_bytes_writer_append` leaves survive `z_bytes_writer_finish` into the
+/// payload — which is what upstream's own `z_bytes.c` then walks with
+/// `z_bytes_get_slice_iterator`.
+pub(crate) type WriterState = ByteBuf;
 
 /// Owned bytes writer (pico `z_owned_bytes_writer_t`, 40 B measured).
 #[repr(C)]
@@ -212,7 +217,7 @@ pub unsafe extern "C" fn z_bytes_writer_write_all(
         if src.is_null() {
             return Z_ERR_NULL;
         }
-        buf.extend_from_slice(std::slice::from_raw_parts(src, len));
+        buf.write_all(std::slice::from_raw_parts(src, len));
         Z_OK
     })
 }
@@ -241,7 +246,10 @@ pub unsafe extern "C" fn z_bytes_writer_append(
         };
         match taken {
             Some(payload) => {
-                buf.extend_from_slice(&payload);
+                // APPEND, not write: pico moves the source payload in as its
+                // own slice(s), and `z_bytes.c` walks the result expecting to
+                // see them back.
+                buf.append_segments(&payload);
                 Z_OK
             }
             None => Z_ERR_NULL,
@@ -334,7 +342,7 @@ pub unsafe extern "C" fn ze_serializer_serialize_sequence_length(
         };
         let mut vle = [0u8; VLE_LEN];
         let n = encode_zint(&mut vle, len as u64);
-        buf.extend_from_slice(&vle[..n]);
+        buf.write_all(&vle[..n]);
         Z_OK
     })
 }
@@ -359,7 +367,7 @@ pub unsafe extern "C" fn ze_serializer_serialize_buf(
             None => return Z_ERR_NULL,
         };
         if len != 0 {
-            buf.extend_from_slice(std::slice::from_raw_parts(val, len));
+            buf.write_all(std::slice::from_raw_parts(val, len));
         }
         Z_OK
     })
@@ -655,7 +663,7 @@ unsafe fn take_length_prefixed(deserializer: *mut ze_deserializer_t) -> Option<B
     let (len, used) = decode_zint(remaining)?;
     let len = len as usize;
     let body = remaining.get(used..used + len)?;
-    let out = body.to_vec();
+    let out = ByteBuf::from(body);
     reader.pos += used + len;
     Some(out)
 }
@@ -679,7 +687,7 @@ macro_rules! impl_arithmetic {
                 if bytes.is_null() {
                     return Z_ERR_NULL;
                 }
-                store_owned_bytes(bytes, data.to_le_bytes().to_vec());
+                store_owned_bytes(bytes, ByteBuf::from(data.to_le_bytes().as_slice()));
                 Z_OK
             })
         }
@@ -828,7 +836,7 @@ mod tests {
         unsafe {
             // `<len=9>` followed by only 2 bytes.
             let mut bytes = std::mem::zeroed();
-            store_owned_bytes(&mut bytes, vec![9u8, 0xAA, 0xBB]);
+            store_owned_bytes(&mut bytes, ByteBuf::from(vec![9u8, 0xAA, 0xBB]));
             let mut d = ze_deserializer_from_bytes(crate::bytes::z_bytes_loan(&bytes));
             let before = d._reader.pos;
             let mut s = std::mem::zeroed();
@@ -863,7 +871,7 @@ mod tests {
             assert_eq!(out, 0x0403_0201);
 
             let mut longer = std::mem::zeroed();
-            store_owned_bytes(&mut longer, vec![1, 2, 3, 4, 5]);
+            store_owned_bytes(&mut longer, ByteBuf::from(vec![1u8, 2, 3, 4, 5]));
             assert_ne!(
                 ze_deserialize_uint32(crate::bytes::z_bytes_loan(&longer), &mut out),
                 Z_OK,

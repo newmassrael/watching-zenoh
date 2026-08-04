@@ -80,7 +80,61 @@ macro_rules! define_handle_type {
 
 define_handle_type!(z_owned_config_t, z_loaned_config_t, z_moved_config_t, 3);
 define_handle_type!(z_owned_bytes_t, z_loaned_bytes_t, z_moved_bytes_t, 3);
-define_handle_type!(z_owned_slice_t, z_loaned_slice_t, z_moved_slice_t, 3);
+
+// ---------------------------------------------------------------------------
+// slice: the BORROWED-VIEW model (the shape string already uses).
+//
+// slice does not use `define_handle_type!` because pico has a `z_view_slice_t`
+// that LOANS into `z_loaned_slice_t` (`_Z_VIEW_FUNCTIONS_DEF(slice)`,
+// `api/primitives.h:1495`), and a view borrows storage it does not own. With a
+// handle-shaped loaned form there is nothing a view could loan into without
+// allocating a `Vec` it would then have to leak — the view has no drop. So the
+// loaned form is a `{ start, len }` borrow pair and the OWNED form carries a
+// cached self-view, exactly as string does; `z_slice_data` / `z_slice_len` then
+// read the same two fields whichever producer they came from.
+// ---------------------------------------------------------------------------
+
+/// Loaned slice — a borrowed `{ start, len }`. Produced both by an owned
+/// slice's `z_slice_loan` (via its cached self-view) and by
+/// `z_view_slice_loan`.
+#[repr(C)]
+pub struct z_loaned_slice_t {
+    pub(crate) _start: *const u8,
+    pub(crate) _len: usize,
+}
+
+/// View slice (pico `z_view_slice_t`, a view of `_z_slice_t` = 32 B). Slots 0/1
+/// are `{ start, len }` so `z_view_slice_loan` is a pointer reinterpretation.
+#[repr(C)]
+pub struct z_view_slice_t {
+    pub(crate) _start: *const u8,
+    pub(crate) _len: usize,
+    pub(crate) _pad: [usize; 2],
+}
+
+/// Owned slice (32 B): our handle → a heap `SliceState`. Its loan derives a
+/// `z_loaned_slice_t` from the state's cached self-view.
+#[repr(C)]
+pub struct z_owned_slice_t {
+    pub(crate) handle: Handle,
+    pub(crate) _pad: [Handle; 3],
+}
+
+/// Moved owned slice (pico `z_moved_slice_t`).
+#[repr(C)]
+pub struct z_moved_slice_t {
+    pub(crate) _this: z_owned_slice_t,
+}
+
+impl z_owned_slice_t {
+    #[inline]
+    pub(crate) fn null_value() -> Self {
+        Self {
+            handle: std::ptr::null_mut(),
+            _pad: [std::ptr::null_mut(); 3],
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Borrowed {ptr,len} view loaned types: keyexpr, string, and the string view.
@@ -354,6 +408,159 @@ macro_rules! impl_value_ownership {
 }
 
 pub(crate) use impl_value_ownership;
+
+/// Emit the OWNED-ELEMENT family for a plane whose LOANED form is a borrowed
+/// callback marshal (`sample`, `reply`, `query`).
+///
+/// These three differ from every type above in one structural way, and it is
+/// the reason they need their own emitter rather than
+/// [`impl_handle_ownership7`]. For a handle value type the loaned form has the
+/// SAME layout as the owned one, so `loan` is a pointer reinterpretation. Here
+/// the loaned form is a pointer to the marshal itself — that is what the
+/// existing accessors read, because that is what a subscriber/query/reply
+/// callback is handed — so `loan` must hand back the marshal the owned struct
+/// POINTS AT, not the owned struct's own address.
+///
+/// The owned struct is a `$size`-byte block (pico stack-allocates it, so the
+/// size is fixed by upstream's header and is pinned by the caller's
+/// `const _` assertion) carrying this crate's `Box` handle in slot 0. That
+/// layout is `memcpy`-relocatable, which pico's channel machinery requires:
+/// `_z_<handler>_elem_move` copies `sizeof(z_owned_*_t)` bytes out of a heap
+/// cell and frees the original.
+///
+/// `take_from_loaned` DEEP-COPIES rather than moving. Upstream can move because
+/// its loaned value is a full `_z_sample_t` the caller owns; wz's is a
+/// dispatcher-owned marshal that is still borrowed by the frame around the
+/// callback (and, when a session holds several matching subscriptions, by the
+/// next callback too). Copying is what makes the escape sound; the cost is one
+/// payload copy per channel push, which is the honest price of the borrow
+/// model this crate already uses everywhere else.
+macro_rules! impl_boxed_element {
+    ($Owned:ident, $Moved:ident, $Loaned:ty, $size:expr,
+     $free:path, $deep_copy:path,
+     $null:ident, $check:ident, $loan:ident, $loan_mut:ident,
+     $mv:ident, $take:ident, $drop:ident, $take_from_loaned:ident) => {
+        /// Owned element: this crate's boxed marshal handle in slot 0, inert
+        /// padding to pico's measured size.
+        #[repr(C)]
+        pub struct $Owned {
+            pub(crate) handle: *mut ::std::ffi::c_void,
+            pub(crate) _pad: [u8; $size - ::std::mem::size_of::<*mut ::std::ffi::c_void>()],
+        }
+
+        /// Moved element (pico `z_moved_*_t`).
+        #[repr(C)]
+        pub struct $Moved {
+            pub(crate) _this: $Owned,
+        }
+
+        impl $Owned {
+            #[inline]
+            pub(crate) fn null_value() -> Self {
+                Self {
+                    handle: ::std::ptr::null_mut(),
+                    _pad: [0u8; $size - ::std::mem::size_of::<*mut ::std::ffi::c_void>()],
+                }
+            }
+        }
+
+        /// Zero the owned struct in place (pico `z_internal_*_null`).
+        #[no_mangle]
+        pub unsafe extern "C" fn $null(obj: *mut $Owned) {
+            if obj.is_null() {
+                return;
+            }
+            *obj = <$Owned>::null_value();
+        }
+
+        /// `true` iff the owned struct holds a live marshal
+        /// (pico `z_internal_*_check`).
+        #[no_mangle]
+        pub unsafe extern "C" fn $check(obj: *const $Owned) -> bool {
+            $crate::ffi::guard_val(false, || !obj.is_null() && !(*obj).handle.is_null())
+        }
+
+        /// Borrow the marshal (pico `z_*_loan`). Hands back the POINTEE, which
+        /// is the same address a callback receives.
+        #[no_mangle]
+        pub unsafe extern "C" fn $loan(obj: *const $Owned) -> *const $Loaned {
+            if obj.is_null() {
+                return ::std::ptr::null();
+            }
+            (*obj).handle as *const $Loaned
+        }
+
+        /// Borrow the marshal mutably (pico `z_*_loan_mut`).
+        #[no_mangle]
+        pub unsafe extern "C" fn $loan_mut(obj: *mut $Owned) -> *mut $Loaned {
+            if obj.is_null() {
+                return ::std::ptr::null_mut();
+            }
+            (*obj).handle as *mut $Loaned
+        }
+
+        /// Move-cast (pico `z_*_move`).
+        #[no_mangle]
+        pub unsafe extern "C" fn $mv(obj: *mut $Owned) -> *mut $Moved {
+            obj as *mut $Moved
+        }
+
+        /// Take the value out of `src` into `dst`, leaving `src` null
+        /// (pico `z_*_take`).
+        #[no_mangle]
+        pub unsafe extern "C" fn $take(dst: *mut $Owned, src: *mut $Moved) {
+            if dst.is_null() || src.is_null() {
+                return;
+            }
+            (*dst).handle = (*src)._this.handle;
+            (*dst)._pad = (*src)._this._pad;
+            (*src)._this = <$Owned>::null_value();
+        }
+
+        /// Release the owned element (pico `z_*_drop`). Idempotent.
+        #[no_mangle]
+        pub unsafe extern "C" fn $drop(obj: *mut $Moved) {
+            let _ = $crate::ffi::guarded(|| {
+                if obj.is_null() {
+                    return $crate::result::Z_OK;
+                }
+                let handle = (*obj)._this.handle;
+                if !handle.is_null() {
+                    $free(handle);
+                    (*obj)._this = <$Owned>::null_value();
+                }
+                $crate::result::Z_OK
+            });
+        }
+
+        /// Escape a borrowed marshal into an owned one
+        /// (pico `z_*_take_from_loaned`). See the macro doc for why this is a
+        /// deep copy.
+        #[no_mangle]
+        pub unsafe extern "C" fn $take_from_loaned(
+            dst: *mut $Owned,
+            src: *mut $Loaned,
+        ) -> $crate::result::ZResult {
+            $crate::ffi::guarded(|| {
+                if dst.is_null() {
+                    return $crate::result::Z_ERR_NULL;
+                }
+                *dst = <$Owned>::null_value();
+                if src.is_null() {
+                    return $crate::result::Z_ERR_NULL;
+                }
+                let handle = $deep_copy(src as *const $Loaned);
+                if handle.is_null() {
+                    return $crate::result::Z_ERR_GENERIC;
+                }
+                (*dst).handle = handle;
+                $crate::result::Z_OK
+            })
+        }
+    };
+}
+
+pub(crate) use impl_boxed_element;
 
 // ---------------------------------------------------------------------------
 // Handle read helper.

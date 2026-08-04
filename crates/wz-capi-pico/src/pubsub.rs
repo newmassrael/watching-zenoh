@@ -69,7 +69,7 @@ pub struct z_loaned_sample_t {
 /// definition instead of two that can drift.
 pub(crate) struct SampleMarshal {
     keyexpr: String,
-    payload: Vec<u8>,
+    payload: ByteBuf,
     kind: z_sample_kind_t,
     /// R311y529 — the sample METADATA the accessors expose. Carried as owned
     /// copies for the same reason the payload is: the wz `SampleView` borrow
@@ -80,7 +80,7 @@ pub(crate) struct SampleMarshal {
     /// one — pico's `z_sample_attachment` returns NULL for absent and a valid
     /// zero-length payload for present-but-empty, and a program that branches on
     /// the pointer sees the difference.
-    attachment: Option<Vec<u8>>,
+    attachment: Option<ByteBuf>,
     timestamp: Option<z_timestamp_t>,
     encoding: Option<crate::encoding::z_owned_encoding_t>,
     loaned_keyexpr: z_loaned_keyexpr_t,
@@ -94,7 +94,7 @@ impl SampleMarshal {
     /// [`crate::query::QueryMarshal::bind`] for why the split is load-bearing
     /// (an earlier cut bound inside a by-value constructor and handed C a
     /// pointer into the dead constructor frame).
-    pub(crate) fn new(keyexpr: String, payload: Vec<u8>, kind: z_sample_kind_t) -> Self {
+    pub(crate) fn new(keyexpr: String, payload: ByteBuf, kind: z_sample_kind_t) -> Self {
         Self {
             keyexpr,
             payload,
@@ -118,7 +118,7 @@ impl SampleMarshal {
     /// [`Self::bind`], since the cached attachment view points at the field this
     /// installs.
     pub(crate) fn with_metadata(mut self, view: &dyn SampleView) -> Self {
-        self.attachment = view.attachment().map(<[u8]>::to_vec);
+        self.attachment = view.attachment().map(ByteBuf::from);
         self.timestamp = view.timestamp().map(|hint| z_timestamp_t {
             valid: true,
             id: crate::zid::z_id_t::from_wire(&hint.zid),
@@ -138,9 +138,9 @@ impl SampleMarshal {
     pub(crate) fn bind(&mut self) {
         self.loaned_keyexpr =
             z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
-        self.loaned_payload.handle = &self.payload as *const Vec<u8> as *mut c_void;
+        self.loaned_payload.handle = &self.payload as *const ByteBuf as *mut c_void;
         if let Some(attachment) = self.attachment.as_ref() {
-            self.loaned_attachment.handle = attachment as *const Vec<u8> as *mut c_void;
+            self.loaned_attachment.handle = attachment as *const ByteBuf as *mut c_void;
         }
     }
 
@@ -148,7 +148,82 @@ impl SampleMarshal {
     pub(crate) fn as_loaned(&self) -> *const z_loaned_sample_t {
         self as *const SampleMarshal as *const z_loaned_sample_t
     }
+
+    /// An INDEPENDENT copy, for `z_sample_take_from_loaned` to escape the
+    /// callback with.
+    ///
+    /// Every owned field is duplicated — including the encoding, whose
+    /// `EncodingState` lives behind a `Box` that the two marshals must not
+    /// share (dropping either would dangle the other). The cached loaned views
+    /// are deliberately left UNBOUND: they point at the copy's own fields, so
+    /// they can only be set once the copy has reached its final address, which
+    /// is [`Self::bind`]'s whole contract.
+    pub(crate) fn deep_copy(&self) -> Self {
+        Self {
+            keyexpr: self.keyexpr.clone(),
+            payload: self.payload.clone(),
+            kind: self.kind,
+            attachment: self.attachment.clone(),
+            timestamp: self.timestamp,
+            encoding: self
+                .encoding
+                .as_ref()
+                // SAFETY: `encoding` is an owned encoding this crate stored.
+                .map(|owned| unsafe { crate::encoding::clone_owned_encoding(owned) }),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_payload: z_loaned_bytes_t {
+                handle: std::ptr::null_mut(),
+                _pad: [std::ptr::null_mut(); 3],
+            },
+            loaned_attachment: z_loaned_bytes_t {
+                handle: std::ptr::null_mut(),
+                _pad: [std::ptr::null_mut(); 3],
+            },
+        }
+    }
 }
+
+// --- the OWNED sample family ------------------------------------------------
+
+/// Release a boxed [`SampleMarshal`].
+///
+/// # Safety
+/// `handle` must be a live `Box::into_raw::<SampleMarshal>` pointer.
+unsafe fn free_sample_marshal(handle: *mut c_void) {
+    drop(Box::from_raw(handle.cast::<SampleMarshal>()));
+}
+
+/// Deep-copy the marshal behind a borrowed sample onto the heap, bound at its
+/// final address.
+///
+/// # Safety
+/// `src` must be null or a pointer this crate handed to a sample callback.
+unsafe fn clone_sample_marshal(src: *const z_loaned_sample_t) -> *mut c_void {
+    if src.is_null() {
+        return std::ptr::null_mut();
+    }
+    let marshal = &*(src as *const SampleMarshal);
+    let mut boxed = Box::new(marshal.deep_copy());
+    boxed.bind();
+    Box::into_raw(boxed).cast::<c_void>()
+}
+
+crate::abi::impl_boxed_element!(
+    z_owned_sample_t,
+    z_moved_sample_t,
+    z_loaned_sample_t,
+    224,
+    free_sample_marshal,
+    clone_sample_marshal,
+    z_internal_sample_null,
+    z_internal_sample_check,
+    z_sample_loan,
+    z_sample_loan_mut,
+    z_sample_move,
+    z_sample_take,
+    z_sample_drop,
+    z_sample_take_from_loaned
+);
 
 /// pico `z_sample_kind_t` (`api/constants.h:164-168`): how the sample was
 /// issued. A plain C enum, so it occupies an `int`.
@@ -265,7 +340,7 @@ pub(crate) fn make_liveliness_callback(
         };
         let mut marshal = SampleMarshal::new(
             sample.keyexpr.to_owned(),
-            Vec::new(),
+            ByteBuf::new(),
             crate::liveliness::liveliness_kind_of(sample.kind),
         );
         marshal.bind();
@@ -291,7 +366,7 @@ pub(crate) fn make_subscriber_callback(
         };
         let mut marshal = SampleMarshal::new(
             view.keyexpr().to_owned(),
-            view.payload().to_vec(),
+            ByteBuf::from(view.payload()),
             sample_kind_of(view.kind()),
         )
         .with_metadata(view);
@@ -681,7 +756,7 @@ impl_handle_ownership7!(
 /// # Safety
 /// `payload` must be null or a valid `z_moved_bytes_t` whose handle is a live
 /// `Box::into_raw::<ByteBuf>` pointer.
-pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<Vec<u8>> {
+pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<ByteBuf> {
     if payload.is_null() {
         return None;
     }
@@ -717,7 +792,7 @@ unsafe fn publisher_put_options(options: *const z_publisher_put_options_t) -> Pu
     let attachment = take_moved_bytes((*options).attachment);
     let encoding = crate::encoding::take_moved_encoding((*options).encoding);
     if let Some(attachment) = attachment {
-        opts = opts.with_attachment(attachment);
+        opts = opts.with_attachment(attachment.to_vec());
     }
     if let Some(hint) = encoding {
         opts = opts.with_encoding(hint);

@@ -69,6 +69,8 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use tokio::sync::Notify;
 
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
+use wz_runtime_tokio::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions};
+use wz_runtime_tokio::advanced_subscriber::{AdvancedSubscriber, AdvancedSubscriberOptions, Miss};
 use wz_runtime_tokio::declare::LivelinessSample;
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
@@ -115,8 +117,22 @@ pub type LivelinessSink =
     Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
 
 /// Mints one queryable callback per face.
+///
+/// Unlike its three siblings this factory receives the FACE'S OWN session, and
+/// that argument is load-bearing rather than convenience. A queryable handler
+/// may let its query ESCAPE the dispatch (zenoh-pico's
+/// `z_query_take_from_loaned`, which is how a channel-based queryable answers
+/// from the application thread), and an escaped query owes two things its
+/// dispatch cannot supply: the deferred replies, and the `ResponseFinal` that
+/// must NOT be emitted until the last holder drops. Both are session
+/// operations, so the shim needs the face's session to build them
+/// ([`wz_runtime_tokio::session::Session::hold_response_final`]). Handing it in
+/// here — rather than letting the shim keep a registry-wide session list — is
+/// what keeps the escape bound to the ONE face the query arrived on.
 pub type QueryableSink = Arc<
-    dyn Fn() -> Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static> + Send + Sync,
+    dyn Fn(&TokioSession) -> Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static>
+        + Send
+        + Sync,
 >;
 
 /// Delivers ONE aggregated matching verdict to C.
@@ -160,6 +176,31 @@ pub type SubId = u64;
 /// one C queryable declaration spawned.
 pub type QblId = u64;
 
+/// A C-level ADVANCED publisher id — what a `ze_owned_advanced_publisher_t`
+/// carries. Its own id space rather than a shared one with [`SubId`]: an
+/// advanced publisher is a distinct C type with its own undeclare, so nothing
+/// ever has to look it up in two maps.
+pub type AdvPubId = u64;
+
+/// A C-level ADVANCED subscriber id — what a `ze_owned_advanced_subscriber_t`
+/// carries. Separate from [`SubId`] for the same reason as [`AdvPubId`].
+pub type AdvSubId = u64;
+
+/// Mints one advanced-subscriber `(on_sample, on_miss)` callback PAIR per face.
+///
+/// A pair rather than two sinks because an advanced subscriber is declared with
+/// both at once and the two share the C program's one subscription: the sample
+/// closure it moved in, and the miss closure it may install afterwards through
+/// `ze_advanced_subscriber_declare_sample_miss_listener`.
+#[allow(clippy::type_complexity)]
+pub type AdvancedSubscriberSink = Arc<
+    dyn Fn() -> (
+            Box<dyn FnMut(wz_runtime_tokio::sample::Sample) + Send + 'static>,
+            Box<dyn FnMut(Miss) + Send + 'static>,
+        ) + Send
+        + Sync,
+>;
+
 /// The face id the dial (`connect`) role occupies. A dialed session has
 /// exactly one peer, so it needs no id space of its own; the accept role's
 /// ids come from the accept loop's own monotonic `FaceId`.
@@ -184,6 +225,11 @@ struct FaceEntry {
     /// handle is what keeps the watch installed; dropping it undeclares that
     /// face's half of one C listener.
     matches: BTreeMap<MatchId, MatchingListener<TokioRuntime>>,
+    /// Per-face ADVANCED publishers. Dropping one tears down that face's `@adv`
+    /// cache queryable + liveliness token (RAII inside `AdvancedPublisher`).
+    adv_pubs: BTreeMap<AdvPubId, AdvancedPublisher<TokioRuntime, TokioTime>>,
+    /// Per-face ADVANCED subscribers, same replay contract as `subs`.
+    adv_subs: BTreeMap<AdvSubId, AdvancedSubscriber<TokioRuntime>>,
     /// R311y296 — the signal that this face's drive loop should re-arm its wake
     /// because a `z_get` just registered a pending query with a nearer deadline
     /// than whatever the loop is currently parked on. Owned per face because
@@ -246,6 +292,23 @@ struct LiveSubEntry {
     keyexpr: String,
     history: bool,
     sink: LivelinessSink,
+}
+
+/// A C-declared ADVANCED publisher — the sixth SSOT, replayed onto every face
+/// exactly as the others are. The options are `Copy`, so the entry stores them
+/// by value and every replay declares an identical publisher.
+struct AdvPubEntry {
+    id: AdvPubId,
+    keyexpr: String,
+    options: AdvancedPublisherOptions,
+}
+
+/// A C-declared ADVANCED subscriber — the seventh SSOT.
+struct AdvSubEntry {
+    id: AdvSubId,
+    keyexpr: String,
+    options: AdvancedSubscriberOptions,
+    sink: AdvancedSubscriberSink,
 }
 
 /// A C-level liveliness token id, keying the per-face wz tokens one C
@@ -461,6 +524,10 @@ struct Inner {
     live_subs: Vec<LiveSubEntry>,
     matches: Vec<MatchEntry>,
     next_match_id: MatchId,
+    adv_pubs: Vec<AdvPubEntry>,
+    next_adv_pub_id: AdvPubId,
+    adv_subs: Vec<AdvSubEntry>,
+    next_adv_sub_id: AdvSubId,
     kexprs: Vec<KexprEntry>,
     /// Next alias id to hand out. Starts at 0 and is PRE-incremented, so the
     /// first id issued is 1: zero is reserved on the wire
@@ -501,6 +568,12 @@ impl SharedSession {
     /// push-declarations-to-the-new-peer, `accept.c:148-149`).
     pub fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>) {
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
+        // This face's LOCAL zid, read off the handshake params the same way
+        // `Session::new` does. The advanced publisher stamps it into every
+        // sample's `SourceInfo` and renders it into the `@adv` keyexpr, so it
+        // must be the identity this face actually negotiated rather than a
+        // registry-wide copy.
+        let zid = actions.params.zid.clone();
         let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock));
 
         let mut guard = self.lock();
@@ -533,7 +606,7 @@ impl SharedSession {
             if let Ok(qbl) = session.declare_queryable(
                 entry.keyexpr.clone(),
                 queryable_options(entry.complete),
-                (entry.sink)(),
+                (entry.sink)(&session),
             ) {
                 qbls.insert(entry.id, qbl);
             }
@@ -590,6 +663,35 @@ impl SharedSession {
                 matches.insert(entry.id, listener);
             }
         }
+        // Advanced pub/sub replay, on the same best-effort per-face contract
+        // as the four planes above. An advanced publisher declares its own
+        // `@adv` cache queryable and liveliness token on the face it binds to,
+        // so a per-face declaration is not merely convenient here — it is the
+        // only shape in which those two reach the peer at all.
+        let mut adv_pubs = BTreeMap::new();
+        for entry in &guard.adv_pubs {
+            if let Ok(pub_) = AdvancedPublisher::declare(
+                &session,
+                entry.keyexpr.clone(),
+                entry.options,
+                zid.to_vec(),
+            ) {
+                adv_pubs.insert(entry.id, pub_);
+            }
+        }
+        let mut adv_subs = BTreeMap::new();
+        for entry in &guard.adv_subs {
+            let (on_sample, on_miss) = (entry.sink)();
+            if let Ok(sub) = AdvancedSubscriber::declare_with_options(
+                &session,
+                entry.keyexpr.clone(),
+                entry.options,
+                on_sample,
+                on_miss,
+            ) {
+                adv_subs.insert(entry.id, sub);
+            }
+        }
         let replaced = guard.faces.insert(
             id,
             FaceEntry {
@@ -599,6 +701,8 @@ impl SharedSession {
                 tokens,
                 live_subs,
                 matches,
+                adv_pubs,
+                adv_subs,
                 revised: Arc::new(Notify::new()),
             },
         );
@@ -1346,6 +1450,143 @@ impl SharedSession {
         drop(dropped_live_entry);
     }
 
+    /// Record a C ADVANCED publisher in the SSOT and declare it on every live
+    /// face, with the same declare-before-peer semantics as every other plane
+    /// here: no face yet -> the entry is still recorded and every future face
+    /// replays it.
+    ///
+    /// The per-face declaration is not an implementation detail of this
+    /// registry, it is what the plane needs: an advanced publisher owns an
+    /// `@adv` cache queryable and an `@adv` liveliness token, and both are
+    /// per-session entities a subscriber reaches over ONE face.
+    pub fn declare_advanced_publisher(
+        &self,
+        keyexpr: String,
+        options: AdvancedPublisherOptions,
+    ) -> AdvPubId {
+        let mut guard = self.lock();
+        let id = guard.next_adv_pub_id;
+        guard.next_adv_pub_id = guard.next_adv_pub_id.wrapping_add(1);
+        for face in guard.faces.values_mut() {
+            let zid = face.session.actions().params.zid.clone();
+            if let Ok(pub_) =
+                AdvancedPublisher::declare(&face.session, keyexpr.clone(), options, zid)
+            {
+                face.adv_pubs.insert(id, pub_);
+            }
+        }
+        guard.adv_pubs.push(AdvPubEntry {
+            id,
+            keyexpr,
+            options,
+        });
+        id
+    }
+
+    /// Publish one payload through a C advanced publisher, on every face that
+    /// carries it. Returns the number of faces that accepted it.
+    ///
+    /// Best-effort per face, like the ordinary fan-out publish: a face
+    /// mid-teardown is skipped rather than failing the whole put, because a C
+    /// caller has no per-face handle to retry with.
+    pub fn advanced_publisher_put(&self, id: AdvPubId, payload: &[u8]) -> usize {
+        let guard = self.lock();
+        let mut delivered = 0usize;
+        for face in guard.faces.values() {
+            if let Some(pub_) = face.adv_pubs.get(&id) {
+                if pub_.put(payload).is_ok() {
+                    delivered += 1;
+                }
+            }
+        }
+        delivered
+    }
+
+    /// Retract a C advanced publisher: drop the SSOT entry so no future face
+    /// replays it, and drop every live face's publisher (which undeclares that
+    /// face's `@adv` cache queryable + liveliness token through RAII).
+    pub fn undeclare_advanced_publisher(&self, id: AdvPubId) {
+        let mut dropped = Vec::new();
+        {
+            let mut guard = self.lock();
+            if let Some(pos) = guard.adv_pubs.iter().position(|entry| entry.id == id) {
+                guard.adv_pubs.remove(pos);
+            }
+            for face in guard.faces.values_mut() {
+                if let Some(pub_) = face.adv_pubs.remove(&id) {
+                    dropped.push(pub_);
+                }
+            }
+        }
+        // Outside the lock: the teardown emits undeclares and may run C drops.
+        drop(dropped);
+    }
+
+    /// Record a C ADVANCED subscriber in the SSOT and declare it on every live
+    /// face. Mirror of [`Self::declare_advanced_publisher`].
+    pub fn declare_advanced_subscriber(
+        &self,
+        keyexpr: String,
+        options: AdvancedSubscriberOptions,
+        sink: AdvancedSubscriberSink,
+    ) -> AdvSubId {
+        let mut guard = self.lock();
+        let id = guard.next_adv_sub_id;
+        guard.next_adv_sub_id = guard.next_adv_sub_id.wrapping_add(1);
+        for face in guard.faces.values_mut() {
+            let (on_sample, on_miss) = (sink)();
+            if let Ok(sub) = AdvancedSubscriber::declare_with_options(
+                &face.session,
+                keyexpr.clone(),
+                options,
+                on_sample,
+                on_miss,
+            ) {
+                face.adv_subs.insert(id, sub);
+            }
+        }
+        guard.adv_subs.push(AdvSubEntry {
+            id,
+            keyexpr,
+            options,
+            sink,
+        });
+        id
+    }
+
+    /// Retract a C advanced subscriber. Mirror of
+    /// [`Self::undeclare_advanced_publisher`].
+    pub fn undeclare_advanced_subscriber(&self, id: AdvSubId) {
+        let mut dropped = Vec::new();
+        let mut dropped_entry = None;
+        {
+            let mut guard = self.lock();
+            if let Some(pos) = guard.adv_subs.iter().position(|entry| entry.id == id) {
+                dropped_entry = Some(guard.adv_subs.remove(pos));
+            }
+            for face in guard.faces.values_mut() {
+                if let Some(sub) = face.adv_subs.remove(&id) {
+                    dropped.push(sub);
+                }
+            }
+        }
+        // Outside the lock: the SSOT entry holds the sink factory, whose last
+        // release runs the C `drop(context)`.
+        drop(dropped);
+        drop(dropped_entry);
+    }
+
+    /// The keyexpr a C advanced subscriber was declared on, for the derived
+    /// `<ke>/@adv/pub/**` publisher-detection subscription.
+    pub fn advanced_subscriber_keyexpr(&self, id: AdvSubId) -> Option<String> {
+        let guard = self.lock();
+        guard
+            .adv_subs
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.keyexpr.clone())
+    }
+
     /// Record a C queryable in the SSOT and declare it on every live face —
     /// the responder-side mirror of [`Self::declare_subscriber`], with the
     /// same declare-before-peer semantics (no face yet → the entry is still
@@ -1362,10 +1603,11 @@ impl SharedSession {
         guard.next_qbl_id = guard.next_qbl_id.wrapping_add(1);
 
         for face in guard.faces.values_mut() {
-            if let Ok(qbl) =
-                face.session
-                    .declare_queryable(keyexpr.clone(), queryable_options(complete), sink())
-            {
+            if let Ok(qbl) = face.session.declare_queryable(
+                keyexpr.clone(),
+                queryable_options(complete),
+                sink(&face.session),
+            ) {
                 face.qbls.insert(id, qbl);
             }
         }

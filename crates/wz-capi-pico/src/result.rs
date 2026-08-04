@@ -15,8 +15,25 @@ pub type ZResult = i8;
 /// Success. Matches pico `Z_OK` / `_Z_RES_OK`.
 pub const Z_OK: ZResult = 0;
 
+/// A channel `recv` found the channel closed and drained. Matches pico
+/// `_Z_RES_CHANNEL_CLOSED` / `Z_CHANNEL_DISCONNECTED` = 1
+/// (`utils/result.h:40-41`).
+///
+/// POSITIVE, unlike every error below: pico's channel loop is
+/// `while (z_recv(..) == Z_OK)`, so a channel that ends must not read as a
+/// failure to a caller testing `< 0`.
+pub const Z_RES_CHANNEL_CLOSED: ZResult = 1;
+
+/// A channel `try_recv` found the channel open but empty. Matches pico
+/// `_Z_RES_CHANNEL_NODATA` / `Z_CHANNEL_NODATA` = 2 (`utils/result.h:42-43`).
+pub const Z_RES_CHANNEL_NODATA: ZResult = 2;
+
 /// Generic failure. Matches pico `_Z_ERR_GENERIC` (`utils/result.h:101`).
 pub const Z_ERR_GENERIC: ZResult = -128;
+
+/// A refcount increment passed pico's lazy `INT32_MAX` bound. Matches pico
+/// `_Z_ERR_OVERFLOW` (`utils/result.h:96`).
+pub const Z_ERR_OVERFLOW: ZResult = -74;
 
 /// A required argument was NULL. Matches pico `_Z_ERR_NULL`
 /// (`utils/result.h:100`).

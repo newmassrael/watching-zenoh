@@ -337,6 +337,129 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
     })
 }
 
+// --- liveliness GET ---------------------------------------------------------
+
+/// pico `z_liveliness_get_options_t` — `{ uint64_t timeout_ms; }`
+/// (`api/liveliness.h:142-147`), 8 B measured. The `cancellation_token` field
+/// the header declares exists only under `Z_FEATURE_UNSTABLE_API`, which
+/// defaults OFF, so a default build has just the timeout.
+#[repr(C)]
+pub struct z_liveliness_get_options_t {
+    /// Snapshot timeout in milliseconds. `0` means "use the default", NOT
+    /// "never expire" — pico rewrites it before issuing
+    /// (`src/api/liveliness.c:132-133`), and so does this crate.
+    pub timeout_ms: u64,
+}
+
+/// Fill default liveliness-get options (pico `z_liveliness_get_options_default`,
+/// `src/api/liveliness.c:111`).
+#[no_mangle]
+pub unsafe extern "C" fn z_liveliness_get_options_default(
+    options: *mut z_liveliness_get_options_t,
+) -> ZResult {
+    guarded(|| {
+        if options.is_null() {
+            return Z_ERR_NULL;
+        }
+        (*options).timeout_ms = 0;
+        Z_OK
+    })
+}
+
+/// Query the liveliness tokens currently alive under `keyexpr` (pico
+/// `z_liveliness_get`).
+///
+/// The wire here is the DECLARATION plane, not the query plane: the request is
+/// a CURRENT liveliness `Interest`, each live token comes back as a
+/// `Declare(DeclToken)` and the snapshot ends with one `DeclFinal`. wz models
+/// that with [`wz_runtime_tokio::session::Session::liveliness_get`], whose
+/// application surface is already reply-shaped — which is why this maps onto
+/// the same `z_owned_closure_reply_t` and the same [`crate::get::fire_reply`]
+/// marshal that `z_get` uses, rather than a parallel one.
+///
+/// Consumes the moved closure on EVERY path (pico's contract), and because the
+/// C `drop(context)` IS the completion signal, an early error correctly reports
+/// "this snapshot is over".
+///
+/// Fanned across every connected face for the reason every declaration in this
+/// crate is: one C session is N per-face wz sessions, and a snapshot that
+/// polled only the first face would silently under-report. The C thread holds
+/// its own clone across the loop so a face that answers and finalises early
+/// cannot complete the get while later faces are still being issued — the same
+/// `guard` discipline as [`crate::get`]'s fan.
+#[no_mangle]
+pub unsafe extern "C" fn z_liveliness_get(
+    zs: *const z_loaned_session_t,
+    keyexpr: *const z_loaned_keyexpr_t,
+    callback: *mut crate::get::z_moved_closure_reply_t,
+    options: *mut z_liveliness_get_options_t,
+) -> ZResult {
+    guarded(|| {
+        if callback.is_null() {
+            return Z_ERR_NULL;
+        }
+        // Adopt the closure FIRST and null the source (consume-on-all-paths).
+        let closure = crate::get::adopt_reply_closure(callback);
+
+        let state = match session_state(zs) {
+            Some(s) => s,
+            None => return Z_ERR_NULL,
+        };
+        let ke = match keyexpr_str(keyexpr) {
+            Some(k) => k.to_owned(),
+            None => return Z_ERR_INVALID,
+        };
+        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+            return Z_ERR_INVALID;
+        }
+        // A NULL options pointer is pico's "defaults", not an error.
+        let timeout_ms = if options.is_null() {
+            0
+        } else {
+            (*options).timeout_ms
+        };
+        // wz's field is a `u32`; saturate rather than wrap, for the reason
+        // `crate::get::get_timeout_ms` records — a wrapped huge timeout becomes
+        // a tiny one and expires the snapshot immediately.
+        let opts = wz_runtime_tokio::session::LivelinessGetOptions::default()
+            .with_timeout_ms(timeout_ms.min(u32::MAX as u64) as u32);
+
+        // A liveliness reply's keyexpr is the TOKEN's, which intersects the
+        // interest by construction; the gate is carried anyway so this plane
+        // uses the same admission rule as `z_get` rather than a second one that
+        // could drift.
+        let gate = Arc::new(crate::get::ReplyGate {
+            query_keyexpr: ke.clone(),
+            anyke: false,
+        });
+
+        let guard = closure.clone();
+        for (session, revised) in state.shared.face_sessions_with_wake() {
+            let per_face = closure.clone();
+            let per_face_gate = gate.clone();
+            let issued = session.liveliness_get(
+                ke.clone(),
+                opts,
+                move |view: &dyn wz_runtime_tokio::reply_sink::ReplyView| {
+                    crate::get::fire_reply(&per_face, &per_face_gate, view);
+                },
+                // Completion is signalled by the pending entry's sink being
+                // DROPPED, which covers a real final, a timeout sweep and a
+                // face death alike — the same reason `z_get`'s `on_final` is
+                // empty.
+                |_id| {},
+            );
+            drop(issued);
+            // Wake this face's drive loop so it re-arms on the deadline just
+            // registered; without it a silent session sweeps the snapshot only
+            // at the next keepalive wake.
+            revised.notify_one();
+        }
+        drop(guard);
+        Z_OK
+    })
+}
+
 /// The pico sample kind for a wz liveliness event.
 pub(crate) fn liveliness_kind_of(kind: LivelinessSampleKind) -> crate::pubsub::z_sample_kind_t {
     match kind {

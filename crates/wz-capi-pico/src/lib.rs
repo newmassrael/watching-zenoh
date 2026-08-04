@@ -68,12 +68,14 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod abi;
+pub mod advanced;
 pub mod bytes;
 pub mod codec;
 pub mod config;
 pub mod encoding;
 mod ffi;
 pub mod get;
+pub mod handlers;
 pub mod keyexpr;
 pub mod liveliness;
 pub mod matching;

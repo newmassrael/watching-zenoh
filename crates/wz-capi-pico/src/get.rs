@@ -231,7 +231,7 @@ struct ReplyMarshal {
     /// The Put/Del body, present iff [`Self::is_ok`].
     sample: SampleMarshal,
     /// The Err blob, meaningful iff `!is_ok`.
-    err_payload: Vec<u8>,
+    err_payload: crate::bytes::ByteBuf,
     loaned_err_payload: z_loaned_bytes_t,
 }
 
@@ -244,9 +244,15 @@ impl ReplyMarshal {
         // A Del reply carries no payload bytes; an Err's payload is the error
         // blob and belongs on the err arm, not the sample.
         let (sample_payload, err_payload) = match kind {
-            ReplyKind::Put => (view.payload().to_vec(), Vec::new()),
-            ReplyKind::Del => (Vec::new(), Vec::new()),
-            ReplyKind::Err => (Vec::new(), view.payload().to_vec()),
+            ReplyKind::Put => (
+                crate::bytes::ByteBuf::from(view.payload()),
+                crate::bytes::ByteBuf::new(),
+            ),
+            ReplyKind::Del => (crate::bytes::ByteBuf::new(), crate::bytes::ByteBuf::new()),
+            ReplyKind::Err => (
+                crate::bytes::ByteBuf::new(),
+                crate::bytes::ByteBuf::from(view.payload()),
+            ),
         };
         let sample_kind = match kind {
             // Only Put/Del reach a sample; the Err arm's value is inert (the C
@@ -270,9 +276,66 @@ impl ReplyMarshal {
     /// stores the address of the `Vec` STRUCT, which moves with the struct.
     fn bind(&mut self) {
         self.sample.bind();
-        self.loaned_err_payload.handle = &self.err_payload as *const Vec<u8> as *mut c_void;
+        self.loaned_err_payload.handle =
+            &self.err_payload as *const crate::bytes::ByteBuf as *mut c_void;
+    }
+
+    /// An INDEPENDENT copy, for `z_reply_take_from_loaned` to escape the
+    /// callback with. Cached views stay UNBOUND until [`Self::bind`] runs at
+    /// the copy's final address — see [`SampleMarshal::deep_copy`].
+    fn deep_copy(&self) -> Self {
+        Self {
+            is_ok: self.is_ok,
+            sample: self.sample.deep_copy(),
+            err_payload: self.err_payload.clone(),
+            loaned_err_payload: z_loaned_bytes_t {
+                handle: std::ptr::null_mut(),
+                _pad: [std::ptr::null_mut(); 3],
+            },
+        }
     }
 }
+
+// --- the OWNED reply family -------------------------------------------------
+
+/// Release a boxed [`ReplyMarshal`].
+///
+/// # Safety
+/// `handle` must be a live `Box::into_raw::<ReplyMarshal>` pointer.
+unsafe fn free_reply_marshal(handle: *mut c_void) {
+    drop(Box::from_raw(handle.cast::<ReplyMarshal>()));
+}
+
+/// Deep-copy the marshal behind a borrowed reply onto the heap, bound at its
+/// final address.
+///
+/// # Safety
+/// `src` must be null or a pointer this crate handed to a reply callback.
+unsafe fn clone_reply_marshal(src: *const z_loaned_reply_t) -> *mut c_void {
+    let Some(marshal) = reply_marshal(src) else {
+        return std::ptr::null_mut();
+    };
+    let mut boxed = Box::new(marshal.deep_copy());
+    boxed.bind();
+    Box::into_raw(boxed).cast::<c_void>()
+}
+
+crate::abi::impl_boxed_element!(
+    z_owned_reply_t,
+    z_moved_reply_t,
+    z_loaned_reply_t,
+    248,
+    free_reply_marshal,
+    clone_reply_marshal,
+    z_internal_reply_null,
+    z_internal_reply_check,
+    z_reply_loan,
+    z_reply_loan_mut,
+    z_reply_move,
+    z_reply_take,
+    z_reply_drop,
+    z_reply_take_from_loaned
+);
 
 /// Read the marshal behind a loaned reply, or `None` if the pointer is null.
 ///
@@ -407,13 +470,13 @@ unsafe impl Sync for CReplyClosure {}
 /// Routed through the SAME intersection SSOT the responder side uses
 /// ([`crate::query::reply_keyexpr_is_covered`]) rather than re-derived, so the
 /// two halves cannot drift apart.
-struct ReplyGate {
+pub(crate) struct ReplyGate {
     /// The keyexpr the get asked under — pico's `pen_qry->_key`.
-    query_keyexpr: String,
+    pub(crate) query_keyexpr: String,
     /// pico's `pen_qry->_anyke`: set when the caller passed
     /// `Z_REPLY_KEYEXPR_ANY` OR wrote `_anyke` into the selector itself
     /// (`primitives.c:575-578` ORs the two).
-    anyke: bool,
+    pub(crate) anyke: bool,
 }
 
 /// Fire the C reply callback for one inbound reply on one face.
@@ -421,7 +484,7 @@ struct ReplyGate {
 /// Marshals the wz [`ReplyView`] into a borrowed `z_loaned_reply_t` and invokes
 /// `call`. The marshal is valid only for that call — pico's contract, which is
 /// why the C side must copy anything it keeps.
-fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn ReplyView) {
+pub(crate) fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn ReplyView) {
     let call = match closure.call {
         Some(f) => f,
         None => return,
@@ -723,8 +786,8 @@ fn get_options(
     consolidation: z_consolidation_mode_t,
     parameters: Vec<u8>,
     timeout_ms: u64,
-    payload: Option<Vec<u8>>,
-    attachment: Option<Vec<u8>>,
+    payload: Option<crate::bytes::ByteBuf>,
+    attachment: Option<crate::bytes::ByteBuf>,
 ) -> QueryOptions {
     let mut opts = QueryOptions::get()
         .with_allowed_destination(Locality::Remote)
@@ -787,10 +850,10 @@ fn get_options(
         opts = opts.with_parameters(parameters);
     }
     if let Some(payload) = payload {
-        opts = opts.with_payload(payload);
+        opts = opts.with_payload(payload.to_vec());
     }
     if let Some(attachment) = attachment {
-        opts = opts.with_attachment(attachment);
+        opts = opts.with_attachment(attachment.to_vec());
     }
     opts
 }

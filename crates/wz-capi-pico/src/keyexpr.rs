@@ -120,6 +120,72 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str_unchecked(
     });
 }
 
+/// Build a view keyexpr borrowing `len` bytes of the caller's buffer (pico
+/// `z_view_keyexpr_from_substr`).
+///
+/// The substring form exists because a keyexpr is frequently a SLICE of a
+/// larger buffer a program already holds — `z_querier.c` builds
+/// `demo/example/**` and then re-views a prefix of it — and copying to
+/// NUL-terminate would defeat the whole point of a borrowing view.
+///
+/// UTF-8 is validated over exactly those `len` bytes, matching the checked
+/// [`z_view_keyexpr_from_str`]: a view this crate stores must be readable as
+/// `&str` at every later publish.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_keyexpr_from_substr(
+    keyexpr: *mut z_view_keyexpr_t,
+    name: *const c_char,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        if keyexpr.is_null() || name.is_null() {
+            return Z_ERR_NULL;
+        }
+        let bytes = std::slice::from_raw_parts(name.cast::<u8>(), len);
+        if std::str::from_utf8(bytes).is_err() {
+            return Z_ERR_INVALID;
+        }
+        *keyexpr = z_view_keyexpr_t {
+            _start: bytes.as_ptr(),
+            _len: len,
+            _pad: [0usize; 4],
+        };
+        Z_OK
+    })
+}
+
+/// Build a view keyexpr over `len` bytes WITHOUT validating it (pico
+/// `z_view_keyexpr_from_substr_unchecked`). Same no-error-channel contract as
+/// [`z_view_keyexpr_from_str_unchecked`], including leaving the view EMPTY
+/// rather than storing bytes this crate could not later read as `&str`.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_keyexpr_from_substr_unchecked(
+    keyexpr: *mut z_view_keyexpr_t,
+    name: *const c_char,
+    len: usize,
+) {
+    let _ = guarded(|| {
+        if keyexpr.is_null() {
+            return Z_ERR_NULL;
+        }
+        if name.is_null() {
+            z_view_keyexpr_empty(keyexpr);
+            return Z_ERR_INVALID;
+        }
+        let bytes = std::slice::from_raw_parts(name.cast::<u8>(), len);
+        if std::str::from_utf8(bytes).is_err() {
+            z_view_keyexpr_empty(keyexpr);
+            return Z_ERR_INVALID;
+        }
+        *keyexpr = z_view_keyexpr_t {
+            _start: bytes.as_ptr(),
+            _len: len,
+            _pad: [0usize; 4],
+        };
+        Z_OK
+    });
+}
+
 /// `true` iff the view keyexpr is empty (pico `z_view_keyexpr_is_empty`).
 #[no_mangle]
 pub unsafe extern "C" fn z_view_keyexpr_is_empty(keyexpr: *const z_view_keyexpr_t) -> bool {

@@ -144,11 +144,32 @@ wz-capi-core = { path = "../wz-capi-core" }
 # `z_scout` has nothing to drive -- and, unlike the silent cases above, its
 # absence is a COMPILE error here rather than a runtime no-op, because this
 # crate names the module directly.
+# `liveliness-get` is selected EXPLICITLY, for the same class of reason as
+# `query-timeout` above and with the opposite failure shape to `scouting-active`.
+# It is NOT in wz-runtime-tokio's default bundle, and `Session::liveliness_get`
+# is SIGNATURE-STABLE across it: without the feature the method still compiles
+# and returns `LivelinessGetError::FeatureDisabled` at runtime. So a build that
+# forgot it would export `z_liveliness_get`, link `z_get_liveliness.c`, run it,
+# and report an empty snapshot — indistinguishable from "no tokens are alive".
+# Gated by the upstream `z_get_liveliness.c` leg, which asserts a token DECLARED
+# by a real zenoh-pico peer comes back.
+# The `ext-pubsub-advanced-*` trio is selected for the `ze_advanced_*` C ABI
+# (`src/advanced.rs`). Like `scouting-active` and unlike the silent-no-op cases
+# above, their absence is a COMPILE error here — that module names
+# `AdvancedPublisherOptions` / `AdvancedSubscriberOptions` and the `@adv` config
+# types directly. They are pico-NATIVE, not a superset:
+# `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION` are both 1 in the pinned
+# pico CMake config, so upstream's `z_advanced_pub.c` / `z_advanced_sub.c`
+# compile their advanced half unconditionally and a drop-in must export it.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "routing-accept",
     "query-timeout",
     "transport-fragmentation",
     "scouting-active",
+    "liveliness-get",
+    "ext-pubsub-advanced-publisher",
+    "ext-pubsub-advanced-history",
+    "ext-pubsub-sample-miss-detection",
 ] }
 
 # Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions

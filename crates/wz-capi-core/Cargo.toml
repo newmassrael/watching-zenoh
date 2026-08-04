@@ -59,7 +59,23 @@ getrandom = "0.2"
 # the `wz` facade, which re-exports the ABI crates and would form a cycle.
 # `routing-accept` is not in the default bundle and gates `accept_loop`, which
 # the listen role needs.
-wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["routing-accept"] }
+# `ext-pubsub-advanced-history` / `-sample-miss-detection` are selected here, not
+# in the C-ABI crates, because THIS crate owns the per-face declaration SSOT the
+# advanced planes replay through. Both are pico-native rather than superset:
+# `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION` are 1 in the pinned pico
+# CMake config, so upstream's `z_advanced_pub.c` / `z_advanced_sub.c` compile
+# their advanced half unconditionally and a drop-in must export it. Unlike the
+# silent-no-op features wz-capi-pico documents, their absence is a COMPILE error
+# here — this file names `AdvancedPublisher` / `AdvancedSubscriber` directly.
+# `-history` is the widest of the subscriber chain (it implies `-recovery`, which
+# implies `-subscriber`), so selecting it composes the whole plane the C option
+# structs can ask for.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
+    "routing-accept",
+    "ext-pubsub-advanced-publisher",
+    "ext-pubsub-advanced-history",
+    "ext-pubsub-sample-miss-detection",
+] }
 # R311y529 — the `TimeSource` trait, so this crate can read the clock it already
 # holds (`SharedSession::now_monotonic_ms`, which `z_timestamp_new` stamps
 # from). Already in the graph via wz-runtime-tokio; named here because a trait

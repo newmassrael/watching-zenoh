@@ -256,6 +256,24 @@ pub(crate) unsafe fn encoding_hint<'a>(
     handle_ref::<z_loaned_encoding_t, EncodingState>(ptr).map(|state| &state.hint)
 }
 
+/// Duplicate an owned encoding into a fresh independent one.
+///
+/// Needed by the OWNED element families (`z_sample_take_from_loaned` and its
+/// siblings): the escaped element must not share the callback marshal's
+/// `EncodingState` box, or dropping either would dangle the other. A `null`
+/// source yields a `null` result, which is the "carried no encoding" case.
+///
+/// # Safety
+/// `src` must be a live owned encoding this crate produced, or null-valued.
+pub(crate) unsafe fn clone_owned_encoding(src: &z_owned_encoding_t) -> z_owned_encoding_t {
+    let mut dst = z_owned_encoding_t::null_value();
+    let loaned = (src as *const z_owned_encoding_t).cast::<z_loaned_encoding_t>();
+    if let Some(hint) = encoding_hint(loaned) {
+        store_encoding(&mut dst, hint.clone());
+    }
+    dst
+}
+
 /// Consume a moved encoding, returning its hint and nulling the source so the
 /// caller's value cannot be released twice.
 ///

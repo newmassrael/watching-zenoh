@@ -63,12 +63,14 @@
 //! would need a `transmute` and hand the C side a pointer whose validity we
 //! could not check.
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
 use wz_runtime_tokio::keyexpr_match;
+use wz_runtime_tokio::query::{QueryReply, QueryResponder};
 use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
+use wz_runtime_tokio::session::TokioSession;
 
 use crate::abi::{
     handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
@@ -181,13 +183,86 @@ enum PendingReply {
     /// `z_query_reply` — a Put-form reply under an explicit keyexpr.
     Put {
         keyexpr: String,
-        payload: Vec<u8>,
-        attachment: Option<Vec<u8>>,
+        payload: crate::bytes::ByteBuf,
+        attachment: Option<crate::bytes::ByteBuf>,
     },
     /// `z_query_reply_del` — a Del-form reply under an explicit keyexpr.
     Del { keyexpr: String },
     /// `z_query_reply_err` — an Err-form reply.
-    Err { payload: Vec<u8> },
+    Err { payload: crate::bytes::ByteBuf },
+}
+
+/// The wire seam an ESCAPED query replies through.
+///
+/// `z_query_take_from_loaned` lets a C program answer a query from its own
+/// thread, arbitrarily later than the dispatch that delivered it — which is the
+/// whole point of `z_queryable_channel.c`. Two things must survive that escape:
+/// the ability to EMIT a reply, and the `ResponseFinal` that must not go out
+/// until this responder is dropped. Both are session operations, so this holds
+/// the face's own session.
+///
+/// The hold is taken by the DISPATCH (see [`make_queryable_callback`]), not
+/// here, and that split is load-bearing: a hold is only effective if it is
+/// visible to the terminator job the same drain batch staged, and this value is
+/// constructed inside the C callback where that ordering is still guaranteed —
+/// but the count is read back by the dispatch after the callback returns,
+/// because a `take_from_loaned` that the C side then discards must still be
+/// balanced.
+struct DeferredResponder {
+    session: TokioSession,
+    rid: u64,
+}
+
+impl DeferredResponder {
+    /// Emit one reply NOW, through the same `QueryReply` -> `ResponseOwned`
+    /// path the in-dispatch flush uses.
+    ///
+    /// Routed through [`QueryResponder`] rather than hand-built so the deferred
+    /// leg and the dispatch leg cannot drift: the responder is the SSOT for how
+    /// a Put / Del / Err reply becomes a wire response, including the keyexpr
+    /// literal and the rid correlation.
+    fn emit(&self, query_keyexpr: &str, reply: PendingReply) {
+        let mut replies: Vec<QueryReply> = Vec::new();
+        {
+            let mut responder =
+                QueryResponder::new(self.rid, query_keyexpr.to_owned(), &mut replies);
+            let mut out: &mut dyn ReplyOut = &mut responder;
+            flush_one(&mut out, reply);
+        }
+        for reply in replies.drain(..) {
+            if let Ok(response) = reply.into_response() {
+                self.session.actions().send_response(response);
+            }
+        }
+    }
+}
+
+impl Drop for DeferredResponder {
+    fn drop(&mut self) {
+        // The terminator this escape has been holding open. pico does exactly
+        // this in `_z_query_clear` (`src/net/query.c:54-61`): dropping the
+        // query is what sends the `ResponseFinal`.
+        self.session.release_response_final(self.rid);
+    }
+}
+
+/// Route ONE accumulated reply into a [`ReplyOut`]. Shared by the in-dispatch
+/// flush and the deferred emit so the two cannot answer differently.
+fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
+    match reply {
+        PendingReply::Put {
+            keyexpr,
+            payload,
+            attachment,
+        } => match attachment {
+            // The attachment rides the reply only through the keyed ATTACHED
+            // seam; `reply_keyed` has no slot for it.
+            Some(att) => out.reply_keyed_attached(&keyexpr, &payload, None, &att),
+            None => out.reply_keyed(&keyexpr, &payload),
+        },
+        PendingReply::Del { keyexpr } => out.reply_keyed_del(&keyexpr),
+        PendingReply::Err { payload } => out.reply_err(None, None, &payload),
+    }
 }
 
 /// The owned marshal behind a borrowed `z_loaned_query_t` during one callback.
@@ -216,13 +291,33 @@ struct QueryMarshal {
     /// `z_query_attachment` (:472). Carrying a presence flag here invites the
     /// accessor to return NULL for absence, which is the one thing a pico
     /// program cannot survive; see the accessors' own docstrings.
-    payload: Vec<u8>,
+    payload: crate::bytes::ByteBuf,
     /// The query's attachment, EMPTY when absent. Same no-presence-flag rule as
     /// [`Self::payload`].
-    attachment: Vec<u8>,
+    attachment: crate::bytes::ByteBuf,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
+    /// The request id this query answers — the correlator a DEFERRED reply and
+    /// the terminator both need, and the one piece of the query that is not
+    /// reachable through any accessor.
+    rid: u64,
+    /// The FACE's session, on a marshal the dispatch built. `None` on one built
+    /// outside a dispatch (a test fixture), which is exactly the case that
+    /// cannot be escaped — see [`clone_query_marshal`].
+    session: Option<TokioSession>,
+    /// How many times this BORROWED marshal has been escaped by
+    /// `z_query_take_from_loaned`. Read by the dispatch after the C callback
+    /// returns, to take that many `ResponseFinal` holds.
+    ///
+    /// A count rather than a flag because the callback may escape the same
+    /// loaned query more than once (pushing it into two channels is legal), and
+    /// each escape is an independent holder that will release on its own drop.
+    escapes: Cell<u32>,
+    /// Present only on an ESCAPED marshal: the seam a reply issued long after
+    /// the dispatch uses. `None` means this marshal is the ordinary borrowed
+    /// one, whose replies are accumulated and flushed by the dispatch.
+    deferred: Option<DeferredResponder>,
     /// Reply accumulator.
     ///
     /// `UnsafeCell` because the accessors receive `*const z_loaned_query_t` and
@@ -257,8 +352,14 @@ impl QueryMarshal {
             parameters,
             // Absence collapses to EMPTY here, not to a flag: the accessors
             // must hand C a pointer either way (see the field docs).
-            payload: view.payload().map(<[u8]>::to_vec).unwrap_or_default(),
-            attachment: view.attachment().map(<[u8]>::to_vec).unwrap_or_default(),
+            payload: view
+                .payload()
+                .map(crate::bytes::ByteBuf::from)
+                .unwrap_or_default(),
+            attachment: view
+                .attachment()
+                .map(crate::bytes::ByteBuf::from)
+                .unwrap_or_default(),
             // R311y529 — owned, for the same reason the payload is: the view's
             // borrow ends when the dispatch returns and the C callback holds
             // its borrowed query for the whole call.
@@ -277,6 +378,62 @@ impl QueryMarshal {
                 handle: std::ptr::null_mut(),
                 _pad: [std::ptr::null_mut(); 3],
             },
+            rid: view.rid(),
+            session: None,
+            escapes: Cell::new(0),
+            deferred: None,
+            replies: UnsafeCell::new(Vec::new()),
+        }
+    }
+
+    /// Bind the FACE's session, so this marshal can be escaped. Called only by
+    /// the dispatch; a marshal without it is un-escapable by construction.
+    fn with_session(mut self, session: TokioSession) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// An INDEPENDENT copy bound to a DEFERRED responder — what
+    /// `z_query_take_from_loaned` hands back.
+    ///
+    /// The copy owns everything the accessors read, so it stays valid for as
+    /// long as the C program keeps it; the cached views stay UNBOUND until
+    /// [`Self::bind`] runs at the copy's final address (see
+    /// [`crate::pubsub::SampleMarshal::deep_copy`]). The reply accumulator is
+    /// created EMPTY rather than copied: replies the callback already asked for
+    /// belong to the borrowed marshal's flush, and duplicating them here would
+    /// send each one twice.
+    fn deep_copy_deferred(&self, session: TokioSession) -> Self {
+        Self {
+            keyexpr: self.keyexpr.clone(),
+            parameters: self.parameters.clone(),
+            anyke: self.anyke,
+            encoding: self
+                .encoding
+                .as_ref()
+                // SAFETY: `encoding` is an owned encoding this crate stored.
+                .map(|owned| unsafe { crate::encoding::clone_owned_encoding(owned) }),
+            payload: self.payload.clone(),
+            attachment: self.attachment.clone(),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_payload: z_loaned_bytes_t {
+                handle: std::ptr::null_mut(),
+                _pad: [std::ptr::null_mut(); 3],
+            },
+            loaned_attachment: z_loaned_bytes_t {
+                handle: std::ptr::null_mut(),
+                _pad: [std::ptr::null_mut(); 3],
+            },
+            rid: self.rid,
+            // The COPY is the escaped end of the chain, so it carries the
+            // responder rather than the raw session: it must never be escaped
+            // again, and having no session is what makes that structural.
+            session: None,
+            escapes: Cell::new(0),
+            deferred: Some(DeferredResponder {
+                session,
+                rid: self.rid,
+            }),
             replies: UnsafeCell::new(Vec::new()),
         }
     }
@@ -306,8 +463,9 @@ impl QueryMarshal {
     fn bind(&mut self) {
         self.loaned_keyexpr =
             z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
-        self.loaned_payload.handle = &self.payload as *const Vec<u8> as *mut c_void;
-        self.loaned_attachment.handle = &self.attachment as *const Vec<u8> as *mut c_void;
+        self.loaned_payload.handle = &self.payload as *const crate::bytes::ByteBuf as *mut c_void;
+        self.loaned_attachment.handle =
+            &self.attachment as *const crate::bytes::ByteBuf as *mut c_void;
     }
 
     /// Append a reply the C callback asked for.
@@ -317,27 +475,28 @@ impl QueryMarshal {
     /// single-threaded-callback contract), so no aliasing borrow of `replies`
     /// exists.
     unsafe fn push_reply(&self, reply: PendingReply) {
+        // An ESCAPED query has no dispatch left to flush it: its callback
+        // returned long ago and the terminator is being held open on its
+        // behalf. Emit straight onto the wire instead of into an accumulator
+        // nobody will drain.
+        if let Some(deferred) = self.deferred.as_ref() {
+            deferred.emit(&self.keyexpr, reply);
+            return;
+        }
         (*self.replies.get()).push(reply);
+    }
+
+    /// Take the escape count this callback accumulated, so the dispatch can
+    /// take exactly that many `ResponseFinal` holds.
+    fn take_escapes(&self) -> u32 {
+        self.escapes.replace(0)
     }
 
     /// Flush the accumulated replies into the wz responder. Runs after the C
     /// callback returned, on the drive thread.
-    fn flush(&mut self, out: &mut dyn ReplyOut) {
+    fn flush(&mut self, mut out: &mut dyn ReplyOut) {
         for reply in self.replies.get_mut().drain(..) {
-            match reply {
-                PendingReply::Put {
-                    keyexpr,
-                    payload,
-                    attachment,
-                } => match attachment {
-                    // The attachment rides the reply only through the keyed
-                    // ATTACHED seam; `reply_keyed` has no slot for it.
-                    Some(att) => out.reply_keyed_attached(&keyexpr, &payload, None, &att),
-                    None => out.reply_keyed(&keyexpr, &payload),
-                },
-                PendingReply::Del { keyexpr } => out.reply_keyed_del(&keyexpr),
-                PendingReply::Err { payload } => out.reply_err(None, None, &payload),
-            }
+            flush_one(&mut out, reply);
         }
     }
 }
@@ -436,13 +595,14 @@ unsafe impl Sync for CQueryClosure {}
 /// must copy anything it keeps.
 pub(crate) fn make_queryable_callback(
     closure: Arc<CQueryClosure>,
+    session: TokioSession,
 ) -> impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static {
     move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
         let call = match closure.call {
             Some(f) => f,
             None => return,
         };
-        let mut marshal = QueryMarshal::new(view);
+        let mut marshal = QueryMarshal::new(view).with_session(session.clone());
         // Bind AFTER the move out of `new` — the marshal is at its final
         // address only here. See `QueryMarshal::bind`.
         marshal.bind();
@@ -457,9 +617,73 @@ pub(crate) fn make_queryable_callback(
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             call(query_ptr, ctx);
         }));
+        // R311y531 — take one `ResponseFinal` hold per escape the callback
+        // made. This MUST happen here, in the handler job, and not inside
+        // `z_query_take_from_loaned`: it is the same observation either way,
+        // but doing it here keeps the ordering argument in one place — every
+        // handler job of a drain batch runs before that batch's terminator
+        // jobs, so a hold taken anywhere in this function is visible to the
+        // job it must suppress.
+        //
+        // Escapes are counted rather than flagged so a callback that pushes the
+        // same query into two channels takes two holds, matching the two
+        // `DeferredResponder` drops that will release them.
+        for _ in 0..marshal.take_escapes() {
+            session.hold_response_final(marshal.rid);
+        }
         marshal.flush(out);
     }
 }
+
+/// Release a boxed [`QueryMarshal`].
+///
+/// Dropping it drops its [`DeferredResponder`], which is what emits the
+/// `ResponseFinal` — pico's `_z_query_clear` contract.
+///
+/// # Safety
+/// `handle` must be a live `Box::into_raw::<QueryMarshal>` pointer.
+unsafe fn free_query_marshal(handle: *mut c_void) {
+    drop(Box::from_raw(handle.cast::<QueryMarshal>()));
+}
+
+/// Escape a borrowed query into an owned one bound to a deferred responder.
+///
+/// # Safety
+/// `src` must be null or a pointer this crate handed to a query callback.
+unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> *mut c_void {
+    let Some(marshal) = query_marshal(src) else {
+        return std::ptr::null_mut();
+    };
+    // Only a marshal the DISPATCH built can be escaped: the session it must
+    // reply through comes from there. A marshal with no session is one this
+    // crate built outside a dispatch (a unit-test fixture), and escaping it
+    // would produce an owned query with no way to answer — reported as a
+    // failure rather than silently handed back.
+    let Some(session) = marshal.session.as_ref() else {
+        return std::ptr::null_mut();
+    };
+    let mut boxed = Box::new(marshal.deep_copy_deferred(session.clone()));
+    boxed.bind();
+    marshal.escapes.set(marshal.escapes.get() + 1);
+    Box::into_raw(boxed).cast::<c_void>()
+}
+
+crate::abi::impl_boxed_element!(
+    z_owned_query_t,
+    z_moved_query_t,
+    z_loaned_query_t,
+    16,
+    free_query_marshal,
+    clone_query_marshal,
+    z_internal_query_null,
+    z_internal_query_check,
+    z_query_loan,
+    z_query_loan_mut,
+    z_query_move,
+    z_query_take,
+    z_query_drop,
+    z_query_take_from_loaned
+);
 
 // --- closure_query exports -------------------------------------------------
 
@@ -784,7 +1008,9 @@ unsafe fn declare_queryable_inner(
         // R311y498 — see the pubsub/liveliness twins: the shim mints, the
         // registry calls the factory per face, the C drop(context) is unmoved.
         let closure = Arc::new(cclosure);
-        Arc::new(move || Box::new(make_queryable_callback(closure.clone())) as Box<_>)
+        Arc::new(move |session: &TokioSession| {
+            Box::new(make_queryable_callback(closure.clone(), session.clone())) as Box<_>
+        })
     });
     Ok((state.shared.clone(), id, ke))
 }
@@ -1244,12 +1470,13 @@ mod tests {
         marshal.bind();
 
         assert_eq!(
-            marshal.loaned_payload.handle as usize, &marshal.payload as *const Vec<u8> as usize,
+            marshal.loaned_payload.handle as usize,
+            &marshal.payload as *const crate::bytes::ByteBuf as usize,
             "the cached payload view must address THIS marshal's Vec, not a moved-from copy's"
         );
         assert_eq!(
             marshal.loaned_attachment.handle as usize,
-            &marshal.attachment as *const Vec<u8> as usize,
+            &marshal.attachment as *const crate::bytes::ByteBuf as usize,
             "the cached attachment view must address THIS marshal's Vec"
         );
         assert_eq!(
