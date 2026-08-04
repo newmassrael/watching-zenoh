@@ -346,10 +346,41 @@ pub type TokenId = u64;
 /// across the set update, never across the C call" discipline was the bug. See
 /// [`deliver_matching_flip`] for why it has to be, and the MATCHING LOCK ORDER
 /// rule in that same doc comment for the invariant that makes it safe.
-#[derive(Default)]
+/// R311y535 — the aggregate OWNS the C sink, and that is what makes
+/// `z_undeclare_matching_listener` free the C context SYNCHRONOUSLY.
+///
+/// Until this round the sink was an `Arc` CLONED into every consumer: the
+/// [`MatchEntry`], each per-face callback ([`face_matching_callback`]), and
+/// [`SharedSession::face_down`]'s purge snapshot. The C `drop(context)` then ran
+/// whenever the LAST of those clones happened to fall, which is not a moment any
+/// caller controls. Measured: `z_undeclare_matching_listener` returned with the
+/// context still alive in 1 run of 21, because a concurrent `face_down` on the
+/// drive thread was mid-purge and still holding a clone; the drop landed ~5 ms
+/// later on that thread. pico frees the context inside its undeclare, so this was
+/// a CONTRACT divergence, not merely a flaky test.
+///
+/// With one owner there are no clones to outlive the undeclare, and the mutex
+/// that already serialises C delivery (see [`deliver_matching_flip`]) becomes the
+/// exclusion that makes the release deterministic: undeclare takes the lock,
+/// which cannot be granted while a delivery is in flight, `take`s the sink, and
+/// drops it after releasing. Any delivery that arrives afterwards finds `None`
+/// and is silently correct — a listener that has been undeclared has no C to
+/// notify.
 struct MatchAggregate {
     faces: BTreeSet<u64>,
     last: bool,
+    /// `None` once retired by `undeclare_matching_listener`.
+    sink: Option<MatchingSink>,
+}
+
+impl MatchAggregate {
+    fn new(sink: MatchingSink) -> Self {
+        Self {
+            faces: BTreeSet::new(),
+            last: false,
+            sink: Some(sink),
+        }
+    }
 }
 
 impl MatchAggregate {
@@ -389,7 +420,9 @@ impl MatchAggregate {
 struct MatchEntry {
     id: MatchId,
     keyexpr: String,
-    sink: MatchingSink,
+    /// R311y535 — the C sink is NOT here. It lives inside the
+    /// [`MatchAggregate`] behind `state`, so exactly one place owns it and
+    /// `undeclare_matching_listener` can retire it deterministically.
     state: Arc<StdMutex<MatchAggregate>>,
     scope: MatchScope,
 }
@@ -487,18 +520,93 @@ impl MatchScope {
 /// (`wz-runtime-tokio/src/session/matching_listener.rs`), so it never re-enters
 /// this function. The `state` and `sink` handles are `Arc` clones held by the
 /// caller, so that undeclare cannot free what this call is using.
+///
+/// ## R311y535 — the sink comes from the aggregate, and a re-entrant undeclare
+///
+/// The `sink` parameter is gone: the aggregate owns it (see [`MatchAggregate`]),
+/// so a flip delivers through `agg.sink` under the acquisition it already held.
+/// A retired listener has `None` there and delivers nothing.
+///
+/// [`IN_MATCHING_DELIVERY`] is set around the C call because
+/// `undeclare_matching_listener` now WAITS on this mutex to retire the sink, and
+/// a C callback that undeclares its own listener from inside the call would
+/// otherwise wait on the mutex its own frame holds. The flag lets that one case
+/// fall back to the pre-R311y535 behaviour — release by `Arc` drop, whenever the
+/// frame unwinds — which is the only thing a caller inside its own context can
+/// safely be given.
 fn deliver_matching_flip(
     state: &StdMutex<MatchAggregate>,
-    sink: &MatchingSink,
     update: impl FnOnce(&mut MatchAggregate) -> Option<bool>,
 ) {
     let mut agg = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(now) = update(&mut agg) {
-        sink(now);
+        if let Some(sink) = agg.sink.as_ref() {
+            let _guard = MatchingDeliveryGuard::enter();
+            sink(now);
+        }
     }
     // `agg` is dropped HERE, after the C call — see the doc comment.
+}
+
+/// Take the C sink out of an aggregate so the CALLER can drop it — the
+/// mechanism behind `z_undeclare_matching_listener`'s synchronous release
+/// (R311y535).
+///
+/// Acquiring the aggregate mutex is the whole point and not incidental
+/// bookkeeping: [`deliver_matching_flip`] holds that mutex ACROSS its C call, so
+/// this cannot be granted while any thread is inside the callback. When it
+/// returns `Some`, no thread is using the context and no thread can start,
+/// because a later delivery finds `None`.
+///
+/// It returns the sink instead of dropping it so the drop happens OUTSIDE the
+/// guard: the C `drop(context)` may re-enter the session, and this file's
+/// discipline is that no C code runs holding a lock it might need.
+///
+/// `None` means there is nothing for the caller to free — either the listener
+/// was already retired, or THIS THREAD is inside a matching callback, where
+/// waiting on the mutex would be waiting on its own frame. In that one case the
+/// sink stays put and falls with the entry's last `Arc`, which is all a caller
+/// undeclaring from inside its own context can be given.
+fn retire_matching_sink(state: &StdMutex<MatchAggregate>) -> Option<MatchingSink> {
+    if MatchingDeliveryGuard::active() {
+        return None;
+    }
+    let mut agg = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    agg.sink.take()
+}
+
+thread_local! {
+    /// Depth of [`deliver_matching_flip`] C calls on THIS thread — see that
+    /// function's doc for why `undeclare_matching_listener` consults it.
+    static IN_MATCHING_DELIVERY: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII depth counter for [`IN_MATCHING_DELIVERY`]. A counter rather than a bool
+/// because a C callback may re-enter the session and reach a SECOND delivery
+/// (a different listener's aggregate), and a bool would clear the outer frame's
+/// mark when the inner one returned.
+struct MatchingDeliveryGuard;
+
+impl MatchingDeliveryGuard {
+    fn enter() -> Self {
+        IN_MATCHING_DELIVERY.with(|d| d.set(d.get() + 1));
+        Self
+    }
+
+    /// Whether this thread is inside a C matching callback right now.
+    fn active() -> bool {
+        IN_MATCHING_DELIVERY.with(|d| d.get()) > 0
+    }
+}
+
+impl Drop for MatchingDeliveryGuard {
+    fn drop(&mut self) {
+        IN_MATCHING_DELIVERY.with(|d| d.set(d.get().saturating_sub(1)));
+    }
 }
 
 /// The per-face callback one [`MatchEntry`] installs on face `face_id`: fold
@@ -517,10 +625,13 @@ fn face_matching_callback(
     face_id: u64,
     entry: &MatchEntry,
 ) -> impl FnMut(MatchingStatus) + Send + 'static {
+    // R311y535 — the STATE only. This closure used to carry a sink clone too,
+    // and since it lives inside the per-face `FaceEntry`, a face removed by
+    // `face_down` kept the C context alive until that entry was dropped —
+    // outliving an `z_undeclare_matching_listener` that ran in between.
     let state = entry.state.clone();
-    let sink = entry.sink.clone();
     move |status| {
-        deliver_matching_flip(&state, &sink, |agg| agg.apply(face_id, status.matching));
+        deliver_matching_flip(&state, |agg| agg.apply(face_id, status.matching));
     }
 }
 
@@ -794,16 +905,23 @@ impl SharedSession {
         // (what this did until R311y528) established a `registry -> aggregate`
         // order, which is the half of the ABBA pair that made holding the
         // aggregate across the C call unsafe. See `deliver_matching_flip`.
-        let watches: Vec<(Arc<StdMutex<MatchAggregate>>, MatchingSink)> = {
+        //
+        // R311y535 — the snapshot is now STATE ONLY. It used to carry a sink
+        // clone per entry and hold the whole vector across every delivery, which
+        // is the clone that made `z_undeclare_matching_listener` non-deterministic:
+        // a C thread undeclaring while this loop ran found a strong count of 2 and
+        // the C `drop(context)` landed later, on this thread. The aggregate now
+        // owns the sink, so nothing here can outlive an undeclare.
+        let watches: Vec<Arc<StdMutex<MatchAggregate>>> = {
             let guard = self.lock();
             guard
                 .matches
                 .iter()
-                .map(|entry| (entry.state.clone(), entry.sink.clone()))
+                .map(|entry| entry.state.clone())
                 .collect()
         };
-        for (state, sink) in watches {
-            deliver_matching_flip(&state, &sink, |agg| agg.forget(id));
+        for state in watches {
+            deliver_matching_flip(&state, |agg| agg.forget(id));
         }
         drop(removed);
     }
@@ -1298,7 +1416,9 @@ impl SharedSession {
         sink: MatchingSink,
         scope: MatchScope,
     ) -> MatchId {
-        let state = Arc::new(StdMutex::new(MatchAggregate::default()));
+        // R311y535 — the sink moves INTO the aggregate, which is now its ONE
+        // owner. The `MatchEntry` keeps only the shared handle.
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
         // Phase 1 — allocate the id, publish the SSOT entry, snapshot the faces.
         let (id, faces) = {
             let mut guard = self.lock();
@@ -1312,7 +1432,6 @@ impl SharedSession {
             guard.matches.push(MatchEntry {
                 id,
                 keyexpr: keyexpr.clone(),
-                sink,
                 state: state.clone(),
                 scope,
             });
@@ -1438,11 +1557,32 @@ impl SharedSession {
             }
         }
         // OUTSIDE the lock: `undeclare` reaches into the face session's
-        // observer, and releasing the entry may drop the last `MatchingSink`
-        // reference — which for the pico shim runs the C `drop(context)`.
+        // observer.
         for listener in removed {
             listener.undeclare();
         }
+        // R311y535 — RETIRE the sink, which is what makes this call free the C
+        // context before it returns rather than whenever the last `Arc` clone
+        // happened to fall. Taking the aggregate mutex is the exclusion: a
+        // delivery in flight holds it across its C call
+        // ([`deliver_matching_flip`]), so the lock is granted only once no
+        // thread is inside the callback, and a delivery that arrives afterwards
+        // finds `None`.
+        //
+        // The taken sink is dropped AFTER the guard, per this file's
+        // drop-outside-the-lock discipline: the C `drop(context)` may re-enter
+        // the session, and it must not do so holding an aggregate.
+        //
+        // The re-entrant case is the exception and is handled rather than
+        // deadlocked: when this thread is already inside a matching callback,
+        // the mutex it would wait on is the one its own frame holds. There, the
+        // sink is left in place and released by `Arc` drop when the entry falls,
+        // which is the pre-R311y535 behaviour and the only outcome available to
+        // a caller undeclaring from inside its own context.
+        let retired = entry
+            .as_ref()
+            .and_then(|entry| retire_matching_sink(&entry.state));
+        drop(retired);
         drop(entry);
     }
 
@@ -1798,21 +1938,28 @@ mod matching_aggregate_tests {
     /// mutex before the sink; against that build this reads `Ok` and reds.
     #[test]
     fn the_aggregate_mutex_is_held_across_the_c_call() {
-        let state = Arc::new(StdMutex::new(MatchAggregate::default()));
-        let probe = state.clone();
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
 
-        let sink: MatchingSink = Arc::new(move |now| {
-            log.lock().unwrap().push(now);
-            assert!(
-                probe.try_lock().is_err(),
-                "the aggregate mutex was NOT held across the C call -- two \
-                 threads can then invoke one C context concurrently"
-            );
+        // R311y535 — `Arc::new_cyclic` because the aggregate now OWNS the sink
+        // while this particular sink observes the aggregate. That cycle is this
+        // test's alone: a real C sink never reaches back into wz state.
+        let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
+            let probe = weak.clone();
+            StdMutex::new(MatchAggregate::new(Arc::new(move |now| {
+                log.lock().unwrap().push(now);
+                let probe = probe
+                    .upgrade()
+                    .expect("the aggregate is alive during its own call");
+                assert!(
+                    probe.try_lock().is_err(),
+                    "the aggregate mutex was NOT held across the C call -- two \
+                     threads can then invoke one C context concurrently"
+                );
+            })))
         });
 
-        deliver_matching_flip(&state, &sink, |agg| agg.apply(7, true));
+        deliver_matching_flip(&state, |agg| agg.apply(7, true));
         assert_eq!(*observed.lock().unwrap(), vec![true], "the flip delivered");
     }
 
@@ -1825,15 +1972,15 @@ mod matching_aggregate_tests {
     /// `[true, true, false, false]` here.
     #[test]
     fn the_verdict_is_the_or_across_faces() {
-        let state = Arc::new(StdMutex::new(MatchAggregate::default()));
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
         let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
-        deliver_matching_flip(&state, &sink, |agg| agg.apply(1, true));
-        deliver_matching_flip(&state, &sink, |agg| agg.apply(2, true));
-        deliver_matching_flip(&state, &sink, |agg| agg.apply(1, false));
-        deliver_matching_flip(&state, &sink, |agg| agg.apply(2, false));
+        deliver_matching_flip(&state, |agg| agg.apply(1, true));
+        deliver_matching_flip(&state, |agg| agg.apply(2, true));
+        deliver_matching_flip(&state, |agg| agg.apply(1, false));
+        deliver_matching_flip(&state, |agg| agg.apply(2, false));
 
         assert_eq!(
             *observed.lock().unwrap(),
@@ -1850,14 +1997,14 @@ mod matching_aggregate_tests {
     /// property to pin is that the second one is silent.
     #[test]
     fn a_purge_after_an_ordinary_false_is_silent() {
-        let state = Arc::new(StdMutex::new(MatchAggregate::default()));
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
         let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
-        deliver_matching_flip(&state, &sink, |agg| agg.apply(3, true));
-        deliver_matching_flip(&state, &sink, |agg| agg.apply(3, false));
-        deliver_matching_flip(&state, &sink, |agg| agg.forget(3));
+        deliver_matching_flip(&state, |agg| agg.apply(3, true));
+        deliver_matching_flip(&state, |agg| agg.apply(3, false));
+        deliver_matching_flip(&state, |agg| agg.forget(3));
 
         assert_eq!(*observed.lock().unwrap(), vec![true, false]);
     }
@@ -1876,7 +2023,6 @@ mod matching_aggregate_tests {
     fn concurrent_folds_deliver_serialised_and_in_order() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let state = Arc::new(StdMutex::new(MatchAggregate::default()));
         let inflight = Arc::new(AtomicUsize::new(0));
         let overlaps = Arc::new(AtomicUsize::new(0));
         let observed = Arc::new(StdMutex::new(Vec::new()));
@@ -1894,26 +2040,27 @@ mod matching_aggregate_tests {
                 inflight.fetch_sub(1, Ordering::SeqCst);
             })
         };
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
         // Face 1 arrives and stays; then two threads race the arrival of face 2
         // against the departure of face 1. Whatever the interleaving, the
         // aggregate is non-empty throughout, so the CORRECT observation is that
         // nothing further is delivered at all.
-        deliver_matching_flip(&state, &sink, |agg| agg.apply(1, true));
+        deliver_matching_flip(&state, |agg| agg.apply(1, true));
 
         let a = {
-            let (state, sink) = (state.clone(), sink.clone());
+            let state = state.clone();
             std::thread::spawn(move || {
                 for _ in 0..200 {
-                    deliver_matching_flip(&state, &sink, |agg| agg.apply(2, true));
+                    deliver_matching_flip(&state, |agg| agg.apply(2, true));
                 }
             })
         };
         let b = {
-            let (state, sink) = (state.clone(), sink.clone());
+            let state = state.clone();
             std::thread::spawn(move || {
                 for _ in 0..200 {
-                    deliver_matching_flip(&state, &sink, |agg| agg.forget(2));
+                    deliver_matching_flip(&state, |agg| agg.forget(2));
                 }
             })
         };
@@ -1929,6 +2076,172 @@ mod matching_aggregate_tests {
             *observed.lock().unwrap(),
             vec![true],
             "face 1 never left, so the session verdict never moved off true"
+        );
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A sink whose `Drop` is observable — the C `drop(context)` stand-in.
+    struct DropProbe(Arc<AtomicUsize>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// R311y535 — retiring an aggregate releases the C context AT THE CALL, and
+    /// a delivery that arrives afterwards is silent.
+    ///
+    /// This is the half of `z_undeclare_matching_listener`'s contract that was
+    /// wrong: the sink used to be an `Arc` cloned into the entry, every per-face
+    /// callback and `face_down`'s purge snapshot, so `drop(context)` ran when the
+    /// LAST clone fell — a moment no caller chose. Against that build this test
+    /// reds on the first assertion, because the undeclare path dropped one clone
+    /// of several.
+    #[test]
+    fn retiring_an_aggregate_frees_the_context_at_the_call_and_silences_it() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+
+        let state = {
+            let probe = DropProbe(dropped.clone());
+            let log = observed.clone();
+            Arc::new(StdMutex::new(MatchAggregate::new(Arc::new(move |now| {
+                // Keep the probe owned BY the closure, exactly as a C sink owns
+                // its context, so the probe's drop is the closure's drop.
+                let _ = &probe;
+                log.lock().unwrap().push(now);
+            }))))
+        };
+
+        deliver_matching_flip(&state, |agg| agg.apply(1, true));
+        assert_eq!(dropped.load(Ordering::SeqCst), 0, "not dropped while live");
+
+        // The production retirement path, not a copy of it.
+        let retired = retire_matching_sink(&state);
+        assert!(retired.is_some(), "a live aggregate yields its sink");
+        drop(retired);
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "the context must be freed BY the retirement, not whenever the last \
+             Arc clone happens to fall"
+        );
+
+        // A flip that arrives after retirement has no C to reach.
+        deliver_matching_flip(&state, |agg| agg.forget(1));
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![true],
+            "a retired listener must deliver nothing"
+        );
+        assert!(
+            retire_matching_sink(&state).is_none(),
+            "retiring twice must not produce a second context to free"
+        );
+    }
+
+    /// R311y535 — a retirement WAITS for a delivery that is in flight, which is
+    /// what makes the release safe rather than merely prompt.
+    ///
+    /// Deterministic, not timing-based: the sink parks on a channel, so the
+    /// delivery is provably still inside the C call when the retiring thread
+    /// starts. The retirement is then observed NOT to have completed, released,
+    /// and observed to complete. Against a build that took the sink without the
+    /// aggregate mutex, the middle assertion reds — and that build would be
+    /// freeing a context another thread is executing in.
+    #[test]
+    fn a_retirement_waits_for_a_delivery_in_flight() {
+        use std::sync::mpsc;
+
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = StdMutex::new(release_rx);
+
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(Arc::new(move |_now| {
+            entered_tx.send(()).expect("the test thread is waiting");
+            release_rx
+                .lock()
+                .unwrap()
+                .recv()
+                .expect("the test thread releases the sink");
+        }))));
+
+        let deliverer = {
+            let state = state.clone();
+            std::thread::spawn(move || deliver_matching_flip(&state, |agg| agg.apply(1, true)))
+        };
+        entered_rx.recv().expect("the sink is entered");
+
+        let retired = Arc::new(AtomicUsize::new(0));
+        let retirer = {
+            let state = state.clone();
+            let retired = retired.clone();
+            std::thread::spawn(move || {
+                let sink = retire_matching_sink(&state);
+                retired.store(1, Ordering::SeqCst);
+                drop(sink);
+            })
+        };
+
+        // The sink is parked INSIDE the C call, so the retirement cannot have
+        // completed. A generous window: this is proving it is still blocked, and
+        // a slow machine only makes the claim stronger.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            retired.load(Ordering::SeqCst),
+            0,
+            "the retirement completed while a delivery was INSIDE the C call — \
+             it would be freeing a context another thread is executing in"
+        );
+
+        release_tx.send(()).expect("the sink is parked");
+        deliverer.join().expect("the delivery completes");
+        retirer.join().expect("the retirement completes");
+        assert_eq!(
+            retired.load(Ordering::SeqCst),
+            1,
+            "the retirement must complete once the delivery leaves the C call"
+        );
+    }
+
+    /// R311y535 — a listener undeclared FROM INSIDE its own callback does not
+    /// deadlock; it falls back to release-by-`Arc`-drop.
+    ///
+    /// The re-entrant case is the one where waiting is impossible: the mutex the
+    /// retirement wants is the one this thread's own frame holds. Without the
+    /// [`MatchingDeliveryGuard`] check this test HANGS rather than failing, which
+    /// is why it exists as its own leg.
+    #[test]
+    fn a_retirement_from_inside_the_callback_does_not_deadlock() {
+        let reentered = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
+            let weak = weak.clone();
+            let reentered = reentered.clone();
+            StdMutex::new(MatchAggregate::new(Arc::new(move |_now| {
+                let state = weak.upgrade().expect("alive during its own call");
+                // The re-entrant undeclare. It must RETURN, and it must decline
+                // to take the sink rather than block on this frame's own lock.
+                assert!(
+                    retire_matching_sink(&state).is_none(),
+                    "a re-entrant retirement must decline, not take a context \
+                     the current frame is executing in"
+                );
+                reentered.fetch_add(1, Ordering::SeqCst);
+            })))
+        });
+
+        deliver_matching_flip(&state, |agg| agg.apply(1, true));
+        assert_eq!(
+            reentered.load(Ordering::SeqCst),
+            1,
+            "the callback ran to completion"
+        );
+        // Outside the callback the ordinary path still works.
+        assert!(
+            retire_matching_sink(&state).is_some(),
+            "the sink is still there to retire once the callback has left"
         );
     }
 }
