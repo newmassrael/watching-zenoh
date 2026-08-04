@@ -88,8 +88,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    compile_pico_example_against_wz_capi, graceful_terminate, read_captured, wait_for_exit,
-    wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenohd_binary,
+    compile_pico_example_against_wz_capi, graceful_terminate, project_root, read_captured,
+    spawn_zenohd_multicast_scouting_on_ephemeral_tcp, wait_for_exit, wait_for_substring,
+    wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenoh_pico_include_dirs, zenohd_binary,
     ChildGuard, PortReservation,
 };
 
@@ -1731,5 +1732,291 @@ fn pico_zpubattachment_source_on_wz_capi_is_fully_decoded_by_real_pico() {
         foreign.contains("with timestamp:"),
         "no timestamp reached the foreign subscriber.\n\
          --- pico z_sub_attachment stdout ---\n{foreign}"
+    );
+}
+
+/// LEG 14 (`pico->wz`) — upstream's `z_sub.c` on wz, subscribing to a
+/// **WILDCARD**, receives from the REAL zenoh-pico `z_pub` binary: a DECLARED
+/// publisher, not a `z_put`.
+///
+/// The distinction is the whole leg, and until R311y530 nothing covered it.
+/// Every other `pico->wz` leg in this file drives `z_put`, which carries no
+/// write filter and therefore cannot observe the publisher path at all.
+/// `z_declare_publisher` arms `_z_write_filter_create` (`net/filtering.c`) and
+/// pico then drops every put LOCALLY until its interest is answered — so a
+/// session that ignores a subscriber Interest passes LEG 1 and silently blocks
+/// every pico app built on `z_declare_publisher`.
+///
+/// MEASURED, and the numbers are why this leg exists in this shape: without
+/// wz's interest response it fails 12 of 12 runs; with it, 8 of 8. R311y529
+/// carried the symptom ("a real pico DECLARED publisher delivers NOTHING to a
+/// wz C-ABI session") without the mechanism.
+///
+/// It is also a lesson about GREEN. An early R311y530 run of this same leg
+/// passed repeatedly against an unfixed tree, and that green nearly retracted a
+/// true carry: a publisher whose filter fails to ARM writes freely, so "it
+/// worked" and "the mechanism is present" are different claims. The rate had to
+/// be measured over repeats before either direction could be believed — a
+/// single green run here proves nothing at all.
+///
+/// The keyexpr is a WILDCARD on purpose and it is the discriminating half:
+/// `zzz/**` against the same publisher delivers ZERO (measured), so the
+/// assertion is not vacuous, and an EXACT keyexpr passes WITHOUT the interest
+/// response (wz's unsolicited `DeclSubscriber` for the literal key satisfies
+/// the peer either way) and would therefore prove nothing.
+///
+/// What this leg does NOT discriminate, stated rather than implied: the reply's
+/// KEYEXPR. Damage-probed — answering with the subscription's own `demo/**`
+/// instead of the interest's keyexpr still passes 4 of 4. The measured
+/// discriminator is the interest-stamped reply EXISTING. The aggregate-keyexpr
+/// choice in `SubscriberRegistry::respond_to_subscriber_interest_borrowed` is
+/// upstream parity (`session/interest.c:274-276` associates an AGGREGATE
+/// interest's replies by `_z_keyexpr_equals`), not something this test pins.
+// wz-proves: api-compat-pico pico->wz partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_pub CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zsub_source_on_wz_capi_receives_from_a_real_pico_declared_publisher() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_sub", dir.path());
+    let z_pub = zenoh_pico_cli_binary("z_pub");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    // The publisher's literal key. The subscriber below deliberately does NOT
+    // name it — see the doc comment.
+    let key = "demo/declared/leg14";
+
+    let mut sub_out = tempfile::tempfile().expect("subscriber stdout capture");
+    let writer = sub_out.try_clone().expect("dup subscriber stdout handle");
+    let mut sub = ChildGuard::wrap(
+        "z_sub.c on wz-capi-pico (wildcard)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args([
+                "-l", &endpoint, "-m", "peer",
+                // WILDCARD, load-bearing: an exact keyexpr passes without the
+                // interest-response and would make this leg vacuous.
+                "-k", "demo/**", "-n", "1",
+            ])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the compiled z_sub drop-in"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_sub.c drop-in never accepted on {endpoint} — {why}; capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    // The REAL pico publisher. `-n 4` rather than 1: the first put can race the
+    // declaration exchange, and a publisher that is only ever going to send once
+    // would turn a timing question into a delivery question.
+    let mut pub_out = tempfile::tempfile().expect("foreign z_pub stdout capture");
+    let pub_writer = pub_out.try_clone().expect("dup foreign z_pub handle");
+    let published = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&z_pub)
+        .args(["-e", &endpoint, "-m", "client", "-k", key, "-n", "4"])
+        .stdout(Stdio::from(pub_writer))
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the real zenoh-pico z_pub");
+    assert!(
+        published.success(),
+        "real zenoh-pico z_pub exited {published:?}\n--- its stdout ---\n{}",
+        read_captured(&mut pub_out)
+    );
+
+    let captured =
+        wait_for_substring(&mut sub_out, key, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+            let driver = read_captured(&mut pub_out);
+            panic!(
+                "upstream z_sub.c on wz's C-ABI, subscribed to `demo/**`, never received \
+                 anything from the REAL zenoh-pico z_pub — a DECLARED publisher.\n\
+                 The publisher reached its put loop: {}\n\
+                 If it did, pico's write filter never opened, so wz's \
+                 `Declare(DeclSubscriber)` for `demo/**` either did not reach the \
+                 publisher or did not match its subscriber Interest.\n\
+                 --- z_sub.c (on wz) stdout ---\n{captured}\n\
+                 --- REAL pico z_pub (driver) stdout ---\n{driver}",
+                driver.contains("Putting Data"),
+            )
+        });
+    assert!(
+        captured.contains("Pub from Pico"),
+        "a sample arrived on the key but not the payload the foreign DECLARED \
+         publisher sends.\n--- stdout ---\n{captured}"
+    );
+
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
+/// Compile an upstream example against the REAL `libzenohpico.so` — the ORACLE
+/// twin of [`dropin_binary`].
+///
+/// The two differ in exactly one flag (`-lzenohpico` vs `-lwz_capi_pico`);
+/// everything else — upstream's program text, upstream's headers, the same
+/// compiler — is shared. That is what makes a diff of their OUTPUT a statement
+/// about the two libraries and nothing else.
+fn oracle_binary(example: &str, dir: &std::path::Path) -> std::path::PathBuf {
+    let root = project_root();
+    let src = root
+        .join("vendor/zenoh-pico/examples/unix/c11")
+        .join(format!("{example}.c"));
+    let libdir = root.join("target/zenoh-pico-build/lib");
+    assert!(
+        libdir.join("libzenohpico.so").is_file(),
+        "the REAL zenoh-pico shared library is missing at {}; run \
+         scripts/build-zenoh-pico-cli.sh first (it is the CMake build product \
+         this oracle compares against)",
+        libdir.display()
+    );
+    let exe = dir.join(format!("{example}_oracle"));
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let mut cmd = Command::new(&cc);
+    cmd.arg(&src).arg("-DZENOH_LINUX");
+    for inc in &zenoh_pico_include_dirs() {
+        cmd.arg(format!("-I{}", inc.display()));
+    }
+    cmd.arg("-o")
+        .arg(&exe)
+        .arg(format!("-L{}", libdir.display()))
+        .arg("-lzenohpico")
+        .arg(format!("-Wl,-rpath,{}", libdir.display()));
+    let out = cmd.output().expect("spawn the C compiler for the oracle");
+    assert!(
+        out.status.success(),
+        "the ORACLE build failed for {example}.c against the real zenoh-pico:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    exe
+}
+
+/// The `Hello { ... }` line `z_scout.c` prints for the peer listening on
+/// `port`, or `None`. Selecting by the PORT rather than by line index is what
+/// makes this robust to another zenoh process answering the same host-wide
+/// multicast group: an extra peer adds a line, it does not move this one.
+fn hello_line_for_port(printed: &str, port: u16) -> Option<&str> {
+    let needle = format!("tcp/127.0.0.1:{port}");
+    printed
+        .lines()
+        .find(|l| l.starts_with("Hello {") && l.contains(&needle))
+}
+
+/// LEG 15 (`wz vs pico`, ORACLE) — upstream's `z_scout.c`, compiled twice
+/// against the SAME headers and linked once to wz's cdylib and once to the REAL
+/// `libzenohpico.so`, discovers the SAME zenohd and prints the SAME line.
+///
+/// R311y530 built the scouting plane (`z_scout`, `z_hello_*`, `z_string_array_*`,
+/// `z_whatami_to_view_string`, `zp_hello_locators`, `z_closure_hello_move`) and
+/// this is what says it is right rather than merely linked — the y529 lesson,
+/// where `z_pub_attachment.c` linked, RAN, and silently dropped three fields.
+///
+/// Every field in the compared line is chosen by a foreign process:
+///
+/// - the **zid** is zenohd's, and its BYTE ORDER is the assertion that a
+///   substring check would miss. `fprintzid` walks `id[i]` ascending, so the
+///   rendered string is the reverse of the id zenohd prints in its own log; a
+///   wz that stored the wire bytes reversed would print a plausible 32-hex
+///   string that differs from the oracle's in every byte.
+/// - the **whatami** is `"Router"`, which pins the bitmask INDEX (slot 1 of
+///   upstream's map, not an ordinal list — slot 3 is `Router|Peer`).
+/// - the **locator** carries an EPHEMERAL port the kernel chose and this test
+///   never gave to either scout, so no build that merely parsed a flag can
+///   print it.
+///
+/// It also pins the DEDUPE. wz drives discovery in cycles and a live responder
+/// answers every cycle, so a cursor over the recorded hellos reports one peer
+/// once per cycle; the oracle prints exactly one line, and so must wz.
+///
+/// The name carries `zenohd` deliberately: Layer E's sweep skips that token
+/// because it provisions no router, so this leg is registered by exact name in
+/// Layer Z, which does. Renaming to dodge the token would make Layer E red on
+/// every machine without zenohd.
+// wz-proves: api-compat-pico wz-vs-pico full
+#[test]
+#[ignore = "spawns a real zenohd and two cc-compiled binaries; run by run-ci Layer Z"]
+fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled binaries");
+    let dropin = dropin_binary("z_scout", dir.path());
+    let oracle = oracle_binary("z_scout", dir.path());
+
+    // A zenohd with its DEFAULT multicast scouting responder; the spawn gates
+    // on zenohd's own scout-listener line, so the group socket is bound and
+    // joined before either scout emits (nothing retransmits a lost Scout).
+    let (mut zenohd, port) =
+        spawn_zenohd_multicast_scouting_on_ephemeral_tcp("zenohd (multicast-scouting router)");
+
+    // The ORACLE first, so a failure to provision multicast at all reads as the
+    // REAL library finding nothing — never as a wz defect.
+    let oracle_out = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&oracle)
+        .output()
+        .expect("run upstream z_scout linked to the REAL zenoh-pico");
+    let oracle_printed = String::from_utf8_lossy(&oracle_out.stdout).into_owned();
+
+    let wz_out = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .output()
+        .expect("run upstream z_scout linked to wz's C-ABI cdylib");
+    let wz_printed = String::from_utf8_lossy(&wz_out.stdout).into_owned();
+
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let oracle_line = hello_line_for_port(&oracle_printed, port).unwrap_or_else(|| {
+        panic!(
+            "the REAL zenoh-pico z_scout did not discover the zenohd on \
+             tcp/127.0.0.1:{port} — multicast scouting is not working on this host, \
+             so the comparison below would be vacuous.\n\
+             --- oracle stdout ---\n{oracle_printed}"
+        )
+    });
+    let wz_line = hello_line_for_port(&wz_printed, port).unwrap_or_else(|| {
+        panic!(
+            "upstream z_scout.c on wz's C-ABI did not discover the zenohd the REAL \
+             zenoh-pico found on the same group.\n\
+             --- oracle stdout (found it) ---\n{oracle_printed}\n\
+             --- z_scout.c on wz stdout ---\n{wz_printed}"
+        )
+    });
+
+    assert_eq!(
+        wz_line, oracle_line,
+        "upstream z_scout.c printed a DIFFERENT line on wz than on the real \
+         zenoh-pico for the same zenohd. The zid rendering (byte order), the \
+         whatami map index, or the locator projection disagrees.\n\
+         --- z_scout.c on wz stdout ---\n{wz_printed}\n\
+         --- oracle stdout ---\n{oracle_printed}"
+    );
+    // Not implied by the line comparison: the oracle prints ONE line per peer,
+    // and a wz that re-reported the peer every cycle would still match on the
+    // first line while flooding the callback.
+    let wz_hits = wz_printed
+        .lines()
+        .filter(|l| l.starts_with("Hello {") && l.contains(&format!("tcp/127.0.0.1:{port}")))
+        .count();
+    assert_eq!(
+        wz_hits, 1,
+        "wz reported the same peer {wz_hits} times; the real zenoh-pico reports it \
+         once per scout.\n--- z_scout.c on wz stdout ---\n{wz_printed}"
+    );
+    // The closure's `drop` is the program's own completion signal, and it must
+    // run AFTER the callbacks — a scout that emitted it early would reorder
+    // upstream's output.
+    assert!(
+        wz_printed.trim_end().ends_with("Dropping scout results."),
+        "z_scout.c on wz did not end with the closure-drop line, so the closure \
+         `drop` did not run last (or did not run).\n\
+         --- z_scout.c on wz stdout ---\n{wz_printed}"
     );
 }

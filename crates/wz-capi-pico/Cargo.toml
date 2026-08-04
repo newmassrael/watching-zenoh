@@ -138,10 +138,17 @@ wz-capi-core = { path = "../wz-capi-core" }
 # pico-faithful, not a superset. Gated by tests/fragmentation_roundtrip.rs,
 # which publishes 200 / 65000 / 131072 / 262144 bytes through the exported
 # symbols and asserts each arrives byte-identical at the subscriber closure.
+# `scouting-active` is selected EXPLICITLY (R311y530): it gates
+# `wz_runtime_tokio::scouting_glue`, the Scout-emit / Hello-decode drive loop the
+# pico `z_scout` C ABI adapts. Without it that module does not exist and
+# `z_scout` has nothing to drive -- and, unlike the silent cases above, its
+# absence is a COMPILE error here rather than a runtime no-op, because this
+# crate names the module directly.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "routing-accept",
     "query-timeout",
     "transport-fragmentation",
+    "scouting-active",
 ] }
 
 # Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions

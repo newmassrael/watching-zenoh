@@ -142,9 +142,12 @@ use crate::handshake_encode::encode_open;
 #[cfg(feature = "session-extauth")]
 use crate::auth_dispatch::AuthDispatch;
 
-// single-source borrowed reply builders (liveliness-token ResponseSink leg)
+// single-source borrowed reply builders (liveliness-token ResponseSink leg).
+// R311y530 — `build_final_reply` dropped: the `DeclFinal` terminator now comes
+// from the UNGATED `declare_build` twin so the same seam serves the
+// session-local subscriber chain (which exists without `liveliness-token`).
 #[cfg(feature = "liveliness-token")]
-use crate::declare::local_token::{build_final_reply, build_token_reply};
+use crate::declare::local_token::build_token_reply;
 
 // Builder + frame-encode modules are imported by glob. The wire-emit action
 // methods are signature-stable (R311j): their signatures are codec-agnostic
@@ -1278,13 +1281,28 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                 .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES"),
         );
     }
-    #[cfg(feature = "liveliness-token")]
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
     fn send_declare_final_reply(&self, interest_id: u64) {
-        self.send_declare(
-            build_final_reply(interest_id)
-                .try_into_owned()
-                .expect("DeclFinal reply carries no bounded fields"),
-        );
+        // R311y530 — built through the UNGATED `declare_build` twin rather than
+        // `local_token::build_final_reply`, so this arm compiles in a
+        // `declare-subscriber`-without-`liveliness-token` build (the
+        // `local_token` module is gated on the latter). Same bytes: both stamp
+        // the I-flag + interest_id onto a bodyless `DeclFinal`.
+        self.send_declare(crate::declare_build::build_declare_final_reply(interest_id));
+    }
+    #[cfg(feature = "declare-subscriber")]
+    fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
+        // A reply keyexpr longer than the bounded codec field cannot be encoded;
+        // the chain's `DeclFinal` still terminates the peer's CURRENT interest,
+        // so a skipped reply degrades to "no matching subscriber" rather than
+        // leaving the peer's query unresolved.
+        if let Ok(declare) = crate::declare_build::build_declare_subscriber_reply_with_id(
+            interest_id,
+            subscriber_id,
+            keyexpr,
+        ) {
+            self.send_declare(declare);
+        }
     }
 }
 

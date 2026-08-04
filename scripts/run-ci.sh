@@ -7277,6 +7277,19 @@ layer_z_zenohd_interop() {
         --test pico_c_examples_on_wz_capi_dropin \
         pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router \
         -- --ignored --quiet --test-threads=1 || return 1
+    # R311y530 — the SCOUTING plane's witness, and the second leg of the drop-in
+    # file that needs a router. Upstream's `z_scout.c` is compiled TWICE against
+    # the same pico headers -- once linked to wz's cdylib, once to the real
+    # `libzenohpico.so` -- and the two must print the SAME `Hello { ... }` line
+    # for the same zenohd. Registered here for exactly the reason the leg above
+    # is: Layer E's sweep carries `--skip zenohd`, and this test's name carries
+    # that token ON PURPOSE so the sweep skips it rather than reding on a machine
+    # with no router. It ALSO needs the CMake-built `libzenohpico.so`, which is
+    # the same artifact Layer E's pico legs depend on, so no new prereq.
+    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test pico_c_examples_on_wz_capi_dropin \
+        pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd \
+        -- --ignored --quiet --test-threads=1 || return 1
     # R311y442 — wz<->zenoh-ext ADVANCED-PUBSUB cross-impl, the FIRST foreign
     # witness the `@adv` plane has ever had. Every advanced-pubsub test before
     # this was wz<->wz, which cannot see a selector-dialect divergence: the same

@@ -82,6 +82,7 @@ pub mod pubsub;
 pub mod querier;
 pub mod query;
 pub mod result;
+pub mod scout;
 pub mod serde;
 pub mod session;
 pub mod sync;

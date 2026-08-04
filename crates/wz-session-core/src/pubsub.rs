@@ -144,6 +144,8 @@ use crate::attachment::{decode_attachment_ext, ATTACHMENT_EXT_ID_PUSH};
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
+// R311y530 — the inbound SUBSCRIBER-Interest parse (`declare-subscriber`), the
+// session-local half of zenoh's `remote-interests` table.
 #[cfg(all(
     feature = "alloc",
     any(feature = "pubsub-put", feature = "pubsub-delete"),
@@ -166,6 +168,8 @@ use crate::sample::{Reliability, Sample};
 ))]
 use crate::sample::{SampleKind, TimestampHint};
 use crate::sink::{SampleSink, SampleView};
+#[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+use wz_codecs::interest::InterestOwned;
 // R311gb-2b — `BoxedSink` is the default sink type (the AP closure
 // adapter); only needed by the `alloc`-gated `register` /
 // `register_with_locality` convenience wrappers. The whole `pubsub`
@@ -318,6 +322,105 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// and the segment was deliberately not opened.
     #[cfg(feature = "transport-shm")]
     shm_unnegotiated_drops: u64,
+    /// R311y530 — inbound SUBSCRIBER `Interest`s this session has been told
+    /// about, zenoh's per-face `remote-interests` table restricted to the
+    /// session-local half. Retired on that interest's `Interest(Final)`.
+    ///
+    /// Its only consumer is [`Self::respond_to_subscriber_interest_borrowed`],
+    /// which needs the interest's OWN keyexpr at DRAIN time to build an
+    /// aggregate reply — and a staged reply item cannot carry it (the staging
+    /// buffer is an inline array sized to its largest variant, and a
+    /// `BoundedString` slot per item is what overflowed a Cortex-M0 stack when
+    /// the liveliness twin tried it). So the keyexpr lives here, once, and the
+    /// staged item is two `u64`s that resolve through it.
+    #[cfg(feature = "declare-subscriber")]
+    inbound_sub_interests: BoundedVec<InboundSubInterest, { caps::MAX_INBOUND_SUB_INTERESTS }>,
+    /// R311y530 — the staged interest-response chain, drained by
+    /// [`Self::take_staged_sub_interest_replies`] through a
+    /// [`crate::response_sink::DeclareReplySink`].
+    #[cfg(feature = "declare-subscriber")]
+    pending_sub_interest_replies: BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }>,
+    /// R311y530 — monotonic source for the wire `DeclSubscriber.id` this
+    /// session answers an AGGREGATE interest with. Non-zero and STABLE per
+    /// registered interest: pico dedups a filter target by `(peer, decl_id)`
+    /// (`net/filtering.c` `_z_filter_target_eq`), so a re-answered interest
+    /// must reuse its id rather than stack a second target.
+    #[cfg(feature = "declare-subscriber")]
+    next_sub_interest_decl_id: u64,
+}
+
+/// R311y530 — whether a session-local subscription `pattern` intersects an
+/// inbound subscriber-interest `interest` (`None` = the keyexpr-less match-all
+/// form). BOTH sides can carry wildcards — the subscription is `demo/**` and
+/// the interest is a publisher's concrete `demo/a` in the case that motivated
+/// this — so the test is INTERSECTION, not one-sided glob matching.
+///
+/// Splits into stack chunk views (no heap). A keyexpr deeper than
+/// [`MAX_KEYEXPR_CHUNKS`] is treated as non-matching rather than matched
+/// truncated, mirroring the sibling registries' conservative rule.
+#[cfg(feature = "declare-subscriber")]
+fn subscription_matches_interest(pattern: &str, interest: Option<&str>) -> bool {
+    let Some(interest) = interest else {
+        return true;
+    };
+    let mut sub_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+    for c in pattern.split('/') {
+        if sub_chunks.push(c).is_err() {
+            return false;
+        }
+    }
+    let mut interest_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+    for c in interest.split('/') {
+        if interest_chunks.push(c).is_err() {
+            return false;
+        }
+    }
+    keyexpr_intersect_patterns(&sub_chunks, &interest_chunks)
+}
+
+/// R311y530 — one remembered inbound SUBSCRIBER `Interest`.
+#[cfg(feature = "declare-subscriber")]
+struct InboundSubInterest {
+    /// The peer's interest id, echoed on every reply and on the terminating
+    /// `DeclFinal` so the peer routes them to this interest.
+    interest_id: u64,
+    /// The interest's RESOLVED keyexpr — the reply keyexpr when
+    /// [`aggregate`](Self::aggregate) is set.
+    keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
+    /// The `AGGREGATE` flag off the interest body. Load-bearing, not
+    /// informational: an aggregate interest's replies are associated by
+    /// `_z_keyexpr_equals` against THIS keyexpr (`session/interest.c:274-276`),
+    /// so a reply carrying a concrete subscription keyexpr matches nothing.
+    aggregate: bool,
+    /// The `DeclSubscriber.id` this session answers this interest with when the
+    /// reply is aggregate (see `next_sub_interest_decl_id`).
+    aggregate_decl_id: u64,
+}
+
+/// R311y530 — one staged item of a session-local subscriber interest-response
+/// chain. Deliberately two `u64`s wide at most: see `inbound_sub_interests`.
+#[cfg(feature = "declare-subscriber")]
+pub enum SubInterestReply {
+    /// Reply ONCE with the interest's own keyexpr (the AGGREGATE form).
+    Aggregate {
+        /// Resolves to the interest row holding the keyexpr and the decl id.
+        interest_id: u64,
+    },
+    /// Reply with local subscription `subscription_id`'s own pattern (the
+    /// non-aggregate form: one item per matching subscription).
+    Concrete {
+        /// Echoed on the reply.
+        interest_id: u64,
+        /// The local subscription whose pattern is the reply keyexpr, and whose
+        /// id is the wire `DeclSubscriber.id`.
+        subscription_id: u64,
+    },
+    /// The terminating `Declare(DeclFinal)`. Staged even when nothing matched,
+    /// so the peer's CURRENT interest always resolves.
+    Final {
+        /// Echoed on the terminator.
+        interest_id: u64,
+    },
 }
 
 impl<C: SampleSink> Default for SubscriberRegistry<C> {
@@ -354,6 +457,14 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             shm_negotiated: false,
             #[cfg(feature = "transport-shm")]
             shm_unnegotiated_drops: 0,
+            #[cfg(feature = "declare-subscriber")]
+            inbound_sub_interests: BoundedVec::new(),
+            #[cfg(feature = "declare-subscriber")]
+            pending_sub_interest_replies: BoundedVec::new(),
+            // Starts at 1: id 0 is zenoh's "current dump, no future id"
+            // (`make_sub_id`), and reusing it here would collide with that.
+            #[cfg(feature = "declare-subscriber")]
+            next_sub_interest_decl_id: 1,
         }
     }
 
@@ -520,6 +631,13 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             })
             .map_err(|_| RegisterError::TableFull)?;
         self.next_id = self.next_id.saturating_add(1);
+        // R311y530 — pub-before-sub: a remote publisher that already registered
+        // a FUTURE subscriber interest is told about THIS subscription now.
+        // Placed here, on the single table-insert path, rather than in the
+        // callers: `register` / `register_with_locality` both funnel through
+        // this method, so no declare route can skip the push.
+        #[cfg(feature = "declare-subscriber")]
+        self.stage_future_subscriber_pushes(id.0);
         Ok(id)
     }
 
@@ -653,7 +771,261 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             NetworkMessage::Push(push) => self.dispatch_push(push, reliability, true),
             #[cfg(feature = "codec-declare")]
             NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body),
+            // R311y530 — a remote publisher's SUBSCRIBER Interest. Answered
+            // from this session's OWN subscriptions; see
+            // [`Self::respond_to_subscriber_interest`].
+            #[cfg(feature = "declare-subscriber")]
+            NetworkMessage::Interest(interest) => self.respond_to_subscriber_interest(interest),
             _ => {}
+        }
+    }
+
+    /// R311y530 — `alloc` inbound-parse entry: consume an inbound
+    /// `Interest`, resolve its keyexpr through the peer mapping table, and
+    /// funnel into the no-heap
+    /// [`Self::respond_to_subscriber_interest_borrowed`].
+    ///
+    /// No-op unless the interest targets SUBSCRIBERS. A subscriber interest
+    /// with no keyexpr is match-all; one naming an undeclared peer mapping id
+    /// drops silently (the same policy every sibling registry applies to an
+    /// unresolvable wireexpr — firing on a partial keyexpr is worse than not
+    /// firing).
+    #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+    fn respond_to_subscriber_interest(&mut self, interest: &InterestOwned) {
+        let interest_id = interest.interest_id;
+        let (current, future) = (interest.c(), interest.f());
+        let Some(body) = interest.body.as_ref() else {
+            // No body and neither bit set is zenoh's interest FINAL: the peer
+            // is CANCELLING `interest_id` (pico emits exactly this when a
+            // declared publisher drops, `net/primitives.c`). Retire the row so
+            // a recycled id cannot inherit a dead publisher's keyexpr.
+            if !current && !future {
+                self.inbound_sub_interests
+                    .retain(|row| row.interest_id != interest_id);
+            }
+            return;
+        };
+        if !body.su() {
+            // A queryable / token interest — the query and liveliness planes
+            // answer those; this registry holds neither.
+            return;
+        }
+        let pattern: Option<String> = match &body.keyexpr {
+            Some(w) => match resolve_wireexpr(&w.body, &self.peer_keyexpr_table) {
+                Some(p) => Some(p),
+                None => return,
+            },
+            None => None,
+        };
+        self.respond_to_subscriber_interest_borrowed(
+            interest_id,
+            pattern.as_deref(),
+            body.ag(),
+            current,
+            future,
+        );
+    }
+
+    /// R311y530 — the no-heap staging SSOT for an inbound SUBSCRIBER
+    /// `Interest`, and the reason a zenoh-pico DECLARED publisher can reach
+    /// this session at all.
+    ///
+    /// pico arms a write filter per `z_declare_publisher` and drops every put
+    /// LOCALLY until it observes a matching `DeclSubscriber`
+    /// (`net/filtering.c`). Two consequences shape this method:
+    ///
+    /// - **CURRENT** dumps the subscriptions this session already holds. An
+    ///   AGGREGATE interest gets ONE reply carrying the INTEREST's keyexpr iff
+    ///   any local subscription matches, because the peer associates an
+    ///   aggregate interest's replies by `_z_keyexpr_equals`
+    ///   (`session/interest.c:274-276`) — answering `demo/**` to an interest on
+    ///   `demo/a` decodes fine and matches NOTHING. Non-aggregate gets one
+    ///   reply per matching subscription, with the subscription's own keyexpr.
+    /// - **FUTURE** registers the interest so a subscription declared LATER is
+    ///   pushed to that publisher ([`Self::stage_future_subscriber_pushes`]).
+    ///
+    /// The terminating `Final` is staged even with zero replies: a peer whose
+    /// CURRENT interest is never terminated keeps the solicitation open, and
+    /// "no matching subscriber" is a legitimate answer (its filter correctly
+    /// stays ACTIVE and it does not put).
+    ///
+    /// Returns the number of reply items staged (the `Final` is not counted).
+    #[cfg(feature = "declare-subscriber")]
+    pub fn respond_to_subscriber_interest_borrowed(
+        &mut self,
+        interest_id: u64,
+        pattern: Option<&str>,
+        aggregate: bool,
+        current: bool,
+        future: bool,
+    ) -> usize {
+        if !current && !future {
+            // Interest FINAL — a cancellation, not a solicitation.
+            self.inbound_sub_interests
+                .retain(|row| row.interest_id != interest_id);
+            return 0;
+        }
+        // Register (or refresh) the row FIRST: the CURRENT dump's aggregate
+        // reply resolves its keyexpr and its decl id THROUGH this row at drain,
+        // so a CURRENT-only interest needs it too. Refreshing rather than
+        // stacking keeps pico's `(peer, decl_id)` target dedup meaningful.
+        let decl_id = match self
+            .inbound_sub_interests
+            .iter()
+            .position(|row| row.interest_id == interest_id)
+        {
+            Some(idx) => self.inbound_sub_interests[idx].aggregate_decl_id,
+            None => {
+                let mut keyexpr = BoundedString::new();
+                if keyexpr.push_str(pattern.unwrap_or("**")).is_err() {
+                    // A keyexpr past the bounded field cannot be replied with
+                    // anyway; terminate the chain honestly instead of half-
+                    // answering it.
+                    let _ = self
+                        .pending_sub_interest_replies
+                        .push(SubInterestReply::Final { interest_id });
+                    return 0;
+                }
+                let decl_id = self.next_sub_interest_decl_id;
+                self.next_sub_interest_decl_id = decl_id.saturating_add(1);
+                // A full table loses only the FUTURE half for this publisher —
+                // the CURRENT dump below still answers, because it reads the
+                // row we would have pushed only for the aggregate keyexpr, and
+                // the push failure hands that keyexpr straight back.
+                let _ = self.inbound_sub_interests.push(InboundSubInterest {
+                    interest_id,
+                    keyexpr,
+                    aggregate,
+                    aggregate_decl_id: decl_id,
+                });
+                decl_id
+            }
+        };
+        let _ = decl_id;
+        let mut staged = 0usize;
+        if current {
+            if aggregate {
+                if self.any_subscription_matches(pattern)
+                    && self
+                        .pending_sub_interest_replies
+                        .push(SubInterestReply::Aggregate { interest_id })
+                        .is_ok()
+                {
+                    staged += 1;
+                }
+            } else {
+                for sub in self.subscribers.iter() {
+                    if !subscription_matches_interest(sub.pattern.as_str(), pattern) {
+                        continue;
+                    }
+                    if self
+                        .pending_sub_interest_replies
+                        .push(SubInterestReply::Concrete {
+                            interest_id,
+                            subscription_id: sub.id.0,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    staged += 1;
+                }
+            }
+            let _ = self
+                .pending_sub_interest_replies
+                .push(SubInterestReply::Final { interest_id });
+        }
+        staged
+    }
+
+    /// R311y530 — whether ANY session-local subscription intersects the
+    /// interest `pattern` (`None` = match-all).
+    #[cfg(feature = "declare-subscriber")]
+    fn any_subscription_matches(&self, pattern: Option<&str>) -> bool {
+        self.subscribers
+            .iter()
+            .any(|sub| subscription_matches_interest(sub.pattern.as_str(), pattern))
+    }
+
+    /// R311y530 — stage an unsolicited `DeclSubscriber` for a subscription
+    /// declared AFTER a remote publisher registered its FUTURE interest: the
+    /// pub-before-sub half of the write-filter release.
+    ///
+    /// Without it the ordering decides whether a publisher ever sees the
+    /// subscriber, which is exactly the kind of race that reads as a flaky
+    /// interop test. Called from [`Self::register_sink`] so no declare path can
+    /// forget it.
+    #[cfg(feature = "declare-subscriber")]
+    fn stage_future_subscriber_pushes(&mut self, new_id: u64) {
+        let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }> =
+            BoundedVec::new();
+        {
+            // The new subscription's pattern is read back out of the table
+            // rather than passed in: `register_sink` has already MOVED it into
+            // the row, and `BoundedString` is deliberately not `Clone` (the
+            // no-alloc backing is an inline buffer). Both borrows are immutable
+            // and end with this block, before the staging push below.
+            let Some(sub) = self.subscribers.iter().find(|s| s.id.0 == new_id) else {
+                return;
+            };
+            let new_pattern = sub.pattern.as_str();
+            for row in self.inbound_sub_interests.iter() {
+                if subscription_matches_interest(new_pattern, Some(row.keyexpr.as_str()))
+                    && hits.push((row.interest_id, row.aggregate)).is_err()
+                {
+                    break;
+                }
+            }
+        }
+        for (interest_id, aggregate) in hits.iter().copied() {
+            let item = if aggregate {
+                SubInterestReply::Aggregate { interest_id }
+            } else {
+                SubInterestReply::Concrete {
+                    interest_id,
+                    subscription_id: new_id,
+                }
+            };
+            // NO terminating `Final` here: this is an unsolicited FUTURE push,
+            // not a CURRENT dump, and the peer's CURRENT solicitation was
+            // already resolved when the interest arrived. A second `Final`
+            // would close an interest that is still live.
+            let _ = self.pending_sub_interest_replies.push(item);
+        }
+    }
+
+    /// R311y530 — take the staged interest-response chain for the drain.
+    /// Paired with [`Self::sub_interest_reply`], which resolves each item to
+    /// its `(DeclSubscriber.id, reply keyexpr)` against the tables that own
+    /// them.
+    #[cfg(feature = "declare-subscriber")]
+    pub fn take_staged_sub_interest_replies(
+        &mut self,
+    ) -> BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }> {
+        core::mem::take(&mut self.pending_sub_interest_replies)
+    }
+
+    /// R311y530 — resolve one staged reply item to the `(subscriber_id,
+    /// keyexpr)` pair the sink encodes. `None` when the backing row vanished
+    /// between stage and drain (an interest cancelled, or a subscription
+    /// dropped): that reply is skipped and its chain's `Final` still
+    /// terminates the peer's solicitation.
+    #[cfg(feature = "declare-subscriber")]
+    pub fn sub_interest_reply(&self, item: &SubInterestReply) -> Option<(u64, &str)> {
+        match item {
+            SubInterestReply::Aggregate { interest_id } => self
+                .inbound_sub_interests
+                .iter()
+                .find(|row| row.interest_id == *interest_id)
+                .map(|row| (row.aggregate_decl_id, row.keyexpr.as_str())),
+            SubInterestReply::Concrete {
+                subscription_id, ..
+            } => self
+                .subscribers
+                .iter()
+                .find(|sub| sub.id.0 == *subscription_id)
+                .map(|sub| (sub.id.0, sub.pattern.as_str())),
+            SubInterestReply::Final { .. } => None,
         }
     }
 

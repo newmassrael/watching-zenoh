@@ -147,6 +147,22 @@ pub const MAX_PENDING_LIVELINESS_GETS: usize = 8;
 /// "generously" off the number.
 pub const MAX_PENDING_DECLARES: usize = 32;
 
+/// Maximum number of inbound SUBSCRIBER `Interest`s one
+/// [`crate::pubsub::SubscriberRegistry`] remembers — zenoh's per-face
+/// `remote-interests` table, session-local half.
+///
+/// One entry per live remote publisher that armed a write filter over this
+/// session (`net/filtering.c` `_z_write_filter_create` emits exactly one
+/// Interest per declared publisher), retired on that publisher's
+/// `Interest(Final)`. A peer with more concurrently-declared publishers than
+/// this simply does not get the surplus ones registered: they still receive
+/// the CURRENT dump (which is answered from the message, before registration),
+/// so the loss is confined to the FUTURE half — a later local subscriber is
+/// not pushed to them. Sized against [`MAX_SUBSCRIPTIONS`] rather than
+/// generously: the table is a linear scan on every inbound Interest and every
+/// local declare.
+pub const MAX_INBOUND_SUB_INTERESTS: usize = 16;
+
 /// Maximum byte length of one static-scouting peer locator string
 /// (`deploy.connect[]` entry, e.g. `"udp/192.168.1.10:7447"`). Bounds the
 /// [`crate::bounded::BoundedString`] each

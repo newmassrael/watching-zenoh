@@ -24,7 +24,13 @@
 use crate::multicast_tx::MulticastTxItem;
 // Only the boxed reply variants (Response / DeclareReply) name Box; the unboxed
 // ResponseFinal does not, so a codec-response-final-only build imports nothing.
-#[cfg(any(feature = "codec-response", feature = "liveliness-token"))]
+// R311y530 — `declare-subscriber` joins the list: the session-local subscriber
+// interest-response also enqueues boxed `DeclareReply` items.
+#[cfg(any(
+    feature = "codec-response",
+    feature = "liveliness-token",
+    feature = "declare-subscriber"
+))]
 use alloc::boxed::Box;
 
 /// The backing one staged multicast reply is enqueued onto for the drive loop to
@@ -101,8 +107,13 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastR
 // derives) and enqueues it. A separate impl block from `ResponseSink` per the
 // R311lq segregation — a declare reply is a distinct message family from a query
 // `Response`.
-#[cfg(feature = "liveliness-token")]
+// R311y530 — the impl block's gate widened with the trait's: `DeclareReplySink`
+// now also carries the session-local SUBSCRIBER interest-response, so a build
+// with `declare-subscriber` and no `liveliness-token` must still find this impl
+// (the multicast reply loop is a `DeclareReplySink` consumer either way).
+#[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
 impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for MulticastReplySink<Q> {
+    #[cfg(feature = "liveliness-token")]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
         let declare =
             crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id)
@@ -113,11 +124,23 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
         });
     }
     fn send_declare_final_reply(&self, interest_id: u64) {
-        let declare = crate::declare::local_token::build_final_reply(interest_id)
-            .try_into_owned()
-            .expect("DeclFinal reply carries no bounded fields");
+        // Same UNGATED builder as the unicast sink, for the same reason: the
+        // `local_token` module does not exist in a `declare-subscriber`-only
+        // build, and `DeclFinal` was never a liveliness-specific message.
         self.queue.enqueue(MulticastTxItem::DeclareReply {
-            declare: Box::new(declare),
+            declare: Box::new(crate::declare_build::build_declare_final_reply(interest_id)),
         });
+    }
+    #[cfg(feature = "declare-subscriber")]
+    fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
+        if let Ok(declare) = crate::declare_build::build_declare_subscriber_reply_with_id(
+            interest_id,
+            subscriber_id,
+            keyexpr,
+        ) {
+            self.queue.enqueue(MulticastTxItem::DeclareReply {
+                declare: Box::new(declare),
+            });
+        }
     }
 }

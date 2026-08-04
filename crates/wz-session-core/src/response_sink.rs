@@ -98,8 +98,41 @@ pub trait DeclareReplySink {
     /// even when no token matched, so the peer's pending CURRENT query
     /// always resolves). Carries only `interest_id` — no heap — so it
     /// composes on the MCU no-alloc profile.
-    #[cfg(feature = "liveliness-token")]
+    ///
+    /// R311y530 — the gate WIDENED to the union of the two chains that
+    /// terminate with it. `DeclFinal` is not a liveliness message: it is the
+    /// terminator of ANY interest-response chain, and the session-local
+    /// SUBSCRIBER chain
+    /// ([`send_declare_subscriber_reply`](Self::send_declare_subscriber_reply))
+    /// needs the identical byte. Its builder already lived in the ungated
+    /// `declare_build` module; only this seam's gate was narrower than the
+    /// message.
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
     fn send_declare_final_reply(&self, interest_id: u64);
+
+    /// R311y530 — encode + enqueue one `Declare(DeclSubscriber)` answering a
+    /// remote publisher's SUBSCRIBER `Interest` from this session's OWN
+    /// (session-local) subscriptions, terminated by
+    /// [`send_declare_final_reply`](Self::send_declare_final_reply).
+    ///
+    /// This is the seam a zenoh-pico DECLARED publisher's write filter depends
+    /// on, and its absence is SILENT in exactly one direction. pico arms
+    /// `_z_write_filter_create` (`net/filtering.c`) per `z_declare_publisher`
+    /// and drops every put LOCALLY until it observes a matching
+    /// `DeclSubscriber`; a plain `z_put` carries no filter, so a session that
+    /// never answers the interest still passes every `z_put` test while
+    /// silently discarding an entire class of publisher.
+    ///
+    /// `keyexpr` is the REPLY keyexpr, which is not always the subscription's
+    /// own: for an AGGREGATE interest (pico client publishers always are) it is
+    /// the INTEREST's keyexpr, because the peer associates an aggregate
+    /// interest's replies by `_z_keyexpr_equals`
+    /// (`session/interest.c:274-276`, and the same rule again in
+    /// `_z_interest_replay_declare` at :603-605) — answering a WILDCARD
+    /// subscription keyexpr decodes fine and matches NOTHING. The registry owns
+    /// that choice; the sink just encodes what it is handed.
+    #[cfg(feature = "declare-subscriber")]
+    fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64);
 }
 
 /// Terminated liveliness-get reconnect-cache prune. NOT a wire emit — a
@@ -149,9 +182,13 @@ impl<S: DeclareReplySink + ?Sized> DeclareReplySink for &S {
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
         (**self).send_declare_token_reply(token_id, keyexpr, interest_id)
     }
-    #[cfg(feature = "liveliness-token")]
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
     fn send_declare_final_reply(&self, interest_id: u64) {
         (**self).send_declare_final_reply(interest_id)
+    }
+    #[cfg(feature = "declare-subscriber")]
+    fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
+        (**self).send_declare_subscriber_reply(subscriber_id, keyexpr, interest_id)
     }
 }
 
@@ -190,9 +227,13 @@ impl<S: DeclareReplySink + ?Sized> DeclareReplySink for alloc::sync::Arc<S> {
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
         (**self).send_declare_token_reply(token_id, keyexpr, interest_id)
     }
-    #[cfg(feature = "liveliness-token")]
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
     fn send_declare_final_reply(&self, interest_id: u64) {
         (**self).send_declare_final_reply(interest_id)
+    }
+    #[cfg(feature = "declare-subscriber")]
+    fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
+        (**self).send_declare_subscriber_reply(subscriber_id, keyexpr, interest_id)
     }
 }
 

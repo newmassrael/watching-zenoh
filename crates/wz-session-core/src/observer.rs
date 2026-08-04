@@ -664,6 +664,28 @@ impl ApplicationLayerObserver {
     /// terminating `Final`. The sink owns the encode (a `VecSink` on AP, a
     /// `SliceSink` on MCU) — no owned `DeclareOwned` crosses the seam.
     fn drain_declare_replies<S: DeclareReplySink>(&mut self, sink: &S) {
+        // R311y530 — the session-local SUBSCRIBER interest-response chain,
+        // drained through the same sink as the liveliness one but staged in the
+        // subscriber registry (which owns both tables the reply resolves
+        // against: the interest's own keyexpr for an AGGREGATE reply, and the
+        // subscription's for a concrete one).
+        #[cfg(feature = "declare-subscriber")]
+        for item in self.subscribers.take_staged_sub_interest_replies() {
+            match &item {
+                crate::pubsub::SubInterestReply::Final { interest_id } => {
+                    sink.send_declare_final_reply(*interest_id)
+                }
+                crate::pubsub::SubInterestReply::Aggregate { interest_id }
+                | crate::pubsub::SubInterestReply::Concrete { interest_id, .. } => {
+                    let interest_id = *interest_id;
+                    if let Some((subscriber_id, keyexpr)) =
+                        self.subscribers.sub_interest_reply(&item)
+                    {
+                        sink.send_declare_subscriber_reply(subscriber_id, keyexpr, interest_id);
+                    }
+                }
+            }
+        }
         #[cfg(feature = "liveliness-token")]
         for item in core::mem::take(&mut self.pending_declares) {
             match item {
@@ -683,7 +705,7 @@ impl ApplicationLayerObserver {
                 }
             }
         }
-        #[cfg(not(feature = "liveliness-token"))]
+        #[cfg(not(any(feature = "liveliness-token", feature = "declare-subscriber")))]
         let _ = sink;
     }
 
