@@ -230,6 +230,18 @@ struct FaceEntry {
     adv_pubs: BTreeMap<AdvPubId, AdvancedPublisher<TokioRuntime, TokioTime>>,
     /// Per-face ADVANCED subscribers, same replay contract as `subs`.
     adv_subs: BTreeMap<AdvSubId, AdvancedSubscriber<TokioRuntime>>,
+    /// R311y532 — the tokio runtime this face is DRIVEN by.
+    ///
+    /// Captured at `face_up`, which runs inside that runtime, and entered
+    /// again by any declaration that spawns. Only the advanced publisher needs
+    /// it today: its heartbeat beacon is a `tokio::spawn`, so
+    /// `AdvancedPublisher::declare` fails `NoRuntime` when called from the C
+    /// APPLICATION thread — which is exactly where a C program declares. A
+    /// dialed session brings its face up BEFORE `z_open` returns, so that is
+    /// the ordinary path, not a corner: measured, the declare failed and was
+    /// swallowed by the best-effort loop, and the publisher then put to nobody
+    /// while still reporting `Z_OK`.
+    runtime: tokio::runtime::Handle,
     /// R311y296 — the signal that this face's drive loop should re-arm its wake
     /// because a `z_get` just registered a pending query with a nearer deadline
     /// than whatever the loop is currently parked on. Owned per face because
@@ -703,6 +715,9 @@ impl SharedSession {
                 matches,
                 adv_pubs,
                 adv_subs,
+                // `face_up` runs on the drive task, so this IS the runtime the
+                // face is driven by.
+                runtime: tokio::runtime::Handle::current(),
                 revised: Arc::new(Notify::new()),
             },
         );
@@ -1469,6 +1484,10 @@ impl SharedSession {
         guard.next_adv_pub_id = guard.next_adv_pub_id.wrapping_add(1);
         for face in guard.faces.values_mut() {
             let zid = face.session.actions().params.zid.clone();
+            // Enter the face's own runtime: this call site is the C application
+            // thread, and the heartbeat beacon is a `tokio::spawn`. See
+            // `FaceEntry::runtime`.
+            let _guard = face.runtime.enter();
             if let Ok(pub_) =
                 AdvancedPublisher::declare(&face.session, keyexpr.clone(), options, zid)
             {
@@ -1535,6 +1554,9 @@ impl SharedSession {
         guard.next_adv_sub_id = guard.next_adv_sub_id.wrapping_add(1);
         for face in guard.faces.values_mut() {
             let (on_sample, on_miss) = (sink)();
+            // Same reason as the publisher's: a `recovery.periodic_queries`
+            // subscriber spawns a background task at declare time.
+            let _guard = face.runtime.enter();
             if let Ok(sub) = AdvancedSubscriber::declare_with_options(
                 &face.session,
                 keyexpr.clone(),

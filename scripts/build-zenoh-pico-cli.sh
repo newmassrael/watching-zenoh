@@ -65,7 +65,14 @@ INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
 # each way: z_advanced_sub carries the history/recovery/miss-detection and
 # publisher-detection surface (liveliness token discovery), z_advanced_pub the
 # cache + sequencing side.
-TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong z_queryable_attachment z_advanced_sub z_advanced_pub)
+# R311y532 — four more, added solely as COUNTERPARTIES so the remaining
+# undriven drop-in programs get a foreign partner. Each is the other half of a
+# pair whose wz-side half already links: z_ping answers a wz z_pong, z_get_lat
+# drives a wz z_queryable_lat, z_pub_thr feeds a wz z_sub_thr, and
+# z_get_attachment sends the attachment a wz z_queryable_attachment reads back.
+# None of the four is a SUBJECT here (the wz-linked build of each is what the
+# drop-in suite exercises); they exist so the verdict can come from outside.
+TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong z_queryable_attachment z_advanced_sub z_advanced_pub z_ping z_get_lat z_pub_thr z_get_attachment)
 
 if [[ ! -e "$VENDOR_DIR/.git" && ! -f "$VENDOR_DIR/CMakeLists.txt" ]]; then
     echo "build-zenoh-pico-cli: vendor/zenoh-pico/ not initialized." >&2

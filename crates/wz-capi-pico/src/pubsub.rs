@@ -119,16 +119,33 @@ impl SampleMarshal {
     /// installs.
     pub(crate) fn with_metadata(mut self, view: &dyn SampleView) -> Self {
         self.attachment = view.attachment().map(ByteBuf::from);
-        self.timestamp = view.timestamp().map(|hint| z_timestamp_t {
-            valid: true,
-            id: crate::zid::z_id_t::from_wire(&hint.zid),
-            time: hint.time,
-        });
-        self.encoding = view.encoding().map(|hint| {
-            let mut owned = crate::encoding::z_owned_encoding_t::null_value();
-            // SAFETY: `owned` is a live slot this call fills.
-            unsafe { crate::encoding::store_encoding(&mut owned, hint.clone()) };
-            owned
+        self.timestamp = view.timestamp().map(timestamp_of);
+        self.encoding = view.encoding().map(|hint| own_encoding(hint.clone()));
+        self
+    }
+
+    /// Attach metadata read off a REPLY rather than a sample.
+    ///
+    /// `ReplyView` is a different trait from `SampleView` and exposes the same
+    /// three fields in different shapes (its encoding is a `(packed_id, schema)`
+    /// tuple, not an `EncodingHint`), so the reply plane cannot reuse
+    /// [`Self::with_metadata`] — but it must not skip the fields either, which
+    /// is what it did until a real zenoh-pico `z_queryable_attachment` replied
+    /// with an attachment and upstream's `z_get_attachment.c` on wz printed the
+    /// value with no attachment line under it.
+    pub(crate) fn with_reply_metadata(
+        mut self,
+        attachment: Option<&[u8]>,
+        encoding: Option<(u32, Option<&str>)>,
+        timestamp: Option<&wz_runtime_tokio::sample::TimestampHint>,
+    ) -> Self {
+        self.attachment = attachment.map(ByteBuf::from);
+        self.timestamp = timestamp.map(timestamp_of);
+        self.encoding = encoding.map(|(packed_id, schema)| {
+            own_encoding(wz_runtime_tokio::sample::EncodingHint {
+                packed_id,
+                schema: schema.map(str::to_owned),
+            })
         });
         self
     }
@@ -224,6 +241,26 @@ crate::abi::impl_boxed_element!(
     z_sample_drop,
     z_sample_take_from_loaned
 );
+
+/// The pico timestamp for a wz [`TimestampHint`]. Shared by the sample and
+/// reply metadata paths so the two cannot render one differently.
+fn timestamp_of(hint: &wz_runtime_tokio::sample::TimestampHint) -> z_timestamp_t {
+    z_timestamp_t {
+        valid: true,
+        id: crate::zid::z_id_t::from_wire(&hint.zid),
+        time: hint.time,
+    }
+}
+
+/// Box an [`EncodingHint`] into an owned encoding slot.
+fn own_encoding(
+    hint: wz_runtime_tokio::sample::EncodingHint,
+) -> crate::encoding::z_owned_encoding_t {
+    let mut owned = crate::encoding::z_owned_encoding_t::null_value();
+    // SAFETY: `owned` is a live slot this call fills.
+    unsafe { crate::encoding::store_encoding(&mut owned, hint) };
+    owned
+}
 
 /// pico `z_sample_kind_t` (`api/constants.h:164-168`): how the sample was
 /// issued. A plain C enum, so it occupies an `int`.

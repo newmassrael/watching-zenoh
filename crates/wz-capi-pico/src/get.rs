@@ -262,7 +262,12 @@ impl ReplyMarshal {
         };
         Self {
             is_ok,
-            sample: SampleMarshal::new(view.keyexpr().to_owned(), sample_payload, sample_kind),
+            // The reply's own metadata rides its sample: an attachment, a value
+            // encoding and a body timestamp are all carried on a Put reply's
+            // inner body, and dropping them here made a foreign queryable's
+            // attachment invisible to upstream's own `z_get_attachment.c`.
+            sample: SampleMarshal::new(view.keyexpr().to_owned(), sample_payload, sample_kind)
+                .with_reply_metadata(view.attachment(), view.put_encoding(), view.timestamp()),
             err_payload,
             loaned_err_payload: z_loaned_bytes_t {
                 handle: std::ptr::null_mut(),

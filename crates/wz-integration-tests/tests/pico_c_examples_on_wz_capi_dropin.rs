@@ -89,9 +89,9 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, graceful_terminate, project_root, read_captured,
-    spawn_zenohd_multicast_scouting_on_ephemeral_tcp, wait_for_exit, wait_for_substring,
-    wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenoh_pico_include_dirs, zenohd_binary,
-    ChildGuard, PortReservation,
+    spawn_zenohd_multicast_scouting_on_ephemeral_tcp, wait_for_capture_alive, wait_for_exit,
+    wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenoh_pico_include_dirs,
+    zenohd_binary, ChildGuard, PortReservation,
 };
 
 /// How long a compiled drop-in gets to bind its listener. Generous relative to
@@ -154,6 +154,42 @@ fn dropin_binary(example: &str, dir: &std::path::Path) -> std::path::PathBuf {
             "§5.27 api-compat-pico: upstream {example}.c does NOT link against wz's \
              C-ABI cdylib, so wz is not a binary drop-in for it.\n{diag}"
         ),
+    }
+}
+
+/// How long a bounded foreign / drop-in invocation gets to EXIT.
+///
+/// The legs below drive programs that wait on their counterparty — `z_ping` and
+/// `z_get_lat` block until their round-trip count completes, `z_get_liveliness`
+/// until its snapshot terminates — so a plain `Command::status()` on any of
+/// them is an UNBOUNDED wait. Measured the hard way: one suite run sat on a
+/// hung snapshot for 25 minutes with no output, because a `status()` that never
+/// returns produces neither a failure nor a diagnostic. Every such call is now
+/// spawned and bounded.
+const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wait for a spawned child to exit within [`EXIT_TIMEOUT`], killing it and
+/// failing with its capture if it does not.
+///
+/// Returns the exit status so the caller still asserts on it: a bounded wait
+/// replaces "hangs forever" with "fails and says why", not with "passes".
+fn bounded_exit(
+    label: &str,
+    mut child: std::process::Child,
+    capture: &mut std::fs::File,
+) -> std::process::ExitStatus {
+    match wait_for_exit(&mut child, EXIT_TIMEOUT) {
+        Ok(status) => status,
+        Err(why) => {
+            let captured = read_captured(capture);
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "{label} did not exit within {EXIT_TIMEOUT:?} — {why}. It waits on \
+                 its counterparty, so this is the shape of a reply that never came.\n\
+                 --- its captured output ---\n{captured}"
+            );
+        }
     }
 }
 
@@ -2400,4 +2436,1026 @@ fn pico_zadvancedsub_source_on_wz_capi_receives_from_the_real_pico_advanced_pub(
 
     graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 20 (`pico->wz`) — upstream's `z_pull.c`, running on wz, keeps the
+/// NEWEST samples when its RING channel overflows, and drops the oldest.
+///
+/// This is the only leg that can see the ring's full policy, and it is the
+/// reason it exists. Every other channel leg pulls fewer samples than the
+/// channel holds, so a ring that kept the OLDEST — or that silently behaved
+/// like a fifo and blocked its producer — would pass all of them. `z_pull.c`
+/// is the upstream program that overflows on purpose: it sets a ring size,
+/// sleeps between drains, and prints what it got.
+///
+/// Four samples into a ring of TWO, drained once. The witness is asymmetric on
+/// purpose: the newest two must be PRESENT and the oldest two ABSENT, because
+/// "3 and 4 arrived" alone is satisfied by a ring of four, and "1 is missing"
+/// alone is satisfied by a ring that dropped everything.
+///
+/// The window is a barrier, not a sleep: the drop-in prints its
+/// `Nothing to pull... sleep for N ms` line BEFORE the publishers start, so all
+/// four puts land inside one 10-second drain interval that has only just begun.
+/// Each `z_put` is a synchronous process whose exit is awaited, so the four are
+/// ordered by construction rather than by timing.
+// wz-proves: api-compat-pico pico->wz partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_put CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zpull_source_on_wz_capi_keeps_the_newest_when_the_ring_overflows() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_pull", dir.path());
+    let z_put = zenoh_pico_cli_binary("z_put");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/dropin/leg20";
+
+    let mut sub_out = tempfile::tempfile().expect("z_pull stdout capture");
+    let writer = sub_out.try_clone().expect("dup z_pull stdout handle");
+    let mut sub = ChildGuard::wrap(
+        "z_pull.c on wz-capi-pico",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args([
+                "-l",
+                &endpoint,
+                "-m",
+                "peer",
+                "-k",
+                "demo/dropin/**",
+                // Ring capacity TWO and a ten-second drain interval: the four
+                // puts below must all land inside one window, and the window
+                // starts when the barrier line appears.
+                "-s",
+                "2",
+                "-i",
+                "10000",
+            ])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the compiled z_pull drop-in"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_pull.c drop-in never accepted on {endpoint} — {why}; capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    // THE BARRIER. Without it the first drain could fire between two puts, the
+    // oldest would be reported, and the leg would red for a timing reason
+    // rather than a policy one.
+    if wait_for_substring(&mut sub_out, "Nothing to pull", EXCHANGE_TIMEOUT).is_err() {
+        panic!(
+            "the z_pull.c drop-in never reached its first empty drain, so the \
+             publish window below would not be bounded.\n--- stdout ---\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+
+    for idx in 1..=4 {
+        let payload = format!("EVICT-{idx}");
+        let put = Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_put)
+            .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", &payload])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run the real zenoh-pico z_put");
+        assert!(put.success(), "real zenoh-pico z_put #{idx} exited {put:?}");
+    }
+
+    // The drain fires at the end of the interval; allow for it plus slack.
+    let captured = wait_for_substring(&mut sub_out, "EVICT-4", Duration::from_secs(30))
+        .unwrap_or_else(|captured| {
+            panic!(
+                "upstream z_pull.c on wz's C-ABI never pulled the NEWEST sample out \
+                 of its ring channel.\n--- z_pull.c (on wz) stdout ---\n{captured}"
+            )
+        });
+    assert!(
+        captured.contains("EVICT-3"),
+        "the ring kept only ONE of its two slots — capacity is not being honoured.\n\
+         --- stdout ---\n{captured}"
+    );
+    assert!(
+        !captured.contains("EVICT-1") && !captured.contains("EVICT-2"),
+        "the ring reported a sample it should have EVICTED. A ring of two that \
+         received four must drop the two OLDEST; this one kept them, so its \
+         overflow policy is a fifo's (or its capacity is wrong).\n\
+         --- z_pull.c (on wz) stdout ---\n{captured}"
+    );
+
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 21 (`wz->pico`) — upstream's `z_advanced_pub.c`, running on wz, is
+/// received by the REAL zenoh-pico's own `z_advanced_sub.c`.
+///
+/// The mirror of LEG 19, and the half that leaves wz nothing to grade itself
+/// on: the sequence numbers, the `@adv` cache queryable and the `@adv`
+/// liveliness token are all produced by wz here, and it is upstream's own
+/// subscriber on the real library that has to make sense of them.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_advanced_sub CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zadvancedpub_source_on_wz_capi_reaches_the_real_pico_advanced_sub() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_advanced_pub", dir.path());
+    let z_advanced_sub = zenoh_pico_cli_binary("z_advanced_sub");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/dropin/leg21";
+    let value = "ADV-FROM-WZ";
+
+    // The FOREIGN process listens; the drop-in dials in.
+    let mut sub_out = tempfile::tempfile().expect("foreign advanced sub capture");
+    let writer = sub_out.try_clone().expect("dup foreign sub handle");
+    let mut sub = ChildGuard::wrap(
+        "real zenoh-pico z_advanced_sub",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_advanced_sub)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_advanced_sub"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_advanced_sub never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    let mut pub_out = tempfile::tempfile().expect("advanced pub drop-in capture");
+    let pub_writer = pub_out.try_clone().expect("dup pub drop-in handle");
+    let pub_err = pub_out.try_clone().expect("dup pub drop-in stderr handle");
+    let mut publisher = ChildGuard::wrap(
+        "z_advanced_pub.c on wz-capi-pico",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", value])
+            .stdout(Stdio::from(pub_writer))
+            .stderr(Stdio::from(pub_err))
+            .spawn()
+            .expect("spawn the compiled z_advanced_pub drop-in"),
+    );
+
+    let foreign =
+        wait_for_substring(&mut sub_out, value, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+            let driver = read_captured(&mut pub_out);
+            panic!(
+                "the REAL zenoh-pico z_advanced_sub never reported a sample from \
+                 upstream's z_advanced_pub.c running ON wz.\nexpected substring: {value}\n\
+                 the drop-in reached its put: {}\n\
+                 --- REAL pico z_advanced_sub stdout ---\n{captured}\n\
+                 --- z_advanced_pub.c (on wz) stdout+stderr ---\n{driver}",
+                driver.contains("Putting Data"),
+            )
+        });
+    assert!(
+        foreign.contains(key),
+        "the foreign advanced subscriber received the value on a different key \
+         than {key}.\n--- stdout ---\n{foreign}"
+    );
+
+    graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 22 (`wz->pico`) — upstream's `z_querier.c`, running on wz, gets a reply
+/// from the REAL zenoh-pico `z_queryable`.
+///
+/// A querier is a get with its keyexpr and options bound once and reused, so
+/// this exercises the `z_querier_*` family end to end rather than through the
+/// `z_get` path its options share.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_queryable CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zquerier_source_on_wz_capi_gets_a_reply_from_real_pico_zqueryable() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_querier", dir.path());
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/dropin/leg22";
+    let value = "REPLY-TO-A-WZ-QUERIER";
+
+    let mut qbl_out = tempfile::tempfile().expect("foreign queryable capture");
+    let writer = qbl_out.try_clone().expect("dup foreign queryable handle");
+    let mut qbl = ChildGuard::wrap(
+        "real zenoh-pico z_queryable",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_queryable)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key, "-v", value])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_queryable"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(qbl.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_queryable never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut qbl_out)
+        );
+    }
+    drop(reservation);
+
+    let mut get_out = tempfile::tempfile().expect("querier drop-in capture");
+    let get_writer = get_out.try_clone().expect("dup querier drop-in handle");
+    let get_err = get_out.try_clone().expect("dup querier stderr handle");
+    // `-n 1`: one query, then exit — which is what flushes the capture.
+    let get = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args(["-e", &endpoint, "-m", "client", "-s", key, "-n", "1"])
+        .stdout(Stdio::from(get_writer))
+        .stderr(Stdio::from(get_err))
+        .spawn()
+        .expect("spawn the compiled z_querier drop-in");
+    let get = bounded_exit("z_querier.c on wz", get, &mut get_out);
+    let captured = read_captured(&mut get_out);
+    assert!(
+        get.success(),
+        "upstream z_querier.c on wz's C-ABI exited {get:?}\n--- its stdout+stderr ---\n{captured}"
+    );
+    assert!(
+        captured.contains(value),
+        "upstream z_querier.c on wz's C-ABI never reported the reply the REAL \
+         zenoh-pico z_queryable sent.\nexpected substring: {value}\n\
+         --- z_querier.c (on wz) stdout+stderr ---\n{captured}\n\
+         --- REAL pico z_queryable stdout ---\n{}",
+        read_captured(&mut qbl_out)
+    );
+
+    graceful_terminate(qbl.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 23 (`wz->pico`) — upstream's `z_get_channel.c`, running on wz, receives
+/// the REAL zenoh-pico `z_queryable`'s reply through a FIFO CHANNEL.
+///
+/// The reply-side twin of LEG 16: the replies are pushed into a channel by the
+/// session's read task and pulled by the application thread, so the owned
+/// REPLY family (248 B) is what carries them out of the callback.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_queryable CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zgetchannel_source_on_wz_capi_receives_replies_through_a_channel() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_get_channel", dir.path());
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/dropin/leg23";
+    let value = "REPLY-INTO-A-CHANNEL";
+
+    let mut qbl_out = tempfile::tempfile().expect("foreign queryable capture");
+    let writer = qbl_out.try_clone().expect("dup foreign queryable handle");
+    let mut qbl = ChildGuard::wrap(
+        "real zenoh-pico z_queryable",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_queryable)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key, "-v", value])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_queryable"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(qbl.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_queryable never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut qbl_out)
+        );
+    }
+    drop(reservation);
+
+    let mut get_out = tempfile::tempfile().expect("get_channel drop-in capture");
+    let get_writer = get_out.try_clone().expect("dup get_channel handle");
+    let get_err = get_out.try_clone().expect("dup get_channel stderr handle");
+    let get = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args(["-e", &endpoint, "-m", "client", "-k", key])
+        .stdout(Stdio::from(get_writer))
+        .stderr(Stdio::from(get_err))
+        .spawn()
+        .expect("spawn the compiled z_get_channel drop-in");
+    let get = bounded_exit("z_get_channel.c on wz", get, &mut get_out);
+    let captured = read_captured(&mut get_out);
+    assert!(
+        get.success(),
+        "upstream z_get_channel.c on wz's C-ABI exited {get:?}\n\
+         --- its stdout+stderr ---\n{captured}"
+    );
+    assert!(
+        captured.contains(value),
+        "upstream z_get_channel.c on wz's C-ABI never pulled the reply the REAL \
+         zenoh-pico z_queryable sent. Either the reply closure never pushed into \
+         the channel, or the blocking recv never woke.\nexpected substring: {value}\n\
+         --- z_get_channel.c (on wz) stdout+stderr ---\n{captured}\n\
+         --- REAL pico z_queryable stdout ---\n{}",
+        read_captured(&mut qbl_out)
+    );
+
+    graceful_terminate(qbl.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 24 (`pico->wz`) — upstream's `z_get_liveliness.c`, running on wz,
+/// discovers a liveliness token declared by the REAL zenoh-pico `z_liveliness`.
+///
+/// The one-shot snapshot half of the presence plane, and the leg that gives
+/// `z_liveliness_get` a foreign witness: the token is declared by upstream's
+/// own binary, and the reply stream that carries it back is wz's CURRENT
+/// Interest, not a query.
+// wz-proves: api-compat-pico pico->wz partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_liveliness CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zgetliveliness_source_on_wz_capi_sees_a_real_pico_token() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_get_liveliness", dir.path());
+    let z_liveliness = zenoh_pico_cli_binary("z_liveliness");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/dropin/leg24";
+
+    let mut tok_out = tempfile::tempfile().expect("foreign token capture");
+    let writer = tok_out.try_clone().expect("dup foreign token handle");
+    let mut token = ChildGuard::wrap(
+        "real zenoh-pico z_liveliness",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_liveliness)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_liveliness"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(token.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_liveliness never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut tok_out)
+        );
+    }
+    drop(reservation);
+
+    let mut get_out = tempfile::tempfile().expect("get_liveliness drop-in capture");
+    let get_writer = get_out.try_clone().expect("dup get_liveliness handle");
+    let get_err = get_out
+        .try_clone()
+        .expect("dup get_liveliness stderr handle");
+    let get = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args(["-e", &endpoint, "-m", "client", "-k", key])
+        .stdout(Stdio::from(get_writer))
+        .stderr(Stdio::from(get_err))
+        .spawn()
+        .expect("spawn the compiled z_get_liveliness drop-in");
+    let get = bounded_exit("z_get_liveliness.c on wz", get, &mut get_out);
+    let captured = read_captured(&mut get_out);
+    assert!(
+        get.success(),
+        "upstream z_get_liveliness.c on wz's C-ABI exited {get:?}\n\
+         --- its stdout+stderr ---\n{captured}"
+    );
+    assert!(
+        captured.contains("Alive token") && captured.contains(key),
+        "upstream z_get_liveliness.c on wz's C-ABI did not report the token the \
+         REAL zenoh-pico z_liveliness declared on {key}.\n\
+         --- z_get_liveliness.c (on wz) stdout+stderr ---\n{captured}\n\
+         --- REAL pico z_liveliness stdout ---\n{}",
+        read_captured(&mut tok_out)
+    );
+
+    graceful_terminate(token.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 25 (`wz->pico`) — upstream's `z_get_attachment.c`, running on wz, reads
+/// back the ATTACHMENT the REAL zenoh-pico `z_queryable_attachment` put on its
+/// reply.
+///
+/// The querier half of the attachment plane. The attachment is a serialized
+/// key/value map built by upstream's own serializer on the foreign side and
+/// walked by upstream's own deserializer on wz, so the framing is asserted by
+/// two pieces of upstream code with wz only carrying the bytes.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_queryable_attachment CLI and a \
+            cc-compiled binary; run by run-ci Layer E"]
+fn pico_zgetattachment_source_on_wz_capi_reads_a_real_pico_reply_attachment() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_get_attachment", dir.path());
+    let z_queryable_attachment = zenoh_pico_cli_binary("z_queryable_attachment");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/dropin/leg25";
+    let value = "ATTACHED-REPLY-FROM-REAL-PICO";
+
+    let mut qbl_out = tempfile::tempfile().expect("foreign queryable capture");
+    let writer = qbl_out.try_clone().expect("dup foreign queryable handle");
+    let mut qbl = ChildGuard::wrap(
+        "real zenoh-pico z_queryable_attachment",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_queryable_attachment)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key, "-v", value])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_queryable_attachment"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(qbl.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_queryable_attachment never accepted on {endpoint} \
+             — {why}; capture so far:\n{}",
+            read_captured(&mut qbl_out)
+        );
+    }
+    drop(reservation);
+
+    let mut get_out = tempfile::tempfile().expect("get_attachment drop-in capture");
+    let get_writer = get_out.try_clone().expect("dup get_attachment handle");
+    let get_err = get_out
+        .try_clone()
+        .expect("dup get_attachment stderr handle");
+    let get = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .args(["-e", &endpoint, "-m", "client", "-k", key])
+        .stdout(Stdio::from(get_writer))
+        .stderr(Stdio::from(get_err))
+        .spawn()
+        .expect("spawn the compiled z_get_attachment drop-in");
+    let get = bounded_exit("z_get_attachment.c on wz", get, &mut get_out);
+    let captured = read_captured(&mut get_out);
+    assert!(
+        get.success(),
+        "upstream z_get_attachment.c on wz's C-ABI exited {get:?}\n\
+         --- its stdout+stderr ---\n{captured}"
+    );
+    assert!(
+        captured.contains(value),
+        "upstream z_get_attachment.c on wz's C-ABI never reported the reply.\n\
+         expected substring: {value}\n--- stdout+stderr ---\n{captured}\n\
+         --- REAL pico z_queryable_attachment stdout ---\n{}",
+        read_captured(&mut qbl_out)
+    );
+    // The ATTACHMENT is the point: a reply that arrived with its attachment
+    // dropped would satisfy the assertion above and fail this one.
+    assert!(
+        captured.contains("with attachment"),
+        "the reply arrived but carried NO attachment, so the attachment ext was \
+         lost on the way in.\n--- z_get_attachment.c (on wz) stdout+stderr ---\n{captured}"
+    );
+
+    graceful_terminate(qbl.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 26 (`wz->pico`) — upstream's `z_queryable_attachment.c`, running on wz,
+/// answers the REAL zenoh-pico `z_get_attachment`, and the FOREIGN process
+/// reports both the reply and its attachment.
+///
+/// The responder half of LEG 25, and the stronger direction: the verdict comes
+/// from upstream's own deserializer running on upstream's own library.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_get_attachment CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zqueryableattachment_source_on_wz_capi_is_read_by_real_pico_zgetattachment() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_queryable_attachment", dir.path());
+    let z_get_attachment = zenoh_pico_cli_binary("z_get_attachment");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/dropin/leg26";
+    let value = "ATTACHED-REPLY-FROM-WZ";
+
+    let mut qbl_out = tempfile::tempfile().expect("queryable drop-in capture");
+    let writer = qbl_out.try_clone().expect("dup queryable drop-in handle");
+    let err = qbl_out.try_clone().expect("dup queryable stderr handle");
+    let mut qbl = ChildGuard::wrap(
+        "z_queryable_attachment.c on wz-capi-pico",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key, "-v", value])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(err))
+            .spawn()
+            .expect("spawn the compiled z_queryable_attachment drop-in"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(qbl.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_queryable_attachment.c drop-in never accepted on {endpoint} — \
+             {why}; capture so far:\n{}",
+            read_captured(&mut qbl_out)
+        );
+    }
+    drop(reservation);
+
+    let mut get_out = tempfile::tempfile().expect("foreign z_get_attachment capture");
+    let get_writer = get_out.try_clone().expect("dup foreign get handle");
+    let get = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&z_get_attachment)
+        .args(["-e", &endpoint, "-m", "client", "-k", key])
+        .stdout(Stdio::from(get_writer))
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the real zenoh-pico z_get_attachment");
+    let get = bounded_exit("real pico z_get_attachment", get, &mut get_out);
+    let foreign = read_captured(&mut get_out);
+    let responder = read_captured(&mut qbl_out);
+    assert!(
+        get.success(),
+        "real zenoh-pico z_get_attachment exited {get:?}\n--- its stdout ---\n{foreign}"
+    );
+    assert!(
+        foreign.contains(value),
+        "the REAL zenoh-pico z_get_attachment never reported the reply upstream's \
+         z_queryable_attachment.c produced ON wz.\nexpected substring: {value}\n\
+         --- REAL pico z_get_attachment stdout ---\n{foreign}\n\
+         --- z_queryable_attachment.c (on wz) stdout+stderr ---\n{responder}"
+    );
+    assert!(
+        foreign.contains("with attachment"),
+        "the foreign querier got the reply but no attachment on it, so wz dropped \
+         the outbound attachment ext.\n--- REAL pico stdout ---\n{foreign}"
+    );
+    // The INBOUND half: upstream's queryable prints the attachment the querier
+    // sent, so a wz that dropped it on the way IN would still pass above.
+    assert!(
+        responder.contains("with attachment"),
+        "the drop-in answered but never reported the querier's OWN attachment, so \
+         the inbound attachment ext was lost.\n--- z_queryable_attachment.c (on wz) \
+         stdout+stderr ---\n{responder}"
+    );
+
+    graceful_terminate(qbl.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 27 (`wz->pico`) — upstream's `z_queryable_lat.c`, running on wz, answers
+/// the REAL zenoh-pico `z_get_lat`, and the FOREIGN process prints the
+/// round-trip times.
+///
+/// The latency pair is the only place a REPLY travels the full request/response
+/// path under back-to-back load rather than once: `z_get_lat` issues its
+/// queries through a QUERIER and waits for each reply before sending the next,
+/// so a single dropped or mis-correlated response stalls it to a timeout
+/// instead of merely skewing a number.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_get_lat CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zqueryablelat_source_on_wz_capi_answers_real_pico_zgetlat() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_queryable_lat", dir.path());
+    let z_get_lat = zenoh_pico_cli_binary("z_get_lat");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    // Both sides default to the `lat` keyexpr, so neither is passed one.
+    let mut qbl_out = tempfile::tempfile().expect("queryable_lat drop-in capture");
+    let writer = qbl_out.try_clone().expect("dup queryable_lat handle");
+    let err = qbl_out
+        .try_clone()
+        .expect("dup queryable_lat stderr handle");
+    let mut qbl = ChildGuard::wrap(
+        "z_queryable_lat.c on wz-capi-pico",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-l", &endpoint, "-m", "peer"])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(err))
+            .spawn()
+            .expect("spawn the compiled z_queryable_lat drop-in"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(qbl.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_queryable_lat.c drop-in never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut qbl_out)
+        );
+    }
+    drop(reservation);
+
+    let mut lat_out = tempfile::tempfile().expect("foreign z_get_lat capture");
+    let lat_writer = lat_out.try_clone().expect("dup foreign get_lat handle");
+    // `-n 5` round trips after a short warmup; each prints one line.
+    let lat = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&z_get_lat)
+        .args(["-e", &endpoint, "-m", "client", "-n", "5", "-w", "500"])
+        .stdout(Stdio::from(lat_writer))
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the real zenoh-pico z_get_lat");
+    let lat = bounded_exit("real pico z_get_lat", lat, &mut lat_out);
+    let foreign = read_captured(&mut lat_out);
+    let responder = read_captured(&mut qbl_out);
+    assert!(
+        lat.success(),
+        "real zenoh-pico z_get_lat exited {lat:?} — a queryable that never replied \
+         stalls it.\n--- its stdout ---\n{foreign}\n\
+         --- z_queryable_lat.c (on wz) stdout+stderr ---\n{responder}"
+    );
+    // One line per completed round trip. Fewer than the five asked for means a
+    // reply was lost or mis-correlated.
+    let round_trips = foreign
+        .lines()
+        .filter(|line| line.trim().parse::<u64>().is_ok())
+        .count();
+    assert_eq!(
+        round_trips, 5,
+        "the REAL zenoh-pico z_get_lat completed {round_trips} of 5 round trips \
+         against upstream's z_queryable_lat.c running ON wz.\n\
+         --- REAL pico z_get_lat stdout ---\n{foreign}\n\
+         --- z_queryable_lat.c (on wz) stdout+stderr ---\n{responder}"
+    );
+
+    graceful_terminate(qbl.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 28 (`pico->wz`) — upstream's `z_sub_attachment.c`, running on wz, reads
+/// the attachment, encoding and timestamp the REAL zenoh-pico
+/// `z_pub_attachment` sent.
+///
+/// The subscriber-side attachment leg. Its twin (`z_pub_attachment` on wz,
+/// decoded by a real pico subscriber) is LEG 13 and is what caught wz silently
+/// dropping all three on the way OUT; this is the inbound direction of the same
+/// three fields.
+// wz-proves: api-compat-pico pico->wz partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_pub_attachment CLI and a cc-compiled \
+            binary; run by run-ci Layer E"]
+fn pico_zsubattachment_source_on_wz_capi_decodes_a_real_pico_attachment() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_sub_attachment", dir.path());
+    let z_pub_attachment = zenoh_pico_cli_binary("z_pub_attachment");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let key = "demo/dropin/leg28";
+
+    let mut sub_out = tempfile::tempfile().expect("sub_attachment drop-in capture");
+    let writer = sub_out.try_clone().expect("dup sub_attachment handle");
+    let err = sub_out
+        .try_clone()
+        .expect("dup sub_attachment stderr handle");
+    let mut sub = ChildGuard::wrap(
+        "z_sub_attachment.c on wz-capi-pico",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(err))
+            .spawn()
+            .expect("spawn the compiled z_sub_attachment drop-in"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_sub_attachment.c drop-in never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    let mut pub_out = tempfile::tempfile().expect("foreign z_pub_attachment capture");
+    let pub_writer = pub_out.try_clone().expect("dup foreign publisher handle");
+    let mut publisher = ChildGuard::wrap(
+        "real zenoh-pico z_pub_attachment",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_pub_attachment)
+            .args(["-e", &endpoint, "-m", "client", "-k", key])
+            .stdout(Stdio::from(pub_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_pub_attachment"),
+    );
+
+    let captured = wait_for_substring(&mut sub_out, "with attachment", EXCHANGE_TIMEOUT)
+        .unwrap_or_else(|captured| {
+            let driver = read_captured(&mut pub_out);
+            panic!(
+                "upstream z_sub_attachment.c on wz's C-ABI never reported an \
+                 attachment on a sample from the REAL zenoh-pico z_pub_attachment.\n\
+                 the foreign publisher reached its put: {}\n\
+                 --- z_sub_attachment.c (on wz) stdout+stderr ---\n{captured}\n\
+                 --- REAL pico z_pub_attachment stdout ---\n{driver}",
+                driver.contains("Putting Data"),
+            )
+        });
+    // Encoding rides the same sample and is a separate ext; upstream prints it
+    // on its own line, so a build that carried the attachment and dropped the
+    // encoding would pass the wait above.
+    assert!(
+        captured.contains("with encoding"),
+        "the attachment arrived but the ENCODING did not, so that ext was lost \
+         inbound.\n--- z_sub_attachment.c (on wz) stdout+stderr ---\n{captured}"
+    );
+
+    graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 31 (`pico->wz`) — upstream's `z_sub_thr.c`, running on wz, measures the
+/// rate of samples from the REAL zenoh-pico `z_pub_thr` under BATCHED load.
+///
+/// NAMING: "measures", not "counts". Layer E's sweep carries `--skip capi_c`
+/// (it excludes the zenoh-c ABI family, whose artifact a later lane rebuilds),
+/// and `..._on_wz_capi_counts_...` contains that token as a substring — so the
+/// first spelling of this test registered and was SILENTLY filtered out, which
+/// the lane reported only as "28 passed; 3 filtered out" against a 31-test
+/// file. Read the lane LOG, not its verdict.
+///
+/// The throughput pair is the only leg that puts many small samples on the wire
+/// back to back, which is what exercises the transport's batching seam rather
+/// than its single-message path: `z_pub_thr` publishes in a tight loop, so the
+/// peer's frames carry several messages each. A receiver that decoded only the
+/// first message of a batch would still pass every single-sample leg here and
+/// would report a throughput of roughly one message per frame.
+// wz-proves: api-compat-pico pico->wz partial
+#[test]
+#[ignore = "spawns the real zenoh-pico z_pub_thr CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zsubthr_source_on_wz_capi_measures_a_real_pico_batched_stream() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = dropin_binary("z_sub_thr", dir.path());
+    let z_pub_thr = zenoh_pico_cli_binary("z_pub_thr");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    // Both sides default to the `thr` keyexpr.
+    let mut sub_out = tempfile::tempfile().expect("sub_thr drop-in capture");
+    let writer = sub_out.try_clone().expect("dup sub_thr handle");
+    let err = sub_out.try_clone().expect("dup sub_thr stderr handle");
+    let mut sub = ChildGuard::wrap(
+        "z_sub_thr.c on wz-capi-pico",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-l", &endpoint, "-m", "peer"])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(err))
+            .spawn()
+            .expect("spawn the compiled z_sub_thr drop-in"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the z_sub_thr.c drop-in never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    let mut pub_out = tempfile::tempfile().expect("foreign z_pub_thr capture");
+    let pub_writer = pub_out.try_clone().expect("dup foreign publisher handle");
+    let mut publisher = ChildGuard::wrap(
+        "real zenoh-pico z_pub_thr",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_pub_thr)
+            .args(["-e", &endpoint, "-m", "client"])
+            .stdout(Stdio::from(pub_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_pub_thr"),
+    );
+
+    // Upstream prints one messages-per-second figure per elapsed period.
+    let captured = wait_for_capture_alive(
+        sub.child_mut(),
+        &mut sub_out,
+        EXCHANGE_TIMEOUT,
+        "a non-zero message rate",
+        |text: &str| {
+            text.lines()
+                .any(|line| line.trim().parse::<f64>().map(|v| v > 0.0).unwrap_or(false))
+                .then(|| text.to_owned())
+        },
+    )
+    .unwrap_or_else(|captured| {
+        let driver = read_captured(&mut pub_out);
+        panic!(
+            "upstream z_sub_thr.c on wz's C-ABI never reported a NON-ZERO message \
+             rate for the REAL zenoh-pico z_pub_thr's stream.\n\
+             --- z_sub_thr.c (on wz) stdout+stderr ---\n{captured}\n\
+             --- REAL pico z_pub_thr stdout ---\n{driver}"
+        )
+    });
+    let best = captured
+        .lines()
+        .filter_map(|line| line.trim().parse::<f64>().ok())
+        .fold(0.0f64, f64::max);
+    // A receiver that decoded one message per frame would land near the frame
+    // rate, orders of magnitude below this. The bound is deliberately loose:
+    // this leg asserts BATCHING happened, not how fast the host is.
+    assert!(
+        best > 1000.0,
+        "the best observed rate was {best:.3} msg/s, which is the shape of a \
+         receiver decoding roughly one message per FRAME rather than draining the \
+         batch.\n--- z_sub_thr.c (on wz) stdout+stderr ---\n{captured}"
+    );
+
+    graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 32 (`ABI-model gate`) — `z_pong.c` is the one program of the 32 that
+/// cannot be driven, and the reason is not a missing export or a feature flag.
+///
+/// Its callback does not use the API at all:
+///
+/// ```c
+/// void callback(z_loaned_sample_t* sample, void* context) {
+///     const z_loaned_publisher_t* pub = z_loan(*(z_owned_publisher_t*)context);
+///     z_owned_bytes_t payload = {._val = sample->payload};
+///     z_publisher_put(pub, z_move(payload), NULL);
+/// }
+/// ```
+///
+/// `sample->payload` reads a FIELD of pico's concrete `_z_sample_t` at pico's
+/// offset, and `{._val = ...}` writes a field of pico's concrete
+/// `z_owned_bytes_t`. Neither goes through `z_sample_payload` or any exported
+/// function. This crate's drop-in contract is the exported SYMBOLS plus the
+/// owned-struct SIZES — a loaned sample is an opaque handle, deliberately (see
+/// [`crate`]'s sibling accessors) — so a program that dereferences pico's
+/// internal layout is reading wz's marshal as if it were `_z_sample_t`.
+///
+/// Reproducing the layout would not be enough either, and that is worth stating
+/// because it is the part that looks close: the C code COPIES the payload
+/// struct by value and then `z_move`s it into `z_publisher_put`, which consumes
+/// it. wz's bytes handle is a `Box`, so a by-value copy that is later consumed
+/// is a double free. pico survives it because `_z_bytes_t` is a refcounted
+/// arc-slice vector; matching that means reimplementing pico's internal slice
+/// allocator, not widening a struct.
+///
+/// Measured, not assumed: the real `z_ping` against this program on wz
+/// completes ZERO of its round trips and then sits until killed. The reverse
+/// direction IS driven and passes — `z_ping.c` on wz against the real `z_pong`
+/// is the leg above, and `z_ping.c` touches no internals.
+///
+/// So this gate asserts the REASON, and fires if upstream ever rewrites the
+/// callback in terms of the API — at which point the real leg becomes writable
+/// and should replace this one.
+// wz-proves: api-compat-pico pico->wz partial
+#[test]
+#[ignore = "reads upstream z_pong.c; run by run-ci Layer E"]
+fn pico_zpong_dereferences_pico_internals_and_so_cannot_be_driven() {
+    let src = project_root().join("vendor/zenoh-pico/examples/unix/c11/z_pong.c");
+    let text = std::fs::read_to_string(&src)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", src.display()));
+    // Both halves of the bypass, asserted separately so a partial rewrite is
+    // not read as the whole one.
+    assert!(
+        text.contains("sample->payload"),
+        "upstream z_pong.c no longer reads `sample->payload` directly. If its \
+         callback now uses `z_sample_payload`, this program is drivable on wz \
+         and this gate must be replaced by a real leg (a wz z_pong echoing the \
+         REAL zenoh-pico z_ping).\n--- {} ---\n{text}",
+        src.display()
+    );
+    assert!(
+        text.contains("._val = sample->payload"),
+        "upstream z_pong.c no longer builds its `z_owned_bytes_t` by writing \
+         pico's internal `_val` field. See this gate's doc: the by-value copy \
+         plus `z_move` is the half that makes a layout match insufficient.\n\
+         --- {} ---\n{text}",
+        src.display()
+    );
+}
+
+/// LEG 31 (`configuration gate`) — FOUR of the 32 have NO body to drive at
+/// this pin, and this leg exists to say which, and to fire when that stops
+/// being true.
+///
+/// `z_pub_tls.c`, `z_sub_tls.c`, `z_pub_st.c` and `z_sub_st.c` are the
+/// remainder without a driven leg, and the reason is not a missing wz export.
+/// Each guards its whole `main` on a `Z_FEATURE_*` combination the pinned
+/// CMake-generated config does not have — TLS wants `Z_FEATURE_LINK_TLS == 1`
+/// (the config has 0) and the single-threaded pair wants
+/// `Z_FEATURE_MULTI_THREAD == 0` (the config has 1) — so all four compile to a
+/// `#else` branch whose entire body is one `printf`. Measured two independent
+/// ways: by running each binary (it prints its `ERROR: Zenoh pico ...` line and
+/// exits without reaching `z_open`) and by reading the `#if` at the top of each
+/// source. A leg that drove them would exercise zero wz code, which is the
+/// definition of a vacuous proof.
+///
+/// The single-threaded pair is worth naming separately, because it is the one
+/// place a reader might expect wz to have a gap and it does not: wz's session
+/// SELF-DRIVES, so `zp_start_read_task` and friends are documented no-ops here.
+/// A `zp_spin_once` build would need `Z_FEATURE_MULTI_THREAD == 0` in the
+/// header set, which is a different pico build, not a different wz export.
+///
+/// So this asserts the CONFIGURATION instead, and it is written to be
+/// self-retracting: the moment the pinned pico build turns TLS on, the header
+/// check below reds and whoever moved the pin is told to write the two real
+/// legs. That is the point — an exclusion that names its own re-open trigger
+/// costs one test and cannot quietly outlive its reason.
+///
+/// Note what the fix is NOT. Rebuilding pico with TLS on is not a local change:
+/// the `Z_FEATURE_*` set decides several owned struct SIZES, and wz's cdylib is
+/// built for the CURRENT set. A second, TLS-enabled header tree would need a
+/// second cdylib arm to link against, which is the same hazard run-ci's Layer
+/// C1cc already manages for the zenoh-c ABI.
+// wz-proves: api-compat-pico pico->wz partial
+#[test]
+#[ignore = "reads the CMake-generated pico config and runs two stub binaries; \
+            run by run-ci Layer E"]
+fn pico_zfeature_gated_examples_are_stub_mains_at_this_pin_and_say_so() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-ins");
+    // The generated config is the SSOT for what these programs compiled to —
+    // not the CMakeLists default, which R311y466 recorded as the trap.
+    let generated = zenoh_pico_include_dirs()[0].join("zenoh-pico/config.h");
+    let config = std::fs::read_to_string(&generated)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", generated.display()));
+    for (feature, expected) in [
+        ("Z_FEATURE_LINK_TLS", "#define Z_FEATURE_LINK_TLS 0"),
+        ("Z_FEATURE_MULTI_THREAD", "#define Z_FEATURE_MULTI_THREAD 1"),
+    ] {
+        assert!(
+            config.contains(expected),
+            "the pinned zenoh-pico build's {feature} changed, so the examples \
+             guarded on it now have a real body and this leg must be replaced by \
+             DRIVEN legs for them. See this test's doc for why the cdylib arm \
+             matters.\n--- {} ---\n{}",
+            generated.display(),
+            config
+                .lines()
+                .filter(|l| l.contains("Z_FEATURE_LINK_TLS")
+                    || l.contains("Z_FEATURE_MULTI_THREAD"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    for example in ["z_pub_tls", "z_sub_tls", "z_pub_st", "z_sub_st"] {
+        let exe = dropin_binary(example, dir.path());
+        let out = Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&exe)
+            .output()
+            .unwrap_or_else(|e| panic!("run {example} on wz: {e}"));
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            printed.contains("ERROR: Zenoh pico"),
+            "{example} on wz did NOT take its feature-gated stub branch, so it \
+             has a body after all and owes a driven leg.\n--- stdout ---\n{printed}\
+             \n--- stderr ---\n{}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
 }
