@@ -1529,11 +1529,33 @@ layer_c1u_cargo_test_tls() {
     # All in the same tls_pem_mtls_e2e binary, so the `--test` wiring below
     # already covers it (no gate-skew). Same gate-skew reasoning: without this
     # invocation the module is empty and the cert-PEM/mTLS path is unexercised.
+    #
+    # R311y537 — the three count guards moved from bare `grep -q` to
+    # `_runci_guarded_test`, and the `session_reconnect_e2e` count moved 5 -> 6.
+    #
+    # The COUNT was stale: `a_dying_link_delivers_remote_liveliness_deletes_to_
+    # the_dialer` landed in that file and this guard was never updated, so the
+    # lane has been red ever since — and nobody saw it, because Layer C1j in the
+    # SAME hosted job failed FIRST and hid it. It surfaced only once R311y536
+    # fixed C1j. Third unmasking of that round: a lane list read off a red run is
+    # a LOWER BOUND on the red set, never the set.
+    #
+    # The SILENCE was the worse half. `| grep -qE '<pattern>'` discards the
+    # child's output AND the reason: this lane failed in 3 s having printed one
+    # unrelated `test result` line and then `Layer C1u FAIL`, stating neither
+    # what it expected nor what it got, so diagnosing it meant running the three
+    # commands by hand. `_runci_guarded_test` tees the output and names the
+    # expectation on mismatch, which is what makes a count guard tolerable at
+    # all — it is a citation, and a citation has to say when it is wrong.
+    _runci_guarded_test C1u + cargo test -p wz-session-core --features alloc --lib locator --quiet \
+        || return 1
+    _runci_guarded_test C1u 2 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
+        || return 1
+    _runci_guarded_test C1u 6 cargo test -p wz-runtime-tokio --features transport-link-tls --test session_reconnect_e2e --quiet \
+        || return 1
+    _runci_guarded_test C1u 6 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_pem_mtls_e2e --quiet \
+        || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-tls --test session_reconnect_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 5 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_pem_mtls_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 6 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-tls --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-tls --quiet -- -D warnings)
 }
@@ -1567,10 +1589,26 @@ layer_c1u_cargo_test_tls() {
 # per-binary steps, each with its anchored exact-count guard (1 / 5 passed).
 # ws loopback is pure cargo, hostable.
 layer_c1v_cargo_test_ws() {
+    # R311y537 — the SECOND instance of C1u's stale count, found by auditing
+    # every bare guard in this file against reality rather than by waiting for
+    # this lane to surface. Same test binary, same missed update, same 5 -> 6:
+    # one commit added a test to `session_reconnect_e2e` and two lanes counted
+    # it. The audit that found it ran each guarded command and compared the
+    # number libtest printed to the number the guard demands, and it cleared the
+    # other 53 bare guards in this file as CURRENT — so the class here is two
+    # instances of one missed update, not a general rot.
+    #
+    # Converted to `_runci_guarded_test` for the reason C1u states at length: a
+    # bare `grep -q` fails without saying what it wanted, which is why the first
+    # instance survived behind another lane's failure instead of being read off
+    # its own message.
+    _runci_guarded_test C1v + cargo test -p wz-session-core --features alloc --lib locator --quiet \
+        || return 1
+    _runci_guarded_test C1v 1 cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet \
+        || return 1
+    _runci_guarded_test C1v 6 cargo test -p wz-runtime-tokio --features transport-link-ws --test session_reconnect_e2e --quiet \
+        || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-ws --test session_reconnect_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 5 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-ws --quiet -- -D warnings)
 }
