@@ -230,6 +230,23 @@ pub fn build_request_query_with_meta(
     if meta.timeout_ms != 0 {
         builder = builder.request_timeout_ms(meta.timeout_ms as u64);
     }
+    // Request-level QoS ext threading. UNGATED, matching the
+    // [`RequestQueryBuilder::request_qos`] setter it feeds and the
+    // `QueryMetadata::qos` slot itself — there is no `query-qos` cargo atom;
+    // the Request outer QoS ext is part of the Request envelope every query
+    // build already emits into, not a separately composable codec vertical.
+    //
+    // The DEFAULT byte is SUPPRESSED, mirroring the Push side's
+    // `build_push_outer_extensions` treatment: zenoh-pico decodes an absent
+    // qos ext as `_Z_N_QOS_DEFAULT` (`_val = 5` = Data / Drop / no-express),
+    // so emitting `QosLevel::DEFAULT` explicitly would put bytes on the wire
+    // that carry no information and would make an options-default `z_get`
+    // wire-differ from a no-options one.
+    if let Some(qos) = meta.qos {
+        if qos != crate::sample::QosLevel::DEFAULT {
+            builder = builder.request_qos(qos.raw);
+        }
+    }
     builder.build()
 }
 
@@ -1347,6 +1364,102 @@ mod tests {
             via_empty, no_meta,
             "empty parameters must elide Q_P (no-meta parity)",
         );
+    }
+
+    /// R311y551 — `build_request_query_with_meta` threads the QueryMetadata
+    /// `qos` slot onto the Request outer QoS ext, byte-identical to a direct
+    /// `RequestQueryBuilder::request_qos_typed`. The composition proof for the
+    /// `z_get_options_t.{priority, congestion_control, is_express}` ->
+    /// QueryOptions -> QueryMetadata -> wire path that did not exist before
+    /// this round: the packer and the emitter were both built, and nothing
+    /// joined them, so every request-side QoS knob in both C ABIs was accepted
+    /// and dropped.
+    ///
+    /// Three claims, because a single equality would not separate them:
+    /// (1) a NON-default QoS reaches the wire identically to the hand-built
+    /// builder chain; (2) the DEFAULT byte is SUPPRESSED — an options-default
+    /// `z_get` must be wire-identical to a no-options one, which is what makes
+    /// the C ABI's defaults safe to always populate; (3) each of the three
+    /// sub-fields moves the bytes ON ITS OWN, so a test that only ever set all
+    /// three at once could not tell a working `priority` from a working
+    /// `express` that happened to carry it.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn build_request_query_with_meta_threads_qos_to_the_request_ext() {
+        use crate::qos::{CongestionControl, Priority};
+        use crate::sample::QosLevel;
+
+        // (1) A non-default QoS is byte-identical to the direct builder chain.
+        let qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
+        let meta = crate::metadata::QueryMetadata {
+            qos: Some(qos),
+            ..Default::default()
+        };
+        let via_meta = build_request_query_with_meta(42, 7, None, &meta)
+            .unwrap()
+            .wire();
+        let via_builder = RequestQueryBuilder::new(42, 7, None)
+            .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
+            .build()
+            .unwrap()
+            .wire();
+        assert_eq!(
+            via_meta, via_builder,
+            "QueryMetadata.qos must thread onto the Request QoS ext byte-for-byte \
+             vs a direct RequestQueryBuilder::request_qos_typed chain",
+        );
+
+        // The ext is really THERE — otherwise (1) would hold vacuously if the
+        // builder had also dropped it. A no-QoS build must differ.
+        let no_meta = build_request_query(42, 7, None).unwrap().wire();
+        assert_ne!(
+            via_meta, no_meta,
+            "a non-default QoS must CHANGE the wire; equality here would mean \
+             both arms dropped it and claim (1) proved nothing",
+        );
+
+        // (2) The DEFAULT byte is suppressed: zenoh-pico decodes an absent ext
+        // as `_Z_N_QOS_DEFAULT` (_val = 5), so emitting it would make an
+        // options-default query wire-differ from a no-options one.
+        let default_meta = crate::metadata::QueryMetadata {
+            qos: Some(QosLevel::DEFAULT),
+            ..Default::default()
+        };
+        let via_default = build_request_query_with_meta(42, 7, None, &default_meta)
+            .unwrap()
+            .wire();
+        assert_eq!(
+            via_default, no_meta,
+            "a DEFAULT QoS must elide the ext (no-meta parity), mirroring the \
+             Push side's build_push_outer_extensions suppression",
+        );
+
+        // (3) Each sub-field moves the bytes on its own, starting from DEFAULT
+        // so exactly one bit differs per arm.
+        for (label, one) in [
+            (
+                "priority",
+                QosLevel::DEFAULT.with_priority(Priority::RealTime),
+            ),
+            (
+                "congestion",
+                QosLevel::DEFAULT.with_congestion(CongestionControl::Block),
+            ),
+            ("express", QosLevel::DEFAULT.with_express(true)),
+        ] {
+            let single = crate::metadata::QueryMetadata {
+                qos: Some(one),
+                ..Default::default()
+            };
+            let wire = build_request_query_with_meta(42, 7, None, &single)
+                .unwrap()
+                .wire();
+            assert_ne!(
+                wire, no_meta,
+                "the {label} sub-field alone must reach the wire; if it does not, \
+                 a three-field test would still pass on the other two",
+            );
+        }
     }
 
     /// R311y250 — `build_request_query_with_meta` threads the QueryMetadata

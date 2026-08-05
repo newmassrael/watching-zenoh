@@ -52,16 +52,17 @@ pub struct z_querier_options_t {
     pub target: c_int,
     /// Reply consolidation. CARRIED.
     pub consolidation: z_query_consolidation_t,
-    /// Congestion control. Accepted and ignored; see the residual list.
+    /// Congestion control. R311y551 — HONOURED: declared once here and packed
+    /// into every `z_querier_get`'s Request QoS ext.
     pub congestion_control: c_int,
-    /// Express flag. Accepted and ignored.
+    /// Express flag. R311y551 — HONOURED (bit 4 of the Request QoS byte).
     pub is_express: bool,
     /// Destination locality. Accepted and ignored.
     pub allowed_destination: c_int,
     /// Which reply keyexprs are accepted — unstable-only.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     pub accept_replies: c_int,
-    /// Priority. Accepted and ignored.
+    /// Priority. R311y551 — HONOURED (bits 0-2 of the Request QoS byte).
     pub priority: c_int,
     /// Timeout in milliseconds. CARRIED.
     pub timeout_ms: u64,
@@ -225,6 +226,15 @@ pub unsafe extern "C" fn z_declare_querier(
             if let Some(mode) = crate::get::consolidation_of(o.consolidation.mode) {
                 base = base.with_consolidation(mode);
             }
+            // R311y551 — the request-side QoS trio, previously accepted and
+            // ignored here exactly as on `z_get`. Declared ONCE on the querier
+            // and inherited by every `z_querier_get`, which is upstream's shape:
+            // `z_querier_get_options_t` carries no QoS fields at all, so the
+            // per-get call has nothing to override them with.
+            base = base
+                .with_priority(crate::publisher::priority_from_c(o.priority))
+                .with_congestion_control(crate::publisher::congestion_from_c(o.congestion_control))
+                .with_express(o.is_express);
         }
 
         let handle = Box::into_raw(Box::new(QuerierState {

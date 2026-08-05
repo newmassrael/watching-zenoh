@@ -2621,6 +2621,84 @@ fn query_options_query_metadata_extracts_wire_fields() {
     );
 }
 
+/// R311y551 — the other half of the request-QoS seam: `QueryOptions` ->
+/// `query_metadata()` -> the Request bytes. `wz-capi-c`'s
+/// `a_get_options_qos_trio_reaches_the_query_options_and_the_wire` and
+/// `wz-capi-pico`'s twin both end at `QueryOptions.qos`, which is where this
+/// picks up, so the two ABIs' option structs are joined to the wire without a
+/// gap.
+///
+/// Three separate claims, because they fail independently:
+/// (1) the three per-field setters MERGE rather than overwrite — a
+/// `with_express` that reset the byte would silently discard the priority set
+/// one line earlier, and a test that set only one field could never see it;
+/// (2) the merged byte survives `query_metadata()`;
+/// (3) it reaches the wire identically to a hand-built builder chain.
+#[cfg(all(feature = "query-get", feature = "codec-request"))]
+#[test]
+fn query_options_qos_reaches_the_request_wire() {
+    use wz_codecs_test_support::TestWire;
+    use wz_session_core::qos::{CongestionControl, Priority};
+
+    let opts = QueryOptions::get()
+        .with_priority(Priority::InteractiveHigh)
+        .with_congestion_control(CongestionControl::Block)
+        .with_express(true);
+
+    // (1) All three survive each other.
+    let qos = opts.qos.expect("the setters populate the slot");
+    assert_eq!(qos.priority(), Priority::InteractiveHigh, "priority merged");
+    assert_eq!(
+        qos.congestion(),
+        CongestionControl::Block,
+        "congestion merged"
+    );
+    assert!(qos.is_express(), "express merged");
+
+    // (2) The byte survives the metadata derivation.
+    let meta = opts.query_metadata();
+    assert_eq!(meta.qos, Some(qos), "query_metadata carries the QoS byte");
+
+    // (3) And it lands on the wire where a direct builder chain puts it.
+    let wire =
+        wz_session_core::request_build::build_request_query_with_meta(7, 0, Some("q/qos"), &meta)
+            .expect("request build")
+            .wire();
+    let expected = wz_session_core::request_build::build_request_query_with_meta(
+        7,
+        0,
+        Some("q/qos"),
+        &wz_session_core::metadata::QueryMetadata {
+            qos: Some(qos),
+            ..meta.clone()
+        },
+    )
+    .expect("reference build")
+    .wire();
+    assert_eq!(wire, expected);
+
+    // The reference arm above shares `meta`, so it cannot discriminate on its
+    // own — assert the QoS ext is actually PRESENT by diffing against the same
+    // query with the slot cleared. Without this the equality would hold on a
+    // build that dropped the QoS everywhere.
+    let without = wz_session_core::request_build::build_request_query_with_meta(
+        7,
+        0,
+        Some("q/qos"),
+        &wz_session_core::metadata::QueryMetadata {
+            qos: None,
+            ..meta.clone()
+        },
+    )
+    .expect("no-qos build")
+    .wire();
+    assert_ne!(
+        wire, without,
+        "the QoS byte must CHANGE the Request bytes; equality here would mean \
+         the slot never reached the encoder and claim (3) proved nothing",
+    );
+}
+
 // R311y326 — the `is_empty()` verdict for default options is now
 // build-dependent: with `query-timeout` ON, default options resolve the
 // timeout to `DEFAULT_QUERY_TIMEOUT_MS` (matching pico/zenoh, neither of which

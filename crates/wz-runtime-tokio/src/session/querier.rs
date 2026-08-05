@@ -10,6 +10,14 @@
 
 use super::*;
 
+// R311y551 — the Request-side QoS trio. Imported here rather than relied on
+// through the `super::*` glob because the glob re-exports the session module's
+// own surface, not `wz-session-core`'s qos vocabulary; `publish_common.rs`
+// names the same three for the same reason.
+use crate::sample::QosLevel;
+use wz_session_core::qos::CongestionControl;
+use wz_session_core::qos::Priority;
+
 /// R311y326 — the platform default per-query timeout, in milliseconds.
 ///
 /// Mirrors zenoh-pico's `Z_GET_TIMEOUT_DEFAULT`
@@ -208,6 +216,29 @@ pub struct QueryOptions {
     /// field directly — [`QueryOptions::effective_timeout_ms`] is the gate; a
     /// raw read is what let a `query-timeout`-off build arm the deadline.
     pub timeout_ms: u32,
+    /// Request-level QoS — priority + congestion-control + express packed into
+    /// the single `_z_n_qos_create` byte carried by the Request outer extension
+    /// `_Z_MSG_EXT_ENC_ZINT | 0x01`. The query-side twin of
+    /// [`PublishOptions::qos`](super::PublishOptions::qos), and the mirror of
+    /// zenoh-c's `z_get_options_t.{priority, congestion_control, is_express}` /
+    /// zenoh-pico's identically-named fields.
+    ///
+    /// `None` elides the ext, and so does a value equal to
+    /// [`QosLevel::DEFAULT`] — the suppression lives in
+    /// `build_request_query_with_meta`, so "options default" and "no options"
+    /// are wire-identical. Set via [`Self::with_priority`] /
+    /// [`Self::with_congestion_control`] / [`Self::with_express`], which merge
+    /// per-field through [`QosLevel`]'s SSOT masks, or wholesale via
+    /// [`Self::with_qos`].
+    ///
+    /// UNGATED, like the field it mirrors: there is no `query-qos` cargo atom
+    /// because the Request outer QoS ext is part of the Request envelope every
+    /// query build emits into, not a separately composable codec vertical. The
+    /// packer ([`QosLevel::from_parts`]) and the emitter
+    /// ([`RequestQueryBuilder::request_qos_typed`](wz_session_core::request_build::RequestQueryBuilder::request_qos_typed))
+    /// were both already built and ungated; this field is the caller-facing
+    /// slot that had been missing between them.
+    pub qos: Option<QosLevel>,
 }
 
 impl QueryOptions {
@@ -222,6 +253,48 @@ impl QueryOptions {
     pub fn with_allowed_destination(mut self, locality: Locality) -> Self {
         self.allowed_destination = locality;
         self
+    }
+
+    /// Set the whole packed Request QoS byte at once. The escape hatch for a
+    /// caller that already holds a [`QosLevel`] (e.g. one relayed from an
+    /// inbound message); prefer the three per-field setters below, which
+    /// preserve the sub-fields they do not name.
+    pub fn with_qos(mut self, qos: QosLevel) -> Self {
+        self.qos = Some(qos);
+        self
+    }
+
+    /// Set the query's transmission priority, merging it into the low 3 bits of
+    /// the packed QoS byte and PRESERVING any congestion / express bits a prior
+    /// setter attached. Mirror of `z_get_options_t.priority`.
+    pub fn with_priority(mut self, priority: Priority) -> Self {
+        self.qos = Some(self.qos_base().with_priority(priority));
+        self
+    }
+
+    /// Set the query's congestion-control mode, merging it into the `nodrop`
+    /// bit (3) and PRESERVING the priority / express bits. Mirror of
+    /// `z_get_options_t.congestion_control`.
+    pub fn with_congestion_control(mut self, congestion: CongestionControl) -> Self {
+        self.qos = Some(self.qos_base().with_congestion(congestion));
+        self
+    }
+
+    /// Set the query's express flag, merging it into bit 4 and PRESERVING the
+    /// priority / congestion bits. Mirror of `z_get_options_t.is_express`.
+    pub fn with_express(mut self, express: bool) -> Self {
+        self.qos = Some(self.qos_base().with_express(express));
+        self
+    }
+
+    /// The base byte the three per-field QoS setters merge into: whatever a
+    /// prior setter attached, else the wire DEFAULT ([`QosLevel::DEFAULT`] =
+    /// 0x05 = Data / Drop / no-express) rather than the zeroed
+    /// `Control`-priority `QosLevel::default()`. Same choice, and same trap
+    /// avoided, as `PublishOptions::qos_base`: starting from raw 0 would
+    /// silently demote an unset priority to `Control`.
+    fn qos_base(&self) -> QosLevel {
+        self.qos.unwrap_or(QosLevel::DEFAULT)
     }
 
     /// Pin the reply target hint. `Some(target)` flips the Q_T flag
@@ -575,6 +648,11 @@ impl QueryOptions {
                 )),
             },
             timeout_ms: self.effective_timeout_ms(),
+            // Ungated, like the field (see `QueryOptions::qos`). The DEFAULT
+            // suppression lives one layer down in
+            // `build_request_query_with_meta` so both this path and any direct
+            // `QueryMetadata` construction get it.
+            qos: self.qos,
         }
     }
 }

@@ -95,9 +95,10 @@ pub struct z_get_options_t {
     /// Value encoding for the query payload. R311y547 — READ, and carried in
     /// the Query value ext alongside the payload. Typed now that it is used.
     pub encoding: *mut crate::abi::z_moved_encoding_t,
-    /// Congestion control. Accepted and ignored.
+    /// Congestion control. R311y551 — HONOURED: packed into the Request QoS
+    /// ext alongside `priority` / `is_express`.
     pub congestion_control: c_int,
-    /// Express flag. Accepted and ignored.
+    /// Express flag. R311y551 — HONOURED (bit 4 of the Request QoS byte).
     pub is_express: bool,
     /// Destination locality. Accepted and ignored.
     pub allowed_destination: c_int,
@@ -105,7 +106,7 @@ pub struct z_get_options_t {
     /// `Z_FEATURE_UNSTABLE_API`.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     pub accept_replies: c_int,
-    /// Priority. Accepted and ignored.
+    /// Priority. R311y551 — HONOURED (bits 0-2 of the Request QoS byte).
     pub priority: c_int,
     /// Querier source info — unstable-only.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
@@ -596,6 +597,19 @@ unsafe fn get_options(options: *mut z_get_options_t) -> QueryOptions {
     if let Some(attachment) = unsafe { crate::bytes::take_payload(o.attachment) } {
         opts = opts.with_attachment(attachment);
     }
+    // R311y551 — the request-side QoS trio. Until this round all three were
+    // "accepted and ignored": `QueryOptions` had no slot to put them in, so a
+    // program that asked for express delivery at `Z_PRIORITY_REAL_TIME` was
+    // correct about the API and sent an ordinary Data-priority query. They ride
+    // ONE packed byte (the Request outer ext `_Z_MSG_EXT_ENC_ZINT | 0x01`), so
+    // all three are set unconditionally rather than each behind an
+    // is-it-non-default test: the suppression of a fully-default byte belongs
+    // at the single wire seam in `build_request_query_with_meta`, not smeared
+    // across three call sites that cannot see each other's contribution.
+    opts = opts
+        .with_priority(crate::publisher::priority_from_c(o.priority))
+        .with_congestion_control(crate::publisher::congestion_from_c(o.congestion_control))
+        .with_express(o.is_express);
     opts
 }
 
@@ -747,6 +761,75 @@ mod tests {
         // goes on the wire.
         assert_eq!(hint.packed_id, 8);
         assert_eq!(hint.schema, None);
+    }
+
+    /// R311y551 — the request-side QoS trio reaches [`QueryOptions`] AND the
+    /// wire, end to end, from the zenoh-c option struct.
+    ///
+    /// This half ends at `QueryOptions.qos`, which is exactly where
+    /// `wz-runtime-tokio`'s `query_options_qos_reaches_the_request_wire` picks
+    /// it up (`QueryOptions` -> `query_metadata()` -> the Request bytes). The
+    /// two meet at that field and nothing between the C struct and the wire is
+    /// taken on trust; the split is because `query_metadata` is `pub(super)`
+    /// and widening it to prove a test would be the tail wagging the ABI.
+    ///
+    /// The VALUES matter as much as the plumbing here. zenoh-c's
+    /// `z_congestion_control_t` is INVERTED against zenoh-pico's (BLOCK is 0
+    /// here, 1 there — R311y545 found that by measurement after shipping the
+    /// pico values in this crate), so a mapping that read the sibling ABI's
+    /// constant would produce a byte that is wrong in exactly the way no
+    /// layout or link check can see.
+    #[test]
+    fn a_get_options_qos_trio_reaches_the_query_options_and_the_wire() {
+        use wz_runtime_tokio::qos::{CongestionControl, Priority};
+
+        let mut opts = z_get_options_t {
+            target: crate::get::Z_QUERY_TARGET_BEST_MATCHING,
+            consolidation: z_query_consolidation_t {
+                mode: crate::get::Z_CONSOLIDATION_MODE_AUTO,
+            },
+            payload: std::ptr::null_mut(),
+            encoding: std::ptr::null_mut(),
+            // DROP, which is 1 in zenoh-c. Deliberately the value that is BLOCK
+            // in zenoh-pico: a mapping cribbed from the sibling ABI inverts the
+            // `nodrop` bit and this assertion is what catches it.
+            congestion_control: crate::publisher::Z_CONGESTION_CONTROL_DROP,
+            is_express: true,
+            allowed_destination: crate::publisher::ZC_LOCALITY_ANY,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            accept_replies: ZC_REPLY_KEYEXPR_MATCHING_QUERY,
+            // Z_PRIORITY_REAL_TIME = 1, distinct from the default (5) so an
+            // implementation that ignored the field and kept the default would
+            // fail rather than coincide.
+            priority: 1,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            source_info: std::ptr::null_mut(),
+            attachment: std::ptr::null_mut(),
+            timeout_ms: 0,
+        };
+        // SAFETY: a live local.
+        let resolved = unsafe { get_options(&mut opts) };
+        let qos = resolved.qos.expect("the QoS trio reaches QueryOptions");
+        assert_eq!(qos.priority(), Priority::RealTime, "priority");
+        assert_eq!(qos.congestion(), CongestionControl::Drop, "congestion");
+        assert!(qos.is_express(), "express");
+
+        // The DEFAULT options must ALSO populate the slot rather than leaving
+        // it `None`: upstream's request-side default is BLOCK, which is NOT the
+        // wire DEFAULT byte (DROP), so a default `z_get` legitimately carries a
+        // QoS ext. Leaving it unset here would silently downgrade every default
+        // query to Drop — the same class of defect as the inverted enum, one
+        // layer up.
+        // SAFETY: a live local.
+        unsafe { z_get_options_default(&mut opts) };
+        // SAFETY: a live local.
+        let defaulted = unsafe { get_options(&mut opts) };
+        let default_qos = defaulted
+            .qos
+            .expect("the options-default QoS reaches QueryOptions too");
+        assert_eq!(default_qos.congestion(), CongestionControl::Block);
+        assert_eq!(default_qos.priority(), Priority::Data);
+        assert!(!default_qos.is_express());
     }
 
     /// The defaults are upstream's, and `timeout_ms` is 0 meaning "resolve the

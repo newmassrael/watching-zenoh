@@ -158,6 +158,11 @@ pub(crate) struct QuerierState {
     consolidation: z_consolidation_mode_t,
     timeout_ms: u64,
     accept_replies: z_reply_keyexpr_t,
+    /// R311y551 — the request-QoS trio declared once on the querier and
+    /// inherited by every `z_querier_get`. pico's `z_querier_get_options_t`
+    /// carries no QoS fields, so the per-get call has nothing to override with;
+    /// this is where they have to live.
+    qos: crate::get::PicoQueryQos,
     matches: StdMutex<Vec<MatchId>>,
 }
 
@@ -281,12 +286,13 @@ pub unsafe extern "C" fn z_declare_querier(
         // pico dereferences `options` only when non-null and otherwise takes the
         // defaults, so a null `options` is a valid default querier — which is
         // exactly what `z_get_lat.c` passes.
-        let (target, consolidation, timeout_ms, accept_replies) = if options.is_null() {
+        let (target, consolidation, timeout_ms, accept_replies, qos) = if options.is_null() {
             (
                 Z_QUERY_TARGET_BEST_MATCHING,
                 Z_CONSOLIDATION_MODE_AUTO,
                 0u64,
                 Z_REPLY_KEYEXPR_MATCHING_QUERY,
+                crate::get::PicoQueryQos::defaults(),
             )
         } else {
             (
@@ -294,6 +300,11 @@ pub unsafe extern "C" fn z_declare_querier(
                 (*options).consolidation.mode,
                 (*options).timeout_ms,
                 (*options).accept_replies,
+                crate::get::PicoQueryQos {
+                    congestion_control: (*options).congestion_control,
+                    priority: (*options).priority,
+                    is_express: (*options).is_express,
+                },
             )
         };
         let boxed = Box::new(QuerierState {
@@ -303,6 +314,7 @@ pub unsafe extern "C" fn z_declare_querier(
             consolidation,
             timeout_ms,
             accept_replies,
+            qos,
             matches: StdMutex::new(Vec::new()),
         });
         *querier = z_owned_querier_t {
@@ -399,6 +411,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             state.accept_replies,
             payload,
             attachment,
+            state.qos,
             closure,
         )
     })

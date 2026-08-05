@@ -142,6 +142,26 @@ pub struct QueryMetadata {
     /// per zenoh-pico's `_z_n_msg_request_needed_exts` predicate
     /// (`msg->_ext_timeout_ms != 0`).
     pub timeout_ms: u32,
+    /// Request-level QoS metadata — priority + congestion-control +
+    /// express packed into the one `_z_n_qos_create` byte, carried as
+    /// the Request outer extension `_Z_MSG_EXT_ENC_ZINT | 0x01`
+    /// (zenoh-pico `_z_request_encode`, `src/protocol/codec/network.c`;
+    /// zenoh `QoSType` on `Request`).
+    ///
+    /// The Request-side twin of [`PushMetadata::qos`]. Before this slot
+    /// existed the packer ([`crate::sample::QosLevel::from_parts`]) and
+    /// the emitter
+    /// ([`crate::request_build::RequestQueryBuilder::request_qos_typed`])
+    /// were both built and both reachable only by hand-assembling a
+    /// builder — no `QueryOptions` field fed them, so a `z_get` that set
+    /// congestion control, priority or express was correct about the API
+    /// and wrong about the wire.
+    ///
+    /// `None` elides the ext. A caller-set QoS equal to
+    /// [`QosLevel::DEFAULT`] also elides it at the builder, mirroring the
+    /// Push side's DEFAULT suppression, so "set it to the default" and
+    /// "do not set it" produce the same bytes.
+    pub qos: Option<QosLevel>,
 }
 
 impl QueryMetadata {
@@ -157,6 +177,7 @@ impl QueryMetadata {
             && self.source_info.is_none()
             && self.value.is_none()
             && self.timeout_ms == 0
+            && self.qos.is_none()
     }
 }
 

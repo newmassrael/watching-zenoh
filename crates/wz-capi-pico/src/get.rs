@@ -786,6 +786,7 @@ fn get_timeout_ms(timeout_ms: u64) -> u32 {
 /// loopback fan and its drain (`session/mod.rs:1976, 2023`), which is what keeps
 /// the C application thread out of `call`. See the `unsafe impl Sync for
 /// CReplyClosure` above — this function is half of that proof.
+#[allow(clippy::too_many_arguments)]
 fn get_options(
     target: z_query_target_t,
     consolidation: z_consolidation_mode_t,
@@ -793,10 +794,21 @@ fn get_options(
     timeout_ms: u64,
     payload: Option<crate::bytes::ByteBuf>,
     attachment: Option<crate::bytes::ByteBuf>,
+    qos: PicoQueryQos,
 ) -> QueryOptions {
     let mut opts = QueryOptions::get()
         .with_allowed_destination(Locality::Remote)
-        .with_timeout_ms(get_timeout_ms(timeout_ms));
+        .with_timeout_ms(get_timeout_ms(timeout_ms))
+        // R311y551 — the request-side QoS trio. This function's own doc, and
+        // `z_get`'s, used to record these as "carried for layout and dropped —
+        // a NAMED DIVERGENCE ... wz's `QueryOptions` has no QoS arm to route
+        // them to". The arm exists as of this round, so the divergence is
+        // closed rather than re-stated: they map onto pico's `_z_n_qos_t` on
+        // the Request (`api.c:1773`), which is the same packed byte
+        // `QueryMetadata::qos` now emits.
+        .with_priority(crate::query::priority_from_pico(qos.priority))
+        .with_congestion_control(crate::query::congestion_from_pico(qos.congestion_control))
+        .with_express(qos.is_express);
 
     // `Z_QUERY_TARGET_BEST_MATCHING` is deliberately NOT representable in wz's
     // `QueryTarget`: pico's encoder clears the target ext when the value is
@@ -972,12 +984,13 @@ unsafe fn get_inner(
 
     // pico dereferences `options` only when non-null and otherwise fills the
     // defaults (`api.c:1756-1761`), so a null `options` is a valid default get.
-    let (target, consolidation, timeout_ms, accept_replies) = if options.is_null() {
+    let (target, consolidation, timeout_ms, accept_replies, qos) = if options.is_null() {
         (
             Z_QUERY_TARGET_BEST_MATCHING,
             Z_CONSOLIDATION_MODE_AUTO,
             0u64,
             crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY,
+            PicoQueryQos::defaults(),
         )
     } else {
         (
@@ -985,6 +998,11 @@ unsafe fn get_inner(
             (*options).consolidation.mode,
             (*options).timeout_ms,
             (*options).accept_replies,
+            PicoQueryQos {
+                congestion_control: (*options).congestion_control,
+                priority: (*options).priority,
+                is_express: (*options).is_express,
+            },
         )
     };
 
@@ -1004,6 +1022,7 @@ unsafe fn get_inner(
         accept_replies,
         payload,
         attachment,
+        qos,
         cclosure,
     )
 }
@@ -1026,6 +1045,37 @@ pub(crate) unsafe fn adopt_reply_closure(
     let adopted = Arc::new(CReplyClosure::new(owned.context, owned.call, owned.drop));
     *owned = z_owned_closure_reply_t::null_value();
     adopted
+}
+
+/// R311y551 — the three request-QoS option fields, bundled so the shared
+/// [`issue_get`] seam does not grow three more positional `c_int`s that a caller
+/// could transpose silently. `z_get_options_t` and `z_querier_options_t` both
+/// declare exactly these three, in this order, with the same pico enum types.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PicoQueryQos {
+    /// pico `z_congestion_control_t` — BLOCK is **1** here (inverted vs
+    /// zenoh-c).
+    pub(crate) congestion_control: crate::query::z_congestion_control_t,
+    /// pico `z_priority_t` — 1..=7, default `Z_PRIORITY_DATA` (5).
+    pub(crate) priority: crate::query::z_priority_t,
+    /// Bypass batching for lower latency.
+    pub(crate) is_express: bool,
+}
+
+impl PicoQueryQos {
+    /// The options-default triple, used when the caller passes a NULL options
+    /// pointer. Mirrors `z_get_options_default`
+    /// (`vendor/zenoh-pico/src/api/api.c`): BLOCK / DATA / not-express. It packs
+    /// to `QosLevel::DEFAULT`'s neighbourhood but NOT to it — pico's request
+    /// default is BLOCK where the wire DEFAULT byte is DROP — so a default
+    /// `z_get` does put a QoS ext on the wire, which is what pico itself does.
+    pub(crate) fn defaults() -> Self {
+        Self {
+            congestion_control: crate::query::Z_CONGESTION_CONTROL_BLOCK,
+            priority: crate::query::Z_PRIORITY_DEFAULT,
+            is_express: false,
+        }
+    }
 }
 
 /// Issue one get on an already-resolved registry — everything `get_inner` does
@@ -1052,6 +1102,7 @@ pub(crate) fn issue_get(
     accept_replies: crate::query::z_reply_keyexpr_t,
     payload: Option<crate::bytes::ByteBuf>,
     attachment: Option<crate::bytes::ByteBuf>,
+    qos: PicoQueryQos,
     closure: Arc<CReplyClosure>,
 ) -> ZResult {
     let params = transmit_parameters(params_in, accept_replies);
@@ -1073,6 +1124,7 @@ pub(crate) fn issue_get(
         timeout_ms,
         payload,
         attachment,
+        qos,
     );
 
     fan_get(shared, &keyexpr, &opts, closure, gate)
@@ -1156,10 +1208,16 @@ fn fan_get(
 ///
 /// `consolidation` is TRANSMITTED but not applied: see `THE CONSOLIDATION
 /// DIVERGENCE` in the module doc. `encoding` is unreachable (opaque, no exported
-/// constructor). `congestion_control` / `priority` / `is_express` are carried for
-/// layout and dropped — a NAMED DIVERGENCE: they map to a `_z_n_qos_t` on pico's
-/// Request (`api.c:1773`), and wz's `QueryOptions` has no QoS arm to route them
-/// to. They affect scheduling and batching, not delivery or content.
+/// constructor).
+///
+/// R311y551 — `congestion_control` / `priority` / `is_express` are HONOURED.
+/// This paragraph used to record them as "carried for layout and dropped — a
+/// NAMED DIVERGENCE ... wz's `QueryOptions` has no QoS arm to route them to",
+/// which was an accurate description of a missing seam rather than of a design
+/// choice. The seam now exists (`QueryOptions::qos` ->
+/// `QueryMetadata::qos` -> `RequestQueryBuilder::request_qos`), so the three
+/// pack into the `_z_n_qos_t` byte on the Request exactly as pico's `z_get`
+/// does (`api.c:1773`).
 #[no_mangle]
 pub unsafe extern "C" fn z_get(
     zs: *const z_loaned_session_t,
@@ -1273,6 +1331,65 @@ mod tests {
         // at once — the one failure mode worth guarding.
         assert_eq!(get_timeout_ms(u64::MAX), u32::MAX);
         assert_eq!(get_timeout_ms(u32::MAX as u64 + 1), u32::MAX);
+    }
+
+    /// R311y551 — the request-side QoS trio reaches [`QueryOptions`] from pico's
+    /// option struct. The twin of `wz-capi-c`'s
+    /// `a_get_options_qos_trio_reaches_the_query_options_and_the_wire`, and the
+    /// continuation into the wire is `wz-runtime-tokio`'s
+    /// `query_options_qos_reaches_the_request_wire`.
+    ///
+    /// The reason BOTH ABIs need their own copy rather than sharing one: pico's
+    /// `z_congestion_control_t` is INVERTED against zenoh-c's — BLOCK is **1**
+    /// here and **0** there. R311y545 shipped pico's values into the zenoh-c
+    /// crate for exactly this reason and the defect survived because no reader
+    /// existed. Now that both are read, each mapping is pinned against its own
+    /// upstream's constant, and the arm below deliberately picks the value that
+    /// means the OPPOSITE thing in the sibling ABI.
+    #[test]
+    fn the_get_options_qos_trio_reaches_the_query_options() {
+        use wz_runtime_tokio::qos::{CongestionControl, Priority};
+
+        // 0 is DROP in pico and BLOCK in zenoh-c. A mapping cribbed from the
+        // sibling inverts the `nodrop` bit, and this assertion is what sees it.
+        let qos = PicoQueryQos {
+            congestion_control: crate::query::Z_CONGESTION_CONTROL_DROP,
+            priority: 1, // Z_PRIORITY_REAL_TIME, distinct from the default (5).
+            is_express: true,
+        };
+        let opts = get_options(
+            Z_QUERY_TARGET_BEST_MATCHING,
+            Z_CONSOLIDATION_MODE_AUTO,
+            Vec::new(),
+            0,
+            None,
+            None,
+            qos,
+        );
+        let packed = opts.qos.expect("the QoS trio reaches QueryOptions");
+        assert_eq!(packed.priority(), Priority::RealTime, "priority");
+        assert_eq!(packed.congestion(), CongestionControl::Drop, "congestion");
+        assert!(packed.is_express(), "express");
+
+        // The options-default triple must populate the slot too: pico's
+        // request-side default is BLOCK, which is NOT the wire DEFAULT byte, so
+        // a default `z_get` legitimately carries a QoS ext. Leaving it unset
+        // would downgrade every default query to Drop.
+        let defaulted = get_options(
+            Z_QUERY_TARGET_BEST_MATCHING,
+            Z_CONSOLIDATION_MODE_AUTO,
+            Vec::new(),
+            0,
+            None,
+            None,
+            PicoQueryQos::defaults(),
+        );
+        let packed = defaulted
+            .qos
+            .expect("the options-default QoS reaches QueryOptions too");
+        assert_eq!(packed.congestion(), CongestionControl::Block);
+        assert_eq!(packed.priority(), Priority::Data);
+        assert!(!packed.is_express());
     }
 
     /// `accept_replies = ANY` is transmitted by APPENDING `_anyke` to the
