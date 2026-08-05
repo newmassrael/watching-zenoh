@@ -315,6 +315,8 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         // survives upstream adding a field.
         let mut opts = LivelinessSubscriberOptions::default();
         opts.history = history;
+        // R311y559 — kept for `z_subscriber_keyexpr`; `ke` is moved below.
+        let keyexpr_literal = ke.clone();
         let id = state.shared.declare_liveliness_subscriber(ke, opts, {
             // R311y498 — the ABI shim mints the callback; the registry only
             // calls the factory (once per face). The `Arc<CClosure>` lives
@@ -325,10 +327,13 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
                 Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>
             })
         });
-        let boxed = Box::new(SubscriberState {
+        let mut boxed = Box::new(SubscriberState {
             shared: state.shared.clone(),
             id,
+            keyexpr: keyexpr_literal,
+            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
         });
+        boxed.bind();
         *sub = z_owned_subscriber_t {
             handle: Box::into_raw(boxed) as *mut c_void,
             _pad: [std::ptr::null_mut(); 3],

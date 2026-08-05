@@ -418,3 +418,541 @@ pub unsafe extern "C" fn z_keyexpr_drop(obj: *mut z_moved_keyexpr_t) {
         Z_OK
     });
 }
+
+// --- R311y559: the keyexpr ALGEBRA + the owned constructors -----------------
+//
+// Every export below is a symbol the real `libzenohpico.so` defines and this
+// cdylib did not (`wz-integration-tests/tests/pico_abi_symbol_census.rs`).
+//
+// None of them re-derives keyexpr semantics. Canonization routes through
+// `wz_runtime_tokio::keyexpr_canon::canonize_keyexpr` and the set relations
+// through `wz_runtime_tokio::keyexpr_match`, which are the SSOTs the wire path
+// and the R300 outbound gate already use — a second reading of the grammar
+// here would be a copy that drifts from the one the wire obeys, and the
+// drift would be invisible to every test that reads only this copy.
+
+/// pico `z_keyexpr_intersection_level_t` (`api/constants.h:112-117`).
+pub type z_keyexpr_intersection_level_t = std::ffi::c_int;
+/// The two key expressions do not intersect.
+pub const Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT: z_keyexpr_intersection_level_t = 0;
+/// They intersect: some key expression is included by both.
+pub const Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS: z_keyexpr_intersection_level_t = 1;
+/// The left one is a superset of the right one.
+pub const Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES: z_keyexpr_intersection_level_t = 2;
+/// They are equal.
+pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 3;
+
+/// Store an owned keyexpr over `literal`, replacing whatever `dst` held.
+///
+/// The `_start` slot points into the boxed `String`'s HEAP buffer, which is
+/// what makes the borrow survive the box moving — the distinction
+/// [`DeclaredKeyexpr`] documents. `_mapping` is 0, the wire's reserved
+/// "no declaration" value: these constructors build a LITERAL keyexpr, not a
+/// declared alias.
+unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, literal: String) {
+    let boxed = Box::new(DeclaredKeyexpr { literal });
+    let start = boxed.literal.as_ptr();
+    let len = boxed.literal.len();
+    *dst = z_owned_keyexpr_t {
+        _start: start,
+        _len: len,
+        _handle: Box::into_raw(boxed) as *mut c_void,
+        _mapping: 0,
+        _pad: [0usize; 2],
+    };
+}
+
+/// Build an owned keyexpr from a NUL-terminated string (pico
+/// `z_keyexpr_from_str`), REJECTING a non-canon input.
+///
+/// Rejecting rather than repairing is upstream's split: the `_autocanonize`
+/// siblings exist precisely because this one does not canonize. A constructor
+/// that silently canonized would make `z_keyexpr_from_str("a//b")` succeed
+/// where upstream fails, and the program would never learn its keyexpr was
+/// malformed.
+///
+/// # Safety
+/// `keyexpr` must be valid and writable; `name` must be null or a valid
+/// NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_from_str(
+    keyexpr: *mut z_owned_keyexpr_t,
+    name: *const c_char,
+) -> ZResult {
+    let len = if name.is_null() {
+        0
+    } else {
+        CStr::from_ptr(name).to_bytes().len()
+    };
+    z_keyexpr_from_substr(keyexpr, name, len)
+}
+
+/// Build an owned keyexpr from an explicitly-sized substring (pico
+/// `z_keyexpr_from_substr`), rejecting a non-canon input.
+///
+/// # Safety
+/// `keyexpr` must be valid and writable; `name` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_from_substr(
+    keyexpr: *mut z_owned_keyexpr_t,
+    name: *const c_char,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        let Some(text) = owned_keyexpr_input(keyexpr, name, len) else {
+            return Z_ERR_NULL;
+        };
+        // The canon CHECK, not the canon transform: equality with the canonical
+        // form is exactly `_z_keyexpr_is_canon` returning OK.
+        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&text) {
+            Ok(canon) if canon.as_str() == text => {
+                store_owned_keyexpr(keyexpr, text);
+                Z_OK
+            }
+            _ => Z_ERR_INVALID,
+        }
+    })
+}
+
+/// Build an owned keyexpr from a NUL-terminated string, CANONIZING it first
+/// (pico `z_keyexpr_from_str_autocanonize`).
+///
+/// # Safety
+/// As [`z_keyexpr_from_str`].
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
+    keyexpr: *mut z_owned_keyexpr_t,
+    name: *const c_char,
+) -> ZResult {
+    guarded(|| {
+        let len = if name.is_null() {
+            0
+        } else {
+            CStr::from_ptr(name).to_bytes().len()
+        };
+        let Some(text) = owned_keyexpr_input(keyexpr, name, len) else {
+            return Z_ERR_NULL;
+        };
+        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&text) {
+            Ok(canon) => {
+                store_owned_keyexpr(keyexpr, canon.as_str().to_owned());
+                Z_OK
+            }
+            Err(_) => Z_ERR_INVALID,
+        }
+    })
+}
+
+/// Build an owned keyexpr from a substring, canonizing it and writing the
+/// canonical LENGTH back through `len` (pico
+/// `z_keyexpr_from_substr_autocanonize`).
+///
+/// `len` is in/out, which is upstream's signature and not an accident:
+/// canonization only ever SHRINKS a keyexpr (`$*` collapses, `*` after `**` is
+/// absorbed), so the caller needs the new length to keep its own view in step.
+///
+/// # Safety
+/// `keyexpr` must be valid and writable; `name` must be null or point at
+/// `*len` readable bytes; `len` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
+    keyexpr: *mut z_owned_keyexpr_t,
+    name: *const c_char,
+    len: *mut usize,
+) -> ZResult {
+    guarded(|| {
+        if len.is_null() {
+            return Z_ERR_NULL;
+        }
+        let Some(text) = owned_keyexpr_input(keyexpr, name, *len) else {
+            return Z_ERR_NULL;
+        };
+        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&text) {
+            Ok(canon) => {
+                *len = canon.as_str().len();
+                store_owned_keyexpr(keyexpr, canon.as_str().to_owned());
+                Z_OK
+            }
+            Err(_) => Z_ERR_INVALID,
+        }
+    })
+}
+
+/// Null `keyexpr` and read `name[..len]` as UTF-8, or `None` on any bad input.
+///
+/// Shared by the four owned constructors so the "null the destination FIRST"
+/// discipline cannot drift between them: a constructor that failed without
+/// nulling would leave the caller's stack value looking live.
+unsafe fn owned_keyexpr_input(
+    keyexpr: *mut z_owned_keyexpr_t,
+    name: *const c_char,
+    len: usize,
+) -> Option<String> {
+    if keyexpr.is_null() {
+        return None;
+    }
+    *keyexpr = z_owned_keyexpr_t::null_value();
+    if name.is_null() {
+        return None;
+    }
+    let bytes = std::slice::from_raw_parts(name as *const u8, len);
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
+
+/// Deep-copy a keyexpr into an owned one (pico `z_keyexpr_clone`).
+///
+/// The clone is a LITERAL keyexpr even when the source is a declared alias:
+/// `_mapping` is not copied. That is deliberate and it is the safe direction —
+/// an alias id belongs to the session that declared it and to the peers that
+/// were told about it, so a clone carrying the id would publish aliased on a
+/// keyexpr whose declaration it does not own a reference to. The literal is
+/// what every peer can resolve.
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a live loaned
+/// keyexpr.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_clone(
+    dst: *mut z_owned_keyexpr_t,
+    src: *const z_loaned_keyexpr_t,
+) -> ZResult {
+    guarded(|| {
+        if dst.is_null() {
+            return Z_ERR_NULL;
+        }
+        *dst = z_owned_keyexpr_t::null_value();
+        match keyexpr_str(src) {
+            Some(text) => {
+                store_owned_keyexpr(dst, text.to_owned());
+                Z_OK
+            }
+            None => Z_ERR_NULL,
+        }
+    })
+}
+
+/// Adopt a loaned keyexpr into an owned one (pico
+/// `z_keyexpr_take_from_loaned`).
+///
+/// COPIES rather than moving, and empties the source. A loaned keyexpr is a
+/// `{ start, len }` borrow with no transferable handle — the same reason
+/// [`crate::bytes::z_string_take_from_loaned`] copies.
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a live loaned
+/// keyexpr.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_take_from_loaned(
+    dst: *mut z_owned_keyexpr_t,
+    src: *mut z_loaned_keyexpr_t,
+) -> ZResult {
+    guarded(|| {
+        if dst.is_null() || src.is_null() {
+            return Z_ERR_NULL;
+        }
+        let rc = z_keyexpr_clone(dst, src as *const z_loaned_keyexpr_t);
+        if rc == Z_OK {
+            (*src)._start = std::ptr::null();
+            (*src)._len = 0;
+        }
+        rc
+    })
+}
+
+/// Append `right[..len]` to `left` and canonize (pico `z_keyexpr_concat`).
+///
+/// Concatenation is TEXTUAL, with no separator inserted — upstream appends the
+/// bytes as given, so `concat("a/b", "c")` is `a/bc` and a caller wanting a new
+/// chunk passes `"/c"`. The result is canonized because the join of two canon
+/// keyexprs need not be canon (`"a/**" + "/*"` is not).
+///
+/// # Safety
+/// `key` must be valid and writable; `left` must be null or a live loaned
+/// keyexpr; `right` must be null or point at `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_concat(
+    key: *mut z_owned_keyexpr_t,
+    left: *const z_loaned_keyexpr_t,
+    right: *const c_char,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        if key.is_null() {
+            return Z_ERR_NULL;
+        }
+        *key = z_owned_keyexpr_t::null_value();
+        let Some(head) = keyexpr_str(left) else {
+            return Z_ERR_NULL;
+        };
+        let tail: &str = if right.is_null() || len == 0 {
+            ""
+        } else {
+            match std::str::from_utf8(std::slice::from_raw_parts(right as *const u8, len)) {
+                Ok(t) => t,
+                Err(_) => return Z_ERR_INVALID,
+            }
+        };
+        let joined = format!("{head}{tail}");
+        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&joined) {
+            Ok(canon) => {
+                store_owned_keyexpr(key, canon.as_str().to_owned());
+                Z_OK
+            }
+            Err(_) => Z_ERR_INVALID,
+        }
+    })
+}
+
+/// Join two keyexprs with a `/` and canonize (pico `z_keyexpr_join`).
+///
+/// # Safety
+/// `key` must be valid and writable; `left` / `right` must be null or live
+/// loaned keyexprs.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_join(
+    key: *mut z_owned_keyexpr_t,
+    left: *const z_loaned_keyexpr_t,
+    right: *const z_loaned_keyexpr_t,
+) -> ZResult {
+    guarded(|| {
+        if key.is_null() {
+            return Z_ERR_NULL;
+        }
+        *key = z_owned_keyexpr_t::null_value();
+        let (Some(l), Some(r)) = (keyexpr_str(left), keyexpr_str(right)) else {
+            return Z_ERR_NULL;
+        };
+        let joined = format!("{l}/{r}");
+        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&joined) {
+            Ok(canon) => {
+                store_owned_keyexpr(key, canon.as_str().to_owned());
+                Z_OK
+            }
+            Err(_) => Z_ERR_INVALID,
+        }
+    })
+}
+
+/// Whether two keyexprs denote the same set (pico `z_keyexpr_equals`).
+///
+/// STRING equality on the canon forms, which is what upstream's
+/// `_z_declared_keyexpr_equals` reduces to — a canon keyexpr is a normal form,
+/// so two canon strings denote the same set iff they are the same string.
+///
+/// # Safety
+/// `l` / `r` must be null or live loaned keyexprs.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_equals(
+    l: *const z_loaned_keyexpr_t,
+    r: *const z_loaned_keyexpr_t,
+) -> bool {
+    guard_val(false, || match (keyexpr_str(l), keyexpr_str(r)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    })
+}
+
+/// Whether `l`'s set CONTAINS `r`'s (pico `z_keyexpr_includes`).
+///
+/// # Safety
+/// As [`z_keyexpr_equals`].
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_includes(
+    l: *const z_loaned_keyexpr_t,
+    r: *const z_loaned_keyexpr_t,
+) -> bool {
+    guard_val(false, || match (keyexpr_str(l), keyexpr_str(r)) {
+        (Some(a), Some(b)) => {
+            let a_chunks: Vec<&str> = a.split('/').collect();
+            let b_chunks: Vec<&str> = b.split('/').collect();
+            wz_runtime_tokio::keyexpr_match::keyexpr_includes_patterns(&a_chunks, &b_chunks)
+        }
+        _ => false,
+    })
+}
+
+/// Whether the two sets share a member (pico `z_keyexpr_intersects`).
+///
+/// # Safety
+/// As [`z_keyexpr_equals`].
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_intersects(
+    l: *const z_loaned_keyexpr_t,
+    r: *const z_loaned_keyexpr_t,
+) -> bool {
+    guard_val(false, || match (keyexpr_str(l), keyexpr_str(r)) {
+        (Some(a), Some(b)) => {
+            let a_chunks: Vec<&str> = a.split('/').collect();
+            let b_chunks: Vec<&str> = b.split('/').collect();
+            wz_runtime_tokio::keyexpr_match::keyexpr_intersect_patterns(&a_chunks, &b_chunks)
+        }
+        _ => false,
+    })
+}
+
+/// The STRONGEST relation that holds between two keyexprs (pico
+/// `z_keyexpr_relation_to`).
+///
+/// The order is upstream's own cascade (`api.c:186-195`) and it is ordered
+/// strongest-first on purpose: equal keyexprs also include and intersect, so
+/// testing `intersects` first would report the weakest true answer for every
+/// input.
+///
+/// # Safety
+/// As [`z_keyexpr_equals`].
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_relation_to(
+    left: *const z_loaned_keyexpr_t,
+    right: *const z_loaned_keyexpr_t,
+) -> z_keyexpr_intersection_level_t {
+    guard_val(Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT, || {
+        if z_keyexpr_equals(left, right) {
+            Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS
+        } else if z_keyexpr_includes(left, right) {
+            Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES
+        } else if z_keyexpr_intersects(left, right) {
+            Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS
+        } else {
+            Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT
+        }
+    })
+}
+
+/// Whether `start[..len]` is already canonical (pico `z_keyexpr_is_canon`).
+///
+/// `Z_OK` for canon, an error otherwise — pico returns a `z_result_t` rather
+/// than a bool here, and a caller writes `if (z_keyexpr_is_canon(s, n) == 0)`.
+///
+/// # Safety
+/// `start` must be null or point at `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) -> ZResult {
+    guarded(|| {
+        if start.is_null() {
+            return Z_ERR_NULL;
+        }
+        let Ok(text) = std::str::from_utf8(std::slice::from_raw_parts(start as *const u8, len))
+        else {
+            return Z_ERR_INVALID;
+        };
+        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(text) {
+            Ok(canon) if canon.as_str() == text => Z_OK,
+            _ => Z_ERR_INVALID,
+        }
+    })
+}
+
+/// Canonize `start[..*len]` IN PLACE, writing the new length back (pico
+/// `z_keyexpr_canonize`).
+///
+/// In place is safe because canonization never grows a keyexpr — every rule
+/// (`$*` -> `*`, `$*$*` -> `$*`, dropping a `*` after `**`) removes bytes or
+/// keeps the count. The buffer is NOT NUL-terminated here; that is
+/// [`z_keyexpr_canonize_null_terminated`]'s job, and the split is upstream's.
+///
+/// # Safety
+/// `start` must be null or point at `*len` readable AND writable bytes; `len`
+/// must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize) -> ZResult {
+    guarded(|| {
+        if start.is_null() || len.is_null() {
+            return Z_ERR_NULL;
+        }
+        let Ok(text) = std::str::from_utf8(std::slice::from_raw_parts(start as *const u8, *len))
+        else {
+            return Z_ERR_INVALID;
+        };
+        let canon = match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(text) {
+            Ok(c) => c,
+            Err(_) => return Z_ERR_INVALID,
+        };
+        let bytes = canon.as_str().as_bytes();
+        debug_assert!(
+            bytes.len() <= *len,
+            "canonization grew a keyexpr, which the in-place contract forbids"
+        );
+        if bytes.len() > *len {
+            return Z_ERR_GENERIC;
+        }
+        std::ptr::copy(bytes.as_ptr(), start as *mut u8, bytes.len());
+        *len = bytes.len();
+        Z_OK
+    })
+}
+
+/// Canonize a NUL-terminated buffer in place, re-terminating it (pico
+/// `z_keyexpr_canonize_null_terminated`).
+///
+/// # Safety
+/// `start` must be null or a valid NUL-terminated, WRITABLE buffer.
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_canonize_null_terminated(start: *mut c_char) -> ZResult {
+    guarded(|| {
+        if start.is_null() {
+            return Z_ERR_NULL;
+        }
+        let mut len = CStr::from_ptr(start).to_bytes().len();
+        let rc = z_keyexpr_canonize(start, &mut len);
+        if rc == Z_OK {
+            *start.add(len) = 0;
+        }
+        rc
+    })
+}
+
+/// Point a view keyexpr at a NUL-terminated string, canonizing it IN PLACE
+/// first (pico `z_view_keyexpr_from_str_autocanonize`).
+///
+/// `name` is `char *`, not `const char *`, in upstream's signature — the
+/// canonization mutates the CALLER's buffer, and the view then borrows it.
+/// That is why this cannot be a wrapper over the const constructor.
+///
+/// # Safety
+/// `keyexpr` must be valid and writable; `name` must be null or a valid
+/// NUL-terminated, WRITABLE buffer that outlives the view.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_keyexpr_from_str_autocanonize(
+    keyexpr: *mut z_view_keyexpr_t,
+    name: *mut c_char,
+) -> ZResult {
+    guarded(|| {
+        if keyexpr.is_null() {
+            return Z_ERR_NULL;
+        }
+        z_view_keyexpr_empty(keyexpr);
+        let rc = z_keyexpr_canonize_null_terminated(name);
+        if rc != Z_OK {
+            return rc;
+        }
+        z_view_keyexpr_from_str(keyexpr, name)
+    })
+}
+
+/// Point a view keyexpr at an explicitly-sized substring, canonizing it in
+/// place and writing the new length back (pico
+/// `z_view_keyexpr_from_substr_autocanonize`).
+///
+/// # Safety
+/// `keyexpr` must be valid and writable; `name` must be null or point at
+/// `*len` readable AND writable bytes that outlive the view; `len` must be
+/// null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_keyexpr_from_substr_autocanonize(
+    keyexpr: *mut z_view_keyexpr_t,
+    name: *mut c_char,
+    len: *mut usize,
+) -> ZResult {
+    guarded(|| {
+        if keyexpr.is_null() || len.is_null() {
+            return Z_ERR_NULL;
+        }
+        z_view_keyexpr_empty(keyexpr);
+        let rc = z_keyexpr_canonize(name, len);
+        if rc != Z_OK {
+            return rc;
+        }
+        z_view_keyexpr_from_substr(keyexpr, name, *len)
+    })
+}

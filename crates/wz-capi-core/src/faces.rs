@@ -686,6 +686,20 @@ struct Inner {
     local_qbls: BTreeMap<QblId, Queryable<TokioRuntime>>,
     subs: Vec<SubEntry>,
     next_sub_id: SubId,
+    /// R311y559 — the session-scope ENTITY id counter the C ABIs' `z_*_id`
+    /// accessors report, for the handles that are NOT registered in a
+    /// per-kind map.
+    ///
+    /// Subscribers and queryables already have ids (`SubId` / `QblId`) because
+    /// the registry keys their per-face replicas on them. Publishers and
+    /// queriers have no such map — they are local handles that fan out through
+    /// the session — yet zenoh assigns every declared entity a global
+    /// `(zid, eid)` and `z_publisher_id` / `z_querier_id` hand it back. This is
+    /// that allocator. A SEPARATE space from `next_sub_id` on purpose: the two
+    /// number different things, and sharing one counter would make an entity's
+    /// id depend on how many subscribers happened to be declared first, which
+    /// is exactly the sort of coupling that reads as stable until it is not.
+    next_entity_id: u64,
     qbls: Vec<QblEntry>,
     next_qbl_id: QblId,
     tokens: Vec<TokenEntry>,
@@ -711,6 +725,8 @@ struct Inner {
 pub struct SharedSession {
     inner: StdMutex<Inner>,
     clock: TokioTime,
+    /// This session's zid — see [`SharedSession::zid`].
+    zid: [u8; 16],
     /// R311y557 — THE FACE-INDEPENDENT LOCAL PLANE.
     ///
     /// One session-scope [`TokioSession`] over an [`InertLinkDriver`], carrying
@@ -763,18 +779,35 @@ impl SharedSession {
     /// on the wire. The local plane takes it so its loopback samples carry the
     /// identity the session actually has, which is what the subscriber
     /// registry's self-echo guard reads.
+    /// This session's own zid, right-zero-padded to the wire's 16 bytes
+    /// (R311y559).
+    ///
+    /// The `(zid, eid)` global id every `z_*_id` accessor reports needs the zid
+    /// half, and the handles that answer those accessors hold only the shared
+    /// registry — not the `SessionState` where the zid was minted. Recorded
+    /// here rather than threaded through each handle so the two readers cannot
+    /// disagree: `SessionState::zid` and this are the SAME bytes, both taken
+    /// from the one `fresh_zid()` call `open_blocking` makes.
+    pub fn zid(&self) -> [u8; 16] {
+        self.zid
+    }
+
     pub fn new(clock: TokioTime, zid: Vec<u8>) -> Self {
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
         // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on
         // the wire, and Peer is what a session that both publishes and answers
         // queries is. The params otherwise come from the one builder both drive
         // roles use, so the plane cannot drift from them.
+        let mut zid_bytes = [0u8; 16];
+        let n = zid.len().min(16);
+        zid_bytes[..n].copy_from_slice(&zid[..n]);
         let params = crate::drive::init_params(wz_runtime_tokio::session_glue::WhatAmI::Peer, zid);
         let actions = new_session_actions(driver, params, clock);
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         let local = TokioSession::new(actions, observer, Arc::new(clock))
             .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
         Self {
+            zid: zid_bytes,
             inner: StdMutex::new(Inner::default()),
             clock,
             local,
@@ -1615,6 +1648,20 @@ impl SharedSession {
     /// its first peer) this declares nothing on the wire and still records the
     /// entry — pico's declare-before-peer. Infallible today; keyexpr canonicity
     /// validation is a separate follow-up.
+    /// Allocate the next session-scope ENTITY id (R311y559).
+    ///
+    /// The `eid` half of the `(zid, eid)` global id `z_publisher_id` /
+    /// `z_querier_id` and their advanced siblings report. Allocated at DECLARE
+    /// and held by the handle, never re-derived per call: upstream's id is
+    /// stable for a handle's whole life, and a counter read per accessor would
+    /// hand back a different answer each time it was asked.
+    pub fn next_entity_id(&self) -> u64 {
+        let mut guard = self.lock();
+        let id = guard.next_entity_id;
+        guard.next_entity_id = guard.next_entity_id.wrapping_add(1);
+        id
+    }
+
     pub fn declare_subscriber(
         &self,
         keyexpr: String,

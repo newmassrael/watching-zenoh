@@ -509,3 +509,264 @@ pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult
         None => Z_ERR_NULL,
     })
 }
+
+// --- R311y559: the entity-identity accessors --------------------------------
+//
+// Every zenoh entity a program declares has a GLOBAL id — the session's zid
+// paired with a session-scope entity id — and upstream exports one accessor per
+// entity kind. The census found the whole family missing, which is why they
+// live together here rather than beside each handle type: they are one claim
+// with five spellings, and splitting them across five modules is how the
+// `zid` half ends up read from a different place in each.
+
+/// The global id of an entity declared on `zs`, or the empty id when the
+/// session is gone.
+///
+/// The `zid` half always comes from the SESSION, never from the handle: an
+/// entity's identity is `(this session's zid, this entity's eid)`, and reading
+/// the zid per-handle would be a second source for a fact that has one.
+pub(crate) unsafe fn entity_global_id(
+    zs: &SessionState,
+    eid: u64,
+) -> crate::advanced::z_entity_global_id_t {
+    crate::advanced::z_entity_global_id_t {
+        zid: crate::zid::z_id_t { id: zs.zid() },
+        // TRUNCATING, and that is upstream's width rather than a loss: zenoh's
+        // `_z_entity_global_id_t.eid` is a `uint32_t`, so the wire cannot carry
+        // more. A session declaring 2^32 entities would wrap, which is the same
+        // thing upstream does.
+        eid: eid as u32,
+    }
+}
+
+/// The session's own global id (pico `z_session_id`) — its zid with entity id
+/// 0, which is what upstream reports for the session entity itself.
+///
+/// # Safety
+/// `zs` must be null or a live loaned session.
+#[no_mangle]
+pub unsafe extern "C" fn z_session_id(
+    zs: *const z_loaned_session_t,
+) -> crate::advanced::z_entity_global_id_t {
+    crate::ffi::guard_val(
+        crate::advanced::z_entity_global_id_t {
+            zid: crate::zid::z_id_t::empty(),
+            eid: 0,
+        },
+        || match session_state(zs) {
+            Some(state) => entity_global_id(state, 0),
+            None => crate::advanced::z_entity_global_id_t {
+                zid: crate::zid::z_id_t::empty(),
+                eid: 0,
+            },
+        },
+    )
+}
+
+/// Whether the session has been closed (pico `z_session_is_closed`).
+///
+/// A NULL / spent handle reports CLOSED. That is the safe direction and it is
+/// also the truthful one: a program holding a session it has already dropped
+/// has no open session, and reporting "open" would invite it to publish
+/// through a dead handle.
+///
+/// # Safety
+/// `zs` must be null or a live loaned session.
+#[no_mangle]
+pub unsafe extern "C" fn z_session_is_closed(zs: *const z_loaned_session_t) -> bool {
+    crate::ffi::guard_val(true, || match session_state(zs) {
+        Some(state) => state.is_closed(),
+        None => true,
+    })
+}
+
+/// Borrow a publisher's keyexpr (pico `z_publisher_keyexpr`).
+///
+/// # Safety
+/// `publisher` must be null or a live loaned publisher.
+#[no_mangle]
+pub unsafe extern "C" fn z_publisher_keyexpr(
+    publisher: *const crate::pubsub::z_loaned_publisher_t,
+) -> *const crate::abi::z_loaned_keyexpr_t {
+    crate::ffi::guard_val(std::ptr::null(), || {
+        match crate::abi::handle_ref::<
+            crate::pubsub::z_loaned_publisher_t,
+            crate::pubsub::PublisherState,
+        >(publisher)
+        {
+            Some(state) => state.loaned_keyexpr(),
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// A publisher's global entity id (pico `z_publisher_id`).
+///
+/// # Safety
+/// `publisher` must be null or a live loaned publisher.
+#[no_mangle]
+pub unsafe extern "C" fn z_publisher_id(
+    publisher: *const crate::pubsub::z_loaned_publisher_t,
+) -> crate::advanced::z_entity_global_id_t {
+    entity_id_of(
+        crate::abi::handle_ref::<
+            crate::pubsub::z_loaned_publisher_t,
+            crate::pubsub::PublisherState,
+        >(publisher)
+        .map(|s| (s.shared_zid(), s.entity_id())),
+    )
+}
+
+/// Borrow a querier's keyexpr (pico `z_querier_keyexpr`).
+///
+/// # Safety
+/// `querier` must be null or a live loaned querier.
+#[no_mangle]
+pub unsafe extern "C" fn z_querier_keyexpr(
+    querier: *const crate::querier::z_loaned_querier_t,
+) -> *const crate::abi::z_loaned_keyexpr_t {
+    crate::ffi::guard_val(std::ptr::null(), || {
+        match crate::abi::handle_ref::<
+            crate::querier::z_loaned_querier_t,
+            crate::querier::QuerierState,
+        >(querier)
+        {
+            Some(state) => state.loaned_keyexpr(),
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// A querier's global entity id (pico `z_querier_id`).
+///
+/// # Safety
+/// `querier` must be null or a live loaned querier.
+#[no_mangle]
+pub unsafe extern "C" fn z_querier_id(
+    querier: *const crate::querier::z_loaned_querier_t,
+) -> crate::advanced::z_entity_global_id_t {
+    entity_id_of(
+        crate::abi::handle_ref::<crate::querier::z_loaned_querier_t, crate::querier::QuerierState>(
+            querier,
+        )
+        .map(|s| (s.shared_zid(), s.entity_id())),
+    )
+}
+
+/// Borrow a subscriber's keyexpr (pico `z_subscriber_keyexpr`).
+///
+/// # Safety
+/// `subscriber` must be null or a live loaned subscriber.
+#[no_mangle]
+pub unsafe extern "C" fn z_subscriber_keyexpr(
+    subscriber: *const crate::pubsub::z_loaned_subscriber_t,
+) -> *const crate::abi::z_loaned_keyexpr_t {
+    crate::ffi::guard_val(std::ptr::null(), || {
+        match crate::abi::handle_ref::<
+            crate::pubsub::z_loaned_subscriber_t,
+            crate::pubsub::SubscriberState,
+        >(subscriber)
+        {
+            Some(state) => &state.loaned_keyexpr as *const crate::abi::z_loaned_keyexpr_t,
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// A subscriber's global entity id (pico `z_subscriber_id`).
+///
+/// The `eid` is the registry's own `SubId` rather than a fresh allocation:
+/// subscriptions already have a session-scope id, and minting a second one
+/// would leave the handle and the registry naming the same entity differently.
+///
+/// # Safety
+/// `subscriber` must be null or a live loaned subscriber.
+#[no_mangle]
+pub unsafe extern "C" fn z_subscriber_id(
+    subscriber: *const crate::pubsub::z_loaned_subscriber_t,
+) -> crate::advanced::z_entity_global_id_t {
+    entity_id_of(
+        crate::abi::handle_ref::<
+            crate::pubsub::z_loaned_subscriber_t,
+            crate::pubsub::SubscriberState,
+        >(subscriber)
+        .map(|s| (s.shared.zid(), s.id)),
+    )
+}
+
+/// A queryable's global entity id (pico `z_queryable_id`).
+///
+/// # Safety
+/// `queryable` must be null or a live loaned queryable.
+#[no_mangle]
+pub unsafe extern "C" fn z_queryable_id(
+    queryable: *const crate::query::z_loaned_queryable_t,
+) -> crate::advanced::z_entity_global_id_t {
+    entity_id_of(crate::query::queryable_identity(queryable))
+}
+
+/// An advanced publisher's global entity id (pico `ze_advanced_publisher_id`).
+///
+/// # Safety
+/// `pub_` must be null or a live loaned advanced publisher.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_id(
+    pub_: *const crate::advanced::ze_loaned_advanced_publisher_t,
+) -> crate::advanced::z_entity_global_id_t {
+    entity_id_of(crate::advanced::advanced_publisher_identity(pub_))
+}
+
+/// Borrow an advanced publisher's keyexpr (pico
+/// `ze_advanced_publisher_keyexpr`).
+///
+/// # Safety
+/// `pub_` must be null or a live loaned advanced publisher.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_keyexpr(
+    pub_: *const crate::advanced::ze_loaned_advanced_publisher_t,
+) -> *const crate::abi::z_loaned_keyexpr_t {
+    crate::advanced::advanced_publisher_keyexpr(pub_)
+}
+
+/// An advanced subscriber's global entity id (pico
+/// `ze_advanced_subscriber_id`).
+///
+/// # Safety
+/// `sub` must be null or a live loaned advanced subscriber.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_subscriber_id(
+    sub: *const crate::advanced::ze_loaned_advanced_subscriber_t,
+) -> crate::advanced::z_entity_global_id_t {
+    entity_id_of(crate::advanced::advanced_subscriber_identity(sub))
+}
+
+/// Borrow an advanced subscriber's keyexpr (pico
+/// `ze_advanced_subscriber_keyexpr`).
+///
+/// # Safety
+/// `sub` must be null or a live loaned advanced subscriber.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_subscriber_keyexpr(
+    sub: *const crate::advanced::ze_loaned_advanced_subscriber_t,
+) -> *const crate::abi::z_loaned_keyexpr_t {
+    crate::advanced::advanced_subscriber_keyexpr(sub)
+}
+
+/// Project an optional `(zid, eid)` into the ABI's global id, with the empty id
+/// standing for a null / spent handle.
+///
+/// One projection for all seven accessors above so the "what does a dead handle
+/// report" answer cannot differ between them — the class of asymmetry this
+/// crate has already paid for.
+fn entity_id_of(identity: Option<([u8; 16], u64)>) -> crate::advanced::z_entity_global_id_t {
+    match identity {
+        Some((zid, eid)) => crate::advanced::z_entity_global_id_t {
+            zid: crate::zid::z_id_t { id: zid },
+            eid: eid as u32,
+        },
+        None => crate::advanced::z_entity_global_id_t {
+            zid: crate::zid::z_id_t::empty(),
+            eid: 0,
+        },
+    }
+}

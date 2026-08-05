@@ -469,6 +469,19 @@ impl ze_owned_advanced_publisher_t {
 pub(crate) struct AdvPubState {
     shared: Arc<SharedSession>,
     id: AdvPubId,
+    /// R311y559 — the keyexpr, kept so `ze_advanced_publisher_keyexpr` has
+    /// stable storage to borrow, plus its cached `{ start, len }` view. Bound
+    /// after boxing, as everywhere else in this crate.
+    keyexpr: String,
+    loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
+}
+
+impl AdvPubState {
+    /// Point the cached view at this state's own keyexpr, after boxing.
+    fn bind(&mut self) {
+        self.loaned_keyexpr =
+            crate::abi::z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+    }
 }
 
 impl Drop for AdvPubState {
@@ -560,13 +573,18 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         {
             return Z_ERR_INVALID;
         }
+        // R311y559 — kept for `ze_advanced_publisher_keyexpr`; `ke` is moved.
+        let adv_keyexpr = ke.clone();
         let id = state
             .shared
             .declare_advanced_publisher(ke, advanced_publisher_options(options));
-        let boxed = Box::new(AdvPubState {
+        let mut boxed = Box::new(AdvPubState {
             shared: state.shared.clone(),
             id,
+            keyexpr: adv_keyexpr,
+            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
         });
+        boxed.bind();
         (*pub_).handle = Box::into_raw(boxed).cast::<c_void>();
         Z_OK
     })
@@ -826,9 +844,20 @@ pub(crate) type MissSlot = Arc<Mutex<Option<Arc<CMissClosure>>>>;
 pub(crate) struct AdvSubState {
     shared: Arc<SharedSession>,
     id: AdvSubId,
+    /// R311y559 — as `AdvPubState`, for `ze_advanced_subscriber_keyexpr`.
+    keyexpr: String,
+    loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
     /// The miss closure the C side may install AFTER declaring. See the module
     /// doc for why the subscriber cannot simply take it at declare time.
     miss: MissSlot,
+}
+
+impl AdvSubState {
+    /// Point the cached view at this state's own keyexpr, after boxing.
+    fn bind(&mut self) {
+        self.loaned_keyexpr =
+            crate::abi::z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+    }
 }
 
 impl Drop for AdvSubState {
@@ -914,6 +943,8 @@ pub unsafe extern "C" fn ze_declare_advanced_subscriber(
         }
         let miss: MissSlot = Arc::new(Mutex::new(None));
         let opts = advanced_subscriber_options(options);
+        // R311y559 — kept for `ze_advanced_subscriber_keyexpr`; `ke` is moved.
+        let adv_keyexpr = ke.clone();
         let id = state.shared.declare_advanced_subscriber(ke, opts, {
             let closure = cclosure.clone();
             let miss = miss.clone();
@@ -935,11 +966,14 @@ pub unsafe extern "C" fn ze_declare_advanced_subscriber(
                 (sample_cb, miss_cb)
             })
         });
-        let boxed = Box::new(AdvSubState {
+        let mut boxed = Box::new(AdvSubState {
             shared: state.shared.clone(),
             id,
+            keyexpr: adv_keyexpr,
+            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             miss,
         });
+        boxed.bind();
         (*subscriber).handle = Box::into_raw(boxed).cast::<c_void>();
         Z_OK
     })
@@ -1284,16 +1318,21 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         };
         let mut opts = wz_runtime_tokio::session::LivelinessSubscriberOptions::default();
         opts.history = history;
+        // R311y559 — kept for `z_subscriber_keyexpr`; `ke` is moved below.
+        let keyexpr_literal = ke.clone();
         let id = state.shared.declare_liveliness_subscriber(ke, opts, {
             let closure = Arc::new(cclosure);
             Arc::new(move || {
                 Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>
             })
         });
-        let boxed = Box::new(SubscriberState {
+        let mut boxed = Box::new(SubscriberState {
             shared: state.shared.clone(),
             id,
+            keyexpr: keyexpr_literal,
+            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
         });
+        boxed.bind();
         *liveliness_subscriber = z_owned_subscriber_t {
             handle: Box::into_raw(boxed) as *mut c_void,
             _pad: [std::ptr::null_mut(); 3],
@@ -1324,3 +1363,53 @@ const _: () = {
     assert!(size_of::<ze_advanced_subscriber_recovery_options_t>() == 24);
     assert!(size_of::<ze_advanced_subscriber_last_sample_miss_detection_options_t>() == 16);
 };
+
+/// The `(zid, eid)` identity behind a loaned advanced publisher, for
+/// [`crate::session::ze_advanced_publisher_id`] (R311y559).
+///
+/// # Safety
+/// `pub_` must be null or a live loaned advanced publisher.
+pub(crate) unsafe fn advanced_publisher_identity(
+    pub_: *const ze_loaned_advanced_publisher_t,
+) -> Option<([u8; 16], u64)> {
+    crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
+        .map(|state| (state.shared.zid(), state.id))
+}
+
+/// The cached keyexpr borrow behind a loaned advanced publisher.
+///
+/// # Safety
+/// As [`advanced_publisher_identity`].
+pub(crate) unsafe fn advanced_publisher_keyexpr(
+    pub_: *const ze_loaned_advanced_publisher_t,
+) -> *const crate::abi::z_loaned_keyexpr_t {
+    match crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_) {
+        Some(state) => &state.loaned_keyexpr as *const crate::abi::z_loaned_keyexpr_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// The `(zid, eid)` identity behind a loaned advanced subscriber, for
+/// [`crate::session::ze_advanced_subscriber_id`] (R311y559).
+///
+/// # Safety
+/// `sub` must be null or a live loaned advanced subscriber.
+pub(crate) unsafe fn advanced_subscriber_identity(
+    sub: *const ze_loaned_advanced_subscriber_t,
+) -> Option<([u8; 16], u64)> {
+    crate::abi::handle_ref::<ze_loaned_advanced_subscriber_t, AdvSubState>(sub)
+        .map(|state| (state.shared.zid(), state.id))
+}
+
+/// The cached keyexpr borrow behind a loaned advanced subscriber.
+///
+/// # Safety
+/// As [`advanced_subscriber_identity`].
+pub(crate) unsafe fn advanced_subscriber_keyexpr(
+    sub: *const ze_loaned_advanced_subscriber_t,
+) -> *const crate::abi::z_loaned_keyexpr_t {
+    match crate::abi::handle_ref::<ze_loaned_advanced_subscriber_t, AdvSubState>(sub) {
+        Some(state) => &state.loaned_keyexpr as *const crate::abi::z_loaned_keyexpr_t,
+        None => std::ptr::null(),
+    }
+}

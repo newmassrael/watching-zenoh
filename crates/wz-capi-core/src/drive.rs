@@ -76,6 +76,17 @@ impl SessionState {
         self.zid
     }
 
+    /// Whether [`Self::close`] has already run (R311y559 — pico
+    /// `z_session_is_closed`).
+    ///
+    /// Reads the SAME `stop` latch the drive loop races against, rather than a
+    /// second flag set beside it: a separate "closed" boolean would have to be
+    /// kept in step with the latch, and the whole point of the latch is that it
+    /// is the one fact both the C thread and the drive thread agree on.
+    pub fn is_closed(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
     /// Signal the drive loop to stop and join the driver thread. Idempotent.
     pub fn close(&self) {
         // The latch is set BEFORE the notify, and is what makes the close

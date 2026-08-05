@@ -343,6 +343,147 @@ pub unsafe extern "C" fn z_string_array_take(
     (*src)._this = z_owned_string_array_t::null_value();
 }
 
+/// Build an EMPTY owned string array (pico `z_string_array_new`).
+///
+/// R311y559 — a symbol the census found missing. An owned array is a live
+/// handle over zero items, not a null one: `z_internal_string_array_check`
+/// reports it PRESENT, which is what makes the push family below usable on a
+/// freshly constructed array.
+///
+/// # Safety
+/// `array` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_array_new(array: *mut z_owned_string_array_t) {
+    if array.is_null() {
+        return;
+    }
+    *array = z_owned_string_array_t {
+        handle: Box::into_raw(StringArrayState::new(Vec::new())) as *mut c_void,
+        _pad: [std::ptr::null_mut(); 3],
+    };
+}
+
+/// Append a COPY of `value` (pico `z_string_array_push_by_copy`), returning the
+/// array's new length.
+///
+/// # Safety
+/// `array` must be a live loaned string array; `value` must be null or a live
+/// loaned string.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_array_push_by_copy(
+    array: *mut z_loaned_string_array_t,
+    value: *const z_loaned_string_t,
+) -> usize {
+    string_array_push(array, value)
+}
+
+/// Append `value` (pico `z_string_array_push_by_alias`), returning the array's
+/// new length.
+///
+/// A NAMED DIVERGENCE, stated rather than left to be inferred from the name:
+/// upstream ALIASES the caller's storage here and copies in the `_by_copy`
+/// sibling, so a program that mutates the source string afterwards sees the
+/// change through the array. wz copies in both.
+///
+/// The reason is structural, not convenience. `StringArrayState` owns its
+/// `items` and hands out `views` pointing INTO them, so an aliased entry would
+/// be a borrow of caller storage with no lifetime wz can enforce — and the
+/// array outlives the call. The observable consequence is confined to
+/// mutate-after-push, which upstream itself documents as the caller's
+/// responsibility; every read path (`len`, `get`, `is_empty`) is identical.
+///
+/// # Safety
+/// As [`z_string_array_push_by_copy`].
+#[no_mangle]
+pub unsafe extern "C" fn z_string_array_push_by_alias(
+    array: *mut z_loaned_string_array_t,
+    value: *const z_loaned_string_t,
+) -> usize {
+    string_array_push(array, value)
+}
+
+/// The shared body of the two push exports — see
+/// [`z_string_array_push_by_alias`] for why they share one.
+///
+/// Rebuilding the state rather than pushing in place is what keeps the cached
+/// `views` valid: `items` is a `Vec<String>`, so a push can REALLOCATE it and
+/// every previously handed-out `z_loaned_string_t` would then point into freed
+/// storage. `StringArrayState::new` re-derives all views from the final
+/// addresses, which is the same discipline `bind`-after-boxing enforces
+/// elsewhere in this crate.
+unsafe fn string_array_push(
+    array: *mut z_loaned_string_array_t,
+    value: *const z_loaned_string_t,
+) -> usize {
+    let Some(state) = string_array_state(array as *const z_loaned_string_array_t) else {
+        return 0;
+    };
+    let Some(view) = value.as_ref() else {
+        return state.items.len();
+    };
+    let Some(bytes) = crate::abi::view_bytes(view._start, view._len) else {
+        return state.items.len();
+    };
+    let mut items = state.items.clone();
+    items.push(String::from_utf8_lossy(bytes).into_owned());
+    let len = items.len();
+    let fresh = StringArrayState::new(items);
+    // Replace the box behind the handle, releasing the old state only after the
+    // new one is in place.
+    let slot = array as *mut z_owned_string_array_t;
+    let old = (*slot).handle;
+    (*slot).handle = Box::into_raw(fresh) as *mut c_void;
+    if !old.is_null() {
+        drop(Box::from_raw(old as *mut StringArrayState));
+    }
+    len
+}
+
+/// Deep-copy a string array (pico `z_string_array_clone`).
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a live loaned array.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_array_clone(
+    dst: *mut z_owned_string_array_t,
+    src: *const z_loaned_string_array_t,
+) -> ZResult {
+    if dst.is_null() {
+        return crate::result::Z_ERR_NULL;
+    }
+    *dst = z_owned_string_array_t::null_value();
+    let Some(state) = string_array_state(src) else {
+        return crate::result::Z_ERR_NULL;
+    };
+    *dst = z_owned_string_array_t {
+        handle: Box::into_raw(StringArrayState::new(state.items.clone())) as *mut c_void,
+        _pad: [std::ptr::null_mut(); 3],
+    };
+    crate::result::Z_OK
+}
+
+/// Adopt a loaned string array into an owned one, emptying the source (pico
+/// `z_string_array_take_from_loaned`).
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a live loaned array.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_array_take_from_loaned(
+    dst: *mut z_owned_string_array_t,
+    src: *mut z_loaned_string_array_t,
+) -> ZResult {
+    if dst.is_null() || src.is_null() {
+        return crate::result::Z_ERR_NULL;
+    }
+    let slot = src as *mut z_owned_string_array_t;
+    *dst = z_owned_string_array_t {
+        handle: (*slot).handle,
+        _pad: [std::ptr::null_mut(); 3],
+    };
+    *slot = z_owned_string_array_t::null_value();
+    crate::result::Z_OK
+}
+
 // ---------------------------------------------------------------------------
 // z_owned_hello_t
 // ---------------------------------------------------------------------------

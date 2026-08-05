@@ -341,9 +341,307 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
     })
 }
 
+// --- the well-known constants ----------------------------------------------
+
+/// A loaned encoding view that lives for the whole program.
+///
+/// `z_loaned_encoding_t` holds a raw pointer, so it is not `Sync` and cannot be
+/// a `static` on its own. This newtype carries the argument that makes it safe:
+/// the value is written ONCE at compile time, never mutated, and its handle
+/// points at a `'static` [`EncodingState`] — so every thread reads the same
+/// immutable bytes pointing at the same immutable state.
+#[repr(transparent)]
+pub(crate) struct StaticLoanedEncoding(z_loaned_encoding_t);
+
+// SAFETY: see the type's docs — immutable after compile time, pointing at a
+// `'static`.
+unsafe impl Sync for StaticLoanedEncoding {}
+
+/// Build the `'static` loaned view for a `'static` state.
+const fn static_view(state: &'static EncodingState) -> StaticLoanedEncoding {
+    StaticLoanedEncoding(z_loaned_encoding_t {
+        handle: state as *const EncodingState as *mut c_void,
+        _pad: [std::ptr::null_mut(); 4],
+    })
+}
+
+/// Emit one of pico's `ENCODING_CONSTANT_MACRO` entries
+/// (`src/api/encoding.c:27-33`): a `'static` state at the given wire id, its
+/// `'static` loaned view, and the exported accessor.
+///
+/// The state and the view are function-scoped statics rather than module-level
+/// ones so the macro needs only the pair upstream's own macro needs — the
+/// exported name and the id — instead of two invented Rust identifiers per
+/// entry. A hand-maintained second name list is a transcription with no oracle,
+/// which is the failure class this crate has already paid for once.
+///
+/// The MIME string is NOT repeated here. It lives once in
+/// [`wz_capi_core::encoding_ids::ENCODING_ID_TO_STR`], indexed by the same id,
+/// so `z_encoding_to_string` on a constant renders through the identical table
+/// the wire codec uses. The (name -> id) pairing below is the only transcribed
+/// fact, and it is adjudicated against upstream's COMPILED library by
+/// `tests/pico_pure_function_oracle.rs::encoding_constants_agree_with_the_real_pico_library`,
+/// which walks every accessor in both implementations and compares the rendered
+/// string. A wrong id there is a visible mismatch, not a silent one.
+macro_rules! encoding_constant {
+    ($fname:ident, $id:expr) => {
+        /// A well-known encoding constant (pico `ENCODING_CONSTANT_MACRO`).
+        ///
+        /// The returned pointer is valid for the whole program: it points at a
+        /// `'static`, so a caller may hold it past any session, and there is
+        /// nothing to release.
+        #[no_mangle]
+        pub extern "C" fn $fname() -> *const z_loaned_encoding_t {
+            static STATE: EncodingState = EncodingState {
+                hint: EncodingHint {
+                    // The wire word is `(id << 1) | has_schema`, and a constant
+                    // never carries a schema — so bit 0 is clear by
+                    // construction rather than by a second field agreeing with
+                    // the first.
+                    packed_id: ($id as u32) << 1,
+                    schema: None,
+                },
+            };
+            static VIEW: StaticLoanedEncoding = static_view(&STATE);
+            &VIEW.0 as *const z_loaned_encoding_t
+        }
+    };
+}
+
+encoding_constant!(z_encoding_zenoh_bytes, 0);
+encoding_constant!(z_encoding_zenoh_string, 1);
+encoding_constant!(z_encoding_zenoh_serialized, 2);
+encoding_constant!(z_encoding_application_octet_stream, 3);
+encoding_constant!(z_encoding_text_plain, 4);
+encoding_constant!(z_encoding_application_json, 5);
+encoding_constant!(z_encoding_text_json, 6);
+encoding_constant!(z_encoding_application_cdr, 7);
+encoding_constant!(z_encoding_application_cbor, 8);
+encoding_constant!(z_encoding_application_yaml, 9);
+encoding_constant!(z_encoding_text_yaml, 10);
+encoding_constant!(z_encoding_text_json5, 11);
+encoding_constant!(z_encoding_application_python_serialized_object, 12);
+encoding_constant!(z_encoding_application_protobuf, 13);
+encoding_constant!(z_encoding_application_java_serialized_object, 14);
+encoding_constant!(z_encoding_application_openmetrics_text, 15);
+encoding_constant!(z_encoding_image_png, 16);
+encoding_constant!(z_encoding_image_jpeg, 17);
+encoding_constant!(z_encoding_image_gif, 18);
+encoding_constant!(z_encoding_image_bmp, 19);
+encoding_constant!(z_encoding_image_webp, 20);
+encoding_constant!(z_encoding_application_xml, 21);
+encoding_constant!(z_encoding_application_x_www_form_urlencoded, 22);
+encoding_constant!(z_encoding_text_html, 23);
+encoding_constant!(z_encoding_text_xml, 24);
+encoding_constant!(z_encoding_text_css, 25);
+encoding_constant!(z_encoding_text_javascript, 26);
+encoding_constant!(z_encoding_text_markdown, 27);
+encoding_constant!(z_encoding_text_csv, 28);
+encoding_constant!(z_encoding_application_sql, 29);
+encoding_constant!(z_encoding_application_coap_payload, 30);
+encoding_constant!(z_encoding_application_json_patch_json, 31);
+encoding_constant!(z_encoding_application_json_seq, 32);
+encoding_constant!(z_encoding_application_jsonpath, 33);
+encoding_constant!(z_encoding_application_jwt, 34);
+encoding_constant!(z_encoding_application_mp4, 35);
+encoding_constant!(z_encoding_application_soap_xml, 36);
+encoding_constant!(z_encoding_application_yang, 37);
+encoding_constant!(z_encoding_audio_aac, 38);
+encoding_constant!(z_encoding_audio_flac, 39);
+encoding_constant!(z_encoding_audio_mp4, 40);
+encoding_constant!(z_encoding_audio_ogg, 41);
+encoding_constant!(z_encoding_audio_vorbis, 42);
+encoding_constant!(z_encoding_video_h261, 43);
+encoding_constant!(z_encoding_video_h263, 44);
+encoding_constant!(z_encoding_video_h264, 45);
+encoding_constant!(z_encoding_video_h265, 46);
+encoding_constant!(z_encoding_video_h266, 47);
+encoding_constant!(z_encoding_video_mp4, 48);
+encoding_constant!(z_encoding_video_ogg, 49);
+encoding_constant!(z_encoding_video_raw, 50);
+encoding_constant!(z_encoding_video_vp8, 51);
+encoding_constant!(z_encoding_video_vp9, 52);
+
+/// The encoding a default-constructed value means (pico
+/// `z_encoding_loan_default`, `src/api/encoding.c:266`) — literally upstream's
+/// own body, `zenoh/bytes`.
+#[no_mangle]
+pub extern "C" fn z_encoding_loan_default() -> *const z_loaned_encoding_t {
+    z_encoding_zenoh_bytes()
+}
+
+/// Duplicate an encoding into a fresh owned one (pico `z_encoding_clone`).
+///
+/// A DEEP copy, unlike the sibling zenoh-c ABI's handle copy. It has to be: the
+/// source may be one of the `'static` constants above OR a heap
+/// [`EncodingState`] a program built with [`z_encoding_from_str`], and
+/// [`z_encoding_drop`] frees its handle. Copying the hint makes those two
+/// sources indistinguishable to the caller, which is what upstream's
+/// `_z_encoding_copy` does.
+///
+/// # Safety
+/// `dst` must be valid and writable; `this_` must be null or a valid loaned
+/// encoding.
+#[no_mangle]
+pub unsafe extern "C" fn z_encoding_clone(
+    dst: *mut z_owned_encoding_t,
+    this_: *const z_loaned_encoding_t,
+) -> ZResult {
+    guarded(|| {
+        if dst.is_null() {
+            return Z_ERR_NULL;
+        }
+        *dst = z_owned_encoding_t::null_value();
+        match encoding_hint(this_) {
+            Some(hint) => {
+                store_encoding(dst, hint.clone());
+                Z_OK
+            }
+            // A null / spent source clones to a null destination, which is the
+            // shape `z_internal_encoding_check` reports as absent. Upstream
+            // copies an empty encoding here rather than failing.
+            None => Z_OK,
+        }
+    })
+}
+
+/// Adopt a loaned encoding into an owned one, emptying the source (pico
+/// `z_encoding_take_from_loaned`).
+///
+/// Hand-written rather than emitted by
+/// [`impl_value_ownership`](crate::abi::impl_value_ownership) because that
+/// macro clears a THREE-slot pad and `z_owned_encoding_t` carries four; a
+/// wrong-width clear would leave a stale pointer word in the source the caller
+/// is entitled to reuse.
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a valid loaned
+/// encoding this crate produced.
+#[no_mangle]
+pub unsafe extern "C" fn z_encoding_take_from_loaned(
+    dst: *mut z_owned_encoding_t,
+    src: *mut z_loaned_encoding_t,
+) -> ZResult {
+    guarded(|| {
+        if dst.is_null() || src.is_null() {
+            return Z_ERR_NULL;
+        }
+        *dst = z_owned_encoding_t {
+            handle: (*src).handle,
+            _pad: (*src)._pad,
+        };
+        (*src).handle = std::ptr::null_mut();
+        (*src)._pad = [std::ptr::null_mut(); 4];
+        Z_OK
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every constant renders through the SAME table the wire codec uses, so a
+    /// constant and a `z_encoding_from_str` of its own string are one value.
+    ///
+    /// This is the LOCAL half of the claim — it cannot catch a wrong (name ->
+    /// id) pairing, because both sides of the comparison read the same table.
+    /// The oracle leg in `tests/pico_pure_function_oracle.rs` is what pins the
+    /// pairing against upstream's compiled library.
+    #[test]
+    fn every_constant_round_trips_through_the_id_table() {
+        // SAFETY: each accessor returns a `'static` view.
+        let cases: [(*const z_loaned_encoding_t, u32); 5] = [
+            (z_encoding_zenoh_bytes(), 0),
+            (z_encoding_text_plain(), 4),
+            (z_encoding_application_json(), 5),
+            (z_encoding_application_octet_stream(), 3),
+            (z_encoding_video_vp9(), 52),
+        ];
+        for (view, id) in cases {
+            // SAFETY: a `'static` view this module minted.
+            let hint = unsafe { encoding_hint(view) }.expect("a constant is never absent");
+            assert_eq!(hint.packed_id >> 1, id, "wire id");
+            assert_eq!(hint.packed_id & 1, 0, "a constant carries no schema");
+            let rendered = EncodingState::to_string(hint);
+            assert_eq!(
+                rendered, ENCODING_ID_TO_STR[id as usize],
+                "a constant renders as its table entry"
+            );
+            assert_eq!(
+                EncodingState::from_str(&rendered).hint.packed_id,
+                hint.packed_id,
+                "and parsing that string back lands on the same id"
+            );
+        }
+    }
+
+    /// `z_encoding_loan_default` is `zenoh/bytes`, and it is the SAME pointer —
+    /// upstream's body delegates, so a caller comparing the two by identity (as
+    /// `z_encoding_equals` callers do by value) sees agreement either way.
+    #[test]
+    fn loan_default_is_zenoh_bytes() {
+        assert_eq!(z_encoding_loan_default(), z_encoding_zenoh_bytes());
+        // SAFETY: two `'static` views.
+        assert!(unsafe { z_encoding_equals(z_encoding_loan_default(), z_encoding_zenoh_bytes()) });
+    }
+
+    /// A clone of a `'static` constant is an INDEPENDENT owned value: dropping
+    /// it must not attempt to free the constant. Pinned by cloning, dropping,
+    /// and then reading the constant again — a handle copy would have freed a
+    /// `'static` and this would be a use-after-free under any sanitizer.
+    #[test]
+    fn cloning_a_constant_yields_an_independently_droppable_value() {
+        let mut owned = z_owned_encoding_t::null_value();
+        // SAFETY: a live local and a `'static` view.
+        unsafe {
+            assert_eq!(z_encoding_clone(&mut owned, z_encoding_text_plain()), Z_OK);
+            assert!(z_internal_encoding_check(&owned));
+            let loaned = z_encoding_loan(&owned);
+            assert_eq!(
+                encoding_hint(loaned).expect("cloned").packed_id,
+                encoding_hint(z_encoding_text_plain())
+                    .expect("constant")
+                    .packed_id
+            );
+            z_encoding_drop(z_encoding_move(&mut owned));
+            assert!(!z_internal_encoding_check(&owned));
+            // The constant is still readable, which a handle copy would have
+            // made false.
+            assert_eq!(
+                encoding_hint(z_encoding_text_plain())
+                    .expect("the constant survived its clone's drop")
+                    .packed_id
+                    >> 1,
+                4
+            );
+        }
+    }
+
+    /// `take_from_loaned` moves the handle and EMPTIES the source, including
+    /// the fourth pad slot the shared macro would have left behind.
+    #[test]
+    fn take_from_loaned_empties_all_four_pad_slots() {
+        let mut src = z_owned_encoding_t::null_value();
+        let mut dst = z_owned_encoding_t::null_value();
+        // SAFETY: live locals.
+        unsafe {
+            store_encoding(&mut src, EncodingState::from_str("text/plain;utf8").hint);
+            // Dirty every pad slot so an under-wide clear is visible.
+            src._pad = [1usize as *mut c_void; 4];
+            let loaned = z_encoding_loan_mut(&mut src);
+            assert_eq!(z_encoding_take_from_loaned(&mut dst, loaned), Z_OK);
+            assert!(!z_internal_encoding_check(&src), "source emptied");
+            assert!(src._pad.iter().all(|p| p.is_null()), "all four pad slots");
+            assert_eq!(
+                encoding_hint(z_encoding_loan(&dst))
+                    .expect("moved")
+                    .schema
+                    .as_deref(),
+                Some("utf8")
+            );
+            z_encoding_drop(z_encoding_move(&mut dst));
+        }
+    }
 
     /// The ABI size a C program stack-allocates through pico's own header.
     #[test]

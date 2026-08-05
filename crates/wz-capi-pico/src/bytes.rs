@@ -20,7 +20,7 @@ use std::ffi::{c_char, c_void, CStr};
 use crate::abi::{
     handle_ref, impl_value_ownership, z_loaned_bytes_t, z_loaned_slice_t, z_loaned_string_t,
     z_moved_bytes_t, z_moved_slice_t, z_moved_string_t, z_owned_bytes_t, z_owned_slice_t,
-    z_owned_string_t, z_view_slice_t,
+    z_owned_string_t, z_view_slice_t, z_view_string_t,
 };
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
@@ -57,6 +57,20 @@ impl ByteBuf {
     /// An empty payload with no segments.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the payload is ONE slice, which is what
+    /// `z_bytes_get_contiguous_view` requires.
+    ///
+    /// wz's storage is always one `Vec`, so a naive answer would be "always" —
+    /// and that would be WRONG against a real pico, whose `_z_bytes_t` is a
+    /// vector of arc-slices and whose `z_bytes_get_contiguous_view` fails once
+    /// there is more than one. The question the export asks is about the
+    /// payload's SEGMENT structure, not about wz's allocator, so it is answered
+    /// from `bounds` — the same field the slice iterator walks, and the same
+    /// field the R311y532 foreign oracle showed wz had been discarding.
+    pub(crate) fn is_contiguous(&self) -> bool {
+        self.bounds.len() <= 1
     }
 
     /// The `idx`-th segment, or `None` past the end — what
@@ -160,6 +174,15 @@ pub(crate) struct SliceState {
 }
 
 impl SliceState {
+    /// The bytes this state owns, read through the SAME cached view
+    /// `z_slice_data` / `z_slice_len` hand to C — so a caller reading them in
+    /// Rust and a caller reading them in C cannot see different lengths.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        // SAFETY: `self_view` is built from `data`'s own pointer and length in
+        // `boxed`, and `data` is never reallocated afterwards.
+        unsafe { crate::abi::view_bytes(self.self_view._start, self.self_view._len) }.unwrap_or(&[])
+    }
+
     fn boxed(buf: ByteBuf) -> Box<SliceState> {
         let buf = buf.data;
         let len = buf.len();
@@ -175,6 +198,13 @@ impl SliceState {
 }
 
 impl StringState {
+    /// The string's LOGICAL bytes — the NUL terminator excluded, exactly as
+    /// `z_string_len` reports and for the same reason as [`SliceState::bytes`].
+    pub(crate) fn bytes(&self) -> &[u8] {
+        // SAFETY: as `SliceState::bytes`.
+        unsafe { crate::abi::view_bytes(self.self_view._start, self.self_view._len) }.unwrap_or(&[])
+    }
+
     fn boxed(bytes: &[u8]) -> Box<StringState> {
         let mut data = Vec::with_capacity(bytes.len() + 1);
         data.extend_from_slice(bytes);
@@ -860,4 +890,475 @@ pub unsafe extern "C" fn z_string_clone(
         store_string(dst, StringState::boxed(bytes));
         Z_OK
     })
+}
+
+// --- R311y559: the rest of the container surface ----------------------------
+//
+// Everything below is a symbol the REAL `libzenohpico.so` defines and this
+// cdylib did not, found by `wz-integration-tests/tests/pico_abi_symbol_census.rs`.
+// A drop-in is a claim about the linker before it is a claim about behaviour: a
+// program naming any of these did not fail a comparison, it failed to LINK, and
+// no behavioural leg in this tree could reach it. They are ordinary members of
+// the families already above and reuse the same state types.
+
+/// Total payload length in bytes (pico `z_bytes_len`).
+///
+/// Across ALL segments, not the first one: a `ByteBuf` may be a multi-segment
+/// gather (a fragmented receive, an `append_segments`), and upstream's
+/// `_z_bytes_len` sums the arc-slice vector. Reading only segment 0 would agree
+/// on every single-segment payload — which is every payload a wz-authored test
+/// builds — and under-report exactly the case the field exists for.
+///
+/// # Safety
+/// `bytes` must be null or a live loaned payload.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_len(bytes: *const z_loaned_bytes_t) -> usize {
+    guard_val(0, || bytes_ref(bytes).map_or(0, |buf| buf.data.len()))
+}
+
+/// Whether a payload carries no bytes (pico `z_bytes_is_empty`).
+///
+/// # Safety
+/// As [`z_bytes_len`].
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_is_empty(bytes: *const z_loaned_bytes_t) -> bool {
+    guard_val(true, || z_bytes_len(bytes) == 0)
+}
+
+/// Copy a loaned slice's bytes into an owned payload (pico
+/// `z_bytes_copy_from_slice`).
+///
+/// # Safety
+/// `bytes` must be valid and writable; `slice` must be null or a live loaned
+/// slice.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_copy_from_slice(
+    bytes: *mut z_owned_bytes_t,
+    slice: *const z_loaned_slice_t,
+) -> ZResult {
+    guarded(|| {
+        if bytes.is_null() {
+            return Z_ERR_NULL;
+        }
+        *bytes = z_owned_bytes_t::null_value();
+        if slice.is_null() {
+            return Z_ERR_NULL;
+        }
+        z_bytes_copy_from_buf(bytes, (*slice)._start, (*slice)._len)
+    })
+}
+
+/// Move an owned slice into an owned payload (pico `z_bytes_from_slice`),
+/// consuming the slice.
+///
+/// The slice is CONSUMED on every path, success or not — upstream's ownership
+/// transfer is unconditional once the call is made, so an early return that
+/// skipped the drop would leak the caller's value.
+///
+/// # Safety
+/// `bytes` must be valid and writable; `slice` must be null or a valid moved
+/// slice.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_from_slice(
+    bytes: *mut z_owned_bytes_t,
+    slice: *mut z_moved_slice_t,
+) -> ZResult {
+    guarded(|| {
+        if bytes.is_null() {
+            // Still consume, per the paragraph above.
+            z_slice_drop(slice);
+            return Z_ERR_NULL;
+        }
+        *bytes = z_owned_bytes_t::null_value();
+        let rc = if slice.is_null() {
+            Z_ERR_NULL
+        } else {
+            match handle_ref::<z_owned_slice_t, SliceState>(&(*slice)._this) {
+                Some(state) => {
+                    store_bytes(bytes, ByteBuf::from(state.bytes().to_vec()));
+                    Z_OK
+                }
+                None => Z_ERR_NULL,
+            }
+        };
+        z_slice_drop(slice);
+        rc
+    })
+}
+
+/// Copy a loaned string's bytes into an owned payload (pico
+/// `z_bytes_copy_from_string`). The NUL terminator is NOT copied — a payload's
+/// length is the string's logical length.
+///
+/// # Safety
+/// `bytes` must be valid and writable; `s` must be null or a live loaned string.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_copy_from_string(
+    bytes: *mut z_owned_bytes_t,
+    s: *const z_loaned_string_t,
+) -> ZResult {
+    guarded(|| {
+        if bytes.is_null() {
+            return Z_ERR_NULL;
+        }
+        *bytes = z_owned_bytes_t::null_value();
+        if s.is_null() {
+            return Z_ERR_NULL;
+        }
+        z_bytes_copy_from_buf(bytes, (*s)._start, (*s)._len)
+    })
+}
+
+/// Move an owned string into an owned payload (pico `z_bytes_from_string`),
+/// consuming the string.
+///
+/// # Safety
+/// `bytes` must be valid and writable; `s` must be null or a valid moved string.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_from_string(
+    bytes: *mut z_owned_bytes_t,
+    s: *mut z_moved_string_t,
+) -> ZResult {
+    guarded(|| {
+        if bytes.is_null() {
+            z_string_drop(s);
+            return Z_ERR_NULL;
+        }
+        *bytes = z_owned_bytes_t::null_value();
+        let rc = if s.is_null() {
+            Z_ERR_NULL
+        } else {
+            match handle_ref::<z_owned_string_t, StringState>(&(*s)._this) {
+                Some(state) => {
+                    store_bytes(bytes, ByteBuf::from(state.bytes().to_vec()));
+                    Z_OK
+                }
+                None => Z_ERR_NULL,
+            }
+        };
+        z_string_drop(s);
+        rc
+    })
+}
+
+/// Adopt a caller-allocated C string into an owned payload (pico
+/// `z_bytes_from_str`).
+///
+/// COPIES and runs the deleter immediately, for the identical reason
+/// [`z_string_from_str`] does — see that function for the named divergence and
+/// its one observable consequence.
+///
+/// # Safety
+/// `bytes` must be valid and writable; `value` must be null or a live
+/// NUL-terminated string the deleter can release.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_from_str(
+    bytes: *mut z_owned_bytes_t,
+    value: *mut c_char,
+    deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    context: *mut c_void,
+) -> ZResult {
+    guarded(|| {
+        let rc = z_bytes_copy_from_str(bytes, value);
+        if let Some(free) = deleter {
+            free(value as *mut c_void, context);
+        }
+        rc
+    })
+}
+
+/// Point a view slice at the payload's bytes WITHOUT copying (pico
+/// `z_bytes_get_contiguous_view`, unstable).
+///
+/// Fails with `Z_ERR_INVALID` on a payload that is not contiguous, which is
+/// upstream's contract and not a limitation of this implementation: the export
+/// exists precisely so a caller can distinguish "I can read this in place" from
+/// "I must gather it", and returning a view over a copy would answer the
+/// question wrongly while looking like it worked.
+///
+/// # Safety
+/// `bytes` must be null or a live loaned payload; `view` must be valid and
+/// writable, and must not outlive `bytes`.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_get_contiguous_view(
+    bytes: *const z_loaned_bytes_t,
+    view: *mut z_view_slice_t,
+) -> ZResult {
+    guarded(|| {
+        if view.is_null() {
+            return Z_ERR_NULL;
+        }
+        z_view_slice_empty(view);
+        let Some(buf) = bytes_ref(bytes) else {
+            return Z_ERR_NULL;
+        };
+        if !buf.is_contiguous() {
+            return crate::result::Z_ERR_INVALID;
+        }
+        z_view_slice_from_buf(view, buf.data.as_ptr(), buf.data.len())
+    })
+}
+
+// --- slice constructors ------------------------------------------------------
+
+/// Copy a buffer into an owned slice (pico `z_slice_copy_from_buf`).
+///
+/// # Safety
+/// `slice` must be valid and writable; `data` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn z_slice_copy_from_buf(
+    slice: *mut z_owned_slice_t,
+    data: *const u8,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        if slice.is_null() {
+            return Z_ERR_NULL;
+        }
+        *slice = z_owned_slice_t::null_value();
+        if data.is_null() && len != 0 {
+            return Z_ERR_NULL;
+        }
+        let bytes = if len == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(data, len).to_vec()
+        };
+        store_slice(slice, ByteBuf::from(bytes));
+        Z_OK
+    })
+}
+
+/// Adopt a caller-owned buffer into an owned slice (pico `z_slice_from_buf`).
+///
+/// Copies and runs the deleter immediately, as [`z_bytes_from_buf`] does.
+///
+/// # Safety
+/// `slice` must be valid and writable; `data` must be null or point at `len`
+/// readable bytes the deleter can release.
+#[no_mangle]
+pub unsafe extern "C" fn z_slice_from_buf(
+    slice: *mut z_owned_slice_t,
+    data: *mut u8,
+    len: usize,
+    deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    context: *mut c_void,
+) -> ZResult {
+    guarded(|| {
+        let rc = z_slice_copy_from_buf(slice, data, len);
+        if let Some(free) = deleter {
+            free(data as *mut c_void, context);
+        }
+        rc
+    })
+}
+
+/// Build an EMPTY owned slice (pico `z_slice_empty`).
+///
+/// Present-but-zero-length, not null — the same distinction
+/// [`z_bytes_empty`] documents, and for the same reason.
+///
+/// # Safety
+/// `slice` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_slice_empty(slice: *mut z_owned_slice_t) {
+    let _ = guarded(|| {
+        if slice.is_null() {
+            return Z_ERR_NULL;
+        }
+        store_slice(slice, ByteBuf::new());
+        Z_OK
+    });
+}
+
+/// Whether a loaned slice carries no bytes (pico `z_slice_is_empty`).
+///
+/// # Safety
+/// `slice` must be null or a live loaned slice.
+#[no_mangle]
+pub unsafe extern "C" fn z_slice_is_empty(slice: *const z_loaned_slice_t) -> bool {
+    guard_val(true, || z_slice_len(slice) == 0)
+}
+
+// --- string constructors + accessors -----------------------------------------
+
+/// Build an EMPTY owned string (pico `z_string_empty`).
+///
+/// # Safety
+/// `str_out` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_empty(str_out: *mut z_owned_string_t) {
+    let _ = guarded(|| {
+        if str_out.is_null() {
+            return Z_ERR_NULL;
+        }
+        store_string(str_out, StringState::boxed(&[]));
+        Z_OK
+    });
+}
+
+/// Whether a loaned string is zero-length (pico `z_string_is_empty`).
+///
+/// # Safety
+/// `str_in` must be null or a live loaned string.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_is_empty(str_in: *const z_loaned_string_t) -> bool {
+    guard_val(true, || z_string_len(str_in) == 0)
+}
+
+/// Copy a NUL-terminated C string into an owned string (pico
+/// `z_string_copy_from_str`).
+///
+/// # Safety
+/// `str_out` must be valid and writable; `value` must be null or a valid
+/// NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_copy_from_str(
+    str_out: *mut z_owned_string_t,
+    value: *const c_char,
+) -> ZResult {
+    let len = if value.is_null() {
+        0
+    } else {
+        CStr::from_ptr(value).to_bytes().len()
+    };
+    z_string_copy_from_substr(str_out, value, len)
+}
+
+/// Copy an explicitly-sized substring into an owned string (pico
+/// `z_string_copy_from_substr`).
+///
+/// # Safety
+/// `str_out` must be valid and writable; `value` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_copy_from_substr(
+    str_out: *mut z_owned_string_t,
+    value: *const c_char,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        if str_out.is_null() {
+            return Z_ERR_NULL;
+        }
+        *str_out = z_owned_string_t::null_value();
+        if value.is_null() && len != 0 {
+            return Z_ERR_NULL;
+        }
+        let bytes: &[u8] = if len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(value as *const u8, len)
+        };
+        store_string(str_out, StringState::boxed(bytes));
+        Z_OK
+    })
+}
+
+/// Reinterpret a loaned string as a loaned slice (pico `z_string_as_slice`).
+///
+/// A pointer reinterpretation, not a copy: both loaned forms are the SAME
+/// `{ start, len }` borrow pair (see [`crate::abi`]), which is exactly why
+/// upstream can hand back a `const z_loaned_slice_t *` into the string's own
+/// storage. The NUL terminator is excluded, because `_len` is the logical
+/// length.
+///
+/// # Safety
+/// `str_in` must be null or a live loaned string; the result must not outlive
+/// it.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_as_slice(
+    str_in: *const z_loaned_string_t,
+) -> *const z_loaned_slice_t {
+    str_in as *const z_loaned_slice_t
+}
+
+// --- the view-string family ---------------------------------------------------
+
+/// Point a view string at a NUL-terminated C string (pico
+/// `z_view_string_from_str`). No copy: the caller keeps `value` alive.
+///
+/// # Safety
+/// `str_out` must be valid and writable; `value` must be null or a valid
+/// NUL-terminated string that outlives the view.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_string_from_str(
+    str_out: *mut z_view_string_t,
+    value: *const c_char,
+) -> ZResult {
+    let len = if value.is_null() {
+        0
+    } else {
+        CStr::from_ptr(value).to_bytes().len()
+    };
+    z_view_string_from_substr(str_out, value, len)
+}
+
+/// Point a view string at an explicitly-sized substring (pico
+/// `z_view_string_from_substr`).
+///
+/// # Safety
+/// `str_out` must be valid and writable; `value` must be null or point at `len`
+/// readable bytes that outlive the view.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_string_from_substr(
+    str_out: *mut z_view_string_t,
+    value: *const c_char,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        if str_out.is_null() {
+            return Z_ERR_NULL;
+        }
+        z_view_string_empty(str_out);
+        if value.is_null() {
+            return Z_ERR_NULL;
+        }
+        *str_out = z_view_string_t {
+            _start: value as *const u8,
+            _len: len,
+            _pad: [0usize; 2],
+        };
+        Z_OK
+    })
+}
+
+/// Zero a view string (pico `z_view_string_empty`).
+///
+/// # Safety
+/// `str_out` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_string_empty(str_out: *mut z_view_string_t) {
+    if str_out.is_null() {
+        return;
+    }
+    *str_out = z_view_string_t {
+        _start: std::ptr::null(),
+        _len: 0,
+        _pad: [0usize; 2],
+    };
+}
+
+/// Whether a view string points at nothing (pico `z_view_string_is_empty`).
+///
+/// # Safety
+/// `str_in` must be null or a valid view string.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_string_is_empty(str_in: *const z_view_string_t) -> bool {
+    guard_val(true, || {
+        str_in.is_null() || (*str_in)._start.is_null() || (*str_in)._len == 0
+    })
+}
+
+/// Mutably borrow a view string (pico `z_view_string_loan_mut`) — the offset-0
+/// reinterpretation its immutable sibling already uses.
+///
+/// # Safety
+/// `str_in` must be null or a valid view string.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_string_loan_mut(
+    str_in: *mut z_view_string_t,
+) -> *mut z_loaned_string_t {
+    str_in as *mut z_loaned_string_t
 }

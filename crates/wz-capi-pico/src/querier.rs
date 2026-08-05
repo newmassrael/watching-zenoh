@@ -154,6 +154,12 @@ pub unsafe extern "C" fn z_querier_get_options_default(options: *mut z_querier_g
 pub(crate) struct QuerierState {
     shared: Arc<SharedSession>,
     keyexpr: String,
+    /// R311y559 — the `eid` half of the global id `z_querier_id` reports,
+    /// allocated once at declare. See `PublisherState::eid`.
+    eid: u64,
+    /// R311y559 — cached `{ start, len }` over `keyexpr` for
+    /// `z_querier_keyexpr`; bound after boxing, as everywhere else here.
+    loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
     target: z_query_target_t,
     consolidation: z_consolidation_mode_t,
     timeout_ms: u64,
@@ -167,6 +173,27 @@ pub(crate) struct QuerierState {
 }
 
 impl QuerierState {
+    /// Point the cached view at this state's own keyexpr, after boxing.
+    pub(crate) fn bind(&mut self) {
+        self.loaned_keyexpr =
+            crate::abi::z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+    }
+
+    /// The `eid` half of the global id `z_querier_id` reports.
+    pub(crate) fn entity_id(&self) -> u64 {
+        self.eid
+    }
+
+    /// The SESSION's zid — the other half of that global id.
+    pub(crate) fn shared_zid(&self) -> [u8; 16] {
+        self.shared.zid()
+    }
+
+    /// The cached borrow `z_querier_keyexpr` hands back.
+    pub(crate) fn loaned_keyexpr(&self) -> *const crate::abi::z_loaned_keyexpr_t {
+        &self.loaned_keyexpr as *const crate::abi::z_loaned_keyexpr_t
+    }
+
     pub(crate) fn keyexpr(&self) -> &str {
         &self.keyexpr
     }
@@ -307,9 +334,11 @@ pub unsafe extern "C" fn z_declare_querier(
                 },
             )
         };
-        let boxed = Box::new(QuerierState {
+        let mut boxed = Box::new(QuerierState {
+            eid: state.shared.next_entity_id(),
             shared: state.shared.clone(),
             keyexpr: ke,
+            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             target,
             consolidation,
             timeout_ms,
@@ -317,6 +346,7 @@ pub unsafe extern "C" fn z_declare_querier(
             qos,
             matches: StdMutex::new(Vec::new()),
         });
+        boxed.bind();
         *querier = z_owned_querier_t {
             handle: Box::into_raw(boxed) as *mut c_void,
             _pad: [std::ptr::null_mut(); 22],

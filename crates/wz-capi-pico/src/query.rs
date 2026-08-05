@@ -1421,6 +1421,22 @@ pub unsafe extern "C" fn z_query_encoding(
     }
 }
 
+/// The `(zid, eid)` identity behind a loaned queryable, for
+/// [`crate::session::z_queryable_id`] (R311y559).
+///
+/// The projection into the ABI struct lives in ONE place (`entity_id_of`), so
+/// this hands back the raw pair rather than the struct — which is also what
+/// keeps `QueryableState` private to this module.
+///
+/// # Safety
+/// `queryable` must be null or a live loaned queryable.
+pub(crate) unsafe fn queryable_identity(
+    queryable: *const z_loaned_queryable_t,
+) -> Option<([u8; 16], u64)> {
+    handle_ref::<z_loaned_queryable_t, QueryableState>(queryable)
+        .map(|state| (state.shared.zid(), state.id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

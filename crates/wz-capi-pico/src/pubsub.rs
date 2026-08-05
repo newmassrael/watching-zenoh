@@ -141,6 +141,19 @@ pub(crate) struct SampleMarshal {
     attachment: Option<ByteBuf>,
     timestamp: Option<z_timestamp_t>,
     encoding: Option<crate::encoding::z_owned_encoding_t>,
+    /// R311y559 — the sample's QoS byte, `None` when the message carried no
+    /// QoS ext. The three `z_sample_{priority,express,congestion_control}`
+    /// accessors decode it rather than each carrying its own field, because
+    /// they are three READINGS of one wire byte and separate fields could
+    /// disagree with it.
+    qos: Option<wz_runtime_tokio::sample::QosLevel>,
+    /// R311y559 — the transport reliability the sample arrived under.
+    reliability: wz_runtime_tokio::Reliability,
+    /// R311y559 — the `(zid, eid, sn)` source triple, in the pico ABI shape
+    /// `z_sample_source_info` hands back a POINTER to. Stored rather than
+    /// synthesised per call for the same reason the cached views are: the
+    /// accessor returns a pointer, and a stack temporary would dangle.
+    source_info: Option<z_source_info_t>,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
@@ -162,6 +175,9 @@ impl SampleMarshal {
             attachment: None,
             timestamp: None,
             encoding: None,
+            qos: None,
+            reliability: wz_runtime_tokio::Reliability::default(),
+            source_info: None,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
                 handle: std::ptr::null_mut(),
@@ -181,6 +197,11 @@ impl SampleMarshal {
         self.attachment = view.attachment().map(ByteBuf::from);
         self.timestamp = view.timestamp().map(timestamp_of);
         self.encoding = view.encoding().map(|hint| own_encoding(hint.clone()));
+        // R311y559 — the three fields the census found unreachable from C. All
+        // three were already on the seam; nothing decoded them into the ABI.
+        self.qos = view.qos();
+        self.reliability = view.reliability();
+        self.source_info = view.source_info().map(source_info_of);
         self
     }
 
@@ -251,6 +272,9 @@ impl SampleMarshal {
             kind: self.kind,
             attachment: self.attachment.clone(),
             timestamp: self.timestamp,
+            qos: self.qos,
+            reliability: self.reliability,
+            source_info: self.source_info,
             encoding: self
                 .encoding
                 .as_ref()
@@ -665,12 +689,45 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
 pub(crate) struct PublisherState {
     shared: Arc<SharedSession>,
     keyexpr: String,
+    /// R311y559 — the `eid` half of the global id `z_publisher_id` reports,
+    /// allocated ONCE at declare from the session's entity counter. See
+    /// `SharedSession::next_entity_id` for why it is allocated rather than
+    /// derived.
+    eid: u64,
+    /// R311y559 — cached `{ start, len }` over `keyexpr`, so
+    /// `z_publisher_keyexpr` hands back a borrow of stable storage rather than
+    /// of a temporary. Bound by [`PublisherState::bind`] once the state sits at
+    /// its final address — the same discipline `QueryableState` and
+    /// `SampleMarshal` use, and for the same reason.
+    loaned_keyexpr: z_loaned_keyexpr_t,
     /// Every matching listener declared THROUGH this publisher, retracted when
     /// it goes away. See [`PublisherState::record_matching_listener`].
     matches: StdMutex<Vec<MatchId>>,
 }
 
 impl PublisherState {
+    /// Point the cached view at this state's own keyexpr. MUST run only once
+    /// the state sits at its FINAL address (i.e. after `Box::new`).
+    pub(crate) fn bind(&mut self) {
+        self.loaned_keyexpr =
+            z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+    }
+
+    /// The `eid` half of the global id `z_publisher_id` reports.
+    pub(crate) fn entity_id(&self) -> u64 {
+        self.eid
+    }
+
+    /// The SESSION's zid — the other half of that global id.
+    pub(crate) fn shared_zid(&self) -> [u8; 16] {
+        self.shared.zid()
+    }
+
+    /// The cached borrow `z_publisher_keyexpr` hands back.
+    pub(crate) fn loaned_keyexpr(&self) -> *const z_loaned_keyexpr_t {
+        &self.loaned_keyexpr as *const z_loaned_keyexpr_t
+    }
+
     /// The declared keyexpr — what the MATCHING plane watches.
     pub(crate) fn keyexpr(&self) -> &str {
         &self.keyexpr
@@ -772,6 +829,22 @@ impl z_owned_publisher_t {
 pub(crate) struct SubscriberState {
     pub(crate) shared: Arc<SharedSession>,
     pub(crate) id: SubId,
+    /// R311y559 — the keyexpr this subscription was declared on, so
+    /// `z_subscriber_keyexpr` has something to borrow. The registry keys the
+    /// per-face replicas on `id` alone, so the string was not kept anywhere the
+    /// handle could reach.
+    pub(crate) keyexpr: String,
+    /// R311y559 — cached `{ start, len }` over `keyexpr`; see
+    /// [`PublisherState::bind`].
+    pub(crate) loaned_keyexpr: z_loaned_keyexpr_t,
+}
+
+impl SubscriberState {
+    /// Point the cached view at this state's own keyexpr, after boxing.
+    pub(crate) fn bind(&mut self) {
+        self.loaned_keyexpr =
+            z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+    }
 }
 
 impl Drop for SubscriberState {
@@ -955,13 +1028,238 @@ fn put_options() -> PublishOptions {
 
 // --- z_put -----------------------------------------------------------------
 
+/// pico `z_put_options_t` (`api/types.h:386-400`), mirrored field for field so
+/// rustc computes the layout from the SAME list the generated header declares.
+///
+/// R311y559 — this type did not exist and `z_put`'s options parameter was
+/// `*const c_void`, IGNORED. A pico program that set an encoding, a priority,
+/// an attachment or a timestamp on its session put had every one of them
+/// silently dropped; the sibling `z_publisher_put_options_t` had been read for
+/// rounds, so the two paths disagreed on the same wire fields depending on
+/// which entry point the program used.
+///
+/// The tail is FEATURE-CONDITIONAL in pico's header and these arms follow the
+/// GENERATED `config.h` the drop-in's programs compile against:
+/// `allowed_destination` is ABSENT (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0) and the
+/// `reliability` / `source_info` pair is PRESENT (`Z_FEATURE_UNSTABLE_API` is
+/// defined). Reading that off the cmake command line instead of the generated
+/// header is the R311y466 trap.
+#[repr(C)]
+pub struct z_put_options_t {
+    pub encoding: *mut c_void,
+    pub congestion_control: c_int,
+    pub priority: c_int,
+    pub timestamp: *mut z_timestamp_t,
+    pub is_express: bool,
+    pub attachment: *mut z_moved_bytes_t,
+    pub reliability: c_int,
+    pub source_info: *mut c_void,
+}
+
+/// pico `z_delete_options_t` (`api/types.h:413-425`).
+///
+/// No encoding and no attachment: a Del body carries neither, and upstream's
+/// struct reflects that.
+#[repr(C)]
+pub struct z_delete_options_t {
+    pub congestion_control: c_int,
+    pub priority: c_int,
+    pub is_express: bool,
+    pub timestamp: *mut z_timestamp_t,
+    pub reliability: c_int,
+    pub source_info: *mut c_void,
+}
+
+/// pico `z_publisher_delete_options_t` (`api/types.h:454-459`).
+#[repr(C)]
+pub struct z_publisher_delete_options_t {
+    pub timestamp: *mut z_timestamp_t,
+    pub source_info: *mut c_void,
+}
+
+/// Fill default put options (pico `z_put_options_default`).
+///
+/// # Safety
+/// `options` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_put_options_default(options: *mut z_put_options_t) {
+    if options.is_null() {
+        return;
+    }
+    *options = z_put_options_t {
+        encoding: std::ptr::null_mut(),
+        congestion_control: crate::query::Z_CONGESTION_CONTROL_DROP,
+        priority: crate::query::Z_PRIORITY_DEFAULT,
+        timestamp: std::ptr::null_mut(),
+        is_express: false,
+        attachment: std::ptr::null_mut(),
+        reliability: Z_RELIABILITY_RELIABLE,
+        source_info: std::ptr::null_mut(),
+    };
+}
+
+/// Fill default delete options (pico `z_delete_options_default`).
+///
+/// # Safety
+/// `options` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_delete_options_default(options: *mut z_delete_options_t) {
+    if options.is_null() {
+        return;
+    }
+    *options = z_delete_options_t {
+        congestion_control: crate::query::Z_CONGESTION_CONTROL_DROP,
+        priority: crate::query::Z_PRIORITY_DEFAULT,
+        is_express: false,
+        timestamp: std::ptr::null_mut(),
+        reliability: Z_RELIABILITY_RELIABLE,
+        source_info: std::ptr::null_mut(),
+    };
+}
+
+/// Fill default publisher-delete options (pico
+/// `z_publisher_delete_options_default`).
+///
+/// # Safety
+/// `options` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_publisher_delete_options_default(
+    options: *mut z_publisher_delete_options_t,
+) {
+    if options.is_null() {
+        return;
+    }
+    *options = z_publisher_delete_options_t {
+        timestamp: std::ptr::null_mut(),
+        source_info: std::ptr::null_mut(),
+    };
+}
+
+/// pico `Z_RELIABILITY_RELIABLE`, its `Z_RELIABILITY_DEFAULT`.
+pub const Z_RELIABILITY_RELIABLE: c_int = 0;
+/// pico `Z_RELIABILITY_BEST_EFFORT`.
+pub const Z_RELIABILITY_BEST_EFFORT: c_int = 1;
+
+/// A caller's PUSH-side `z_congestion_control_t` as wz's.
+///
+/// Distinct from [`crate::query::congestion_from_pico`] in ONE way, and it is
+/// the reason this is not a call to that function: the two differ in what an
+/// UNRECOGNISED value degrades to. pico's request-side default is BLOCK
+/// (`z_get_options_default`) and its push-side default is DROP
+/// (`z_put_options_default`), so each fallback has to be the default of the
+/// plane it serves. The two recognised values agree, and the mapping is written
+/// out rather than cast because the SIBLING zenoh-c ABI inverts them —
+/// R311y545 paid for exactly that.
+fn push_congestion_from_pico(c: c_int) -> wz_runtime_tokio::qos::CongestionControl {
+    match c {
+        crate::query::Z_CONGESTION_CONTROL_BLOCK => wz_runtime_tokio::qos::CongestionControl::Block,
+        _ => wz_runtime_tokio::qos::CongestionControl::Drop,
+    }
+}
+
+/// A caller's `z_reliability_t` as wz's.
+///
+/// INVERTED against wz's own enum: pico spells `RELIABLE = 0` /
+/// `BEST_EFFORT = 1` while wz is `BestEffort = 0` / `Reliable = 1`. Written
+/// out for exactly that reason.
+fn reliability_from_pico(r: c_int) -> Reliability {
+    match r {
+        Z_RELIABILITY_BEST_EFFORT => Reliability::BestEffort,
+        _ => Reliability::Reliable,
+    }
+}
+
+/// Read a caller-supplied `z_timestamp_t*` option field into a wz hint.
+///
+/// # Safety
+/// `ptr` must be null or point at a valid `z_timestamp_t`.
+unsafe fn timestamp_hint_of(
+    ptr: *const z_timestamp_t,
+) -> Option<wz_runtime_tokio::sample::TimestampHint> {
+    if ptr.is_null() {
+        return None;
+    }
+    let ts = &*ptr;
+    if !ts.valid {
+        return None;
+    }
+    Some(wz_runtime_tokio::sample::TimestampHint {
+        time: ts.time,
+        // The wire form strips trailing zeros; the codec re-pads.
+        zid: ts.id.id.to_vec(),
+    })
+}
+
+/// Fold a caller's `z_put_options_t` into wz's [`PublishOptions`].
+///
+/// Consumes the moved `encoding` and `attachment` on EVERY path — pico's
+/// ownership transfer is unconditional once the call is made — and a NULL
+/// `options` is the plain default, which is what pico does too.
+///
+/// `allowed_destination` is absent from the struct (see [`z_put_options_t`]),
+/// so the locality stays [`put_options`]'s `Remote`: a default pico build does
+/// not deliver a session's own put to its own subscriber, and there is no field
+/// through which a program could ask it to.
+///
+/// # Safety
+/// `options` must be null or a valid put-options struct.
+unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions {
+    let mut opts = put_options();
+    if options.is_null() {
+        return opts;
+    }
+    // Consumed FIRST, before any branch could skip them.
+    let attachment = take_moved_bytes((*options).attachment);
+    let encoding = crate::encoding::take_moved_encoding((*options).encoding);
+    opts = opts
+        .with_priority(crate::query::priority_from_pico((*options).priority))
+        .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
+        .with_express((*options).is_express)
+        .with_reliability(reliability_from_pico((*options).reliability));
+    if let Some(attachment) = attachment {
+        opts = opts.with_attachment(attachment.to_vec());
+    }
+    if let Some(hint) = encoding {
+        opts = opts.with_encoding(hint);
+    }
+    if let Some(ts) = timestamp_hint_of((*options).timestamp) {
+        opts = opts.with_timestamp(ts);
+    }
+    opts
+}
+
+/// Fold a caller's `z_delete_options_t` into wz's [`PublishOptions`], as the
+/// Del kind.
+///
+/// # Safety
+/// `options` must be null or a valid delete-options struct.
+unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishOptions {
+    let mut opts = put_options();
+    opts.kind = SampleKind::Del;
+    if options.is_null() {
+        return opts;
+    }
+    opts = opts
+        .with_priority(crate::query::priority_from_pico((*options).priority))
+        .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
+        .with_express((*options).is_express)
+        .with_reliability(reliability_from_pico((*options).reliability));
+    if let Some(ts) = timestamp_hint_of((*options).timestamp) {
+        opts = opts.with_timestamp(ts);
+    }
+    opts
+}
+
 /// Publish a payload on a session (pico `z_put`). Consumes the moved payload.
+///
+/// R311y559 — the options are now READ. See [`z_put_options_t`] for what was
+/// being dropped and why the two put paths had drifted.
 #[no_mangle]
 pub unsafe extern "C" fn z_put(
     zs: *const z_loaned_session_t,
     keyexpr: *const z_loaned_keyexpr_t,
     payload: *mut z_moved_bytes_t,
-    _options: *const c_void,
+    options: *const z_put_options_t,
 ) -> ZResult {
     guarded(|| {
         // Consume the moved payload FIRST so it is freed on every path (pico's
@@ -986,13 +1284,88 @@ pub unsafe extern "C" fn z_put(
         // discriminant off its `_z_declared_keyexpr_t`). Each face resolves the
         // literal from its own outbound mapping table, so this is correct even
         // for a face that joined after the declaration and got it by replay.
+        // Resolved AFTER the payload is taken and BEFORE any keyexpr branch, so
+        // the moved encoding / attachment are consumed on every path.
+        let resolved = session_put_options(options);
         let result = match keyexpr_mapping(keyexpr) {
-            Some(mapping) => state
-                .shared
-                .publish_aliased_all(mapping, &buf, &put_options()),
-            None => state.shared.publish_all(ke, &buf, &put_options()),
+            Some(mapping) => state.shared.publish_aliased_all(mapping, &buf, &resolved),
+            None => state.shared.publish_all(ke, &buf, &resolved),
         };
         match result {
+            Ok(_) => Z_OK,
+            Err(_) => Z_ERR_GENERIC,
+        }
+    })
+}
+
+/// Publish a DELETE on a session (pico `z_delete`).
+///
+/// R311y559 — this export did not exist. A Del is not a Put with an empty
+/// payload: it carries a different inner body, and a subscriber reads
+/// `z_sample_kind` to tell them apart, so a program deleting a key had no way
+/// to say so through this ABI at all.
+///
+/// # Safety
+/// `zs` must be null or a live loaned session; `keyexpr` must be null or a live
+/// loaned keyexpr; `options` must be null or a valid delete-options struct.
+#[no_mangle]
+pub unsafe extern "C" fn z_delete(
+    zs: *const z_loaned_session_t,
+    keyexpr: *const z_loaned_keyexpr_t,
+    options: *const z_delete_options_t,
+) -> ZResult {
+    guarded(|| {
+        let state = match session_state(zs) {
+            Some(s) => s,
+            None => return Z_ERR_NULL,
+        };
+        let ke = match keyexpr_str(keyexpr) {
+            Some(k) => k,
+            None => return Z_ERR_INVALID,
+        };
+        let resolved = session_delete_options(options);
+        // The empty payload is the Del body's own shape, not a stand-in for a
+        // missing one: `_z_msg_del_t` has no payload field.
+        let result = match keyexpr_mapping(keyexpr) {
+            Some(mapping) => state.shared.publish_aliased_all(mapping, &[], &resolved),
+            None => state.shared.publish_all(ke, &[], &resolved),
+        };
+        match result {
+            Ok(_) => Z_OK,
+            Err(_) => Z_ERR_GENERIC,
+        }
+    })
+}
+
+/// Publish a DELETE through a declared publisher (pico `z_publisher_delete`).
+///
+/// R311y559 — as [`z_delete`], this export did not exist.
+///
+/// # Safety
+/// `publisher` must be null or a live loaned publisher; `options` must be null
+/// or a valid publisher-delete-options struct.
+#[no_mangle]
+pub unsafe extern "C" fn z_publisher_delete(
+    publisher: *const z_loaned_publisher_t,
+    options: *const z_publisher_delete_options_t,
+) -> ZResult {
+    guarded(|| {
+        let state = match crate::abi::handle_ref::<z_loaned_publisher_t, PublisherState>(publisher)
+        {
+            Some(s) => s,
+            None => return Z_ERR_NULL,
+        };
+        let mut opts = put_options();
+        opts.kind = SampleKind::Del;
+        if !options.is_null() {
+            if let Some(ts) = timestamp_hint_of((*options).timestamp) {
+                opts = opts.with_timestamp(ts);
+            }
+        }
+        match state
+            .shared_session()
+            .publish_all(state.keyexpr(), &[], &opts)
+        {
             Ok(_) => Z_OK,
             Err(_) => Z_ERR_GENERIC,
         }
@@ -1068,11 +1441,14 @@ pub unsafe extern "C" fn z_declare_publisher(
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
         };
-        let boxed = Box::new(PublisherState {
+        let mut boxed = Box::new(PublisherState {
+            eid: state.shared.next_entity_id(),
             shared: state.shared.clone(),
             keyexpr: ke,
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             matches: StdMutex::new(Vec::new()),
         });
+        boxed.bind();
         *publisher = z_owned_publisher_t {
             handle: Box::into_raw(boxed) as *mut c_void,
             _pad: [std::ptr::null_mut(); 3],
@@ -1278,14 +1654,20 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // build and why this crate's mirror of it has none either. A default
         // pico build never delivers a session's own put to its own subscriber,
         // so neither does this ABI.
+        // R311y559 — kept for `z_subscriber_keyexpr`, which needs storage the
+        // handle owns; `ke` is moved into the registry below.
+        let keyexpr_literal = ke.clone();
         let id = state.shared.declare_subscriber(ke, Locality::Remote, {
             let closure = Arc::new(cclosure);
             Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
         });
-        let boxed = Box::new(SubscriberState {
+        let mut boxed = Box::new(SubscriberState {
             shared: state.shared.clone(),
             id,
+            keyexpr: keyexpr_literal,
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
         });
+        boxed.bind();
         *subscriber = z_owned_subscriber_t {
             handle: Box::into_raw(boxed) as *mut c_void,
             _pad: [std::ptr::null_mut(); 3],
@@ -1409,5 +1791,286 @@ pub unsafe extern "C" fn z_sample_kind(sample: *const z_loaned_sample_t) -> z_sa
             return Z_SAMPLE_KIND_PUT;
         }
         (*(sample as *const SampleMarshal)).kind
+    })
+}
+
+// --- R311y559: source info + the sample QoS accessors -----------------------
+
+/// pico `z_source_info_t` = `_z_source_info_t` (`protocol/core.h:257-260`),
+/// `{ _z_entity_global_id_t _source_id; uint32_t _source_sn; }` — 24 B at
+/// ALIGNMENT 4.
+///
+/// The alignment is 4, not 8, and that is ABI rather than trivia: `z_id_t` is a
+/// bare `uint8_t[16]` and so contributes alignment 1, leaving `eid` / `_source_sn`
+/// to set it. The same reasoning that makes
+/// [`z_entity_global_id_t`](crate::advanced::z_entity_global_id_t) 20 bytes
+/// rather than 24. This type crosses the boundary BY VALUE out of
+/// [`z_source_info_new`], so getting it wrong misplaces every field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct z_source_info_t {
+    pub _source_id: crate::advanced::z_entity_global_id_t,
+    pub _source_sn: u32,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_source_info_t>() == 24);
+    assert!(std::mem::align_of::<z_source_info_t>() == 4);
+};
+
+impl z_source_info_t {
+    /// The all-zero value, which is pico's `_z_source_info_null`.
+    pub(crate) fn empty() -> Self {
+        Self {
+            _source_id: crate::advanced::z_entity_global_id_t {
+                zid: crate::zid::z_id_t::empty(),
+                eid: 0,
+            },
+            _source_sn: 0,
+        }
+    }
+}
+
+/// The pico ABI shape for a wz [`SourceInfo`](wz_runtime_tokio::sample::SourceInfo).
+///
+/// `zid_len` is DROPPED, and deliberately: wz carries the wire's effective zid
+/// length because the codec's header nibble encodes it, while pico's `z_id_t`
+/// is a fixed 16-byte array whose unused tail is zero. The wz value is already
+/// right-zero-padded to 16, so the projection is a copy — but a reader
+/// comparing two zids must compare all 16 bytes, which is what
+/// `z_id_to_string` and every pico program do.
+fn source_info_of(info: &wz_runtime_tokio::sample::SourceInfo) -> z_source_info_t {
+    z_source_info_t {
+        _source_id: crate::advanced::z_entity_global_id_t {
+            zid: crate::zid::z_id_t::from_wire(&info.zid),
+            eid: info.eid,
+        },
+        _source_sn: info.sn,
+    }
+}
+
+/// Build a global entity id from a zid and an entity id (pico
+/// `z_entity_global_id_new`).
+///
+/// # Safety
+/// `gid` must be valid and writable; `zid` must be null or a valid `z_id_t`.
+#[no_mangle]
+pub unsafe extern "C" fn z_entity_global_id_new(
+    gid: *mut crate::advanced::z_entity_global_id_t,
+    zid: *const crate::zid::z_id_t,
+    eid: u32,
+) -> ZResult {
+    crate::ffi::guarded(|| {
+        if gid.is_null() {
+            return crate::result::Z_ERR_NULL;
+        }
+        *gid = crate::advanced::z_entity_global_id_t {
+            zid: if zid.is_null() {
+                crate::zid::z_id_t::empty()
+            } else {
+                *zid
+            },
+            eid,
+        };
+        crate::result::Z_OK
+    })
+}
+
+/// Build a source-info record (pico `z_source_info_new`), returned BY VALUE.
+///
+/// # Safety
+/// `source_id` must be null or a valid global entity id.
+#[no_mangle]
+pub unsafe extern "C" fn z_source_info_new(
+    source_id: *const crate::advanced::z_entity_global_id_t,
+    source_sn: u32,
+) -> z_source_info_t {
+    crate::ffi::guard_val(z_source_info_t::empty(), || z_source_info_t {
+        _source_id: if source_id.is_null() {
+            z_source_info_t::empty()._source_id
+        } else {
+            *source_id
+        },
+        _source_sn: source_sn,
+    })
+}
+
+/// The `(zid, eid)` half of a source-info record (pico `z_source_info_id`).
+///
+/// # Safety
+/// `info` must be null or a valid source-info record.
+#[no_mangle]
+pub unsafe extern "C" fn z_source_info_id(
+    info: *const z_source_info_t,
+) -> crate::advanced::z_entity_global_id_t {
+    crate::ffi::guard_val(z_source_info_t::empty()._source_id, || {
+        if info.is_null() {
+            z_source_info_t::empty()._source_id
+        } else {
+            (*info)._source_id
+        }
+    })
+}
+
+/// The sequence number of a source-info record (pico `z_source_info_sn`).
+///
+/// # Safety
+/// `info` must be null or a valid source-info record.
+#[no_mangle]
+pub unsafe extern "C" fn z_source_info_sn(info: *const z_source_info_t) -> u32 {
+    crate::ffi::guard_val(0, || {
+        if info.is_null() {
+            0
+        } else {
+            (*info)._source_sn
+        }
+    })
+}
+
+/// Borrow a sample's source info, or NULL when it carried none (pico
+/// `z_sample_source_info`).
+///
+/// NULL for absent is the contract, not an error path: a sample published
+/// without the inner-body source_info ext genuinely has none, and a program
+/// that branches on the pointer — as an advanced subscriber re-keying by
+/// `(zid, eid, sn)` must — needs the two cases distinguishable.
+///
+/// # Safety
+/// `sample` must be null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_source_info(
+    sample: *const z_loaned_sample_t,
+) -> *const z_source_info_t {
+    crate::ffi::guard_val(std::ptr::null(), || match sample_marshal(sample) {
+        Some(m) => match m.source_info.as_ref() {
+            Some(info) => info as *const z_source_info_t,
+            None => std::ptr::null(),
+        },
+        None => std::ptr::null(),
+    })
+}
+
+/// A sample's transport reliability (pico `z_sample_reliability`).
+///
+/// Note the enum is INVERTED against wz's own: pico spells
+/// `Z_RELIABILITY_RELIABLE = 0` and `Z_RELIABILITY_BEST_EFFORT = 1`
+/// (`api/constants.h:201-203`) while `wz_runtime_tokio::Reliability`
+/// is `BestEffort = 0` / `Reliable = 1`. The mapping is written out rather than
+/// cast, because a cast agrees on neither value and R311y545 already paid for
+/// exactly this class of slip on `z_congestion_control_t`.
+///
+/// # Safety
+/// `sample` must be null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_reliability(sample: *const z_loaned_sample_t) -> c_int {
+    /// pico `Z_RELIABILITY_RELIABLE`, and its `Z_RELIABILITY_DEFAULT`.
+    const Z_RELIABILITY_RELIABLE: c_int = 0;
+    /// pico `Z_RELIABILITY_BEST_EFFORT`.
+    const Z_RELIABILITY_BEST_EFFORT: c_int = 1;
+    crate::ffi::guard_val(Z_RELIABILITY_RELIABLE, || {
+        match sample_marshal(sample).map(|m| m.reliability) {
+            Some(wz_runtime_tokio::Reliability::BestEffort) => Z_RELIABILITY_BEST_EFFORT,
+            _ => Z_RELIABILITY_RELIABLE,
+        }
+    })
+}
+
+/// A sample's congestion-control setting (pico `z_sample_congestion_control`).
+///
+/// pico and wz AGREE numerically here (`Z_CONGESTION_CONTROL_DROP = 0`,
+/// `BLOCK = 1`) — but the sibling zenoh-c ABI does NOT, which is why the
+/// mapping is spelled out instead of cast.
+///
+/// # Safety
+/// `sample` must be null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_congestion_control(sample: *const z_loaned_sample_t) -> c_int {
+    /// pico `Z_CONGESTION_CONTROL_DROP`, which is also its default.
+    const Z_CONGESTION_CONTROL_DROP: c_int = 0;
+    /// pico `Z_CONGESTION_CONTROL_BLOCK`.
+    const Z_CONGESTION_CONTROL_BLOCK: c_int = 1;
+    crate::ffi::guard_val(Z_CONGESTION_CONTROL_DROP, || {
+        match sample_qos(sample).map(|q| q.congestion()) {
+            Some(wz_runtime_tokio::qos::CongestionControl::Block) => Z_CONGESTION_CONTROL_BLOCK,
+            _ => Z_CONGESTION_CONTROL_DROP,
+        }
+    })
+}
+
+/// Whether a sample bypassed batching (pico `z_sample_express`).
+///
+/// # Safety
+/// `sample` must be null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_express(sample: *const z_loaned_sample_t) -> bool {
+    crate::ffi::guard_val(false, || sample_qos(sample).is_some_and(|q| q.is_express()))
+}
+
+/// A sample's priority (pico `z_sample_priority`).
+///
+/// A sample carrying NO QoS ext reports `Z_PRIORITY_DATA` (5), which is what
+/// the wire means by its absence — the ext is elided precisely when every field
+/// is at its default.
+///
+/// # Safety
+/// `sample` must be null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_priority(sample: *const z_loaned_sample_t) -> c_int {
+    /// pico `Z_PRIORITY_DATA` (`api/constants.h:247`).
+    const Z_PRIORITY_DATA: c_int = 5;
+    crate::ffi::guard_val(Z_PRIORITY_DATA, || match sample_qos(sample) {
+        Some(q) => c_int::from(q.priority().wire_byte()),
+        None => Z_PRIORITY_DATA,
+    })
+}
+
+/// The marshal behind a loaned sample, or `None` on a null / spent one.
+///
+/// One reader for the accessors this round added, rather than the
+/// `&*(sample as *const SampleMarshal)` each older accessor spells out: the
+/// null check is the part that must not be forgotten, and a shared reader is
+/// how it stops being per-accessor discipline.
+unsafe fn sample_marshal<'a>(sample: *const z_loaned_sample_t) -> Option<&'a SampleMarshal> {
+    if sample.is_null() {
+        return None;
+    }
+    Some(&*(sample as *const SampleMarshal))
+}
+
+/// The QoS byte behind a loaned sample, or `None` when it carried no QoS ext.
+unsafe fn sample_qos(
+    sample: *const z_loaned_sample_t,
+) -> Option<wz_runtime_tokio::sample::QosLevel> {
+    sample_marshal(sample).and_then(|m| m.qos)
+}
+
+/// Deep-copy a sample into an owned one (pico `z_sample_clone`).
+///
+/// The same deep copy `z_sample_take_from_loaned` performs — routed through the
+/// identical [`clone_sample_marshal`] so the two cannot diverge — with the
+/// source left INTACT, which is the only difference between the two exports.
+///
+/// # Safety
+/// `dst` must be valid and writable; `this_` must be null or a live loaned
+/// sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_clone(
+    dst: *mut z_owned_sample_t,
+    this_: *const z_loaned_sample_t,
+) -> ZResult {
+    crate::ffi::guarded(|| {
+        if dst.is_null() {
+            return crate::result::Z_ERR_NULL;
+        }
+        *dst = z_owned_sample_t::null_value();
+        if this_.is_null() {
+            return crate::result::Z_ERR_NULL;
+        }
+        let handle = clone_sample_marshal(this_);
+        if handle.is_null() {
+            return crate::result::Z_ERR_GENERIC;
+        }
+        (*dst).handle = handle;
+        crate::result::Z_OK
     })
 }

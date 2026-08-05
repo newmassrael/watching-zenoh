@@ -729,6 +729,38 @@ impl_arithmetic!(ze_serialize_int64, ze_deserialize_int64, i64);
 impl_arithmetic!(ze_serialize_float, ze_deserialize_float, f32);
 impl_arithmetic!(ze_serialize_double, ze_deserialize_double, f64);
 
+/// Adopt a loaned writer into an owned one, emptying the source (pico
+/// `z_bytes_writer_take_from_loaned`).
+///
+/// R311y559 — a symbol the census found missing. Hand-written rather than
+/// emitted by [`impl_value_ownership`](crate::abi::impl_value_ownership)
+/// because that macro clears a THREE-slot pad and the writer carries four; an
+/// under-wide clear would leave a stale pointer word in the source the caller
+/// is entitled to reuse. Same reason, same shape as
+/// [`z_encoding_take_from_loaned`](crate::encoding::z_encoding_take_from_loaned).
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a live loaned writer
+/// this crate produced.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_writer_take_from_loaned(
+    dst: *mut z_owned_bytes_writer_t,
+    src: *mut z_loaned_bytes_writer_t,
+) -> ZResult {
+    guarded(|| {
+        if dst.is_null() || src.is_null() {
+            return Z_ERR_NULL;
+        }
+        *dst = z_owned_bytes_writer_t {
+            handle: (*src).handle,
+            _pad: (*src)._pad,
+        };
+        (*src).handle = std::ptr::null_mut();
+        (*src)._pad = [std::ptr::null_mut(); 4];
+        Z_OK
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

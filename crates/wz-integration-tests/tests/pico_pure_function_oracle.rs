@@ -780,3 +780,313 @@ unsafe fn deserialize_str(lib: &Library, raw: &[u8]) -> String {
     let _ = drop_bytes(bytes.as_mut_ptr());
     out
 }
+
+/// The 53 well-known encoding accessors, by the name upstream exports.
+///
+/// Deliberately NOT derived from wz's own macro invocation list: this is the
+/// list a C program can name, and the point of the leg below is to call the
+/// SAME name in both libraries. Deriving it from wz would compare wz against
+/// itself, which is the failure this file exists to rule out.
+const ENCODING_CONSTANT_ACCESSORS: [&str; 53] = [
+    "z_encoding_zenoh_bytes",
+    "z_encoding_zenoh_string",
+    "z_encoding_zenoh_serialized",
+    "z_encoding_application_octet_stream",
+    "z_encoding_text_plain",
+    "z_encoding_application_json",
+    "z_encoding_text_json",
+    "z_encoding_application_cdr",
+    "z_encoding_application_cbor",
+    "z_encoding_application_yaml",
+    "z_encoding_text_yaml",
+    "z_encoding_text_json5",
+    "z_encoding_application_python_serialized_object",
+    "z_encoding_application_protobuf",
+    "z_encoding_application_java_serialized_object",
+    "z_encoding_application_openmetrics_text",
+    "z_encoding_image_png",
+    "z_encoding_image_jpeg",
+    "z_encoding_image_gif",
+    "z_encoding_image_bmp",
+    "z_encoding_image_webp",
+    "z_encoding_application_xml",
+    "z_encoding_application_x_www_form_urlencoded",
+    "z_encoding_text_html",
+    "z_encoding_text_xml",
+    "z_encoding_text_css",
+    "z_encoding_text_javascript",
+    "z_encoding_text_markdown",
+    "z_encoding_text_csv",
+    "z_encoding_application_sql",
+    "z_encoding_application_coap_payload",
+    "z_encoding_application_json_patch_json",
+    "z_encoding_application_json_seq",
+    "z_encoding_application_jsonpath",
+    "z_encoding_application_jwt",
+    "z_encoding_application_mp4",
+    "z_encoding_application_soap_xml",
+    "z_encoding_application_yang",
+    "z_encoding_audio_aac",
+    "z_encoding_audio_flac",
+    "z_encoding_audio_mp4",
+    "z_encoding_audio_ogg",
+    "z_encoding_audio_vorbis",
+    "z_encoding_video_h261",
+    "z_encoding_video_h263",
+    "z_encoding_video_h264",
+    "z_encoding_video_h265",
+    "z_encoding_video_h266",
+    "z_encoding_video_mp4",
+    "z_encoding_video_ogg",
+    "z_encoding_video_raw",
+    "z_encoding_video_vp8",
+    "z_encoding_video_vp9",
+];
+
+/// Render what `accessor()` returns, through `lib`'s own `z_encoding_to_string`.
+///
+/// # Safety
+/// `lib` must export the named accessor plus pico's encoding + string ABI.
+unsafe fn encoding_constant_string(lib: &Library, accessor: &str) -> String {
+    let mut name = accessor.as_bytes().to_vec();
+    name.push(0);
+    let constant: Symbol<unsafe extern "C" fn() -> *const u8> = lib
+        .get(&name)
+        .unwrap_or_else(|e| panic!("library does not export {accessor}: {e}"));
+    let to_string: Symbol<unsafe extern "C" fn(*const u8, *mut u8) -> i8> = lib
+        .get(b"z_encoding_to_string\0")
+        .expect("library does not export z_encoding_to_string");
+    let string_loan: Symbol<unsafe extern "C" fn(*const u8) -> *const u8> =
+        lib.get(b"z_string_loan\0").expect("no z_string_loan");
+    let data: Symbol<unsafe extern "C" fn(*const u8) -> *const u8> =
+        lib.get(b"z_string_data\0").expect("no z_string_data");
+    let len: Symbol<unsafe extern "C" fn(*const u8) -> usize> =
+        lib.get(b"z_string_len\0").expect("no z_string_len");
+
+    let mut owned = Slot::<32>::zeroed();
+    assert_eq!(
+        to_string(constant(), owned.as_mut_ptr()),
+        0,
+        "z_encoding_to_string failed for {accessor}"
+    );
+    let ls = string_loan(owned.as_ptr());
+    let ptr = data(ls);
+    let n = len(ls);
+    if ptr.is_null() {
+        String::new()
+    } else {
+        String::from_utf8(std::slice::from_raw_parts(ptr, n).to_vec()).expect("UTF-8")
+    }
+}
+
+/// R311y559 — every well-known encoding CONSTANT names the same encoding in wz
+/// as in the real library.
+///
+/// The constants are the half of the encoding plane a census cannot judge and a
+/// round trip cannot either. `encoding_ids_agree_with_the_real_pico_library`
+/// pins the (string -> id) table; this pins the (ACCESSOR NAME -> id) pairing,
+/// which is a second, independent transcription — wz's macro invocation list
+/// maps `z_encoding_text_plain` to id 4, and nothing inside wz can tell that
+/// from a list that maps it to 5. Both libraries are asked for the constant by
+/// the same name and the answers are compared.
+///
+/// Damage probe: swapping any two ids in `wz-capi-pico/src/encoding.rs`'s macro
+/// list reds exactly the two accessors involved. Renaming an accessor reds at
+/// `dlopen` with "library does not export", which is the census's finding
+/// arriving through this leg.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "dlopens the CMake-built libzenohpico.so oracle; run by run-ci \
+            Layer E"]
+fn encoding_constants_agree_with_the_real_pico_library() {
+    unsafe {
+        let wz = open(wz_cdylib());
+        let pico = open(pico_library());
+        for accessor in ENCODING_CONSTANT_ACCESSORS {
+            let from_wz = encoding_constant_string(&wz, accessor);
+            let from_pico = encoding_constant_string(&pico, accessor);
+            assert_eq!(
+                from_wz, from_pico,
+                "{accessor}() names a different encoding in wz than in the real \
+                 zenoh-pico -- the wire id byte would differ"
+            );
+            assert!(
+                !from_wz.is_empty(),
+                "{accessor}() rendered empty in BOTH libraries, so the \
+                 comparison above is vacuous"
+            );
+        }
+
+        // `z_encoding_loan_default` is upstream's own alias for `zenoh/bytes`;
+        // asserted through the same path so a divergence in either half shows.
+        assert_eq!(
+            encoding_constant_string(&wz, "z_encoding_loan_default"),
+            encoding_constant_string(&pico, "z_encoding_loan_default"),
+        );
+        assert_eq!(
+            encoding_constant_string(&wz, "z_encoding_loan_default"),
+            encoding_constant_string(&wz, "z_encoding_zenoh_bytes"),
+        );
+    }
+}
+
+/// A `struct timespec` / `struct timeval` as the two libraries see it — two
+/// `i64` fields on every LP64 Unix, which is the only shape this ABI is
+/// grounded for.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TimePair {
+    a: i64,
+    b: i64,
+}
+
+/// R311y559 — the CLOCK arithmetic agrees with upstream's compiled code,
+/// exactly, on the inputs where "exactly" is even meaningful.
+///
+/// `z_clock_advance_*` and `zp_clock_elapsed_*_since` are total functions of
+/// their arguments: no `now`, no wire, no timing. That makes them the same
+/// class as `_z_zint_len` and it makes a byte-for-byte comparison possible,
+/// which is why they are adjudicated here rather than pinned by wz-authored
+/// expectations.
+///
+/// The two properties a plausible implementation gets wrong, and both are
+/// covered by the sweep below:
+///
+/// **The advance carry is ONE borrow, not a loop and not a modulo.** Upstream
+/// adds and then subtracts 1e9 at most once (`system.c:270-290`), which is
+/// sufficient only because `tv_nsec` starts normalised. An implementation
+/// using `%` agrees on every input; one that forgets the carry entirely
+/// disagrees on any input that crosses the boundary.
+///
+/// **`_since` CLAMPS backwards intervals to zero and TRUNCATES seconds.** The
+/// obvious `Duration`-based rewrite panics on the first and rounds the second.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "dlopens the CMake-built libzenohpico.so oracle; run by run-ci \
+            Layer E"]
+fn clock_arithmetic_agrees_with_the_real_pico_library() {
+    unsafe {
+        let wz = open(wz_cdylib());
+        let pico = open(pico_library());
+
+        // Inputs chosen to straddle every branch: no carry, exact boundary,
+        // carry, zero duration, and a nanosecond field already at the top.
+        let advance_cases: [(TimePair, u64); 7] = [
+            (
+                TimePair {
+                    a: 100,
+                    b: 900_000_000,
+                },
+                200,
+            ),
+            (
+                TimePair {
+                    a: 100,
+                    b: 900_000_000,
+                },
+                100,
+            ),
+            (TimePair { a: 0, b: 0 }, 0),
+            (TimePair { a: 5, b: 1_000 }, 999),
+            (
+                TimePair {
+                    a: 7,
+                    b: 999_999_999,
+                },
+                1,
+            ),
+            (
+                TimePair {
+                    a: -3,
+                    b: 500_000_000,
+                },
+                1_500,
+            ),
+            (
+                TimePair {
+                    a: 1_700_000_000,
+                    b: 123_456_789,
+                },
+                4_294_967_296,
+            ),
+        ];
+        for unit in ["us", "ms", "s"] {
+            let mut name = format!("z_clock_advance_{unit}").into_bytes();
+            name.push(0);
+            let wz_fn: Symbol<unsafe extern "C" fn(*mut TimePair, u64)> =
+                wz.get(&name).expect("wz does not export the advance");
+            let pico_fn: Symbol<unsafe extern "C" fn(*mut TimePair, u64)> =
+                pico.get(&name).expect("pico does not export the advance");
+            for (start, duration) in advance_cases {
+                let (mut l, mut r) = (start, start);
+                wz_fn(&mut l, duration);
+                pico_fn(&mut r, duration);
+                assert_eq!(
+                    l, r,
+                    "z_clock_advance_{unit}({start:?}, {duration}) disagrees \
+                     with upstream"
+                );
+            }
+        }
+
+        // Forwards, backwards, equal, sub-second, and a nanosecond borrow in
+        // the difference — the five shapes the clamp and the truncation
+        // separate.
+        let pairs: [(TimePair, TimePair); 6] = [
+            (
+                TimePair {
+                    a: 11,
+                    b: 500_000_000,
+                },
+                TimePair { a: 10, b: 0 },
+            ),
+            (
+                TimePair { a: 10, b: 0 },
+                TimePair {
+                    a: 11,
+                    b: 500_000_000,
+                },
+            ),
+            (TimePair { a: 10, b: 0 }, TimePair { a: 10, b: 0 }),
+            (
+                TimePair {
+                    a: 10,
+                    b: 999_999_999,
+                },
+                TimePair { a: 10, b: 0 },
+            ),
+            (
+                TimePair { a: 11, b: 0 },
+                TimePair {
+                    a: 10,
+                    b: 999_999_999,
+                },
+            ),
+            (
+                TimePair { a: 100, b: 1 },
+                TimePair {
+                    a: 0,
+                    b: 999_999_999,
+                },
+            ),
+        ];
+        for unit in ["us", "ms", "s"] {
+            let mut name = format!("zp_clock_elapsed_{unit}_since").into_bytes();
+            name.push(0);
+            let wz_fn: Symbol<unsafe extern "C" fn(*mut TimePair, *mut TimePair) -> u64> =
+                wz.get(&name).expect("wz does not export the elapsed");
+            let pico_fn: Symbol<unsafe extern "C" fn(*mut TimePair, *mut TimePair) -> u64> =
+                pico.get(&name).expect("pico does not export the elapsed");
+            for (instant, epoch) in pairs {
+                let (mut li, mut le) = (instant, epoch);
+                let (mut ri, mut re) = (instant, epoch);
+                assert_eq!(
+                    wz_fn(&mut li, &mut le),
+                    pico_fn(&mut ri, &mut re),
+                    "zp_clock_elapsed_{unit}_since({instant:?}, {epoch:?}) \
+                     disagrees with upstream"
+                );
+            }
+        }
+    }
+}
