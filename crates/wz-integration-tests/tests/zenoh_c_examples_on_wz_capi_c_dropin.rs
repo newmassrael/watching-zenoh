@@ -371,6 +371,8 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         // R311y543 — the base subscriber options. Not unstable-gated, and the
         // struct `ze_advanced_subscriber_options_t` embeds at offset 0.
         ("z_subscriber_options_t", "sizeof(z_subscriber_options_t)"),
+        ("z_put_options_t", "sizeof(z_put_options_t)"),
+        ("z_delete_options_t", "sizeof(z_delete_options_t)"),
     ];
     // R311y543 — the `ze_advanced_*` plane, measured ONLY where upstream
     // declares it. The order must match `abi.rs`'s
@@ -549,4 +551,205 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
             mine[i], upstream[i]
         );
     }
+}
+
+/// R311y545 — the OPTION DEFAULTS gate: one C probe, compiled once, LINKED
+/// TWICE, stdout diffed.
+///
+/// ## Why the layout gate above cannot see this
+///
+/// `z_publisher_options_t` is transparent, so the sibling leg measures its
+/// SIZE against the installed header and a wrong size fails loudly. Nothing
+/// measured the VALUES `*_options_default` writes into it, and those values are
+/// C enum discriminants — a wrong one is a correctly-sized struct carrying a
+/// different meaning.
+///
+/// That is not hypothetical: this crate had `Z_CONGESTION_CONTROL_DROP = 0`
+/// and `Z_RELIABILITY_RELIABLE = 0`, both transcribed from the zenoh-PICO
+/// sibling, whose enums are INVERTED against zenoh-c's
+/// (`Z_CONGESTION_CONTROL_BLOCK = 0` / `DROP = 1`;
+/// `Z_RELIABILITY_BEST_EFFORT = 0` / `RELIABLE = 1`). So
+/// `z_publisher_options_default` wrote BLOCK where upstream writes DROP, and a
+/// C program comparing the field against the header's own constant got the
+/// wrong answer. It was invisible for as long as the fields were accepted and
+/// ignored — nothing read the value — and it becomes a WIRE divergence the
+/// moment they are honoured, which is what R311y545 does.
+///
+/// ## Why a wz-authored probe here, when the corpus rule says upstream's
+///
+/// The rule exists because a wz-authored program is written against the
+/// exports wz happens to have. That bias cannot operate on a differential: the
+/// SAME source is compiled once and linked against both libraries, so anything
+/// wz-flavoured about the probe shows up identically on both arms and cancels.
+/// What survives the subtraction is exactly a disagreement between the two
+/// implementations. No upstream example prints these defaults, so the
+/// alternative is not a better witness — it is no witness.
+///
+/// Every field of both structs is printed, including the pointer fields as
+/// null-or-not, so a future edit that "defaults" one of them to a dangling
+/// value reds here rather than in a caller's frame.
+///
+/// ## No cross-impl proof annotation, and the ABSENCE is the correct form
+///
+/// Layer A4-3 refuses one here — "a file whose classifier finds no foreign
+/// implementation may not annotate at all, not even to decline", the rule this
+/// file's own header records. A first draft declined explicitly, mirroring the
+/// z_bytes differential in the sibling pico file, and the lane red. The sibling
+/// may decline because the classifier finds real pico there; this file has only
+/// wz's cdylib and the reference `libzenohc.so`, and zenoh-c is not in A4's
+/// class vocabulary. The reasoning lives in prose instead, which is the same
+/// place the rest of this file keeps it.
+#[test]
+#[ignore = "compiles a C probe against the machine-local zenoh-c headers and links \
+            it against BOTH wz's cdylib and the real libzenohc.so; run-ci Layer \
+            C1cc drives it"]
+fn upstream_option_defaults_on_wz_capi_c_match_real_libzenohc() {
+    let Some((include, libdir_ref, _examples)) = oracle_or_note() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled probes");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("probe source dir");
+    // The `#if defined(Z_FEATURE_UNSTABLE_API)` arms are the header's own, so
+    // one source serves both oracle flavours and the probe cannot name a field
+    // this installation does not have.
+    std::fs::write(
+        src_dir.join("wz_option_defaults.c"),
+        r#"#include <stdio.h>
+#include "zenoh.h"
+
+int main(void) {
+    z_publisher_options_t po;
+    z_publisher_options_default(&po);
+    printf("publisher.encoding_is_null=%d\n", po.encoding == NULL);
+    printf("publisher.congestion_control=%d\n", (int)po.congestion_control);
+    printf("publisher.priority=%d\n", (int)po.priority);
+    printf("publisher.is_express=%d\n", (int)po.is_express);
+#if defined(Z_FEATURE_UNSTABLE_API)
+    printf("publisher.reliability=%d\n", (int)po.reliability);
+#endif
+    printf("publisher.allowed_destination=%d\n", (int)po.allowed_destination);
+
+    z_publisher_put_options_t ppo;
+    z_publisher_put_options_default(&ppo);
+    printf("publisher_put.encoding_is_null=%d\n", ppo.encoding == NULL);
+    printf("publisher_put.timestamp_is_null=%d\n", ppo.timestamp == NULL);
+#if defined(Z_FEATURE_UNSTABLE_API)
+    printf("publisher_put.source_info_is_null=%d\n", ppo.source_info == NULL);
+#endif
+    printf("publisher_put.attachment_is_null=%d\n", ppo.attachment == NULL);
+
+    z_put_options_t puo;
+    z_put_options_default(&puo);
+    printf("put.encoding_is_null=%d\n", puo.encoding == NULL);
+    printf("put.congestion_control=%d\n", (int)puo.congestion_control);
+    printf("put.priority=%d\n", (int)puo.priority);
+    printf("put.is_express=%d\n", (int)puo.is_express);
+    printf("put.timestamp_is_null=%d\n", puo.timestamp == NULL);
+#if defined(Z_FEATURE_UNSTABLE_API)
+    printf("put.reliability=%d\n", (int)puo.reliability);
+#endif
+    printf("put.allowed_destination=%d\n", (int)puo.allowed_destination);
+#if defined(Z_FEATURE_UNSTABLE_API)
+    printf("put.source_info_is_null=%d\n", puo.source_info == NULL);
+#endif
+    printf("put.attachment_is_null=%d\n", puo.attachment == NULL);
+
+    z_delete_options_t duo;
+    z_delete_options_default(&duo);
+    printf("delete.congestion_control=%d\n", (int)duo.congestion_control);
+    printf("delete.priority=%d\n", (int)duo.priority);
+    printf("delete.is_express=%d\n", (int)duo.is_express);
+    printf("delete.timestamp_is_null=%d\n", duo.timestamp == NULL);
+#if defined(Z_FEATURE_UNSTABLE_API)
+    printf("delete.reliability=%d\n", (int)duo.reliability);
+#endif
+    printf("delete.allowed_destination=%d\n", (int)duo.allowed_destination);
+    return 0;
+}
+"#,
+    )
+    .expect("write the probe source");
+
+    let lib = wz_capi_c_cdylib();
+    let wz_libdir = lib.parent().expect("cdylib has a parent").to_path_buf();
+    let on_wz = compile_zenoh_c_example(
+        "wz_option_defaults",
+        dir.path(),
+        &include,
+        &src_dir,
+        &wz_libdir,
+        "wz_capi_c",
+    )
+    .unwrap_or_else(|diag| {
+        panic!(
+            "§5.27 api-compat-c: the option-defaults probe does NOT link against wz's \
+             C-ABI cdylib.\n{diag}"
+        )
+    });
+    let ref_dir = dir.path().join("reference");
+    std::fs::create_dir_all(&ref_dir).expect("reference build dir");
+    let on_ref = compile_zenoh_c_example(
+        "wz_option_defaults",
+        &ref_dir,
+        &include,
+        &src_dir,
+        &libdir_ref,
+        "zenohc",
+    )
+    .unwrap_or_else(|diag| {
+        panic!("the option-defaults probe does not link against the REAL libzenohc.so\n{diag}")
+    });
+
+    let run = |exe: &Path, libdir: &Path| -> (bool, String) {
+        let out = Command::new(exe)
+            .env("LD_LIBRARY_PATH", libdir)
+            .output()
+            .unwrap_or_else(|why| panic!("spawn {}: {why}", exe.display()));
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    let (wz_ok, wz_stdout) = run(&on_wz, &wz_libdir);
+    let (ref_ok, ref_stdout) = run(&on_ref, &libdir_ref);
+
+    assert!(
+        ref_ok,
+        "the REFERENCE arm failed, so this machine's oracle cannot serve as one \
+         here — the comparison below would be meaningless.\n{ref_stdout}"
+    );
+    assert!(
+        wz_ok,
+        "the option-defaults probe exited non-zero on wz's C ABI.\n\
+         --- stdout on wz ---\n{wz_stdout}"
+    );
+    // Asserted BEFORE the diff: two empty captures are equal, and an equality
+    // between them would report the strongest result this file can produce
+    // while measuring nothing.
+    for required in [
+        "publisher.congestion_control=",
+        "put.congestion_control=",
+        "delete.congestion_control=",
+    ] {
+        assert!(
+            ref_stdout.contains(required),
+            "the reference arm printed no `{required}` line, so the diff below \
+             would compare two outputs neither of which contains a field this leg \
+             exists for. One assertion per STRUCT, because the three \
+             `*_options_default` families are independent exports and a probe that \
+             silently stopped printing one would still diff EQUAL.\n\
+             --- stdout on real libzenohc ---\n{ref_stdout}"
+        );
+    }
+    assert_eq!(
+        wz_stdout, ref_stdout,
+        "wz's `*_options_default` writes DIFFERENT values than the real \
+         libzenohc.so on the SAME header. These are C enum discriminants: a \
+         correctly-sized struct carrying a different meaning, which the layout \
+         gate cannot see. Check the constants in wz-capi-c/src/publisher.rs \
+         against zenoh_commons.h — zenoh-c and zenoh-pico INVERT both the \
+         congestion-control and the reliability enum.\n\
+         --- stdout on wz ---\n{wz_stdout}\n--- stdout on real libzenohc ---\n{ref_stdout}"
+    );
 }

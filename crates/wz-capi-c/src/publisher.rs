@@ -38,11 +38,12 @@ use std::sync::Arc;
 
 use wz_capi_core::faces::SharedSession;
 use wz_runtime_tokio::locality::Locality;
+use wz_runtime_tokio::qos::{CongestionControl, Priority};
 use wz_runtime_tokio::session::PublishOptions;
 
 use crate::abi::{
     z_loaned_keyexpr_t, z_loaned_publisher_t, z_loaned_session_t, z_moved_bytes_t,
-    z_moved_publisher_t, z_owned_publisher_t, Handle,
+    z_moved_encoding_t, z_moved_publisher_t, z_owned_publisher_t, Handle,
 };
 use crate::bytes::take_payload;
 use crate::ffi::{guard_val, guarded};
@@ -59,25 +60,90 @@ pub type z_reliability_t = std::ffi::c_int;
 /// zenoh-c's `zc_locality_t` (`zenoh_commons.h:273-286`).
 pub type zc_locality_t = std::ffi::c_int;
 
-/// `Z_CONGESTION_CONTROL_DROP` = 0 — upstream's publisher default.
-pub const Z_CONGESTION_CONTROL_DROP: z_congestion_control_t = 0;
+// R311y545 — THE TWO CONSTANTS BELOW WERE WRONG, AND THE ERROR HAS ONE CAUSE:
+// zenoh-c's enums are NOT zenoh-pico's, and this crate was carrying the pico
+// sibling's values. zenoh-pico has `Z_CONGESTION_CONTROL_BLOCK = 1` /
+// `DROP = 0` (`api/constants.h`); zenoh-c INVERTS them. It was invisible while
+// the fields were accepted-and-ignored — nothing read the value — and it
+// becomes a wire divergence the moment they are honoured, which is what this
+// round does.
+//
+// MEASURED, not read: a C probe compiled against the installed header and
+// linked against the real `libzenohc.so` prints
+// `publisher.congestion_control=1`, and the twice-and-diff leg
+// `upstream_option_defaults_on_wz_capi_c_match_real_libzenohc` now runs that
+// probe against BOTH libraries on every C1cc pass so a future edit cannot
+// re-introduce either value.
+/// `Z_CONGESTION_CONTROL_BLOCK` = 0 (`zenoh_commons.h:45-60`) — messages are
+/// NOT dropped on congestion. Note the inversion against zenoh-pico.
+pub const Z_CONGESTION_CONTROL_BLOCK: z_congestion_control_t = 0;
+/// `Z_CONGESTION_CONTROL_DROP` = 1 — upstream's publisher default
+/// (`CongestionControl::DEFAULT_PUSH`).
+pub const Z_CONGESTION_CONTROL_DROP: z_congestion_control_t = 1;
+/// `Z_CONGESTION_CONTROL_BLOCK_FIRST` = 2 — present only under
+/// `Z_FEATURE_UNSTABLE_API`.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub const Z_CONGESTION_CONTROL_BLOCK_FIRST: z_congestion_control_t = 2;
+/// `Z_PRIORITY_REAL_TIME` = 1 — upstream's highest application priority.
+pub const Z_PRIORITY_REAL_TIME: z_priority_t = 1;
 /// `Z_PRIORITY_DATA` = 5 — upstream's default priority.
 pub const Z_PRIORITY_DATA: z_priority_t = 5;
-/// `Z_RELIABILITY_RELIABLE` = 0.
-pub const Z_RELIABILITY_RELIABLE: z_reliability_t = 0;
+/// `Z_PRIORITY_BACKGROUND` = 7 — upstream's lowest.
+pub const Z_PRIORITY_BACKGROUND: z_priority_t = 7;
+/// `Z_RELIABILITY_BEST_EFFORT` = 0 (`commons.rs:300-305`).
+pub const Z_RELIABILITY_BEST_EFFORT: z_reliability_t = 0;
+/// `Z_RELIABILITY_RELIABLE` = 1 — upstream's default
+/// (`z_reliability_default()` = `Reliability::default()`). This was 0, the
+/// second half of the pico-values transcription described above.
+pub const Z_RELIABILITY_RELIABLE: z_reliability_t = 1;
 /// `ZC_LOCALITY_ANY` = 0.
 pub const ZC_LOCALITY_ANY: zc_locality_t = 0;
+/// `ZC_LOCALITY_SESSION_LOCAL` = 1.
+pub const ZC_LOCALITY_SESSION_LOCAL: zc_locality_t = 1;
+/// `ZC_LOCALITY_REMOTE` = 2.
+pub const ZC_LOCALITY_REMOTE: zc_locality_t = 2;
+
+/// zenoh-c's `z_congestion_control_t` as wz's typed [`CongestionControl`].
+///
+/// `BLOCK_FIRST` maps to `Block`: the packed QoS byte carries a single `nodrop`
+/// bit (`_z_n_qos_create`, pico `network.h:86`), so "block only the first" has
+/// no distinct wire encoding to project onto. An out-of-range value takes
+/// upstream's default rather than panicking, matching the permissive-decode
+/// spirit of [`Priority::from_wire`].
+pub(crate) fn congestion_from_c(c: z_congestion_control_t) -> CongestionControl {
+    match c {
+        Z_CONGESTION_CONTROL_BLOCK => CongestionControl::Block,
+        Z_CONGESTION_CONTROL_DROP => CongestionControl::Drop,
+        // BLOCK_FIRST (2) and anything unrecognised.
+        2 => CongestionControl::Block,
+        _ => CongestionControl::Drop,
+    }
+}
+
+/// zenoh-c's `z_priority_t` as wz's typed [`Priority`].
+///
+/// zenoh-c's enum spans 1..=7; wire priority 0 (`Control`) is reserved for
+/// zenoh's own control traffic and has no zenoh-c spelling, so it is accepted
+/// on the wire and never produced from a C option. Anything outside 0..=7
+/// cannot fit the 3-bit field and clamps to upstream's default.
+pub(crate) fn priority_from_c(p: z_priority_t) -> Priority {
+    match u8::try_from(p) {
+        Ok(byte) if byte <= 7 => Priority::from_wire(byte),
+        _ => Priority::DEFAULT,
+    }
+}
 
 /// Options for `z_declare_publisher` (`zenoh_commons.h:644-673`).
 ///
-/// `encoding` is a `z_moved_encoding_t*`; this slice does not read it, so it is
-/// typed as an opaque pointer rather than pulling in the encoding family. The
-/// FIELD is what the layout depends on, not its pointee.
+/// `encoding` is a `z_moved_encoding_t*`, and R311y545 made it a TYPED pointer
+/// because the field is now READ: the declare path resolves the label through
+/// [`moved_encoding_hint`](crate::encoding::moved_encoding_hint) and every put
+/// on this publisher carries it. The layout is unchanged — a pointer is a
+/// pointer — but the type now says what the code does.
 #[repr(C)]
 pub struct z_publisher_options_t {
-    /// Default encoding for messages published here. Consumed by upstream; not
-    /// read by this slice.
-    pub encoding: *mut c_void,
+    /// Default encoding for messages published here.
+    pub encoding: *mut z_moved_encoding_t,
     /// Congestion control to apply when routing.
     pub congestion_control: z_congestion_control_t,
     /// Priority of published messages.
@@ -94,9 +160,16 @@ pub struct z_publisher_options_t {
 /// Options for `z_publisher_put` (`zenoh_commons.h:902-923`).
 #[repr(C)]
 pub struct z_publisher_put_options_t {
-    /// Encoding of the published data. Consumed by upstream; not read here.
-    pub encoding: *mut c_void,
+    /// Encoding of the published data. Overrides the publisher's default when
+    /// set, as upstream's `PutBuilder::encoding` does.
+    pub encoding: *mut z_moved_encoding_t,
     /// Timestamp of the publication.
+    ///
+    /// Still an opaque pointer, and still UNREAD — `z_timestamp_t` is not
+    /// declared by this crate and no upstream example sets the field, so
+    /// declaring the type would add an unmeasured entry to the footprint gate
+    /// to serve no driver. The residual is named here rather than left to be
+    /// inferred from the pointer's type.
     pub timestamp: *const c_void,
     /// Source info. Present only under `Z_FEATURE_UNSTABLE_API`.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
@@ -125,6 +198,16 @@ pub(crate) struct PublisherState {
     /// also makes the attach thread-safe without any argument about which thread
     /// a C program declares from.
     matching: std::sync::Mutex<Option<crate::matching::MatchingHold>>,
+    /// R311y545 — the declare-time options, resolved ONCE into the wz publish
+    /// bundle every put on this publisher starts from.
+    ///
+    /// Resolved at declare rather than per put because that is upstream's
+    /// shape: `_declare_publisher_inner` folds the options into a
+    /// `PublisherBuilder` and the built `Publisher` carries them, so a caller
+    /// that mutates its options struct after declaring changes nothing — and
+    /// the `encoding` field is `z_moved_encoding_t*`, i.e. CONSUMED at declare,
+    /// so reading it again per put would be reading a moved value.
+    base: PublishOptions,
 }
 
 impl PublisherState {
@@ -150,14 +233,106 @@ impl PublisherState {
     }
 }
 
-/// The publish options a C publisher uses.
+/// The publish options a C publisher uses when it passes NO options — the
+/// values `z_publisher_options_default` writes, resolved.
 ///
 /// `Locality::Remote` for the same structural reason
 /// [`crate::put`] documents: a C session is N per-face wz sessions each holding a
 /// replica of the subscription, so a local-capable publish would fire one C
-/// callback once PER FACE for a single put.
-fn publisher_put_options() -> PublishOptions {
-    PublishOptions::put().with_locality(Locality::Remote)
+/// callback once PER FACE for a single put. `allowed_destination` is therefore
+/// the one field of `z_publisher_options_t` this crate still does not honour,
+/// and that is a named residual with a structural cause rather than an omission.
+pub(crate) fn publisher_put_options() -> PublishOptions {
+    PublishOptions::put()
+        .with_locality(Locality::Remote)
+        .with_priority(priority_from_c(Z_PRIORITY_DATA))
+        .with_congestion_control(congestion_from_c(Z_CONGESTION_CONTROL_DROP))
+        .with_express(false)
+}
+
+/// Fold a `z_publisher_options_t` into the wz publish bundle.
+///
+/// The QoS sub-fields are set through the three TYPED setters rather than a
+/// hand-assembled `QosLevel`, so the packed byte's layout stays in its one
+/// place (`QosLevel::from_parts`) — the same reason `with_priority` exists on
+/// the Rust API.
+///
+/// # Safety
+/// `options` must be null or a valid publisher-options struct whose `encoding`
+/// field is null or a valid moved encoding.
+pub(crate) unsafe fn resolve_publisher_options(
+    options: *const z_publisher_options_t,
+) -> PublishOptions {
+    let base = publisher_put_options();
+    if options.is_null() {
+        return base;
+    }
+    // SAFETY: the caller's contract.
+    let opts = unsafe { &*options };
+    let resolved = base
+        .with_priority(priority_from_c(opts.priority))
+        .with_congestion_control(congestion_from_c(opts.congestion_control))
+        .with_express(opts.is_express);
+    // SAFETY: the caller's contract for the pointee.
+    match unsafe { crate::encoding::moved_encoding_hint(opts.encoding) } {
+        Some(hint) => resolved.with_encoding(hint),
+        None => resolved,
+    }
+}
+
+/// The owned halves of a `z_publisher_put_options_t`, TAKEN.
+///
+/// A plain value rather than a `PublishOptions` fold because the take has to
+/// happen unconditionally — upstream documents every owned options field as
+/// "consumed upon function return", so an early `Z_ENULL` still has to
+/// invalidate the caller's values — while the base it overrides is only
+/// reachable once the publisher handle is known live.
+#[derive(Default)]
+struct PutOverrides {
+    encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
+    attachment: Option<Vec<u8>>,
+}
+
+impl PutOverrides {
+    /// Take the owned fields out of a `z_publisher_put_options_t`.
+    ///
+    /// # Safety
+    /// `options` must be null or a valid publisher-put-options struct whose
+    /// `encoding` / `attachment` fields are null or valid moved values.
+    unsafe fn take(options: *mut z_publisher_put_options_t) -> Self {
+        if options.is_null() {
+            return Self::default();
+        }
+        // SAFETY: the caller's contract.
+        let opts = unsafe { &mut *options };
+        Self {
+            // SAFETY: as above. Read rather than taken: every encoding this
+            // crate hands out is `'static`, which is the same fact that makes
+            // `z_encoding_drop` free nothing.
+            encoding: unsafe { crate::encoding::moved_encoding_hint(opts.encoding) },
+            // SAFETY: as above. TAKEN — `take_payload` reclaims the box and
+            // gravestones the caller's slot, so a program that puts twice with
+            // one options struct does not double-free.
+            attachment: unsafe { take_payload(opts.attachment) },
+        }
+    }
+
+    /// Apply over a publisher's declare-time bundle.
+    ///
+    /// Per-put encoding OVERRIDES the publisher's default (upstream's
+    /// `PutBuilder::encoding` wins over `PublisherBuilder::encoding`); an
+    /// absent one leaves the publisher's in place. The attachment is per-put
+    /// only — `z_publisher_options_t` carries no attachment field.
+    fn apply(self, base: PublishOptions) -> PublishOptions {
+        let with_encoding = match self.encoding {
+            Some(hint) => base.with_encoding(hint),
+            None => base,
+        };
+        match self.attachment {
+            Some(blob) => with_encoding.with_attachment(blob),
+            None => with_encoding,
+        }
+    }
 }
 
 /// Read the state behind a loaned publisher.
@@ -193,6 +368,8 @@ pub unsafe extern "C" fn z_publisher_options_default(this_: *mut z_publisher_opt
     unsafe {
         *this_ = z_publisher_options_t {
             encoding: std::ptr::null_mut(),
+            // DROP, and it is 1 here — see the constant's own note. Writing 0
+            // spelled BLOCK to every C program that read the field back.
             congestion_control: Z_CONGESTION_CONTROL_DROP,
             priority: Z_PRIORITY_DATA,
             is_express: false,
@@ -227,18 +404,25 @@ pub unsafe extern "C" fn z_publisher_put_options_default(this_: *mut z_publisher
 
 /// Declare a publisher (zenoh-c `z_declare_publisher`).
 ///
+/// R311y545 — `options` is READ. Encoding, congestion control, priority and
+/// express are folded into the publish bundle every put on this publisher
+/// starts from, which is what upstream's `_declare_publisher_inner` does with
+/// the same four. `allowed_destination` is the one field still not honoured,
+/// for the structural reason [`publisher_put_options`] documents;
+/// `reliability` is a link-selection marker upstream itself does not put on the
+/// wire ("`reliability` does not trigger any data retransmission on the wire",
+/// `zenoh-c/src/commons.rs:294`).
+///
 /// # Safety
 /// `session` must be a valid loaned session; `publisher` must be valid and
-/// writable; `key_expr` must be a valid loaned keyexpr. `_options` is accepted
-/// for ABI compatibility and read only for its presence — the option fields
-/// (encoding, congestion control, priority, express, locality) are a later slice,
-/// and this is recorded rather than implied.
+/// writable; `key_expr` must be a valid loaned keyexpr; `options` must be null
+/// or a valid publisher-options struct.
 #[no_mangle]
 pub unsafe extern "C" fn z_declare_publisher(
     session: *const z_loaned_session_t,
     publisher: *mut z_owned_publisher_t,
     key_expr: *const z_loaned_keyexpr_t,
-    _options: *mut z_publisher_options_t,
+    options: *mut z_publisher_options_t,
 ) -> ZResult {
     guarded(|| {
         if publisher.is_null() {
@@ -265,6 +449,8 @@ pub unsafe extern "C" fn z_declare_publisher(
             keyexpr: KeyexprState { keyexpr },
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             matching: std::sync::Mutex::new(None),
+            // SAFETY: the caller's contract for `options`.
+            base: unsafe { resolve_publisher_options(options) },
         });
         // Bind AFTER the box, never before: the cached view must point at the
         // state's final address.
@@ -283,24 +469,31 @@ pub unsafe extern "C" fn z_declare_publisher(
 ///
 /// # Safety
 /// `this_` must be null or a valid loaned publisher; `payload` must be a valid
-/// moved bytes. `_options` is accepted for ABI compatibility and ignored.
+/// moved bytes; `options` must be null or a valid publisher-put-options struct.
 #[no_mangle]
 pub unsafe extern "C" fn z_publisher_put(
     this_: *const z_loaned_publisher_t,
     payload: *mut z_moved_bytes_t,
-    _options: *mut z_publisher_put_options_t,
+    options: *mut z_publisher_put_options_t,
 ) -> ZResult {
     guarded(|| {
-        // Taken FIRST and unconditionally — see the doc note.
+        // Taken FIRST and unconditionally — see the doc note. The options'
+        // owned fields go the same way, and for the same reason, which is why
+        // `apply_publisher_put_options` runs before the null check below.
         // SAFETY: the caller's contract.
         let payload = unsafe { take_payload(payload) };
+        // SAFETY: the caller's contract for the options struct.
+        let overrides = unsafe { PutOverrides::take(options) };
         // SAFETY: the caller's contract.
         let (Some(state), Some(payload)) = (unsafe { publisher_state(this_) }, payload) else {
             return Z_ENULL;
         };
+        // The publisher's declare-time bundle is the base; the per-put options
+        // taken above override it field by field.
+        let publish = overrides.apply(state.base.clone());
         match state
             .shared
-            .publish_all(&state.keyexpr.keyexpr, &payload, &publisher_put_options())
+            .publish_all(&state.keyexpr.keyexpr, &payload, &publish)
         {
             Ok(_) => Z_OK,
             Err(_) => Z_EINVAL,
@@ -324,7 +517,15 @@ pub unsafe extern "C" fn z_publisher_delete(
         let Some(state) = (unsafe { publisher_state(this_) }) else {
             return Z_ENULL;
         };
-        let options = PublishOptions::del().with_locality(Locality::Remote);
+        // R311y545 — the publisher's declare-time QoS applies to its Del as
+        // well as its Put, which is upstream's shape (`z_publisher_delete`
+        // resolves off the same `Publisher`). Only the kind differs; the
+        // encoding is dropped because a Del body has no encoding slot
+        // (`_z_msg_del_t`).
+        let options = state
+            .base
+            .clone()
+            .with_kind(wz_runtime_tokio::sample::SampleKind::Del);
         match state
             .shared
             .publish_all(&state.keyexpr.keyexpr, &[], &options)

@@ -45,8 +45,13 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 /// pico's `ENCODING_VALUES_ID_TO_STR` (`src/api/encoding.c:89`), 53 entries,
 /// index = encoding id.
 ///
-/// Order IS the contract — the index is what goes on the wire — so this is
-/// pinned entry-for-entry against `libzenohpico.so` rather than eyeballed.
+/// R311y545 — the table itself moved to
+/// [`wz_capi_core::encoding_ids`](wz_capi_core::encoding_ids), which is where
+/// an ABI-neutral wire fact belongs: `wz-capi-c`'s `z_encoding_*` constants
+/// need the SAME ids, and two transcriptions of one wire table drift in a way
+/// neither crate's own tests can see. This stays as a re-export so the
+/// cross-impl oracle keeps naming the constant it always named — and so it
+/// keeps gating the SSOT rather than a copy of it.
 ///
 /// `pub` deliberately, and NOT part of the C ABI: it is a Rust constant so the
 /// cross-impl test can feed entry `i` to the REAL pico and assert pico assigns
@@ -55,67 +60,11 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 /// so it is invariant under ANY permutation, which a damage probe demonstrated
 /// by swapping two entries and staying green. See
 /// `tests/pico_pure_function_oracle.rs::encoding_ids_agree_with_the_real_pico_library`.
-pub const ENCODING_ID_TO_STR: [&str; 53] = [
-    "zenoh/bytes",
-    "zenoh/string",
-    "zenoh/serialized",
-    "application/octet-stream",
-    "text/plain",
-    "application/json",
-    "text/json",
-    "application/cdr",
-    "application/cbor",
-    "application/yaml",
-    "text/yaml",
-    "text/json5",
-    "application/python-serialized-object",
-    "application/protobuf",
-    "application/java-serialized-object",
-    "application/openmetrics-text",
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "image/bmp",
-    "image/webp",
-    "application/xml",
-    "application/x-www-form-urlencoded",
-    "text/html",
-    "text/xml",
-    "text/css",
-    "text/javascript",
-    "text/markdown",
-    "text/csv",
-    "application/sql",
-    "application/coap-payload",
-    "application/json-patch+json",
-    "application/json-seq",
-    "application/jsonpath",
-    "application/jwt",
-    "application/mp4",
-    "application/soap+xml",
-    "application/yang",
-    "audio/aac",
-    "audio/flac",
-    "audio/mp4",
-    "audio/ogg",
-    "audio/vorbis",
-    "video/h261",
-    "video/h263",
-    "video/h264",
-    "video/h265",
-    "video/h266",
-    "video/mp4",
-    "video/ogg",
-    "video/raw",
-    "video/vp8",
-    "video/vp9",
-];
+pub use wz_capi_core::encoding_ids::ENCODING_ID_TO_STR;
 
-/// pico's `ENCODING_SCHEMA_SEPARATOR` (`src/api/encoding.c:25`).
-const SCHEMA_SEPARATOR: char = ';';
-
-/// pico's `_Z_ENCODING_ID_DEFAULT` — `zenoh/bytes`, id 0.
-const ENCODING_ID_DEFAULT: u16 = 0;
+/// pico's `_Z_ENCODING_ID_DEFAULT` — `zenoh/bytes`, id 0. Re-exported from the
+/// same SSOT as the table it indexes.
+use wz_capi_core::encoding_ids::ENCODING_ID_DEFAULT;
 
 /// Behind a `z_owned_encoding_t`: the wire projection, in the SAME shape the
 /// decode path produces.
@@ -131,28 +80,8 @@ impl EncodingState {
     /// error: the whole string becomes the schema under the default id. That
     /// fallback is why `z_encoding_from_str` has no invalid input.
     pub(crate) fn from_str(s: &str) -> Self {
-        if let Some(pos) = s.find(SCHEMA_SEPARATOR) {
-            let (prefix, rest) = s.split_at(pos);
-            // Skip the separator itself.
-            let schema = &rest[SCHEMA_SEPARATOR.len_utf8()..];
-            if let Some(id) = lookup_id(prefix) {
-                return Self::make(id, schema);
-            }
-        } else if let Some(id) = lookup_id(s) {
-            return Self::make(id, "");
-        }
-        Self::make(ENCODING_ID_DEFAULT, s)
-    }
-
-    fn make(id: u16, schema: &str) -> Self {
-        let has_schema = !schema.is_empty();
         Self {
-            hint: EncodingHint {
-                // The wire word: id in the high bits, schema-present in bit 0.
-                // Derived here, so the flag can never disagree with the schema.
-                packed_id: (u32::from(id) << 1) | u32::from(has_schema),
-                schema: has_schema.then(|| schema.to_owned()),
-            },
+            hint: wz_capi_core::encoding_ids::hint_from_str(s),
         }
     }
 
@@ -161,34 +90,8 @@ impl EncodingState {
     /// renders as the empty prefix, which is pico's behaviour too (its bounds
     /// check leaves `prefix` NULL and `prefix_len` 0).
     pub(crate) fn to_string(hint: &EncodingHint) -> String {
-        let id = (hint.packed_id >> 1) as usize;
-        let mut out = String::new();
-        if let Some(prefix) = ENCODING_ID_TO_STR.get(id) {
-            out.push_str(prefix);
-        }
-        if let Some(schema) = hint.schema.as_deref() {
-            if !schema.is_empty() {
-                out.push(SCHEMA_SEPARATOR);
-                out.push_str(schema);
-            }
-        }
-        out
+        wz_capi_core::encoding_ids::hint_to_string(hint)
     }
-}
-
-/// The table index for `prefix`, or `None`.
-///
-/// pico compares with `strncmp(schema, TABLE[i], len)` — a PREFIX compare of
-/// exactly `len` bytes — so a candidate shorter than the table entry can match
-/// it (`"text/j"` matches `"text/json"`). That is upstream's behaviour and it is
-/// reproduced rather than corrected: a from_str that disagreed with pico about
-/// which id a string means would put a different byte on the wire, which is the
-/// one thing this module exists to prevent. The oracle test walks it.
-fn lookup_id(candidate: &str) -> Option<u16> {
-    ENCODING_ID_TO_STR
-        .iter()
-        .position(|entry| entry.as_bytes().starts_with(candidate.as_bytes()))
-        .map(|i| i as u16)
 }
 
 /// Owned encoding (pico `z_owned_encoding_t`, 40 B measured).

@@ -9108,6 +9108,7 @@ layer_c1cc_api_compat_c() {
     # dropped test then fails the lane instead of shrinking it.
     for leg in \
         the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation \
+        upstream_option_defaults_on_wz_capi_c_match_real_libzenohc \
         upstream_z_put_links_against_wz_capi_c_and_a_real_wz_subscriber_receives_it; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
@@ -9138,7 +9139,9 @@ layer_c1cc_api_compat_c() {
         upstream_z_queryable_with_channels_on_wz_capi_c_answers_from_its_own_thread \
         upstream_z_pull_on_wz_capi_c_pulls_a_real_pico_sample_out_of_a_ring \
         upstream_z_ping_on_wz_capi_c_round_trips_against_a_real_pico_pong \
-        upstream_z_bytes_on_wz_capi_c_prints_identically_to_real_libzenohc; do
+        upstream_z_bytes_on_wz_capi_c_prints_identically_to_real_libzenohc \
+        upstream_z_pub_on_wz_capi_c_carries_its_put_encoding_to_a_real_pico \
+        upstream_z_pub_thr_on_wz_capi_c_carries_its_publisher_qos_to_a_real_pico; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \
@@ -9224,6 +9227,17 @@ layer_c1ce_api_compat_c_shm_oracle() {
         cargo test -p wz-integration-tests \
         --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
         --exact the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation || rc=1
+    # R311y545 — the option-DEFAULTS differential, and this oracle is the only
+    # place it can measure the unstable half. `z_publisher_options_t.reliability`
+    # and `z_put_options_t.source_info` exist ONLY under Z_FEATURE_UNSTABLE_API,
+    # which the installed header C1cc runs against does not define — so the
+    # `Z_RELIABILITY_RELIABLE` value R311y545 corrected from 0 to 1 is invisible
+    # on that lane. This is the arm nobody was measuring, which is the shape
+    # R311y540 paid for.
+    WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce option defaults" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
+        --exact upstream_option_defaults_on_wz_capi_c_match_real_libzenohc || rc=1
     # R311y543 — the RUN legs for the two planes this oracle is what makes
     # reachable. Layer C1cc cannot host them: against the INSTALLED header
     # (neither Z_FEATURE_SHARED_MEMORY nor Z_FEATURE_UNSTABLE_API) these six

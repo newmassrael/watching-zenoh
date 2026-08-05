@@ -1521,3 +1521,282 @@ fn upstream_z_ping_on_wz_capi_c_round_trips_against_a_real_pico_pong() {
     graceful_terminate(ping.child_mut(), Duration::from_secs(5));
     graceful_terminate(pong.child_mut(), Duration::from_secs(5));
 }
+
+/// LEG 14 (`wz->pico`, PUT-OPTIONS ENCODING) — upstream's `z_pub.c`, running on
+/// WZ's C ABI, puts a `text/plain` encoding on the wire and the REAL zenoh-pico
+/// `z_sub_attachment` prints it back.
+///
+/// ## What was wrong, and why LEG 5 could not see it
+///
+/// `z_pub.c` sets `options.encoding = z_move(z_encoding_text_plain())` on EVERY
+/// put — it is not behind a flag. Until R311y545 wz accepted that field and
+/// dropped it, so the program was correct about the API and wrong about the
+/// wire, and `wz-capi-c/src/encoding.rs` said so in its own module doc. LEG 5
+/// runs the same binary against a real pico and passes either way, because the
+/// stock `z_sub` prints the payload and not the encoding.
+///
+/// The observer is what makes this a different question. `z_sub_attachment`
+/// prints `with encoding: <label>` from `z_encoding_to_string(z_sample_encoding(
+/// sample))` — its own stock line, no build-time patch involved — and a dropped
+/// encoding decodes as pico's default `zenoh/bytes`. So the two outcomes are
+/// distinct strings produced by a foreign implementation, not by anything wz
+/// computed.
+///
+/// ## Why `text/plain` discriminates
+///
+/// The label is the zenoh wire id 4, which wz packs as `4 << 1 = 8` through the
+/// ABI-neutral table in `wz-capi-core::encoding_ids` — the same table
+/// `wz-capi-pico` pins against the real `libzenohpico.so`. A wz that emitted the
+/// wrong id would print some OTHER label here rather than nothing, and a wz that
+/// emitted no encoding at all prints `zenoh/bytes`. Both failure modes are
+/// visible, which is why the assertion is on the exact line rather than on the
+/// absence of the default.
+// wz-proves: api-compat-c wz->pico partial
+#[test]
+#[ignore = "compiles an upstream zenoh-c example with cc and spawns the real \
+            zenoh-pico z_sub_attachment CLI; needs the machine-local zenoh-c \
+            oracle; run-ci Layer C1cc drives it"]
+fn upstream_z_pub_on_wz_capi_c_carries_its_put_encoding_to_a_real_pico() {
+    let Some((include, _libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let (dropin, libdir) = dropin_binary("z_pub", dir.path(), &include, &examples);
+    let z_sub = zenoh_pico_cli_binary("z_sub_attachment");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let payload = "PAYLOAD-FROM-UPSTREAM-ZPUB-WITH-ENCODING";
+    let key = "demo/example/leg14";
+
+    let mut sub_out = tempfile::tempfile().expect("foreign subscriber stdout capture");
+    let writer = sub_out.try_clone().expect("dup foreign subscriber handle");
+    let mut sub = ChildGuard::wrap(
+        "real zenoh-pico z_sub_attachment",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub)
+            .args(["-l", &endpoint, "-m", "peer", "-k", "demo/example/**"])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_sub_attachment"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_sub_attachment never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    let mut pub_out = tempfile::tempfile().expect("drop-in stdout capture");
+    let pub_writer = pub_out.try_clone().expect("dup drop-in stdout handle");
+    let mut publisher = ChildGuard::wrap(
+        "upstream z_pub.c on wz",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-e", &endpoint, "-m", "client", "-k", key, "-p", payload])
+            .env("LD_LIBRARY_PATH", &libdir)
+            .stdout(Stdio::from(pub_writer.try_clone().expect("dup")))
+            .stderr(Stdio::from(pub_writer))
+            .spawn()
+            .expect("run upstream z_pub.c on wz's C ABI"),
+    );
+
+    // The payload barrier FIRST, so the two failures separate: a sample that
+    // never arrived reds here, and a sample that arrived with the encoding
+    // stripped reds only on the line below.
+    let captured =
+        wait_for_substring(&mut sub_out, payload, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+            panic!(
+                "the REAL zenoh-pico z_sub_attachment never reported the payload \
+                 published by upstream's z_pub.c on wz's zenoh-c ABI.\n\
+                 expected substring: {payload}\n\
+                 --- REAL pico z_sub_attachment stdout ---\n{captured}\n\
+                 --- z_pub.c (on wz) stdout+stderr ---\n{}",
+                read_captured(&mut pub_out),
+            )
+        });
+    let encoding_witness = "with encoding: text/plain";
+    let captured = if captured.contains(encoding_witness) {
+        captured
+    } else {
+        wait_for_substring(&mut sub_out, encoding_witness, EXCHANGE_TIMEOUT).unwrap_or_else(
+            |captured| {
+                panic!(
+                    "a REAL zenoh-pico decoded the sample but NOT the encoding \
+                     upstream's z_pub.c set on it. `z_pub.c` assigns \
+                     `options.encoding = z_move(z_encoding_text_plain())` on every put, \
+                     so wz accepted the field and dropped it — the sample arrived with \
+                     pico's default, which prints `with encoding: zenoh/bytes`.\n\
+                     expected substring: {encoding_witness}\n\
+                     --- REAL pico z_sub_attachment stdout ---\n{captured}\n\
+                     --- z_pub.c (on wz) stdout+stderr ---\n{}",
+                    read_captured(&mut pub_out),
+                )
+            },
+        )
+    };
+    assert!(
+        captured.contains(key),
+        "the foreign subscriber decoded the sample but on a different key than the \
+         publisher was declared on ({key}).\n\
+         --- REAL pico z_sub_attachment stdout ---\n{captured}"
+    );
+
+    graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
+/// LEG 15 (`wz->pico`, PUBLISHER-OPTIONS QoS) — upstream's `z_pub_thr.c`, running
+/// on WZ's C ABI, puts its DECLARE-TIME priority, congestion control and express
+/// bits on the wire, and the REAL zenoh-pico `z_sub_attachment` decodes all three.
+///
+/// ## The struct this leg exists for
+///
+/// `z_pub_thr.c` is the only upstream example that populates
+/// `z_publisher_options_t`, and it populates exactly the three fields that reach
+/// the wire:
+///
+/// ```c
+/// options.congestion_control = Z_CONGESTION_CONTROL_BLOCK;
+/// options.priority = args.priority;   // -p
+/// options.is_express = args.express;  // --express
+/// ```
+///
+/// Until R311y545 `z_declare_publisher` took `_options` and ignored it, so all
+/// three were dropped. They ride ONE packed QoS byte (priority in the low 3
+/// bits, `nodrop` at bit 3, express at bit 4), which is why one leg witnessing
+/// all three is honest rather than three legs each witnessing a third: the byte
+/// is one compile unit (`pubsub-qos`) and one wire extension.
+///
+/// ## Why these three values discriminate
+///
+/// pico's default sample QoS is `_Z_N_QOS_DEFAULT._val = 5` — priority `Data`
+/// (5), congestion DROP (0), express false (0). This leg asks for
+/// `Z_PRIORITY_REAL_TIME` (1) and `--express`, and `z_pub_thr.c` hard-codes
+/// BLOCK. A wz that dropped the struct prints `1`/`0`/`0` on the wire's default
+/// path — i.e. `with priority: 5`, `with congestion: 0`, `with express: 0` — so
+/// every one of the three assertions separates "propagated" from "dropped".
+///
+/// Note the enum inversion this leg is downstream of: zenoh-c's
+/// `Z_CONGESTION_CONTROL_BLOCK` is **0** and pico's `z_sample_congestion_control`
+/// returns **1** for the same meaning. The C side says 0, the observing pico says
+/// 1, and both are right — which is precisely the mapping R311y545 had wrong.
+///
+/// ## The publisher is a THROUGHPUT loop, and that is handled rather than hoped
+///
+/// `z_pub_thr.c` publishes in a tight `while (1)`, so it is spawned LAST, its
+/// payload is the smallest useful size, and it is terminated the moment the
+/// witness lands. The subscriber's stdout is a temp file rather than a pipe for
+/// the same reason: a full pipe buffer would block the writer instead of the
+/// test.
+// wz-proves: api-compat-c wz->pico partial
+#[test]
+#[ignore = "compiles an upstream zenoh-c example with cc and spawns the real \
+            zenoh-pico z_sub_attachment CLI; needs the machine-local zenoh-c \
+            oracle; run-ci Layer C1cc drives it"]
+fn upstream_z_pub_thr_on_wz_capi_c_carries_its_publisher_qos_to_a_real_pico() {
+    let Some((include, _libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let (dropin, libdir) = dropin_binary("z_pub_thr", dir.path(), &include, &examples);
+    let z_sub = zenoh_pico_cli_binary("z_sub_attachment");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    // `z_pub_thr.c` hard-codes its keyexpr; the subscriber has to meet it there.
+    let key = "test/thr";
+
+    let mut sub_out = tempfile::tempfile().expect("foreign subscriber stdout capture");
+    let writer = sub_out.try_clone().expect("dup foreign subscriber handle");
+    let mut sub = ChildGuard::wrap(
+        "real zenoh-pico z_sub_attachment",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub)
+            .args(["-l", &endpoint, "-m", "peer", "-k", key])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the real zenoh-pico z_sub_attachment"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_sub_attachment never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    let mut pub_out = tempfile::tempfile().expect("drop-in stdout capture");
+    let pub_writer = pub_out.try_clone().expect("dup drop-in stdout handle");
+    let mut publisher = ChildGuard::wrap(
+        "upstream z_pub_thr.c on wz",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args(["-e", &endpoint, "-m", "client", "-p", "1", "--express", "8"])
+            .env("LD_LIBRARY_PATH", &libdir)
+            .stdout(Stdio::from(pub_writer.try_clone().expect("dup")))
+            .stderr(Stdio::from(pub_writer))
+            .spawn()
+            .expect("run upstream z_pub_thr.c on wz's C ABI"),
+    );
+
+    // Each of the three is waited for on its own line, in the order a failure
+    // would be most informative: arrival first, then the three sub-fields.
+    let mut captured =
+        wait_for_substring(&mut sub_out, ">> [Subscriber] Received", EXCHANGE_TIMEOUT)
+            .unwrap_or_else(|captured| {
+                graceful_terminate(publisher.child_mut(), Duration::from_secs(2));
+                panic!(
+                    "the REAL zenoh-pico z_sub_attachment never received anything from \
+                 upstream's z_pub_thr.c on wz's zenoh-c ABI.\n\
+                 --- REAL pico z_sub_attachment stdout ---\n{captured}\n\
+                 --- z_pub_thr.c (on wz) stdout+stderr ---\n{}",
+                    read_captured(&mut pub_out),
+                )
+            });
+    for (witness, dropped) in [
+        ("with priority: 1", "with priority: 5"),
+        ("with congestion: 1", "with congestion: 0"),
+        ("with express: 1", "with express: 0"),
+    ] {
+        if !captured.contains(witness) {
+            captured = wait_for_substring(&mut sub_out, witness, EXCHANGE_TIMEOUT).unwrap_or_else(
+                |captured| {
+                    graceful_terminate(publisher.child_mut(), Duration::from_secs(2));
+                    panic!(
+                        "a REAL zenoh-pico received the samples but NOT the QoS \
+                         `z_pub_thr.c` set on its DECLARED PUBLISHER. All three \
+                         sub-fields ride one packed byte, so a dropped \
+                         `z_publisher_options_t` prints pico's defaults instead.\n\
+                         expected substring: {witness}   (dropped would print: {dropped})\n\
+                         --- REAL pico z_sub_attachment stdout (tail) ---\n{}\n\
+                         --- z_pub_thr.c (on wz) stdout+stderr ---\n{}",
+                        captured
+                            .chars()
+                            .rev()
+                            .take(4000)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect::<String>(),
+                        read_captured(&mut pub_out),
+                    )
+                },
+            );
+        }
+    }
+
+    graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}

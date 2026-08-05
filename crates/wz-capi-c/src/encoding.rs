@@ -16,15 +16,26 @@
 //! docs), and sixty constants nothing calls would be exactly the hand-picked list
 //! that rule exists to avoid.
 //!
-//! ## The label does not reach the wire yet, and that is stated rather than implied
+//! ## The label DOES reach the wire (R311y545)
 //!
-//! `z_publisher_options_t::encoding` is accepted and dropped by the publisher
-//! plane; wz's `PublishOptions` has no encoding field on this path. So a program
-//! that sets one is not misled about the API and IS misled about the wire, which
-//! is why it is written down here and carried as a named residual rather than
-//! left for a reader to infer from silence.
+//! This section used to say the opposite: "`z_publisher_options_t::encoding` is
+//! accepted and dropped by the publisher plane; wz's `PublishOptions` has no
+//! encoding field on this path." The second half was already false when it was
+//! written — [`PublishOptions::with_encoding`] has existed since R233 and is
+//! foreign-proven wz->pico (R311y207) — and the first half is now false too:
+//! [`encoding_hint`] resolves a label to its wire id through the ABI-neutral
+//! table in [`wz_capi_core::encoding_ids`], and both the publisher plane and
+//! the session put attach it.
+//!
+//! The id table is NOT transcribed here. It lives once, in `wz-capi-core`, and
+//! is pinned against the real `libzenohpico.so` by `wz-capi-pico`'s oracle —
+//! two transcriptions of one wire table drift in a way neither crate's own
+//! tests can see, because a `from_str -> to_string` round trip reads the same
+//! copy in both directions.
 
 use std::ffi::c_void;
+
+use wz_runtime_tokio::sample::EncodingHint;
 
 use crate::abi::{z_loaned_encoding_t, z_moved_encoding_t, z_owned_encoding_t, Handle};
 use crate::ffi::{guard_val, guarded};
@@ -105,6 +116,48 @@ pub(crate) unsafe fn encoding_label<'a>(this_: *const z_loaned_encoding_t) -> Op
     }
     // SAFETY: as above.
     Some(unsafe { &*(handle as *const EncodingState) }.label)
+}
+
+/// The WIRE projection of a loaned encoding, or `None` when the handle is a
+/// gravestone.
+///
+/// R311y545 — the bridge between this crate's `'static` labels and
+/// [`PublishOptions::with_encoding`](wz_runtime_tokio::session::PublishOptions).
+/// The lookup runs per call rather than being baked into the statics because
+/// [`EncodingHint`] owns an `Option<String>` schema, which no `const` can
+/// build; the table walk is 53 prefix compares against a label the caller
+/// already had to allocate an options struct for.
+///
+/// # Safety
+/// `this_` must be null, or a valid loaned encoding whose handle slot holds a
+/// live [`EncodingState`] pointer.
+pub(crate) unsafe fn encoding_hint(this_: *const z_loaned_encoding_t) -> Option<EncodingHint> {
+    // SAFETY: the caller's contract.
+    let label = unsafe { encoding_label(this_) }?;
+    Some(wz_capi_core::encoding_ids::hint_from_str(label))
+}
+
+/// The same projection for a MOVED encoding, which is the shape every options
+/// struct carries (`z_move(encoding)` yields a `z_moved_encoding_t*`).
+///
+/// Reading rather than consuming: [`z_encoding_drop`] frees nothing because
+/// every label this crate hands out is `'static`, so there is no ownership to
+/// reclaim and no slot to gravestone. The moment a non-static encoding exists
+/// this becomes a take, and the two facts are stated together so they cannot
+/// drift apart.
+///
+/// # Safety
+/// `moved` must be null, or a valid moved encoding.
+pub(crate) unsafe fn moved_encoding_hint(moved: *const z_moved_encoding_t) -> Option<EncodingHint> {
+    if moved.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract — `z_owned_encoding_t` and
+    // `z_loaned_encoding_t` are the same footprint, and the owned value is the
+    // first (only) field of the moved wrapper.
+    unsafe {
+        encoding_hint(&(*moved)._this as *const z_owned_encoding_t as *const z_loaned_encoding_t)
+    }
 }
 
 /// The `text/plain` constant (zenoh-c `z_encoding_text_plain`).

@@ -880,6 +880,12 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     // header (present on both installed oracles), and it is the struct
     // `ze_advanced_subscriber_options_t` embeds at offset 0.
     "z_subscriber_options_t",
+    // R311y545 — the SESSION-level put / delete options. Newly DECLARED this
+    // round (both entry points took `void*` before), and both are transparent
+    // and stack-allocated by the C side, so they belong to this gate for the
+    // same reason `z_publisher_options_t` does.
+    "z_put_options_t",
+    "z_delete_options_t",
 ];
 
 /// The `Z_FEATURE_UNSTABLE_API`-only half of the table — the `ze_advanced_*`
@@ -1002,6 +1008,8 @@ fn layout_values() -> Vec<usize> {
         size_of::<crate::querier::z_querier_get_options_t>(),
         size_of::<crate::scout::z_scout_options_t>(),
         size_of::<crate::sub::z_subscriber_options_t>(),
+        size_of::<crate::put::z_put_options_t>(),
+        size_of::<crate::put::z_delete_options_t>(),
     ];
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     values.extend_from_slice(&[
