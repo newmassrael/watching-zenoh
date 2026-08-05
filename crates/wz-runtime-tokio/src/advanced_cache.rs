@@ -57,7 +57,7 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::ntp64::Ntp64;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
-use wz_session_core::sample::{SourceInfo, TimestampHint};
+use wz_session_core::sample::{SampleKind, SourceInfo, TimestampHint};
 
 use crate::session::{Queryable, QueryableError, QueryableOptions, Session, Unicast};
 use crate::session_glue::SessionLinkActions;
@@ -86,6 +86,18 @@ pub struct CachedSample {
     /// The sample's timestamp (the publisher stamps every cached put), used
     /// to order replies and stamp them back ([`ReplyOut::reply_keyed_sourced`]).
     pub timestamp: TimestampHint,
+    /// R311y561 — whether the retained sample was a PUT or a DELETE.
+    ///
+    /// zenoh caches the whole `Sample`, and a `Sample` carries its kind, so a
+    /// cached Del replays as a Del. Before this field wz's ring was Put-only by
+    /// construction and `AdvancedPublisher::delete` therefore skipped the cache
+    /// entirely — replaying a Del as a Put would RESURRECT a deleted key on a
+    /// recovering subscriber, which is strictly worse than losing the
+    /// retraction. With the kind stored, [`answer_from_ring`] dispatches the
+    /// reply arm ([`ReplyOut::reply_keyed_sourced`] vs
+    /// [`ReplyOut::reply_keyed_del_sourced`]) and deletes are retained like any
+    /// other sample.
+    pub kind: SampleKind,
 }
 
 /// How many samples the cache retains. Mirror of zenoh-ext `CacheConfig`
@@ -226,18 +238,31 @@ fn answer_from_ring(
     }
 
     for s in matched {
-        // reply_keyed_sourced carries the sample's source_info (the inner-body
-        // ext id 0x01) so a recovery subscriber re-keys / reorders it. The
-        // emission is gated `reply-source-info` at the codec (default OFF = the
-        // recovery reply is source_info-free, i.e. advanced-cache without the
-        // advanced-recovery composition); the cache passes it unconditionally.
-        out.reply_keyed_sourced(
-            &s.keyexpr,
-            &s.payload,
-            None,
-            &s.timestamp,
-            s.source_info.as_ref(),
-        );
+        // Both arms carry the sample's source_info (the inner-body ext id 0x01)
+        // so a recovery subscriber re-keys / reorders it. The emission is gated
+        // `reply-source-info` at the codec (default OFF = the recovery reply is
+        // source_info-free, i.e. advanced-cache without the advanced-recovery
+        // composition); the cache passes it unconditionally.
+        //
+        // R311y561 — the KIND decides the arm. zenoh replies the cached `Sample`
+        // whole, so a cached DELETE comes back as a Del reply; replaying it on
+        // the Put arm would resurrect the deleted key on the recovering
+        // subscriber. The `_sn` / `_max` / `_time` filters above are
+        // kind-agnostic on purpose: a Del occupies its sequence number exactly
+        // like a Put, so excluding it from a range would re-introduce the
+        // apparent gap the shared counter exists to avoid.
+        match s.kind {
+            SampleKind::Put => out.reply_keyed_sourced(
+                &s.keyexpr,
+                &s.payload,
+                None,
+                &s.timestamp,
+                s.source_info.as_ref(),
+            ),
+            SampleKind::Del => {
+                out.reply_keyed_del_sourced(&s.keyexpr, &s.timestamp, s.source_info.as_ref())
+            }
+        }
     }
 }
 
@@ -428,14 +453,31 @@ mod tests {
     /// Shared `ReplyOut` recorder for the `answer_from_ring` integration
     /// tests: captures each reply's `(keyexpr, payload)` and its source
     /// identity `(zid_prefix, eid, sn)` (or `None`).
+    ///
+    /// R311y561 — `arms` records which reply ARM each emission took, in emit
+    /// order, and `dels` the Del arm's own `(keyexpr, timestamp, source_info)`.
+    /// Without `arms` a Del replayed on the Put arm (the pre-y561 behaviour, and
+    /// the resurrect-a-deleted-key bug) is INVISIBLE to a recorder that only
+    /// collects `(keyexpr, payload)` — a cached Del carries an empty payload, so
+    /// it would land in `keyed` as `("demo/k", vec![])` and read as a legitimate
+    /// empty Put.
+    /// A recorded source identity `(zid_prefix, eid, sn)`, or `None` when the
+    /// reply carried none.
+    type RecSource = Option<(Vec<u8>, u32, u32)>;
+    /// One Del-arm emission: `(keyexpr, timestamp, source_info)`.
+    type RecDel = (String, u64, RecSource);
+
     #[derive(Default)]
     struct Rec {
         keyed: Vec<(String, Vec<u8>)>,
-        sourced: Vec<Option<(Vec<u8>, u32, u32)>>,
+        sourced: Vec<RecSource>,
+        arms: Vec<&'static str>,
+        dels: Vec<RecDel>,
     }
     impl ReplyOut for Rec {
         fn reply(&mut self, payload: &[u8]) {
             self.keyed.push((String::new(), payload.to_vec()));
+            self.arms.push("put");
         }
         fn reply_keyed_sourced(
             &mut self,
@@ -448,8 +490,24 @@ mod tests {
             self.keyed.push((keyexpr.to_string(), payload.to_vec()));
             self.sourced
                 .push(source_info.map(|si| (si.zid_prefix().to_vec(), si.eid, si.sn)));
+            self.arms.push("put");
         }
-        fn reply_del(&mut self) {}
+        fn reply_keyed_del_sourced(
+            &mut self,
+            keyexpr: &str,
+            timestamp: &TimestampHint,
+            source_info: Option<&SourceInfo>,
+        ) {
+            self.dels.push((
+                keyexpr.to_string(),
+                timestamp.time,
+                source_info.map(|si| (si.zid_prefix().to_vec(), si.eid, si.sn)),
+            ));
+            self.arms.push("del");
+        }
+        fn reply_del(&mut self) {
+            self.arms.push("bare-del");
+        }
         fn reply_err(&mut self, _: Option<u32>, _: Option<&str>, _: &[u8]) {}
         fn with_responder(&mut self, _: &[u8], _: u32) {}
         fn clear_responder(&mut self) {}
@@ -499,6 +557,7 @@ mod tests {
                     time: 100 + sn as u64,
                     zid: vec![1],
                 },
+                kind: SampleKind::Put,
             });
         }
         let q = |params: Option<&'static [u8]>| BorrowedQuery {
@@ -543,6 +602,98 @@ mod tests {
             ],
             "each recovery reply carries the cached sample's source_info",
         );
+    }
+
+    /// R311y561 — a cached DELETE replays on the Del arm, under its own key,
+    /// carrying its timestamp and its `(zid, eid, sn)`.
+    ///
+    /// The assertion that carries the weight is `arms`, not the payloads: a Del
+    /// replayed on the Put arm emits `("demo/k", vec![])`, which a
+    /// payload-only recorder cannot tell from a legitimate empty Put — and that
+    /// mistake is exactly the one that resurrects a deleted key on the
+    /// recovering subscriber. Point the reply arm at `reply_keyed_sourced`
+    /// unconditionally (the pre-y561 shape) and this test fails on `arms` while
+    /// `keyed` still looks plausible.
+    ///
+    /// The kind-agnostic `_sn` filter is asserted too: the Del occupies sn 1
+    /// like any other sample, so `_sn=1..` starts AT it. Excluding deletes from
+    /// the range would re-open the apparent gap the shared sn counter exists to
+    /// close.
+    #[test]
+    fn cached_delete_replays_on_the_del_arm() {
+        use wz_session_core::query_sink::BorrowedQuery;
+
+        // sn 0 Put, sn 1 DEL, sn 2 Put — one mixed stream from one publisher.
+        let mut ring = VecDeque::new();
+        for sn in 0..3u32 {
+            let kind = if sn == 1 {
+                SampleKind::Del
+            } else {
+                SampleKind::Put
+            };
+            ring.push_back(CachedSample {
+                keyexpr: "demo/k".to_string(),
+                payload: if kind == SampleKind::Del {
+                    Vec::new()
+                } else {
+                    vec![sn as u8]
+                },
+                source_info: Some(SourceInfo::new(&[0x07], 9, sn)),
+                timestamp: TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: vec![1],
+                },
+                kind,
+            });
+        }
+        let q = |params: Option<&'static [u8]>| BorrowedQuery {
+            keyexpr: "demo/k",
+            parameters: params,
+            attachment: None,
+            source_info: None,
+            payload: None,
+            encoding: None,
+            rid: 0,
+            is_local: true,
+        };
+
+        let mut out = Rec::default();
+        answer_from_ring(&ring, &q(None), &mut out, 0);
+
+        assert_eq!(
+            out.arms,
+            vec!["put", "del", "put"],
+            "the retained kind decides the reply arm, in ring order"
+        );
+        assert_eq!(
+            out.keyed,
+            vec![
+                ("demo/k".to_string(), vec![0]),
+                ("demo/k".to_string(), vec![2])
+            ],
+            "only the two Puts carry a payload; the Del never reaches the Put arm"
+        );
+        assert_eq!(
+            out.dels,
+            vec![("demo/k".to_string(), 101, Some((vec![0x07], 9, 1)))],
+            "the Del reply carries its own concrete key, its timestamp, and its \
+             (zid, eid, sn) — the identity the subscriber re-keys it by"
+        );
+
+        // The `_sn` range is kind-agnostic: `_sn=1..` starts at the DELETE.
+        let mut out = Rec::default();
+        answer_from_ring(&ring, &q(Some(b"_sn=1..")), &mut out, 0);
+        assert_eq!(
+            out.arms,
+            vec!["del", "put"],
+            "a Del occupies its sequence number like any other sample, so a \
+             recovery range starting at it replays it"
+        );
+
+        // ... and so is `_max`, which counts the Del as one of the newest.
+        let mut out = Rec::default();
+        answer_from_ring(&ring, &q(Some(b"_max=2")), &mut out, 0);
+        assert_eq!(out.arms, vec!["del", "put"], "_max counts the Del");
     }
 
     #[test]
@@ -664,6 +815,7 @@ mod tests {
                     time: secs << 32,
                     zid: vec![1],
                 },
+                kind: SampleKind::Put,
             });
         }
         let q = BorrowedQuery {

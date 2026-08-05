@@ -982,29 +982,45 @@ fn issue_recovery_query<R, T>(
 
 /// Re-key a recovery / history reply into a `(source-key, sn, Sample)` for the
 /// per-source ordering: read the source identity off the reply's source_info
-/// (the `reply-source-info` seam) + rebuild the Put sample. `None` for a
-/// non-Put reply or one with no source identity (it cannot be re-keyed — the
-/// answerer needs `reply-source-info` on). Shared by the recovery + history GETs.
+/// (the `reply-source-info` seam) + rebuild the sample. `None` for an Err reply
+/// or one with no source identity (it cannot be re-keyed — the answerer needs
+/// `reply-source-info` on). Shared by the recovery + history GETs.
+///
+/// R311y561 — the DEL arm. A Del reply is now rebuilt as a Del sample rather
+/// than discarded: the `@adv` cache retains deletes since
+/// [`crate::advanced_cache::CachedSample`] carries the sample kind, so a
+/// recovering subscriber sees the retraction it missed instead of silently
+/// keeping a resurrected value. This is also why the `ReplyKind` test is now an
+/// Err-exclusion rather than a Put-only admission.
+///
+/// R311y561 also RESTORES the timestamp. The R311y95 note below said a recovered
+/// sample "arrives timestamp-less" because "the `ReplyView` exposes no
+/// reply-timestamp accessor" — that ceased to be true at R311y321, which added
+/// [`ReplyView::timestamp`], and the prose outlived the fact by rounds. The
+/// cached timestamp is re-applied here, so what a recovered sample still loses
+/// vs the live one is exactly `encoding` + `attachment`, and only because the
+/// cache does not retain those two.
 ///
 /// R311y95 (review L4) — documented fidelity gap of a RECOVERED sample vs the
 /// original live one. The encoding + attachment ARE re-applied from the reply
-/// when present, but the `@adv` cache stores only `(keyexpr, payload, source_info,
-/// timestamp)` ([`crate::advanced_cache::CachedSample`]), so it never carries the
-/// original encoding / attachment back — those are lost on recovery. The cached
-/// `timestamp` is also dropped: the `ReplyView` exposes no reply-timestamp
-/// accessor, so a recovered sample arrives timestamp-less. A recovered sample is
-/// therefore faithful in `(source_info, sn, payload)` but lossy on
-/// encoding / attachment / timestamp.
+/// when present, but the `@adv` cache stores only `(keyexpr, payload,
+/// source_info, timestamp, kind)`, so it never carries the original encoding /
+/// attachment back — those are lost on recovery.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<((Vec<u8>, u32), u32, Sample)> {
-    if reply.kind() != ReplyKind::Put {
+    let kind = reply.kind();
+    if kind == ReplyKind::Err {
         return None;
     }
     let source_info = reply.source_info()?;
     let key = (source_info.zid_prefix().to_vec(), source_info.eid);
     let sn = source_info.sn;
-    let mut sample = Sample::new_put(reply.keyexpr(), reply.payload().to_vec());
+    let mut sample = match kind {
+        ReplyKind::Del => Sample::new_del(reply.keyexpr()),
+        _ => Sample::new_put(reply.keyexpr(), reply.payload().to_vec()),
+    };
     sample.source_info = Some(source_info.clone());
+    sample.timestamp = reply.timestamp().cloned();
     sample.attachment = reply.attachment().map(<[u8]>::to_vec);
     if let Some((packed_id, schema)) = reply.put_encoding() {
         sample.encoding = Some(EncodingHint {
@@ -2085,6 +2101,7 @@ mod tests {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
+                kind: crate::sample::SampleKind::Put,
             });
         }
 
@@ -2135,6 +2152,142 @@ mod tests {
             *misses.lock().unwrap(),
             0,
             "the recovery filled the hole -> no Miss"
+        );
+    }
+
+    /// R311y561 — the same composed loopback recovery, but the sample in the
+    /// hole is a **DELETE**, and it must arrive as a Del.
+    ///
+    /// This is the end-to-end half of the divergence R311y559 shipped and y561
+    /// closes. Before y561 the publisher never cached a Del at all, precisely
+    /// because the ring could only replay it as a Put — and a Put replayed in
+    /// place of a retraction RESURRECTS the deleted key on the recovering
+    /// subscriber, which is worse than losing the retraction. The chain proven
+    /// here is every link of that fix at once: the ring retains the kind, the
+    /// cache answers on the Del arm
+    /// ([`wz_session_core::query_sink::ReplyOut::reply_keyed_del_sourced`]), the
+    /// reply survives the loopback as a Del, `recovered_sample_from_reply`
+    /// rebuilds a Del `Sample` instead of discarding it, and the reorder buffer
+    /// drains it in sn order between the live Puts around it.
+    ///
+    /// The assertion is on `(kind, payload)` pairs, not payloads: a Del rebuilt
+    /// as an empty Put has the same payload and only the kind discriminates.
+    /// The recovered TIMESTAMP is asserted separately — it is the second thing
+    /// y561 restored, after a doc comment claimed for rounds that `ReplyView`
+    /// had no timestamp accessor when R311y321 had already added one.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-cache",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn composed_recovery_replays_a_cached_delete_as_a_delete() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use crate::sample::SampleKind;
+        use wz_session_core::sample::TimestampHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x0Au8];
+        let pub_eid = 6u32;
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+
+        // The cache holds the full stream 0..=4 where sn 3 is a DELETE.
+        let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
+        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
+            .expect("advanced cache declares");
+        for sn in 0u8..5 {
+            let kind = if sn == 3 {
+                SampleKind::Del
+            } else {
+                SampleKind::Put
+            };
+            cache.cache_sample(CachedSample {
+                keyexpr: "demo/data".to_string(),
+                payload: if kind == SampleKind::Del {
+                    Vec::new()
+                } else {
+                    vec![sn]
+                },
+                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                timestamp: TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: pub_zid.clone(),
+                },
+                kind,
+            });
+        }
+
+        // Record (kind, payload) — a Del rebuilt as an empty Put would be
+        // indistinguishable on payload alone — plus the delivered timestamps.
+        type Delivered = Vec<(SampleKind, Vec<u8>)>;
+        let delivered: Arc<Mutex<Delivered>> = Arc::new(Mutex::new(Vec::new()));
+        let stamps = Arc::new(Mutex::new(Vec::<Option<u64>>::new()));
+        let misses = Arc::new(Mutex::new(0usize));
+        let d = Arc::clone(&delivered);
+        let ts = Arc::clone(&stamps);
+        let m = Arc::clone(&misses);
+        let _sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_recovery(RecoveryConfig::new())
+                .with_get_locality(Locality::SessionLocal),
+            move |sample: Sample| {
+                d.lock()
+                    .unwrap()
+                    .push((sample.kind, sample.payload.clone()));
+                ts.lock().unwrap().push(sample.timestamp.map(|t| t.time));
+            },
+            move |_miss: Miss| *m.lock().unwrap() += 1,
+        )
+        .expect("recovering advanced subscriber declares");
+
+        let live = |sn: u32, v: u8| {
+            session
+                .publish(
+                    "demo/data",
+                    &[v],
+                    PublishOptions::put()
+                        .with_locality(Locality::SessionLocal)
+                        .with_source_info(SourceInfo::new(&pub_zid, pub_eid, sn)),
+                )
+                .expect("loopback live publish");
+        };
+        live(0, 0xA0);
+        live(1, 0xA1);
+        live(2, 0xA2);
+        // sn 3 missing -> buffer the live sn 4, GET _sn=3.. -> the cache replies
+        // the DEL at sn 3 (and the Put at sn 4, a dup that is dropped).
+        live(4, 0xA4);
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![
+                (SampleKind::Put, vec![0xA0]),
+                (SampleKind::Put, vec![0xA1]),
+                (SampleKind::Put, vec![0xA2]),
+                (SampleKind::Del, Vec::new()),
+                (SampleKind::Put, vec![0xA4]),
+            ],
+            "the recovered sn 3 arrives as a DELETE with an empty payload, in \
+             sn order between the live Puts — not as an empty Put, which would \
+             leave the subscriber believing the key still holds a value"
+        );
+        assert_eq!(
+            *misses.lock().unwrap(),
+            0,
+            "the recovery filled the hole with the retraction -> no Miss"
+        );
+        assert_eq!(
+            stamps.lock().unwrap()[3],
+            Some(103),
+            "the recovered sample carries the timestamp the cache retained \
+             (100 + sn) — ReplyView::timestamp has existed since R311y321 and \
+             the recovery path now reads it"
         );
     }
 
@@ -2244,6 +2397,7 @@ mod tests {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
+                kind: crate::sample::SampleKind::Put,
             });
         }
 
@@ -2433,6 +2587,7 @@ mod tests {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
+                kind: crate::sample::SampleKind::Put,
             });
         }
 
@@ -2561,6 +2716,7 @@ mod tests {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
+                kind: crate::sample::SampleKind::Put,
             });
         }
 
@@ -2795,6 +2951,7 @@ mod tests {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
+                kind: crate::sample::SampleKind::Put,
             });
         }
 
@@ -2854,6 +3011,7 @@ mod tests {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
+                kind: crate::sample::SampleKind::Put,
             });
         }
 
@@ -2947,6 +3105,7 @@ mod tests {
                     time: t,
                     zid: pub_zid.clone(),
                 },
+                kind: crate::sample::SampleKind::Put,
             });
         }
 
@@ -3095,6 +3254,7 @@ mod tests {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
+                kind: crate::sample::SampleKind::Put,
             });
         }
 

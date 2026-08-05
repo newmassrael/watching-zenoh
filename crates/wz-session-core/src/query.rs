@@ -879,6 +879,40 @@ impl<'a> QueryResponder<'a> {
         });
     }
 
+    /// The Del-arm mirror of [`Self::send_reply_keyed_sourced`]: a Del-form
+    /// reply under an explicit concrete `keyexpr`, carrying the sample's
+    /// `timestamp` (the inner `MsgDel` T-flag) AND its `source_info` (the
+    /// push-body ext id 0x01).
+    ///
+    /// The union of what [`Self::send_reply_keyed_del`] (key, no metadata) and
+    /// [`Self::send_reply_del_sourced`] (source_info, bound key, no timestamp)
+    /// each carried half of. No codec work: the `into_response` Del arm already
+    /// threads `keyexpr_literal`, `timestamp` and `source_info` onto the
+    /// `MsgDel` body — a Del body shares the push-body `_commons` with a Put, so
+    /// each rides exactly as it does on the Put arm. What was missing was a
+    /// staging call that sets all three at once, which is precisely the record
+    /// an `ext-pubsub-advanced-cache` recovery reply for a cached DELETE needs.
+    ///
+    /// As on the Put arm the caller must pass a keyexpr the querier's query
+    /// covers (the `reply ⊆ query` contract); the seam does not re-check it.
+    pub fn send_reply_keyed_del_sourced(
+        &mut self,
+        keyexpr: &str,
+        timestamp: &TimestampHint,
+        source_info: Option<&SourceInfo>,
+    ) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: keyexpr.to_string(),
+            body: ReplyBody::Del,
+            encoding: None,
+            timestamp: Some(timestamp.clone()),
+            responder: self.responder.clone(),
+            attachment: None,
+            source_info: source_info.cloned(),
+        });
+    }
+
     /// Emit an Err reply. `encoding_id` (with optional `schema`)
     /// maps onto [`crate::response_build::ResponseErrBuilder::encoding`]
     /// at frame-emit
@@ -1063,6 +1097,14 @@ impl ReplyOut for QueryResponder<'_> {
     }
     fn reply_del_sourced(&mut self, source_info: Option<&SourceInfo>) {
         self.send_reply_del_sourced(source_info);
+    }
+    fn reply_keyed_del_sourced(
+        &mut self,
+        keyexpr: &str,
+        timestamp: &TimestampHint,
+        source_info: Option<&SourceInfo>,
+    ) {
+        self.send_reply_keyed_del_sourced(keyexpr, timestamp, source_info);
     }
     fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
         #[cfg(feature = "query-reply-err")]
@@ -2900,6 +2942,78 @@ mod tests {
             via_chain, via_builder,
             "reply_del_sourced → QueryResponder → into_response must emit the \
              source_info ext on the MsgDel reply byte-for-byte",
+        );
+    }
+
+    /// R311y561 — `reply_keyed_del_sourced` carries all three at once: an
+    /// explicit concrete keyexpr, the sample TIMESTAMP, and the source_info.
+    ///
+    /// Each half already existed and neither sufficed. `reply_keyed_del` carries
+    /// the key and no metadata; `reply_del_sourced` carries the source_info but
+    /// can only ever reply under the responder's BOUND keyexpr and stamps no
+    /// timestamp. An `ext-pubsub-advanced-cache` replaying a cached DELETE needs
+    /// the union — the concrete key it was published under, the timestamp that
+    /// versions it, and the `(zid, eid, sn)` the recovering subscriber re-keys
+    /// it by. The keyexpr assertion is the discriminating one: the responder is
+    /// bound to `demo/**` here and the reply must come back under `demo/data`,
+    /// which `reply_del_sourced` structurally cannot do.
+    #[cfg(feature = "reply-source-info")]
+    #[test]
+    fn reply_keyed_del_sourced_emits_key_timestamp_and_source_info() {
+        let si = crate::sample::SourceInfo::new(&[0x09; 1], 3, 5);
+        let si_cb = si.clone();
+        let ts = TimestampHint {
+            time: 0x1234,
+            zid: vec![0x09],
+        };
+        let ts_cb = ts.clone();
+        // Bound to the WILDCARD; the reply must carry the concrete key.
+        let mut reg = QueryableRegistry::new();
+        reg.register("demo/**", move |_q, responder| {
+            responder.reply_keyed_del_sourced("demo/data", &ts_cb, Some(&si_cb));
+        });
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(7, 0, Some("demo/**")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        assert_eq!(replies.len(), 1);
+        let staged = replies.pop().unwrap();
+        match &staged {
+            QueryReply::Reply {
+                body,
+                keyexpr_literal,
+                timestamp,
+                source_info,
+                ..
+            } => {
+                assert_eq!(*body, ReplyBody::Del, "stages a Del body");
+                assert_eq!(
+                    keyexpr_literal, "demo/data",
+                    "the CONCRETE key, not the `demo/**` the responder is bound to",
+                );
+                assert_eq!(
+                    timestamp.as_ref().map(|t| t.time),
+                    Some(0x1234),
+                    "the Del reply is timestamped",
+                );
+                assert!(source_info.is_some(), "the Del reply carries source_info");
+            }
+            _ => panic!("reply_keyed_del_sourced must stage a QueryReply::Reply"),
+        }
+        let via_chain = staged.into_response().unwrap().wire();
+        let via_builder = ResponseReplyBuilder::new(7, 0, Some("demo/data"), &[])
+            .reply_del()
+            .timestamp(&ts)
+            .source_info(&si)
+            .build()
+            .unwrap()
+            .wire();
+        assert_eq!(
+            via_chain, via_builder,
+            "reply_keyed_del_sourced → QueryResponder → into_response must emit \
+             the keyed, timestamped, source_info-bearing MsgDel byte-for-byte",
         );
     }
 

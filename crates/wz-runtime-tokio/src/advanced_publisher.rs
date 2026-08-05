@@ -348,6 +348,7 @@ where
                 payload: payload.to_vec(),
                 source_info,
                 timestamp,
+                kind: crate::sample::SampleKind::Put,
             });
         }
         Ok(written)
@@ -360,11 +361,14 @@ where
     /// what keeps a subscriber's miss detection correct across a mixed stream:
     /// a Del that skipped the counter would leave a permanent apparent gap.
     ///
-    /// NOT cached, and that is a stated residual rather than an oversight:
-    /// [`CachedSample`] carries no sample KIND, so a cached Del would replay as
-    /// a Put and a recovering subscriber would resurrect a deleted key — worse
-    /// than not replaying it. Giving the cache a kind is the fix; until then
-    /// the live path is faithful and the recovery path omits deletes.
+    /// R311y561 — the Del IS cached now, closing the divergence R311y559
+    /// shipped. [`CachedSample`] carries the sample KIND, so the ring retains
+    /// the retraction and [`crate::advanced_cache::answer_from_ring`] replays it
+    /// on the Del arm ([`wz_session_core::query_sink::ReplyOut::reply_keyed_del_sourced`]).
+    /// The old behaviour — skip the cache — was the right call only while a
+    /// cached Del would have come back as a Put and resurrected the deleted key
+    /// on a recovering subscriber; with the kind stored that failure mode is
+    /// gone, and a recovering subscriber now sees the retraction it missed.
     pub fn delete(&self) -> Result<usize, PublishError> {
         let sn = self
             .seqnum
@@ -375,11 +379,22 @@ where
 
         let mut opts = PublishOptions::put()
             .with_kind(crate::sample::SampleKind::Del)
-            .with_timestamp(timestamp);
+            .with_timestamp(timestamp.clone());
         if let Some(si) = &source_info {
             opts = opts.with_source_info(si.clone());
         }
-        self.session.publish(&self.keyexpr, &[], opts)
+        let written = self.session.publish(&self.keyexpr, &[], opts)?;
+
+        if let Some(cache) = &self.cache {
+            cache.cache_sample(CachedSample {
+                keyexpr: self.keyexpr.clone(),
+                payload: Vec::new(),
+                source_info,
+                timestamp,
+                kind: crate::sample::SampleKind::Del,
+            });
+        }
+        Ok(written)
     }
 
     /// The publisher's allocated entity id (test / introspection seam).
@@ -576,6 +591,121 @@ mod tests {
             ],
             "the loopback query recovered all three cached samples under their original key"
         );
+    }
+
+    /// R311y561 — `delete()` RETAINS the retraction in the cache, and a loopback
+    /// recovery GET gets it back as a **Del** reply carrying its own sn.
+    ///
+    /// R311y559 shipped `delete()` deliberately skipping the cache, because a
+    /// ring with no sample kind could only have replayed the Del as a Put —
+    /// resurrecting the deleted key on any recovering subscriber. `CachedSample`
+    /// carries the kind now, so the reason is gone and the retraction is
+    /// retained like any other sample.
+    ///
+    /// Two things are asserted that a payload-only check would miss. The reply
+    /// KIND, because a Del and an empty Put have the same (empty) payload and
+    /// only the kind tells a subscriber whether the key still holds a value. And
+    /// the ring DEPTH plus the recovered sn set, because the delete draws from
+    /// the same sequence counter as `put` — a Del that skipped the counter, or
+    /// one dropped from the ring, leaves a permanent apparent gap that a
+    /// gap-detecting subscriber re-asks for forever.
+    #[cfg(feature = "query-get")]
+    #[test]
+    fn deleted_sample_is_cached_and_recovers_as_a_del_reply() {
+        use std::sync::Mutex;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::reply_sink::{ReplyKind, ReplyView};
+        use crate::runtime_impl::TokioTime;
+        use crate::session::{QueryOptions, TokioSession};
+        use wz_session_core::locality::Locality;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let options = AdvancedPublisherOptions {
+            sequencing: Sequencing::SequenceNumber,
+            cache: Some(CacheConfig { max_samples: 8 }),
+            publisher_detection: true,
+            sample_miss_detection: MissDetectionConfig::default(),
+        };
+        let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
+            .expect("advanced publisher declares against the test link");
+
+        // put(sn 0), put(sn 1), delete(sn 2), put(sn 3) — one mixed stream.
+        publisher.put(&[0]).expect("advanced put");
+        publisher.put(&[1]).expect("advanced put");
+        publisher.delete().expect("advanced delete");
+        publisher.put(&[3]).expect("advanced put");
+
+        assert_eq!(
+            publisher.cache().map(|c| c.len()),
+            Some(4),
+            "the DELETE is retained alongside the three puts (3 before y561)"
+        );
+
+        /// One recorded reply: its kind, its concrete key, its payload, and the
+        /// `sn` off its source_info (`None` when the build emits no
+        /// `reply-source-info` — see the assertions below).
+        type RecordedReply = (ReplyKind, String, Vec<u8>, Option<u32>);
+
+        let replies: Arc<Mutex<Vec<RecordedReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec = Arc::clone(&replies);
+        session
+            .query(
+                "demo/data/@adv/**",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                move |reply: &dyn ReplyView| {
+                    rec.lock().expect("reply recorder poisoned").push((
+                        reply.kind(),
+                        reply.keyexpr().to_string(),
+                        reply.payload().to_vec(),
+                        reply.source_info().map(|si| si.sn),
+                    ));
+                },
+                |_rid| {},
+            )
+            .expect("loopback query fires the cache queryable inline");
+
+        let got = replies.lock().expect("reply recorder poisoned").clone();
+        // The cache replies oldest-first, so ring order IS reply order and no
+        // sort is needed — which also keeps this arm meaningful on a build that
+        // emits no source_info to sort by.
+        let shapes: Vec<(ReplyKind, String, Vec<u8>)> = got
+            .iter()
+            .map(|(k, ke, p, _)| (*k, ke.clone(), p.clone()))
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                (ReplyKind::Put, "demo/data".to_string(), vec![0]),
+                (ReplyKind::Put, "demo/data".to_string(), vec![1]),
+                (ReplyKind::Del, "demo/data".to_string(), Vec::new()),
+                (ReplyKind::Put, "demo/data".to_string(), vec![3]),
+            ],
+            "the delete comes back as a Del reply under its own key, in ring \
+             order between the puts around it"
+        );
+
+        // The sn sequence needs the source_info ext on the wire, which the codec
+        // gates `reply-source-info` — composed by `ext-pubsub-advanced-recovery`
+        // (Cargo.toml), NOT by advanced-cache alone. Without it the recovery
+        // reply is deliberately source_info-free (pico-faithful), so asserting
+        // the sequence unconditionally would fail a lane that is behaving
+        // correctly. This is the arm that pins the DELETE occupying sn 2: a Del
+        // that skipped the shared counter would leave a permanent apparent gap.
+        #[cfg(feature = "ext-pubsub-advanced-recovery")]
+        {
+            let sns: Vec<Option<u32>> = got.iter().map(|(_, _, _, sn)| *sn).collect();
+            assert_eq!(
+                sns,
+                vec![Some(0), Some(1), Some(2), Some(3)],
+                "an unbroken 0..=3 sequence with the DELETE at sn 2 — the delete \
+                 draws from the same counter as put"
+            );
+        }
     }
 
     /// R311y85 — the heartbeat beacon emits the publisher's last published sn on

@@ -287,6 +287,39 @@ pub trait ReplyOut {
         let _ = source_info;
         self.reply_del();
     }
+    /// Emit a Del-form reply under an explicit concrete `keyexpr` carrying the
+    /// sample's `timestamp` (the inner `MsgDel` T-flag) AND its `source_info`
+    /// (the inner-body source_info ext id 0x01) — the Del-arm mirror of
+    /// [`Self::reply_keyed_sourced`], and the full-metadata form
+    /// [`Self::reply_del_sourced`] could not express because it can only ever
+    /// reply under the responder's BOUND keyexpr and stamps no timestamp.
+    ///
+    /// This is what an `ext-pubsub-advanced-cache` recovery reply needs when the
+    /// retransmitted sample is a DELETE: zenoh replies the cached `Sample`
+    /// whole, so a cached Del comes back as a Del under its own concrete key,
+    /// carrying the `(zid, eid, sn)` the subscriber re-keys / reorders it by and
+    /// the timestamp it versions it by. Without this seam the cache can only
+    /// replay a Del as a Put, which RESURRECTS a deleted key on the recovering
+    /// subscriber — which is why deletes were left out of the ring entirely
+    /// before it existed.
+    ///
+    /// Default impl falls back to [`Self::reply_keyed_del`] (dropping the
+    /// timestamp + source_info), so impls that predate this seam stay valid — a
+    /// build without `reply-source-info` / `pubsub-timestamp` (or a sink that
+    /// does not carry them) simply omits those wire arms. `alloc`-gated (the
+    /// [`crate::sample::TimestampHint`] / [`crate::sample::SourceInfo`] types
+    /// live in the `alloc`-gated `sample` module), mirroring
+    /// [`Self::reply_keyed_sourced`].
+    #[cfg(feature = "alloc")]
+    fn reply_keyed_del_sourced(
+        &mut self,
+        keyexpr: &str,
+        timestamp: &crate::sample::TimestampHint,
+        source_info: Option<&crate::sample::SourceInfo>,
+    ) {
+        let _ = (timestamp, source_info);
+        self.reply_keyed_del(keyexpr);
+    }
     /// Emit a Del-form reply (the queryable signals deletion at the
     /// keyexpr).
     fn reply_del(&mut self);

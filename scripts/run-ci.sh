@@ -2874,7 +2874,7 @@ layer_c1ap_cargo_test_ext_pubsub_serde() {
 # wz-runtime-tokio). query-get supplies the loopback get; pubsub-allow-loop the
 # loopback dispatch.
 layer_c1aq_cargo_test_ext_pubsub_advanced() {
-    _runci_guarded_test "C1aq advanced_" 11 \
+    _runci_guarded_test "C1aq advanced_" 13 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
         --lib advanced_ --quiet || return 1
     (cd crates \
@@ -2995,7 +2995,7 @@ layer_c1be_cargo_test_query_value() {
 # header deferred "they need the reorder buffer"; it lands WITH the active flip.
 # Then clippy-gates the recovery surface + validates the facade forward target.
 layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
-    _runci_guarded_test "C1at advanced_subscriber" 14 \
+    _runci_guarded_test "C1at advanced_subscriber" 15 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -3018,7 +3018,7 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
 # faithfulness test (the emitted payload decodes to last_sn on the @adv KE). Then
 # clippy-gates the producer surface + validates the facade forward target.
 layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
-    _runci_guarded_test "C1au advanced_publisher" 7 \
+    _runci_guarded_test "C1au advanced_publisher" 8 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
         --lib advanced_publisher --quiet || return 1
     (cd crates \
@@ -3045,7 +3045,7 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
 # (--lib advanced_subscriber, which now also pulls liveliness-subscriber); the
 # cache-side _time parser + filter tests run under C1aq (--lib advanced_).
 layer_c1av_cargo_test_ext_pubsub_advanced_history() {
-    _runci_guarded_test "C1av advanced_subscriber" 24 \
+    _runci_guarded_test "C1av advanced_subscriber" 25 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
