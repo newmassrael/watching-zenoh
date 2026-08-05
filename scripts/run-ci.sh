@@ -9253,7 +9253,15 @@ layer_c1ce_api_compat_c_shm_oracle() {
     # cdylib built for a different header is the one-shared-artifact hazard this
     # tree has already been bitten by.
     _runci_build_capi_c_for_oracle "C1ce restore" || rc=1
-    return $rc
+    # QUOTED, and the quotes are the whole point (R311y543). The pinned 0.11.0
+    # linter hosted CI installs reports SC2086 on a bare `return $rc` and the
+    # 0.8.0 that floats on a dev machine does not, so R311y541 shipped this line
+    # and hosted CI red on Layer 0 while every local run was green. Same class
+    # R311y419 fixed five of.
+    #
+    # (This comment deliberately does not open a line with the linter's own
+    # name: a comment that does is parsed as a DIRECTIVE, which is SC1073.)
+    return "$rc"
 }
 
 # ─── Layer C1cd — §5.27 api-compat-c ATTACHMENT, pico + zenohd ──────
