@@ -90,9 +90,17 @@ getrandom = "0.2"
 # worse: a build without it would silently lose the sweep, which is precisely the
 # defect R311y533 exists to close (an armed liveliness deadline nobody enforces
 # blocks the C caller in `z_recv` forever). The sweeper must be unconditional.
+# R311y539 — `scouting-active` is selected HERE, not only by the C-ABI crates,
+# because the scouting DRIVE moved into this crate (`scouting::run_scout`): both
+# ABIs' `z_scout` is a shim over one implementation, and the module names
+# `wz_runtime_tokio::scouting_glue` directly, so its absence is a COMPILE error
+# rather than a silent no-op. Selecting it here also means `cargo test -p
+# wz-capi-core` alone builds, which feature UNIFICATION would otherwise hide —
+# the R311y533 lesson, one crate later.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "routing-accept",
     "liveliness-get",
+    "scouting-active",
     "ext-pubsub-advanced-publisher",
     "ext-pubsub-advanced-history",
     "ext-pubsub-sample-miss-detection",

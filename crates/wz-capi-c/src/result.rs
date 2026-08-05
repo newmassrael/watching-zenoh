@@ -37,6 +37,27 @@ pub const Z_ENULL: ZResult = -5;
 /// A resource could not be obtained (`Z_EUNAVAILABLE`) — the id space behind a
 /// declaration is exhausted.
 pub const Z_EUNAVAILABLE: ZResult = -6;
+/// A value could not be deserialized (`Z_EDESERIALIZE`) — the payload ended
+/// mid-value, or its bytes do not decode as the requested type.
+pub const Z_EDESERIALIZE: ZResult = -7;
+/// The session was closed (`Z_ESESSION_CLOSED`).
+pub const Z_ESESSION_CLOSED: ZResult = -8;
+/// A channel is disconnected and will never yield again
+/// (`Z_CHANNEL_DISCONNECTED` = 1). zenoh-c spells the two channel statuses as
+/// POSITIVE values, not errors, so a C caller's `if (rc < 0)` does not treat a
+/// drained channel as a failure — and `z_queryable_with_channels.c`'s
+/// `for (rc = z_recv(..); rc == Z_OK; ..)` loop exits on either.
+///
+/// The value is 1 and NODATA is 2, which is the opposite of the order the names
+/// suggest; transcribed from `zenoh_concrete.h:25-26` rather than guessed.
+pub const Z_CHANNEL_DISCONNECTED: ZResult = 1;
+/// A channel is alive but empty and the caller asked not to block
+/// (`Z_CHANNEL_NODATA` = 2).
+pub const Z_CHANNEL_NODATA: ZResult = 2;
+/// A mutex handle was not usable (`Z_EINVAL_MUTEX` = -22). zenoh-c forwards
+/// `pthread`'s own `errno` values for the mutex family rather than mapping them
+/// onto its `Z_E*` set, which is why this number is -22 and not a small one.
+pub const Z_EINVAL_MUTEX: ZResult = -22;
 /// An unclassified failure (`Z_EGENERIC` = `INT8_MIN`). zenoh-c spells its
 /// catch-all as the type's minimum rather than as another small negative, so the
 /// value is transcribed rather than chosen.
@@ -57,6 +78,9 @@ mod tests {
             Z_ENETWORK,
             Z_ENULL,
             Z_EUNAVAILABLE,
+            Z_EDESERIALIZE,
+            Z_ESESSION_CLOSED,
+            Z_EINVAL_MUTEX,
             Z_EGENERIC,
         ];
         for (i, a) in errs.iter().enumerate() {
@@ -66,6 +90,21 @@ mod tests {
             }
         }
         assert_eq!(Z_OK, 0);
+    }
+
+    /// The two CHANNEL statuses are positive and distinct from `Z_OK` — the
+    /// property `z_queryable_with_channels.c`'s `rc == Z_OK` loop rests on, and
+    /// the reason they are not in the sweep above. Their numbering is the
+    /// opposite of what the names suggest, which is exactly the kind of thing a
+    /// reader assumes rather than checks.
+    #[test]
+    fn the_channel_statuses_are_positive_and_not_ok() {
+        assert_eq!(Z_CHANNEL_DISCONNECTED, 1);
+        assert_eq!(Z_CHANNEL_NODATA, 2);
+        for code in [Z_CHANNEL_DISCONNECTED, Z_CHANNEL_NODATA] {
+            assert!(code > 0, "a channel status must not read as an error");
+            assert_ne!(code, Z_OK, "a channel status must not read as success");
+        }
     }
 
     /// These are NOT zenoh-pico's values, and the difference is the reason the

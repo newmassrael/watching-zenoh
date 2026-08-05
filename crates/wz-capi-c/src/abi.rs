@@ -104,7 +104,14 @@ macro_rules! define_opaque {
             }
 
             /// Wrap a `Box::into_raw` pointer.
+            ///
+            /// `allow(dead_code)`: some families are RECEIVE-ONLY in this ABI —
+            /// `z_owned_hello_t` is one, because upstream only ever hands a
+            /// hello to a callback and this slice ships no hello channel to
+            /// escape one into. The type still has to exist (a C program may
+            /// declare and null one), and its `null_value` stays checked.
             #[inline]
+            #[allow(dead_code)]
             pub(crate) fn from_handle(handle: Handle) -> Self {
                 Self {
                     handle,
@@ -142,6 +149,58 @@ macro_rules! define_opaque {
             assert!(std::mem::size_of::<$Loaned>() == $size);
             assert!(std::mem::align_of::<$Loaned>() == 8);
             // The moved wrapper is a newtype, so it must not add a byte.
+            assert!(std::mem::size_of::<$Moved>() == $size);
+        };
+    };
+}
+
+/// Declare only the OWNED + MOVED half of a family, for the types whose loaned
+/// form is a zero-sized TAG rather than a stack-allocatable struct.
+///
+/// `z_owned_sample_t` / `z_owned_query_t` / `z_owned_reply_t` are all
+/// stack-allocated by the C side, so their SIZE is ABI — but the matching
+/// `z_loaned_*` is only ever seen as a pointer, and this crate aims that pointer
+/// straight at its own marshal (see [`z_loaned_sample_t`]). Emitting a loaned
+/// blob for them too would define a type nothing constructs.
+macro_rules! define_opaque_owned {
+    ($Owned:ident, $Moved:ident, $size:expr) => {
+        /// Owned value: our handle in slot 0, zero padding to the C size.
+        #[repr(C)]
+        pub struct $Owned {
+            pub(crate) handle: Handle,
+            pub(crate) _pad: [u8; $size - std::mem::size_of::<Handle>()],
+        }
+
+        /// Moved wrapper — zenoh-c's `z_moved_X_t` is literally
+        /// `struct { z_owned_X_t _this; }`.
+        #[repr(C)]
+        pub struct $Moved {
+            pub(crate) _this: $Owned,
+        }
+
+        impl $Owned {
+            /// The gravestone value: a null handle and zeroed padding.
+            #[inline]
+            pub(crate) fn null_value() -> Self {
+                Self {
+                    handle: std::ptr::null_mut(),
+                    _pad: [0u8; $size - std::mem::size_of::<Handle>()],
+                }
+            }
+
+            /// Wrap a `Box::into_raw` pointer.
+            #[inline]
+            pub(crate) fn from_handle(handle: Handle) -> Self {
+                Self {
+                    handle,
+                    _pad: [0u8; $size - std::mem::size_of::<Handle>()],
+                }
+            }
+        }
+
+        const _: () = {
+            assert!(std::mem::size_of::<$Owned>() == $size);
+            assert!(std::mem::align_of::<$Owned>() == 8);
             assert!(std::mem::size_of::<$Moved>() == $size);
         };
     };
@@ -193,6 +252,304 @@ define_opaque!(
     104
 );
 
+// --- the planes R311y539 adds -----------------------------------------------
+//
+// Sizes MEASURED against this installation's `zenoh_opaque.h` by a C compiler
+// (the layout gate re-measures every one of them on every run). The
+// `Z_FEATURE_UNSTABLE_API` arm is NOT split for any of these: only one oracle
+// build exists on this machine, so a second arm would be a TRANSCRIBED number
+// with nothing to check it — the failure mode this file's own header warns
+// about. See the crate's residual list.
+
+// The owned sample — 184 bytes, and `z_pull.c` / `z_storage.c` stack-allocate
+// it. Its handle points at a heap `SampleMarshal`, which is the SAME type the
+// borrowed `z_loaned_sample_t` aims at, so every existing sample accessor
+// serves the owned form with no second path.
+define_opaque_owned!(z_owned_sample_t, z_moved_sample_t, 184);
+// The queryable family — 48 bytes; `z_queryable.c` stack-allocates the owned one.
+define_opaque!(
+    z_owned_queryable_t,
+    z_loaned_queryable_t,
+    z_moved_queryable_t,
+    48
+);
+// The querier family — 80 bytes; `z_querier.c` stack-allocates the owned one.
+define_opaque!(z_owned_querier_t, z_loaned_querier_t, z_moved_querier_t, 80);
+// The owned query — 136 bytes; `z_queryable_with_channels.c` stack-allocates it
+// to receive an ESCAPED query off its fifo.
+define_opaque_owned!(z_owned_query_t, z_moved_query_t, 136);
+// The owned reply — 184 bytes; every channel-based get stack-allocates it.
+define_opaque_owned!(z_owned_reply_t, z_moved_reply_t, 184);
+// The reply ERROR is BORROW-ONLY here: `z_reply_err` hands back a pointer into
+// the reply's own marshal, so there is no owned form to construct and none is
+// declared. Upstream's `z_owned_reply_err_t` (72 bytes) arrives with the family
+// that produces one — a reply-error channel, which no example in the corpus
+// uses.
+// The hello family — 48 bytes; `z_scout.c` never stack-allocates one (the
+// callback receives a pointer), but the owned form is what a hello channel
+// would hand back and the size is measured either way.
+define_opaque!(z_owned_hello_t, z_loaned_hello_t, z_moved_hello_t, 48);
+// The string-array family — 24 bytes; `z_scout.c` stack-allocates the owned one
+// for `z_hello_locators`.
+define_opaque!(
+    z_owned_string_array_t,
+    z_loaned_string_array_t,
+    z_moved_string_array_t,
+    24
+);
+// The bytes WRITER — 56 bytes; `z_bytes.c` stack-allocates the owned one.
+define_opaque!(
+    z_owned_bytes_writer_t,
+    z_loaned_bytes_writer_t,
+    z_moved_bytes_writer_t,
+    56
+);
+// The SERIALIZER — 56 bytes, and the same handle representation as the writer.
+// That is an ABI fact rather than a convenience: upstream's serializer wraps a
+// writer at offset 0, so a program is free to hand one to the other's
+// functions.
+define_opaque!(
+    ze_owned_serializer_t,
+    ze_loaned_serializer_t,
+    ze_moved_serializer_t,
+    56
+);
+// The three CHANNEL handlers — 8 bytes each, a bare handle with no padding.
+define_opaque!(
+    z_owned_fifo_handler_reply_t,
+    z_loaned_fifo_handler_reply_t,
+    z_moved_fifo_handler_reply_t,
+    8
+);
+define_opaque!(
+    z_owned_fifo_handler_query_t,
+    z_loaned_fifo_handler_query_t,
+    z_moved_fifo_handler_query_t,
+    8
+);
+define_opaque!(
+    z_owned_ring_handler_sample_t,
+    z_loaned_ring_handler_sample_t,
+    z_moved_ring_handler_sample_t,
+    8
+);
+// The MUTEX family — 24 bytes at align 8; `z_ping.c` / `z_storage.c`
+// stack-allocate the owned one.
+define_opaque!(z_owned_mutex_t, z_loaned_mutex_t, z_moved_mutex_t, 24);
+
+/// The CONDVAR, which is the one type here that cannot hold a pointer.
+///
+/// `z_owned_condvar_t` is 8 bytes at align **4** and `z_loaned_condvar_t` is
+/// **4** — measured, and the loaned one is the constraint: a pointer does not
+/// fit in it at all, so the handle-in-slot-0 shape every other family uses is
+/// structurally unavailable. A `u32` key into a process-wide registry is what
+/// remains, and `z_condvar_loan` is still a plain cast because the key sits at
+/// offset 0 of both.
+#[repr(C)]
+pub struct z_owned_condvar_t {
+    pub(crate) key: u32,
+    pub(crate) _pad: u32,
+}
+
+/// The 4-byte borrowed condvar (`z_loaned_condvar_t`).
+#[repr(C)]
+pub struct z_loaned_condvar_t {
+    pub(crate) key: u32,
+}
+
+/// Moved condvar (`z_moved_condvar_t`).
+#[repr(C)]
+pub struct z_moved_condvar_t {
+    pub(crate) _this: z_owned_condvar_t,
+}
+
+impl z_owned_condvar_t {
+    /// The gravestone: key 0, which the registry never issues.
+    #[inline]
+    pub(crate) fn null_value() -> Self {
+        Self { key: 0, _pad: 0 }
+    }
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_owned_condvar_t>() == 8);
+    assert!(std::mem::align_of::<z_owned_condvar_t>() == 4);
+    assert!(std::mem::size_of::<z_loaned_condvar_t>() == 4);
+    assert!(std::mem::align_of::<z_loaned_condvar_t>() == 4);
+    assert!(std::mem::size_of::<z_moved_condvar_t>() == 8);
+};
+
+/// One slice representation shared by all three of zenoh-c's slice types, for
+/// exactly the reason [`StringRepr`] is shared by the string ones: both loans
+/// are pointer casts upstream, so an owned slice and a view slice must be
+/// READABLE as the same loaned shape.
+///
+/// `owned` is the freeing handle — a leaked `Box<Vec<u8>>` for
+/// `z_owned_slice_t`, null for a view.
+#[repr(C)]
+pub struct SliceRepr {
+    pub(crate) ptr: *const u8,
+    pub(crate) len: usize,
+    pub(crate) owned: Handle,
+    pub(crate) _pad: usize,
+}
+
+impl SliceRepr {
+    /// The gravestone: an empty, non-owning slice.
+    #[inline]
+    pub(crate) fn null_value() -> Self {
+        Self {
+            ptr: std::ptr::null(),
+            len: 0,
+            owned: std::ptr::null_mut(),
+            _pad: 0,
+        }
+    }
+}
+
+/// Owned slice (zenoh-c `z_owned_slice_t`) — frees its buffer on drop.
+pub type z_owned_slice_t = SliceRepr;
+/// Loaned slice (zenoh-c `z_loaned_slice_t`) — what both loan casts produce.
+pub type z_loaned_slice_t = SliceRepr;
+/// Borrowed slice view (zenoh-c `z_view_slice_t`) — never frees.
+pub type z_view_slice_t = SliceRepr;
+
+/// Moved slice (zenoh-c `z_moved_slice_t`).
+#[repr(C)]
+pub struct z_moved_slice_t {
+    pub(crate) _this: z_owned_slice_t,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<SliceRepr>() == 32);
+    assert!(std::mem::align_of::<SliceRepr>() == 8);
+    assert!(std::mem::size_of::<z_moved_slice_t>() == 32);
+};
+
+/// The borrowed query a queryable callback receives.
+///
+/// A zero-sized TAG, for the same reason [`z_loaned_sample_t`] is: the C side
+/// never stack-allocates one — it receives a `z_loaned_query_t*` and hands it
+/// back to the accessors — so the pointer aims straight at wz's own
+/// [`QueryMarshal`](crate::query::QueryMarshal). The 136-byte `z_owned_query_t`
+/// above is the type that IS stack-allocated, and it carries a handle to the
+/// same marshal.
+#[repr(C)]
+pub struct z_loaned_query_t {
+    _opaque: [u8; 0],
+}
+
+/// The borrowed reply a get callback receives — the same tag shape, for the
+/// same reason.
+#[repr(C)]
+pub struct z_loaned_reply_t {
+    _opaque: [u8; 0],
+}
+
+/// The borrowed reply ERROR `z_reply_err` hands back.
+#[repr(C)]
+pub struct z_loaned_reply_err_t {
+    _opaque: [u8; 0],
+}
+
+/// The C callback a QUERY closure carries (`zenoh_commons.h:551`).
+pub type z_closure_query_callback_t =
+    Option<unsafe extern "C" fn(query: *mut z_loaned_query_t, context: *mut c_void)>;
+
+/// Owned query closure (zenoh-c `z_owned_closure_query_t`) — TRANSPARENT
+/// upstream, so it matches field for field.
+#[repr(C)]
+pub struct z_owned_closure_query_t {
+    pub(crate) context: *mut c_void,
+    pub(crate) call: z_closure_query_callback_t,
+    pub(crate) drop: z_closure_drop_callback_t,
+}
+
+/// Moved query closure (zenoh-c `z_moved_closure_query_t`).
+#[repr(C)]
+pub struct z_moved_closure_query_t {
+    pub(crate) _this: z_owned_closure_query_t,
+}
+
+impl z_owned_closure_query_t {
+    /// The gravestone: no context, no callbacks.
+    #[inline]
+    pub(crate) fn null_value() -> Self {
+        Self {
+            context: std::ptr::null_mut(),
+            call: None,
+            drop: None,
+        }
+    }
+}
+
+/// The C callback a REPLY closure carries (`zenoh_commons.h:567`).
+pub type z_closure_reply_callback_t =
+    Option<unsafe extern "C" fn(reply: *mut z_loaned_reply_t, context: *mut c_void)>;
+
+/// Owned reply closure (zenoh-c `z_owned_closure_reply_t`), transparent.
+#[repr(C)]
+pub struct z_owned_closure_reply_t {
+    pub(crate) context: *mut c_void,
+    pub(crate) call: z_closure_reply_callback_t,
+    pub(crate) drop: z_closure_drop_callback_t,
+}
+
+/// Moved reply closure (zenoh-c `z_moved_closure_reply_t`).
+#[repr(C)]
+pub struct z_moved_closure_reply_t {
+    pub(crate) _this: z_owned_closure_reply_t,
+}
+
+impl z_owned_closure_reply_t {
+    /// The gravestone: no context, no callbacks.
+    #[inline]
+    pub(crate) fn null_value() -> Self {
+        Self {
+            context: std::ptr::null_mut(),
+            call: None,
+            drop: None,
+        }
+    }
+}
+
+/// The C callback a HELLO closure carries (`zenoh_commons.h:499`).
+pub type z_closure_hello_callback_t =
+    Option<unsafe extern "C" fn(hello: *mut z_loaned_hello_t, context: *mut c_void)>;
+
+/// Owned hello closure (zenoh-c `z_owned_closure_hello_t`), transparent.
+#[repr(C)]
+pub struct z_owned_closure_hello_t {
+    pub(crate) context: *mut c_void,
+    pub(crate) call: z_closure_hello_callback_t,
+    pub(crate) drop: z_closure_drop_callback_t,
+}
+
+/// Moved hello closure (zenoh-c `z_moved_closure_hello_t`).
+#[repr(C)]
+pub struct z_moved_closure_hello_t {
+    pub(crate) _this: z_owned_closure_hello_t,
+}
+
+impl z_owned_closure_hello_t {
+    /// The gravestone: no context, no callbacks.
+    #[inline]
+    pub(crate) fn null_value() -> Self {
+        Self {
+            context: std::ptr::null_mut(),
+            call: None,
+            drop: None,
+        }
+    }
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_owned_closure_query_t>() == 24);
+    assert!(std::mem::size_of::<z_owned_closure_reply_t>() == 24);
+    assert!(std::mem::size_of::<z_owned_closure_hello_t>() == 24);
+    assert!(std::mem::align_of::<z_owned_closure_query_t>() == 8);
+};
+
 /// The borrowed sample a subscriber callback receives.
 ///
 /// A zero-sized TAG rather than a `define_opaque!` family, and the difference is
@@ -203,9 +560,10 @@ define_opaque!(
 /// which keeps the marshal's fields directly reachable instead of hidden behind a
 /// handle slot the C side would then be free to mis-size.
 ///
-/// `z_owned_sample_t` (184 bytes, and genuinely stack-allocated by
-/// `z_storage.c` / the reply plane) is deliberately NOT defined in this slice —
-/// it arrives with the family that produces one.
+/// [`z_owned_sample_t`] (184 bytes, genuinely stack-allocated by `z_pull.c` and
+/// `z_storage.c`) is defined above and stores a handle to a HEAP marshal of the
+/// same type — so a loan is `handle as *const z_loaned_sample_t` and every
+/// accessor below serves both forms unchanged.
 #[repr(C)]
 pub struct z_loaned_sample_t {
     _opaque: [u8; 0],
@@ -388,96 +746,191 @@ const _: () = {
 /// The layout numbers this build asserts, in a form a gate can READ back out of
 /// the compiled cdylib rather than re-transcribing.
 ///
-/// Exported because the alternative is a second hand-maintained copy of the
-/// table in a test — the shape this project has repeatedly found drifts. The
-/// lane reads these, reads `zenoh_opaque.h`, and compares; neither side is a
-/// list someone remembered to update.
-#[repr(C)]
-pub struct wz_capi_c_layout_t {
-    /// `size_of::<z_owned_session_t>()`.
-    pub session: usize,
-    /// `size_of::<z_owned_bytes_t>()`.
-    pub bytes: usize,
-    /// `size_of::<z_view_keyexpr_t>()`.
-    pub keyexpr: usize,
-    /// `size_of::<z_owned_config_t>()`.
-    pub config: usize,
-    /// The alignment every one of them shares.
-    pub align: usize,
-    /// `size_of::<z_owned_subscriber_t>()`.
-    pub subscriber: usize,
-    /// `size_of::<z_owned_string_t>()`.
-    pub string: usize,
-    /// `size_of::<z_owned_closure_sample_t>()`.
-    pub closure_sample: usize,
-    /// `size_of::<z_owned_liveliness_token_t>()`.
-    pub liveliness_token: usize,
-    /// `size_of::<z_owned_publisher_t>()`.
-    pub publisher: usize,
-    /// `size_of::<z_publisher_options_t>()` — FEATURE-DEPENDENT and computed by
-    /// the compiler from a mirrored field list, which is exactly why it is
-    /// measured here rather than trusted.
-    pub publisher_options: usize,
-    /// `size_of::<z_publisher_put_options_t>()`, also feature-dependent.
-    pub publisher_put_options: usize,
-    /// `size_of::<z_owned_encoding_t>()`.
-    pub encoding: usize,
-    /// `size_of::<z_owned_closure_zid_t>()`.
-    pub closure_zid: usize,
-    /// `size_of::<z_owned_closure_matching_status_t>()`.
-    pub closure_matching_status: usize,
-    /// `size_of::<z_id_t>()` — 16 bytes at align 1, and the ALIGNMENT is the
-    /// half that a `u128`-backed implementation would get wrong.
-    pub id: usize,
-    /// `align_of::<z_id_t>()`.
-    pub id_align: usize,
-    /// `size_of::<z_clock_t>()`.
-    pub clock: usize,
-    /// `size_of::<z_liveliness_subscriber_options_t>()`.
-    pub liveliness_subscriber_options: usize,
-    /// `size_of::<z_matching_status_t>()`.
-    pub matching_status: usize,
+/// ## Why an ARRAY and not a struct (changed R311y539)
+///
+/// Until R311y539 this was a `#[repr(C)]` struct the test declared a parallel
+/// copy of. That shape has a failure mode the comment on the test itself named:
+/// the cdylib writes through the caller's pointer, so a test copy NARROWER than
+/// the exported struct is a stack overwrite in the test process — silent, and
+/// worse than the drift it stands in for. Widening the table by twenty-odd
+/// entries in one round makes that a question of when, not whether.
+///
+/// The array form removes the hazard structurally. The caller says how many
+/// slots it has; this writes at most that many and returns the TRUE count, so a
+/// width disagreement surfaces as an assertion on a returned integer instead of
+/// as memory corruption. The names live in [`WZ_CAPI_C_LAYOUT_NAMES`] and are
+/// read out of the same artifact, so the gate never re-transcribes them either.
+pub const WZ_CAPI_C_LAYOUT_NAMES: &[&str] = &[
+    "z_owned_session_t",
+    "z_owned_bytes_t",
+    "z_view_keyexpr_t",
+    "z_owned_config_t",
+    "align",
+    "z_owned_subscriber_t",
+    "z_owned_string_t",
+    "z_owned_closure_sample_t",
+    "z_owned_liveliness_token_t",
+    "z_owned_publisher_t",
+    "z_publisher_options_t",
+    "z_publisher_put_options_t",
+    "z_owned_encoding_t",
+    "z_owned_closure_zid_t",
+    "z_owned_closure_matching_status_t",
+    "z_id_t",
+    "z_id_t/align",
+    "z_clock_t",
+    "z_liveliness_subscriber_options_t",
+    "z_matching_status_t",
+    // R311y539 — the query / reply / channel / sync / serialization planes.
+    "z_owned_sample_t",
+    "z_owned_queryable_t",
+    "z_owned_querier_t",
+    "z_owned_query_t",
+    "z_owned_reply_t",
+    "z_owned_hello_t",
+    "z_owned_string_array_t",
+    "z_owned_bytes_writer_t",
+    "ze_owned_serializer_t",
+    "z_owned_fifo_handler_reply_t",
+    "z_owned_fifo_handler_query_t",
+    "z_owned_ring_handler_sample_t",
+    "z_owned_mutex_t",
+    "z_owned_condvar_t",
+    "z_owned_condvar_t/align",
+    "z_loaned_condvar_t",
+    "z_loaned_condvar_t/align",
+    "z_owned_slice_t",
+    "z_owned_closure_query_t",
+    "z_owned_closure_reply_t",
+    "z_owned_closure_hello_t",
+    "z_bytes_reader_t",
+    "z_bytes_slice_iterator_t",
+    "ze_deserializer_t",
+    "z_get_options_t",
+    "z_queryable_options_t",
+    "z_query_reply_options_t",
+    "z_liveliness_get_options_t",
+    "z_querier_options_t",
+    "z_querier_get_options_t",
+    "z_scout_options_t",
+];
+
+/// This build's footprint table, in [`WZ_CAPI_C_LAYOUT_NAMES`] order.
+fn layout_values() -> [usize; WZ_CAPI_C_LAYOUT_NAMES.len()] {
+    use std::mem::{align_of, size_of};
+    [
+        size_of::<z_owned_session_t>(),
+        size_of::<z_owned_bytes_t>(),
+        size_of::<z_view_keyexpr_t>(),
+        size_of::<z_owned_config_t>(),
+        align_of::<z_owned_session_t>(),
+        size_of::<z_owned_subscriber_t>(),
+        size_of::<z_owned_string_t>(),
+        size_of::<z_owned_closure_sample_t>(),
+        size_of::<z_owned_liveliness_token_t>(),
+        size_of::<z_owned_publisher_t>(),
+        size_of::<crate::publisher::z_publisher_options_t>(),
+        size_of::<crate::publisher::z_publisher_put_options_t>(),
+        size_of::<z_owned_encoding_t>(),
+        size_of::<crate::zid::z_owned_closure_zid_t>(),
+        size_of::<crate::matching::z_owned_closure_matching_status_t>(),
+        size_of::<crate::zid::z_id_t>(),
+        align_of::<crate::zid::z_id_t>(),
+        size_of::<crate::platform::z_clock_t>(),
+        size_of::<crate::liveliness::z_liveliness_subscriber_options_t>(),
+        size_of::<crate::matching::z_matching_status_t>(),
+        size_of::<z_owned_sample_t>(),
+        size_of::<z_owned_queryable_t>(),
+        size_of::<z_owned_querier_t>(),
+        size_of::<z_owned_query_t>(),
+        size_of::<z_owned_reply_t>(),
+        size_of::<z_owned_hello_t>(),
+        size_of::<z_owned_string_array_t>(),
+        size_of::<z_owned_bytes_writer_t>(),
+        size_of::<ze_owned_serializer_t>(),
+        size_of::<z_owned_fifo_handler_reply_t>(),
+        size_of::<z_owned_fifo_handler_query_t>(),
+        size_of::<z_owned_ring_handler_sample_t>(),
+        size_of::<z_owned_mutex_t>(),
+        size_of::<z_owned_condvar_t>(),
+        align_of::<z_owned_condvar_t>(),
+        size_of::<z_loaned_condvar_t>(),
+        align_of::<z_loaned_condvar_t>(),
+        size_of::<z_owned_slice_t>(),
+        size_of::<z_owned_closure_query_t>(),
+        size_of::<z_owned_closure_reply_t>(),
+        size_of::<z_owned_closure_hello_t>(),
+        size_of::<crate::bytes::z_bytes_reader_t>(),
+        size_of::<crate::bytes::z_bytes_slice_iterator_t>(),
+        size_of::<crate::serde::ze_deserializer_t>(),
+        size_of::<crate::get::z_get_options_t>(),
+        size_of::<crate::query::z_queryable_options_t>(),
+        size_of::<crate::query::z_query_reply_options_t>(),
+        size_of::<crate::liveliness::z_liveliness_get_options_t>(),
+        size_of::<crate::querier::z_querier_options_t>(),
+        size_of::<crate::querier::z_querier_get_options_t>(),
+        size_of::<crate::scout::z_scout_options_t>(),
+    ]
 }
 
-/// Report this build's owned-type footprints — the drop-in's half of the layout
-/// gate.
+/// Report this build's footprints — the drop-in's half of the layout gate.
+///
+/// Writes at most `cap` entries through `out` (ignored when null) and returns
+/// the number this build actually has. A caller whose buffer is short gets a
+/// truncated prefix and a count that says so; it never gets its frame written
+/// past.
 ///
 /// # Safety
-/// Writes five `usize`s through `out`, which must be a valid, aligned
-/// `wz_capi_c_layout_t`. Null is ignored.
+/// `out` must be null, or valid and writable for `cap` `usize`s.
 #[no_mangle]
-pub unsafe extern "C" fn wz_capi_c_layout(out: *mut wz_capi_c_layout_t) {
-    if out.is_null() {
-        return;
+pub unsafe extern "C" fn wz_capi_c_layout(out: *mut usize, cap: usize) -> usize {
+    let values = layout_values();
+    if !out.is_null() {
+        let n = cap.min(values.len());
+        // SAFETY: the caller's contract bounds `out` at `cap`, and `n <= cap`.
+        unsafe { std::ptr::copy_nonoverlapping(values.as_ptr(), out, n) };
     }
-    // SAFETY: the caller's contract — a valid, aligned out-param.
-    unsafe {
-        *out = wz_capi_c_layout_t {
-            session: std::mem::size_of::<z_owned_session_t>(),
-            bytes: std::mem::size_of::<z_owned_bytes_t>(),
-            keyexpr: std::mem::size_of::<z_view_keyexpr_t>(),
-            config: std::mem::size_of::<z_owned_config_t>(),
-            align: std::mem::align_of::<z_owned_session_t>(),
-            subscriber: std::mem::size_of::<z_owned_subscriber_t>(),
-            string: std::mem::size_of::<z_owned_string_t>(),
-            closure_sample: std::mem::size_of::<z_owned_closure_sample_t>(),
-            liveliness_token: std::mem::size_of::<z_owned_liveliness_token_t>(),
-            publisher: std::mem::size_of::<z_owned_publisher_t>(),
-            publisher_options: std::mem::size_of::<crate::publisher::z_publisher_options_t>(),
-            publisher_put_options: std::mem::size_of::<crate::publisher::z_publisher_put_options_t>(
-            ),
-            encoding: std::mem::size_of::<z_owned_encoding_t>(),
-            closure_zid: std::mem::size_of::<crate::zid::z_owned_closure_zid_t>(),
-            closure_matching_status: std::mem::size_of::<
-                crate::matching::z_owned_closure_matching_status_t,
-            >(),
-            id: std::mem::size_of::<crate::zid::z_id_t>(),
-            id_align: std::mem::align_of::<crate::zid::z_id_t>(),
-            clock: std::mem::size_of::<crate::platform::z_clock_t>(),
-            liveliness_subscriber_options: std::mem::size_of::<
-                crate::liveliness::z_liveliness_subscriber_options_t,
-            >(),
-            matching_status: std::mem::size_of::<crate::matching::z_matching_status_t>(),
-        };
+    values.len()
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// The names and the values are two lists that must stay the same length —
+    /// the one thing the array form cannot check at the type level, because
+    /// `layout_values` is sized FROM the names.
+    ///
+    /// It can still catch the real mistake: an entry appended to the names and
+    /// forgotten in the values makes `layout_values` fail to compile, and an
+    /// entry appended to the values alone overflows the array. So this test
+    /// exists for the third case — a name added and a value added in the WRONG
+    /// position, which compiles and would silently compare `z_owned_mutex_t`
+    /// against a condvar. Duplicate names are what that looks like.
+    #[test]
+    fn every_layout_entry_has_a_distinct_name() {
+        let mut seen = std::collections::BTreeSet::new();
+        for name in WZ_CAPI_C_LAYOUT_NAMES {
+            assert!(seen.insert(*name), "duplicate layout entry name: {name}");
+        }
+        assert_eq!(seen.len(), layout_values().len());
+    }
+
+    /// A short buffer is TRUNCATED, not overrun, and the true count still comes
+    /// back. This is the property the struct form did not have.
+    #[test]
+    fn a_short_buffer_is_truncated_and_the_true_count_is_returned() {
+        let mut buf = [usize::MAX; 4];
+        // SAFETY: `buf` is a valid, writable 4-slot array and `cap` says so.
+        let total = unsafe { wz_capi_c_layout(buf.as_mut_ptr(), 3) };
+        assert_eq!(total, WZ_CAPI_C_LAYOUT_NAMES.len());
+        assert_eq!(buf[0], std::mem::size_of::<z_owned_session_t>());
+        assert_eq!(
+            buf[3],
+            usize::MAX,
+            "the fourth slot was outside `cap` and must not have been written"
+        );
+        // SAFETY: null is the documented "count only" call.
+        assert_eq!(unsafe { wz_capi_c_layout(std::ptr::null_mut(), 0) }, total);
     }
 }

@@ -37,6 +37,15 @@ pub(crate) const MODE_KEY: &str = "mode";
 pub(crate) const CONNECT_KEY: &str = "connect/endpoints";
 /// `listen/endpoints` (`Z_CONFIG_LISTEN_KEY`, `:25`).
 pub(crate) const LISTEN_KEY: &str = "listen/endpoints";
+/// `scouting/multicast/address` (`Z_CONFIG_MULTICAST_IPV4_ADDRESS_KEY`, `:30`) —
+/// the group `z_scout` beacons onto.
+pub(crate) const MULTICAST_LOCATOR_KEY: &str = "scouting/multicast/address";
+/// `scouting/timeout` (`Z_CONFIG_SCOUTING_TIMEOUT_KEY`, `:32`).
+pub(crate) const SCOUTING_TIMEOUT_KEY: &str = "scouting/timeout";
+/// `id` — the session zid. NOT in `zenoh_constants.h`'s `Z_CONFIG_*` list (it is
+/// a plain json5 field of zenoh's own config schema), which is why it is spelled
+/// out here rather than cited to a `#define` that does not exist.
+pub(crate) const SESSION_ZID_KEY: &str = "id";
 
 /// The key/value store behind an owned config.
 ///

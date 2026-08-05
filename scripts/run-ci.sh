@@ -9094,7 +9094,13 @@ layer_c1cc_api_compat_c() {
         upstream_z_delete_on_wz_capi_c_is_decoded_by_a_real_pico_zsub \
         upstream_z_pub_on_wz_capi_c_reaches_a_real_pico_zsub_and_sees_it_match \
         upstream_z_liveliness_on_wz_capi_c_is_seen_alive_by_real_pico \
-        upstream_z_sub_liveliness_on_wz_capi_c_sees_a_real_pico_token_come_and_go; do
+        upstream_z_sub_liveliness_on_wz_capi_c_sees_a_real_pico_token_come_and_go \
+        upstream_z_queryable_on_wz_capi_c_answers_a_real_pico_zget \
+        upstream_z_get_on_wz_capi_c_is_answered_by_a_real_pico_queryable \
+        upstream_z_queryable_with_channels_on_wz_capi_c_answers_from_its_own_thread \
+        upstream_z_pull_on_wz_capi_c_pulls_a_real_pico_sample_out_of_a_ring \
+        upstream_z_ping_on_wz_capi_c_round_trips_against_a_real_pico_pong \
+        upstream_z_bytes_on_wz_capi_c_prints_identically_to_real_libzenohc; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \

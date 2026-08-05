@@ -248,6 +248,20 @@ fn upstream_z_put_links_against_wz_capi_c_and_a_real_wz_subscriber_receives_it()
 ///
 /// Neither side is a list someone remembered to update: one is the installed
 /// header, the other is `size_of` inside the shipped library.
+///
+/// ## R311y539 — the export is an ARRAY now, and the count is asserted
+///
+/// This test used to declare a `#[repr(C)]` struct in parallel with the
+/// cdylib's, and its own comment named the hazard: the cdylib writes through
+/// the pointer, so a test copy NARROWER than the exported struct is a silent
+/// stack overwrite in the test process. Widening the table from twenty entries
+/// to fifty made that a question of when.
+///
+/// The array form removes it structurally. This side says how many slots it
+/// has, the cdylib writes at most that many and returns the TRUE count, and the
+/// count is asserted first — so a width disagreement is a failed assertion on an
+/// integer, not memory corruption. The NAMES still have to be kept in step with
+/// the C probe below, which is what the per-entry message is for.
 #[test]
 #[ignore = "compiles a C probe against the machine-local zenoh-c headers; run-ci \
             Layer C1cc drives it"]
@@ -255,37 +269,105 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
     let Some((include, _libdir_ref, _examples)) = oracle_or_note() else {
         return;
     };
+    // (name, C expression). ONE list, so the name and the thing measured cannot
+    // drift apart — the previous shape kept them in two.
+    let probes: &[(&str, &str)] = &[
+        ("z_owned_session_t", "sizeof(z_owned_session_t)"),
+        ("z_owned_bytes_t", "sizeof(z_owned_bytes_t)"),
+        ("z_view_keyexpr_t", "sizeof(z_view_keyexpr_t)"),
+        ("z_owned_config_t", "sizeof(z_owned_config_t)"),
+        ("align", "_Alignof(z_owned_session_t)"),
+        ("z_owned_subscriber_t", "sizeof(z_owned_subscriber_t)"),
+        ("z_owned_string_t", "sizeof(z_owned_string_t)"),
+        (
+            "z_owned_closure_sample_t",
+            "sizeof(z_owned_closure_sample_t)",
+        ),
+        (
+            "z_owned_liveliness_token_t",
+            "sizeof(z_owned_liveliness_token_t)",
+        ),
+        ("z_owned_publisher_t", "sizeof(z_owned_publisher_t)"),
+        ("z_publisher_options_t", "sizeof(z_publisher_options_t)"),
+        (
+            "z_publisher_put_options_t",
+            "sizeof(z_publisher_put_options_t)",
+        ),
+        ("z_owned_encoding_t", "sizeof(z_owned_encoding_t)"),
+        ("z_owned_closure_zid_t", "sizeof(z_owned_closure_zid_t)"),
+        (
+            "z_owned_closure_matching_status_t",
+            "sizeof(z_owned_closure_matching_status_t)",
+        ),
+        ("z_id_t", "sizeof(z_id_t)"),
+        ("z_id_t/align", "_Alignof(z_id_t)"),
+        ("z_clock_t", "sizeof(z_clock_t)"),
+        (
+            "z_liveliness_subscriber_options_t",
+            "sizeof(z_liveliness_subscriber_options_t)",
+        ),
+        ("z_matching_status_t", "sizeof(z_matching_status_t)"),
+        // R311y539 — the query / reply / channel / sync / serialization planes.
+        // Every one of these is STACK-ALLOCATED by an upstream example, which is
+        // why a wrong size corrupts the caller's frame rather than failing to
+        // link.
+        ("z_owned_sample_t", "sizeof(z_owned_sample_t)"),
+        ("z_owned_queryable_t", "sizeof(z_owned_queryable_t)"),
+        ("z_owned_querier_t", "sizeof(z_owned_querier_t)"),
+        ("z_owned_query_t", "sizeof(z_owned_query_t)"),
+        ("z_owned_reply_t", "sizeof(z_owned_reply_t)"),
+        ("z_owned_hello_t", "sizeof(z_owned_hello_t)"),
+        ("z_owned_string_array_t", "sizeof(z_owned_string_array_t)"),
+        ("z_owned_bytes_writer_t", "sizeof(z_owned_bytes_writer_t)"),
+        ("ze_owned_serializer_t", "sizeof(ze_owned_serializer_t)"),
+        (
+            "z_owned_fifo_handler_reply_t",
+            "sizeof(z_owned_fifo_handler_reply_t)",
+        ),
+        (
+            "z_owned_fifo_handler_query_t",
+            "sizeof(z_owned_fifo_handler_query_t)",
+        ),
+        (
+            "z_owned_ring_handler_sample_t",
+            "sizeof(z_owned_ring_handler_sample_t)",
+        ),
+        ("z_owned_mutex_t", "sizeof(z_owned_mutex_t)"),
+        ("z_owned_condvar_t", "sizeof(z_owned_condvar_t)"),
+        ("z_owned_condvar_t/align", "_Alignof(z_owned_condvar_t)"),
+        ("z_loaned_condvar_t", "sizeof(z_loaned_condvar_t)"),
+        ("z_loaned_condvar_t/align", "_Alignof(z_loaned_condvar_t)"),
+        ("z_owned_slice_t", "sizeof(z_owned_slice_t)"),
+        ("z_owned_closure_query_t", "sizeof(z_owned_closure_query_t)"),
+        ("z_owned_closure_reply_t", "sizeof(z_owned_closure_reply_t)"),
+        ("z_owned_closure_hello_t", "sizeof(z_owned_closure_hello_t)"),
+        ("z_bytes_reader_t", "sizeof(z_bytes_reader_t)"),
+        (
+            "z_bytes_slice_iterator_t",
+            "sizeof(z_bytes_slice_iterator_t)",
+        ),
+        ("ze_deserializer_t", "sizeof(ze_deserializer_t)"),
+        ("z_get_options_t", "sizeof(z_get_options_t)"),
+        ("z_queryable_options_t", "sizeof(z_queryable_options_t)"),
+        ("z_query_reply_options_t", "sizeof(z_query_reply_options_t)"),
+        (
+            "z_liveliness_get_options_t",
+            "sizeof(z_liveliness_get_options_t)",
+        ),
+        ("z_querier_options_t", "sizeof(z_querier_options_t)"),
+        ("z_querier_get_options_t", "sizeof(z_querier_get_options_t)"),
+        ("z_scout_options_t", "sizeof(z_scout_options_t)"),
+    ];
+
     let dir = tempfile::tempdir().expect("tempdir for the layout probe");
     let src = dir.path().join("layout.c");
-    // R311y500 widened this probe by three. The subscriber slice added types the
-    // C side STACK-ALLOCATES — `z_sub.c` declares a `z_owned_subscriber_t`, a
-    // `z_owned_closure_sample_t`, a `z_view_string_t` and a `z_owned_string_t` as
-    // locals — and a stack-allocated type whose size wz gets wrong corrupts the
-    // caller's frame rather than failing anything. The closure is the sharpest of
-    // them: it is TRANSPARENT in upstream's header, so it must match field for
-    // field and not merely in total.
+    let body: String = probes
+        .iter()
+        .map(|(_, expr)| format!("    printf(\"%zu\\n\", {expr});\n"))
+        .collect();
     std::fs::write(
         &src,
-        r#"#include <stdio.h>
-#include "zenoh.h"
-int main(void) {
-    printf("%zu %zu %zu %zu %zu %zu %zu %zu "
-           "%zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu\n",
-        sizeof(z_owned_session_t), sizeof(z_owned_bytes_t),
-        sizeof(z_view_keyexpr_t), sizeof(z_owned_config_t),
-        _Alignof(z_owned_session_t),
-        sizeof(z_owned_subscriber_t), sizeof(z_owned_string_t),
-        sizeof(z_owned_closure_sample_t),
-        sizeof(z_owned_liveliness_token_t), sizeof(z_owned_publisher_t),
-        sizeof(z_publisher_options_t), sizeof(z_publisher_put_options_t),
-        sizeof(z_owned_encoding_t), sizeof(z_owned_closure_zid_t),
-        sizeof(z_owned_closure_matching_status_t),
-        sizeof(z_id_t), _Alignof(z_id_t), sizeof(z_clock_t),
-        sizeof(z_liveliness_subscriber_options_t),
-        sizeof(z_matching_status_t));
-    return 0;
-}
-"#,
+        format!("#include <stdio.h>\n#include \"zenoh.h\"\nint main(void) {{\n{body}    return 0;\n}}\n"),
     )
     .expect("write the layout probe");
 
@@ -310,99 +392,38 @@ int main(void) {
         .split_whitespace()
         .map(|t| t.parse().expect("the probe prints one integer per field"))
         .collect();
-    assert_eq!(upstream.len(), 20, "probe output: {text:?}");
+    assert_eq!(upstream.len(), probes.len(), "probe output: {text:?}");
 
-    // What the SHIPPED cdylib says about itself, read through its own export
-    // rather than re-transcribed here.
-    // Kept field-for-field in step with `wz_capi_c::abi::wz_capi_c_layout_t`. It
-    // MUST NOT be narrower than the exported struct: the cdylib writes through
-    // this pointer, so a stale copy here is a stack overwrite in the test process
-    // — silent, and worse than the drift it would be standing in for. Widening
-    // that struct means widening this one in the same commit.
-    #[repr(C)]
-    struct Layout {
-        session: usize,
-        bytes: usize,
-        keyexpr: usize,
-        config: usize,
-        align: usize,
-        subscriber: usize,
-        string: usize,
-        closure_sample: usize,
-        liveliness_token: usize,
-        publisher: usize,
-        publisher_options: usize,
-        publisher_put_options: usize,
-        encoding: usize,
-        closure_zid: usize,
-        closure_matching_status: usize,
-        id: usize,
-        id_align: usize,
-        clock: usize,
-        liveliness_subscriber_options: usize,
-        matching_status: usize,
-    }
+    // What the SHIPPED cdylib says about itself, read through its own export.
     let lib = wz_capi_c_cdylib();
     // SAFETY: loading wz's own freshly built cdylib and calling its documented
-    // layout-report export, which writes five `usize`s through the out-param.
-    let mine = unsafe {
+    // layout-report export, which writes at most `cap` `usize`s through the
+    // out-param and returns the true count.
+    let (mine, total) = unsafe {
         let handle = libloading::Library::new(&lib).expect("dlopen wz's cdylib");
         let f = handle
-            .get::<unsafe extern "C" fn(*mut Layout)>(b"wz_capi_c_layout\0")
+            .get::<unsafe extern "C" fn(*mut usize, usize) -> usize>(b"wz_capi_c_layout\0")
             .expect("the cdylib exports wz_capi_c_layout");
-        let mut out = Layout {
-            session: 0,
-            bytes: 0,
-            keyexpr: 0,
-            config: 0,
-            align: 0,
-            subscriber: 0,
-            string: 0,
-            closure_sample: 0,
-            liveliness_token: 0,
-            publisher: 0,
-            publisher_options: 0,
-            publisher_put_options: 0,
-            encoding: 0,
-            closure_zid: 0,
-            closure_matching_status: 0,
-            id: 0,
-            id_align: 0,
-            clock: 0,
-            liveliness_subscriber_options: 0,
-            matching_status: 0,
-        };
-        f(&mut out);
-        [
-            out.session,
-            out.bytes,
-            out.keyexpr,
-            out.config,
-            out.align,
-            out.subscriber,
-            out.string,
-            out.closure_sample,
-            out.liveliness_token,
-            out.publisher,
-            out.publisher_options,
-            out.publisher_put_options,
-            out.encoding,
-            out.closure_zid,
-            out.closure_matching_status,
-            out.id,
-            out.id_align,
-            out.clock,
-            out.liveliness_subscriber_options,
-            out.matching_status,
-        ]
+        let mut out = vec![0usize; probes.len()];
+        let total = f(out.as_mut_ptr(), out.len());
+        (out, total)
     };
+    // Asserted BEFORE the values are read: a cdylib that reports more entries
+    // than this probe measures means someone widened `abi.rs` without widening
+    // the C side, and comparing the truncated prefix would pass while leaving
+    // the new types unchecked.
+    assert_eq!(
+        total,
+        probes.len(),
+        "the cdylib reports {total} footprint entries and this probe measures {}. \
+         Widen the `probes` table above in the same commit as `abi.rs`.",
+        probes.len()
+    );
 
     // WHICH zenoh-c build this is. `Z_FEATURE_UNSTABLE_API` changes type SIZES,
-    // not just option fields — `z_owned_bytes_t` is 40 with it and 32 without — so
-    // the message can name the cargo feature to flip instead of leaving a reader
-    // with two numbers and no next step. That distinction is only known because
-    // upstream's published archive was provisioned beside a local build and both
-    // were measured.
+    // not just option fields — `z_owned_bytes_t` is 40 with it and 32 without —
+    // so the message can name the cargo feature to flip instead of leaving a
+    // reader with two numbers and no next step.
     let configure = std::fs::read_to_string(include.join("zenoh_configure.h"))
         .expect("the oracle ships zenoh_configure.h");
     let advice = if configure.contains("#define Z_FEATURE_UNSTABLE_API") {
@@ -413,29 +434,7 @@ int main(void) {
          with --features zenoh-c-no-unstable-api"
     };
 
-    let names = [
-        "z_owned_session_t",
-        "z_owned_bytes_t",
-        "z_view_keyexpr_t",
-        "z_owned_config_t",
-        "align",
-        "z_owned_subscriber_t",
-        "z_owned_string_t",
-        "z_owned_closure_sample_t",
-        "z_owned_liveliness_token_t",
-        "z_owned_publisher_t",
-        "z_publisher_options_t",
-        "z_publisher_put_options_t",
-        "z_owned_encoding_t",
-        "z_owned_closure_zid_t",
-        "z_owned_closure_matching_status_t",
-        "z_id_t",
-        "_Alignof(z_id_t)",
-        "z_clock_t",
-        "z_liveliness_subscriber_options_t",
-        "z_matching_status_t",
-    ];
-    for (i, name) in names.iter().enumerate() {
+    for (i, (name, _)) in probes.iter().enumerate() {
         assert_eq!(
             mine[i], upstream[i],
             "{name}: wz says {} and this installation's zenoh-c header says {}. A \

@@ -71,8 +71,8 @@ impl SampleMarshal {
     ) -> Self {
         Self {
             keyexpr: KeyexprState { keyexpr },
-            payload: BytesState { payload },
-            attachment: attachment.map(|payload| BytesState { payload }),
+            payload: BytesState::whole(payload),
+            attachment: attachment.map(BytesState::whole),
             kind,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
@@ -374,6 +374,232 @@ mod tests {
             assert!(z_sample_payload(std::ptr::null()).is_null());
             assert!(z_sample_attachment(std::ptr::null()).is_null());
             assert_eq!(z_sample_kind(std::ptr::null()), Z_SAMPLE_KIND_PUT);
+        }
+    }
+}
+
+// --- R311y539: the OWNED sample --------------------------------------------
+
+impl SampleMarshal {
+    /// An INDEPENDENT copy with its cached views still UNBOUND, for a sample
+    /// that must outlive the callback it was delivered to.
+    ///
+    /// The views are deliberately left unbound rather than copied: they hold
+    /// the ADDRESS of the source marshal's fields, and copying them would aim
+    /// the new sample's accessors at the old marshal — a use-after-free the
+    /// moment the callback returns. [`Self::bind`] re-aims them at the copy's
+    /// own fields once it is at its final address.
+    pub(crate) fn deep_copy(&self) -> Self {
+        Self {
+            keyexpr: KeyexprState {
+                keyexpr: self.keyexpr.keyexpr.clone(),
+            },
+            payload: BytesState::whole(self.payload.payload.clone()),
+            attachment: self
+                .attachment
+                .as_ref()
+                .map(|state| BytesState::whole(state.payload.clone())),
+            kind: self.kind,
+            loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
+            loaned_payload: z_loaned_bytes_t::null_value(),
+            loaned_attachment: z_loaned_bytes_t::null_value(),
+        }
+    }
+}
+
+/// Escape a borrowed sample onto the heap, bound at its final address — what a
+/// sample CHANNEL does when the callback hands it a sample.
+///
+/// # Safety
+/// `src` must be null or a pointer this crate handed to a sample callback.
+pub(crate) unsafe fn escape_sample(src: *const z_loaned_sample_t) -> crate::abi::Handle {
+    // SAFETY: the caller's contract, delegated.
+    let Some(m) = (unsafe { marshal(src) }) else {
+        return std::ptr::null_mut();
+    };
+    let mut boxed = Box::new(m.deep_copy());
+    boxed.bind();
+    Box::into_raw(boxed) as crate::abi::Handle
+}
+
+/// Borrow an owned sample (zenoh-c `z_sample_loan`).
+///
+/// The handle IS the marshal pointer the accessors read, so this reads slot 0
+/// rather than casting the owned struct.
+///
+/// # Safety
+/// `this_` must be null or a valid owned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_loan(
+    this_: *const crate::abi::z_owned_sample_t,
+) -> *const z_loaned_sample_t {
+    guard_val(std::ptr::null(), || {
+        if this_.is_null() {
+            return std::ptr::null();
+        }
+        // SAFETY: the caller's contract.
+        unsafe { (*this_).handle as *const z_loaned_sample_t }
+    })
+}
+
+/// Deep-copy a borrowed sample into an owned one (zenoh-c `z_sample_clone`).
+///
+/// # Safety
+/// `dst` must be null or valid and writable; `this_` must be null or a live
+/// loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_clone(
+    dst: *mut crate::abi::z_owned_sample_t,
+    this_: *const z_loaned_sample_t,
+) {
+    guard_val((), || {
+        if dst.is_null() {
+            return;
+        }
+        // The gravestone first, so a caller that clones a null sample sees an
+        // empty owned value rather than a stale stack one.
+        // SAFETY: the caller's contract.
+        unsafe { *dst = crate::abi::z_owned_sample_t::null_value() };
+        // SAFETY: the caller's contract, delegated.
+        let handle = unsafe { escape_sample(this_) };
+        if !handle.is_null() {
+            // SAFETY: as above.
+            unsafe { *dst = crate::abi::z_owned_sample_t::from_handle(handle) };
+        }
+    });
+}
+
+/// `true` iff the owned sample holds a live marshal (zenoh-c
+/// `z_internal_sample_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_sample_check(
+    this_: *const crate::abi::z_owned_sample_t,
+) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+    })
+}
+
+/// Zero an owned sample (zenoh-c `z_internal_sample_null`).
+///
+/// # Safety
+/// `this_` must be null or a valid, writable owned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_sample_null(this_: *mut crate::abi::z_owned_sample_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = crate::abi::z_owned_sample_t::null_value() };
+    }
+}
+
+/// Free an owned sample (zenoh-c `z_sample_drop`).
+///
+/// # Safety
+/// `this_` must be null or a valid moved sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_drop(this_: *mut crate::abi::z_moved_sample_t) {
+    let _ = crate::ffi::guarded(|| {
+        if this_.is_null() {
+            return crate::result::Z_OK;
+        }
+        // SAFETY: the caller's contract.
+        let handle = unsafe { (*this_)._this.handle };
+        if !handle.is_null() {
+            // SAFETY: a live `Box<SampleMarshal>` this crate leaked.
+            drop(unsafe { Box::from_raw(handle as *mut SampleMarshal) });
+            unsafe { (*this_)._this = crate::abi::z_owned_sample_t::null_value() };
+        }
+        crate::result::Z_OK
+    });
+}
+
+#[cfg(test)]
+mod owned_tests {
+    use super::*;
+    use wz_runtime_tokio::Reliability;
+
+    /// A `SampleView` the escape test can build without a session.
+    struct View;
+
+    impl SampleView for View {
+        fn keyexpr(&self) -> &str {
+            "demo/owned"
+        }
+        fn payload(&self) -> &[u8] {
+            b"BODY"
+        }
+        fn kind(&self) -> SampleKind {
+            SampleKind::Put
+        }
+        fn reliability(&self) -> Reliability {
+            Reliability::Reliable
+        }
+        fn attachment(&self) -> Option<&[u8]> {
+            Some(b"ATT")
+        }
+    }
+
+    /// An escaped sample OUTLIVES the callback and still reads correctly.
+    ///
+    /// The damage this guards is specific: `deep_copy` leaves the cached loaned
+    /// views UNBOUND on purpose, and copying them instead would leave the
+    /// escaped sample's accessors pointing into the callback's dead frame. This
+    /// test reads the copy AFTER `with_marshalled` has returned, which is
+    /// exactly when that would surface.
+    #[test]
+    fn an_escaped_sample_outlives_the_callback_that_delivered_it() {
+        let mut owned = crate::abi::z_owned_sample_t::null_value();
+        with_marshalled(&View, |sample| {
+            // SAFETY: `sample` is live for this call.
+            unsafe { z_sample_clone(&mut owned, sample) };
+        });
+        // SAFETY: `owned` is a live heap marshal, independent of the frame
+        // above, which has now returned.
+        unsafe {
+            assert!(z_internal_sample_check(&owned));
+            let loaned = z_sample_loan(&owned);
+            assert_eq!(z_sample_kind(loaned), Z_SAMPLE_KIND_PUT);
+
+            let mut view_string = crate::abi::z_view_string_t::null_value();
+            z_keyexpr_as_view_string(z_sample_keyexpr(loaned), &mut view_string);
+            let ls = crate::string::z_view_string_loan(&view_string);
+            assert_eq!(
+                std::slice::from_raw_parts(
+                    crate::string::z_string_data(ls) as *const u8,
+                    crate::string::z_string_len(ls)
+                ),
+                b"demo/owned"
+            );
+            assert_eq!(
+                crate::bytes::bytes_slice(z_sample_payload(loaned)).unwrap(),
+                b"BODY"
+            );
+            assert_eq!(
+                crate::bytes::bytes_slice(z_sample_attachment(loaned)).unwrap(),
+                b"ATT"
+            );
+
+            let mut moved = crate::abi::z_moved_sample_t { _this: owned };
+            z_sample_drop(&mut moved);
+            assert!(!z_internal_sample_check(&moved._this));
+            // Idempotent — the slot was nulled.
+            z_sample_drop(&mut moved);
+        }
+    }
+
+    /// Cloning a NULL sample yields a gravestone, not a dereference.
+    #[test]
+    fn cloning_a_null_sample_yields_a_gravestone() {
+        let mut owned = crate::abi::z_owned_sample_t::from_handle(1 as crate::abi::Handle);
+        // SAFETY: passing NULL is exactly what this guard exists for.
+        unsafe {
+            z_sample_clone(&mut owned, std::ptr::null());
+            assert!(!z_internal_sample_check(&owned));
+            assert!(z_sample_loan(std::ptr::null()).is_null());
         }
     }
 }

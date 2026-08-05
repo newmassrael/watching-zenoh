@@ -66,7 +66,7 @@ impl z_id_t {
     /// yields: "this function returning an array of 16 zeros means you failed to
     /// pass it a valid session" (`zenoh_commons.h:3095-3098`), which is why the
     /// by-value return needs no error channel.
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             id: [0u8; Z_ID_SIZE],
         }
@@ -79,7 +79,7 @@ impl z_id_t {
     /// Longer input is truncated rather than rejected — a 17-byte zid cannot
     /// reach a `z_id_t` at all, and dropping the peer from the enumeration would
     /// hide a real face, which is the worse failure of the two.
-    fn from_wire(bytes: &[u8]) -> Self {
+    pub(crate) fn from_wire(bytes: &[u8]) -> Self {
         let mut id = [0u8; Z_ID_SIZE];
         let n = bytes.len().min(Z_ID_SIZE);
         id[..n].copy_from_slice(&bytes[..n]);

@@ -29,7 +29,7 @@ use std::ffi::c_char;
 
 use crate::abi::{z_loaned_string_t, z_moved_string_t, z_owned_string_t, z_view_string_t, Handle};
 use crate::ffi::{guard_val, guarded};
-use crate::result::Z_OK;
+use crate::result::{ZResult, Z_OK};
 
 /// Build an OWNED string from bytes, taking a copy the caller then owns.
 ///
@@ -152,4 +152,53 @@ pub unsafe extern "C" fn z_string_drop(this_: *mut z_moved_string_t) {
         unsafe { (*this_)._this = z_owned_string_t::null_value() };
         Z_OK
     });
+}
+
+/// Build an owned string by TAKING OWNERSHIP of a caller buffer (zenoh-c
+/// `z_string_from_str`).
+///
+/// wz copies the bytes and then invokes the caller's `drop` IMMEDIATELY, on
+/// every path including the failure ones — the same unconditional-transfer rule
+/// [`crate::bytes::z_bytes_from_buf`] records. A path that skipped it would leak
+/// the caller's buffer, a divergence visible only in their code.
+///
+/// `z_bytes.c` passes `NULL, NULL` for the pair, which is upstream's "the string
+/// is static, there is nothing to free".
+///
+/// # Safety
+/// `this_` must be null or valid and writable; `str_` must be null or
+/// NUL-terminated; `drop` must be null or a valid C function pointer, and owns
+/// `str_` after this call.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_from_str(
+    this_: *mut z_owned_string_t,
+    str_: *mut c_char,
+    drop: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void)>,
+    context: *mut std::ffi::c_void,
+) -> ZResult {
+    let rc = guarded(|| {
+        if this_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_string_t::null_value() };
+        if str_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: the caller's contract — NUL-terminated.
+        let bytes = unsafe { std::ffi::CStr::from_ptr(str_) }.to_bytes();
+        // SAFETY: as above.
+        unsafe { *this_ = owned_string_from(bytes) };
+        Z_OK
+    });
+    // UNCONDITIONAL, and outside the `guarded` body so it runs on the error
+    // returns above too.
+    if let Some(free) = drop {
+        // SAFETY: upstream's contract — the deleter owns `str_` from here, and
+        // an unwind across the C boundary is UB, so it is caught.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            free(str_ as *mut std::ffi::c_void, context);
+        }));
+    }
+    rc
 }

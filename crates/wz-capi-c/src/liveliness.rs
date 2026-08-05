@@ -337,3 +337,126 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         Z_OK
     })
 }
+
+// --- R311y539: the liveliness GET ------------------------------------------
+
+/// zenoh-c `z_liveliness_get_options_t` (`zenoh_commons.h:866-870`) — 8 bytes.
+#[repr(C)]
+pub struct z_liveliness_get_options_t {
+    /// Snapshot timeout in milliseconds. `0` means "use the default", NOT
+    /// "never expire" — the runtime resolves it, as upstream does.
+    pub timeout_ms: u64,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_liveliness_get_options_t>() == 8);
+    assert!(std::mem::align_of::<z_liveliness_get_options_t>() == 8);
+};
+
+/// Fill default liveliness-get options (zenoh-c
+/// `z_liveliness_get_options_default`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_liveliness_get_options_default(this_: *mut z_liveliness_get_options_t) {
+    if this_.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    unsafe { *this_ = z_liveliness_get_options_t { timeout_ms: 0 } };
+}
+
+/// Query the liveliness tokens currently alive under `key_expr` (zenoh-c
+/// `z_liveliness_get`). Consumes the moved closure on every path.
+///
+/// ## The wire here is the DECLARATION plane, not the query plane
+///
+/// The request is a CURRENT liveliness `Interest`, each live token comes back as
+/// a `Declare(DeclToken)` and the snapshot ends with one `DeclFinal`. wz models
+/// that with [`wz_runtime_tokio::session::Session::liveliness_get`], whose
+/// application surface is already reply-shaped — which is why this maps onto the
+/// same `z_owned_closure_reply_t` and the same [`crate::get::fire_reply`] marshal
+/// `z_get` uses, rather than a parallel one.
+///
+/// Fanned across every connected face for the reason every declaration in this
+/// crate is, and the C thread holds its own clone across the loop so a face that
+/// finalises early cannot complete the snapshot while later faces are still
+/// being issued.
+///
+/// # Safety
+/// `session` must be a valid loaned session; `key_expr` must be a valid loaned
+/// keyexpr; `callback` must be a valid moved reply closure; `options` must be
+/// null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn z_liveliness_get(
+    session: *const crate::abi::z_loaned_session_t,
+    key_expr: *const crate::abi::z_loaned_keyexpr_t,
+    callback: *mut crate::abi::z_moved_closure_reply_t,
+    options: *mut z_liveliness_get_options_t,
+) -> crate::result::ZResult {
+    crate::ffi::guarded(|| {
+        if callback.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // Adopt the closure FIRST (consume-on-all-paths): the C `drop(context)`
+        // IS the completion signal, so every early return correctly reports
+        // "this snapshot is over".
+        // SAFETY: the caller's contract.
+        let closure = unsafe { crate::get::adopt_reply_closure(callback) };
+
+        // SAFETY: the caller's contract for both handles.
+        let (Some(state), Some(ke)) = (unsafe { crate::session::session_state(session) }, unsafe {
+            crate::keyexpr::keyexpr_str(key_expr)
+        }) else {
+            return crate::result::Z_ENULL;
+        };
+        let ke = ke.to_owned();
+        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+            return crate::result::Z_EINVAL;
+        }
+        // A NULL options pointer is upstream's "defaults", not an error.
+        let timeout_ms = if options.is_null() {
+            0
+        } else {
+            // SAFETY: the caller's contract.
+            unsafe { (*options).timeout_ms }
+        };
+        // SATURATE rather than wrap: a wrapped huge timeout becomes a tiny one
+        // and expires the snapshot immediately.
+        let opts = wz_runtime_tokio::session::LivelinessGetOptions::default()
+            .with_timeout_ms(timeout_ms.min(u32::MAX as u64) as u32);
+
+        // A liveliness reply's keyexpr is the TOKEN's, which intersects the
+        // interest by construction; the gate is carried anyway so this plane
+        // uses the same admission rule as `z_get` rather than a second one.
+        let gate = std::sync::Arc::new(crate::get::ReplyGate {
+            query_keyexpr: ke.clone(),
+            anyke: false,
+        });
+
+        let guard = closure.clone();
+        for (face, revised) in state.shared.face_sessions_with_wake() {
+            let per_face = closure.clone();
+            let per_face_gate = gate.clone();
+            let issued = face.liveliness_get(
+                ke.clone(),
+                opts,
+                move |view: &dyn wz_runtime_tokio::reply_sink::ReplyView| {
+                    crate::get::fire_reply(&per_face, &per_face_gate, view);
+                },
+                // Completion is signalled by the pending entry's sink being
+                // DROPPED, which covers a real final, a timeout sweep and a face
+                // death alike — the same reason `z_get`'s `on_final` is empty.
+                |_id| {},
+            );
+            drop(issued);
+            // Wake this face's drive loop so it re-arms on the deadline just
+            // registered; without it a silent session sweeps the snapshot only
+            // at the next keepalive wake.
+            revised.notify_one();
+        }
+        drop(guard);
+        crate::result::Z_OK
+    })
+}

@@ -29,12 +29,7 @@
 /// sweeps the top of the range rather than sampling it.
 #[no_mangle]
 pub extern "C" fn _z_zint_len(v: u64) -> u8 {
-    for n in 1..=8u32 {
-        if v >> (7 * n) == 0 {
-            return n as u8;
-        }
-    }
-    9
+    wz_capi_core::codec::zint_len(v) as u8
 }
 
 /// pico `_z_zint64_encode_buf` (`src/protocol/codec.c:132-147`): write the VLE
@@ -58,50 +53,12 @@ pub unsafe extern "C" fn _z_zint64_encode_buf(buf: *mut u8, v: u64) -> u8 {
     encode_zint(out, v) as u8
 }
 
-/// pico's `VLE_LEN` — the maximum VLE encoding length for a `u64`.
-pub(crate) const VLE_LEN: usize = 9;
-
-/// Write the VLE encoding of `v` into `out`, returning the byte count. The
-/// Rust-side helper the serializer uses; `_z_zint64_encode_buf` is its C export.
-pub(crate) fn encode_zint(out: &mut [u8], v: u64) -> usize {
-    let mut lv = v;
-    let mut len = 0usize;
-    // While bits above the low 7 remain, emit a continuation byte.
-    while lv >> 7 != 0 {
-        out[len] = ((lv & 0x7f) as u8) | 0x80;
-        len += 1;
-        lv >>= 7;
-    }
-    if len != VLE_LEN {
-        out[len] = (lv & 0xff) as u8;
-        len += 1;
-    }
-    len
-}
-
-/// Read a VLE value from `input`, returning `(value, bytes_consumed)` or `None`
-/// when the input ends mid-encoding.
-///
-/// The ninth byte is terminal REGARDLESS of its high bit — the mirror of
-/// [`encode_zint`]'s asymmetry. A decoder that kept honouring the continuation
-/// flag would read a tenth byte that the encoder never writes.
-pub(crate) fn decode_zint(input: &[u8]) -> Option<(u64, usize)> {
-    let mut value: u64 = 0;
-    let mut shift = 0u32;
-    for (i, byte) in input.iter().take(VLE_LEN).enumerate() {
-        let is_last = i + 1 == VLE_LEN;
-        if is_last {
-            value |= u64::from(*byte) << shift;
-            return Some((value, i + 1));
-        }
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Some((value, i + 1));
-        }
-        shift += 7;
-    }
-    None
-}
+// The codec ITSELF is `wz_capi_core::codec` — one implementation, both ABIs,
+// because zenoh-c's `ze_serializer_*` writes the same VLE lengths this one does
+// and two copies of a wire-format encoder drift while each stays green against
+// its own decoder. What remains in this file is the pico ABI's EXPORTS, which
+// are surface even when their bodies are one line.
+pub(crate) use wz_capi_core::codec::{decode_zint, encode_zint, VLE_LEN};
 
 #[cfg(test)]
 mod tests {
