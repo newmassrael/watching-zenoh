@@ -289,3 +289,80 @@ pub unsafe extern "C" fn z_delete(
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R311y552 — THE SOUNDNESS GUARD. Every publish this crate issues must be
+    /// `Locality::Remote`, and this test exists because the prose saying so is
+    /// not enough: it was attempted and it produced a data race.
+    ///
+    /// `unsafe impl Sync for CClosure` (`crate::sub`) rests on the C application
+    /// thread never invoking `call`. The only thing keeping that true is that
+    /// these publishes are Remote, so `Session::publish` takes the
+    /// `allows_local() == false` branch and stages no loopback fire. Make them
+    /// local-capable and `session/mod.rs:867` drains the staged fires
+    /// SYNCHRONOUSLY ON THE CALLER THREAD — so a C-thread `z_put` whose keyexpr
+    /// matches a subscription runs that callback while the drive thread may be
+    /// running the same C context's callback for another face's inbound sample.
+    /// Two concurrent `call(context)` on one context, which upstream's
+    /// single-threaded-callback contract forbids, and which R311y288 already
+    /// fixed once on this plane.
+    ///
+    /// So honouring `allowed_destination` is NOT the "~20 lines plus a test"
+    /// the debt ledger estimated from the fan shape. The fan split is the easy
+    /// half; the blocker is that the loopback drain runs on whoever called
+    /// publish. Closing it needs the local delivery moved onto the drive task
+    /// (stage without draining, wake the face, let the drive loop drain) —
+    /// wz-runtime-tokio has no entry point for that today.
+    ///
+    /// The assertion is on the RESOLVED options rather than on the constant, so
+    /// it catches the change wherever it is made.
+    #[test]
+    fn every_publish_this_crate_issues_is_remote_only() {
+        for (label, opts) in [
+            ("z_put default", put_options()),
+            ("z_delete default", delete_options()),
+            (
+                "z_publisher_put default",
+                crate::publisher::publisher_put_options(),
+            ),
+        ] {
+            assert_eq!(
+                opts.allowed_destination,
+                Locality::Remote,
+                "{label}: a local-capable publish makes `unsafe impl Sync for \
+                 CClosure` false — see this test's doc before changing it",
+            );
+            assert!(
+                !opts.allowed_destination.allows_local(),
+                "{label}: allows_local() must stay false",
+            );
+        }
+
+        // And the resolved-from-C path cannot smuggle one in either: a caller
+        // asking for SESSION_LOCAL must not produce a local-capable bundle
+        // while the drain still runs on the caller thread.
+        let mut o = z_put_options_t {
+            encoding: std::ptr::null_mut(),
+            congestion_control: Z_CONGESTION_CONTROL_DROP,
+            priority: Z_PRIORITY_DATA,
+            is_express: false,
+            timestamp: std::ptr::null(),
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            reliability: Z_RELIABILITY_RELIABLE,
+            allowed_destination: crate::publisher::ZC_LOCALITY_SESSION_LOCAL,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            source_info: std::ptr::null_mut(),
+            attachment: std::ptr::null_mut(),
+        };
+        // SAFETY: a live local whose owned fields are all null.
+        let resolved = unsafe { resolve_put_options(&mut o) };
+        assert!(
+            !resolved.allowed_destination.allows_local(),
+            "z_put_options_t.allowed_destination is READ FOR LAYOUT; honouring \
+             it requires the drive-task hand-off this test's doc describes",
+        );
+    }
+}
