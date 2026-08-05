@@ -2008,7 +2008,10 @@ mod tests {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         // Direct literal bug-three pattern.
         let err = actions
-            .send_declare_queryable(1, 0, Some("**/foo/*"), false)
+            // R311y544 — was `**/foo/*`, which a real pico canonizes
+            // to itself. The gate-inheritance claim needs a string that
+            // actually aborts.
+            .send_declare_queryable(1, 0, Some("**/c/*"), false)
             .expect_err("queryable inherits the same gate");
         assert!(matches!(
             err,
@@ -2024,7 +2027,8 @@ mod tests {
     fn send_declare_token_inherits_gate() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         let err = actions
-            .send_declare_token(1, 0, Some("**/abc/*/def"))
+            // R311y544 — was `**/abc/*/def`; see the queryable test.
+            .send_declare_token(1, 0, Some("**/a/b/*"))
             .expect_err("token inherits the same gate");
         assert!(matches!(
             err,

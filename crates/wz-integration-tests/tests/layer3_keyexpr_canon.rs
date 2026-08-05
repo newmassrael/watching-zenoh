@@ -43,12 +43,13 @@
 //!    `*`. Wz processes chunks independently and accepts the input.
 //!    Example: input `$*/a/*` → wz=Ok(`*/a/*`), pico=Err(-5).
 //!
-//! 3. **`**` + literal chunk + `*`** — pico's `__zp_canon_prefix`
-//!    case-1 branch (length-1 chunk that is NOT `*` while
-//!    `in_big_wild=true`) takes the `else { advance; continue; }`
-//!    path which SKIPS the post-walk `in_big_wild = false` reset.
-//!    A subsequent `*` chunk then re-enters case-1 with `in_big_wild`
-//!    still true and returns `SINGLE_STAR_AFTER_DOUBLE_STAR` with
+//! 3. **`**` + SINGLE-BYTE chunk(s) + `*` or `**`** — pico's
+//!    `__zp_canon_prefix` case-1 branch (length-1 chunk that is NOT
+//!    `*` while `in_big_wild=true`) takes the
+//!    `else { advance; continue; }` path which SKIPS the post-walk
+//!    `in_big_wild = false` reset. A subsequent `*`-shape chunk then
+//!    re-enters with `in_big_wild` still true and returns
+//!    `SINGLE_STAR_AFTER_DOUBLE_STAR` with
 //!    `*len = (chunk_start_of_star - start) - 3` — a position that
 //!    is NOT the start of a 2-byte chunk ending in `*` (it lands on
 //!    the `/` between the literal and the `*`). Main canonize then
@@ -58,6 +59,16 @@
 //!    Example: input `**/c/*` → wz=Ok(`**/c/*`) (identity — the
 //!    `**` only absorbs an IMMEDIATELY following `*`-shape chunk,
 //!    not one separated by a literal), pico=SIGABRT.
+//!
+//!    R311y544 — "SINGLE-BYTE" is load-bearing and this paragraph used
+//!    to say "literal chunk". Only `case 1:` reaches the reset-skipping
+//!    branch, so a chunk of length >= 2 that is not `**` falls through
+//!    to the char-walk and CLOSES the window (`keyexpr.c:206`).
+//!    Measured, not read: `canon_pico_abort_family_is_single_byte_chunks_only_measured`
+//!    runs the real canonizer in a subprocess and pins `**/ab/*` as
+//!    healthy next to `**/a/*` as an abort. The paragraph below said
+//!    this case "cannot be cross-validated at runtime"; that is true
+//!    only IN-PROCESS, and the subprocess probe is the whole fix.
 //!
 //! Both bugs #1/#2 produce wrong outputs (wire-interop divergence);
 //! bug #3 ABORTS the process (denial-of-service risk if a wz peer
@@ -70,7 +81,11 @@
 use std::os::raw::c_char;
 
 use proptest::prelude::*;
+// R311y544 — the outbound gate under differential test lives in
+// wz-session-core; the canon it wraps is re-exported through
+// wz-runtime-tokio, which is where the rest of this fixture reaches it.
 use wz_runtime_tokio::keyexpr_canon::{canonize_keyexpr, KeyexprCanonError};
+use wz_session_core::keyexpr_canon::{check_outbound_keyexpr_pico_safe, OutboundKeyexprError};
 
 /// Invoke zenoh-pico's `_z_keyexpr_canonize` against a writable copy
 /// of `input`. Returns the canonical rewritten string on SUCCESS, or
@@ -171,6 +186,148 @@ fn assert_agree(input: &str) {
             );
         }
     }
+}
+
+// ── R311y544 — the SUBPROCESS abort probe ──────────────────────
+//
+// `canon_known_pico_anomaly_double_star_literal_star_aborts` below says
+// "We CANNOT cross-validate this case at runtime — pico aborts the
+// entire process, which would also kill the test binary", and then
+// documents the pico side ANALYTICALLY. That is true of an in-process
+// call and false of the claim: a subprocess can carry the abort. The
+// harness below re-execs THIS test binary against a single input and
+// reports which of the three outcomes pico actually produced, so the
+// bug-#3 family membership is a measurement rather than a reading.
+//
+// It matters because `check_outbound_keyexpr_pico_safe`'s doc asserts
+// the trigger fires on multi-char literals too ("Empirically … `**/foo/*`,
+// `**/abc/*/def`") and cites this fixture as the evidence — a fixture
+// that never called pico on them.
+
+/// The env var carrying the probe input to the re-exec'd child.
+const PICO_CANON_PROBE_ENV: &str = "WZ_PICO_CANON_PROBE_INPUT";
+
+/// Exit code the child uses for "pico's canonize returned SUCCESS".
+const PICO_PROBE_EXIT_OK: i32 = 10;
+/// Exit code the child uses for "pico's canonize returned a status code".
+const PICO_PROBE_EXIT_ERR: i32 = 11;
+/// Separates libtest's own `--nocapture` banner from the child's payload.
+/// The child runs INSIDE a test body, so libtest has already written
+/// "\nrunning 1 test\n" to the same stdout by the time the payload lands.
+const PICO_PROBE_MARKER: &str = "<<<WZ-PICO-CANON-PROBE>>>";
+
+/// What a real `_z_keyexpr_canonize` did with one input, observed from
+/// outside the process so that an `assert(false)` is data rather than a
+/// dead test binary.
+#[derive(Debug, PartialEq, Eq)]
+enum PicoCanonOutcome {
+    /// Returned `Z_KEYEXPR_CANON_SUCCESS` with this canonical output.
+    Success(String),
+    /// Returned a negative `zp_keyexpr_canon_status_t`.
+    Status(i32),
+    /// Died on a signal — `assert(false)` raises `SIGABRT` (6).
+    Signal(i32),
+}
+
+/// The child half of the probe: called by the re-exec'd binary when
+/// [`PICO_CANON_PROBE_ENV`] is set. Never returns.
+fn pico_canon_probe_child(input: &str) -> ! {
+    use std::io::Write as _;
+    match zenoh_pico_canonize(input) {
+        Ok(out) => {
+            print!("{PICO_PROBE_MARKER}{out}");
+            std::io::stdout().flush().ok();
+            std::process::exit(PICO_PROBE_EXIT_OK);
+        }
+        Err(status) => {
+            print!("{PICO_PROBE_MARKER}{status}");
+            std::io::stdout().flush().ok();
+            std::process::exit(PICO_PROBE_EXIT_ERR);
+        }
+    }
+}
+
+/// Run pico's `_z_keyexpr_canonize` on `input` inside a fresh process
+/// and report the outcome.
+///
+/// The child is this same test binary re-exec'd with the probe env var
+/// set; the `#[test]` that observes the var short-circuits into
+/// [`pico_canon_probe_child`] before libtest can start, so no test body
+/// runs there and the process is free to abort.
+fn probe_pico_canon(input: &str) -> PicoCanonOutcome {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let exe = std::env::current_exe().expect("test binary path");
+    let out = std::process::Command::new(exe)
+        // Name the child test EXACTLY so libtest does not fan out into
+        // the rest of this file inside the child.
+        .args([
+            "--exact",
+            "pico_canon_subprocess_probe_entry",
+            "--nocapture",
+        ])
+        .env(PICO_CANON_PROBE_ENV, input)
+        .output()
+        .expect("re-exec the test binary as a canon probe");
+
+    let raw = String::from_utf8_lossy(&out.stdout).to_string();
+    // Everything after the marker is the child's payload; everything
+    // before it is libtest's `--nocapture` banner.
+    let payload = raw
+        .split_once(PICO_PROBE_MARKER)
+        .map(|(_, tail)| tail.to_string());
+    match (out.status.code(), out.status.signal()) {
+        (Some(PICO_PROBE_EXIT_OK), _) => {
+            PicoCanonOutcome::Success(payload.expect("the OK child writes the marker"))
+        }
+        (Some(PICO_PROBE_EXIT_ERR), _) => PicoCanonOutcome::Status(
+            payload
+                .expect("the ERR child writes the marker")
+                .trim()
+                .parse()
+                .expect("the child prints the raw status code"),
+        ),
+        (_, Some(sig)) => PicoCanonOutcome::Signal(sig),
+        (code, _) => panic!(
+            "canon probe child for `{input}` exited {code:?} without reaching either \
+             probe exit; stdout=`{raw}`, stderr=`{}`",
+            String::from_utf8_lossy(&out.stderr),
+        ),
+    }
+}
+
+/// The re-exec target. In the PARENT (no env var) this is a self-test of
+/// the harness: it asserts that the probe can carry each of the three
+/// outcomes, which is what makes a `Success` verdict elsewhere in this
+/// file mean something. Without it a probe that silently reported
+/// `Success` for everything would pass every abort test
+/// (`feedback_a_vacuous_proof_passes_on_absence`).
+// wz-proves: none -- harness self-test; calibrates `probe_pico_canon` on all
+// three outcomes so the tests that USE it are not vacuous. It witnesses no atom
+// of its own; the atoms are witnessed by its callers.
+#[test]
+fn pico_canon_subprocess_probe_entry() {
+    if let Ok(input) = std::env::var(PICO_CANON_PROBE_ENV) {
+        pico_canon_probe_child(&input);
+    }
+
+    // Outcome 1 — a plain canonical input round-trips through the child.
+    assert_eq!(
+        probe_pico_canon("home/temp"),
+        PicoCanonOutcome::Success("home/temp".to_string()),
+    );
+    // Outcome 2 — a grammar violation comes back as its status code
+    // (`Z_KEYEXPR_CANON_EMPTY_CHUNK` = -4) rather than as a signal.
+    assert_eq!(probe_pico_canon("a//b"), PicoCanonOutcome::Status(-4));
+    // Outcome 3 — the probe can OBSERVE an abort. `**/c/*` is the R299
+    // bug-#3 witness; if pico is ever fixed this flips and the
+    // divergence lock below is what forces the revisit.
+    assert_eq!(
+        probe_pico_canon("**/c/*"),
+        PicoCanonOutcome::Signal(libc::SIGABRT),
+        "the probe must be able to carry a SIGABRT, or every abort \
+         assertion in this file is vacuous",
+    );
 }
 
 /// Capture both implementations' output without panicking on
@@ -320,6 +477,216 @@ fn canon_known_pico_anomaly_double_star_literal_star_aborts() {
     assert_eq!(canonize_keyexpr("**/foo/*").unwrap(), "**/foo/*");
     assert_eq!(canonize_keyexpr("**/abc/*/def").unwrap(), "**/abc/*/def");
     assert_eq!(canonize_keyexpr("**/a/b/*").unwrap(), "**/a/b/*");
+}
+
+// wz-proves: keyexpr-canon codec-parity partial
+#[test]
+fn canon_pico_abort_family_is_single_byte_chunks_only_measured() {
+    // R311y544 — the MEASUREMENT the test above says cannot be taken.
+    // It can; it just needs a subprocess. See `probe_pico_canon`.
+    //
+    // The claim under test is the one `check_outbound_keyexpr_pico_safe`
+    // rests its gate on: "the trigger fires on multi-char literals as
+    // well (`**/foo/*`, `**/abc/*/def`), not only the documented
+    // single-char case", cited to the fixture above — which never called
+    // pico on them. pico's `__zp_canon_prefix` reaches the
+    // reset-skipping `else { advance; continue; }` ONLY from
+    // `case 1:` (`keyexpr.c:130-138`), i.e. only for a chunk of length
+    // ONE. A chunk of length >= 2 that is not `**` falls through to the
+    // char-walk and executes `in_big_wild = false` (`keyexpr.c:206`),
+    // closing the window.
+    //
+    // Each row is (input, what a real `_z_keyexpr_canonize` does).
+    let cases: &[(&str, PicoCanonOutcome)] = &[
+        // ── the window OPENS on single-byte chunks and aborts ──
+        ("**/c/*", PicoCanonOutcome::Signal(libc::SIGABRT)),
+        ("**/a/b/*", PicoCanonOutcome::Signal(libc::SIGABRT)),
+        // …and the closer may be `**` as well as `*`, via
+        // DOUBLE_STAR_AFTER_DOUBLE_STAR taking the same rewrite path.
+        ("**/c/**", PicoCanonOutcome::Signal(libc::SIGABRT)),
+        // ── a chunk of length >= 2 CLOSES the window: no abort ──
+        // These two are the exact strings the gate's doc calls
+        // empirical aborts. They are not.
+        (
+            "**/foo/*",
+            PicoCanonOutcome::Success("**/foo/*".to_string()),
+        ),
+        (
+            "**/abc/*/def",
+            PicoCanonOutcome::Success("**/abc/*/def".to_string()),
+        ),
+        // The BOUNDARY of the new rule: length 2 is already enough to
+        // reach the char-walk and reset `in_big_wild`. One byte fewer
+        // (`**/a/*`) aborts.
+        ("**/ab/*", PicoCanonOutcome::Success("**/ab/*".to_string())),
+        ("**/a/*", PicoCanonOutcome::Signal(libc::SIGABRT)),
+        // An opened window can be CLOSED again by a later long chunk,
+        // so "did a single-byte chunk ever appear" is not the rule —
+        // "is one still open at the closer" is.
+        (
+            "**/a/foo/*",
+            PicoCanonOutcome::Success("**/a/foo/*".to_string()),
+        ),
+        // ── no intervening chunk at all: the rewrite is well-formed,
+        //    so this is bug #1 (wrong output), not bug #3 (abort) ──
+        ("**/*", PicoCanonOutcome::Success("*/**".to_string())),
+        ("**/**", PicoCanonOutcome::Success("**".to_string())),
+        // ── a `$*` closer takes the LONE_DOLLAR_STAR branch, whose
+        //    `*len` points AT the `$*` chunk, so it does not abort ──
+        ("**/c/$*", PicoCanonOutcome::Success("**/c/*".to_string())),
+    ];
+
+    for (input, expected) in cases {
+        assert_eq!(
+            &probe_pico_canon(input),
+            expected,
+            "pico's real canon outcome for `{input}` changed — upstream may \
+             have fixed or widened R299 bug #3; the outbound gate \
+             (`check_outbound_keyexpr_pico_safe`) is calibrated against \
+             exactly this table and must be re-derived",
+        );
+    }
+}
+
+// wz-proves: keyexpr-canon codec-parity partial
+#[test]
+fn outbound_pico_safe_gate_rejects_exactly_what_pico_aborts_on() {
+    // R311y544 — the gate is a CLAIM about a foreign process, so prove
+    // it against that process rather than against its own doc comment.
+    //
+    // Enumerate every keyexpr over a chunk alphabet chosen to cover
+    // each branch of pico's `__zp_canon_prefix` switch — a length-1
+    // literal (`case 1`, the only reset-skipping path), a length-2
+    // literal (the boundary), a longer literal, `*`, `**` and `$*` —
+    // then require, for each, that
+    //
+    //     check_outbound_keyexpr_pico_safe(ke).is_err()
+    //         <=> a real `_z_keyexpr_canonize(ke)` dies on a signal.
+    //
+    // Both directions matter. `=>` is the safety property the gate
+    // exists for. `<=` is the one R311y543 lacked: an over-broad gate
+    // silently disabled the advanced subscriber's whole recovery plane
+    // for the commonest base keyexpr in the world.
+    const CHUNKS: &[&str] = &["a", "ab", "foo", "*", "**", "$*", "$*$*", "x$*y"];
+
+    // Every string any wz-side unit test asserts a verdict for, so the
+    // unit tests are backed by this measurement rather than by a reading
+    // of pico's source.
+    const UNIT_TEST_STRINGS: &[&str] = &[
+        "**/c/*",
+        "**/foo/*",
+        "**/abc/*/def",
+        "**/a/b/*",
+        "**/c/**",
+        "**/c/$*",
+        "**/c/$*$*",
+        "**/foo$*bar",
+        "**/foo$*bar/temp",
+        "**/foo$*bar/*",
+        "**/a/**",
+        "**/a/**/b",
+        "**/a/**/b/*",
+        "**/*",
+        "**/**",
+        "**/$*",
+        "**/$*/temp",
+        "home/**/*/temp",
+    ];
+
+    let mut corpus: Vec<String> = UNIT_TEST_STRINGS.iter().map(|s| s.to_string()).collect();
+    for a in CHUNKS {
+        for b in CHUNKS {
+            corpus.push(format!("{a}/{b}"));
+            for c in CHUNKS {
+                corpus.push(format!("{a}/{b}/{c}"));
+            }
+        }
+    }
+    // The @adv-shaped tail, which is the whole reason this gate is
+    // being re-derived: a `**`-tailed base plus the derived namespace.
+    for a in CHUNKS {
+        for b in CHUNKS {
+            corpus.push(format!("{a}/**/@adv/pub/{b}"));
+            corpus.push(format!("{a}/{b}/**/@adv/pub/**"));
+        }
+    }
+
+    let mut checked = 0usize;
+    let mut rejected = 0usize;
+    let mut aborting = 0usize;
+    for ke in &corpus {
+        // Inputs the grammar itself refuses are out of scope: the gate
+        // reports NotCanonical for them and never reaches the bug walk.
+        let verdict = check_outbound_keyexpr_pico_safe(ke);
+        if matches!(verdict, Err(OutboundKeyexprError::NotCanonical(_))) {
+            continue;
+        }
+        checked += 1;
+        let gate_rejects = verdict.is_err();
+        let outcome = probe_pico_canon(ke);
+        let pico_aborts = matches!(outcome, PicoCanonOutcome::Signal(_));
+        if gate_rejects {
+            rejected += 1;
+        }
+        if pico_aborts {
+            aborting += 1;
+        }
+        assert_eq!(
+            gate_rejects,
+            pico_aborts,
+            "`{ke}`: check_outbound_keyexpr_pico_safe says {}, a real \
+             zenoh-pico says {outcome:?}",
+            if gate_rejects { "REFUSE" } else { "allow" },
+        );
+    }
+
+    // Guard against a vacuous pass: the corpus must actually exercise
+    // both verdicts, or the equality above holds for free.
+    assert!(
+        checked > 200,
+        "corpus collapsed to {checked} canonical inputs",
+    );
+    assert!(aborting > 0, "no input in the corpus aborts a real pico");
+    assert_eq!(
+        rejected, aborting,
+        "the two counters are the same quantity measured from each side",
+    );
+}
+
+// wz-proves: keyexpr-canon codec-parity partial
+#[test]
+fn canon_derived_adv_keyexprs_do_not_abort_pico() {
+    // R311y544 — the consequence half of the exclusion, measured.
+    //
+    // wz's advanced subscriber derives three `@adv` channels from its
+    // base keyexpr, and for a `**`-tailed base all three were refused by
+    // `check_outbound_keyexpr_pico_safe` on the grounds that they would
+    // SIGABRT a real zenoh-pico peer. They do not, and they structurally
+    // cannot: the chunk immediately following the base's trailing `**`
+    // is always `@adv`, four bytes, which closes pico's window.
+    //
+    // Upstream's own `z_advanced_sub.c` defaults to `demo/example/**`,
+    // so these are the COMMON derived forms, not edge cases.
+    let derived: &[&str] = &[
+        // heartbeat / late-publisher detection subscriber
+        "demo/example/**/@adv/pub/**",
+        "**/@adv/pub/**",
+        "a/**/@adv/pub/**",
+        // startup history GET
+        "demo/example/**/@adv/**",
+        // sample-driven recovery GET (`<zid>` hex, `<eid>` decimal —
+        // the single-digit eid is deliberate: it is a length-1 chunk,
+        // and the point is that it lands AFTER the window has closed)
+        "demo/example/**/@adv/*/a0b1c2d3e4f5/1/**",
+    ];
+    for ke in derived {
+        assert_eq!(
+            probe_pico_canon(ke),
+            PicoCanonOutcome::Success((*ke).to_string()),
+            "`{ke}` is a keyexpr wz's advanced subscriber must be able to \
+             put on the wire; a real zenoh-pico canonizes it to itself",
+        );
+    }
 }
 
 // wz-proves: none -- pins a wz/pico DIVERGENCE (wz Ok vs pico Err)

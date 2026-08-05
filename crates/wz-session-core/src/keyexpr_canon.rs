@@ -366,12 +366,23 @@ use alloc::string::{String, ToString};
 /// `chunk_end - reader == 2` precondition and triggers
 /// `assert(false)`, aborting the receiving process via SIGABRT.
 ///
-/// Empirically (R299 fixture
-/// `canon_known_pico_anomaly_double_star_literal_star_aborts`) the
-/// trigger fires on multi-char literals as well (`**/foo/*`,
-/// `**/abc/*/def`), not only the documented single-char case. The
-/// gate consequently treats ANY non-`*`-shape chunk after `**` as a
-/// bug-window opener.
+/// R311y544 — this paragraph used to say the trigger fires on
+/// multi-char literals as well (`**/foo/*`, `**/abc/*/def`), citing
+/// the R299 fixture `canon_known_pico_anomaly_double_star_literal_star_aborts`
+/// as empirical. That fixture never called pico on them; it says in so
+/// many words that it cannot, because an in-process abort would take
+/// the test binary with it. A SUBPROCESS can, and does
+/// (`layer3_keyexpr_canon::canon_pico_abort_family_is_single_byte_chunks_only_measured`):
+/// a real `_z_keyexpr_canonize` canonizes both of those to themselves.
+///
+/// Only a chunk of length ONE holds the window open, because
+/// `case 1:` (`keyexpr.c:130-138`) is the only branch that reaches the
+/// reset-skipping `else { advance; continue; }`. Anything longer falls
+/// through to the char-walk and runs `in_big_wild = false`
+/// (`keyexpr.c:206`). The window must ALSO have at least one
+/// intervening chunk: with the closer adjacent to the `**`, pico's
+/// `pos - 3` offset addresses the `**` chunk correctly and the result
+/// is bug #1 (wrong output) rather than an abort.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundKeyexprError {
@@ -471,30 +482,76 @@ pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyex
     // is the R299 carry #3 architectural decision).
     canonize_keyexpr(input).map_err(OutboundKeyexprError::NotCanonical)?;
 
-    // Bug #3 family walk. State machine:
-    // * seen_double_star — set true after any `**` chunk has been
-    //   observed.
-    // * seen_literal_after_double_star — set true after a non-`**`,
-    //   non-`*`-shape chunk has been observed since the most recent
-    //   `**` chunk. Reset on every fresh `**` chunk.
-    // Reject fires when both flags are set and the current chunk is
-    // `*`-shape. This is exactly the R299 bug #3 trigger condition
-    // (`__zp_canon_prefix` case-1 stale `in_big_wild`).
-    let mut seen_double_star = false;
-    let mut seen_literal_after_double_star = false;
+    // Bug #3 family walk — a direct model of pico's `__zp_canon_prefix`
+    // chunk loop (`vendor/zenoh-pico/src/session/keyexpr.c:121-209`),
+    // because that loop is what decides whether the abort fires.
+    //
+    // * big_wild_open — pico's `in_big_wild`. Set by a `**` chunk.
+    // * intervening — whether at least one chunk has passed since that
+    //   `**` while the window stayed open. It is what separates an
+    //   ABORT from bug #1: pico's rewrite offset is
+    //   `pos(closer) - 3`, which addresses the `**` chunk exactly when
+    //   the closer is adjacent to it, and lands mid-keyexpr otherwise
+    //   (`keyexpr.c:132` / `:147` vs the `chunk_end - reader == 2`
+    //   precondition at `:330`).
+    //
+    // ONLY a chunk of length 1 keeps the window open. pico reaches the
+    // reset-skipping `else { advance; continue; }` exclusively from
+    // `case 1:` (`keyexpr.c:130-138`); every chunk of length >= 2 that
+    // is not `**` falls through to the char-walk and runs
+    // `in_big_wild = false` (`keyexpr.c:206`). R311y544 measured this
+    // rather than reading it —
+    // `layer3_keyexpr_canon::canon_pico_abort_family_is_single_byte_chunks_only_measured`
+    // runs the real `_z_keyexpr_canonize` in a subprocess and pins the
+    // outcome for each shape, including the `**/ab/*` vs `**/a/*`
+    // boundary. It REFUTES this function's former claim that the
+    // trigger "fires on multi-char literals as well"; `**/foo/*` and
+    // `**/abc/*/def` canonize to themselves on a real pico.
+    //
+    // The closer must be an exact `*` or `**`. A `$*`-shape closer
+    // takes pico's LONE_DOLLAR_STAR branch, whose offset addresses the
+    // `$*` chunk itself, so it cannot trip the assert (measured:
+    // `**/c/$*` returns `**/c/*`).
+    // The walk TERMINATES at the first chunk for which pico's loop
+    // leaves `Z_KEYEXPR_CANON_SUCCESS`, because that is where
+    // `__zp_canon_prefix` returns. Past that point control is in the
+    // rewrite loop (`keyexpr.c:342-422`), which carries no assert, so
+    // nothing later in the keyexpr can abort.
+    let mut big_wild_open = false;
+    let mut intervening = false;
     for chunk in input.split('/') {
-        let is_star_shape = chunk_canonizes_to_star_shape(chunk);
-        if seen_double_star && seen_literal_after_double_star && is_star_shape {
-            return Err(OutboundKeyexprError::PicoBugThreeFamily {
+        let abort = |offending: &str| {
+            Err(OutboundKeyexprError::PicoBugThreeFamily {
                 keyexpr: input.to_string(),
-                offending_chunk: chunk.to_string(),
-            });
-        }
+                offending_chunk: offending.to_string(),
+            })
+        };
         if chunk == "**" {
-            seen_double_star = true;
-            seen_literal_after_double_star = false;
-        } else if seen_double_star && !is_star_shape {
-            seen_literal_after_double_star = true;
+            if big_wild_open {
+                // DOUBLE_STAR_AFTER_DOUBLE_STAR — walk ends here.
+                return if intervening { abort(chunk) } else { Ok(()) };
+            }
+            big_wild_open = true;
+            intervening = false;
+        } else if chunk == "*" {
+            if big_wild_open {
+                // SINGLE_STAR_AFTER_DOUBLE_STAR — walk ends here.
+                return if intervening { abort(chunk) } else { Ok(()) };
+            }
+            // pico's `case 1:` else-branch: advance, no reset. The
+            // window is already closed, so nothing to carry.
+        } else if chunk_canonizes_to_star_shape(chunk) {
+            // A `$*`-run chunk: LONE_DOLLAR_STAR, whose offset
+            // addresses this chunk itself, so the rewrite precondition
+            // holds and the walk ends without an assert.
+            return Ok(());
+        } else if chunk.len() == 1 {
+            // pico's `case 1:` — advance without resetting the window.
+            intervening = big_wild_open;
+        } else {
+            // Any longer chunk reaches the char-walk, which resets it.
+            big_wild_open = false;
+            intervening = false;
         }
     }
     Ok(())
@@ -728,14 +785,18 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn outbound_rejects_bug_three_family_double_star_literal_star() {
-        // R299 bug #3 — `**` + literal chunk + `*`-shape chunk. Pico
-        // SIGABRTs on receive canonize; R300 reject pre-emit.
-        let cases = [
-            ("**/c/*", "*"),
-            ("**/foo/*", "*"),
-            ("**/abc/*/def", "*"),
-            ("**/a/b/*", "*"),
-        ];
+        // R299 bug #3 — `**` + SINGLE-BYTE chunk(s) + `*`-shape chunk.
+        // Pico SIGABRTs on receive canonize; R300 rejects pre-emit.
+        //
+        // R311y544 removed `**/foo/*` and `**/abc/*/def` from this list.
+        // They were here on the strength of the word "empirically" in
+        // this module's doc, and the fixture it cited never called pico
+        // on them. A subprocess probe does, and a real
+        // `_z_keyexpr_canonize` canonizes both to themselves — a
+        // multi-byte chunk reaches pico's char-walk, which resets
+        // `in_big_wild`. They now live in
+        // `outbound_allows_multi_byte_chunk_after_double_star` below.
+        let cases = [("**/c/*", "*"), ("**/a/b/*", "*")];
         for (input, expected_offending) in cases {
             match check_outbound_keyexpr_pico_safe(input) {
                 Err(OutboundKeyexprError::PicoBugThreeFamily {
@@ -760,21 +821,52 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn outbound_rejects_bug_three_family_with_dsl_or_double_star_trailing() {
-        // Bug #3 also fires when the trailing star-shape chunk is
-        // `**` or a `$*`-only chunk (canonizes to `*`). Same case-1
-        // trigger on pico's side.
+        // Bug #3 also fires when the closer is `**` rather than `*` —
+        // pico's DOUBLE_STAR_AFTER_DOUBLE_STAR takes the same rewrite
+        // path with the same off-by-a-chunk offset.
         assert!(matches!(
             check_outbound_keyexpr_pico_safe("**/c/**"),
             Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
         ));
+        // A `$*`-shape closer does NOT. R311y544 measured it: pico
+        // takes the LONE_DOLLAR_STAR branch, whose offset addresses the
+        // `$*` chunk itself, so the `chunk_end - reader == 2`
+        // precondition holds and no assert fires — `**/c/$*` comes back
+        // as `**/c/*`. Refusing it was a false positive.
+        assert!(check_outbound_keyexpr_pico_safe("**/c/$*").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("**/c/$*$*").is_ok());
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn outbound_allows_multi_byte_chunk_after_double_star() {
+        // R311y544 — the half of the gate that was wrong, and the
+        // reason it mattered: `<base>/@adv/pub/**` for a `**`-tailed
+        // base is exactly this shape, and refusing it disabled the
+        // advanced subscriber's entire recovery plane for upstream's
+        // own default keyexpr.
+        //
+        // Only pico's `case 1:` (chunk length 1) skips the
+        // `in_big_wild = false` reset. Every chunk of length >= 2 that
+        // is not `**` falls through to the char-walk and closes the
+        // window. Measured, not read, by
+        // `layer3_keyexpr_canon::canon_pico_abort_family_is_single_byte_chunks_only_measured`.
+        assert!(check_outbound_keyexpr_pico_safe("**/foo/*").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("**/abc/*/def").is_ok());
+        // The boundary: two bytes is already enough.
+        assert!(check_outbound_keyexpr_pico_safe("**/ab/*").is_ok());
         assert!(matches!(
-            check_outbound_keyexpr_pico_safe("**/c/$*"),
+            check_outbound_keyexpr_pico_safe("**/a/*"),
             Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
         ));
-        assert!(matches!(
-            check_outbound_keyexpr_pico_safe("**/c/$*$*"),
-            Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
-        ));
+        // An opened window is CLOSED again by a later long chunk.
+        assert!(check_outbound_keyexpr_pico_safe("**/a/foo/*").is_ok());
+        // The three derived `@adv` channels for a `**`-tailed base.
+        assert!(check_outbound_keyexpr_pico_safe("demo/example/**/@adv/pub/**").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("demo/example/**/@adv/**").is_ok());
+        assert!(
+            check_outbound_keyexpr_pico_safe("demo/example/**/@adv/*/a0b1c2d3e4f5/1/**").is_ok()
+        );
     }
 
     #[cfg(feature = "alloc")]
@@ -805,36 +897,30 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     #[test]
-    fn outbound_mixed_chunk_after_double_star_opens_bug_window() {
-        // A Mixed chunk (literal + `$*` + literal) is NOT star-shape
-        // so it functions as a literal in the bug #3 walk — it CAN
-        // open the literal-after-`**` window but does not itself
-        // trigger reject. Reject only fires on a SUBSEQUENT
-        // star-shape chunk.
+    fn outbound_mixed_chunk_after_double_star_closes_the_bug_window() {
+        // A Mixed chunk (literal + `$*` + literal) is NOT star-shape,
+        // and it is longer than one byte, so on pico it reaches the
+        // char-walk and CLOSES the window rather than holding it open.
+        // R311y544 renamed and corrected this test: it previously
+        // asserted the opposite for `**/foo$*bar/*`, which a real pico
+        // canonizes to itself.
         assert!(check_outbound_keyexpr_pico_safe("**/foo$*bar").is_ok());
         assert!(check_outbound_keyexpr_pico_safe("**/foo$*bar/temp").is_ok());
-        assert!(matches!(
-            check_outbound_keyexpr_pico_safe("**/foo$*bar/*"),
-            Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
-        ));
+        assert!(check_outbound_keyexpr_pico_safe("**/foo$*bar/*").is_ok());
     }
 
     #[cfg(feature = "alloc")]
     #[test]
     fn outbound_conservatively_rejects_double_star_after_literal_segment() {
-        // R300 NARROW gate is CONSERVATIVE on the trailing star-
-        // shape: any *-shape chunk (single `*`, `**`, or `$*`-only)
-        // appearing after a `**` segment with at least one non-`*`-
-        // shape chunk between, is rejected. R299 fixture empirically
-        // pins SIGABRT only for trailing single `*` (trailing `**`
-        // / `$*` cannot be cross-validated against pico without
-        // SIGABRT-aborting the test binary), but the underlying
-        // `in_big_wild` stale-state mechanism does not distinguish
-        // the closer's exact star-shape. Conservative reject keeps
-        // wz unconditionally safe on send; narrowing this false-
-        // positive zone (semantically `**/a/**`-style inputs ARE
-        // valid zenoh-keyexpr — "a appears somewhere") is a future
-        // round, pending an empirical fork-based pico abort probe.
+        // A `**` closer aborts as surely as a `*` one, so these stay
+        // rejected — but they are now rejected on a MEASUREMENT rather
+        // than on conservatism. This comment used to end "narrowing
+        // this false-positive zone ... is a future round, pending an
+        // empirical fork-based pico abort probe"; R311y544 built that
+        // probe (`probe_pico_canon`, a subprocess rather than a fork)
+        // and did the narrowing. What survives here is the part the
+        // probe CONFIRMED: a single-byte chunk between the `**` and
+        // the closer really does hold pico's window open.
         assert!(matches!(
             check_outbound_keyexpr_pico_safe("**/a/**"),
             Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),

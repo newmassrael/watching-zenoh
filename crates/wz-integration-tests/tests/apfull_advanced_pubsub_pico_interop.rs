@@ -558,3 +558,141 @@ fn apfull_advanced_subscriber_recovers_history_from_a_real_pico_cache() {
          witnessed anything\n--- z_advanced_pub capture ---\n{pico_out}"
     );
 }
+
+/// LEG 3 — wz puts the derived `@adv` keyexpr for a `**`-tailed base ON THE WIRE
+/// and a real zenoh-pico peer SURVIVES it.
+///
+/// This is the claim R311y544's gate narrowing rests on, taken end to end. The
+/// R300 outbound gate refused `demo/example/**/@adv/pub/**` because that shape
+/// was believed to SIGABRT a real zenoh-pico's canonizer (R299 bug #3), and the
+/// belief was never measured against a pico — the R299 fixture says outright
+/// that it cannot be, since an in-process abort would take the test binary with
+/// it. `layer3_keyexpr_canon` now measures the canonizer directly, in a
+/// subprocess. This leg measures the thing that actually matters: a pico process
+/// on the far end of a session over which wz declares that keyexpr.
+///
+/// The discriminator is pico's LIVENESS, and it is checked the only way a
+/// SIGABRT can be caught — by asking the child for an exit status. A crashed
+/// pico dies on signal 6 and `wait_for_capture_alive` reports the corpse instead
+/// of waiting out the timeout, so a regression here names itself rather than
+/// presenting as a missing sample. That helper's corpse arm is calibrated by its
+/// own unit test (`wait_for_capture_alive_reports_a_corpse_instead_of_waiting`),
+/// which is what stops the assertion below from holding vacuously.
+///
+/// ## The corroboration that was in this file all along
+///
+/// The gate only ever covered the DECLARE paths
+/// (`session_actions::prepare_declare_{subscriber,queryable,token}`). The QUERY
+/// emit path (`send_request_query`) has NO pico-safety check, and the advanced
+/// subscriber's startup history GET for a `**`-tailed base is
+/// `demo/example/**/@adv/**` — the same family the gate refused. So leg 2 above
+/// has been sending that keyexpr to a real zenoh-pico for as long as it has
+/// existed, and pico's cache queryable has been ANSWERING it. A pico that
+/// canonizes the string well enough to match a queryable against it is a pico
+/// that does not abort on it. The evidence against the gate's premise was
+/// already green in the same file; nobody connected it.
+///
+/// The samples are asserted too, and they are not decoration: they are what
+/// proves the session carried real traffic in the window the declare was on the
+/// wire, rather than the pico having simply never been reached.
+// wz-proves: ext-pubsub-advanced-subscriber pico->wz
+// wz-proves: ext-pubsub-advanced-recovery pico->wz partial
+// wz-proves: keyexpr-canon wz->pico partial
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features preset-ap-full + zenoh-pico z_advanced_pub); Layer E11 runs via --ignored"]
+fn apfull_double_star_adv_keyexpr_does_not_crash_a_real_pico_peer() {
+    let demo = wz_ap_demo_binary();
+    let z_advanced_pub = zenoh_pico_cli_binary("z_advanced_pub");
+    let keyexpr = "demo/example/picoadv";
+    let value = "WILDCARD-ADV-ON-THE-WIRE";
+
+    let hub_stderr = tempfile::tempfile().expect("tempfile for AP-full hub stderr");
+    let (mut hub_guard, mut hub_reader, port) = spawn_on_ephemeral_port(
+        &demo,
+        &["--peer", "127.0.0.1:0"],
+        "peer: listening on 127.0.0.1:",
+        "wz-ap-demo (preset-ap-full, --peer hub)",
+        hub_stderr,
+    );
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    assert_advanced_was_built(&read_captured(&mut hub_reader), "peer hub");
+
+    let (mut pub_child, mut pub_reader) =
+        spawn_caching_advanced_pub(&z_advanced_pub, keyexpr, value, &endpoint, || {
+            tempfile::tempfile().expect("tempfile for z_advanced_pub capture")
+        });
+
+    // `--advanced-recovery-heartbeat` is what makes wz declare the derived
+    // subscriber at all. Without it there is no `@adv` declare and this leg
+    // would pass on a build that never emitted the keyexpr under test.
+    let (mut sub_guard, mut sub_reader) = spawn_demo_client(
+        &demo,
+        port,
+        &[
+            "--advanced-subscribe",
+            "demo/example/**",
+            "--advanced-recovery",
+            "--advanced-recovery-heartbeat",
+        ],
+        "wz-ap-demo (preset-ap-full, --advanced-subscribe **)",
+        tempfile::tempfile().expect("tempfile for wz advanced subscriber stderr"),
+    );
+
+    let sub_log = wait_for_substring(
+        &mut sub_reader,
+        "DECLARED ADVANCED SUBSCRIBER",
+        EXCHANGE_TIMEOUT,
+    )
+    .unwrap_or_else(|c| panic!("wz never declared the advanced subscriber\n{c}"));
+    // The channel must be LIVE, or nothing was ever put on the wire and pico's
+    // survival below is survival of an event that did not happen
+    // (`feedback_a_vacuous_proof_passes_on_absence`).
+    assert!(
+        sub_log.contains("heartbeat_channel_live=true"),
+        "the heartbeat channel degraded, so `demo/example/**/@adv/pub/**` was \
+         never declared and this leg witnesses nothing\n\
+         --- wz subscriber stderr ---\n{sub_log}"
+    );
+
+    // Traffic in the window: the pico publisher keeps publishing, and the
+    // wz subscriber keeps receiving, while the derived declare is live.
+    let last_marker = format!("payload='[{:4}] {value}'", BURST - 1);
+    let exchanged = wait_for_substring(&mut sub_reader, &last_marker, EXCHANGE_TIMEOUT)
+        .map(|c| c.to_string())
+        .unwrap_or_else(|c| {
+            panic!(
+                "the wz subscriber never saw sample {} from the real pico while its \
+                 derived `@adv` declare was on the wire\n--- wz ---\n{c}\n--- pico ---\n{}",
+                BURST - 1,
+                read_captured(&mut pub_reader)
+            )
+        });
+
+    // THE ASSERTION THIS LEG EXISTS FOR: pico is still running. A canonizer
+    // SIGABRT would have reaped it by now — the declare crossed the hub long
+    // before the samples above did.
+    let alive = wait_for_capture_alive(
+        pub_child.child_mut(),
+        &mut pub_reader,
+        Duration::from_secs(2),
+        "a liveness window with wz's derived `@adv` keyexpr on the wire",
+        // Never satisfied on purpose: the value here is the ERROR arm, which
+        // fires the moment the child dies. A clean run spends the 2s budget and
+        // comes back with the timeout, which is the PASS.
+        |_| None::<()>,
+    );
+    let diagnosis = alive.expect_err("the extractor never returns Some");
+    assert!(
+        !diagnosis.contains("process exited before"),
+        "the real zenoh-pico peer DIED while wz's derived \
+         `demo/example/**/@adv/pub/**` was declared. That is the R299 bug #3 \
+         SIGABRT the R300 gate was built to prevent, and R311y544 narrowed the \
+         gate on the measurement that this keyexpr is outside the bug family — \
+         so this is the measurement being wrong, not a flake.\n{diagnosis}\n\
+         --- wz subscriber stderr ---\n{exchanged}"
+    );
+
+    kill_now(sub_guard.child_mut());
+    kill_now(pub_child.child_mut());
+    graceful_terminate(hub_guard.child_mut(), Duration::from_secs(5));
+}

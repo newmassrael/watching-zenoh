@@ -11,9 +11,10 @@
 //!
 //! ## What this fixture proves
 //!
-//! * The 3 R299 fixture-documented bug #3 family inputs
-//!   (`**/c/*`, `**/foo/*`, `**/a/b/*`) are rejected with exit
-//!   code 2 and a diagnostic stderr line.
+//! * Three MEASURED bug #3 family inputs (`**/c/*`, `**/c/**`,
+//!   `**/a/b/*`) are rejected with exit code 2 and a diagnostic stderr
+//!   line. R311y544 replaced `**/foo/*` here — the gate no longer
+//!   refuses it, because a real zenoh-pico does not abort on it.
 //! * The reject path runs at argv parse — no `--connect`
 //!   completion required (the fixture uses a deliberately
 //!   unreachable connect target so the binary never reaches the
@@ -90,7 +91,13 @@ fn run_demo_queryable_gate(keyexpr: &str) -> (Option<i32>, String) {
 fn r300_argv_gate_rejects_bug_three_via_key() {
     // R311oy — `--key` (routed subscriber declare) carries an outbound keyexpr
     // into the eager gate, replacing the retired `--declare-subscriber`.
-    for pattern in ["**/c/*", "**/foo/*", "**/a/b/*"] {
+    // R311y544 — `**/foo/*` left this list: it is not in the abort
+    // family (a real pico canonizes it to itself, measured by
+    // `layer3_keyexpr_canon::canon_pico_abort_family_is_single_byte_chunks_only_measured`),
+    // so the gate correctly ACCEPTS it now and it can no longer stand
+    // for a reject. `**/c/**` replaces it and widens the coverage to a
+    // `**` closer.
+    for pattern in ["**/c/*", "**/c/**", "**/a/b/*"] {
         let (exit, stderr) = run_demo_with_declare_flag("--key", pattern);
         assert_eq!(
             exit,

@@ -139,12 +139,18 @@
 //!     calibration — without it, a parser that matched nothing would satisfy the
 //!     negative vacuously.
 //!
-//!    These two subscribe on a CONCRETE keyexpr rather than `demo/example/**`.
-//!    The heartbeat trigger declares a second subscriber on `<ke>/@adv/pub/**`,
-//!    which under a `**`-tailed base composes to the `**`+literal+`*` shape wz's
-//!    R300 gate refuses for SIGABRTing zenoh-pico (`keyexpr_canon.rs:383-394`).
-//!    Upstream emits it regardless, so wz is the safer side here — but in wz the
-//!    heartbeat trigger and a `**`-tailed base are not composable.
+//!    These two subscribe on a CONCRETE keyexpr rather than `demo/example/**`,
+//!    and leg 9b is the same measurement on the `**`-tailed base.
+//!
+//!    Until R311y544 this paragraph read "in wz the heartbeat trigger and a
+//!    `**`-tailed base are not composable", because the derived
+//!    `<ke>/@adv/pub/**` was refused by wz's R300 gate as a zenoh-pico SIGABRT
+//!    shape. It is not that shape — only a ONE-byte chunk holds pico's
+//!    `in_big_wild` window open, and `@adv` is four — and the same paragraph
+//!    already noted that "upstream emits it regardless", which was the
+//!    counter-evidence sitting next to the claim. The gate is narrowed, leg 9b
+//!    exists, and `spawn_wz_advanced_subscriber` now asserts the channel's
+//!    OUTCOME rather than the argv flag that was echoed back.
 //!
 //! ## The naming obligation (R311y443)
 //!
@@ -322,6 +328,19 @@ fn spawn_wz_advanced_subscriber(
         captured.contains(&format!("recovery_heartbeat={recovery_heartbeat}")),
         "wz-ap-demo declared with recovery_heartbeat != {recovery_heartbeat}; the \
          --advanced-recovery-heartbeat flag did not take\n--- captured ---\n{captured}"
+    );
+    // R311y544 — the assertion above reads the ARGV FLAG echoed back, so it
+    // passes whether or not a heartbeat subscriber was ever declared. That is
+    // exactly what happened: the subscriber degrades the channel silently when
+    // its derived `<base>/@adv/pub/**` is refused, and for a `**`-tailed base
+    // it always was. Assert the OUTCOME the declare now reports.
+    assert!(
+        captured.contains(&format!("heartbeat_channel_live={recovery_heartbeat}")),
+        "wz-ap-demo asked for recovery_heartbeat={recovery_heartbeat} and built a \
+         heartbeat channel that does not match. A DEGRADED channel means \
+         heartbeat-driven retransmission is not available on this subscriber, so \
+         any recovery this leg observes came from a different \
+         trigger\n--- captured ---\n{captured}"
     );
     // R311y447 — same reason as the two above, and it matters MORE here: the
     // periodic trigger's signature is a GET arriving with nothing to explain it,
@@ -1151,19 +1170,31 @@ fn requested_sn_ranges(oracle_trace: &str) -> Vec<(u32, Option<u32>)> {
 ///
 /// Returns wz's log, the oracle's trace, and the relay's drop count.
 ///
-/// wz subscribes on the CONCRETE `demo/example/adv`, not the `demo/example/**`
-/// every other leg here uses, and that is forced rather than stylistic. The
-/// heartbeat trigger declares a SECOND subscriber on `<ke>/@adv/pub/**`, which
-/// with a `**`-tailed base composes to `demo/example/**/@adv/pub/**` — a `**`
-/// chunk, then literal chunks, then a `*`-shape chunk, which is exactly what
-/// wz's R300 outbound gate refuses because it SIGABRTs zenoh-pico's canon
-/// (`keyexpr_canon.rs:383-394`, R299 bug #3). Upstream emits that keyexpr anyway
-/// (the oracle runs `-k demo/example/**` with its own heartbeat armed), so this
-/// is wz declining to put a pico-crashing keyexpr on the wire rather than a
-/// defect — but the composition limit is real: in wz the heartbeat trigger and a
-/// `**`-tailed base cannot be used together, and a fixture that ignored it would
-/// fail at declare with the trigger never armed at all.
-fn run_heartbeat_trigger_fixture(heartbeat: bool, value: &str) -> (String, String, usize) {
+/// `sub_keyexpr` is the base wz subscribes on. Legs 9 and 10 use the CONCRETE
+/// `demo/example/adv`; leg 9b uses `demo/example/**`.
+///
+/// R311y544 REMOVED the composition limit this comment used to state. It said:
+/// "in wz the heartbeat trigger and a `**`-tailed base cannot be used together,
+/// and a fixture that ignored it would fail at declare with the trigger never
+/// armed at all." The reason given was that `<base>/@adv/pub/**` for a
+/// `**`-tailed base is refused by wz's R300 outbound gate as a zenoh-pico
+/// SIGABRT shape. It is not that shape. A subprocess probe of the real
+/// `_z_keyexpr_canonize`
+/// (`layer3_keyexpr_canon::canon_derived_adv_keyexprs_do_not_abort_pico`) shows
+/// `demo/example/**/@adv/pub/**` canonizing to itself; only a chunk of length
+/// ONE holds pico's `in_big_wild` window open, and `@adv` is four bytes. The
+/// gate has been narrowed to pico's actual bug window, and leg 9b is the
+/// composition this comment declared impossible.
+///
+/// The corroboration was here the whole time: the paragraph noted that upstream
+/// "emits that keyexpr anyway (the oracle runs `-k demo/example/**` with its own
+/// heartbeat armed)". A real zenoh has been putting it on the wire in this very
+/// fixture, against these very peers, for the whole life of the limit.
+fn run_heartbeat_trigger_fixture(
+    sub_keyexpr: &str,
+    heartbeat: bool,
+    value: &str,
+) -> (String, String, usize) {
     let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
     let (_oracle, mut oracle_out) =
         spawn_zenoh_advanced_pub_with_log(port, "demo/example/adv", value, "warn,zenoh_ext=trace");
@@ -1175,15 +1206,8 @@ fn run_heartbeat_trigger_fixture(heartbeat: bool, value: &str) -> (String, Strin
             needle: needle.into_bytes(),
         },
     );
-    let (_demo, mut reader, _at_declare) = spawn_wz_advanced_subscriber(
-        relay.port(),
-        "demo/example/adv",
-        None,
-        None,
-        true,
-        heartbeat,
-        None,
-    );
+    let (_demo, mut reader, _at_declare) =
+        spawn_wz_advanced_subscriber(relay.port(), sub_keyexpr, None, None, true, heartbeat, None);
     std::thread::sleep(RECOVERY_RUN);
     (
         read_captured(&mut reader),
@@ -1555,7 +1579,8 @@ fn zenoh_ext_advanced_sub_cannot_recover_a_lost_last_sample_without_the_wz_heart
 #[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
 fn zenoh_ext_heartbeat_beacon_drives_a_bounded_wz_recovery_get() {
     let value = "HBTRIG";
-    let (captured, oracle_trace, dropped) = run_heartbeat_trigger_fixture(true, value);
+    let (captured, oracle_trace, dropped) =
+        run_heartbeat_trigger_fixture("demo/example/adv", true, value);
     let delivered = delivered_indices(&captured);
     let ranges = requested_sn_ranges(&oracle_trace);
     let ctx = format!(
@@ -1607,6 +1632,65 @@ fn zenoh_ext_heartbeat_beacon_drives_a_bounded_wz_recovery_get() {
     );
 }
 
+/// Leg 9b — leg 9 on a `**`-TAILED BASE, which this file's own fixture comment
+/// declared impossible until R311y544.
+///
+/// `demo/example/**` is upstream `z_advanced_sub.c`'s default keyexpr and the
+/// base every other leg in this file already uses, so this is the COMMON
+/// composition rather than an exotic one. It was unavailable because wz's R300
+/// outbound gate refused the derived `<base>/@adv/pub/**` on the grounds that it
+/// SIGABRTs a real zenoh-pico, and the subscriber degraded the channel SILENTLY
+/// rather than failing — so the argv flag still read back
+/// `recovery_heartbeat=true` while no heartbeat subscriber existed.
+///
+/// Two things had to change and both are load-bearing here. The gate was
+/// narrowed to pico's measured bug window (only a ONE-byte chunk holds
+/// `in_big_wild` open; `@adv` is four), and the declare line now reports
+/// `heartbeat_channel_live=` — the OUTCOME, not the request — which
+/// `spawn_wz_advanced_subscriber` asserts for every leg in this file.
+///
+/// The assertion is leg 9's: a BOUNDED `_sn=GAP..GAP` in the FOREIGN oracle's
+/// own trace, which nothing but the heartbeat path emits. On the pre-y544 build
+/// this leg fails at the declare assertion with `heartbeat_channel_live=false`,
+/// naming the degradation instead of timing out on a missing range and reading
+/// like a wire defect.
+// wz-proves: ext-pubsub-advanced-recovery zenoh-ext->wz
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
+fn zenoh_ext_heartbeat_beacon_drives_a_bounded_wz_recovery_get_on_a_double_star_base() {
+    let value = "HBWILD";
+    let (captured, oracle_trace, dropped) =
+        run_heartbeat_trigger_fixture("demo/example/**", true, value);
+    let delivered = delivered_indices(&captured);
+    let ranges = requested_sn_ranges(&oracle_trace);
+    let ctx = format!(
+        "delivered={delivered:?} sn_ranges={ranges:?}\n--- wz ---\n{captured}\n\
+         --- oracle trace ---\n{oracle_trace}"
+    );
+    assert_eq!(
+        dropped, 1,
+        "the relay removed {dropped} batches, not 1; with 0 there is no gap at \
+         index {GAP_INDEX}\n{ctx}"
+    );
+    // The derived channel really is the one under test, spelled out so a future
+    // reader does not have to re-derive which keyexpr this leg turns on.
+    assert!(
+        captured.contains("heartbeat_channel_live=true"),
+        "the subscriber degraded its heartbeat channel on a `**`-tailed base, so \
+         the derived `demo/example/**/@adv/pub/**` is still being refused\n{ctx}"
+    );
+    let expected = GAP_INDEX as u32;
+    assert!(
+        ranges
+            .iter()
+            .any(|(from, to)| *from == expected && *to == Some(expected)),
+        "no bounded `_sn={expected}..{expected}` in the oracle's trace. Only the \
+         heartbeat path sets an upper bound, so on a `**`-tailed base wz either \
+         declared no heartbeat subscriber or failed to decode the foreign \
+         beacon\n{ctx}"
+    );
+}
+
 /// Leg 10 — the CONTROL twin of leg 9. Same fixture, same induced gap, heartbeat
 /// trigger unarmed: wz still recovers (the sample-driven trigger fires on the
 /// successor) but every `_sn` range it asks for is OPEN.
@@ -1621,7 +1705,8 @@ fn zenoh_ext_heartbeat_beacon_drives_a_bounded_wz_recovery_get() {
 #[ignore = "external binaries: zenohd + zenoh-ext examples; run-ci Layer Z"]
 fn zenoh_ext_wz_recovery_get_stays_unbounded_without_the_heartbeat_trigger() {
     let value = "HBCTRL";
-    let (captured, oracle_trace, dropped) = run_heartbeat_trigger_fixture(false, value);
+    let (captured, oracle_trace, dropped) =
+        run_heartbeat_trigger_fixture("demo/example/adv", false, value);
     let delivered = delivered_indices(&captured);
     let ranges = requested_sn_ranges(&oracle_trace);
     let ctx = format!(

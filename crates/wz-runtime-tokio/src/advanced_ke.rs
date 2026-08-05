@@ -63,20 +63,28 @@ pub(crate) fn heartbeat_sub_ke(base: &str) -> String {
 
 /// `true` when a DERIVED `@adv` keyexpr may go on the wire.
 ///
-/// R311y543. A base keyexpr wz accepts can derive an `@adv` form wz's own
-/// outbound gate refuses, and the commonest base in the world is exactly the
-/// one that does it: anything ending in `**` derives `<base>/@adv/pub/**`,
-/// which is the `** chunk` + literal chunk(s) + `*`-shape chunk shape that
-/// SIGABRTs a real zenoh-pico peer's canonizer
-/// ([`crate::keyexpr_canon::check_outbound_keyexpr_pico_safe`], R299 bug #3 /
-/// R300 gate). Upstream's own `z_advanced_sub.c` defaults to
-/// `demo/example/**`.
+/// R311y543 added this predicate because a base wz accepts could derive an
+/// `@adv` form wz's own outbound gate refused, and the commonest base in the
+/// world did it: anything ending in `**` derives `<base>/@adv/pub/**`, which the
+/// gate read as the zenoh-pico SIGABRT shape (R299 bug #3 / R300). Upstream's
+/// own `z_advanced_sub.c` defaults to `demo/example/**`, so the whole recovery
+/// plane was off for the default keyexpr.
 ///
-/// So the gate is RIGHT to refuse the derived form — weakening it would put a
-/// crashing keyexpr on the wire — and the caller's job is to DEGRADE rather
-/// than to fail: the live subscription is the contract, the `@adv` recovery
-/// channels are an enhancement. This predicate is where that distinction is
-/// made, so the three derived channels cannot answer it differently.
+/// R311y544 measured the premise and it was FALSE. Only a chunk of length ONE
+/// holds pico's `in_big_wild` window open, and the chunk immediately after the
+/// base is always `@adv` — four bytes. Every derived channel of every base wz
+/// accepts is therefore safe, pinned by
+/// [`tests::no_accepted_base_derives_a_refused_adv_channel`] on the wz side and
+/// by `layer3_keyexpr_canon::canon_derived_adv_keyexprs_do_not_abort_pico`
+/// against a real `_z_keyexpr_canonize` in a subprocess.
+///
+/// The predicate STAYS, as a guard rather than as a live degradation: it is one
+/// string walk, the failure it protects against is a remote process abort, and a
+/// future change to the derivation could reopen the window without anyone
+/// noticing. What changed is that its false branch is now an alarm — the caller
+/// logs a warning and reports the outcome through
+/// `AdvancedSubscriber::heartbeat_channel_is_live` — instead of a silent
+/// amputation of the recovery plane.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 pub(crate) fn adv_ke_is_outbound_safe(ke: &str) -> bool {
     crate::keyexpr_canon::check_outbound_keyexpr_pico_safe(ke).is_ok()
@@ -84,27 +92,75 @@ pub(crate) fn adv_ke_is_outbound_safe(ke: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    /// The fact the degradation rests on, pinned rather than assumed: the
-    /// derived heartbeat keyexpr for a `**`-tailed base is refused by wz's own
-    /// outbound gate, while the base itself is fine. Before R311y543 the
-    /// refusal propagated through `?` and took the LIVE subscription with it,
-    /// so an advanced subscriber on `demo/example/**` — upstream's own default
-    /// — received nothing at all.
+    /// R311y544 — this test used to assert the OPPOSITE, and pinned the
+    /// premise of R311y543's degradation: that the derived heartbeat keyexpr
+    /// for a `**`-tailed base is refused by wz's own outbound gate. The
+    /// refusal was a false positive. A subprocess probe of the real
+    /// `_z_keyexpr_canonize`
+    /// (`layer3_keyexpr_canon::canon_derived_adv_keyexprs_do_not_abort_pico`)
+    /// shows every derived `@adv` form canonizing to itself, and the gate has
+    /// been narrowed to pico's actual bug window. So a `**`-tailed base — which
+    /// is upstream's own `z_advanced_sub.c` default — gets its recovery plane.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     #[test]
-    fn a_double_star_base_derives_a_heartbeat_ke_the_outbound_gate_refuses() {
+    fn a_double_star_base_derives_adv_keyexprs_the_outbound_gate_accepts() {
         use super::{adv_ke_is_outbound_safe, heartbeat_sub_ke};
-        assert!(
-            adv_ke_is_outbound_safe("demo/example/**"),
-            "the BASE is accepted; it is only the derived form that is not"
-        );
+        assert!(adv_ke_is_outbound_safe("demo/example/**"));
         let derived = heartbeat_sub_ke("demo/example/**");
         assert_eq!(derived, "demo/example/**/@adv/pub/**");
         assert!(
-            !adv_ke_is_outbound_safe(&derived),
-            "{derived} must be refused — it is the shape that SIGABRTs a real \
-             zenoh-pico peer's canonizer"
+            adv_ke_is_outbound_safe(&derived),
+            "{derived} is safe on a real zenoh-pico; refusing it silently \
+             removed the heartbeat / history / recovery channels"
         );
+    }
+
+    /// The structural reason the degradation path is now unreachable for any
+    /// base wz itself accepts, stated as a test rather than as a comment: the
+    /// chunk immediately after the base is always `@adv`, four bytes, and only
+    /// a ONE-byte chunk holds pico's `in_big_wild` window open. So no accepted
+    /// base can derive a refused `@adv` channel.
+    ///
+    /// The predicate stays in the code as a guard — it is cheap, and the
+    /// alternative to a wrong answer here is a remote SIGABRT — but this
+    /// pins that it is a guard and not a live degradation.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    #[test]
+    fn no_accepted_base_derives_a_refused_adv_channel() {
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        use super::history_get_ke;
+        #[cfg(feature = "ext-pubsub-advanced-recovery")]
+        use super::recovery_get_ke;
+        use super::{adv_ke_is_outbound_safe, heartbeat_sub_ke};
+
+        for base in [
+            "demo/example/**",
+            "**",
+            "a/**",
+            "**/a",
+            "demo/example/thing",
+            "demo/*/thing",
+            "a/b/c",
+            "**/a/b",
+        ] {
+            assert!(
+                adv_ke_is_outbound_safe(base),
+                "fixture base `{base}` must itself be accepted"
+            );
+            assert!(
+                adv_ke_is_outbound_safe(&heartbeat_sub_ke(base)),
+                "heartbeat channel refused for base `{base}`"
+            );
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            assert!(
+                adv_ke_is_outbound_safe(&history_get_ke(base)),
+                "history channel refused for base `{base}`"
+            );
+            assert!(
+                adv_ke_is_outbound_safe(&recovery_get_ke(base, "a0b1c2d3e4f5", 1)),
+                "recovery channel refused for base `{base}`"
+            );
+        }
     }
 
     /// The other half: an EXACT base derives a safe heartbeat keyexpr, so the

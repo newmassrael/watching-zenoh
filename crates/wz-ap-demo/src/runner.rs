@@ -1091,13 +1091,23 @@ fn install_session_handles(
         );
         match declared {
             Ok(sub) => {
+                // R311y544 — `recovery_heartbeat=` echoes the ARGV FLAG, so it
+                // reports what was asked for and not what was built. The
+                // subscriber degrades its heartbeat channel silently when the
+                // derived keyexpr is refused, and for months every fixture that
+                // "checked heartbeat was on" was reading this echo. The
+                // OUTCOME is appended here, at the END of the line so no
+                // existing substring assertion moves
+                // (`feedback_extend_a_log_line_at_the_end`).
                 log::info!(
                     "wz-ap-demo: DECLARED ADVANCED SUBSCRIBER keyexpr='{filter}' \
                      history_max={advanced_history_max:?} \
                      history_max_age={advanced_history_max_age:?} \
                      recovery={advanced_recovery} \
                      recovery_heartbeat={advanced_recovery_heartbeat} \
-                     recovery_periodic_ms={advanced_recovery_periodic_ms:?}"
+                     recovery_periodic_ms={advanced_recovery_periodic_ms:?} \
+                     heartbeat_channel_live={}",
+                    sub.heartbeat_channel_is_live(),
                 );
                 Some(sub)
             }

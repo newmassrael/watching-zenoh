@@ -1306,6 +1306,27 @@ pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRunt
 #[cfg(feature = "ext-pubsub-advanced-history")]
 struct LivelinessSubGuard(#[allow(dead_code)] Box<dyn Send>);
 
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl<R: SessionRuntime> AdvancedSubscriber<R> {
+    /// Whether the heartbeat-driven retransmission channel is actually LIVE.
+    ///
+    /// R311y544. `RecoveryConfig::heartbeat` is a REQUEST; this is the
+    /// OUTCOME. They can differ: [`declare_with_options`](Self::declare_with_options)
+    /// degrades rather than failing when the derived `<base>/@adv/pub/**`
+    /// keyexpr is refused by wz's outbound pico-safety gate, because the live
+    /// subscription is the contract and the recovery channels are an
+    /// enhancement.
+    ///
+    /// Before this accessor existed the degradation was SILENT, and the only
+    /// thing observable about it was an argv flag echoed back into a log line —
+    /// which reads as "heartbeat is on" whether or not any heartbeat subscriber
+    /// exists. Callers that need the enhancement (and every fixture asserting
+    /// it) must read this, not the request.
+    pub fn heartbeat_channel_is_live(&self) -> bool {
+        self._heartbeat_sub.is_some()
+    }
+}
+
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
 impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// Declare an advanced subscriber on `keyexpr`. `on_sample` receives
@@ -1554,12 +1575,24 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         // where the real `libzenohc.so` receives every sample. Measured, on the
         // wire, against a real zenoh-pico advanced publisher.
         //
-        // The gate is not the thing to weaken — the keyexpr it refuses really
-        // does crash a pico peer. The live subscription is the contract and the
-        // `@adv` recovery channels are an enhancement, so an unusable derived
-        // keyexpr costs the enhancement and nothing else. The history and
-        // recovery GETs already degrade this way (their failures are not
-        // propagated); this makes the heartbeat subscriber agree with them.
+        // R311y544 — "the gate is not the thing to weaken", this comment used to
+        // continue, "the keyexpr it refuses really does crash a pico peer". That
+        // was the unmeasured half. The gate WAS the thing to fix: only a
+        // ONE-byte chunk holds pico's `in_big_wild` window open and `@adv` is
+        // four, so the derived form was never in the bug family. Measured
+        // against a real `_z_keyexpr_canonize` in a subprocess
+        // (`layer3_keyexpr_canon`), and end to end against a live zenoh-pico
+        // peer (`apfull_double_star_adv_keyexpr_does_not_crash_a_real_pico_peer`).
+        //
+        // The evidence was already in the tree: the QUERY emit path carries no
+        // pico-safety check, so the history GET for the same base has been
+        // sending `<base>/@adv/**` to real picos all along, and their cache
+        // queryables have been answering it.
+        //
+        // The degrade path stays as a guard for a future derivation that reopens
+        // the window — but it is no longer SILENT. It warns, and
+        // `heartbeat_channel_is_live` reports the outcome so a caller can tell a
+        // live channel from an amputated one.
         let heartbeat_sub = if heartbeat
             && crate::advanced_ke::adv_ke_is_outbound_safe(&crate::advanced_ke::heartbeat_sub_ke(
                 &base_keyexpr,
@@ -1599,6 +1632,21 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 },
             )?)
         } else {
+            // R311y544 — and it SAYS SO. A degradation nobody can observe is
+            // indistinguishable from a working channel: the demo's declare log
+            // reports the argv flag, so `recovery_heartbeat=true` printed
+            // happily through the whole window in which no heartbeat subscriber
+            // was ever declared. See [`Self::heartbeat_channel_is_live`].
+            if heartbeat {
+                log::warn!(
+                    "advanced subscriber on '{base_keyexpr}': heartbeat recovery was \
+                     REQUESTED but its derived keyexpr '{}' is refused by the outbound \
+                     pico-safety gate, so the channel is DEGRADED — the live \
+                     subscription is unaffected, heartbeat-driven retransmission is not \
+                     available",
+                    crate::advanced_ke::heartbeat_sub_ke(&base_keyexpr),
+                );
+            }
             None
         };
 

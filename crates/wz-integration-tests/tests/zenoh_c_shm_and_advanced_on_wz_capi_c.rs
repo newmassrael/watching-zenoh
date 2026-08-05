@@ -47,6 +47,16 @@
 //!    `demo/example/**`, got no subscriber at all. The reference arm received
 //!    every sample. Fixed by DEGRADING: the live subscription is the contract,
 //!    the `@adv` recovery channels are an enhancement.
+//!
+//!    R311y544 FOLLOW-UP: the degradation was the right shape and the wrong
+//!    diagnosis. The gate's premise — that `<base>/@adv/pub/**` SIGABRTs a real
+//!    zenoh-pico — was never measured, and it is false: only a chunk of length
+//!    ONE holds pico's `in_big_wild` window open, and `@adv` is four bytes. The
+//!    gate is narrowed, so a `**`-tailed base now gets its heartbeat, history
+//!    and recovery channels instead of a silently amputated recovery plane. See
+//!    `layer3_keyexpr_canon` for the subprocess measurement and
+//!    `apfull_advanced_pubsub_pico_interop` leg 3 for a live pico surviving the
+//!    keyexpr on the wire.
 //! 2. **A user subscription was handed zenoh's ADMIN namespace.** With (1) fixed,
 //!    the wz arm received the 4 data samples AND 7 `@adv/pub/<zid>/<eid>/_`
 //!    beacons; the reference arm received the 4 and none of the 7. A plain
