@@ -7478,7 +7478,13 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenoh-ext example oracle not built \
 ($ext_examples_dir/$missing_ext_example; run: bash scripts/build-zenohd.sh)" || return 1
     else
-        _runci_guarded_test Z 12 env WZ_ZENOHD_BIN="$zenohd" \
+        # R311y550 — 13, not 12. R311y544 added leg 9b (`..._on_a_double_star_base`)
+        # to this binary and left the count at 12, so the lane redded on HOSTED
+        # CI with "no libtest summary matched". This is the debt class the
+        # ledger names: nothing ties a guard's number to its binary, and both
+        # sides are readable without running the tests
+        # (`cargo test --test X -- --list`).
+        _runci_guarded_test Z 13 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
             --test wz_advanced_pubsub_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \
             || return 1
