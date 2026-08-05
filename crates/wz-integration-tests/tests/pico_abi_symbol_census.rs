@@ -169,6 +169,12 @@ fn missing_public_symbols() -> BTreeSet<String> {
 ///
 /// A failure prints the missing set in full rather than only its size, because
 /// the size alone cannot be acted on and the set is the work list.
+///
+/// The claim is `partial`, not `full`: this bounds the SURFACE — which programs
+/// can be attempted at all — and says nothing about whether wz answers the same
+/// way. The behavioural half is `pico_c_examples_on_wz_capi_dropin.rs` and
+/// `pico_pure_function_oracle.rs`.
+// wz-proves: api-compat-pico wz->pico partial
 #[test]
 #[ignore = "reads the CMake-built libzenohpico.so oracle; run by run-ci Layer E"]
 fn wz_defines_every_public_symbol_the_real_pico_defines() {
@@ -193,6 +199,10 @@ fn wz_defines_every_public_symbol_the_real_pico_defines() {
 /// the gate above pass unconditionally. This pins that both inputs parse to a
 /// plausible surface AND that the two agree on symbols that certainly exist in
 /// both, so an empty `missing` set means agreement rather than blindness.
+///
+/// It witnesses no atom of its own: it is the gate above's positive control,
+/// and crediting it separately would count one claim twice.
+// wz-proves: none -- positive control for the census gate, not an atom witness
 #[test]
 #[ignore = "reads the CMake-built libzenohpico.so oracle; run by run-ci Layer E"]
 fn the_census_reads_both_libraries_rather_than_nothing() {
