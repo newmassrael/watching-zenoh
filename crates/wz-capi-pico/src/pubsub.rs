@@ -665,7 +665,7 @@ pub struct z_publisher_put_options_t {
     pub encoding: *mut c_void,
     pub timestamp: *mut z_timestamp_t,
     pub attachment: *mut z_moved_bytes_t,
-    pub source_info: *mut c_void,
+    pub source_info: *mut z_source_info_t,
 }
 
 /// Fill default publisher-put options (pico `z_publisher_put_options_default`).
@@ -969,10 +969,10 @@ pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<B
 /// ownership transfer is unconditional once the call is made — and a NULL
 /// `options` is the plain default, which is what pico does too.
 ///
-/// `source_info` is read and DROPPED, named rather than implied: wz's
-/// `PublishOptions::with_source_info` exists, but this crate has no exported
-/// constructor for a `z_source_info_t`, so a C program cannot produce one to
-/// pass. Wiring it without a way to build it would be untestable surface.
+/// R311y561 — `source_info` is READ now (see [`source_info_hint_of`]). It was
+/// read-and-dropped with a stated reason: no exported constructor for a
+/// `z_source_info_t` existed, so no C program could build one. `z_source_info_new`
+/// landed in R311y559 and the reason expired with it.
 ///
 /// # Safety
 /// `options` must be null or a valid put-options struct.
@@ -991,15 +991,11 @@ unsafe fn publisher_put_options(options: *const z_publisher_put_options_t) -> Pu
     if let Some(hint) = encoding {
         opts = opts.with_encoding(hint);
     }
-    if !(*options).timestamp.is_null() {
-        let ts = &*(*options).timestamp;
-        if ts.valid {
-            opts = opts.with_timestamp(wz_runtime_tokio::sample::TimestampHint {
-                time: ts.time,
-                // The wire form strips trailing zeros; the codec re-pads.
-                zid: ts.id.id.to_vec(),
-            });
-        }
+    if let Some(ts) = timestamp_hint_of((*options).timestamp) {
+        opts = opts.with_timestamp(ts);
+    }
+    if let Some(si) = source_info_hint_of((*options).source_info) {
+        opts = opts.with_source_info(si);
     }
     opts
 }
@@ -1053,7 +1049,7 @@ pub struct z_put_options_t {
     pub is_express: bool,
     pub attachment: *mut z_moved_bytes_t,
     pub reliability: c_int,
-    pub source_info: *mut c_void,
+    pub source_info: *mut z_source_info_t,
 }
 
 /// pico `z_delete_options_t` (`api/types.h:413-425`).
@@ -1067,14 +1063,14 @@ pub struct z_delete_options_t {
     pub is_express: bool,
     pub timestamp: *mut z_timestamp_t,
     pub reliability: c_int,
-    pub source_info: *mut c_void,
+    pub source_info: *mut z_source_info_t,
 }
 
 /// pico `z_publisher_delete_options_t` (`api/types.h:454-459`).
 #[repr(C)]
 pub struct z_publisher_delete_options_t {
     pub timestamp: *mut z_timestamp_t,
-    pub source_info: *mut c_void,
+    pub source_info: *mut z_source_info_t,
 }
 
 /// Fill default put options (pico `z_put_options_default`).
@@ -1190,6 +1186,45 @@ unsafe fn timestamp_hint_of(
     })
 }
 
+/// R311y561 — read a caller-supplied `z_source_info_t*` option field into a wz
+/// [`SourceInfo`](wz_runtime_tokio::sample::SourceInfo). The INVERSE of
+/// [`source_info_of`], which projects the receive direction.
+///
+/// This is the field R311y559 left UNREAD on every pico put/delete path, and it
+/// left it unread for a reason that y559 itself then dissolved: at the time
+/// this crate exported no constructor for a `z_source_info_t`, so no C program
+/// could build one to pass and wiring it would have been untestable surface.
+/// `z_source_info_new` shipped in the same round, so the justification expired
+/// with it — a residual is a claim with a date on it.
+///
+/// A NULL pointer and pico's own null value (`_z_source_info_null` = all-zero,
+/// which `_z_source_info_check` rejects on the zero zid) both read as `None`,
+/// matching how pico's own getters treat an unchecked info. Anything else is
+/// carried: the zid is the fixed 16-byte array with its zero tail intact,
+/// because the wz codec re-derives the wire's effective length from the value.
+///
+/// # Safety
+/// `ptr` must be null or point at a valid `z_source_info_t`.
+unsafe fn source_info_hint_of(
+    ptr: *const z_source_info_t,
+) -> Option<wz_runtime_tokio::sample::SourceInfo> {
+    if ptr.is_null() {
+        return None;
+    }
+    let info = &*ptr;
+    // pico's `_z_source_info_check` is `_z_entity_global_id_check`, which is an
+    // all-zero-zid test: an unset info must not reach the wire as a source
+    // identity of zid 0.
+    if info._source_id.zid.id.iter().all(|b| *b == 0) {
+        return None;
+    }
+    Some(wz_runtime_tokio::sample::SourceInfo::new(
+        &info._source_id.zid.id,
+        info._source_id.eid,
+        info._source_sn,
+    ))
+}
+
 /// Fold a caller's `z_put_options_t` into wz's [`PublishOptions`].
 ///
 /// Consumes the moved `encoding` and `attachment` on EVERY path — pico's
@@ -1225,6 +1260,9 @@ unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions
     if let Some(ts) = timestamp_hint_of((*options).timestamp) {
         opts = opts.with_timestamp(ts);
     }
+    if let Some(si) = source_info_hint_of((*options).source_info) {
+        opts = opts.with_source_info(si);
+    }
     opts
 }
 
@@ -1246,6 +1284,9 @@ unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishO
         .with_reliability(reliability_from_pico((*options).reliability));
     if let Some(ts) = timestamp_hint_of((*options).timestamp) {
         opts = opts.with_timestamp(ts);
+    }
+    if let Some(si) = source_info_hint_of((*options).source_info) {
+        opts = opts.with_source_info(si);
     }
     opts
 }
@@ -1360,6 +1401,9 @@ pub unsafe extern "C" fn z_publisher_delete(
         if !options.is_null() {
             if let Some(ts) = timestamp_hint_of((*options).timestamp) {
                 opts = opts.with_timestamp(ts);
+            }
+            if let Some(si) = source_info_hint_of((*options).source_info) {
+                opts = opts.with_source_info(si);
             }
         }
         match state
