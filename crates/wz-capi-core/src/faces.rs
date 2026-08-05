@@ -1146,11 +1146,11 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        let sessions = self.face_sessions();
+        let sessions = self.face_sessions_with_wake();
         let mut delivered = 0usize;
         if opts.allowed_destination.allows_remote() {
             let remote = opts.clone().with_locality(Locality::Remote);
-            for session in &sessions {
+            for (session, _) in &sessions {
                 match session.publish(keyexpr, payload, remote.clone()) {
                     Ok(n) => delivered += n,
                     // Per-face transient failure (link released / reconnecting):
@@ -1162,13 +1162,21 @@ impl SharedSession {
             }
         }
         if opts.allowed_destination.allows_local() {
-            if let Some(session) = sessions.first() {
+            if let Some((session, revised)) = sessions.first() {
                 let local = opts.clone().with_locality(Locality::SessionLocal);
                 match session.publish(keyexpr, payload, local) {
                     Ok(n) => delivered += n,
                     Err(PublishError::TransportUnavailable) => {}
                     Err(_) => return Err(FanoutError::ExceedsCapacity),
                 }
+                // R311y555 — WAKE THE FACE. Staging a fire does not make the
+                // drive loop iterate; `next_reply_deadline_ms` reports the face
+                // due now, but the loop only re-reads it when something wakes
+                // it. Without this the delivery rides the next inbound message
+                // or the keepalive tick, MEASURED at 3.334 s — the fan's own
+                // `z_get` sibling has notified here since R311y296 and the
+                // publish path was simply missing the same line.
+                revised.notify_one();
             }
         }
         Ok(delivered)
@@ -1201,11 +1209,11 @@ impl SharedSession {
         // resolved out of each face's own outbound table, so a face that never
         // got the declare cannot resolve it and its `UnknownMapping` must not
         // consume the session's single local delivery.
-        let sessions = self.face_sessions();
+        let sessions = self.face_sessions_with_wake();
         let mut delivered = 0usize;
         if opts.allowed_destination.allows_remote() {
             let remote = opts.clone().with_locality(Locality::Remote);
-            for session in &sessions {
+            for (session, _) in &sessions {
                 match session.publish_aliased_auto(mapping_id, None, payload, remote.clone()) {
                     Ok(n) => delivered += n,
                     Err(PublishAliasError::UnknownMapping(_)) => {}
@@ -1216,10 +1224,13 @@ impl SharedSession {
         }
         if opts.allowed_destination.allows_local() {
             let local = opts.clone().with_locality(Locality::SessionLocal);
-            for session in &sessions {
+            for (session, revised) in &sessions {
                 match session.publish_aliased_auto(mapping_id, None, payload, local.clone()) {
                     Ok(n) => {
                         delivered += n;
+                        // R311y555 — see `publish_all`; the face that took the
+                        // local leg is the one that has to iterate.
+                        revised.notify_one();
                         break;
                     }
                     Err(PublishAliasError::UnknownMapping(_)) => continue,

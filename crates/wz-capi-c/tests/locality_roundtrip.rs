@@ -212,13 +212,29 @@ fn a_default_put_reaches_this_sessions_own_subscriber_exactly_once_across_two_fa
         // below is about the count, so a one-face race would silently weaken it.
         std::thread::sleep(Duration::from_millis(300));
 
+        let issued = Instant::now();
         put_once(&listener, None);
         let count = settle(&hits, 1, Duration::from_millis(300));
+        let latency = issued.elapsed();
         assert_eq!(
             count, 1,
             "an Any put must reach this session's own subscriber EXACTLY once: \
              0 means the field is still dropped, >1 means the fan delivers per \
              face instead of per session"
+        );
+        // R311y555 — AND IT MUST BE PROMPT, which is a separate claim the
+        // count cannot make. Staging a fire does not make the drive loop
+        // iterate; something has to wake it. Before the wake landed this leg
+        // still passed, because `settle` waits up to 5 s and the delivery rode
+        // the ~3333 ms keepalive tick instead — a green test that could not
+        // discriminate a working hand-off from a broken one. Measured at
+        // ~3.334 s then; the bound is deliberately far below one tick so a
+        // regression cannot hide inside the tolerance.
+        assert!(
+            latency < Duration::from_millis(1500),
+            "in-process delivery took {latency:?}; anything near the ~3333 ms \
+             keepalive tick means the face was never woken and the fire simply \
+             waited for the next scheduled iteration"
         );
 
         z_undeclare_subscriber(
