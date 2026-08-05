@@ -1364,6 +1364,128 @@ const _: () = {
     assert!(size_of::<ze_advanced_subscriber_last_sample_miss_detection_options_t>() == 16);
 };
 
+// --- R311y559: the advanced plane's remaining exports -----------------------
+
+/// Publish a DELETE through an advanced publisher (pico
+/// `ze_advanced_publisher_delete`).
+///
+/// # Safety
+/// `pub_` must be null or a live loaned advanced publisher; `options` must be
+/// null or a valid delete-options struct.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_delete(
+    pub_: *const ze_loaned_advanced_publisher_t,
+    options: *const ze_advanced_publisher_delete_options_t,
+) -> ZResult {
+    let _ = options;
+    crate::ffi::guarded(|| {
+        let Some(state) =
+            crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
+        else {
+            return Z_ERR_NULL;
+        };
+        match state.shared.advanced_publisher_delete(state.id) {
+            true => Z_OK,
+            false => Z_ERR_GENERIC,
+        }
+    })
+}
+
+/// Whether any subscriber currently matches an advanced publisher (pico
+/// `ze_advanced_publisher_get_matching_status`).
+///
+/// # Safety
+/// `publisher` must be null or a live loaned advanced publisher;
+/// `matching_status` must be valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_get_matching_status(
+    publisher: *const ze_loaned_advanced_publisher_t,
+    matching_status: *mut crate::matching::z_matching_status_t,
+) -> ZResult {
+    crate::ffi::guarded(|| {
+        if matching_status.is_null() {
+            return Z_ERR_NULL;
+        }
+        let Some((shared, keyexpr)) = advanced_publisher_match_target(publisher) else {
+            return Z_ERR_NULL;
+        };
+        (*matching_status).matching = shared.has_matching(&keyexpr);
+        Z_OK
+    })
+}
+
+/// Watch an advanced publisher's matching status (pico
+/// `ze_advanced_publisher_declare_matching_listener`).
+///
+/// # Safety
+/// `publisher` must be null or a live loaned advanced publisher; `listener`
+/// must be valid and writable; `callback` must be a valid moved closure, which
+/// is consumed on every path.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_declare_matching_listener(
+    publisher: *const ze_loaned_advanced_publisher_t,
+    listener: *mut crate::matching::z_owned_matching_listener_t,
+    callback: *mut crate::matching::z_moved_closure_matching_status_t,
+) -> ZResult {
+    crate::matching::declare_advanced_matching(
+        advanced_publisher_match_target(publisher),
+        Some(listener),
+        callback,
+    )
+}
+
+/// The background form (pico
+/// `ze_advanced_publisher_declare_background_matching_listener`) — the watch
+/// lives for the session and there is no handle to retract it with.
+///
+/// # Safety
+/// As [`ze_advanced_publisher_declare_matching_listener`], without the handle.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_listener(
+    publisher: *const ze_loaned_advanced_publisher_t,
+    callback: *mut crate::matching::z_moved_closure_matching_status_t,
+) -> ZResult {
+    crate::matching::declare_advanced_matching(
+        advanced_publisher_match_target(publisher),
+        None,
+        callback,
+    )
+}
+
+/// The `(session, keyexpr)` a matching watch on an advanced publisher targets.
+///
+/// The keyexpr is the publisher's OWN, not its `@adv` cache key: matching asks
+/// "is anyone subscribed to what I publish", and what an advanced publisher
+/// publishes is the plain keyexpr.
+///
+/// # Safety
+/// `pub_` must be null or a live loaned advanced publisher.
+unsafe fn advanced_publisher_match_target(
+    pub_: *const ze_loaned_advanced_publisher_t,
+) -> Option<(Arc<SharedSession>, String)> {
+    crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
+        .map(|state| (state.shared.clone(), state.keyexpr.clone()))
+}
+
+/// Install a miss listener that lives for the session (pico
+/// `ze_advanced_subscriber_declare_background_sample_miss_listener`).
+///
+/// The BACKGROUND form of the listener the subscriber already accepts: it takes
+/// the same closure and installs it in the same slot, and differs only in
+/// having no handle to retract it with. Routed through the same installer so
+/// the two cannot drift.
+///
+/// # Safety
+/// `subscriber` must be null or a live loaned advanced subscriber; `callback`
+/// must be a valid moved miss closure, consumed on every path.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_subscriber_declare_background_sample_miss_listener(
+    subscriber: *const ze_loaned_advanced_subscriber_t,
+    callback: *mut ze_moved_closure_miss_t,
+) -> ZResult {
+    ze_advanced_subscriber_declare_sample_miss_listener(subscriber, std::ptr::null_mut(), callback)
+}
+
 /// The `(zid, eid)` identity behind a loaned advanced publisher, for
 /// [`crate::session::ze_advanced_publisher_id`] (R311y559).
 ///
@@ -1412,4 +1534,83 @@ pub(crate) unsafe fn advanced_subscriber_keyexpr(
         Some(state) => &state.loaned_keyexpr as *const crate::abi::z_loaned_keyexpr_t,
         None => std::ptr::null(),
     }
+}
+
+/// Declare a session-lifetime advanced subscriber with no handle (pico
+/// `ze_declare_background_advanced_subscriber`).
+///
+/// R311y559 — the background form of [`ze_declare_advanced_subscriber`], with
+/// the same delegate-and-leak shape and the same justification as
+/// [`crate::liveliness::z_liveliness_declare_background_subscriber`]: the
+/// subscription is retracted by its state's `Drop`, so "lives for the session"
+/// IS "the state is never dropped".
+///
+/// # Safety
+/// `zs` must be null or a live loaned session; `keyexpr` must be null or a live
+/// loaned keyexpr; `callback` must be a valid moved closure, consumed on every
+/// path; `options` must be null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn ze_declare_background_advanced_subscriber(
+    zs: *const z_loaned_session_t,
+    keyexpr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut ze_advanced_subscriber_options_t,
+) -> ZResult {
+    guarded(|| {
+        let mut sub = ze_owned_advanced_subscriber_t::null_value();
+        let rc = ze_declare_advanced_subscriber(zs, &mut sub, keyexpr, callback, options);
+        // The handle slot is simply LEFT, which is what "background" means
+        // here: this crate's owned advanced-subscriber struct is a plain
+        // pointer slot with no `Drop` of its own — the retraction lives in the
+        // boxed `AdvSubState` behind it, and that box is reclaimed only by
+        // `ze_undeclare_advanced_subscriber`. Letting the slot go out of scope
+        // therefore leaves the subscription live for the session, which
+        // `z_close` still tears down when it clears every face.
+        let _ = sub;
+        rc
+    })
+}
+
+/// Watch for advanced PUBLISHERS appearing on this subscriber's keyexpr, for
+/// the session's lifetime (pico
+/// `ze_advanced_subscriber_detect_publishers_background`).
+///
+/// A liveliness subscription on the `@adv` publisher-detection keyexpr — which
+/// is what publisher detection IS on the wire: an advanced publisher declares a
+/// liveliness token under `<base>/@adv/pub/...`, and detecting publishers means
+/// subscribing to those tokens. Routed through the same background-liveliness
+/// body [`crate::liveliness::z_liveliness_declare_background_subscriber`] uses,
+/// so the two cannot drift.
+///
+/// # Safety
+/// `subscriber` must be null or a live loaned advanced subscriber; `callback`
+/// must be a valid moved closure, consumed on every path; `options` must be
+/// null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
+    subscriber: *const ze_loaned_advanced_subscriber_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut crate::liveliness::z_liveliness_subscriber_options_t,
+) -> ZResult {
+    guarded(|| {
+        let Some(state) =
+            crate::abi::handle_ref::<ze_loaned_advanced_subscriber_t, AdvSubState>(subscriber)
+        else {
+            // The shared body consumes the closure; reaching it with a bad
+            // handle is not possible, so consume it here instead.
+            if !callback.is_null() {
+                let owned = &mut (*callback)._this;
+                drop(CClosure::new(owned.context, owned.call, owned.drop));
+                *owned = z_owned_closure_sample_t::null_value();
+            }
+            return Z_ERR_NULL;
+        };
+        let detection = format!("{}/@adv/pub/**", state.keyexpr);
+        crate::liveliness::declare_background_liveliness_subscriber(
+            &state.shared,
+            &detection,
+            callback,
+            options,
+        )
+    })
 }

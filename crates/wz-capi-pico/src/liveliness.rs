@@ -481,3 +481,78 @@ pub(crate) unsafe fn token_state<'a>(
 ) -> Option<&'a TokenState> {
     handle_ref::<z_loaned_liveliness_token_t, TokenState>(ptr)
 }
+
+/// Declare a liveliness subscription on `shared` that lives for the SESSION
+/// (R311y559).
+///
+/// The shared body of [`z_liveliness_declare_background_subscriber`] and
+/// [`crate::advanced::ze_advanced_subscriber_detect_publishers_background`],
+/// which are the same operation reached from two handles — a session and an
+/// advanced subscriber. Consumes the moved closure on every path.
+///
+/// "Lives for the session" is implemented as "no `SubscriberState` is ever
+/// built", not as a leaked one: the state's `Drop` is what retracts a
+/// subscription, so never constructing it is both simpler and exactly the
+/// intent. `z_close` still tears it down, because closing clears every face and
+/// the registry entry with them.
+///
+/// # Safety
+/// `keyexpr` must be a valid keyexpr string; `callback` must be a valid moved
+/// closure; `options` must be null or valid.
+pub(crate) unsafe fn declare_background_liveliness_subscriber(
+    shared: &Arc<wz_capi_core::faces::SharedSession>,
+    keyexpr: &str,
+    callback: *mut z_moved_closure_sample_t,
+    options: *const z_liveliness_subscriber_options_t,
+) -> ZResult {
+    guarded(|| {
+        if callback.is_null() {
+            return Z_ERR_NULL;
+        }
+        // Consume the moved closure FIRST (consume-on-all-paths).
+        let owned = &mut (*callback)._this;
+        let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
+        *owned = z_owned_closure_sample_t::null_value();
+
+        let mut opts = LivelinessSubscriberOptions::default();
+        opts.history = !options.is_null() && (*options).history;
+        shared.declare_liveliness_subscriber(keyexpr.to_owned(), opts, {
+            let closure = Arc::new(cclosure);
+            Arc::new(move || {
+                Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>
+            })
+        });
+        Z_OK
+    })
+}
+
+/// Declare a session-lifetime liveliness subscriber with no handle (pico
+/// `z_liveliness_declare_background_subscriber`).
+///
+/// R311y559 — the BACKGROUND form of [`z_liveliness_declare_subscriber`]. It
+/// takes the same arguments minus the handle slot and installs the same
+/// subscription; the difference is ownership, not behaviour. See
+/// [`declare_background_liveliness_subscriber`] for how "lives for the
+/// session" is implemented.
+///
+/// # Safety
+/// `zs` must be null or a live loaned session; `keyexpr` must be null or a live
+/// loaned keyexpr; `callback` must be a valid moved closure, consumed on every
+/// path; `options` must be null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn z_liveliness_declare_background_subscriber(
+    zs: *const z_loaned_session_t,
+    keyexpr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut z_liveliness_subscriber_options_t,
+) -> ZResult {
+    guarded(|| {
+        let Some(state) = session_state(zs) else {
+            return Z_ERR_NULL;
+        };
+        let Some(ke) = keyexpr_str(keyexpr) else {
+            return Z_ERR_INVALID;
+        };
+        declare_background_liveliness_subscriber(&state.shared, ke, callback, options)
+    })
+}

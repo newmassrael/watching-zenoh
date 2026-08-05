@@ -1111,6 +1111,64 @@ fn run_scout(
     })
 }
 
+/// Adopt a loaned hello into an owned one (pico `z_hello_take_from_loaned`).
+///
+/// R311y559 — a symbol the census found missing. A DEEP COPY that leaves the
+/// source EMPTY, routed through the same [`HelloState::new`] `z_hello_clone`
+/// uses so the two cannot render a peer differently. Copying rather than moving
+/// the handle: a loaned hello is the scout dispatcher's own state, still
+/// borrowed by the frame around the callback — the same argument
+/// `z_sample_take_from_loaned` makes.
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a live loaned hello.
+#[no_mangle]
+pub unsafe extern "C" fn z_hello_take_from_loaned(
+    dst: *mut z_owned_hello_t,
+    src: *mut z_loaned_hello_t,
+) -> ZResult {
+    crate::ffi::guarded(|| {
+        if dst.is_null() || src.is_null() {
+            return crate::result::Z_ERR_NULL;
+        }
+        let rc = z_hello_clone(dst, src as *const z_loaned_hello_t);
+        if rc == crate::result::Z_OK {
+            // Empty the source, as every `take_from_loaned` in this crate does.
+            (*src).handle = std::ptr::null_mut();
+        }
+        rc
+    })
+}
+
+/// Build an owned hello closure from a callback + drop + context (pico
+/// `z_closure_hello`).
+///
+/// R311y559 — the CONSTRUCTOR of a family whose `_call` / `_drop` / `_loan`
+/// half already existed. A pico program builds its scout closure with this
+/// function, so without it the whole scouting example could not link.
+///
+/// # Safety
+/// `closure` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_closure_hello(
+    closure: *mut z_owned_closure_hello_t,
+    call: z_closure_hello_callback_t,
+    drop: crate::pubsub::z_closure_drop_callback_t,
+    context: *mut std::ffi::c_void,
+) -> ZResult {
+    crate::ffi::guarded(|| {
+        if closure.is_null() {
+            return crate::result::Z_ERR_NULL;
+        }
+        *closure = z_owned_closure_hello_t {
+            context,
+            call,
+            drop,
+        };
+        crate::result::Z_OK
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

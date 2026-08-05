@@ -353,6 +353,35 @@ where
         Ok(written)
     }
 
+    /// Publish a DELETE on this publisher's keyexpr, stamping the same
+    /// `(zid, eid, sn)` + timestamp a [`Self::put`] would (R311y559).
+    ///
+    /// The sequence number is drawn from the SAME counter as `put`, which is
+    /// what keeps a subscriber's miss detection correct across a mixed stream:
+    /// a Del that skipped the counter would leave a permanent apparent gap.
+    ///
+    /// NOT cached, and that is a stated residual rather than an oversight:
+    /// [`CachedSample`] carries no sample KIND, so a cached Del would replay as
+    /// a Put and a recovering subscriber would resurrect a deleted key — worse
+    /// than not replaying it. Giving the cache a kind is the fix; until then
+    /// the live path is faithful and the recovery path omits deletes.
+    pub fn delete(&self) -> Result<usize, PublishError> {
+        let sn = self
+            .seqnum
+            .as_ref()
+            .map(|counter| counter.fetch_add(1, Ordering::Relaxed));
+        let timestamp = self.stamp.stamp();
+        let source_info = sn.map(|sn| SourceInfo::new(&self.zid, self.eid, sn));
+
+        let mut opts = PublishOptions::put()
+            .with_kind(crate::sample::SampleKind::Del)
+            .with_timestamp(timestamp);
+        if let Some(si) = &source_info {
+            opts = opts.with_source_info(si.clone());
+        }
+        self.session.publish(&self.keyexpr, &[], opts)
+    }
+
     /// The publisher's allocated entity id (test / introspection seam).
     pub fn eid(&self) -> u32 {
         self.eid

@@ -1839,7 +1839,7 @@ impl z_source_info_t {
 /// right-zero-padded to 16, so the projection is a copy — but a reader
 /// comparing two zids must compare all 16 bytes, which is what
 /// `z_id_to_string` and every pico program do.
-fn source_info_of(info: &wz_runtime_tokio::sample::SourceInfo) -> z_source_info_t {
+pub(crate) fn source_info_of(info: &wz_runtime_tokio::sample::SourceInfo) -> z_source_info_t {
     z_source_info_t {
         _source_id: crate::advanced::z_entity_global_id_t {
             zid: crate::zid::z_id_t::from_wire(&info.zid),
@@ -2073,4 +2073,29 @@ pub unsafe extern "C" fn z_sample_clone(
         (*dst).handle = handle;
         crate::result::Z_OK
     })
+}
+
+/// Invoke a sample closure (pico `z_closure_sample_call`).
+///
+/// R311y559 — the `_call` half of the sample-closure family, which the zid and
+/// hello families already had. A program that forwards samples between closures
+/// — upstream's channel handlers do exactly this — could not link without it.
+///
+/// # Safety
+/// `closure` must be null or a live loaned sample closure; `sample` must be
+/// null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_closure_sample_call(
+    closure: *const z_loaned_closure_sample_t,
+    sample: *mut z_loaned_sample_t,
+) {
+    let _ = guarded(|| {
+        if closure.is_null() {
+            return Z_ERR_NULL;
+        }
+        if let Some(call) = (*closure).call {
+            call(sample, (*closure).context);
+        }
+        Z_OK
+    });
 }

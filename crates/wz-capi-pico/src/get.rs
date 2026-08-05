@@ -1304,6 +1304,290 @@ pub unsafe extern "C" fn z_reply_err_payload(
     })
 }
 
+// --- R311y559: the OWNED reply-error family + the reply clone / replier id ---
+//
+// Every export below is a symbol the real `libzenohpico.so` defines and this
+// cdylib did not. `z_owned_reply_err_t` is 72 B MEASURED against the built
+// library's own headers.
+
+/// pico `z_owned_reply_err_t` — `{ _z_value_t _val }`, 72 B measured.
+///
+/// The handle model, as everywhere else in this crate: this crate's boxed
+/// marshal in slot 0, inert padding to upstream's size. The padding is what a
+/// C program stack-allocates, so its width is ABI even though nothing reads it.
+#[repr(C)]
+pub struct z_owned_reply_err_t {
+    handle: *mut c_void,
+    _pad: [u8; 64],
+}
+
+/// Moved reply error (pico `z_moved_reply_err_t`).
+#[repr(C)]
+pub struct z_moved_reply_err_t {
+    _this: z_owned_reply_err_t,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_owned_reply_err_t>() == 72);
+};
+
+impl z_owned_reply_err_t {
+    fn null_value() -> Self {
+        Self {
+            handle: std::ptr::null_mut(),
+            _pad: [0u8; 64],
+        }
+    }
+}
+
+/// The ENCODING of an error reply's value (pico `z_reply_err_encoding`).
+///
+/// Reads through the SAME [`ReplyMarshal`] both producers point at — see
+/// [`z_reply_err_loan`] for why the owned form loans its POINTEE rather than
+/// itself, which is what makes one accessor serve both. The encoding lives on
+/// the marshal's sample half because that is where the reply body's E-flag is
+/// decoded, so this and `z_sample_encoding` read one field rather than two.
+///
+/// # Safety
+/// `reply_err` must be null or a live loaned reply error.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_encoding(
+    reply_err: *const z_loaned_reply_err_t,
+) -> *const crate::encoding::z_loaned_encoding_t {
+    guard_val(std::ptr::null(), || match reply_err_marshal(reply_err) {
+        Some(marshal) => crate::pubsub::z_sample_encoding(marshal.sample.as_loaned()),
+        None => std::ptr::null(),
+    })
+}
+
+/// Deep-copy an error reply into an owned one (pico `z_reply_err_clone`).
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a live loaned reply
+/// error handed to a callback.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_clone(
+    dst: *mut z_owned_reply_err_t,
+    src: *const z_loaned_reply_err_t,
+) -> ZResult {
+    crate::ffi::guarded(|| {
+        if dst.is_null() {
+            return Z_ERR_NULL;
+        }
+        *dst = z_owned_reply_err_t::null_value();
+        let Some(marshal) = reply_err_marshal(src) else {
+            return Z_ERR_NULL;
+        };
+        // A deep copy of the WHOLE marshal, not just the error blob: the owned
+        // value has to answer `z_reply_err_payload` AND `z_reply_err_encoding`
+        // after the callback frame is gone, and both read the marshal.
+        let mut boxed = Box::new(marshal.deep_copy());
+        boxed.bind();
+        (*dst).handle = Box::into_raw(boxed) as *mut c_void;
+        Z_OK
+    })
+}
+
+/// Borrow an owned reply error (pico `z_reply_err_loan`).
+///
+/// Hands back the POINTEE — the boxed [`ReplyMarshal`] — not the owned struct's
+/// own address, which is the same shape `z_reply_loan` and `z_sample_loan` take
+/// (`impl_boxed_element!`). It is load-bearing rather than stylistic: the OTHER
+/// producer of a `z_loaned_reply_err_t` is `z_reply_err(reply)`, which hands
+/// back the dispatcher's marshal, and an accessor cannot tell two different
+/// pointee types apart behind one C pointer type. Loaning the pointee makes
+/// both producers yield a `ReplyMarshal`, so `z_reply_err_payload` and
+/// `z_reply_err_encoding` are ONE reader each rather than two arms that could
+/// disagree — or, worse, one arm reading a `bool` field as a pointer.
+///
+/// # Safety
+/// `err` must be null or a valid owned reply error.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_loan(
+    err: *const z_owned_reply_err_t,
+) -> *const z_loaned_reply_err_t {
+    guard_val(std::ptr::null(), || {
+        if err.is_null() {
+            return std::ptr::null();
+        }
+        (*err).handle as *const z_loaned_reply_err_t
+    })
+}
+
+/// Mutably borrow an owned reply error (pico `z_reply_err_loan_mut`).
+///
+/// # Safety
+/// As [`z_reply_err_loan`].
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_loan_mut(
+    err: *mut z_owned_reply_err_t,
+) -> *mut z_loaned_reply_err_t {
+    guard_val(std::ptr::null_mut(), || {
+        if err.is_null() {
+            return std::ptr::null_mut();
+        }
+        (*err).handle as *mut z_loaned_reply_err_t
+    })
+}
+
+/// Move-cast an owned reply error (pico `z_reply_err_move`).
+///
+/// # Safety
+/// As [`z_reply_err_loan`].
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_move(
+    err: *mut z_owned_reply_err_t,
+) -> *mut z_moved_reply_err_t {
+    err as *mut z_moved_reply_err_t
+}
+
+/// Take an owned reply error out of a moved wrapper (pico
+/// `z_reply_err_take`).
+///
+/// # Safety
+/// Both pointers must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_take(
+    dst: *mut z_owned_reply_err_t,
+    src: *mut z_moved_reply_err_t,
+) {
+    if dst.is_null() || src.is_null() {
+        return;
+    }
+    (*dst).handle = (*src)._this.handle;
+    (*dst)._pad = (*src)._this._pad;
+    (*src)._this = z_owned_reply_err_t::null_value();
+}
+
+/// Release an owned reply error (pico `z_reply_err_drop`).
+///
+/// # Safety
+/// `err` must be null or a valid moved reply error this crate produced.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_drop(err: *mut z_moved_reply_err_t) {
+    let _ = crate::ffi::guarded(|| {
+        if err.is_null() {
+            return Z_OK;
+        }
+        let handle = (*err)._this.handle;
+        (*err)._this = z_owned_reply_err_t::null_value();
+        if !handle.is_null() {
+            drop(Box::from_raw(handle as *mut ReplyMarshal));
+        }
+        Z_OK
+    });
+}
+
+/// Escape a borrowed reply error into an owned one (pico
+/// `z_reply_err_take_from_loaned`).
+///
+/// A DEEP COPY, as `z_sample_take_from_loaned` is and for the same reason: the
+/// loaned form is a dispatcher-owned marshal still borrowed by the frame around
+/// the callback.
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a live loaned reply
+/// error.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_take_from_loaned(
+    dst: *mut z_owned_reply_err_t,
+    src: *mut z_loaned_reply_err_t,
+) -> ZResult {
+    z_reply_err_clone(dst, src as *const z_loaned_reply_err_t)
+}
+
+/// Zero an owned reply error (pico `z_internal_reply_err_null`).
+///
+/// # Safety
+/// `err` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_reply_err_null(err: *mut z_owned_reply_err_t) {
+    if !err.is_null() {
+        *err = z_owned_reply_err_t::null_value();
+    }
+}
+
+/// `true` iff the owned reply error holds a live value (pico
+/// `z_internal_reply_err_check`).
+///
+/// # Safety
+/// `err` must be null or a valid owned reply error.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_reply_err_check(err: *const z_owned_reply_err_t) -> bool {
+    guard_val(false, || !err.is_null() && !(*err).handle.is_null())
+}
+
+/// Deep-copy a reply into an owned one (pico `z_reply_clone`).
+///
+/// Routed through the SAME [`clone_reply_marshal`] `z_reply_take_from_loaned`
+/// uses, so the two cannot diverge; the only difference is that this leaves the
+/// source intact.
+///
+/// # Safety
+/// `dst` must be valid and writable; `this_` must be null or a live loaned
+/// reply.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_clone(
+    dst: *mut z_owned_reply_t,
+    this_: *const z_loaned_reply_t,
+) -> ZResult {
+    crate::ffi::guarded(|| {
+        if dst.is_null() {
+            return Z_ERR_NULL;
+        }
+        *dst = z_owned_reply_t::null_value();
+        if this_.is_null() {
+            return Z_ERR_NULL;
+        }
+        let handle = clone_reply_marshal(this_);
+        if handle.is_null() {
+            return crate::result::Z_ERR_GENERIC;
+        }
+        (*dst).handle = handle;
+        Z_OK
+    })
+}
+
+/// The global id of the entity that sent a reply (pico
+/// `z_reply_replier_id`), `false` when the reply carried none.
+///
+/// The BOOLEAN return is upstream's shape and it is load-bearing: a reply's
+/// replier id rides the response's source_info, which is optional, so "absent"
+/// has to be distinguishable from "the zero id". A program that ignored the
+/// return and printed `out_id` would print zeros for an anonymous replier,
+/// which is why upstream does not fold the two.
+///
+/// # Safety
+/// `reply` must be null or a live loaned reply; `out_id` must be null or valid
+/// and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_replier_id(
+    reply: *const z_loaned_reply_t,
+    out_id: *mut crate::advanced::z_entity_global_id_t,
+) -> bool {
+    guard_val(false, || {
+        if out_id.is_null() {
+            return false;
+        }
+        *out_id = crate::advanced::z_entity_global_id_t {
+            zid: crate::zid::z_id_t::empty(),
+            eid: 0,
+        };
+        let Some(marshal) = reply_marshal(reply) else {
+            return false;
+        };
+        // The sample half carries the source triple; an Err reply's inert
+        // sample has none, which reads as absent — the honest answer.
+        let sample = marshal.sample.as_loaned();
+        let info = crate::pubsub::z_sample_source_info(sample);
+        if info.is_null() {
+            return false;
+        }
+        *out_id = crate::pubsub::z_source_info_id(info);
+        true
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

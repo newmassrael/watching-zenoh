@@ -2024,6 +2024,22 @@ impl SharedSession {
         delivered
     }
 
+    /// Publish a DELETE through a C advanced publisher, on every face that
+    /// carries it (R311y559). `true` when at least one face accepted it.
+    ///
+    /// Best-effort per face for the same reason [`Self::advanced_publisher_put`]
+    /// is: a C caller has no per-face handle to retry with.
+    pub fn advanced_publisher_delete(&self, id: AdvPubId) -> bool {
+        let guard = self.lock();
+        let mut delivered = false;
+        for face in guard.faces.values() {
+            if let Some(pub_) = face.adv_pubs.get(&id) {
+                delivered |= pub_.delete().is_ok();
+            }
+        }
+        delivered
+    }
+
     /// Retract a C advanced publisher: drop the SSOT entry so no future face
     /// replays it, and drop every live face's publisher (which undeclares that
     /// face's `@adv` cache queryable + liveliness token through RAII).

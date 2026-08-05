@@ -761,6 +761,247 @@ pub unsafe extern "C" fn z_bytes_writer_take_from_loaned(
     })
 }
 
+// --- R311y559: the one-shot serialize / deserialize helpers ----------------
+//
+// Upstream's `ze_serialize_*` / `ze_deserialize_*` are the SINGLE-VALUE forms
+// of the serializer family already above: each builds (or consumes) a whole
+// payload holding exactly one value. They are written as compositions of the
+// serializer rather than as parallel encoders, so the wire format has ONE
+// definition — a second encoder here would be a copy that drifts, and the
+// R311y532 slice-arrangement finding is what that drift looks like when only a
+// foreign oracle can see it.
+
+/// Serialize a length-prefixed byte buffer as a whole payload (pico
+/// `ze_serialize_buf`).
+///
+/// # Safety
+/// `bytes` must be valid and writable; `data` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_buf(
+    bytes: *mut z_owned_bytes_t,
+    data: *const u8,
+    len: usize,
+) -> ZResult {
+    one_shot(bytes, |serializer| {
+        ze_serializer_serialize_buf(serializer, data, len)
+    })
+}
+
+/// Serialize a loaned slice as a whole payload (pico `ze_serialize_slice`).
+///
+/// # Safety
+/// `bytes` must be valid and writable; `slice` must be null or a live loaned
+/// slice.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_slice(
+    bytes: *mut z_owned_bytes_t,
+    slice: *const crate::abi::z_loaned_slice_t,
+) -> ZResult {
+    one_shot(bytes, |serializer| {
+        ze_serializer_serialize_slice(serializer, slice)
+    })
+}
+
+/// Serialize a NUL-terminated string as a whole payload (pico
+/// `ze_serialize_str`).
+///
+/// # Safety
+/// `bytes` must be valid and writable; `value` must be null or a valid
+/// NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_str(
+    bytes: *mut z_owned_bytes_t,
+    value: *const std::ffi::c_char,
+) -> ZResult {
+    one_shot(bytes, |serializer| {
+        ze_serializer_serialize_str(serializer, value)
+    })
+}
+
+/// Serialize an explicitly-sized substring as a whole payload (pico
+/// `ze_serialize_substr`).
+///
+/// # Safety
+/// `bytes` must be valid and writable; `start` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_substr(
+    bytes: *mut z_owned_bytes_t,
+    start: *const std::ffi::c_char,
+    len: usize,
+) -> ZResult {
+    one_shot(bytes, |serializer| {
+        ze_serializer_serialize_substr(serializer, start, len)
+    })
+}
+
+/// Serialize a loaned string as a whole payload (pico `ze_serialize_string`).
+///
+/// # Safety
+/// `bytes` must be valid and writable; `s` must be null or a live loaned
+/// string.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_string(
+    bytes: *mut z_owned_bytes_t,
+    s: *const crate::abi::z_loaned_string_t,
+) -> ZResult {
+    one_shot(bytes, |serializer| {
+        ze_serializer_serialize_string(serializer, s)
+    })
+}
+
+/// Serialize a boolean as a whole payload (pico `ze_serialize_bool`).
+///
+/// ONE byte, 0 or 1 — zenoh's serializer encodes a bool as a plain octet with
+/// no length prefix, unlike every other value in this family. Written out
+/// rather than routed through the length-prefixed buffer form for exactly that
+/// reason.
+///
+/// # Safety
+/// `bytes` must be valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_bool(bytes: *mut z_owned_bytes_t, val: bool) -> ZResult {
+    guarded(|| {
+        if bytes.is_null() {
+            return Z_ERR_NULL;
+        }
+        let octet: [u8; 1] = [u8::from(val)];
+        crate::bytes::z_bytes_copy_from_buf(bytes, octet.as_ptr(), 1)
+    })
+}
+
+/// Build a payload by running `body` against a fresh serializer, then finishing
+/// it into `bytes`.
+///
+/// Shared by every `ze_serialize_*` above so the "null the destination, build,
+/// finish" sequence — and its failure path — cannot drift between them.
+///
+/// # Safety
+/// `bytes` must be null or valid and writable.
+unsafe fn one_shot(
+    bytes: *mut z_owned_bytes_t,
+    body: impl FnOnce(*mut ze_loaned_serializer_t) -> ZResult,
+) -> ZResult {
+    guarded(|| {
+        if bytes.is_null() {
+            return Z_ERR_NULL;
+        }
+        *bytes = z_owned_bytes_t::null_value();
+        let mut serializer = ze_owned_serializer_t::null_value();
+        let rc = ze_serializer_empty(&mut serializer);
+        if rc != Z_OK {
+            return rc;
+        }
+        let rc = body(ze_serializer_loan_mut(&mut serializer));
+        if rc != Z_OK {
+            // Release the half-built serializer rather than leaking it; the
+            // caller sees a null payload, which `z_internal_bytes_check`
+            // reports as absent.
+            ze_serializer_drop(ze_serializer_move(&mut serializer));
+            return rc;
+        }
+        ze_serializer_finish(ze_serializer_move(&mut serializer), bytes);
+        Z_OK
+    })
+}
+
+/// Read one length-prefixed slice out of a whole payload (pico
+/// `ze_deserialize_slice`).
+///
+/// # Safety
+/// `bytes` must be null or a live loaned payload; `dst` must be valid and
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn ze_deserialize_slice(
+    bytes: *const z_loaned_bytes_t,
+    dst: *mut crate::abi::z_owned_slice_t,
+) -> ZResult {
+    guarded(|| {
+        let mut deserializer = ze_deserializer_from_bytes(bytes);
+        ze_deserializer_deserialize_slice(&mut deserializer, dst)
+    })
+}
+
+/// Read one length-prefixed string out of a whole payload (pico
+/// `ze_deserialize_string`).
+///
+/// # Safety
+/// `bytes` must be null or a live loaned payload; `str_out` must be valid and
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn ze_deserialize_string(
+    bytes: *const z_loaned_bytes_t,
+    str_out: *mut crate::abi::z_owned_string_t,
+) -> ZResult {
+    guarded(|| {
+        let mut deserializer = ze_deserializer_from_bytes(bytes);
+        ze_deserializer_deserialize_string(&mut deserializer, str_out)
+    })
+}
+
+/// Read a boolean out of a whole payload (pico `ze_deserialize_bool`).
+///
+/// The mirror of [`ze_serialize_bool`]: one octet, and any non-zero value reads
+/// as `true`. A payload of a different length is REJECTED rather than
+/// truncated — a caller asking for a bool and being handed a 4-byte value has
+/// a type mismatch, not a bool.
+///
+/// # Safety
+/// `bytes` must be null or a live loaned payload; `dst` must be valid and
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn ze_deserialize_bool(
+    bytes: *const z_loaned_bytes_t,
+    dst: *mut bool,
+) -> ZResult {
+    guarded(|| {
+        if dst.is_null() {
+            return Z_ERR_NULL;
+        }
+        *dst = false;
+        let Some(buf) = crate::bytes::bytes_ref(bytes) else {
+            return Z_ERR_NULL;
+        };
+        match buf.as_slice() {
+            [octet] => {
+                *dst = *octet != 0;
+                Z_OK
+            }
+            _ => crate::result::Z_ERR_INVALID,
+        }
+    })
+}
+
+/// Adopt a loaned serializer into an owned one, emptying the source (pico
+/// `ze_serializer_take_from_loaned`).
+///
+/// Hand-written for the same reason
+/// [`z_bytes_writer_take_from_loaned`] is: the shared macro clears a
+/// THREE-slot pad and this type carries four.
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a live loaned
+/// serializer this crate produced.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serializer_take_from_loaned(
+    dst: *mut ze_owned_serializer_t,
+    src: *mut ze_loaned_serializer_t,
+) -> ZResult {
+    guarded(|| {
+        if dst.is_null() || src.is_null() {
+            return Z_ERR_NULL;
+        }
+        *dst = ze_owned_serializer_t {
+            handle: (*src).handle,
+            _pad: (*src)._pad,
+        };
+        (*src).handle = std::ptr::null_mut();
+        (*src)._pad = [std::ptr::null_mut(); 4];
+        Z_OK
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -492,6 +492,52 @@ unsafe fn declare_matching(
     Ok((shared, id))
 }
 
+/// Declare a matching watch on an ADVANCED publisher (R311y559).
+///
+/// Shared by the handled and background advanced forms, and shaped like
+/// [`declare_matching`] rather than reusing it because the target is resolved
+/// differently: an advanced publisher's state is a different type, so the
+/// caller hands over the already-resolved `(session, keyexpr)` pair.
+///
+/// `listener` of `None` is the BACKGROUND form — the watch lives for the
+/// session and the id is deliberately dropped, exactly as
+/// [`z_publisher_declare_background_matching_listener`] does.
+///
+/// # Safety
+/// `listener` must be null or valid and writable; `callback` must be a valid
+/// moved closure, which is consumed on every path.
+pub(crate) unsafe fn declare_advanced_matching(
+    target: Option<(Arc<SharedSession>, String)>,
+    listener: Option<*mut z_owned_matching_listener_t>,
+    callback: *mut z_moved_closure_matching_status_t,
+) -> ZResult {
+    guarded(|| {
+        // Take the closure FIRST, so an invalid publisher still releases it.
+        let sink: MatchingSink = match consume_matching_closure(callback) {
+            Ok(sink) => sink,
+            Err(code) => return code,
+        };
+        let Some((shared, keyexpr)) = target else {
+            // `sink` drops here, running the caller's `drop(context)`.
+            return Z_ERR_NULL;
+        };
+        let id = shared.declare_matching_listener(keyexpr, sink);
+        match listener {
+            None => Z_OK,
+            Some(slot) if slot.is_null() => {
+                // No handle slot to fill, so the watch would be unreachable:
+                // retract it rather than leaving an un-undeclarable listener.
+                shared.undeclare_matching_listener(id);
+                Z_ERR_NULL
+            }
+            Some(slot) => {
+                *slot = MatchingListenerState::into_handle(shared, id);
+                Z_OK
+            }
+        }
+    })
+}
+
 /// Consume a moved matching closure and adapt it to a [`MatchingSink`].
 ///
 /// Shared by the PUBLISHER and QUERIER declare forms so the ownership contract

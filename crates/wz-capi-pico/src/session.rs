@@ -770,3 +770,156 @@ fn entity_id_of(identity: Option<([u8; 16], u64)>) -> crate::advanced::z_entity_
         },
     }
 }
+
+// --- R311y559: the remaining option defaults + the two `zp_` task probes -----
+
+/// pico `z_subscriber_options_t` — a ONE-BYTE dummy in this build.
+///
+/// The struct is `{ z_locality_t allowed_origin; }` under
+/// `Z_FEATURE_LOCAL_SUBSCRIBER` and `{ uint8_t __dummy; }` without it, and the
+/// generated `config.h` these programs compile against has the feature OFF. So
+/// the field a caller can set does not exist, which is the same fact
+/// `crate::pubsub`'s `Locality::Remote` subscribe pin records from the other
+/// side. 1 B MEASURED.
+#[repr(C)]
+pub struct z_subscriber_options_t {
+    pub __dummy: u8,
+}
+
+/// pico `z_open_options_t`, 16 B measured:
+/// `{ bool auto_start_read_task; bool auto_start_lease_task; z_task_attr_t* }`.
+///
+/// Both booleans are DEPRECATED upstream — with multi-threading enabled the
+/// tasks start automatically — and wz's session starts its own drive thread in
+/// `z_open`, so they are accepted and have no effect here either. That is not a
+/// wz divergence: it is upstream's own documented state for this build.
+#[repr(C)]
+pub struct z_open_options_t {
+    pub auto_start_read_task: bool,
+    pub auto_start_lease_task: bool,
+    pub executor_task_attributes: *mut crate::sync::z_task_attr_t,
+}
+
+/// pico `z_close_options_t` — a one-byte dummy, 1 B measured.
+#[repr(C)]
+pub struct z_close_options_t {
+    pub __dummy: u8,
+}
+
+/// pico `zp_task_read_options_t`, 8 B measured.
+#[repr(C)]
+pub struct zp_task_read_options_t {
+    pub task_attributes: *mut crate::sync::z_task_attr_t,
+}
+
+/// pico `zp_task_lease_options_t`, 8 B measured.
+#[repr(C)]
+pub struct zp_task_lease_options_t {
+    pub task_attributes: *mut crate::sync::z_task_attr_t,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_subscriber_options_t>() == 1);
+    assert!(std::mem::size_of::<z_open_options_t>() == 16);
+    assert!(std::mem::size_of::<z_close_options_t>() == 1);
+    assert!(std::mem::size_of::<zp_task_read_options_t>() == 8);
+    assert!(std::mem::size_of::<zp_task_lease_options_t>() == 8);
+};
+
+/// Fill default subscriber options (pico `z_subscriber_options_default`).
+///
+/// # Safety
+/// `options` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_subscriber_options_default(options: *mut z_subscriber_options_t) {
+    if !options.is_null() {
+        (*options).__dummy = 0;
+    }
+}
+
+/// Fill default open options (pico `z_open_options_default`).
+///
+/// # Safety
+/// `options` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_open_options_default(options: *mut z_open_options_t) {
+    if !options.is_null() {
+        *options = z_open_options_t {
+            auto_start_read_task: true,
+            auto_start_lease_task: true,
+            executor_task_attributes: std::ptr::null_mut(),
+        };
+    }
+}
+
+/// Fill default close options (pico `z_close_options_default`).
+///
+/// # Safety
+/// `options` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_close_options_default(options: *mut z_close_options_t) {
+    if !options.is_null() {
+        (*options).__dummy = 0;
+    }
+}
+
+/// Fill default read-task options (pico `zp_task_read_options_default`).
+///
+/// # Safety
+/// `options` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn zp_task_read_options_default(options: *mut zp_task_read_options_t) {
+    if !options.is_null() {
+        (*options).task_attributes = std::ptr::null_mut();
+    }
+}
+
+/// Fill default lease-task options (pico `zp_task_lease_options_default`).
+///
+/// # Safety
+/// `options` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn zp_task_lease_options_default(options: *mut zp_task_lease_options_t) {
+    if !options.is_null() {
+        (*options).task_attributes = std::ptr::null_mut();
+    }
+}
+
+/// Whether the session's READ task is running (pico `zp_read_task_is_running`).
+///
+/// wz runs ONE drive thread serving both roles rather than pico's separate read
+/// and lease tasks, so this and [`zp_lease_task_is_running`] answer the same
+/// question — "is the session still driving?" — and both are the negation of
+/// [`z_session_is_closed`]. Stated rather than left to be inferred from two
+/// identical bodies: a program polling one to decide whether the other is up
+/// gets a consistent answer here, which is the property that matters.
+///
+/// # Safety
+/// `zs` must be null or a live loaned session.
+#[no_mangle]
+pub unsafe extern "C" fn zp_read_task_is_running(zs: *const z_loaned_session_t) -> bool {
+    !z_session_is_closed(zs)
+}
+
+/// Whether the session's LEASE task is running (pico
+/// `zp_lease_task_is_running`). See [`zp_read_task_is_running`].
+///
+/// # Safety
+/// `zs` must be null or a live loaned session.
+#[no_mangle]
+pub unsafe extern "C" fn zp_lease_task_is_running(zs: *const z_loaned_session_t) -> bool {
+    !z_session_is_closed(zs)
+}
+
+/// pico's default priority (pico `z_priority_default`) — `Z_PRIORITY_DATA`.
+#[no_mangle]
+pub extern "C" fn z_priority_default() -> std::ffi::c_int {
+    crate::query::Z_PRIORITY_DEFAULT
+}
+
+/// pico's default reliability (pico `z_reliability_default`) —
+/// `Z_RELIABILITY_RELIABLE`, which is 0 on this ABI and 1 in wz's own enum.
+#[no_mangle]
+pub extern "C" fn z_reliability_default() -> std::ffi::c_int {
+    crate::pubsub::Z_RELIABILITY_RELIABLE
+}

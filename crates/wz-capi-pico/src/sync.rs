@@ -41,7 +41,8 @@
 //! or hang for the wall-clock/uptime skew. The two calls only agree because
 //! both name the same clock.
 
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
+use std::sync::Arc;
 
 use crate::ffi::guard_val;
 use crate::platform::z_clock_t;
@@ -321,6 +322,439 @@ pub unsafe extern "C" fn z_condvar_wait_until(
         }
         sys(rc)
     })
+}
+
+// ---------------------------------------------------------------------------
+// R311y559 — Task, cancellation token, and the `z_internal_*_null` trio
+// ---------------------------------------------------------------------------
+//
+// Every export below is a symbol the real `libzenohpico.so` defines and this
+// cdylib did not (`wz-integration-tests/tests/pico_abi_symbol_census.rs`).
+// A pico program that starts its own worker — upstream's own `z_ping.c` shape
+// — could not link at all.
+
+/// pico `z_owned_task_t` — `{ _z_task_t _val }`, and `_z_task_t` is `pthread_t`
+/// on unix. 8 B MEASURED against the built library's own headers, not inferred.
+///
+/// As with mutex and condvar, the loaned / moved forms are the same 8 bytes at
+/// the same address, so the family is pointer identity.
+pub type z_owned_task_t = libc::pthread_t;
+/// Loaned task — see [`z_owned_task_t`].
+pub type z_loaned_task_t = libc::pthread_t;
+/// Moved task — see [`z_owned_task_t`].
+pub type z_moved_task_t = libc::pthread_t;
+
+/// pico `z_task_attr_t` — `pthread_attr_t` on unix, 56 B measured.
+pub type z_task_attr_t = libc::pthread_attr_t;
+
+const _: () = {
+    assert!(std::mem::size_of::<z_owned_task_t>() == 8);
+    assert!(std::mem::size_of::<z_task_attr_t>() == 56);
+};
+
+/// Start a thread running `fun(arg)` (pico `z_task_init`).
+///
+/// `pthread_create` directly, because upstream's is: the handle a caller gets
+/// back is a real `pthread_t` it may hand to `z_task_join`, and a Rust
+/// `JoinHandle` cannot be one. `attr` is passed through rather than ignored —
+/// a program setting a stack size on a constrained target is the reason the
+/// parameter exists.
+///
+/// # Safety
+/// `task` must be valid and writable; `attr` must be null or a valid
+/// `pthread_attr_t`; `fun` must be a valid C function pointer.
+#[no_mangle]
+pub unsafe extern "C" fn z_task_init(
+    task: *mut z_owned_task_t,
+    attr: *mut z_task_attr_t,
+    fun: Option<extern "C" fn(*mut c_void) -> *mut c_void>,
+    arg: *mut c_void,
+) -> ZResult {
+    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+        if task.is_null() {
+            return Z_ERR_NULL;
+        }
+        *task = 0;
+        let Some(entry) = fun else {
+            return Z_ERR_NULL;
+        };
+        sys(libc::pthread_create(task, attr, entry, arg))
+    })
+}
+
+/// Wait for a task to finish (pico `z_task_join`).
+///
+/// # Safety
+/// `task` must be null or a valid moved task this crate started.
+#[no_mangle]
+pub unsafe extern "C" fn z_task_join(task: *mut z_moved_task_t) -> ZResult {
+    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+        if task.is_null() {
+            return Z_ERR_NULL;
+        }
+        // A zero handle is an already-joined / never-started task, which is
+        // SUCCESS rather than an error: the export is idempotent in upstream
+        // too, and `pthread_join(0, ..)` is undefined behaviour.
+        if *task == 0 {
+            return Z_OK;
+        }
+        let handle = *task;
+        *task = 0;
+        sys(libc::pthread_join(handle, std::ptr::null_mut()))
+    })
+}
+
+/// Release a task WITHOUT waiting (pico `z_task_detach`).
+///
+/// # Safety
+/// As [`z_task_join`].
+#[no_mangle]
+pub unsafe extern "C" fn z_task_detach(task: *mut z_moved_task_t) -> ZResult {
+    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+        if task.is_null() {
+            return Z_ERR_NULL;
+        }
+        if *task == 0 {
+            return Z_OK;
+        }
+        let handle = *task;
+        *task = 0;
+        sys(libc::pthread_detach(handle))
+    })
+}
+
+/// Drop a task (pico `z_task_drop`) — upstream documents this as EXACTLY
+/// `z_task_detach`, so it delegates rather than repeating the body.
+///
+/// # Safety
+/// As [`z_task_join`].
+#[no_mangle]
+pub unsafe extern "C" fn z_task_drop(task: *mut z_moved_task_t) -> ZResult {
+    z_task_detach(task)
+}
+
+/// Borrow a task (pico `z_task_loan`) — pointer identity.
+///
+/// # Safety
+/// `task` must be null or a valid owned task.
+#[no_mangle]
+pub unsafe extern "C" fn z_task_loan(task: *const z_owned_task_t) -> *const z_loaned_task_t {
+    task
+}
+
+/// Mutably borrow a task (pico `z_task_loan_mut`).
+///
+/// # Safety
+/// As [`z_task_loan`].
+#[no_mangle]
+pub unsafe extern "C" fn z_task_loan_mut(task: *mut z_owned_task_t) -> *mut z_loaned_task_t {
+    task
+}
+
+/// Move-cast a task (pico `z_task_move`).
+///
+/// # Safety
+/// As [`z_task_loan`].
+#[no_mangle]
+pub unsafe extern "C" fn z_task_move(task: *mut z_owned_task_t) -> *mut z_moved_task_t {
+    task
+}
+
+/// Take a task out of a moved wrapper (pico `z_task_take`), zeroing the source.
+///
+/// # Safety
+/// Both pointers must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_task_take(dst: *mut z_owned_task_t, src: *mut z_moved_task_t) {
+    if dst.is_null() || src.is_null() {
+        return;
+    }
+    *dst = *src;
+    *src = 0;
+}
+
+/// Zero an owned task (pico `z_internal_task_null`).
+///
+/// # Safety
+/// `task` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_task_null(task: *mut z_owned_task_t) {
+    if !task.is_null() {
+        *task = 0;
+    }
+}
+
+/// Zero an owned mutex (pico `z_internal_mutex_null`).
+///
+/// Zeroing rather than `pthread_mutex_init`: upstream's `_null` family marks a
+/// value as ABSENT, and a caller then asks `z_mutex_init` for a live one. An
+/// initialised-but-"null" mutex would leak the pthread object at every
+/// subsequent `z_mutex_init` on the same storage.
+///
+/// # Safety
+/// `m` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_mutex_null(m: *mut z_owned_mutex_t) {
+    if !m.is_null() {
+        std::ptr::write_bytes(m.cast::<u8>(), 0, std::mem::size_of::<z_owned_mutex_t>());
+    }
+}
+
+/// Zero an owned condvar (pico `z_internal_condvar_null`).
+///
+/// # Safety
+/// `cv` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_condvar_null(cv: *mut z_owned_condvar_t) {
+    if !cv.is_null() {
+        std::ptr::write_bytes(cv.cast::<u8>(), 0, std::mem::size_of::<z_owned_condvar_t>());
+    }
+}
+
+// --- cancellation token -----------------------------------------------------
+
+/// The shared flag behind a `z_owned_cancellation_token_t`.
+///
+/// An `AtomicBool` behind an `Arc`, which is what makes upstream's semantics
+/// reproducible: pico's token is a REFCOUNTED value (`_Z_OWNED_TYPE_RC`), so a
+/// clone and its original name the SAME cancellation state and cancelling
+/// either cancels both. A plain copy of a bool would give each holder its own
+/// flag and `z_cancellation_token_clone` would silently stop working.
+struct CancellationToken {
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+/// pico `z_owned_cancellation_token_t` — `{ _z_cancellation_token_rc_t _rc }`,
+/// 16 B MEASURED. Slot 0 carries this crate's `Arc` handle; slot 1 is the
+/// refcount word upstream keeps there and wz leaves zero.
+#[repr(C)]
+pub struct z_owned_cancellation_token_t {
+    handle: *mut c_void,
+    _cnt: *mut c_void,
+}
+
+/// Loaned cancellation token — same footprint.
+#[repr(C)]
+pub struct z_loaned_cancellation_token_t {
+    handle: *mut c_void,
+    _cnt: *mut c_void,
+}
+
+/// Moved cancellation token.
+#[repr(C)]
+pub struct z_moved_cancellation_token_t {
+    _this: z_owned_cancellation_token_t,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_owned_cancellation_token_t>() == 16);
+};
+
+impl z_owned_cancellation_token_t {
+    fn null_value() -> Self {
+        Self {
+            handle: std::ptr::null_mut(),
+            _cnt: std::ptr::null_mut(),
+        }
+    }
+}
+
+/// The `Arc` behind a token handle, or `None` on a null / spent one.
+///
+/// # Safety
+/// `ptr` must be null or a token this crate produced.
+unsafe fn token_ref<'a>(
+    ptr: *const z_loaned_cancellation_token_t,
+) -> Option<&'a Arc<CancellationToken>> {
+    if ptr.is_null() || (*ptr).handle.is_null() {
+        return None;
+    }
+    Some(&*((*ptr).handle as *const Arc<CancellationToken>))
+}
+
+/// Build a fresh, uncancelled token (pico `z_cancellation_token_new`).
+///
+/// # Safety
+/// `token` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_cancellation_token_new(
+    token: *mut z_owned_cancellation_token_t,
+) -> ZResult {
+    crate::ffi::guarded(|| {
+        if token.is_null() {
+            return Z_ERR_NULL;
+        }
+        let arc = Arc::new(CancellationToken {
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+        });
+        *token = z_owned_cancellation_token_t {
+            handle: Box::into_raw(Box::new(arc)) as *mut c_void,
+            _cnt: std::ptr::null_mut(),
+        };
+        Z_OK
+    })
+}
+
+/// Cancel a token (pico `z_cancellation_token_cancel`).
+///
+/// Visible through every CLONE, which is the whole point of the type — see
+/// [`CancellationToken`].
+///
+/// # Safety
+/// `token` must be null or a live loaned token.
+#[no_mangle]
+pub unsafe extern "C" fn z_cancellation_token_cancel(
+    token: *mut z_loaned_cancellation_token_t,
+) -> ZResult {
+    crate::ffi::guarded(|| match token_ref(token as *const _) {
+        Some(arc) => {
+            arc.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Z_OK
+        }
+        None => Z_ERR_NULL,
+    })
+}
+
+/// Whether a token has been cancelled (pico
+/// `z_cancellation_token_is_cancelled`).
+///
+/// # Safety
+/// `token` must be null or a live loaned token.
+#[no_mangle]
+pub unsafe extern "C" fn z_cancellation_token_is_cancelled(
+    token: *const z_loaned_cancellation_token_t,
+) -> bool {
+    crate::ffi::guard_val(false, || match token_ref(token) {
+        Some(arc) => arc.cancelled.load(std::sync::atomic::Ordering::SeqCst),
+        None => false,
+    })
+}
+
+/// Clone a token so both handles name the SAME cancellation state (pico
+/// `z_cancellation_token_clone`).
+///
+/// # Safety
+/// `dst` must be valid and writable; `src` must be null or a live loaned token.
+#[no_mangle]
+pub unsafe extern "C" fn z_cancellation_token_clone(
+    dst: *mut z_owned_cancellation_token_t,
+    src: *const z_loaned_cancellation_token_t,
+) -> ZResult {
+    crate::ffi::guarded(|| {
+        if dst.is_null() {
+            return Z_ERR_NULL;
+        }
+        *dst = z_owned_cancellation_token_t::null_value();
+        match token_ref(src) {
+            Some(arc) => {
+                *dst = z_owned_cancellation_token_t {
+                    handle: Box::into_raw(Box::new(Arc::clone(arc))) as *mut c_void,
+                    _cnt: std::ptr::null_mut(),
+                };
+                Z_OK
+            }
+            None => Z_ERR_NULL,
+        }
+    })
+}
+
+/// Release a token handle (pico `z_cancellation_token_drop`).
+///
+/// Drops THIS handle's `Arc`; the state survives while any clone holds one.
+///
+/// # Safety
+/// `token` must be null or a valid moved token this crate produced.
+#[no_mangle]
+pub unsafe extern "C" fn z_cancellation_token_drop(token: *mut z_moved_cancellation_token_t) {
+    let _ = crate::ffi::guarded(|| {
+        if token.is_null() {
+            return Z_OK;
+        }
+        let handle = (*token)._this.handle;
+        (*token)._this = z_owned_cancellation_token_t::null_value();
+        if !handle.is_null() {
+            drop(Box::from_raw(handle as *mut Arc<CancellationToken>));
+        }
+        Z_OK
+    });
+}
+
+/// Borrow a token (pico `z_cancellation_token_loan`) — offset-0 identity.
+///
+/// # Safety
+/// `token` must be null or a valid owned token.
+#[no_mangle]
+pub unsafe extern "C" fn z_cancellation_token_loan(
+    token: *const z_owned_cancellation_token_t,
+) -> *const z_loaned_cancellation_token_t {
+    token as *const z_loaned_cancellation_token_t
+}
+
+/// Mutably borrow a token (pico `z_cancellation_token_loan_mut`).
+///
+/// # Safety
+/// As [`z_cancellation_token_loan`].
+#[no_mangle]
+pub unsafe extern "C" fn z_cancellation_token_loan_mut(
+    token: *mut z_owned_cancellation_token_t,
+) -> *mut z_loaned_cancellation_token_t {
+    token as *mut z_loaned_cancellation_token_t
+}
+
+/// Move-cast a token (pico `z_cancellation_token_move`).
+///
+/// # Safety
+/// As [`z_cancellation_token_loan`].
+#[no_mangle]
+pub unsafe extern "C" fn z_cancellation_token_move(
+    token: *mut z_owned_cancellation_token_t,
+) -> *mut z_moved_cancellation_token_t {
+    token as *mut z_moved_cancellation_token_t
+}
+
+/// Take a token out of a moved wrapper (pico `z_cancellation_token_take`).
+///
+/// # Safety
+/// Both pointers must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_cancellation_token_take(
+    dst: *mut z_owned_cancellation_token_t,
+    src: *mut z_moved_cancellation_token_t,
+) {
+    if dst.is_null() || src.is_null() {
+        return;
+    }
+    *dst = z_owned_cancellation_token_t {
+        handle: (*src)._this.handle,
+        _cnt: (*src)._this._cnt,
+    };
+    (*src)._this = z_owned_cancellation_token_t::null_value();
+}
+
+/// Zero an owned token (pico `z_internal_cancellation_token_null`).
+///
+/// # Safety
+/// `token` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_cancellation_token_null(
+    token: *mut z_owned_cancellation_token_t,
+) {
+    if !token.is_null() {
+        *token = z_owned_cancellation_token_t::null_value();
+    }
+}
+
+/// `true` iff the owned token holds a live state (pico
+/// `z_internal_cancellation_token_check`).
+///
+/// # Safety
+/// `token` must be null or a valid owned token.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_cancellation_token_check(
+    token: *const z_owned_cancellation_token_t,
+) -> bool {
+    crate::ffi::guard_val(false, || !token.is_null() && !(*token).handle.is_null())
 }
 
 #[cfg(test)]

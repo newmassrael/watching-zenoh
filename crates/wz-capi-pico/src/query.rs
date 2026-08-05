@@ -317,6 +317,11 @@ struct QueryMarshal {
     /// [`parameters_has_anyke`]) — the same derivation pico does, and the gate
     /// `z_query_reply` consults.
     anyke: bool,
+    /// R311y559 — the query's `(zid, eid, sn)` source triple, in the pico ABI
+    /// shape `z_query_source_info` hands back a POINTER to. Stored rather than
+    /// synthesised per call for the same reason every cached view here is: the
+    /// accessor returns a pointer, and a stack temporary would dangle.
+    source_info: Option<crate::pubsub::z_source_info_t>,
     /// The query's ENCODING, if it carried one. Unlike the payload this stays
     /// an `Option`, because `z_query_encoding` hands back a POINTER and pico
     /// distinguishes "no encoding" from "the default encoding".
@@ -408,6 +413,10 @@ impl QueryMarshal {
                 unsafe { crate::encoding::store_encoding(&mut owned, hint.clone()) };
                 owned
             }),
+            // R311y559 — carried through the SAME projection the sample plane
+            // uses, so a `(zid, eid, sn)` read off a query and one read off a
+            // sample cannot render differently.
+            source_info: view.source_info().map(crate::pubsub::source_info_of),
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
                 handle: std::ptr::null_mut(),
@@ -452,6 +461,7 @@ impl QueryMarshal {
                 .as_ref()
                 // SAFETY: `encoding` is an owned encoding this crate stored.
                 .map(|owned| unsafe { crate::encoding::clone_owned_encoding(owned) }),
+            source_info: self.source_info,
             payload: self.payload.clone(),
             attachment: self.attachment.clone(),
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
@@ -1435,6 +1445,61 @@ pub(crate) unsafe fn queryable_identity(
 ) -> Option<([u8; 16], u64)> {
     handle_ref::<z_loaned_queryable_t, QueryableState>(queryable)
         .map(|state| (state.shared.zid(), state.id))
+}
+
+/// Borrow a query's source info, or NULL when it carried none (pico
+/// `z_query_source_info`).
+///
+/// R311y559 — a symbol the census found missing. NULL for absent is the
+/// contract, not an error path, exactly as on
+/// [`crate::pubsub::z_sample_source_info`].
+///
+/// # Safety
+/// `query` must be null or a live loaned query.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_source_info(
+    query: *const z_loaned_query_t,
+) -> *const crate::pubsub::z_source_info_t {
+    crate::ffi::guard_val(std::ptr::null(), || match query_marshal(query) {
+        Some(marshal) => match marshal.source_info.as_ref() {
+            Some(info) => info as *const crate::pubsub::z_source_info_t,
+            None => std::ptr::null(),
+        },
+        None => std::ptr::null(),
+    })
+}
+
+/// Deep-copy a query into an owned one (pico `z_query_clone`).
+///
+/// Routed through the SAME [`clone_query_marshal`] `z_query_take_from_loaned`
+/// uses, so the two cannot diverge; the only difference is that this leaves the
+/// source intact. Both are ESCAPES: the copy carries a deferred responder and
+/// holds the `ResponseFinal` open until it is dropped, which is what makes "the
+/// query is answered when the C side drops it" true for a clone too.
+///
+/// # Safety
+/// `dst` must be valid and writable; `this_` must be null or a live loaned
+/// query.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_clone(
+    dst: *mut z_owned_query_t,
+    this_: *const z_loaned_query_t,
+) -> ZResult {
+    guarded(|| {
+        if dst.is_null() {
+            return Z_ERR_NULL;
+        }
+        *dst = z_owned_query_t::null_value();
+        if this_.is_null() {
+            return Z_ERR_NULL;
+        }
+        let handle = clone_query_marshal(this_);
+        if handle.is_null() {
+            return crate::result::Z_ERR_GENERIC;
+        }
+        (*dst).handle = handle;
+        Z_OK
+    })
 }
 
 #[cfg(test)]

@@ -363,6 +363,34 @@ pub unsafe extern "C" fn _z_id_len(id: z_id_t) -> u8 {
     len
 }
 
+/// Build an owned zid closure from a callback + drop + context (pico
+/// `z_closure_zid`).
+///
+/// R311y559 — the constructor of a family whose `_call` half already existed,
+/// exactly as [`crate::scout::z_closure_hello`] was.
+///
+/// # Safety
+/// `closure` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_closure_zid(
+    closure: *mut z_owned_closure_zid_t,
+    call: z_closure_zid_callback_t,
+    drop: crate::pubsub::z_closure_drop_callback_t,
+    context: *mut c_void,
+) -> ZResult {
+    crate::ffi::guarded(|| {
+        if closure.is_null() {
+            return crate::result::Z_ERR_NULL;
+        }
+        *closure = z_owned_closure_zid_t {
+            context,
+            call,
+            drop,
+        };
+        crate::result::Z_OK
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -93,7 +93,24 @@ pub(crate) struct ConfigState {
 impl ConfigState {
     #[inline]
     pub(crate) fn get(&self, key: u8) -> Option<&str> {
-        self.entries.get(&key).map(String::as_str)
+        self.entries
+            .get(&key)
+            .map(|v| v.strip_suffix('\0').unwrap_or(v.as_str()))
+    }
+
+    /// Record `value` under `key`, NUL-TERMINATED in the map (R311y559).
+    ///
+    /// The terminator is stored rather than appended per read because
+    /// [`zp_config_get`] hands the C side a `const char *` INTO this storage —
+    /// upstream's contract is a borrow of the config, not a rendered copy — and
+    /// a borrow can only be NUL-terminated if the stored bytes are. Every
+    /// reader goes through [`Self::get`], which strips it, so the terminator is
+    /// invisible to the Rust side.
+    pub(crate) fn insert(&mut self, key: u8, value: &str) {
+        let mut owned = String::with_capacity(value.len() + 1);
+        owned.push_str(value);
+        owned.push('\0');
+        self.entries.insert(key, owned);
     }
 }
 
@@ -153,11 +170,46 @@ pub unsafe extern "C" fn zp_config_insert(
         }
         let state = &mut *(handle as *mut ConfigState);
         let val = match CStr::from_ptr(value).to_str() {
-            Ok(s) => s.to_owned(),
+            Ok(s) => s,
             Err(_) => return Z_ERR_INVALID,
         };
-        state.entries.insert(key, val);
+        state.insert(key, val);
         Z_OK
+    })
+}
+
+/// Read a config value by int key (pico `zp_config_get`), or NULL when unset.
+///
+/// R311y559 — a symbol the census found missing. The returned pointer borrows
+/// the config's OWN storage, which is upstream's contract and is why the value
+/// is not rendered into a temporary: a caller holds it for as long as it holds
+/// the config. `ConfigState::entries` owns `String`s that are never rewritten
+/// in place (`zp_config_insert` replaces the map entry), so the borrow is
+/// stable for the entry's life.
+///
+/// The stored bytes carry the terminator, which is what makes the borrow a
+/// valid C string; see [`ConfigState::insert`].
+///
+/// # Safety
+/// `config` must be null or a live loaned config; the result must not outlive
+/// it.
+#[no_mangle]
+pub unsafe extern "C" fn zp_config_get(config: *const z_loaned_config_t, key: u8) -> *const c_char {
+    crate::ffi::guard_val(std::ptr::null(), || {
+        if config.is_null() {
+            return std::ptr::null();
+        }
+        let handle = (*config).handle;
+        if handle.is_null() {
+            return std::ptr::null();
+        }
+        let state = &*(handle as *const ConfigState);
+        match state.entries.get(&key) {
+            // The map's values are stored NUL-terminated (see the insert path),
+            // so the pointer is a valid C string.
+            Some(value) => value.as_ptr() as *const c_char,
+            None => std::ptr::null(),
+        }
     })
 }
 
