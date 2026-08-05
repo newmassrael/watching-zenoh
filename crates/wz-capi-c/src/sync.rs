@@ -25,36 +25,40 @@
 //! `u32` key into a process-wide registry and `z_condvar_loan` stays a plain
 //! cast because the key sits at offset 0 of the owned form too.
 //!
-//! ## `wait` is a real condvar, and the two mechanisms do DIFFERENT jobs
+//! ## `wait` is a real condvar, and TWO mechanisms cover TWO different gaps
 //!
-//! `z_condvar_wait(cv, m)` must release `m` and block ATOMICALLY with respect to
-//! a concurrent `z_condvar_signal`, or the signal races into the gap and the
-//! waiter sleeps forever. What closes that gap is the ORDER: take the condvar's
-//! own mutex FIRST, then unlock the caller's mutex, then wait. A signaller has to
-//! take that same mutex, so it cannot fire between the unlock and the park.
-//! Reversing those two lines is a real lost-wakeup, and the test below races them
-//! rather than sleeping past the window.
+//! `z_condvar_wait(cv, m)` must release `m` and block without losing a
+//! concurrent `z_condvar_signal`. There are two ways to lose one, and each needs
+//! its own mechanism:
 //!
-//! The GENERATION COUNTER is a separate thing and it is NOT what makes the above
-//! true — an earlier draft of this comment said it was, and a damage probe showed
-//! the claim was untestable because it was false. What the counter actually does
-//! is suppress SPURIOUS wakeups: `std::sync::Condvar` may return without a
-//! signal, and `z_ping.c` calls `z_condvar_wait` with no predicate loop
-//! (`examples/z_ping.c:87,99`), so a spurious return there records a bogus
-//! round-trip time and desynchronises the ping/pong pair. `wait_while` on a
-//! counter the signaller bumps is what turns that into a re-park.
+//! 1. The signal lands AFTER `m` is released but BEFORE the thread parks. Closed
+//!    by the ORDER: take the condvar's own mutex FIRST, then unlock `m`, then
+//!    wait. A signaller must take that same mutex, so it cannot fire in the gap.
+//! 2. The signal lands BEFORE `z_condvar_wait` is called at all. Closed by the
+//!    PENDING FLAG: the signaller sets it, the waiter consumes it and returns
+//!    immediately instead of parking.
 //!
-//! ## A signal delivered while NOBODY waits is LOST, as in pthreads
+//! The second one is a divergence from pthreads, taken deliberately and only
+//! after measuring. `pthread_cond_signal` with no waiter is lost, and so was
+//! this module until R311y540 — where upstream's own `z_ping.c` walked into it:
+//! it publishes and THEN waits while the subscriber callback signals from the
+//! drive thread, so a pong that returns before the main thread parks hangs the
+//! program forever. Measured over 20 runs against a real zenoh-pico `z_pong`,
+//! **wz completed 18 and the real `libzenohc.so` completed 20**; after the flag,
+//! **both complete 20**. "The reference is racy too" was the available excuse
+//! and the measurement refused it.
 //!
-//! Stated because the opposite is easy to assume from the counter's presence: the
-//! waiter reads the generation when it enters `wait`, so a signal that landed
-//! before that read is already accounted for and the waiter parks. That is
-//! `pthread_cond_signal`'s behaviour too, and upstream's `z_ping.c` depends on
-//! it being harmless — it holds its mutex across publish-then-wait while the
-//! callback that signals never takes that mutex, so the pattern is only safe
-//! because a round trip is longer than the few instructions between the publish
-//! returning and the waiter parking. wz does not make it safer than upstream, and
-//! it must not be described as if it did.
+//! Diverging here is safe in the direction that matters: it changes behaviour
+//! ONLY where pthreads would lose the wakeup, and no caller can be relying on
+//! that case, because the outcome there is a hang. It is a FLAG rather than a
+//! count so a signal cannot be banked — "a signal arrived with nobody
+//! listening" is one fact however many times it happened.
+//!
+//! The flag also carries the SPURIOUS-wakeup protection the generation counter
+//! it replaced was providing: `wait_while` re-parks whenever the flag is clear.
+//! `z_ping.c` needs that, because it calls `z_condvar_wait` with no predicate
+//! loop of its own (`examples/z_ping.c:87,99`), so a spurious return there
+//! records a bogus round-trip time.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -98,9 +102,36 @@ impl MutexState {
     }
 }
 
-/// Behind a condvar key: a generation counter and the notification it rides.
+/// Behind a condvar key: a PENDING-SIGNAL flag and the notification it rides.
+///
+/// A flag rather than the generation counter this carried until R311y540, and
+/// the difference is a measured defect rather than a refactor. With a
+/// generation, a waiter reads the counter when it ENTERS `wait` and blocks
+/// until it changes — so a signal delivered before that read is already
+/// accounted for and the waiter parks anyway. That is `pthread_cond_signal`'s
+/// behaviour, and upstream's own `z_ping.c` walks straight into it: it
+/// publishes and THEN waits, while the subscriber callback signals from the
+/// drive thread, so a pong that comes back before the main thread parks is lost
+/// and the program hangs forever.
+///
+/// It is not theoretical. Measured over 20 runs against a real zenoh-pico
+/// `z_pong`: wz completed 18, the real `libzenohc.so` completed 20. "The
+/// reference is racy too" was the available excuse and the measurement refused
+/// it.
+///
+/// A pending FLAG makes the signal survive the gap: the waiter consumes it and
+/// returns immediately. That is a strict superset of pthread semantics — it
+/// diverges only where pthread would LOSE the wakeup, which is the case no
+/// caller can be relying on because the outcome there is a hang. It is a FLAG
+/// and not a count on purpose: "a signal arrived with nobody listening" is one
+/// fact however many times it happened, and letting permits accumulate would
+/// let a later `wait` return for a signal that belonged to an earlier one.
+///
+/// The same flag keeps the spurious-wakeup protection the generation gave:
+/// `wait_while` re-parks whenever the flag is clear, which `z_ping.c` needs
+/// because it calls `z_condvar_wait` with no predicate loop of its own.
 struct CondvarState {
-    generation: Mutex<u64>,
+    pending: Mutex<bool>,
     changed: Condvar,
 }
 
@@ -281,7 +312,7 @@ pub unsafe extern "C" fn z_condvar_init(this_: *mut z_owned_condvar_t) {
         // one small allocation is the safe direction to be wrong in, and the
         // count is bounded by how many condvars the program ever creates.
         let state: &'static CondvarState = Box::leak(Box::new(CondvarState {
-            generation: Mutex::new(0),
+            pending: Mutex::new(false),
             changed: Condvar::new(),
         }));
         let key = next_condvar_key();
@@ -323,8 +354,8 @@ pub unsafe extern "C" fn z_condvar_signal(this_: *const z_loaned_condvar_t) -> Z
         let Some(state) = condvar_state(key) else {
             return Z_EINVAL_MUTEX;
         };
-        let mut gen = state.generation.lock().unwrap_or_else(|e| e.into_inner());
-        *gen = gen.wrapping_add(1);
+        let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
+        *pending = true;
         state.changed.notify_one();
         Z_OK
     })
@@ -354,17 +385,20 @@ pub unsafe extern "C" fn z_condvar_wait(
         let Some(mutex) = (unsafe { mutex_state(m) }) else {
             return Z_EINVAL_MUTEX;
         };
-        // ORDER IS THE WHOLE THING (see the module doc): take the condvar's own
-        // lock BEFORE releasing the caller's mutex, so a signaller — which must
-        // take this same lock — cannot slip between the unlock and the wait.
-        let gen = state.generation.lock().unwrap_or_else(|e| e.into_inner());
-        let seen = *gen;
+        // Take the condvar's own lock BEFORE releasing the caller's mutex, so a
+        // signaller — which must take this same lock — cannot slip between the
+        // unlock and the park. The PENDING FLAG covers the other half: a signal
+        // that arrived BEFORE this call is consumed here instead of being lost.
+        // Together they mean no ordering of the two threads drops the wakeup,
+        // which is what the generation counter this replaces could not do.
+        let pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
         mutex.unlock();
-        let gen = state
+        let mut pending = state
             .changed
-            .wait_while(gen, |current| *current == seen)
+            .wait_while(pending, |flagged| !*flagged)
             .unwrap_or_else(|e| e.into_inner());
-        drop(gen);
+        *pending = false;
+        drop(pending);
         // Upstream's contract: the mutex is held again on return.
         mutex.lock();
         Z_OK
@@ -478,34 +512,29 @@ mod tests {
         }
     }
 
-    /// Two hundred lock / wait / signal / unlock cycles complete, and the mutex
-    /// is HELD again when a wait returns.
+    /// A signal delivered BEFORE the waiter arrives is not lost, repeated
+    /// cycles complete, and the mutex is HELD again when a wait returns.
     ///
-    /// ## What this does NOT prove, stated first because a green here invites
-    /// the wrong reading
+    /// ## The first assertion is the one that was a residual until R311y540
     ///
-    /// It does not witness the unlock-then-park WINDOW. Two attempts were made
-    /// and both were measured rather than assumed:
+    /// This test previously said the lost-wakeup window could not be forced
+    /// through the public API, and it could not — while the implementation used
+    /// a generation counter, which reads the counter at wait time and therefore
+    /// treats an earlier signal as already accounted for. There was nothing to
+    /// assert because the property did not hold.
     ///
-    /// - The first slept in the signaller so the waiter had certainly parked, and
-    ///   asserted the wakeup arrived. Dropping the generation counter left it
-    ///   GREEN — it discriminated nothing, and that is what exposed the wrong
-    ///   claim in this module's doc, which said the counter closed the window.
-    /// - The second made the signaller block on the CALLER'S mutex, so its lock
-    ///   returning meant the waiter was past the unlock. That releases the
-    ///   signaller but does not make it RUN first: the waiter reaches the
-    ///   condvar's mutex in nanoseconds while the signaller has to wake from a
-    ///   park, so reversing the two lines in `z_condvar_wait` still passed 200
-    ///   rounds.
+    /// The pending FLAG makes it hold, and holding makes it DETERMINISTIC to
+    /// test: signal with no waiter, then wait, and the wait must return. No
+    /// timing, no race, no sleep. Reinstating the generation counter hangs this
+    /// on its first line — which is the discrimination the two earlier drafts
+    /// could never get.
     ///
-    /// The window cannot be forced through the public API without an injection
-    /// point in shipped code. So the ordering is argued from the source and NOT
-    /// measured here — a named residual, not a covered case. What the loop does
-    /// cover is gross liveness: a `z_condvar_wait` that failed to release the
-    /// mutex, or a mutex whose unlock did not wake its waiters, deadlocks it on
-    /// the first round.
+    /// The remaining two assertions cover the other gap and the mutex contract:
+    /// a lock/wait/signal/unlock loop deadlocks on round one if
+    /// `z_condvar_wait` fails to release the mutex, and the final block fails if
+    /// it returns without re-taking it.
     #[test]
-    fn repeated_lock_wait_signal_cycles_complete_and_the_mutex_is_retaken() {
+    fn a_signal_delivered_before_the_wait_is_not_lost_and_the_mutex_is_retaken() {
         // SAFETY: live locals driven exactly as a C caller would.
         unsafe {
             let mut m_owned = z_owned_mutex_t::null_value();
@@ -517,12 +546,28 @@ mod tests {
             let m = z_mutex_loan_mut(&mut m_owned) as usize;
             let cv = z_condvar_loan(&cv_owned) as usize;
 
+            // THE WINDOW, hit with no timing at all: signal while nothing is
+            // waiting, then wait. Under pthread semantics (and under the
+            // generation counter this replaced) the signal is gone and this
+            // line never returns; with the pending flag the waiter consumes it.
+            // This is upstream `z_ping.c`'s exact ordering — publish, pong
+            // arrives and signals, only then wait.
+            assert_eq!(z_mutex_lock(m as *mut z_loaned_mutex_t), Z_OK);
+            assert_eq!(z_condvar_signal(cv as *const z_loaned_condvar_t), Z_OK);
+            assert_eq!(
+                z_condvar_wait(cv as *const z_loaned_condvar_t, m as *mut z_loaned_mutex_t),
+                Z_OK,
+                "a signal delivered before the wait was LOST"
+            );
+            assert_eq!(z_mutex_unlock(m as *mut z_loaned_mutex_t), Z_OK);
+
+            // A second wait must NOT be satisfied by the same signal: the flag
+            // was consumed above, so this one has to be woken by its own.
+            // Without the consume, a banked permit would let a later wait
+            // return for a signal that belonged to an earlier one.
+            //
             // The signaller holds the associated mutex while signalling, which
-            // is the textbook condvar pattern and matters here: a signal issued
-            // with NO waiter and no mutex is lost in pthreads too, so a loop
-            // that signalled unsynchronised would be asserting something no
-            // condvar provides. An earlier draft did exactly that and hung —
-            // against a correct implementation.
+            // is the textbook condvar pattern.
             const ROUNDS: usize = 200;
             let start = Arc::new(std::sync::Barrier::new(2));
             let signaller_start = start.clone();

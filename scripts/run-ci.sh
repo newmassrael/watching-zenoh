@@ -9109,6 +9109,20 @@ layer_c1cc_api_compat_c() {
     # REPORTED, never enforced — see the script's own header for why a ratchet
     # needs a committed baseline and is a separate decision.
     python3 scripts/lib/capi_c_coverage.py || return 1
+    # R311y540 — the OTHER ABI arm. Everything above measures wz against the
+    # INSTALLED header, which exists for exactly one `Z_FEATURE_*` set, so the
+    # arm this machine did NOT provision is measured by nothing at all. That is
+    # where a 40-byte `z_owned_bytes_t` survived from R311y498 to R311y540.
+    #
+    # Behind a flag because a COLD run builds the zenoh dependency graph twice
+    # (minutes, and it needs network for zenoh-c's git dependency on zenoh) — the
+    # same on-demand shape `build-zenohd.sh` has. Re-runs are incremental. The
+    # script SKIPs loudly without zenoh-c's SOURCE checkout, and
+    # WZ_CAPI_C_ARMS_REQUIRE=1 turns that skip into a failure on a job that
+    # provisions it.
+    if [[ -n "${WZ_C1CC_OPAQUE_ARMS:-}" ]]; then
+        bash scripts/check-capi-c-opaque-arms.sh || return 1
+    fi
 }
 
 # ─── Layer C1cd — §5.27 api-compat-c ATTACHMENT, pico + zenohd ──────

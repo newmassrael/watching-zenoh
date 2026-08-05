@@ -28,30 +28,78 @@
 //! Two gates, because they answer different questions: "is this file
 //! self-consistent" and "is this file still true of the ABI".
 //!
-//! ## The footprints are FEATURE-DEPENDENT, which was measured, not assumed
+//! ## The footprints are FEATURE-DEPENDENT — and R311y540 MEASURED which ones
 //!
-//! zenoh-c's published standalone archive is built WITH `Z_FEATURE_UNSTABLE_API`;
-//! a build without it is a different ABI, and not only in the option structs:
+//! This section said, from R311y498 until R311y540, that zenoh-c's published
+//! standalone archive is built WITH `Z_FEATURE_UNSTABLE_API` and that
+//! `z_owned_bytes_t` is 40 bytes there against 32 without. **Both halves were
+//! wrong**, and the way they were wrong is instructive: the OBSERVATION (two
+//! builds exist, and their type sizes differ) was right, while the ATTRIBUTION
+//! (which build is which, and which type moves) was not — the failure mode this
+//! project has hit repeatedly.
 //!
-//! | type (LP64)                        | unstable | no-unstable |
-//! |------------------------------------|---------:|------------:|
-//! | `z_owned_session_t` / `z_loaned_*` |        8 |           8 |
-//! | `z_owned_bytes_t` / `z_loaned_*`   |   **40** |      **32** |
-//! | `z_view_keyexpr_t` / `z_loaned_*`  |       32 |          32 |
-//! | `z_owned_config_t` / `z_loaned_*`  |     1960 |        1960 |
+//! What is true, measured by running UPSTREAM'S OWN opaque-type generator
+//! (`build-resources/opaque-types`, which emits `type: X, align: N, size: M` as
+//! compilation errors) under zenoh-c's PINNED toolchain and the exact feature
+//! list the archive's `zenoh_configure.h` declares:
 //!
-//! So "wz is a zenoh-c drop-in" is not a complete sentence — it has to name the
-//! build. The DEFAULT here is the published archive's (unstable), because that is
-//! what a consumer installs and what CI provisions; the
-//! `zenoh-c-no-unstable-api` feature selects the other. Layer C1cc reads
-//! `Z_FEATURE_UNSTABLE_API` out of the INSTALLED header and says which one this
-//! cdylib was built for when they disagree.
+//! - The published archive is the **no-unstable** build. Its
+//!   `zenoh_configure.h` has no `Z_FEATURE_UNSTABLE_API` line at all, and
+//!   `install-zenoh-c.sh` installs that archive — so the arm CI provisions is
+//!   the one the `zenoh-c-no-unstable-api` feature selects, NOT the default.
+//! - `z_owned_bytes_t` is **32 on BOTH arms**. There is no 40-byte
+//!   `z_owned_bytes_t` at zenoh-c 1.5.0 under either arm.
+//! - Exactly **four** opaque types move with `Z_FEATURE_UNSTABLE_API`:
 //!
-//! This was found by provisioning the release archive beside a hand-built local
-//! install and measuring both — not by reading, which had produced the single
-//! hardcoded 32 this table replaces.
+//! | type (LP64)                          | no-unstable | unstable |
+//! |--------------------------------------|------------:|---------:|
+//! | `z_owned_sample_t` / `z_loaned_*`    |         184 |  **216** |
+//! | `z_owned_reply_t` / `z_loaned_*`     |         184 |  **240** |
+//!
+//! The generator is a VALIDATED oracle rather than an assumed one: its
+//! no-unstable arm reproduces the installed `zenoh_opaque.h` on **62 of 62**
+//! types. Getting there took removing two variables — the exact feature list
+//! (which turned out not to matter: `zenoh/default` and the archive's list give
+//! identical tables) and the TOOLCHAIN (which did: `z_owned_task_t` is 32 under
+//! the pinned 1.85.0 and 24 under 1.97.0, and that single disagreement was the
+//! whole gap).
+//!
+//! So "wz is a zenoh-c drop-in" is still not a complete sentence — it has to
+//! name the build — but the sentence now names the right builds. Layer C1cc
+//! reads `Z_FEATURE_UNSTABLE_API` out of the INSTALLED header and selects the
+//! matching cdylib arm, which means the arm the installed oracle is NOT gets
+//! measured by nothing. That is why `scripts/check-capi-c-opaque-arms.sh`
+//! exists: it drives upstream's generator for BOTH arms and compares each
+//! against a cdylib built for it.
 
 use std::ffi::c_void;
+
+/// `true` when this build targets a zenoh-c compiled WITH
+/// `Z_FEATURE_UNSTABLE_API`. That is the DEFAULT arm; the
+/// `zenoh-c-no-unstable-api` feature selects the other.
+const UNSTABLE: bool = !cfg!(feature = "zenoh-c-no-unstable-api");
+/// `true` when this build targets a zenoh-c compiled WITH
+/// `Z_FEATURE_SHARED_MEMORY`. OFF by default, because the published archive
+/// (what `install-zenoh-c.sh` provisions) is built without it.
+const SHM: bool = cfg!(feature = "zenoh-c-shared-memory");
+
+// The eight sizes that MOVE across the two-axis feature space, written as
+// explicit measured constants rather than arithmetic on a base. Every number
+// below came out of upstream's own opaque-type generator under zenoh-c's pinned
+// toolchain (R311y540); `scripts/check-capi-c-opaque-arms.sh` re-measures them.
+//
+// The two axes are INDEPENDENT and their deltas ADD — `z_owned_sample_t` is 184
+// plain, +16 for shared-memory, +32 for unstable and +48 for both — but the
+// deltas are per-type (8 for most, 16 for sample and reply), so expressing them
+// as one shared constant would be a coincidence waiting to break.
+const BYTES_SIZE: usize = if SHM { 40 } else { 32 };
+const PUBLISHER_SIZE: usize = if SHM { 112 } else { 104 };
+pub(crate) const ENCODING_SIZE: usize = if SHM { 48 } else { 40 };
+const QUERY_SIZE: usize = if SHM { 144 } else { 136 };
+const BYTES_WRITER_SIZE: usize = if SHM { 64 } else { 56 };
+const SERIALIZER_SIZE: usize = BYTES_WRITER_SIZE;
+const SAMPLE_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 32 } else { 0 };
+const REPLY_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 56 } else { 0 };
 
 /// A raw pointer used as an FFI handle slot. Null = "gravestone / not present",
 /// which is zenoh-c's own word for a moved-from or failed-to-construct value.
@@ -207,14 +255,17 @@ macro_rules! define_opaque_owned {
 }
 
 define_opaque!(z_owned_session_t, z_loaned_session_t, z_moved_session_t, 8);
-// `z_owned_bytes_t` is 40 bytes in the published (unstable-API) build and 32
-// without it — see the module table. The default matches the archive CI
-// provisions. A `//` comment, not `///`: a doc comment on a macro INVOCATION
-// documents nothing and is a hard error under `warnings = "deny"`.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-define_opaque!(z_owned_bytes_t, z_loaned_bytes_t, z_moved_bytes_t, 40);
-#[cfg(feature = "zenoh-c-no-unstable-api")]
-define_opaque!(z_owned_bytes_t, z_loaned_bytes_t, z_moved_bytes_t, 32);
+// `z_owned_bytes_t` moves with SHARED-MEMORY, not with unstable — 32 without,
+// 40 with, on both unstable arms. The 40 the two-arm split here used to
+// attribute to `Z_FEATURE_UNSTABLE_API` was real; it was the SHM number. A `//`
+// comment, not `///`: a doc comment on a macro INVOCATION documents nothing and
+// is a hard error under `warnings = "deny"`.
+define_opaque!(
+    z_owned_bytes_t,
+    z_loaned_bytes_t,
+    z_moved_bytes_t,
+    BYTES_SIZE
+);
 define_opaque!(z_owned_config_t, z_loaned_config_t, z_moved_config_t, 1960);
 // The subscriber family — 48 bytes at align 8, and `z_sub.c` stack-allocates
 // the owned one, so this is a size the C side genuinely depends on. Unlike
@@ -240,7 +291,7 @@ define_opaque!(
     z_owned_encoding_t,
     z_loaned_encoding_t,
     z_moved_encoding_t,
-    40
+    ENCODING_SIZE
 );
 // The publisher family — 104 bytes at align 8 (`zenoh_opaque.h:226-228`).
 // `z_pub.c` / `z_pong.c` / `z_pub_thr.c` all stack-allocate the owned one, so
@@ -249,7 +300,7 @@ define_opaque!(
     z_owned_publisher_t,
     z_loaned_publisher_t,
     z_moved_publisher_t,
-    104
+    PUBLISHER_SIZE
 );
 
 // --- the planes R311y539 adds -----------------------------------------------
@@ -261,11 +312,13 @@ define_opaque!(
 // with nothing to check it — the failure mode this file's own header warns
 // about. See the crate's residual list.
 
-// The owned sample — 184 bytes, and `z_pull.c` / `z_storage.c` stack-allocate
-// it. Its handle points at a heap `SampleMarshal`, which is the SAME type the
-// borrowed `z_loaned_sample_t` aims at, so every existing sample accessor
-// serves the owned form with no second path.
-define_opaque_owned!(z_owned_sample_t, z_moved_sample_t, 184);
+// The owned sample — one of the FOUR types that move with
+// `Z_FEATURE_UNSTABLE_API` (184 without, 216 with; measured R311y540). Its
+// handle points at a heap `SampleMarshal`, which is the SAME type the borrowed
+// `z_loaned_sample_t` aims at, so every existing sample accessor serves the
+// owned form with no second path. `z_pull.c` / `z_storage.c` stack-allocate it,
+// so the size is a size the C side genuinely depends on.
+define_opaque_owned!(z_owned_sample_t, z_moved_sample_t, SAMPLE_SIZE);
 // The queryable family — 48 bytes; `z_queryable.c` stack-allocates the owned one.
 define_opaque!(
     z_owned_queryable_t,
@@ -277,9 +330,10 @@ define_opaque!(
 define_opaque!(z_owned_querier_t, z_loaned_querier_t, z_moved_querier_t, 80);
 // The owned query — 136 bytes; `z_queryable_with_channels.c` stack-allocates it
 // to receive an ESCAPED query off its fifo.
-define_opaque_owned!(z_owned_query_t, z_moved_query_t, 136);
-// The owned reply — 184 bytes; every channel-based get stack-allocates it.
-define_opaque_owned!(z_owned_reply_t, z_moved_reply_t, 184);
+define_opaque_owned!(z_owned_query_t, z_moved_query_t, QUERY_SIZE);
+// The owned reply — the other moving pair (184 without `Z_FEATURE_UNSTABLE_API`,
+// 240 with). Every channel-based get stack-allocates it.
+define_opaque_owned!(z_owned_reply_t, z_moved_reply_t, REPLY_SIZE);
 // The reply ERROR is BORROW-ONLY here: `z_reply_err` hands back a pointer into
 // the reply's own marshal, so there is no owned form to construct and none is
 // declared. Upstream's `z_owned_reply_err_t` (72 bytes) arrives with the family
@@ -302,7 +356,7 @@ define_opaque!(
     z_owned_bytes_writer_t,
     z_loaned_bytes_writer_t,
     z_moved_bytes_writer_t,
-    56
+    BYTES_WRITER_SIZE
 );
 // The SERIALIZER — 56 bytes, and the same handle representation as the writer.
 // That is an ABI fact rather than a convenience: upstream's serializer wraps a
@@ -312,7 +366,7 @@ define_opaque!(
     ze_owned_serializer_t,
     ze_loaned_serializer_t,
     ze_moved_serializer_t,
-    56
+    SERIALIZER_SIZE
 );
 // The three CHANNEL handlers — 8 bytes each, a bare handle with no padding.
 define_opaque!(
@@ -871,6 +925,36 @@ fn layout_values() -> [usize; WZ_CAPI_C_LAYOUT_NAMES.len()] {
         size_of::<crate::querier::z_querier_get_options_t>(),
         size_of::<crate::scout::z_scout_options_t>(),
     ]
+}
+
+/// The NUL-terminated name of layout entry `index`, or NULL past the end.
+///
+/// R311y540. Exported so a gate written in another language reads the names out
+/// of the SAME artifact it reads the values from. The alternative is a second
+/// copy of [`WZ_CAPI_C_LAYOUT_NAMES`] in the tool, which is the drift hazard the
+/// array form of `wz_capi_c_layout` was introduced to remove — putting it back
+/// one language over would have undone that.
+///
+/// The strings are `'static` and NUL-terminated here rather than in the const
+/// table, so the table itself stays readable as plain Rust.
+///
+/// # Safety
+/// Takes no pointers; the returned pointer is `'static` and must not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn wz_capi_c_layout_name(index: usize) -> *const std::ffi::c_char {
+    use std::sync::OnceLock;
+    static NUL_TERMINATED: OnceLock<Vec<std::ffi::CString>> = OnceLock::new();
+    let table = NUL_TERMINATED.get_or_init(|| {
+        WZ_CAPI_C_LAYOUT_NAMES
+            .iter()
+            // The names are ASCII literals in this file, so the only way this
+            // could fail is an embedded NUL nobody can write by accident.
+            .map(|name| std::ffi::CString::new(*name).expect("a layout name has no interior NUL"))
+            .collect()
+    });
+    table
+        .get(index)
+        .map_or(std::ptr::null(), |name| name.as_ptr())
 }
 
 /// Report this build's footprints — the drop-in's half of the layout gate.

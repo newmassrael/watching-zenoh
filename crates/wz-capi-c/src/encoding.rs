@@ -74,7 +74,11 @@ unsafe impl Sync for StaticLoanedEncoding {}
 const fn static_view(state: &'static EncodingState) -> StaticLoanedEncoding {
     StaticLoanedEncoding(z_loaned_encoding_t {
         handle: state as *const EncodingState as *mut c_void,
-        _pad: [0u8; 40 - std::mem::size_of::<Handle>()],
+        // Sized from the SAME constant `define_opaque!` uses, not a repeated
+        // literal: `z_owned_encoding_t` moves with `Z_FEATURE_SHARED_MEMORY`
+        // (40 -> 48), and a second copy of the number here compiled fine on the
+        // default arm while breaking the SHM one.
+        _pad: [0u8; crate::abi::ENCODING_SIZE - std::mem::size_of::<Handle>()],
     })
 }
 

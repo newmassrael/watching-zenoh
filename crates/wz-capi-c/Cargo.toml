@@ -61,6 +61,20 @@ crate-type = ["cdylib", "rlib"]
 # DEFAULT = the published archive, because that is what a consumer installs and
 # what CI provisions. This feature selects the other.
 zenoh-c-no-unstable-api = []
+# R311y540 — the OTHER axis. `Z_FEATURE_SHARED_MEMORY` moves EIGHT of the types
+# this crate declares (`z_owned_bytes_t` 32 -> 40, `z_owned_sample_t` +16, ...),
+# independently of `Z_FEATURE_UNSTABLE_API` and additively with it. It was found
+# while measuring the unstable arm: the 40-byte `z_owned_bytes_t` this crate had
+# attributed to unstable since R311y498 is the SHM number.
+#
+# LAYOUT ONLY. This feature makes wz's structs the right SIZE for a program
+# compiled against an SHM-built zenoh-c header; it does NOT export the SHM API
+# surface, so a program that actually calls `z_shm_*` still will not link. The
+# configuration it serves is the common one — a program built against an SHM
+# header that uses none of the SHM entry points.
+#
+# OFF by default, because the published standalone archive is built without it.
+zenoh-c-shared-memory = []
 
 [dependencies]
 # The ABI-neutral session model, shared with wz-capi-pico.
