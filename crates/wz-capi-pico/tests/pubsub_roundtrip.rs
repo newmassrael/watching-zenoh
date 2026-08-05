@@ -18,7 +18,7 @@
 //! bounded so a genuine failure fails fast rather than hanging.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -442,4 +442,273 @@ fn publish_from_subscriber_callback_delivers_echo() {
     }
 
     acceptor.join().expect("acceptor thread panicked");
+}
+
+/// R311y549 — the SUBSCRIBER plane's re-entrancy probe: a C callback that
+/// undeclares its OWN subscriber must RETURN.
+///
+/// ## Why this test exists, and why it is not about publishing
+///
+/// [`publish_from_subscriber_callback_delivers_echo`] above proves a callback
+/// may re-enter the session to PUBLISH. That is a different lock: `z_put` fans
+/// out through the faces registry and never re-takes the observer mutex the
+/// dispatch is holding. Undeclaring does re-take it — `Subscriber::teardown`
+/// calls `observer.subscribers.unregister(id)` under
+/// `R::with_mutex_mut(&self.observer, ..)`, and `TokioRuntime`'s mutex is a
+/// plain `std::sync::Mutex`, which is not reentrant.
+///
+/// R311y535 fixed exactly this shape on the MATCHING plane, with a thread-local
+/// delivery guard that makes a re-entrant retirement DECLINE rather than block
+/// on its own frame's lock (`faces.rs::MatchingDeliveryGuard`). The four other
+/// SSOT sinks — subscriber, queryable, liveliness-subscriber, advanced
+/// subscriber — were left with no equivalent, and the project's own debt ledger
+/// carries that as an OPEN QUESTION rather than a cleared one: the matching
+/// case was found by a flaky test, and nobody had run the equivalent
+/// instrumentation on the other four. This is that instrumentation for the
+/// first of them.
+///
+/// ## A deadlock must FAIL, not hang
+///
+/// The callback sets `entered` before the undeclare and `returned` after, and
+/// the assertion is on `returned` within a deadline. A wedged drive thread is
+/// leaked rather than joined — there is nothing to join a deadlocked thread
+/// with — but the TEST reports a failure naming the two flags, instead of the
+/// suite stalling until the harness is killed. `entered && !returned` is the
+/// signature of the deadlock; `!entered` is a different (delivery) failure and
+/// says so.
+#[test]
+fn undeclare_from_inside_a_subscriber_callback_does_not_deadlock() {
+    let port = free_port();
+    let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_acc = stop.clone();
+    let acceptor = std::thread::spawn(move || unsafe {
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                Z_CONFIG_LISTEN_KEY,
+                listen.as_ptr()
+            ),
+            Z_OK
+        );
+        let _ = started_tx.send(());
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+            Z_OK,
+            "acceptor z_open failed"
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, c"demo/a".as_ptr()), Z_OK);
+        // Republish until the dialer says it is done: the subscriber's
+        // declaration has to propagate first, and one landing suffices.
+        for _ in 0..500 {
+            if stop_acc.load(Ordering::SeqCst) {
+                break;
+            }
+            let mut payload = std::mem::zeroed();
+            assert_eq!(
+                z_bytes_copy_from_str(&mut payload, c"trigger".as_ptr()),
+                Z_OK
+            );
+            let _ = z_put(
+                z_session_loan(&session),
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_bytes_move(&mut payload),
+                std::ptr::null(),
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+    });
+
+    started_rx.recv().unwrap();
+
+    let mut session: z_owned_session_t = unsafe { std::mem::zeroed() };
+    let mut opened = false;
+    for _ in 0..250 {
+        unsafe {
+            let mut cfg: z_owned_config_t = std::mem::zeroed();
+            assert_eq!(z_config_default(&mut cfg), Z_OK);
+            assert_eq!(
+                zp_config_insert(
+                    z_config_loan_mut(&mut cfg),
+                    Z_CONFIG_CONNECT_KEY,
+                    connect.as_ptr()
+                ),
+                Z_OK
+            );
+            if z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()) == Z_OK {
+                opened = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(opened, "dialer z_open never succeeded");
+
+    // The handle the callback will undeclare lives in a Box so its address is
+    // stable across the thread boundary — which is what a C program does when
+    // it hands a subscriber to its own callback's context.
+    let handle: Box<z_owned_subscriber_t> = Box::new(unsafe { std::mem::zeroed() });
+    let handle = Box::into_raw(handle);
+    let entered = Arc::new(AtomicBool::new(false));
+    let returned = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let after = Arc::new(AtomicUsize::new(0));
+    let ctx = Box::into_raw(Box::new(SelfUndeclareCtx {
+        handle,
+        entered: entered.clone(),
+        returned: returned.clone(),
+        dropped: dropped.clone(),
+        after: after.clone(),
+        done: AtomicBool::new(false),
+    })) as *mut c_void;
+
+    unsafe {
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(
+                &mut closure,
+                Some(on_sample_self_undeclare),
+                Some(on_drop_self_undeclare),
+                ctx
+            ),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, c"demo/**".as_ptr()), Z_OK);
+        assert_eq!(
+            z_declare_subscriber(
+                z_session_loan(&session),
+                &mut *handle,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK
+        );
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if returned.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The acceptor keeps publishing: the `after` window below needs traffic to
+    // still be arriving, or "nothing reached the retired callback" would be
+    // true of a silent link and would prove nothing.
+
+    let entered_v = entered.load(Ordering::SeqCst);
+    let returned_v = returned.load(Ordering::SeqCst);
+    assert!(
+        entered_v,
+        "the subscriber callback never fired, so this leg measured nothing \
+         about re-entrant undeclare — the delivery failed first"
+    );
+    assert!(
+        returned_v,
+        "the subscriber callback ENTERED z_undeclare_subscriber and never \
+         returned: a C callback undeclaring its own subscriber DEADLOCKS. The \
+         dispatch holds the observer mutex across the C call and \
+         `Subscriber::teardown` re-takes it on the same thread; \
+         `std::sync::Mutex` is not reentrant. R311y535 gave the MATCHING plane \
+         a thread-local delivery guard for exactly this and the subscriber \
+         plane has none. The drive thread is wedged and is leaked rather than \
+         joined."
+    );
+
+    // The undeclare must have DONE something, not merely returned: the handle
+    // is gravestoned and the C `drop(context)` has run. Without these two a
+    // `z_undeclare_subscriber` that returned early would satisfy the deadlock
+    // assertion above while proving nothing.
+    assert!(
+        !unsafe { wz_capi_pico::z_internal_subscriber_check(&*handle) },
+        "z_undeclare_subscriber returned without gravestoning the handle, so \
+         the no-deadlock result above is about a call that did nothing"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the C drop(context) never ran, so the undeclare did not release the \
+         last Arc<CClosure> — the context is still owned by something and this \
+         leg's `after` assertion is measuring a live registration, not a \
+         retired one"
+    );
+
+    // Keep the acceptor publishing for a further window and assert NOTHING
+    // reaches the retired callback. CALIBRATED: with the undeclare skipped,
+    // 24 samples land in this same window, so a zero here is a measurement and
+    // not a silent link. This is the R311lh take-call-restore
+    // question: the deferred-fire cell is TAKEN while the callback runs, so a
+    // restore that put it back after the subscriber was unregistered would
+    // deliver again — into a context whose C drop has already run.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        after.load(Ordering::SeqCst),
+        0,
+        "a sample reached the subscriber callback AFTER it undeclared itself \
+         and its C drop(context) had run. The deferred-fire cell is taken \
+         across the C call (R311lh); a restore must not resurrect a cell whose \
+         subscriber was unregistered while it was taken."
+    );
+
+    stop.store(true, Ordering::SeqCst);
+    unsafe {
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+        drop(Box::from_raw(handle));
+    }
+    acceptor.join().expect("acceptor thread panicked");
+}
+
+/// Context for [`undeclare_from_inside_a_subscriber_callback_does_not_deadlock`].
+struct SelfUndeclareCtx {
+    handle: *mut z_owned_subscriber_t,
+    entered: Arc<AtomicBool>,
+    returned: Arc<AtomicBool>,
+    /// Set by the C drop callback — the observable that the undeclare released
+    /// the LAST `Arc<CClosure>` rather than merely returning.
+    dropped: Arc<AtomicBool>,
+    /// Deliveries seen AFTER the undeclare returned. Must stay 0.
+    after: Arc<AtomicUsize>,
+    /// The undeclare runs ONCE. A second delivery must not touch a handle the
+    /// first one already moved.
+    done: AtomicBool,
+}
+
+unsafe extern "C" fn on_sample_self_undeclare(_sample: *const z_loaned_sample_t, ctx: *mut c_void) {
+    let ctx = &*(ctx as *const SelfUndeclareCtx);
+    if ctx.done.swap(true, Ordering::SeqCst) {
+        // Every delivery past the first one is a delivery to a subscriber that
+        // has been undeclared, which is what the `after` assertion reads.
+        ctx.after.fetch_add(1, Ordering::SeqCst);
+        return;
+    }
+    ctx.entered.store(true, Ordering::SeqCst);
+    z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut *ctx.handle));
+    ctx.returned.store(true, Ordering::SeqCst);
+}
+
+/// The C `drop(context)` — records that it ran and LEAKS the context.
+///
+/// The leak is the point, and it is what makes the `after` assertion sound. The
+/// property under test is "no delivery reaches this callback once it has been
+/// undeclared", and the deferred-fire cell is TAKEN while the callback runs
+/// (R311lh take-call-restore), so a restore that resurrected a cell whose
+/// subscriber had just been unregistered would deliver again. Freeing the
+/// context here would make that case a use-after-free — undefined, and
+/// therefore unable to distinguish "did not happen" from "happened and read
+/// garbage". One leaked context per test process is the price of a probe whose
+/// failure mode is an assertion.
+unsafe extern "C" fn on_drop_self_undeclare(ctx: *mut c_void) {
+    let ctx = &*(ctx as *const SelfUndeclareCtx);
+    ctx.dropped.store(true, Ordering::SeqCst);
 }
