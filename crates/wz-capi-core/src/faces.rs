@@ -84,9 +84,12 @@ use wz_runtime_tokio::session::{
     PublishOptions, QueryOptions, Queryable, QueryableOptions, SubscribeOptions, Subscriber,
     TokioSession,
 };
-use wz_runtime_tokio::session_glue::{IterationEvent, SessionLinkActions};
+use wz_runtime_tokio::session_glue::{
+    new_session_actions, BoxedLinkDriver, IterationEvent, SessionLinkActions,
+};
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::Mutex as WzMutex;
+use wz_runtime_tokio::Reliability;
 
 // R311y498 — NO `use crate::pubsub` / `use crate::query` here, deliberately.
 //
@@ -645,9 +648,42 @@ fn face_matching_callback(
     }
 }
 
+/// The link driver under the [face-independent local plane](SharedSession::local).
+///
+/// The plane is a real unicast [`TokioSession`] because the query / queryable
+/// surface is unicast-typestate-only, and a unicast session is built from a
+/// [`SessionLinkActions`] bundle, which is built from a link driver. Nothing
+/// drives this one's FSM and nobody reads what it writes, so every method is
+/// the honest no-op: the plane's whole job is the LOOPBACK half of `publish` /
+/// `query`, which never reaches the wire.
+///
+/// The bytes handed to `send_blocking` are the declares the plane emits for its
+/// own registrations (a `Declare(DeclSubscriber)` per local subscriber, and the
+/// matching undeclares). Discarding them is correct rather than lossy: the WIRE
+/// announcement of a C declaration is the FACES' job — every face replays the
+/// whole SSOT in [`SharedSession::face_up`] — and announcing the same
+/// subscription twice from one session is what would be wrong.
+struct InertLinkDriver;
+
+impl BoxedLinkDriver for InertLinkDriver {
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
+    fn open_blocking(&self) {}
+    fn close_blocking(&self) {}
+}
+
 #[derive(Default)]
 struct Inner {
     faces: BTreeMap<u64, FaceEntry>,
+    /// The local plane's own handles for the SSOT declarations, keyed by the
+    /// same C-level ids the per-face maps use.
+    ///
+    /// Held here rather than beside the plane itself so the whole
+    /// declare / undeclare discipline — mutate under the registry lock, drop the
+    /// released handles OUTSIDE it — is the one discipline the faces already
+    /// follow. A `Subscriber` / `Queryable` handle owns an `Arc<CClosure>`, so
+    /// releasing the last one runs the C `drop(context)`.
+    local_subs: BTreeMap<SubId, Subscriber<TokioRuntime>>,
+    local_qbls: BTreeMap<QblId, Queryable<TokioRuntime>>,
     subs: Vec<SubEntry>,
     next_sub_id: SubId,
     qbls: Vec<QblEntry>,
@@ -675,13 +711,110 @@ struct Inner {
 pub struct SharedSession {
     inner: StdMutex<Inner>,
     clock: TokioTime,
+    /// R311y557 — THE FACE-INDEPENDENT LOCAL PLANE.
+    ///
+    /// One session-scope [`TokioSession`] over an [`InertLinkDriver`], carrying
+    /// every C declaration a second time and serving the LOOPBACK half of
+    /// `publish` / `query` alone. The faces carry the wire half and nothing
+    /// else: every fan-out below hands each face [`Locality::Remote`] and the
+    /// plane [`Locality::SessionLocal`], so the two halves are disjoint by
+    /// construction rather than by a first-face convention.
+    ///
+    /// ## What it closes
+    ///
+    /// Before it, in-process delivery was a property of the FIRST FACE, so a
+    /// session with no peer delivered nothing to its own subscriber — a
+    /// divergence from zenoh-c, whose subscriber table is session-scope, and one
+    /// reachable as an ordinary race rather than only as a configuration: a
+    /// `z_open(listen=..)` publishes before its first peer connects, and a
+    /// client's `z_put` can beat its own dial. `publish_all_delivers_locally_with_no_face`
+    /// is the measurement; it asserted the OPPOSITE until this landed.
+    ///
+    /// ## Why it also removes a hazard the first-face rule carried
+    ///
+    /// The fan split had to reason about WHICH face takes the single local leg
+    /// (`publish_aliased_all` needed a face owning the mapping; `issue_get`
+    /// needed a `continue` arm for a local-only get whose leg was already
+    /// placed). With a dedicated plane the local leg has exactly one home and
+    /// none of those arms exists, so a C subscription cannot be delivered to
+    /// twice by two faces however the face set moves under it.
+    ///
+    /// ## Who drains it
+    ///
+    /// The plane is [`LocalDeliveryDrain::DriveTask`] like every face session,
+    /// and the `unsafe impl Sync` premise behind every C closure on these ABIs —
+    /// the C application thread never invokes it — is kept by draining it from
+    /// the drive role's own `select!` arm ([`Self::drive_local_plane`]), which
+    /// is the SAME task the faces dispatch on. A `tokio::spawn`ed drain would
+    /// have satisfied "not the C thread" and still broken the premise, because
+    /// the per-session runtime has two workers.
+    local: TokioSession,
+    /// The local plane's re-arm signal — the twin of [`FaceEntry::revised`].
+    ///
+    /// Staging a fire does not make a drive loop iterate (R311y555 measured the
+    /// cost of assuming it does: every in-process delivery rode the ~3333 ms
+    /// keepalive tick). Every path that stages onto the plane notifies this, and
+    /// [`Self::drive_local_plane`] is what waits on it.
+    local_wake: Arc<Notify>,
 }
 
 impl SharedSession {
-    pub fn new(clock: TokioTime) -> Self {
+    /// `zid` is this session's own 16-byte identity — the same one the faces put
+    /// on the wire. The local plane takes it so its loopback samples carry the
+    /// identity the session actually has, which is what the subscriber
+    /// registry's self-echo guard reads.
+    pub fn new(clock: TokioTime, zid: Vec<u8>) -> Self {
+        let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
+        // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on
+        // the wire, and Peer is what a session that both publishes and answers
+        // queries is. The params otherwise come from the one builder both drive
+        // roles use, so the plane cannot drift from them.
+        let params = crate::drive::init_params(wz_runtime_tokio::session_glue::WhatAmI::Peer, zid);
+        let actions = new_session_actions(driver, params, clock);
+        let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
+        let local = TokioSession::new(actions, observer, Arc::new(clock))
+            .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
         Self {
             inner: StdMutex::new(Inner::default()),
             clock,
+            local,
+            local_wake: Arc::new(Notify::new()),
+        }
+    }
+
+    /// The local plane's session — what the ABI shims issue the LOCAL leg of a
+    /// `z_get` on (the publish legs stay inside this file).
+    pub fn local_session(&self) -> &TokioSession {
+        &self.local
+    }
+
+    /// Wake the local plane's drain. Call after staging anything on it.
+    pub fn wake_local_plane(&self) {
+        self.local_wake.notify_one();
+    }
+
+    /// Run the local plane's staged fires, returning how many ran.
+    ///
+    /// Public because it is both the drive loop's step and the only way a test
+    /// without a drive thread can observe a delivery: `publish` returns the
+    /// number of subscribers MATCHED, which is a different claim from the
+    /// callback having run (R311y555's lesson, one level down).
+    pub fn drain_local_plane(&self) -> usize {
+        self.local.drain_deferred_fires()
+    }
+
+    /// The drive roles' `select!` arm for the local plane: drain, then sleep on
+    /// the wake. Never returns.
+    ///
+    /// Draining BEFORE the first await is deliberate — a `z_put` that lands
+    /// between `z_open` returning and this arm being first polled has already
+    /// staged, and its `notify_one` permit is stored either way, so neither
+    /// order can lose a delivery; draining first makes the very first poll
+    /// deliver instead of waiting for a second event.
+    pub async fn drive_local_plane(&self) {
+        loop {
+            self.drain_local_plane();
+            self.local_wake.notified().await;
         }
     }
 
@@ -1130,16 +1263,10 @@ impl SharedSession {
     /// [`Locality::SessionLocal`] (which suppresses that face's wire leg — it
     /// already sent in the loop above).
     ///
-    /// **Named divergence: a session with NO face delivers nothing locally.**
-    /// The subscriber registries live on the per-face sessions, so with no peer
-    /// there is no registry holding the subscription and an `Any` put has
-    /// nowhere to deliver. zenoh-c would deliver (its subscriber table is
-    /// session-scope); zenoh-pico's DEFAULT build would not deliver either, and
-    /// for a different reason — `Z_FEATURE_LOCAL_SUBSCRIBER` is 0
-    /// (`vendor/zenoh-pico/CMakeLists.txt:343`). Closing it needs a
-    /// face-independent local plane, which is a session-architecture round of
-    /// its own; `publish_all_local_leg_needs_a_face` pins the current behaviour
-    /// so the gap stays measured rather than assumed.
+    /// R311y557 — the local leg no longer belongs to a FACE. It runs on the
+    /// session-scope [local plane](Self::local), so it runs identically at zero
+    /// faces and at N, and the "first face takes it" convention (with the
+    /// zenoh-c divergence it carried at zero faces) is gone.
     pub fn publish_all(
         &self,
         keyexpr: &str,
@@ -1162,22 +1289,19 @@ impl SharedSession {
             }
         }
         if opts.allowed_destination.allows_local() {
-            if let Some((session, revised)) = sessions.first() {
-                let local = opts.clone().with_locality(Locality::SessionLocal);
-                match session.publish(keyexpr, payload, local) {
-                    Ok(n) => delivered += n,
-                    Err(PublishError::TransportUnavailable) => {}
-                    Err(_) => return Err(FanoutError::ExceedsCapacity),
-                }
-                // R311y555 — WAKE THE FACE. Staging a fire does not make the
-                // drive loop iterate; `next_reply_deadline_ms` reports the face
-                // due now, but the loop only re-reads it when something wakes
-                // it. Without this the delivery rides the next inbound message
-                // or the keepalive tick, MEASURED at 3.334 s — the fan's own
-                // `z_get` sibling has notified here since R311y296 and the
-                // publish path was simply missing the same line.
-                revised.notify_one();
+            let local = opts.clone().with_locality(Locality::SessionLocal);
+            match self.local.publish(keyexpr, payload, local) {
+                Ok(n) => delivered += n,
+                // The plane's link is inert, so this arm is unreachable through
+                // it; kept because the local leg's error handling must not be
+                // more brittle than the wire leg's if the plane ever changes.
+                Err(PublishError::TransportUnavailable) => {}
+                Err(_) => return Err(FanoutError::ExceedsCapacity),
             }
+            // R311y555 — WAKE THE DRAIN. Staging a fire does not make a drive
+            // loop iterate; without this the delivery rides the next inbound
+            // message or the keepalive tick, MEASURED at 3.334 s.
+            self.local_wake.notify_one();
         }
         Ok(delivered)
     }
@@ -1202,13 +1326,13 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        // R311y554 — the same one-local-leg split as [`Self::publish_all`]; see
-        // that function for why N faces must not each deliver the sample to the
-        // one C callback. The aliased local leg goes to the FIRST face that
-        // owns the mapping rather than simply the first face: the alias is
-        // resolved out of each face's own outbound table, so a face that never
-        // got the declare cannot resolve it and its `UnknownMapping` must not
-        // consume the session's single local delivery.
+        // R311y554 / R311y557 — the same one-local-leg split as
+        // [`Self::publish_all`]; see that function for why N faces must not each
+        // deliver the sample to the one C callback. The aliased local leg needs
+        // no "first face that OWNS the mapping" search any more: the local plane
+        // took `send_declare_keyexpr` in [`Self::declare_keyexpr`] alongside
+        // every face, so it always resolves an alias the caller could legally
+        // publish on, and it resolves it whether or not any face does.
         let sessions = self.face_sessions_with_wake();
         let mut delivered = 0usize;
         if opts.allowed_destination.allows_remote() {
@@ -1224,20 +1348,21 @@ impl SharedSession {
         }
         if opts.allowed_destination.allows_local() {
             let local = opts.clone().with_locality(Locality::SessionLocal);
-            for (session, revised) in &sessions {
-                match session.publish_aliased_auto(mapping_id, None, payload, local.clone()) {
-                    Ok(n) => {
-                        delivered += n;
-                        // R311y555 — see `publish_all`; the face that took the
-                        // local leg is the one that has to iterate.
-                        revised.notify_one();
-                        break;
-                    }
-                    Err(PublishAliasError::UnknownMapping(_)) => continue,
-                    Err(PublishAliasError::TransportUnavailable) => continue,
-                    Err(_) => return Err(FanoutError::ExceedsCapacity),
-                }
+            match self
+                .local
+                .publish_aliased_auto(mapping_id, None, payload, local)
+            {
+                Ok(n) => delivered += n,
+                // An id the plane does not know is an id no face was told about
+                // either (`declare_keyexpr` announces to both, and
+                // `undeclare_keyexpr` retracts from both), so this is the
+                // caller publishing on an alias it never declared.
+                Err(PublishAliasError::UnknownMapping(_)) => {}
+                Err(PublishAliasError::TransportUnavailable) => {}
+                Err(_) => return Err(FanoutError::ExceedsCapacity),
             }
+            // R311y555 — see `publish_all`.
+            self.local_wake.notify_one();
         }
         Ok(delivered)
     }
@@ -1266,6 +1391,12 @@ impl SharedSession {
         for face in guard.faces.values() {
             let _ = face.session.actions().send_declare_keyexpr(id, &keyexpr);
         }
+        // R311y557 — the LOCAL PLANE takes the same alias. Its declare goes to
+        // the inert driver, so nothing extra reaches any peer; what it populates
+        // is the plane's own OUTBOUND mapping table, which is what
+        // [`Self::publish_aliased_all`]'s local leg resolves against. Without
+        // it an aliased put would deliver on the wire and to nobody in-process.
+        let _ = self.local.actions().send_declare_keyexpr(id, &keyexpr);
         guard.kexprs.push(KexprEntry { id, keyexpr });
         Some(id)
     }
@@ -1284,6 +1415,10 @@ impl SharedSession {
         for face in guard.faces.values() {
             face.session.actions().send_undeclare_kexpr(mapping_id);
         }
+        // R311y557 — retract from the local plane too, so a subsequent aliased
+        // put on a retracted id answers `UnknownMapping` on BOTH legs rather
+        // than continuing to deliver in-process.
+        self.local.actions().send_undeclare_kexpr(mapping_id);
     }
 
     /// Record a C liveliness TOKEN in the SSOT and declare it on every live
@@ -1498,6 +1633,18 @@ impl SharedSession {
             ) {
                 face.subs.insert(id, sub);
             }
+        }
+        // R311y557 — and on the LOCAL PLANE, which is what makes an in-process
+        // put reach this subscriber whether or not a peer exists. Its
+        // `allowed_origin` is the caller's own, so a `Remote`-only subscriber
+        // still refuses its own session's put — the filter is applied by the
+        // registry, not by which registry holds it.
+        if let Ok(sub) = self.local.declare_subscriber(
+            keyexpr.clone(),
+            SubscribeOptions::default().with_allowed_origin(allowed_origin),
+            sink(),
+        ) {
+            guard.local_subs.insert(id, sub);
         }
         guard.subs.push(SubEntry {
             id,
@@ -1742,6 +1889,14 @@ impl SharedSession {
                     dropped.push(sub);
                 }
             }
+            // R311y557 — and the local plane's copy. Taken into the same
+            // out-of-lock drop list: with no face at all the plane now holds the
+            // last `Arc<CClosure>` and dropping it here would run the C
+            // `drop(context)` under the registry lock — which is precisely the
+            // case the SSOT entry above was already careful about.
+            if let Some(sub) = guard.local_subs.remove(&id) {
+                dropped.push(sub);
+            }
             // The LIVELINESS subscriptions share this id space (see
             // `declare_liveliness_subscriber`), so an id belongs to exactly one
             // of the two maps and both must be searched — a `z_owned_subscriber_t`
@@ -1940,6 +2095,18 @@ impl SharedSession {
                 face.qbls.insert(id, qbl);
             }
         }
+        // R311y557 — and on the LOCAL PLANE, which is what an in-process
+        // `z_get` reaches. The sink factory receives the PLANE's session for
+        // the same reason each face's receives its own: an escaped query owes
+        // its deferred replies and its `ResponseFinal` to the session the query
+        // arrived on, and for a local query that session is this one.
+        if let Ok(qbl) = self.local.declare_queryable(
+            keyexpr.clone(),
+            queryable_options(complete, allowed_origin),
+            sink(&self.local),
+        ) {
+            guard.local_qbls.insert(id, qbl);
+        }
         guard.qbls.push(QblEntry {
             id,
             keyexpr,
@@ -1966,6 +2133,12 @@ impl SharedSession {
                 if let Some(qbl) = face.qbls.remove(&id) {
                     dropped.push(qbl);
                 }
+            }
+            // R311y557 — the local plane's copy, into the same out-of-lock drop
+            // list (see `undeclare_subscriber` for why the plane's handle can be
+            // the last one alive).
+            if let Some(qbl) = guard.local_qbls.remove(&id) {
+                dropped.push(qbl);
             }
         }
         // Drop OUTSIDE the lock — see `undeclare_subscriber`: the last
@@ -2065,21 +2238,40 @@ impl FaceForwarder for CApiForwarder {
 mod matching_aggregate_tests {
     use super::*;
 
-    /// R311y554 — the NAMED DIVERGENCE, measured rather than asserted in prose.
+    /// A dummy session identity for the registry unit tests — the shape
+    /// `open_blocking` mints, without the entropy call.
+    fn test_zid() -> Vec<u8> {
+        vec![0x11; 16]
+    }
+
+    /// R311y557 — the CLOSING measurement for what R311y554 pinned as a named
+    /// divergence, and the test that entry said would have to change.
     ///
-    /// The subscriber registries live on the per-face sessions, so a session
-    /// with no peer has no registry holding the subscription and an `Any` put
-    /// has nowhere to deliver locally. zenoh-c WOULD deliver here (its
-    /// subscriber table is session-scope); zenoh-pico's default build would
-    /// not, for a different reason (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0,
-    /// `vendor/zenoh-pico/CMakeLists.txt:343`).
+    /// It asserted `delivered == 0` with the reasoning that the subscriber
+    /// registries live on the per-face sessions, so a session with no peer had
+    /// none holding the subscription. zenoh-c WOULD deliver here (its subscriber
+    /// table is session-scope), so that was a real divergence, and it was
+    /// reachable as an ordinary race rather than only as a configuration.
     ///
-    /// Pinned so the gap stays a measurement with a date on it. Closing it needs
-    /// a face-independent local plane, which is a session-architecture round of
-    /// its own — and when that lands, THIS test is the one that must change.
+    /// Both halves are asserted, because they are separately omittable and only
+    /// one of them was ever the hard part (R311y555, one level up): `publish`
+    /// returns how many subscribers MATCHED, and the callback running is a
+    /// different claim that only the drain establishes.
     #[test]
-    fn publish_all_local_leg_needs_a_face() {
-        let shared = SharedSession::new(TokioTime::new());
+    fn publish_all_delivers_locally_with_no_face() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid());
+        let seen = Arc::new(StdMutex::new(Vec::<Vec<u8>>::new()));
+        let sink_log = seen.clone();
+        let sink: SubscriberSink = Arc::new(move || {
+            let log = sink_log.clone();
+            Box::new(move |sample: &dyn SampleView| {
+                log.lock()
+                    .expect("test mutex")
+                    .push(sample.payload().to_vec());
+            })
+        });
+        shared.declare_subscriber("wz/no/face".to_owned(), Locality::Any, sink);
+
         let delivered = shared
             .publish_all(
                 "wz/no/face",
@@ -2088,9 +2280,172 @@ mod matching_aggregate_tests {
             )
             .expect("a faceless publish is not an error");
         assert_eq!(
+            delivered, 1,
+            "the local plane holds the subscription independently of any face, \
+             so an Any put with no peer connected still matches it"
+        );
+        assert_eq!(
+            shared.drain_local_plane(),
+            1,
+            "the matched fire is STAGED by the publish and RUN by the drain — \
+             the two are separately omittable and a match count alone would not \
+             prove the callback ran"
+        );
+        assert_eq!(
+            seen.lock().expect("test mutex").as_slice(),
+            &[b"x".to_vec()],
+            "the C subscriber callback received the payload exactly once"
+        );
+    }
+
+    /// R311y557 — a REMOTE-only subscriber still refuses its own session's put,
+    /// with the local plane holding the subscription.
+    ///
+    /// The plane is not a bypass of `allowed_origin`: the filter is applied by
+    /// the subscriber registry, and the plane registers with the caller's own
+    /// value. Without this the plane would have SILENTLY widened every
+    /// `Remote`-origin C subscriber, and the fan's own exactly-once leg could
+    /// not tell the difference (it declares `Any`).
+    #[test]
+    fn a_remote_origin_subscriber_is_not_widened_by_the_local_plane() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid());
+        let hits = Arc::new(StdMutex::new(0usize));
+        let sink_hits = hits.clone();
+        let sink: SubscriberSink = Arc::new(move || {
+            let hits = sink_hits.clone();
+            Box::new(move |_sample: &dyn SampleView| {
+                *hits.lock().expect("test mutex") += 1;
+            })
+        });
+        shared.declare_subscriber("wz/remote/only".to_owned(), Locality::Remote, sink);
+
+        let delivered = shared
+            .publish_all(
+                "wz/remote/only",
+                b"x",
+                &PublishOptions::put().with_locality(Locality::Any),
+            )
+            .expect("a faceless publish is not an error");
+        assert_eq!(
             delivered, 0,
-            "with no face there is no per-face subscriber registry to deliver \
-             into, so an Any put delivers nothing locally"
+            "a Remote-origin subscriber matches no local put"
+        );
+        assert_eq!(shared.drain_local_plane(), 0, "and stages nothing to run");
+        assert_eq!(*hits.lock().expect("test mutex"), 0);
+    }
+
+    /// R311y557 — the ALIASED local leg, which shipped at R311y554 with no
+    /// driver at all (the debt ledger's "cheapest real gap on this list").
+    ///
+    /// It is the aliased twin of `publish_all_delivers_locally_with_no_face`,
+    /// and it is what proves the plane took `send_declare_keyexpr` in
+    /// [`SharedSession::declare_keyexpr`]: without that the plane cannot resolve
+    /// the id, `publish_aliased_auto` answers `UnknownMapping`, and an aliased
+    /// put delivers on the wire and to nobody in-process.
+    #[test]
+    fn publish_aliased_all_delivers_locally_with_no_face() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid());
+        let seen = Arc::new(StdMutex::new(Vec::<Vec<u8>>::new()));
+        let sink_log = seen.clone();
+        let sink: SubscriberSink = Arc::new(move || {
+            let log = sink_log.clone();
+            Box::new(move |sample: &dyn SampleView| {
+                log.lock()
+                    .expect("test mutex")
+                    .push(sample.payload().to_vec());
+            })
+        });
+        shared.declare_subscriber("wz/alias/target".to_owned(), Locality::Any, sink);
+        let mapping = shared
+            .declare_keyexpr("wz/alias/target".to_owned())
+            .expect("the first alias id is not exhausted");
+
+        let delivered = shared
+            .publish_aliased_all(
+                mapping,
+                b"aliased",
+                &PublishOptions::put().with_locality(Locality::Any),
+            )
+            .expect("a faceless aliased publish is not an error");
+        assert_eq!(delivered, 1, "the plane resolved the alias and matched");
+        assert_eq!(shared.drain_local_plane(), 1);
+        assert_eq!(
+            seen.lock().expect("test mutex").as_slice(),
+            &[b"aliased".to_vec()]
+        );
+    }
+
+    /// R311y557 — an UNDECLARED alias stops delivering in-process.
+    ///
+    /// The negative arm that makes the test above a claim about the mapping
+    /// rather than about the keyexpr: with the plane's retraction omitted this
+    /// still delivers, because the plane's outbound table would keep the entry
+    /// the faces had dropped.
+    #[test]
+    fn an_undeclared_alias_no_longer_delivers_locally() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid());
+        let hits = Arc::new(StdMutex::new(0usize));
+        let sink_hits = hits.clone();
+        let sink: SubscriberSink = Arc::new(move || {
+            let hits = sink_hits.clone();
+            Box::new(move |_sample: &dyn SampleView| {
+                *hits.lock().expect("test mutex") += 1;
+            })
+        });
+        shared.declare_subscriber("wz/alias/gone".to_owned(), Locality::Any, sink);
+        let mapping = shared
+            .declare_keyexpr("wz/alias/gone".to_owned())
+            .expect("the first alias id is not exhausted");
+        shared.undeclare_keyexpr(mapping);
+
+        let delivered = shared
+            .publish_aliased_all(
+                mapping,
+                b"aliased",
+                &PublishOptions::put().with_locality(Locality::Any),
+            )
+            .expect("publishing on a retracted alias is not a fanout error");
+        assert_eq!(delivered, 0, "the retracted id resolves on neither leg");
+        assert_eq!(shared.drain_local_plane(), 0);
+        assert_eq!(*hits.lock().expect("test mutex"), 0);
+    }
+
+    /// R311y557 — `z_delete`'s local leg end to end through the registry, which
+    /// the debt ledger recorded as unit-tested-only on the option struct and
+    /// never driven through a delivery.
+    ///
+    /// The kind is what is asserted, not just the arrival: a Del that arrived as
+    /// a Put would satisfy an arrival-only assertion and mean the opposite thing
+    /// to the C subscriber.
+    #[test]
+    fn a_delete_reaches_the_local_plane_as_a_del() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid());
+        let kinds = Arc::new(StdMutex::new(Vec::<bool>::new()));
+        let sink_kinds = kinds.clone();
+        let sink: SubscriberSink = Arc::new(move || {
+            let kinds = sink_kinds.clone();
+            Box::new(move |sample: &dyn SampleView| {
+                kinds
+                    .lock()
+                    .expect("test mutex")
+                    .push(sample.kind() == wz_runtime_tokio::sample::SampleKind::Del);
+            })
+        });
+        shared.declare_subscriber("wz/del/local".to_owned(), Locality::Any, sink);
+
+        let delivered = shared
+            .publish_all(
+                "wz/del/local",
+                &[],
+                &PublishOptions::del().with_locality(Locality::Any),
+            )
+            .expect("a faceless delete is not an error");
+        assert_eq!(delivered, 1);
+        assert_eq!(shared.drain_local_plane(), 1);
+        assert_eq!(
+            kinds.lock().expect("test mutex").as_slice(),
+            &[true],
+            "the local leg carries the Del kind, not a Put with an empty payload"
         );
     }
 

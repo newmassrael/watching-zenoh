@@ -150,7 +150,7 @@ fn fresh_zid() -> Option<[u8; ZID_LENGTH]> {
 
 /// Fixed session-init parameters (mirrors the wz-ap-demo defaults), with a
 /// per-session [`fresh_zid`].
-fn init_params(whatami: WhatAmI, zid: Vec<u8>) -> SessionInitParams {
+pub(crate) fn init_params(whatami: WhatAmI, zid: Vec<u8>) -> SessionInitParams {
     SessionInitParams {
         version: 0x09,
         whatami,
@@ -272,6 +272,13 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx:
     // `face_up` above registered the face, so its re-arm signal exists.
     let revised = shared.deadline_revised(DIAL_FACE_ID);
 
+    // R311y557 — the LOCAL PLANE's drain is an arm of THIS select, not a
+    // `tokio::spawn`. Both placements keep the C application thread out of the
+    // C callbacks, which is the `unsafe impl Sync` premise; only this one also
+    // keeps the plane's deliveries from overlapping the face's, because a
+    // `select!` polls its arms on ONE task while the per-session runtime has two
+    // worker threads a spawned task could land on.
+    let local_shared = shared.clone();
     tokio::select! {
         _ = drive_session_until_terminal_with_extra_deadline(
             &mut driver,
@@ -286,6 +293,7 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx:
                 revised: revised.as_deref(),
             },
         ) => {}
+        _ = local_shared.drive_local_plane() => {}
         _ = shutdown_future(shutdown, stop) => {}
     }
 
@@ -593,18 +601,25 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     // dispatches its inbound events into that face's own session. Shutdown is
     // a future the loop races, so a `z_close` with NO peer ever connected
     // unwinds a pending `accept()` cleanly.
+    let local_shared = shared.clone();
     let forwarder = CApiForwarder::new(shared);
     let params = init_params(WhatAmI::Peer, zid.to_vec());
-    let _summary = accept_loop(
-        listener,
-        params,
-        clock,
-        DEFAULT_OPEN_TICK_MS,
-        shutdown_future(shutdown, stop),
-        |_event| {},
-        &forwarder,
-    )
-    .await;
+    // R311y557 — the LISTEN role is where the local plane matters most: a
+    // listener is unblocked by the BIND, so every put it makes before its first
+    // peer connects had nowhere to deliver in-process. The drain rides this
+    // task's `select!` for the same one-task reason `drive_dial` does.
+    tokio::select! {
+        _summary = accept_loop(
+            listener,
+            params,
+            clock,
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_future(shutdown, stop),
+            |_event| {},
+            &forwarder,
+        ) => { let _ = _summary; }
+        _ = local_shared.drive_local_plane() => {}
+    }
 }
 
 /// Open a session: spawn the drive thread and wait for the role's open
@@ -620,7 +635,7 @@ pub fn open_blocking(
     // Minted here, on the CALLING thread, so `SessionState` can hand it to
     // `z_info_zid` and the INIT cannot disagree with it — see the field doc.
     let zid = fresh_zid().ok_or(OpenError::DriveFailed)?;
-    let shared = Arc::new(SharedSession::new(clock));
+    let shared = Arc::new(SharedSession::new(clock, zid.to_vec()));
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<bool>();

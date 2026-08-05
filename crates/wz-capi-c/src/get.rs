@@ -213,6 +213,10 @@ impl ReplyMarshal {
                 // foreign queryable's metadata invisible.
                 view.attachment().map(<[u8]>::to_vec),
                 sample_kind,
+                // R311y557 — a reply's sample carries its timestamp too, read
+                // through the same `z_sample_timestamp` accessor.
+                view.timestamp()
+                    .map(crate::timestamp::z_timestamp_t::from_hint),
             ),
             err_payload: BytesState::whole(err_payload),
             loaned_err_payload: z_loaned_bytes_t::null_value(),
@@ -529,59 +533,62 @@ pub(crate) fn issue_get(
         _ => opts,
     };
 
-    // R311y554 — the same one-local-leg split as the fan-out publish, and here
-    // it is load-bearing in BOTH directions. A C session's queryable is
-    // replayed onto every face, so handing an `Any` get to each face would run
-    // the ONE C query handler once per face and answer a single `z_get` N
-    // times. The local leg is a property of the session, so it is issued
-    // exactly once, on the first face, as `SessionLocal` (which suppresses that
-    // face's wire leg — the loop already sent it).
-    //
-    // With no face at all there is no session to run the local leg on, the same
-    // named divergence `SharedSession::publish_all` documents on the publish
-    // side.
+    // R311y554 / R311y557 — the same two-legs-are-disjoint split as the fan-out
+    // publish. A C session's queryable is replayed onto every face AND onto the
+    // session-scope local plane, so handing an `Any` get to each face would run
+    // the ONE C query handler once per face and answer a single `z_get` N times.
+    // The faces therefore take `Remote` and only `Remote`; the LOCAL leg is
+    // issued exactly once, on the plane, which owns it whether or not a face
+    // exists. That is what the "first face carries it, and with no face there is
+    // no local leg" convention this replaced could not do.
     use wz_runtime_tokio::locality::Locality;
     let want_remote = opts.allowed_destination.allows_remote();
-    let mut local_pending = opts.allowed_destination.allows_local();
+    let want_local = opts.allowed_destination.allows_local();
 
     // The C thread's own clone, held across the whole loop — see the module doc
     // for why a face that finalises early must not be able to complete the get
     // while later faces are still being issued.
     let guard = closure.clone();
-    for (session, revised) in shared.face_sessions_with_wake() {
-        // The face that carries the session's single local leg carries it IN
-        // ADDITION to its own wire leg — ONE `query` call at the caller's own
-        // locality, not two, because a second call would register a second
-        // pending entry and so deliver a second Final for one `z_get`.
-        let per_face_locality = match (std::mem::take(&mut local_pending), want_remote) {
-            (true, true) => Locality::Any,
-            (true, false) => Locality::SessionLocal,
-            (false, true) => Locality::Remote,
-            // A local-only get whose one local leg is already placed: the
-            // remaining faces have nothing to do, and issuing a Remote query
-            // on them would send exactly what the caller asked us not to.
-            (false, false) => continue,
-        };
-        let per_face = closure.clone();
-        let per_face_gate = gate.clone();
-        // Only `on_reply` carries the `Arc`. Completion is signalled by the
-        // pending entry's sink being DROPPED, which covers a real final, a
-        // timeout sweep and a face death alike — whereas a counter incremented
-        // in `on_final` would never be reached by the face-death path.
-        let issued = session.query(
+    if want_remote {
+        for (session, revised) in shared.face_sessions_with_wake() {
+            let per_face = closure.clone();
+            let per_face_gate = gate.clone();
+            // Only `on_reply` carries the `Arc`. Completion is signalled by the
+            // pending entry's sink being DROPPED, which covers a real final, a
+            // timeout sweep and a face death alike — whereas a counter
+            // incremented in `on_final` would never be reached by the face-death
+            // path.
+            let issued = session.query(
+                &keyexpr,
+                opts.clone().with_allowed_destination(Locality::Remote),
+                move |view: &dyn ReplyView| fire_reply(&per_face, &per_face_gate, view),
+                |_rid| {},
+            );
+            // A per-face issue error (a face mid-teardown) is swallowed,
+            // matching the fan-out publish's best-effort discipline; its clone
+            // was already dropped with the rolled-back sink.
+            drop(issued);
+            // Wake this face's drive loop so it re-arms on the deadline just
+            // registered; without it a silent session sweeps only at the next
+            // keepalive wake.
+            revised.notify_one();
+        }
+    }
+    if want_local {
+        let local = closure.clone();
+        let local_gate = gate.clone();
+        let issued = shared.local_session().query(
             &keyexpr,
-            opts.clone().with_allowed_destination(per_face_locality),
-            move |view: &dyn ReplyView| fire_reply(&per_face, &per_face_gate, view),
+            opts.with_allowed_destination(Locality::SessionLocal),
+            move |view: &dyn ReplyView| fire_reply(&local, &local_gate, view),
             |_rid| {},
         );
-        // A per-face issue error (a face mid-teardown) is swallowed, matching
-        // the fan-out publish's best-effort discipline; its clone was already
-        // dropped with the rolled-back sink.
         drop(issued);
-        // Wake this face's drive loop so it re-arms on the deadline just
-        // registered; without it a silent session sweeps only at the next
-        // keepalive wake.
-        revised.notify_one();
+        // The plane's own drain, for the deferred half: the loopback replies and
+        // the Final are finalised INLINE by `Session::query`, but a local
+        // queryable handler that publishes stages onto the plane like any other
+        // producer.
+        shared.wake_local_plane();
     }
     drop(guard);
     Z_OK
