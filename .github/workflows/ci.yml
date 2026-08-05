@@ -2329,6 +2329,112 @@ jobs:
       - name: Layer C1bf — wz-runtime-tokio --all-features clippy (R311y420)
         run: bash scripts/run-ci.sh --layer C1bf
 
+  capi-c-arms:
+    name: §5.27 api-compat-c — the ABI arms and the SHM oracle (C1ce + arms gate)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ─── why this is its OWN job ─────────────────────────────────────────
+      #
+      # R311y542. Both checks below need zenoh-c built from SOURCE, which pulls
+      # the whole zenoh dependency graph: the SHM oracle is one such build and
+      # the four-arm size gate is four more. On a COLD cache that is tens of
+      # minutes, and putting it in the `ci` job would add all of it to the lane
+      # every other gate waits behind. Warm it is free — both artifacts are pure
+      # functions of (zenoh-c version, script content, pinned toolchain), which
+      # is the same argument the existing zenoh-c oracle cache makes.
+      #
+      # It also needs NO pico CLIs and no zenohd, so it provisions strictly less
+      # than the `ci` job despite building more.
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache the zenoh-c oracle (pinned 1.5.0)
+        # SAME key as the `ci` job's, deliberately: `install-zenoh-c.sh` clones
+        # the whole zenoh-c REPOSITORY into ~/zenoh-c-ref (not just its
+        # examples), which is exactly the source checkout both checks below
+        # need. Sharing the key means whichever job runs first populates it for
+        # the other rather than each paying for its own clone.
+        id: zenoh-c-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/include
+            ~/.local/lib/libzenohc.so
+            ~/zenoh-c-ref
+          key: zenoh-c-1.5.0-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh') }}
+
+      - name: Provision the zenoh-c oracle (cache miss only)
+        if: steps.zenoh-c-cache.outputs.cache-hit != 'true'
+        run: bash scripts/install-zenoh-c.sh
+
+      - name: Install zenoh-c's OWN pinned toolchain
+        # Read out of the checkout rather than hardcoded, so an upstream pin bump
+        # moves this with it. It is NOT wz's pin: the two projects pin different
+        # channels, and R311y540 measured why it matters — `z_owned_task_t` is 32
+        # bytes under zenoh-c's 1.85.0 and 24 under 1.97.0, so a size table built
+        # with the wrong compiler describes an ABI upstream does not ship.
+        run: |
+          set -euo pipefail
+          channel="$(sed -n 's/^ *channel *= *"\([^"]*\)".*/\1/p' \
+            "$HOME/zenoh-c-ref/rust-toolchain.toml" | head -1)"
+          test -n "$channel" || { echo "no pinned channel in zenoh-c's rust-toolchain.toml" >&2; exit 1; }
+          echo "zenoh-c pins $channel"
+          rustup toolchain install "$channel" --profile minimal
+
+      - name: Cache the shared-memory zenoh-c oracle
+        id: zenoh-c-shm-cache
+        uses: actions/cache@v4
+        with:
+          path: target/zenoh-c-shm
+          key: zenoh-c-shm-1.5.0-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c-shm.sh') }}
+
+      - name: Provision the shared-memory zenoh-c oracle (cache miss only)
+        if: steps.zenoh-c-shm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/install-zenoh-c-shm.sh
+
+      - name: Cache the opaque-type size tables
+        # Only the generator's STDERR is cached, not its target dirs. The stderr
+        # IS the artifact — `check-capi-c-opaque-arms.sh` reuses any arm whose
+        # file already carries size records — and it is a few tens of kilobytes
+        # against gigabytes of build output.
+        id: capi-c-arms-cache
+        uses: actions/cache@v4
+        with:
+          path: target/zenoh-c-opaque/*.stderr
+          key: capi-c-opaque-1.5.0-ubuntu-22.04-${{ hashFiles('scripts/check-capi-c-opaque-arms.sh') }}
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+
+      - name: api-compat-c — all four ABI arms against upstream's own size table
+        # WZ_CAPI_C_ARMS_REQUIRE=1 because THIS job provisions what the script
+        # needs: without it an absent checkout is a SKIP, and a skip is green —
+        # the masked-skip burn this tree has taken twice.
+        #
+        # Run directly rather than through `run-ci.sh --layer C1cc`: C1cc's other
+        # legs need the pico CLIs, which this job deliberately does not build.
+        # The WZ_C1CC_OPAQUE_ARMS flag inside that lane stays for local runs.
+        env:
+          WZ_CAPI_C_ARMS_REQUIRE: "1"
+        run: bash scripts/check-capi-c-opaque-arms.sh
+
+      - name: Layer C1ce — api-compat-c against the SHARED-MEMORY oracle
+        # WZ_C1CE_REQUIRE=1 for the same reason, and the number this prints is
+        # the honest one: against this oracle the denominator is the WHOLE
+        # corpus (21 of 29 at R311y541), where the default oracle can only ever
+        # report 22 of 22 with seven examples excluded for not compiling.
+        env:
+          WZ_C1CE_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer C1ce
+
   portability:
     name: portability (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
