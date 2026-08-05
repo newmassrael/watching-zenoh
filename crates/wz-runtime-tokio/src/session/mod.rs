@@ -469,10 +469,48 @@ pub use transport::Unicast;
 /// loopback dispatches from a background task are observable to the
 /// main `drive_session` loop's `observer.dispatch` calls and vice
 /// versa.
+/// R311y554 — WHO runs the deferred-fire queue for an in-process delivery a
+/// caller-thread API call stages.
+///
+/// The queue itself has always had two drainers: the drive loop (after every
+/// dispatch) and the staging call (`publish` / `query`, inline before they
+/// return). The second one is what this policy makes optional, because it is
+/// the only thing that can run a listener callback on a thread that is not the
+/// drive task — and for an FFI host, "which thread invokes the callback" is not
+/// an implementation detail but the premise its `unsafe impl Sync` rests on.
+///
+/// This is a property of the HOST, not of one call: a host that needs the
+/// guarantee needs it on every plane, including planes added after it opted in.
+/// So it lives on the session and every local-delivery site consults it, rather
+/// than being an option each new call site must remember to set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LocalDeliveryDrain {
+    /// The staging call drains its own fires before returning, so an
+    /// in-process publish delivers synchronously — the behaviour every wz host
+    /// had before this policy existed, and what a single-threaded Rust
+    /// application wants.
+    #[default]
+    Caller,
+    /// The staging call STAGES ONLY; the drive task drains. An in-process
+    /// publish therefore delivers asynchronously, shortly after the publishing
+    /// call returns, on the one thread the host allows callbacks on.
+    ///
+    /// A host in this mode owes the queue a wake: staging alone does not make
+    /// the drive loop iterate, so it must arm the loop (the C ABI does it
+    /// through its per-face `next_extra_deadline_ms` / `deadline_revised`
+    /// seam) or the fires wait for the next inbound message or keepalive tick.
+    /// Nothing is lost either way — an undrained queue delays, never drops.
+    DriveTask,
+}
+
 pub struct Session<R: SessionRuntime, T: TimeSource, Tp>
 where
     Tp: TransportState<R, T>,
 {
+    /// R311y554 — who drains a locally-staged fire; see [`LocalDeliveryDrain`].
+    /// `Copy`, and copied rather than shared on `clone()`: it is fixed at
+    /// construction by the host and a clone is the same host.
+    local_delivery: LocalDeliveryDrain,
     /// The transport-specific payload, projected from the [`Tp`](TransportState)
     /// typestate marker: the unicast [`SessionLinkActions`] bundle on a
     /// `Session<R, T, Unicast>`, or the multicast TX seam on a
@@ -621,6 +659,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
+            local_delivery: self.local_delivery,
             transport: self.transport.clone(),
             observer: self.observer.clone(),
             fires: self.fires.clone(),
@@ -864,7 +903,13 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 // path (a Remote-only publish stages nothing). The
                 // observer-serialized take keeps a concurrent drive-loop batch
                 // atomic (R311lj).
-                self.drain_deferred_fires();
+                //
+                // R311y554 — subject to the session's `LocalDeliveryDrain`: a
+                // host that forbids callbacks off its drive task stages here
+                // and the drive loop delivers. Ordering survives either way,
+                // because the queue is FIFO and this call stages before it
+                // returns.
+                self.drain_local_fires_if_inline();
                 delivered
             } else {
                 0
@@ -1048,6 +1093,98 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// observer lock self-deadlocks on the first take.
     pub fn drain_deferred_fires(&self) -> usize {
         self.fires.drain(&self.observer)
+    }
+
+    /// R311y554 — adopt a [`LocalDeliveryDrain`] policy for this session.
+    ///
+    /// Consuming builder rather than a setter because the policy is a
+    /// construction-time property of the host: `Session::new` has upwards of a
+    /// hundred call sites and none of them should have to name a default, while
+    /// the one host that needs the non-default gets it in the same expression
+    /// that builds the session.
+    #[must_use]
+    pub fn with_local_delivery_drain(mut self, drain: LocalDeliveryDrain) -> Self {
+        self.local_delivery = drain;
+        self
+    }
+
+    /// This session's [`LocalDeliveryDrain`] policy.
+    pub fn local_delivery_drain(&self) -> LocalDeliveryDrain {
+        self.local_delivery
+    }
+
+    /// Whether a staged fire is waiting for a drain.
+    ///
+    /// The wake-arm companion to [`LocalDeliveryDrain::DriveTask`]: a host that
+    /// defers the drain to its drive task asks this to decide whether the loop
+    /// is due to iterate NOW rather than at its next keepalive tick. Cheap (a
+    /// queue length read), and truthful in both directions — an empty queue
+    /// arms nothing, so a session that never publishes locally pays nothing and
+    /// the loop cannot hot-spin on a queue it has already emptied.
+    pub fn has_pending_fires(&self) -> bool {
+        !self.fires.is_empty()
+    }
+
+    /// Run the caller-thread half of the deferred drain, subject to this
+    /// session's [`LocalDeliveryDrain`] policy.
+    ///
+    /// Every in-process delivery site calls THIS rather than
+    /// [`Self::drain_deferred_fires`] directly, which is what makes the policy
+    /// mechanical instead of a promise: a plane added later gets the host's
+    /// guarantee by using the same helper its siblings use, and a plane that
+    /// bypasses it is visible as a direct `drain_deferred_fires` call at a
+    /// non-drive-thread site.
+    ///
+    /// `pubsub-allow-loop`-gated: that is the OR of every arm that calls it
+    /// (all three loopback-publish legs), and a helper whose cfg is wider than
+    /// its callers' is dead code in the subset build — the class R311y537's
+    /// hosted-red block was four fifths made of.
+    #[cfg(feature = "pubsub-allow-loop")]
+    fn drain_local_fires_if_inline(&self) -> usize {
+        match self.local_delivery {
+            LocalDeliveryDrain::Caller => self.drain_deferred_fires(),
+            LocalDeliveryDrain::DriveTask => 0,
+        }
+    }
+
+    /// Close the loopback half of a local query's pending entry, preserving
+    /// Reply-before-Final under EITHER [`LocalDeliveryDrain`].
+    ///
+    /// R311y554, and this exists because a test caught the naive version. The
+    /// `Caller` sequence is R311li's: drain the local queryable handlers, THEN
+    /// deliver the synthetic Final, then drain what that staged — so `on_final`
+    /// arrives after every local `on_reply`, which is pico's own
+    /// `_z_session_deliver_query_locally` emit-final-at-tail ordering. Simply
+    /// dropping the drains under `DriveTask` does NOT preserve that: the
+    /// handler jobs are still queued when `deliver_local_final` runs, the
+    /// pending entry completes and is removed, and every reply the handler was
+    /// about to produce is dropped on the floor. Measured, not reasoned:
+    /// `an_in_process_get_reaches_this_sessions_own_queryable_exactly_once...`
+    /// saw the handler fire once and the querier receive zero replies.
+    ///
+    /// The fix is one hop of the queue's own ordering rather than a drain: the
+    /// Final is STAGED, so it lands in the same batch as the handler jobs and
+    /// runs after them, and the `on_reply` fires those handlers stage land in
+    /// the batch before the `on_final` this one stages. FIFO does the rest.
+    #[cfg(feature = "query-get")]
+    fn finalize_local_query(&self, rid: u64) {
+        match self.local_delivery {
+            LocalDeliveryDrain::Caller => {
+                self.drain_deferred_fires();
+                R::with_mutex_mut(&self.observer, |observer| {
+                    observer.replies.deliver_local_final(rid);
+                });
+                self.drain_deferred_fires();
+            }
+            LocalDeliveryDrain::DriveTask => {
+                let observer = self.observer.clone();
+                self.fires.stage(Box::new(move || {
+                    R::with_mutex_mut(&observer, |observer| {
+                        observer.replies.deliver_local_final(rid);
+                    });
+                }));
+            }
+        }
     }
 
     /// Sweep expired pending queries (reply-registry deadline enforcement)
@@ -1252,6 +1389,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         >,
     ) -> Self {
         Self {
+            local_delivery: LocalDeliveryDrain::default(),
             transport: transport::MulticastPayload {
                 #[cfg(feature = "codec-push")]
                 tx,
@@ -1419,6 +1557,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             crate::node_clock::TimestampingEnabled::default(),
         );
         let session = Self {
+            // R311y554 — the default is the pre-policy behaviour; a host that
+            // needs the drive-task hand-off opts in with
+            // [`Self::with_local_delivery_drain`].
+            local_delivery: LocalDeliveryDrain::default(),
             // R311nf — on `Session<R, T, Unicast>` the `transport` field IS the
             // `Arc<SessionLinkActions<R, T>>` payload (`<Unicast as
             // TransportState<R, T>>::Payload`); no enum-variant wrap.
@@ -1581,7 +1723,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 let sample = build_loopback_sample(keyexpr, payload.bytes(), &opts);
                 let delivered =
                     R::with_mutex_mut(&self.observer, |o| o.subscribers.local_publish(&sample));
-                self.drain_deferred_fires();
+                // R311y554 — same policy gate as `Session::publish`.
+                self.drain_local_fires_if_inline();
                 return Ok(delivered);
             }
             return Ok(0);
@@ -1908,7 +2051,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 });
                 // R311lh / R311lj — drain the loopback-staged fires;
                 // gated on the local-delivery path, see `Session::publish`.
-                self.drain_deferred_fires();
+                // R311y554 — and on the session's `LocalDeliveryDrain`.
+                self.drain_local_fires_if_inline();
                 delivered
             } else {
                 0
@@ -2345,27 +2489,20 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // property this gate exists for: a Remote query stages nothing of its
             // own, so skipping the drain can lose none of ITS fires.
             if allows_local {
-                // R311lg — drain the fires this call staged so local replies run
-                // synchronously on the caller thread, outside the observer lock,
-                // before `query` returns. An overlapping drive-loop drain is
-                // lossless (the cell backlog hands the overlapped call to the
-                // active drainer).
-                self.drain_deferred_fires();
-
-                // R311li — the synthetic loopback Final closes the
-                // loopback half of the pending entry's
-                // `remaining_finals` counter AFTER the drain above ran
-                // every deferred local queryable handler and delivered
-                // its replies — so `on_final` fires after every local
-                // `on_reply` (the pico `_z_session_deliver_query_locally`
-                // emit-final-at-tail ordering, preserved across the
-                // deferred handler shape). Stays under `query-get` so
-                // the wire-only getter finalises the loopback half even
-                // with no queryable plane (R311fq).
-                R::with_mutex_mut(&self.observer, |observer| {
-                    observer.replies.deliver_local_final(rid);
-                });
-                self.drain_deferred_fires();
+                // R311lg / R311li — drain the local queryable handlers, THEN
+                // close the loopback half of the pending entry's
+                // `remaining_finals` counter, so `on_final` fires after every
+                // local `on_reply` (the pico
+                // `_z_session_deliver_query_locally` emit-final-at-tail
+                // ordering, preserved across the deferred handler shape).
+                // Under `query-get` so a wire-only getter finalises the
+                // loopback half even with no queryable plane (R311fq).
+                //
+                // R311y554 — the whole sequence moved into
+                // [`Self::finalize_local_query`], because the ordering above is
+                // exactly what a naive `LocalDeliveryDrain::DriveTask` breaks.
+                // See that function.
+                self.finalize_local_query(rid);
             }
 
             Ok(handle)
@@ -2569,16 +2706,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 }
             }
 
-            // R311lg / R311li — drain + post-drain loopback Final; see
-            // `Session::query` for the ordering rationale and for why R311y290
-            // gates BOTH drains on `allows_local`.
+            // R311lg / R311li / R311y554 — drain + loopback Final; see
+            // `Session::finalize_local_query` for the ordering rationale and
+            // `Session::query` for why R311y290 gates it on `allows_local`.
             if allows_local {
-                self.drain_deferred_fires();
-
-                R::with_mutex_mut(&self.observer, |observer| {
-                    observer.replies.deliver_local_final(rid);
-                });
-                self.drain_deferred_fires();
+                self.finalize_local_query(rid);
             }
 
             Ok(handle)

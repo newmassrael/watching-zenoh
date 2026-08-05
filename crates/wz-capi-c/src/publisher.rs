@@ -236,15 +236,16 @@ impl PublisherState {
 /// The publish options a C publisher uses when it passes NO options — the
 /// values `z_publisher_options_default` writes, resolved.
 ///
-/// `Locality::Remote` for the same structural reason
-/// [`crate::put`] documents: a C session is N per-face wz sessions each holding a
-/// replica of the subscription, so a local-capable publish would fire one C
-/// callback once PER FACE for a single put. `allowed_destination` is therefore
-/// the one field of `z_publisher_options_t` this crate still does not honour,
-/// and that is a named residual with a structural cause rather than an omission.
+/// R311y554 — `Locality::Any`, the value `z_publisher_options_default` writes.
+/// It was `Locality::Remote` until the drive-task hand-off landed; see
+/// [`crate::put::put_options`] for why that pin was a soundness workaround
+/// rather than the fidelity choice its doc comment claimed, and what replaced
+/// it. The one-local-delivery-per-session fan split lives in
+/// `wz_capi_core::faces::SharedSession::publish_all`, so the per-face replica
+/// count is no longer this function's problem.
 pub(crate) fn publisher_put_options() -> PublishOptions {
     PublishOptions::put()
-        .with_locality(Locality::Remote)
+        .with_locality(Locality::Any)
         .with_priority(priority_from_c(Z_PRIORITY_DATA))
         .with_congestion_control(congestion_from_c(Z_CONGESTION_CONTROL_DROP))
         .with_express(false)
@@ -272,7 +273,11 @@ pub(crate) unsafe fn resolve_publisher_options(
     let resolved = base
         .with_priority(priority_from_c(opts.priority))
         .with_congestion_control(congestion_from_c(opts.congestion_control))
-        .with_express(opts.is_express);
+        .with_express(opts.is_express)
+        // R311y554 — HONOURED. Declared ONCE and inherited by every
+        // `z_publisher_put` on this handle, which is upstream's shape:
+        // `z_publisher_put_options_t` carries no locality field of its own.
+        .with_locality(crate::put::locality_from_c(opts.allowed_destination));
     // SAFETY: the caller's contract for the pointee.
     match unsafe { crate::encoding::moved_encoding_hint(opts.encoding) } {
         Some(hint) => resolved.with_encoding(hint),
@@ -407,11 +412,11 @@ pub unsafe extern "C" fn z_publisher_put_options_default(this_: *mut z_publisher
 /// R311y545 — `options` is READ. Encoding, congestion control, priority and
 /// express are folded into the publish bundle every put on this publisher
 /// starts from, which is what upstream's `_declare_publisher_inner` does with
-/// the same four. `allowed_destination` is the one field still not honoured,
-/// for the structural reason [`publisher_put_options`] documents;
-/// `reliability` is a link-selection marker upstream itself does not put on the
-/// wire ("`reliability` does not trigger any data retransmission on the wire",
-/// `zenoh-c/src/commons.rs:294`).
+/// the same four. R311y554 makes it FIVE: `allowed_destination` is honoured
+/// too, declared once here and inherited by every `z_publisher_put`.
+/// `reliability` remains a link-selection marker upstream itself does not put
+/// on the wire ("`reliability` does not trigger any data retransmission on the
+/// wire", `zenoh-c/src/commons.rs:294`).
 ///
 /// # Safety
 /// `session` must be a valid loaned session; `publisher` must be valid and
@@ -635,5 +640,39 @@ pub unsafe extern "C" fn z_internal_publisher_null(this_: *mut z_owned_publisher
     if !this_.is_null() {
         // SAFETY: the caller's contract.
         unsafe { *this_ = z_owned_publisher_t::null_value() };
+    }
+}
+
+#[cfg(test)]
+mod locality_tests {
+    use super::*;
+
+    /// R311y554 — the publisher declares its locality ONCE and every
+    /// `z_publisher_put` inherits it, which is upstream's shape:
+    /// `z_publisher_put_options_t` carries no locality field of its own, so the
+    /// declaration is the only place a program can express it.
+    #[test]
+    fn publisher_options_carry_the_callers_allowed_destination() {
+        for (c_value, expected) in [
+            (ZC_LOCALITY_ANY, Locality::Any),
+            (ZC_LOCALITY_SESSION_LOCAL, Locality::SessionLocal),
+            (ZC_LOCALITY_REMOTE, Locality::Remote),
+        ] {
+            let o = z_publisher_options_t {
+                encoding: std::ptr::null_mut(),
+                congestion_control: Z_CONGESTION_CONTROL_DROP,
+                priority: Z_PRIORITY_DATA,
+                is_express: false,
+                #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+                reliability: Z_RELIABILITY_RELIABLE,
+                allowed_destination: c_value,
+            };
+            // SAFETY: a live local whose owned field is null.
+            let resolved = unsafe { resolve_publisher_options(&o) };
+            assert_eq!(
+                resolved.allowed_destination, expected,
+                "z_publisher_options_t.allowed_destination = {c_value} -> {expected:?}",
+            );
+        }
     }
 }

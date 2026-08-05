@@ -80,8 +80,9 @@ use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
 };
 use wz_runtime_tokio::session::{
-    MatchingListener, MatchingStatus, PublishAliasError, PublishError, PublishOptions,
-    QueryOptions, Queryable, QueryableOptions, SubscribeOptions, Subscriber, TokioSession,
+    LocalDeliveryDrain, MatchingListener, MatchingStatus, PublishAliasError, PublishError,
+    PublishOptions, QueryOptions, Queryable, QueryableOptions, SubscribeOptions, Subscriber,
+    TokioSession,
 };
 use wz_runtime_tokio::session_glue::{IterationEvent, SessionLinkActions};
 use wz_runtime_tokio::sink::SampleView;
@@ -256,6 +257,12 @@ struct FaceEntry {
 struct SubEntry {
     id: SubId,
     keyexpr: String,
+    /// R311y554 — the C caller's `allowed_origin`, kept in the SSOT because a
+    /// face that joins later must replay the subscription with the SAME filter
+    /// the C program asked for. A per-face default here would make the
+    /// declaration mean one thing on the face that was up at declare time and
+    /// another on every face after it.
+    allowed_origin: Locality,
     sink: SubscriberSink,
 }
 
@@ -269,6 +276,9 @@ struct QblEntry {
     id: QblId,
     keyexpr: String,
     complete: bool,
+    /// R311y554 — the C caller's `allowed_origin`; kept for the same reason
+    /// [`SubEntry::allowed_origin`] is.
+    allowed_origin: Locality,
     sink: QueryableSink,
 }
 
@@ -697,7 +707,23 @@ impl SharedSession {
         // must be the identity this face actually negotiated rather than a
         // registry-wide copy.
         let zid = actions.params.zid.clone();
-        let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock));
+        // R311y554 — THE hand-off that makes `allowed_destination` honourable.
+        //
+        // Every C closure on this ABI is `unsafe impl Sync` on one premise: the
+        // C application thread never invokes it. Before this line the premise
+        // was kept by REFUSING local delivery (`Locality::Remote` pinned in
+        // `put_options` / `queryable_options`), because `Session::publish`
+        // drains the fires it stages on whatever thread called it — so a
+        // C-thread `z_put` matching a local subscription would have run that
+        // callback while the drive thread ran the same C context for another
+        // face. `DriveTask` moves the drain instead of forbidding the delivery:
+        // the C thread stages and returns, [`Self::next_reply_deadline_ms`]
+        // reports the face due NOW, its `deadline_revised` wake gets the loop
+        // back, and [`Self::dispatch`] drains — on the one thread the premise
+        // allows. The premise is unchanged; what changed is that honouring the
+        // field no longer breaks it.
+        let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock))
+            .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
 
         let mut guard = self.lock();
         // Keyexpr aliases replay FIRST, before the subscriber and queryable
@@ -718,7 +744,7 @@ impl SharedSession {
         for entry in &guard.subs {
             if let Ok(sub) = session.declare_subscriber(
                 entry.keyexpr.clone(),
-                SubscribeOptions::default(),
+                SubscribeOptions::default().with_allowed_origin(entry.allowed_origin),
                 (entry.sink)(),
             ) {
                 subs.insert(entry.id, sub);
@@ -728,7 +754,7 @@ impl SharedSession {
         for entry in &guard.qbls {
             if let Ok(qbl) = session.declare_queryable(
                 entry.keyexpr.clone(),
-                queryable_options(entry.complete),
+                queryable_options(entry.complete, entry.allowed_origin),
                 (entry.sink)(&session),
             ) {
                 qbls.insert(entry.id, qbl);
@@ -1023,6 +1049,18 @@ impl SharedSession {
             // its final invokes C callbacks, and this is the one thread on
             // which that is allowed.
             session.sweep_expired_liveliness_gets();
+            // R311y554 — the DRIVE-TASK half of the local-delivery hand-off.
+            //
+            // A C-thread `z_put` whose `allowed_destination` allows local
+            // stages its subscriber fires and returns without running them
+            // (`LocalDeliveryDrain::DriveTask`, set in `face_up`). This is where
+            // they run. Explicit rather than left to the two sweeps above,
+            // because both are feature-gated (`query-get` / `liveliness-get`)
+            // and the hand-off must hold in EVERY feature subset that has a
+            // subscriber plane — which is all of them. Idempotent and cheap: an
+            // empty queue costs one length read, and the drain is re-entrant
+            // (a callback that publishes again is drained by the same loop).
+            session.drain_deferred_fires();
         }
     }
 
@@ -1042,6 +1080,20 @@ impl SharedSession {
             // wake is what makes it expire ON its deadline instead, and on a
             // face with no other traffic it is the only thing that gets the
             // drive loop back at all.
+            // R311y554 — a staged-but-undrained local fire makes this face due
+            // NOW. Without it the hand-off would still be correct but slow: the
+            // fires would wait for the next inbound message or the ~3333 ms
+            // keepalive tick, so an in-process `z_put` into an otherwise idle
+            // session would deliver seconds late. Reported as "now" on this
+            // session's own monotonic scale, so the `min` below and the
+            // driver's `saturating_sub` both read it as a zero-length sleep.
+            //
+            // It cannot hot-spin: `dispatch` drains before the loop re-reads
+            // this, so the second read finds the queue empty.
+            if session.has_pending_fires() {
+                use wz_runtime_core::TimeSource as _;
+                return Some(self.clock.now_monotonic_ms());
+            }
             let reply = session.next_reply_deadline_ms();
             let liveliness = session.next_liveliness_get_deadline_ms();
             match (reply, liveliness) {
@@ -1065,6 +1117,29 @@ impl SharedSession {
     /// codec (`ExceedsCapacity`), which would fail identically on every face —
     /// is surfaced. Zero faces is `Ok(0)`: a put with no peer connected simply
     /// has no recipient (pico's empty peer list → OK).
+    ///
+    /// # The local leg runs ONCE, and that is the whole of the "fan split"
+    ///
+    /// R311y554 — `opts.allowed_destination` now reaches this function meaning
+    /// what the C caller said, so the two legs have to be separated. wz holds N
+    /// faces where pico holds one transport, and a C subscription is declared
+    /// on EVERY face's session — so handing the caller's locality unchanged to
+    /// each face would deliver one in-process put to the same C callback N
+    /// times. The wire leg is per-face by nature; the local leg is a property
+    /// of the session, so it is issued exactly once, on the first face, with
+    /// [`Locality::SessionLocal`] (which suppresses that face's wire leg — it
+    /// already sent in the loop above).
+    ///
+    /// **Named divergence: a session with NO face delivers nothing locally.**
+    /// The subscriber registries live on the per-face sessions, so with no peer
+    /// there is no registry holding the subscription and an `Any` put has
+    /// nowhere to deliver. zenoh-c would deliver (its subscriber table is
+    /// session-scope); zenoh-pico's DEFAULT build would not deliver either, and
+    /// for a different reason — `Z_FEATURE_LOCAL_SUBSCRIBER` is 0
+    /// (`vendor/zenoh-pico/CMakeLists.txt:343`). Closing it needs a
+    /// face-independent local plane, which is a session-architecture round of
+    /// its own; `publish_all_local_leg_needs_a_face` pins the current behaviour
+    /// so the gap stays measured rather than assumed.
     pub fn publish_all(
         &self,
         keyexpr: &str,
@@ -1073,14 +1148,27 @@ impl SharedSession {
     ) -> Result<usize, FanoutError> {
         let sessions = self.face_sessions();
         let mut delivered = 0usize;
-        for session in sessions {
-            match session.publish(keyexpr, payload, opts.clone()) {
-                Ok(n) => delivered += n,
-                // Per-face transient failure (link released / reconnecting):
-                // best-effort, keep delivering to the surviving faces.
-                Err(PublishError::TransportUnavailable) => {}
-                // Deterministic, face-independent: fails on every face.
-                Err(_) => return Err(FanoutError::ExceedsCapacity),
+        if opts.allowed_destination.allows_remote() {
+            let remote = opts.clone().with_locality(Locality::Remote);
+            for session in &sessions {
+                match session.publish(keyexpr, payload, remote.clone()) {
+                    Ok(n) => delivered += n,
+                    // Per-face transient failure (link released / reconnecting):
+                    // best-effort, keep delivering to the surviving faces.
+                    Err(PublishError::TransportUnavailable) => {}
+                    // Deterministic, face-independent: fails on every face.
+                    Err(_) => return Err(FanoutError::ExceedsCapacity),
+                }
+            }
+        }
+        if opts.allowed_destination.allows_local() {
+            if let Some(session) = sessions.first() {
+                let local = opts.clone().with_locality(Locality::SessionLocal);
+                match session.publish(keyexpr, payload, local) {
+                    Ok(n) => delivered += n,
+                    Err(PublishError::TransportUnavailable) => {}
+                    Err(_) => return Err(FanoutError::ExceedsCapacity),
+                }
             }
         }
         Ok(delivered)
@@ -1106,14 +1194,38 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
+        // R311y554 — the same one-local-leg split as [`Self::publish_all`]; see
+        // that function for why N faces must not each deliver the sample to the
+        // one C callback. The aliased local leg goes to the FIRST face that
+        // owns the mapping rather than simply the first face: the alias is
+        // resolved out of each face's own outbound table, so a face that never
+        // got the declare cannot resolve it and its `UnknownMapping` must not
+        // consume the session's single local delivery.
         let sessions = self.face_sessions();
         let mut delivered = 0usize;
-        for session in sessions {
-            match session.publish_aliased_auto(mapping_id, None, payload, opts.clone()) {
-                Ok(n) => delivered += n,
-                Err(PublishAliasError::UnknownMapping(_)) => {}
-                Err(PublishAliasError::TransportUnavailable) => {}
-                Err(_) => return Err(FanoutError::ExceedsCapacity),
+        if opts.allowed_destination.allows_remote() {
+            let remote = opts.clone().with_locality(Locality::Remote);
+            for session in &sessions {
+                match session.publish_aliased_auto(mapping_id, None, payload, remote.clone()) {
+                    Ok(n) => delivered += n,
+                    Err(PublishAliasError::UnknownMapping(_)) => {}
+                    Err(PublishAliasError::TransportUnavailable) => {}
+                    Err(_) => return Err(FanoutError::ExceedsCapacity),
+                }
+            }
+        }
+        if opts.allowed_destination.allows_local() {
+            let local = opts.clone().with_locality(Locality::SessionLocal);
+            for session in &sessions {
+                match session.publish_aliased_auto(mapping_id, None, payload, local.clone()) {
+                    Ok(n) => {
+                        delivered += n;
+                        break;
+                    }
+                    Err(PublishAliasError::UnknownMapping(_)) => continue,
+                    Err(PublishAliasError::TransportUnavailable) => continue,
+                    Err(_) => return Err(FanoutError::ExceedsCapacity),
+                }
             }
         }
         Ok(delivered)
@@ -1357,7 +1469,12 @@ impl SharedSession {
     /// its first peer) this declares nothing on the wire and still records the
     /// entry — pico's declare-before-peer. Infallible today; keyexpr canonicity
     /// validation is a separate follow-up.
-    pub fn declare_subscriber(&self, keyexpr: String, sink: SubscriberSink) -> SubId {
+    pub fn declare_subscriber(
+        &self,
+        keyexpr: String,
+        allowed_origin: Locality,
+        sink: SubscriberSink,
+    ) -> SubId {
         let mut guard = self.lock();
         let id = guard.next_sub_id;
         guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
@@ -1365,13 +1482,18 @@ impl SharedSession {
         for face in guard.faces.values_mut() {
             if let Ok(sub) = face.session.declare_subscriber(
                 keyexpr.clone(),
-                SubscribeOptions::default(),
+                SubscribeOptions::default().with_allowed_origin(allowed_origin),
                 sink(),
             ) {
                 face.subs.insert(id, sub);
             }
         }
-        guard.subs.push(SubEntry { id, keyexpr, sink });
+        guard.subs.push(SubEntry {
+            id,
+            keyexpr,
+            allowed_origin,
+            sink,
+        });
         id
     }
 
@@ -1787,7 +1909,13 @@ impl SharedSession {
     /// allocates its own request ids (`alloc_next_request_id` is per
     /// `SessionLinkActions`), so two peers querying concurrently cannot
     /// correlate onto one another's reply chain.
-    pub fn declare_queryable(&self, keyexpr: String, complete: bool, sink: QueryableSink) -> QblId {
+    pub fn declare_queryable(
+        &self,
+        keyexpr: String,
+        complete: bool,
+        allowed_origin: Locality,
+        sink: QueryableSink,
+    ) -> QblId {
         let mut guard = self.lock();
         let id = guard.next_qbl_id;
         guard.next_qbl_id = guard.next_qbl_id.wrapping_add(1);
@@ -1795,7 +1923,7 @@ impl SharedSession {
         for face in guard.faces.values_mut() {
             if let Ok(qbl) = face.session.declare_queryable(
                 keyexpr.clone(),
-                queryable_options(complete),
+                queryable_options(complete, allowed_origin),
                 sink(&face.session),
             ) {
                 face.qbls.insert(id, qbl);
@@ -1805,6 +1933,7 @@ impl SharedSession {
             id,
             keyexpr,
             complete,
+            allowed_origin,
             sink,
         });
         id
@@ -1837,35 +1966,38 @@ impl SharedSession {
 
 /// The wz queryable options one C `z_queryable_options_t` maps to.
 ///
-/// `allowed_origin` is pinned `Locality::Remote`, mirroring the fan-out
-/// publish's choice (`pubsub::put_options`), for two independent reasons:
+/// R311y554 — `allowed_origin` is now the CALLER's, where it used to be pinned
+/// `Locality::Remote`. The pin rested on two arguments and exactly one of them
+/// was about this function:
 ///
-/// **Fidelity.** pico's `Z_FEATURE_LOCAL_QUERYABLE` defaults to **0**
-/// (`~/zenoh-pico/CMakeLists.txt:353`) — that is why its default
-/// `z_queryable_options_t` has no `allowed_origin` field at all (see
-/// [`crate::query::z_queryable_options_t`]). A default pico build has NO local
-/// queryable, so Remote-only IS the faithful default rather than a restriction.
+/// **The soundness argument, which was real and is now discharged elsewhere.**
+/// `Locality::Any::allows_local()` is TRUE (`wz-session-core/src/locality.rs`),
+/// the `unsafe impl Sync for CQueryClosure` rests on the C application thread
+/// never invoking the queryable handler, and `Session::query` ran its in-process
+/// fan AND its drain on whatever thread called it. So an `Any` queryable made
+/// that `unsafe impl` false the moment a C-thread `z_get` landed. What fixes it
+/// is not a locality pin but [`LocalDeliveryDrain::DriveTask`], adopted by every
+/// session this crate builds ([`SharedSession::face_up`]): the C thread stages,
+/// the drive task drains, and there is still exactly one thread that ever calls
+/// into C. Worth stating plainly, because the pin was ALSO the only thing
+/// containing the same hazard on the `z_get` side — a default-locality get made
+/// `Session::query` drain the whole per-session queue on the C thread whether or
+/// not any local queryable matched, and no locality pin on THIS function could
+/// have stopped that.
 ///
-/// **Soundness — and this one is load-bearing.** `Locality::Any::allows_local()`
-/// is TRUE (`wz-session-core/src/locality.rs:70-72`). The `unsafe impl Sync for
-/// CQueryClosure` rests on the C application thread never invoking the queryable
-/// handler; `Session::query` gates its in-process fan and its drain on
-/// `allows_local` (`session/mod.rs:1976, 2023`), which protects a Remote-only
-/// get but NOT a default-locality one. So an `Any` queryable would make that
-/// `unsafe impl` FALSE the moment `z_get` lands: a C-thread get would run
-/// `local_query` + `drain_deferred_fires` on the C thread while a drive thread
-/// ran `call` on another face — two `call(context)` at once on one C context,
-/// which is precisely the unsound-`Sync` bug R311y288 already fixed once on the
-/// publish plane. Pinning Remote makes the obligation MECHANICAL instead of a
-/// promise in prose that a future round can silently break.
-///
-/// Consequence, named: an in-process `z_get` will not reach this session's own
-/// queryable — matching pico's default build, and the same
-/// `Z_FEATURE_LOCAL_*` divergence already named for local subscriber delivery.
-fn queryable_options(complete: bool) -> QueryableOptions {
+/// **The fidelity argument, which was always about the pico ABI, not this one.**
+/// zenoh-pico's `Z_FEATURE_LOCAL_QUERYABLE` defaults to 0
+/// (`vendor/zenoh-pico/CMakeLists.txt:353`), which is why its
+/// `z_queryable_options_t` has no `allowed_origin` field in a default build.
+/// zenoh-c has no such switch: its struct always carries the field
+/// (`zenoh_commons.h:450-459`) and zenoh always serves local queries. So the two
+/// ABIs want DIFFERENT defaults, which is exactly why the value is now a
+/// parameter: `wz-capi-c` passes what the C caller wrote, `wz-capi-pico` passes
+/// `Locality::Remote` and documents it against the CMake default.
+fn queryable_options(complete: bool, allowed_origin: Locality) -> QueryableOptions {
     QueryableOptions::new()
         .with_complete(complete)
-        .with_allowed_origin(Locality::Remote)
+        .with_allowed_origin(allowed_origin)
 }
 
 /// The [`FaceForwarder`] the accept loop threads its held faces through. The
@@ -1921,6 +2053,35 @@ impl FaceForwarder for CApiForwarder {
 #[cfg(test)]
 mod matching_aggregate_tests {
     use super::*;
+
+    /// R311y554 — the NAMED DIVERGENCE, measured rather than asserted in prose.
+    ///
+    /// The subscriber registries live on the per-face sessions, so a session
+    /// with no peer has no registry holding the subscription and an `Any` put
+    /// has nowhere to deliver locally. zenoh-c WOULD deliver here (its
+    /// subscriber table is session-scope); zenoh-pico's default build would
+    /// not, for a different reason (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0,
+    /// `vendor/zenoh-pico/CMakeLists.txt:343`).
+    ///
+    /// Pinned so the gap stays a measurement with a date on it. Closing it needs
+    /// a face-independent local plane, which is a session-architecture round of
+    /// its own — and when that lands, THIS test is the one that must change.
+    #[test]
+    fn publish_all_local_leg_needs_a_face() {
+        let shared = SharedSession::new(TokioTime::new());
+        let delivered = shared
+            .publish_all(
+                "wz/no/face",
+                b"x",
+                &PublishOptions::put().with_locality(Locality::Any),
+            )
+            .expect("a faceless publish is not an error");
+        assert_eq!(
+            delivered, 0,
+            "with no face there is no per-face subscriber registry to deliver \
+             into, so an Any put delivers nothing locally"
+        );
+    }
 
     /// R311y528 — THE defect this round closed, asserted at the mechanism.
     ///

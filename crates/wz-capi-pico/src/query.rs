@@ -1043,14 +1043,23 @@ unsafe fn declare_queryable_inner(
     } else {
         (*options).complete
     };
-    let id = state.shared.declare_queryable(ke.clone(), complete, {
-        // R311y498 — see the pubsub/liveliness twins: the shim mints, the
-        // registry calls the factory per face, the C drop(context) is unmoved.
-        let closure = Arc::new(cclosure);
-        Arc::new(move |session: &TokioSession| {
-            Box::new(make_queryable_callback(closure.clone(), session.clone())) as Box<_>
-        })
-    });
+    // R311y554 — `Locality::Remote`: `Z_FEATURE_LOCAL_QUERYABLE` defaults to 0
+    // (`vendor/zenoh-pico/CMakeLists.txt:353`), so a default pico build has no
+    // local queryable at all and its `z_queryable_options_t` carries no
+    // `allowed_origin` field — which is why this crate's mirror carries none.
+    let id = state.shared.declare_queryable(
+        ke.clone(),
+        complete,
+        wz_runtime_tokio::locality::Locality::Remote,
+        {
+            // R311y498 — see the pubsub/liveliness twins: the shim mints, the
+            // registry calls the factory per face, the C drop(context) is unmoved.
+            let closure = Arc::new(cclosure);
+            Arc::new(move |session: &TokioSession| {
+                Box::new(make_queryable_callback(closure.clone(), session.clone())) as Box<_>
+            })
+        },
+    );
     Ok((state.shared.clone(), id, ke))
 }
 

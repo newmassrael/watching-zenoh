@@ -1270,7 +1270,15 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // records the entry (pico's declare-before-peer); each face replays the
         // SSOT as it comes up. Recording the local entry always succeeds
         // (mirrors pico's `_z_register_subscriber`).
-        let id = state.shared.declare_subscriber(ke, {
+        // R311y554 — `Locality::Remote`, and unlike the zenoh-c sibling this is
+        // a FIDELITY choice with a measured source rather than a soundness
+        // workaround: `Z_FEATURE_LOCAL_SUBSCRIBER` defaults to 0
+        // (`vendor/zenoh-pico/CMakeLists.txt:343`), which is why pico's own
+        // `z_subscriber_options_t` has no `allowed_origin` field in a default
+        // build and why this crate's mirror of it has none either. A default
+        // pico build never delivers a session's own put to its own subscriber,
+        // so neither does this ABI.
+        let id = state.shared.declare_subscriber(ke, Locality::Remote, {
             let closure = Arc::new(cclosure);
             Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
         });
@@ -1329,7 +1337,8 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         // The returned SubId is deliberately discarded: with no owned handle
         // there is nothing that could ever undeclare it, so retaining the id
         // would only invite a caller-less removal path that pico does not have.
-        let _ = state.shared.declare_subscriber(ke, {
+        // R311y554 — same Remote pin, same reason as the owned form above.
+        let _ = state.shared.declare_subscriber(ke, Locality::Remote, {
             let closure = Arc::new(cclosure);
             Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
         });

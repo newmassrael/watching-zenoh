@@ -89,22 +89,50 @@ pub struct z_delete_options_t {
     pub allowed_destination: zc_locality_t,
 }
 
-/// `Locality::Remote`, not the `Any` default — the same choice the zenoh-pico
-/// shim documents and for the same structural reason: a C session here is N
-/// per-face wz sessions, each with its own observer holding a replica of the
-/// subscription, so a local-capable publish would fire one C callback once PER
-/// FACE for a single `z_put`. `allowed_destination` is therefore READ FOR ITS
-/// LAYOUT and not honoured, which is a named residual with a structural cause
-/// rather than an omission.
+/// Map zenoh-c's `zc_locality_t` onto wz's [`Locality`].
+///
+/// R311y554. The three constants agree numerically across zenoh-c
+/// (`ZC_LOCALITY_ANY` = 0, `zenoh_commons.h:273-286`), zenoh-pico
+/// (`Z_LOCALITY_ANY` = 0, `vendor/zenoh-pico/include/zenoh-pico/api/constants.h:66-68`)
+/// and wz (`Locality::Any` = 0) — which is worth stating explicitly, and
+/// pinning by test, because the sibling ABIs do NOT always agree: R311y545
+/// found `z_congestion_control_t` INVERTED between them. An agreement that has
+/// been checked is a different thing from one that has been assumed.
+///
+/// An unrecognized value takes zenoh-c's own default rather than rejecting: the
+/// field is a plain `c_int` on this ABI, so a caller can hand over anything, and
+/// upstream's `z_put_options_default` writes `ZC_LOCALITY_ANY`.
+pub(crate) fn locality_from_c(value: zc_locality_t) -> Locality {
+    match value {
+        crate::publisher::ZC_LOCALITY_SESSION_LOCAL => Locality::SessionLocal,
+        crate::publisher::ZC_LOCALITY_REMOTE => Locality::Remote,
+        _ => Locality::Any,
+    }
+}
+
+/// `Locality::Any`, which is what `z_put_options_default` writes into
+/// `allowed_destination` and what upstream therefore does when a caller passes
+/// NULL options.
+///
+/// R311y554 — this was `Locality::Remote` for six rounds, and NOT because
+/// `Any` was wrong on the wire: `Session::publish` drained the fires it staged
+/// on the CALLER's thread, so a local-capable `z_put` from a C thread would run
+/// a subscriber callback concurrently with the drive thread running the same C
+/// context, breaking the `unsafe impl Sync for CClosure` in
+/// [`crate::sub`]. The pin was a soundness workaround wearing a fidelity
+/// argument. What removed it is [`wz_runtime_tokio::session::LocalDeliveryDrain`]:
+/// the C ABI's sessions stage local fires and let the drive task drain them, so
+/// the callback still runs on exactly one thread and the field can mean what
+/// the caller said.
 fn put_options() -> PublishOptions {
     PublishOptions::put()
-        .with_locality(Locality::Remote)
+        .with_locality(Locality::Any)
         .with_priority(priority_from_c(Z_PRIORITY_DATA))
         .with_congestion_control(congestion_from_c(Z_CONGESTION_CONTROL_DROP))
         .with_express(false)
 }
 
-/// The Del-kind counterpart, with the same locality choice and for the same
+/// The Del-kind counterpart, with the same locality default and for the same
 /// reason.
 fn delete_options() -> PublishOptions {
     put_options().with_kind(SampleKind::Del)
@@ -125,7 +153,9 @@ unsafe fn resolve_put_options(options: *mut z_put_options_t) -> PublishOptions {
     let qos = base
         .with_priority(priority_from_c(opts.priority))
         .with_congestion_control(congestion_from_c(opts.congestion_control))
-        .with_express(opts.is_express);
+        .with_express(opts.is_express)
+        // R311y554 — HONOURED, no longer read for layout.
+        .with_locality(locality_from_c(opts.allowed_destination));
     // SAFETY: as above. Read rather than taken — every encoding this crate
     // hands out is `'static`, the same fact that makes `z_encoding_drop` free
     // nothing.
@@ -155,6 +185,8 @@ unsafe fn resolve_delete_options(options: *const z_delete_options_t) -> PublishO
     base.with_priority(priority_from_c(opts.priority))
         .with_congestion_control(congestion_from_c(opts.congestion_control))
         .with_express(opts.is_express)
+        // R311y554 — HONOURED, as on the put side.
+        .with_locality(locality_from_c(opts.allowed_destination))
 }
 
 /// Fill in the default put options (zenoh-c `z_put_options_default`).
@@ -294,33 +326,47 @@ pub unsafe extern "C" fn z_delete(
 mod tests {
     use super::*;
 
-    /// R311y552 — THE SOUNDNESS GUARD. Every publish this crate issues must be
-    /// `Locality::Remote`, and this test exists because the prose saying so is
-    /// not enough: it was attempted and it produced a data race.
+    /// A `z_put_options_t` whose owned fields are all null, so it can be
+    /// resolved in a unit test without a session — the caller supplies only the
+    /// field under test.
+    fn put_options_struct(allowed_destination: zc_locality_t) -> z_put_options_t {
+        z_put_options_t {
+            encoding: std::ptr::null_mut(),
+            congestion_control: Z_CONGESTION_CONTROL_DROP,
+            priority: Z_PRIORITY_DATA,
+            is_express: false,
+            timestamp: std::ptr::null(),
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            reliability: Z_RELIABILITY_RELIABLE,
+            allowed_destination,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            source_info: std::ptr::null_mut(),
+            attachment: std::ptr::null_mut(),
+        }
+    }
+
+    /// R311y554 — the successor to R311y552's `..._is_remote_only` guard, which
+    /// asserted the OPPOSITE of this and was right to, for as long as its
+    /// premise held.
     ///
-    /// `unsafe impl Sync for CClosure` (`crate::sub`) rests on the C application
-    /// thread never invoking `call`. The only thing keeping that true is that
-    /// these publishes are Remote, so `Session::publish` takes the
-    /// `allows_local() == false` branch and stages no loopback fire. Make them
-    /// local-capable and `session/mod.rs:867` drains the staged fires
-    /// SYNCHRONOUSLY ON THE CALLER THREAD — so a C-thread `z_put` whose keyexpr
-    /// matches a subscription runs that callback while the drive thread may be
-    /// running the same C context's callback for another face's inbound sample.
-    /// Two concurrent `call(context)` on one context, which upstream's
-    /// single-threaded-callback contract forbids, and which R311y288 already
-    /// fixed once on this plane.
+    /// That premise was never about fidelity: `unsafe impl Sync for CClosure`
+    /// (`crate::sub`) rests on the C application thread never invoking `call`,
+    /// and until this round the only thing keeping it true was that these
+    /// publishes were `Remote`, so `Session::publish` stayed out of the branch
+    /// that drains staged fires ON THE CALLER'S THREAD. y552 attempted the fan
+    /// split, measured the race, and reverted — correctly.
     ///
-    /// So honouring `allowed_destination` is NOT the "~20 lines plus a test"
-    /// the debt ledger estimated from the fan shape. The fan split is the easy
-    /// half; the blocker is that the loopback drain runs on whoever called
-    /// publish. Closing it needs the local delivery moved onto the drive task
-    /// (stage without draining, wake the face, let the drive loop drain) —
-    /// wz-runtime-tokio has no entry point for that today.
+    /// What changed is the drain, not the argument:
+    /// [`wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask`], adopted by
+    /// every session `wz_capi_core::faces::SharedSession::face_up` builds. The C
+    /// thread stages and returns; the drive task drains. So exactly one thread
+    /// still ever calls into C, and the field can finally mean what the caller
+    /// wrote.
     ///
-    /// The assertion is on the RESOLVED options rather than on the constant, so
-    /// it catches the change wherever it is made.
+    /// The assertions are on RESOLVED options rather than on the constants, so
+    /// they catch the change wherever it is made.
     #[test]
-    fn every_publish_this_crate_issues_is_remote_only() {
+    fn every_publish_default_this_crate_issues_is_the_upstream_any_default() {
         for (label, opts) in [
             ("z_put default", put_options()),
             ("z_delete default", delete_options()),
@@ -331,38 +377,82 @@ mod tests {
         ] {
             assert_eq!(
                 opts.allowed_destination,
-                Locality::Remote,
-                "{label}: a local-capable publish makes `unsafe impl Sync for \
-                 CClosure` false — see this test's doc before changing it",
-            );
-            assert!(
-                !opts.allowed_destination.allows_local(),
-                "{label}: allows_local() must stay false",
+                Locality::Any,
+                "{label}: upstream's `*_options_default` writes ZC_LOCALITY_ANY, \
+                 so a NULL-options call must resolve to Any",
             );
         }
+    }
 
-        // And the resolved-from-C path cannot smuggle one in either: a caller
-        // asking for SESSION_LOCAL must not produce a local-capable bundle
-        // while the drain still runs on the caller thread.
-        let mut o = z_put_options_t {
-            encoding: std::ptr::null_mut(),
-            congestion_control: Z_CONGESTION_CONTROL_DROP,
-            priority: Z_PRIORITY_DATA,
-            is_express: false,
-            timestamp: std::ptr::null(),
-            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-            reliability: Z_RELIABILITY_RELIABLE,
-            allowed_destination: crate::publisher::ZC_LOCALITY_SESSION_LOCAL,
-            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-            source_info: std::ptr::null_mut(),
-            attachment: std::ptr::null_mut(),
-        };
-        // SAFETY: a live local whose owned fields are all null.
-        let resolved = unsafe { resolve_put_options(&mut o) };
-        assert!(
-            !resolved.allowed_destination.allows_local(),
-            "z_put_options_t.allowed_destination is READ FOR LAYOUT; honouring \
-             it requires the drive-task hand-off this test's doc describes",
+    /// R311y554 — the C field reaches the publish bundle, on all three values.
+    ///
+    /// A table over the whole enum rather than one probe: a mapping tested only
+    /// at its default cannot tell a working `match` from a constant.
+    #[test]
+    fn put_and_delete_options_carry_the_callers_allowed_destination() {
+        for (c_value, expected) in [
+            (crate::publisher::ZC_LOCALITY_ANY, Locality::Any),
+            (
+                crate::publisher::ZC_LOCALITY_SESSION_LOCAL,
+                Locality::SessionLocal,
+            ),
+            (crate::publisher::ZC_LOCALITY_REMOTE, Locality::Remote),
+        ] {
+            let mut o = put_options_struct(c_value);
+            // SAFETY: a live local whose owned fields are all null.
+            let resolved = unsafe { resolve_put_options(&mut o) };
+            assert_eq!(
+                resolved.allowed_destination, expected,
+                "z_put_options_t.allowed_destination = {c_value} must resolve to {expected:?}",
+            );
+
+            let d = z_delete_options_t {
+                congestion_control: Z_CONGESTION_CONTROL_DROP,
+                priority: Z_PRIORITY_DATA,
+                is_express: false,
+                timestamp: std::ptr::null(),
+                #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+                reliability: Z_RELIABILITY_RELIABLE,
+                allowed_destination: c_value,
+            };
+            // SAFETY: a live local with no owned fields.
+            let resolved = unsafe { resolve_delete_options(&d) };
+            assert_eq!(
+                resolved.allowed_destination, expected,
+                "z_delete_options_t.allowed_destination = {c_value} must resolve to {expected:?}",
+            );
+        }
+    }
+
+    /// R311y554 — the three ABIs' locality constants AGREE, pinned rather than
+    /// assumed.
+    ///
+    /// This is the R311y545 defect class run in reverse. There, zenoh-c and
+    /// zenoh-pico defined `z_congestion_control_t` INVERTED from each other and
+    /// a value transcribed from the wrong sibling silently meant the opposite
+    /// thing. Locality happens to agree on all three values across zenoh-c
+    /// (`zenoh_commons.h:273-286`), zenoh-pico
+    /// (`vendor/zenoh-pico/include/zenoh-pico/api/constants.h:66-68`) and wz
+    /// (`Locality as u8`) — and "happens to agree" is exactly the kind of fact
+    /// that deserves a test rather than a comment, because nothing else in the
+    /// build would notice it changing.
+    #[test]
+    fn zenoh_c_locality_constants_agree_with_pico_and_with_wz() {
+        assert_eq!(crate::publisher::ZC_LOCALITY_ANY, 0);
+        assert_eq!(crate::publisher::ZC_LOCALITY_SESSION_LOCAL, 1);
+        assert_eq!(crate::publisher::ZC_LOCALITY_REMOTE, 2);
+        assert_eq!(Locality::Any as i32, crate::publisher::ZC_LOCALITY_ANY);
+        assert_eq!(
+            Locality::SessionLocal as i32,
+            crate::publisher::ZC_LOCALITY_SESSION_LOCAL
         );
+        assert_eq!(
+            Locality::Remote as i32,
+            crate::publisher::ZC_LOCALITY_REMOTE
+        );
+        // An out-of-range value takes upstream's default rather than panicking
+        // or rejecting: the field is a plain `c_int` on this ABI.
+        assert_eq!(locality_from_c(99), Locality::Any);
+        assert_eq!(locality_from_c(-1), Locality::Any);
     }
 }

@@ -8340,3 +8340,145 @@ fn query_without_consolidation_still_delivers_every_reply() {
         "the default get must not consolidate: both versions, in arrival order"
     );
 }
+
+// --- R311y554: LocalDeliveryDrain ------------------------------------------
+
+#[test]
+fn local_delivery_drain_defaults_to_caller_and_survives_clone() {
+    let (session, _driver) = build_session();
+    assert_eq!(
+        session.local_delivery_drain(),
+        LocalDeliveryDrain::Caller,
+        "the default must be the pre-policy behaviour: the staging call drains"
+    );
+    let deferred = session.with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
+    assert_eq!(
+        deferred.local_delivery_drain(),
+        LocalDeliveryDrain::DriveTask
+    );
+    assert_eq!(
+        deferred.clone().local_delivery_drain(),
+        LocalDeliveryDrain::DriveTask,
+        "a clone is the same host, so it must carry the same policy — a clone \
+         that reverted to Caller would reopen the hole on any background task"
+    );
+}
+
+/// R311y554 — THE mechanism, asserted as a difference rather than as a
+/// property of one arm.
+///
+/// Both arms publish the same sample to the same registry. Under `Caller` the
+/// subscriber callback has already run when `publish` returns; under
+/// `DriveTask` it has NOT, the fire is queued, and the drain runs it. The
+/// second half is what makes `allowed_destination` honourable on an FFI ABI
+/// whose `unsafe impl Sync` rests on one thread invoking the callback.
+#[cfg(feature = "pubsub-allow-loop")]
+#[test]
+fn drive_task_policy_stages_the_local_delivery_where_caller_runs_it_inline() {
+    for (policy, expect_inline) in [
+        (LocalDeliveryDrain::Caller, 1usize),
+        (LocalDeliveryDrain::DriveTask, 0usize),
+    ] {
+        let (base, _driver) = build_session();
+        let session = base.with_local_delivery_drain(policy);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        // The DEFERRING registration path — `Session::declare_subscriber`, which
+        // is what the C ABI declares through. The bare
+        // `observer().subscribers.register` used elsewhere in this file installs
+        // a DIRECT callback that no policy can defer, so a test written against
+        // it would report `Caller` behaviour under both arms.
+        let _sub = session
+            .declare_subscriber("home/temp", SubscribeOptions::default(), move |_sample| {
+                c.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("declare");
+
+        let fired = session
+            .publish(
+                "home/temp",
+                b"22.5",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .expect("loopback publish");
+        assert_eq!(
+            fired, 1,
+            "{policy:?}: the MATCH count is the registry's answer and is \
+             independent of who drains — only the timing of the callback moves"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            expect_inline,
+            "{policy:?}: callback-ran-before-publish-returned"
+        );
+        assert_eq!(
+            session.has_pending_fires(),
+            expect_inline == 0,
+            "{policy:?}: a deferred delivery must be VISIBLE as pending, which \
+             is what lets the host arm its drive loop to run it"
+        );
+
+        // Whoever drains next runs it — nothing was lost, only deferred.
+        session.drain_deferred_fires();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "{policy:?}: the fire is delivered exactly once either way"
+        );
+        assert!(!session.has_pending_fires());
+    }
+}
+
+/// R311y554 — the hazard the publish-plane guard could not see, measured.
+///
+/// `Session::query` gates its drain on `allows_local`, and that drain takes the
+/// WHOLE per-session queue, not the fires the query staged. So a default-
+/// locality get — which is what `z_get` issues, since both zenoh-c's
+/// `allowed_destination` default and `QueryOptions`' are `Any` — runs whatever
+/// an inbound Push staged, on the caller's thread. `wz-capi-c`'s
+/// `every_publish_this_crate_issues_is_remote_only` pinned the PUBLISH plane
+/// against exactly this and the get walked through the same door.
+///
+/// Both arms share ONE `fires` queue (clone shares the Arc) and differ only in
+/// the policy, so the assertion is about the policy and nothing else.
+#[cfg(all(feature = "query-get", feature = "pubsub-allow-loop"))]
+#[test]
+fn a_default_locality_query_runs_fires_it_did_not_stage_unless_the_drain_is_deferred() {
+    for (getter_policy, expect_ran) in [
+        (LocalDeliveryDrain::Caller, 1usize),
+        (LocalDeliveryDrain::DriveTask, 0usize),
+    ] {
+        let (base, _driver) = build_session();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        let _sub = base
+            .declare_subscriber("home/temp", SubscribeOptions::default(), move |_sample| {
+                c.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("declare");
+
+        // Stage a subscriber fire that has NOTHING to do with the query below.
+        let stager = base
+            .clone()
+            .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
+        stager
+            .publish(
+                "home/temp",
+                b"22.5",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .expect("loopback publish");
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "staged, not run");
+
+        // A get on an unrelated keyexpr, at the DEFAULT locality.
+        let getter = base.clone().with_local_delivery_drain(getter_policy);
+        let _handle = getter.query("other/key", QueryOptions::get(), |_reply| {}, |_rid| {});
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            expect_ran,
+            "{getter_policy:?}: whether an unrelated get ran the staged \
+             subscriber callback on the calling thread"
+        );
+    }
+}

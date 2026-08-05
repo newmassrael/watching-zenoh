@@ -56,14 +56,23 @@ pub(crate) type CClosure = FfiClosure<z_closure_sample_callback_t>;
 // `call` is only ever invoked from the session's single drive task. Every face
 // of a session is driven on ONE task (the accept loop multiplexes its faces
 // through one `select!`; a dialed session has exactly one drive loop), and
-// inbound dispatch is the only caller. It is load-bearing that the C application
-// thread never invokes `call`: this crate's fan-out publishes are
-// `Locality::Remote` (see `crate::put::put_options`), so a `z_put` stages no
-// loopback fire and never drains a callback on the C thread. Were the publishes
-// local-capable, a C-thread `z_put` whose keyexpr matched a subscription would
-// drain that face's loopback fire concurrently with the drive thread's inbound
-// dispatch on another face — two `call(context)`s at once on one C context,
-// which upstream's single-threaded-callback contract forbids.
+// inbound dispatch is the only caller.
+//
+// R311y554 — WHAT KEEPS THAT TRUE CHANGED, and the old text is worth keeping in
+// view because it named a real hazard. It used to be: "this crate's fan-out
+// publishes are `Locality::Remote`, so a `z_put` stages no loopback fire". That
+// held, but it made a soundness invariant depend on a FIDELITY knob — and it
+// silently did not cover `z_get`, whose default locality is `Any` on both
+// zenoh-c and wz, so `Session::query` drained the whole per-session queue on the
+// C thread whatever the queryables' own locality said.
+//
+// It is now the DRAIN that is pinned, not the locality: every session this ABI
+// builds adopts `LocalDeliveryDrain::DriveTask`
+// (`wz_capi_core::faces::SharedSession::face_up`), so a local delivery is
+// STAGED by whoever publishes and RUN by the drive task. A C-thread `z_put` or
+// `z_get` therefore returns without invoking `call`, on any locality, and the
+// "one thread ever calls into C" premise stops depending on what a caller asked
+// for. `SharedSession::dispatch` is the drainer.
 //
 // `drop` runs only when the last `Arc` is released, which cannot overlap a live
 // `call` because a running callback holds a reference.
@@ -137,12 +146,29 @@ impl Drop for SubscriberState {
 /// equivalent is a one-byte dummy, so the two option structs are genuinely
 /// different sizes and neither may borrow the other's number.
 ///
-/// The field is carried for layout; `allowed_origin` is a NAMED gap, the same
-/// one [`z_declare_subscriber`] already records.
+/// R311y554 — the field is READ. It reaches the wz subscriber registration as
+/// `SubscribeOptions::allowed_origin`, which is the predicate that decides
+/// whether a loopback-origin Sample fires this subscription at all.
 #[repr(C)]
 pub struct z_subscriber_options_t {
     /// Restrict matching publications by their origin locality.
     pub allowed_origin: crate::publisher::zc_locality_t,
+}
+
+/// The `allowed_origin` a subscriber declaration should carry, defaulting to
+/// upstream's own `z_subscriber_options_default` value when the caller passes
+/// NULL (which `z_sub.c` does).
+///
+/// # Safety
+/// `options` must be null or a valid subscriber-options struct.
+unsafe fn subscriber_allowed_origin(
+    options: *const z_subscriber_options_t,
+) -> wz_runtime_tokio::locality::Locality {
+    if options.is_null() {
+        return wz_runtime_tokio::locality::Locality::Any;
+    }
+    // SAFETY: the caller's contract.
+    crate::put::locality_from_c(unsafe { (*options).allowed_origin })
 }
 
 /// Fill in the default subscriber options (zenoh-c
@@ -227,16 +253,15 @@ pub unsafe extern "C" fn z_closure_sample_drop(closure_: *mut z_moved_closure_sa
 /// # Safety
 /// `session` must be a valid loaned session; `subscriber` must be valid and
 /// writable; `key_expr` must be a valid loaned keyexpr; `callback` must be a
-/// valid moved closure. `_options` is accepted for ABI compatibility and
-/// ignored: `z_sub.c` passes NULL, and the one field
-/// (`allowed_origin`) is a later slice.
+/// valid moved closure. `options` must be null or a valid subscriber-options
+/// struct; R311y554 READS its one field, `allowed_origin`.
 #[no_mangle]
 pub unsafe extern "C" fn z_declare_subscriber(
     session: *const z_loaned_session_t,
     subscriber: *mut z_owned_subscriber_t,
     key_expr: *const z_loaned_keyexpr_t,
     callback: *mut z_moved_closure_sample_t,
-    _options: *mut z_subscriber_options_t,
+    options: *mut z_subscriber_options_t,
 ) -> ZResult {
     guarded(|| {
         if subscriber.is_null() || callback.is_null() {
@@ -272,7 +297,9 @@ pub unsafe extern "C" fn z_declare_subscriber(
             return Z_EINVAL;
         }
 
-        let id = state.shared.declare_subscriber(ke, {
+        // SAFETY: the caller's contract for the options struct.
+        let allowed_origin = unsafe { subscriber_allowed_origin(options) };
+        let id = state.shared.declare_subscriber(ke, allowed_origin, {
             let closure = Arc::new(cclosure);
             Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
         });
@@ -393,5 +420,50 @@ pub unsafe extern "C" fn z_internal_subscriber_null(this_: *mut z_owned_subscrib
     if !this_.is_null() {
         // SAFETY: the caller's contract.
         unsafe { *this_ = z_owned_subscriber_t::null_value() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wz_runtime_tokio::locality::Locality;
+
+    /// R311y554 — `z_subscriber_options_t`'s ONE field is read.
+    ///
+    /// It reaches `SubscribeOptions::allowed_origin`, the predicate that
+    /// decides whether a loopback-origin Sample fires this subscription. Until
+    /// this round the struct was declared purely so
+    /// `ze_advanced_subscriber_options_t` — which embeds one at offset 0 — had
+    /// the right size, and the field itself was carried and dropped.
+    ///
+    /// NULL resolves to upstream's own default (`ZC_LOCALITY_ANY`), which is
+    /// what `z_sub.c` passes and therefore the value that decides whether the
+    /// stock example can see its own session's put.
+    #[test]
+    fn subscriber_options_allowed_origin_is_read_on_every_value() {
+        // SAFETY: null is the documented "use defaults" input.
+        assert_eq!(
+            unsafe { subscriber_allowed_origin(std::ptr::null()) },
+            Locality::Any,
+            "z_subscriber_options_default writes ZC_LOCALITY_ANY",
+        );
+        for (c_value, expected) in [
+            (crate::publisher::ZC_LOCALITY_ANY, Locality::Any),
+            (
+                crate::publisher::ZC_LOCALITY_SESSION_LOCAL,
+                Locality::SessionLocal,
+            ),
+            (crate::publisher::ZC_LOCALITY_REMOTE, Locality::Remote),
+        ] {
+            let o = z_subscriber_options_t {
+                allowed_origin: c_value,
+            };
+            // SAFETY: a live local.
+            assert_eq!(
+                unsafe { subscriber_allowed_origin(&o) },
+                expected,
+                "z_subscriber_options_t.allowed_origin = {c_value} -> {expected:?}",
+            );
+        }
     }
 }

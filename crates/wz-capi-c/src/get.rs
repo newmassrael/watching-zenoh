@@ -100,7 +100,9 @@ pub struct z_get_options_t {
     pub congestion_control: c_int,
     /// Express flag. R311y551 — HONOURED (bit 4 of the Request QoS byte).
     pub is_express: bool,
-    /// Destination locality. Accepted and ignored.
+    /// Destination locality. R311y554 — HONOURED. Note what "ignored" meant
+    /// before: `QueryOptions`' own default is `Any`, so a caller who wrote
+    /// REMOTE still got the in-process fan.
     pub allowed_destination: c_int,
     /// Which reply keyexprs are accepted — present only under
     /// `Z_FEATURE_UNSTABLE_API`.
@@ -527,11 +529,39 @@ pub(crate) fn issue_get(
         _ => opts,
     };
 
+    // R311y554 — the same one-local-leg split as the fan-out publish, and here
+    // it is load-bearing in BOTH directions. A C session's queryable is
+    // replayed onto every face, so handing an `Any` get to each face would run
+    // the ONE C query handler once per face and answer a single `z_get` N
+    // times. The local leg is a property of the session, so it is issued
+    // exactly once, on the first face, as `SessionLocal` (which suppresses that
+    // face's wire leg — the loop already sent it).
+    //
+    // With no face at all there is no session to run the local leg on, the same
+    // named divergence `SharedSession::publish_all` documents on the publish
+    // side.
+    use wz_runtime_tokio::locality::Locality;
+    let want_remote = opts.allowed_destination.allows_remote();
+    let mut local_pending = opts.allowed_destination.allows_local();
+
     // The C thread's own clone, held across the whole loop — see the module doc
     // for why a face that finalises early must not be able to complete the get
     // while later faces are still being issued.
     let guard = closure.clone();
     for (session, revised) in shared.face_sessions_with_wake() {
+        // The face that carries the session's single local leg carries it IN
+        // ADDITION to its own wire leg — ONE `query` call at the caller's own
+        // locality, not two, because a second call would register a second
+        // pending entry and so deliver a second Final for one `z_get`.
+        let per_face_locality = match (std::mem::take(&mut local_pending), want_remote) {
+            (true, true) => Locality::Any,
+            (true, false) => Locality::SessionLocal,
+            (false, true) => Locality::Remote,
+            // A local-only get whose one local leg is already placed: the
+            // remaining faces have nothing to do, and issuing a Remote query
+            // on them would send exactly what the caller asked us not to.
+            (false, false) => continue,
+        };
         let per_face = closure.clone();
         let per_face_gate = gate.clone();
         // Only `on_reply` carries the `Arc`. Completion is signalled by the
@@ -540,7 +570,7 @@ pub(crate) fn issue_get(
         // in `on_final` would never be reached by the face-death path.
         let issued = session.query(
             &keyexpr,
-            opts.clone(),
+            opts.clone().with_allowed_destination(per_face_locality),
             move |view: &dyn ReplyView| fire_reply(&per_face, &per_face_gate, view),
             |_rid| {},
         );
@@ -610,6 +640,12 @@ unsafe fn get_options(options: *mut z_get_options_t) -> QueryOptions {
         .with_priority(crate::publisher::priority_from_c(o.priority))
         .with_congestion_control(crate::publisher::congestion_from_c(o.congestion_control))
         .with_express(o.is_express);
+    // R311y554 — `allowed_destination` is HONOURED. The default was already
+    // `Locality::Any` on the wz side, so the pre-y554 code did not merely ignore
+    // this field: it ignored a caller who wrote REMOTE and ran the in-process
+    // fan anyway. `fan_get` is what keeps the local half from running once per
+    // face.
+    opts = opts.with_allowed_destination(crate::put::locality_from_c(o.allowed_destination));
     opts
 }
 
@@ -693,6 +729,36 @@ pub unsafe extern "C" fn z_get(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R311y554 — `z_get_options_t.allowed_destination` reaches
+    /// [`QueryOptions`], on every value.
+    ///
+    /// The pre-y554 behaviour was not "ignored": `QueryOptions`' own default is
+    /// `Locality::Any`, so a caller who wrote REMOTE still got the in-process
+    /// fan. A field that is dropped in the direction that RELAXES the request is
+    /// worse than one that is dropped symmetrically, which is why the REMOTE row
+    /// of this table is the load-bearing one.
+    #[test]
+    fn get_options_carry_the_callers_allowed_destination() {
+        use wz_runtime_tokio::locality::Locality;
+        for (c_value, expected) in [
+            (crate::publisher::ZC_LOCALITY_ANY, Locality::Any),
+            (
+                crate::publisher::ZC_LOCALITY_SESSION_LOCAL,
+                Locality::SessionLocal,
+            ),
+            (crate::publisher::ZC_LOCALITY_REMOTE, Locality::Remote),
+        ] {
+            let mut o: z_get_options_t = unsafe { std::mem::zeroed() };
+            o.allowed_destination = c_value;
+            // SAFETY: a live local whose owned pointer fields are all null.
+            let resolved = unsafe { get_options(&mut o) };
+            assert_eq!(
+                resolved.allowed_destination, expected,
+                "z_get_options_t.allowed_destination = {c_value} -> {expected:?}",
+            );
+        }
+    }
 
     /// R311y547 — the query VALUE's encoding reaches [`QueryOptions`].
     ///

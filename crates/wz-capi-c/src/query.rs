@@ -64,6 +64,13 @@ pub(crate) type CQueryClosure = FfiClosure<z_closure_query_callback_t>;
 // dispatch is its only caller), and `drop` runs when the last `Arc` is released,
 // which cannot overlap a live `call` because a running callback holds a
 // reference.
+//
+// R311y554 — and now, as on the subscriber plane, that premise no longer rests
+// on a locality pin. `z_declare_queryable` honours the caller's
+// `allowed_origin`, so an in-process `z_get` CAN reach this session's own
+// queryable; what keeps the handler off the C thread is that the session runs
+// `LocalDeliveryDrain::DriveTask` and the local query's handler fires from the
+// staged queue that `SharedSession::dispatch` drains.
 unsafe impl Sync for CQueryClosure {}
 
 /// One reply the C callback asked for, held until it can be flushed.
@@ -459,8 +466,8 @@ pub struct z_queryable_options_t {
     /// Whether this queryable claims to hold the COMPLETE set of data for its
     /// keyexpr — what a querier's `AllComplete` target selects on.
     pub complete: bool,
-    /// Which origins the queryable accepts queries from. Accepted and ignored;
-    /// see the crate's residual list.
+    /// Which origins the queryable accepts queries from. R311y554 — READ; it
+    /// becomes the wz queryable's `allowed_origin` predicate.
     pub allowed_origin: c_int,
 }
 
@@ -485,6 +492,29 @@ pub unsafe extern "C" fn z_queryable_options_default(this_: *mut z_queryable_opt
             allowed_origin: 0,
         }
     };
+}
+
+/// Both fields of a `z_queryable_options_t`, resolved, with upstream's defaults
+/// standing in for a NULL pointer.
+///
+/// R311y554 — extracted so `allowed_origin` is read at the SAME seam as
+/// `complete`. They come from one struct and reading one while ignoring the
+/// other is precisely how the second stayed "carried for layout" for six
+/// rounds; a function that returns both cannot forget one.
+///
+/// # Safety
+/// `options` must be null or a valid queryable-options struct.
+pub(crate) unsafe fn queryable_declare_params(
+    options: *const z_queryable_options_t,
+) -> (bool, wz_runtime_tokio::locality::Locality) {
+    if options.is_null() {
+        // `z_queryable_options_default` writes `complete = false` and
+        // `allowed_origin = ZC_LOCALITY_ANY`.
+        return (false, wz_runtime_tokio::locality::Locality::Any);
+    }
+    // SAFETY: the caller's contract.
+    let o = unsafe { &*options };
+    (o.complete, crate::put::locality_from_c(o.allowed_origin))
 }
 
 /// Behind a `z_owned_queryable_t` handle: the C queryable's id in the session's
@@ -541,20 +571,17 @@ pub unsafe extern "C" fn z_declare_queryable(
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_EINVAL;
         }
-        // A NULL options pointer is upstream's "defaults", not an error.
-        let complete = if options.is_null() {
-            false
-        } else {
-            // SAFETY: the caller's contract.
-            unsafe { (*options).complete }
-        };
+        // SAFETY: the caller's contract for the options struct.
+        let (complete, allowed_origin) = unsafe { queryable_declare_params(options) };
 
-        let id = state.shared.declare_queryable(ke, complete, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move |face: &TokioSession| {
-                Box::new(make_queryable_callback(closure.clone(), face.clone())) as Box<_>
-            })
-        });
+        let id = state
+            .shared
+            .declare_queryable(ke, complete, allowed_origin, {
+                let closure = Arc::new(cclosure);
+                Arc::new(move |face: &TokioSession| {
+                    Box::new(make_queryable_callback(closure.clone(), face.clone())) as Box<_>
+                })
+            });
         let handle = Box::into_raw(Box::new(QueryableState {
             shared: state.shared.clone(),
             id,
@@ -912,6 +939,50 @@ pub unsafe extern "C" fn z_query_drop(this_: *mut z_moved_query_t) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R311y554 — `allowed_origin` reaches the declaration, on every value,
+    /// and `complete` still does. Both are asserted at the ONE seam that reads
+    /// them, which is why the seam exists.
+    #[test]
+    fn queryable_options_carry_both_complete_and_allowed_origin() {
+        use wz_runtime_tokio::locality::Locality;
+        // A NULL pointer is upstream's defaults, not an error.
+        // SAFETY: null is the documented "use defaults" input.
+        let (complete, origin) = unsafe { queryable_declare_params(std::ptr::null()) };
+        assert!(
+            !complete,
+            "z_queryable_options_default writes complete=false"
+        );
+        assert_eq!(
+            origin,
+            Locality::Any,
+            "and allowed_origin = ZC_LOCALITY_ANY, which is what makes an \
+             in-process z_get able to reach this session's own queryable"
+        );
+
+        for (c_value, expected) in [
+            (crate::publisher::ZC_LOCALITY_ANY, Locality::Any),
+            (
+                crate::publisher::ZC_LOCALITY_SESSION_LOCAL,
+                Locality::SessionLocal,
+            ),
+            (crate::publisher::ZC_LOCALITY_REMOTE, Locality::Remote),
+        ] {
+            for complete_in in [false, true] {
+                let o = z_queryable_options_t {
+                    complete: complete_in,
+                    allowed_origin: c_value,
+                };
+                // SAFETY: a live local.
+                let (complete, origin) = unsafe { queryable_declare_params(&o) };
+                assert_eq!(complete, complete_in, "complete must not be disturbed");
+                assert_eq!(
+                    origin, expected,
+                    "z_queryable_options_t.allowed_origin = {c_value} -> {expected:?}",
+                );
+            }
+        }
+    }
 
     /// The `reply ⊆ query` gate is an INTERSECTION, so a wildcard query admits
     /// a concrete reply — the ordinary case, which string equality would
