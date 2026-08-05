@@ -92,8 +92,9 @@ pub struct z_get_options_t {
     pub consolidation: z_query_consolidation_t,
     /// Query VALUE payload. CARRIED — consumed by [`z_get`].
     pub payload: *mut z_moved_bytes_t,
-    /// Value encoding. Accepted and ignored; see the residual list.
-    pub encoding: *mut c_void,
+    /// Value encoding for the query payload. R311y547 — READ, and carried in
+    /// the Query value ext alongside the payload. Typed now that it is used.
+    pub encoding: *mut crate::abi::z_moved_encoding_t,
     /// Congestion control. Accepted and ignored.
     pub congestion_control: c_int,
     /// Express flag. Accepted and ignored.
@@ -582,6 +583,16 @@ unsafe fn get_options(options: *mut z_get_options_t) -> QueryOptions {
     if let Some(payload) = unsafe { crate::bytes::take_payload(o.payload) } {
         opts = opts.with_payload(payload);
     }
+    // R311y547 — the query VALUE's encoding. `payload` + `encoding` collapse
+    // into the wire `_z_value_t` pair that `QueryMetadata::value` threads onto
+    // `RequestQueryBuilder::query_value` (the Q_B / Q_E value ext 0x03), so a
+    // querier that set one was previously sending its payload with the default
+    // label. READ rather than taken, for the reason
+    // `crate::encoding::moved_encoding_hint` documents.
+    // SAFETY: the caller's contract.
+    if let Some(hint) = unsafe { crate::encoding::moved_encoding_hint(o.encoding) } {
+        opts = opts.with_encoding(hint);
+    }
     if let Some(attachment) = unsafe { crate::bytes::take_payload(o.attachment) } {
         opts = opts.with_attachment(attachment);
     }
@@ -668,6 +679,75 @@ pub unsafe extern "C" fn z_get(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R311y547 — the query VALUE's encoding reaches [`QueryOptions`].
+    ///
+    /// ## Why this is a unit test and not a foreign witness
+    ///
+    /// Stated rather than left to be inferred from its absence: no zenoh-pico
+    /// example RENDERS the encoding of a query it received. `z_queryable.c`
+    /// prints the query's keyexpr, parameters and value; the build-time patch
+    /// this repo applies to it adds the source_info; neither reaches
+    /// `z_query_encoding`, and pico's own `z_get_attachment` prints the
+    /// encoding of a REPLY, which is the direction
+    /// `a_wz_capi_c_queryable_reply_encoding_reaches_a_real_pico_as_it_does_on_libzenohc`
+    /// witnesses foreign-side. So this half is proven where it can be proven —
+    /// at the seam — and the wire leg is a NON-CLAIM, not an oversight.
+    ///
+    /// The seam is the load-bearing part regardless: `QueryOptions::encoding`
+    /// collapses with `payload` into the `QueryMetadata::value` pair that
+    /// `RequestQueryBuilder::query_value` puts on the wire (ext 0x03), and that
+    /// path is already byte-pinned by its own tests.
+    #[test]
+    fn a_get_options_encoding_reaches_the_query_options() {
+        let mut opts = z_get_options_t {
+            target: crate::get::Z_QUERY_TARGET_BEST_MATCHING,
+            consolidation: z_query_consolidation_t {
+                mode: crate::get::Z_CONSOLIDATION_MODE_AUTO,
+            },
+            payload: std::ptr::null_mut(),
+            encoding: std::ptr::null_mut(),
+            congestion_control: crate::publisher::Z_CONGESTION_CONTROL_BLOCK,
+            is_express: false,
+            allowed_destination: crate::publisher::ZC_LOCALITY_ANY,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            accept_replies: ZC_REPLY_KEYEXPR_MATCHING_QUERY,
+            priority: crate::publisher::Z_PRIORITY_DATA,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            source_info: std::ptr::null_mut(),
+            attachment: std::ptr::null_mut(),
+            timeout_ms: 0,
+        };
+        // No encoding set: the slot stays empty, so the assertion below cannot
+        // pass on a build that hard-codes one.
+        // SAFETY: a live local.
+        let bare = unsafe { get_options(&mut opts) };
+        assert!(
+            bare.encoding.is_none(),
+            "an unset encoding must not synthesise one"
+        );
+
+        // `z_encoding_text_plain()` hands back a `'static` loaned view; the
+        // moved wrapper the C side would build is the owned value at offset 0,
+        // which is the same footprint.
+        let mut owned = crate::abi::z_owned_encoding_t::null_value();
+        // SAFETY: live locals, valid for the call.
+        unsafe {
+            crate::encoding::z_encoding_clone(&mut owned, crate::encoding::z_encoding_text_plain())
+        };
+        let mut moved = crate::abi::z_moved_encoding_t { _this: owned };
+        opts.encoding = &mut moved as *mut crate::abi::z_moved_encoding_t;
+        // SAFETY: a live local.
+        let resolved = unsafe { get_options(&mut opts) };
+        let hint = resolved
+            .encoding
+            .expect("a set encoding reaches QueryOptions");
+        // `text/plain` is zenoh wire id 4, so the packed word is `4 << 1`. The
+        // NUMBER is asserted rather than the label, because the number is what
+        // goes on the wire.
+        assert_eq!(hint.packed_id, 8);
+        assert_eq!(hint.schema, None);
+    }
 
     /// The defaults are upstream's, and `timeout_ms` is 0 meaning "resolve the
     /// default" — not "never expire", which would leave a get that no peer

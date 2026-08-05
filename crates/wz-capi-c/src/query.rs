@@ -72,6 +72,13 @@ enum PendingReply {
     Put {
         keyexpr: String,
         payload: Vec<u8>,
+        /// R311y547 — the reply's value encoding, from
+        /// `z_query_reply_options_t::encoding`. The `ReplyOut` seam has
+        /// carried this slot since the storage per-version reply landed
+        /// (`reply_keyed_encoded` / `reply_keyed_attached` both take it); this
+        /// crate was passing `None` into it, which is why a queryable that set
+        /// an encoding was answering with `zenoh/bytes` on the wire.
+        encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
         attachment: Option<Vec<u8>>,
     },
 }
@@ -120,10 +127,18 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
         PendingReply::Put {
             keyexpr,
             payload,
+            encoding,
             attachment,
         } => match attachment {
-            Some(att) => out.reply_keyed_attached(&keyexpr, &payload, None, &att),
-            None => out.reply_keyed(&keyexpr, &payload),
+            Some(att) => out.reply_keyed_attached(&keyexpr, &payload, encoding.as_ref(), &att),
+            // R311y547 — `reply_keyed_encoded` rather than `reply_keyed` when
+            // an encoding is set. The two differ only in the inner `MsgPut`
+            // E-flag, and the no-encoding case still takes the narrower seam so
+            // a default reply's bytes are unchanged.
+            None => match encoding {
+                Some(enc) => out.reply_keyed_encoded(&keyexpr, &payload, Some(&enc)),
+                None => out.reply_keyed(&keyexpr, &payload),
+            },
         },
     }
 }
@@ -716,8 +731,11 @@ pub unsafe extern "C" fn z_query_attachment(
 /// arms are written out below.
 #[repr(C)]
 pub struct z_query_reply_options_t {
-    /// Reply value encoding. Accepted and ignored; see the residual list.
-    pub encoding: *mut c_void,
+    /// Reply value encoding. R311y547 — READ, and carried on the reply's own
+    /// `MsgPut` body (the E-flag), which is where a foreign querier reads it
+    /// from. Typed rather than `*mut c_void` now that the field is used; the
+    /// layout is unchanged, a pointer being a pointer.
+    pub encoding: *mut crate::abi::z_moved_encoding_t,
     /// Congestion control. Accepted and ignored.
     pub congestion_control: c_int,
     /// Priority. Accepted and ignored.
@@ -784,11 +802,21 @@ pub unsafe extern "C" fn z_query_reply(
         // leak the caller's payload.
         // SAFETY: the caller's contract.
         let taken = unsafe { crate::bytes::take_payload(payload) };
-        let attachment = if options.is_null() {
-            None
+        let (encoding, attachment) = if options.is_null() {
+            (None, None)
         } else {
-            // SAFETY: the caller's contract.
-            unsafe { crate::bytes::take_payload((*options).attachment) }
+            // SAFETY: the caller's contract. The encoding is READ rather than
+            // taken (every label this crate hands out is `'static`, the same
+            // fact that makes `z_encoding_drop` free nothing); the attachment
+            // is TAKEN, as upstream specifies for owned options fields. Both
+            // happen before any early return, so a failed reply still consumes
+            // what upstream would have consumed.
+            unsafe {
+                (
+                    crate::encoding::moved_encoding_hint((*options).encoding),
+                    crate::bytes::take_payload((*options).attachment),
+                )
+            }
         };
 
         // SAFETY: the caller's contract, delegated.
@@ -808,6 +836,7 @@ pub unsafe extern "C" fn z_query_reply(
         marshal.push_reply(PendingReply::Put {
             keyexpr: ke.to_owned(),
             payload,
+            encoding,
             attachment,
         });
         Z_OK

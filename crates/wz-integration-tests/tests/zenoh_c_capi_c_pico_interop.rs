@@ -1800,3 +1800,250 @@ fn upstream_z_pub_thr_on_wz_capi_c_carries_its_publisher_qos_to_a_real_pico() {
     graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
 }
+
+/// LEG 16 (`wz->pico`, REPLY-OPTIONS ENCODING) — a queryable on WZ's C ABI sets
+/// `z_query_reply_options_t::encoding`, and the REAL zenoh-pico
+/// `z_get_attachment` prints the label it decoded off the reply.
+///
+/// ## Why this leg is a DIFFERENTIAL and the sibling legs are not
+///
+/// Every other `wz->pico` leg in this file drives an UPSTREAM example, because
+/// a wz-authored program calls only what wz exports and that bias is exactly
+/// what the corpus rule exists to remove. No upstream example sets a reply
+/// encoding — `z_queryable.c` takes `z_query_reply_options_default` and touches
+/// nothing — so an upstream driver cannot reach this field at all.
+///
+/// The answer is not to write a wz-authored program and trust it: it is to
+/// compile ONE wz-authored source TWICE, against wz's cdylib and against the
+/// real `libzenohc.so`, put a real zenoh-pico on the far side of BOTH, and
+/// compare what the FOREIGN process printed. Anything wz-flavoured about the
+/// driver appears identically on both arms and cancels; what survives the
+/// subtraction is a disagreement between the two implementations, adjudicated
+/// by a third. That is the same argument the option-defaults differential
+/// makes, with a foreign observer added.
+///
+/// ## What was wrong
+///
+/// `wz-capi-c`'s `z_query_reply` took the options struct, TOOK its attachment,
+/// and dropped its encoding on the floor — `flush_one` passed a literal `None`
+/// into `ReplyOut::reply_keyed_attached`'s encoding slot. That slot has carried
+/// a real value since the storage per-version reply landed, so the wire path
+/// was there the whole time and nothing fed it. A queryable that set
+/// `text/plain` answered with `zenoh/bytes`.
+///
+/// pico's `z_get_attachment.c` prints `with encoding: <label>` per reply from
+/// its own stock handler — no build-time patch involved — so the two outcomes
+/// are distinct strings produced by a foreign implementation.
+// wz-proves: api-compat-c wz->pico partial
+#[test]
+#[ignore = "compiles a C driver against wz's cdylib AND the real libzenohc.so \
+            and spawns the real zenoh-pico z_get_attachment CLI; needs the \
+            machine-local zenoh-c oracle; run-ci Layer C1cc drives it"]
+fn a_wz_capi_c_queryable_reply_encoding_reaches_a_real_pico_as_it_does_on_libzenohc() {
+    let Some((include, libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drivers");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("driver source dir");
+    // Upstream's own `parse_args.h` is copied beside the driver so the driver
+    // can use the SAME argument and config handling every example in the corpus
+    // uses — the endpoint / mode plumbing is then upstream's, not this test's.
+    std::fs::copy(examples.join("parse_args.h"), src_dir.join("parse_args.h"))
+        .expect("upstream parse_args.h is part of the examples clone");
+    std::fs::write(
+        src_dir.join("wz_reply_encoding.c"),
+        r#"#include <stdio.h>
+#include <string.h>
+
+#include "parse_args.h"
+#include "zenoh.h"
+
+static const char *REPLY_VALUE = "REPLY-CARRYING-AN-ENCODING";
+
+void query_handler(z_loaned_query_t *query, void *context) {
+    z_query_reply_options_t options;
+    z_query_reply_options_default(&options);
+    // The field this driver exists for. Everything else is defaults.
+    z_owned_encoding_t encoding;
+    z_encoding_clone(&encoding, z_encoding_text_plain());
+    options.encoding = z_move(encoding);
+
+    z_owned_bytes_t reply_payload;
+    z_bytes_copy_from_str(&reply_payload, REPLY_VALUE);
+    z_view_keyexpr_t reply_keyexpr;
+    z_view_keyexpr_from_str(&reply_keyexpr, (const char *)context);
+    printf(">> [Queryable ] Responding with text/plain\n");
+    fflush(stdout);
+    z_query_reply(query, z_loan(reply_keyexpr), z_move(reply_payload), &options);
+}
+
+int main(int argc, char **argv) {
+    zc_init_log_from_env_or("error");
+    z_owned_config_t config;
+    z_config_default(&config);
+    parse_zenoh_common_args(argc, argv, &config);
+    // The keyexpr is the LAST argument, so no option-table plumbing is needed
+    // beyond upstream's own.
+    const char *keyexpr = argv[argc - 1];
+
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) {
+        printf("Unable to open session!\n");
+        return -1;
+    }
+
+    z_owned_closure_query_t callback;
+    z_closure(&callback, query_handler, NULL, (void *)keyexpr);
+    z_owned_queryable_t qable;
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, keyexpr);
+    if (z_declare_queryable(z_loan(s), &qable, z_loan(ke), z_move(callback), NULL) < 0) {
+        printf("Unable to create queryable.\n");
+        return -1;
+    }
+    printf("Queryable declared on '%s'\n", keyexpr);
+    fflush(stdout);
+    while (1) {
+        z_sleep_s(1);
+    }
+    z_drop(z_move(qable));
+    z_drop(z_move(s));
+    return 0;
+}
+"#,
+    )
+    .expect("write the driver source");
+
+    let lib = wz_capi_c_cdylib();
+    let wz_libdir = lib.parent().expect("cdylib has a parent").to_path_buf();
+    let on_wz = compile_zenoh_c_example(
+        "wz_reply_encoding",
+        dir.path(),
+        &include,
+        &src_dir,
+        &wz_libdir,
+        "wz_capi_c",
+    )
+    .unwrap_or_else(|diag| {
+        panic!("the reply-encoding driver does NOT link against wz's C-ABI cdylib.\n{diag}")
+    });
+    let ref_dir = dir.path().join("reference");
+    std::fs::create_dir_all(&ref_dir).expect("reference build dir");
+    let on_ref = compile_zenoh_c_example(
+        "wz_reply_encoding",
+        &ref_dir,
+        &include,
+        &src_dir,
+        &libdir_ref,
+        "zenohc",
+    )
+    .unwrap_or_else(|diag| {
+        panic!("the reply-encoding driver does not link against the REAL libzenohc.so\n{diag}")
+    });
+
+    // One arm: queryable listens, a real pico z_get_attachment dials in and
+    // reports what it decoded. A FRESH port per arm — a shared one makes the
+    // second arm's result depend on the first, which the sibling dropin file
+    // paid for once already.
+    let z_get = zenoh_pico_cli_binary("z_get_attachment");
+    let run_arm = |driver: &Path, libdir: &Path, arm: &str| -> String {
+        let key = "demo/capic/leg16";
+        let reservation = PortReservation::pick();
+        let port = reservation.port();
+        let endpoint = format!("tcp/127.0.0.1:{port}");
+
+        let mut qbl_out = tempfile::tempfile().expect("queryable stdout capture");
+        let writer = qbl_out.try_clone().expect("dup queryable handle");
+        let mut qbl = ChildGuard::wrap(
+            format!("reply-encoding queryable ({arm})"),
+            Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(driver)
+                .args(["-l", &endpoint, "-m", "peer", key])
+                .env("LD_LIBRARY_PATH", libdir)
+                .stdout(Stdio::from(writer))
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap_or_else(|why| panic!("spawn the {arm} queryable: {why}")),
+        );
+        if let Err(why) = wait_for_tcp_accept_alive(qbl.child_mut(), port, LISTEN_TIMEOUT) {
+            panic!(
+                "the {arm} queryable never accepted on {endpoint} — {why}; capture so \
+                 far:\n{}",
+                read_captured(&mut qbl_out)
+            );
+        }
+        drop(reservation);
+        // The port accepting is NOT the queryable being declared, and pico's
+        // z_get is one-shot: it sends its query as soon as it is open and takes
+        // the final notification as its answer. The first draft waited only on
+        // the port and the REFERENCE arm came back with an empty reply set,
+        // which is the fixture racing the declaration rather than either
+        // library dropping anything. The driver prints its own declaration, so
+        // the barrier is that line.
+        if let Err(captured) =
+            wait_for_substring(&mut qbl_out, "Queryable declared on", LISTEN_TIMEOUT)
+        {
+            panic!(
+                "the {arm} queryable never reported its declaration within \
+                 {LISTEN_TIMEOUT:?}.\n--- {arm} queryable stdout ---\n{captured}"
+            );
+        }
+
+        let mut get_out = tempfile::tempfile().expect("foreign querier stdout capture");
+        let get_writer = get_out.try_clone().expect("dup foreign querier handle");
+        let mut get = ChildGuard::wrap(
+            format!("real zenoh-pico z_get_attachment ({arm})"),
+            Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(&z_get)
+                .args(["-k", key, "-e", &endpoint, "-m", "client"])
+                .stdout(Stdio::from(get_writer))
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn the real zenoh-pico z_get_attachment"),
+        );
+        let captured = wait_for_substring(&mut get_out, "with encoding:", EXCHANGE_TIMEOUT)
+            .unwrap_or_else(|captured| {
+                panic!(
+                    "the REAL zenoh-pico z_get_attachment never printed an encoding line \
+                     for the {arm} queryable's reply.\n\
+                     --- REAL pico z_get_attachment stdout ---\n{captured}\n\
+                     --- {arm} queryable stdout ---\n{}",
+                    read_captured(&mut qbl_out)
+                )
+            });
+        graceful_terminate(get.child_mut(), Duration::from_secs(5));
+        graceful_terminate(qbl.child_mut(), Duration::from_secs(5));
+        // Only the encoding lines, so the comparison below is not sensitive to
+        // reply ordering or to anything else the two libraries may narrate.
+        captured
+            .lines()
+            .filter(|l| l.contains("with encoding:"))
+            .map(|l| l.trim().to_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let ref_lines = run_arm(&on_ref, &libdir_ref, "REFERENCE libzenohc");
+    let wz_lines = run_arm(&on_wz, &wz_libdir, "wz cdylib");
+
+    // The reference arm establishes what the answer IS, before wz is compared
+    // to it — a differential between two arms that both dropped the field would
+    // be EQUAL and prove nothing.
+    assert!(
+        ref_lines.contains("with encoding: text/plain"),
+        "the REFERENCE arm did not carry the reply encoding either, so this \
+         machine's oracle cannot serve as one here and the comparison below \
+         would be vacuous.\n--- pico saw (reference) ---\n{ref_lines}"
+    );
+    assert_eq!(
+        wz_lines, ref_lines,
+        "a REAL zenoh-pico decoded a DIFFERENT reply encoding from wz's C ABI \
+         than from the real libzenohc.so, driven by the SAME C source. \
+         `z_query_reply_options_t::encoding` is the only field this driver sets; \
+         wz dropping it makes pico print the default `zenoh/bytes`.\n\
+         --- pico saw (wz) ---\n{wz_lines}\n--- pico saw (reference) ---\n{ref_lines}"
+    );
+}

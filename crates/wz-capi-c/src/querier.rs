@@ -13,7 +13,15 @@
 //! QUERYABLES rather than subscribers, which is the one thing that differs from
 //! the publisher's ([`crate::matching`]).
 
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{c_char, c_int, CStr};
+// R311y547 — `c_void`'s only remaining user in this module is the
+// unstable-gated `z_querier_get_options_t::source_info`, so the import carries
+// the SAME cfg. The y536 rule ("a symbol's cfg is the OR of every arm that uses
+// it") read backwards: when the last unconditional user goes away, an
+// unconditional import becomes an unused-import error on exactly the arms the
+// remaining user is absent from — and only two of the four lanes compile those.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
 use wz_runtime_tokio::session::QueryOptions;
@@ -102,8 +110,9 @@ pub unsafe extern "C" fn z_querier_options_default(this_: *mut z_querier_options
 pub struct z_querier_get_options_t {
     /// Query VALUE payload. CARRIED — consumed by [`z_querier_get`].
     pub payload: *mut z_moved_bytes_t,
-    /// Value encoding. Accepted and ignored.
-    pub encoding: *mut c_void,
+    /// Value encoding for the query payload. R311y547 — READ, and carried in
+    /// the Query value ext alongside the payload, the same as `z_get`'s.
+    pub encoding: *mut crate::abi::z_moved_encoding_t,
     /// Querier source info — unstable-only.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     pub source_info: *mut c_void,
@@ -267,14 +276,15 @@ pub unsafe extern "C" fn z_querier_get(
 
         // The per-get moved payload / attachment are consumed on every path
         // too, matching upstream's unconditional ownership transfer.
-        let (payload, attachment) = if options.is_null() {
-            (None, None)
+        let (payload, attachment, encoding) = if options.is_null() {
+            (None, None, None)
         } else {
             // SAFETY: the caller's contract.
             unsafe {
                 (
                     crate::bytes::take_payload((*options).payload),
                     crate::bytes::take_payload((*options).attachment),
+                    crate::encoding::moved_encoding_hint((*options).encoding),
                 )
             }
         };
@@ -286,6 +296,9 @@ pub unsafe extern "C" fn z_querier_get(
         let mut opts = state.base.clone();
         if let Some(payload) = payload {
             opts = opts.with_payload(payload);
+        }
+        if let Some(encoding) = encoding {
+            opts = opts.with_encoding(encoding);
         }
         if let Some(attachment) = attachment {
             opts = opts.with_attachment(attachment);
@@ -446,7 +459,7 @@ mod tests {
 
         let mut get_opts = z_querier_get_options_t {
             payload: 1 as *mut z_moved_bytes_t,
-            encoding: 1 as *mut c_void,
+            encoding: 1 as *mut crate::abi::z_moved_encoding_t,
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
             source_info: 1 as *mut c_void,
             attachment: 1 as *mut z_moved_bytes_t,
