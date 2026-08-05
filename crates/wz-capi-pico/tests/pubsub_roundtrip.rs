@@ -712,3 +712,602 @@ unsafe extern "C" fn on_drop_self_undeclare(ctx: *mut c_void) {
     let ctx = &*(ctx as *const SelfUndeclareCtx);
     ctx.dropped.store(true, Ordering::SeqCst);
 }
+
+// ===========================================================================
+// R311y553 — the three SSOT sink planes R311y549 left UNINSTRUMENTED.
+// ===========================================================================
+//
+// R311y549 instrumented ONE of the four sinks (subscriber) and said so, rather
+// than reporting the debt as closed. These are the other three: queryable,
+// liveliness-subscriber and advanced-subscriber. Each asks its own plane the
+// same question — a C callback that undeclares its OWN registration must
+// RETURN — because the answer rests on a mechanism that is per-plane and not
+// per-registry: `unregister` drops the slot under the observer mutex and the
+// teardown re-takes that mutex, so on a straight lock-order read every one of
+// them deadlocks. R311lh's deferred-fire cell is what makes it not so, and
+// whether a given plane routes through that cell is a fact about that plane.
+// Reading that all four "reference the same deferred_fire machinery" is a
+// reading; this is the measurement.
+//
+// ## What is new here versus y549: the CALIBRATION IS AUTOMATIC
+//
+// y549's `after == 0` assertion was calibrated by hand — the undeclare was
+// skipped once, 24 samples were observed in the same window, and the number
+// went in a ledger bullet. That makes the calibration a claim about a run
+// nobody repeats. Here each probe runs BOTH arms in the same test: a
+// CALIBRATION arm that skips the undeclare and REQUIRES traffic in the window,
+// and the REAL arm that performs it and requires silence. A link that went
+// quiet fails the calibration arm instead of passing the real one, so the zero
+// cannot become vacuous without the test saying so.
+
+/// Context shared by the three re-entrancy probes below.
+///
+/// One struct rather than three because the four observables are the same on
+/// every plane — entered / returned / dropped / after — and the only thing that
+/// differs is which `z_undeclare_*` the callback calls.
+struct ReentrantCtx {
+    /// The handle the callback undeclares. Type-erased: each plane casts it
+    /// back to its own owned type. Boxed by the test so the address is stable.
+    handle: *mut c_void,
+    entered: Arc<AtomicBool>,
+    returned: Arc<AtomicBool>,
+    /// Set by the C drop callback — the observable that the undeclare released
+    /// the LAST `Arc<CClosure>` rather than merely returning.
+    dropped: Arc<AtomicBool>,
+    /// Deliveries seen after the first. In the REAL arm this must be 0; in the
+    /// CALIBRATION arm it must be > 0, which is what makes the 0 a measurement.
+    after: Arc<AtomicUsize>,
+    /// The undeclare runs at most ONCE.
+    done: AtomicBool,
+    /// CALIBRATION arm: fire the observables but SKIP the undeclare, so the
+    /// window measures what an un-retired registration receives.
+    calibrate: bool,
+}
+
+/// The C `drop(context)` for all three probes — records and LEAKS.
+///
+/// The leak is deliberate and is what makes the `after` assertion sound; see
+/// [`on_drop_self_undeclare`] for the full argument. One leaked context per
+/// probe per test process.
+unsafe extern "C" fn on_drop_reentrant(ctx: *mut c_void) {
+    let ctx = &*(ctx as *const ReentrantCtx);
+    ctx.dropped.store(true, Ordering::SeqCst);
+}
+
+/// Spin up an acceptor session on `port` that repeatedly runs `drive` until
+/// `stop` is set, and a dialer session connected to it. Returns the dialer.
+///
+/// Extracted because the three probes differ only in what the acceptor does to
+/// generate traffic (put / declare a token / advanced-put) and what the dialer
+/// declares; the session bring-up, the convergence retry on `z_open` and the
+/// stop signalling are identical, and three copies of them would be three
+/// places for a timing fix to be applied twice.
+fn reentrancy_harness(
+    port: u16,
+    drive: impl Fn(*const z_loaned_session_t) + Send + 'static,
+) -> (
+    z_owned_session_t,
+    Arc<AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_acc = stop.clone();
+
+    let acceptor = std::thread::spawn(move || unsafe {
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                Z_CONFIG_LISTEN_KEY,
+                listen.as_ptr()
+            ),
+            Z_OK
+        );
+        let _ = started_tx.send(());
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+            Z_OK,
+            "acceptor z_open failed"
+        );
+        // Keep generating traffic until told to stop. The probe's whole
+        // measurement is "what arrives in a window", so the traffic must
+        // outlive the undeclare — that is what the calibration arm reads.
+        while !stop_acc.load(Ordering::SeqCst) {
+            drive(z_session_loan(&session));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+    });
+
+    started_rx.recv().unwrap();
+
+    let mut session: z_owned_session_t = unsafe { std::mem::zeroed() };
+    let mut opened = false;
+    for _ in 0..250 {
+        unsafe {
+            let mut cfg: z_owned_config_t = std::mem::zeroed();
+            assert_eq!(z_config_default(&mut cfg), Z_OK);
+            assert_eq!(
+                zp_config_insert(
+                    z_config_loan_mut(&mut cfg),
+                    Z_CONFIG_CONNECT_KEY,
+                    connect.as_ptr()
+                ),
+                Z_OK
+            );
+            if z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()) == Z_OK {
+                opened = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(opened, "dialer z_open never succeeded");
+    (session, stop, acceptor)
+}
+
+/// Wait for `returned`, then assert the four observables of a re-entrant
+/// undeclare. `plane` names the plane in every failure message.
+///
+/// The `after` verdict is the arm-dependent half: the REAL arm requires
+/// silence, the CALIBRATION arm requires traffic. Passing the same window to
+/// both is what makes the silence meaningful.
+fn assert_reentrant_undeclare(
+    plane: &str,
+    ctx: &ReentrantCtx,
+    entered: &AtomicBool,
+    returned: &AtomicBool,
+    dropped: &AtomicBool,
+    after: &AtomicUsize,
+    still_live: impl Fn() -> bool,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if returned.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    assert!(
+        entered.load(Ordering::SeqCst),
+        "{plane}: the callback never fired, so this leg measured NOTHING about \
+         re-entrant undeclare — the delivery failed first"
+    );
+    assert!(
+        returned.load(Ordering::SeqCst),
+        "{plane}: the callback ENTERED its own undeclare and never returned — \
+         a C callback retiring its own registration DEADLOCKS on this plane. \
+         The dispatch holds the observer mutex across the C call and the \
+         teardown re-takes it on the same thread; std::sync::Mutex is not \
+         reentrant. R311y535 gave the MATCHING plane a thread-local delivery \
+         guard for exactly this. The drive thread is wedged and is leaked \
+         rather than joined."
+    );
+
+    if ctx.calibrate {
+        // The calibration arm skipped the undeclare, so the handle must still
+        // be live and the window must have carried traffic.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            still_live(),
+            "{plane} CALIBRATION: the handle was retired even though this arm \
+             skips the undeclare — the arm is not measuring what it claims"
+        );
+        assert!(
+            after.load(Ordering::SeqCst) > 0,
+            "{plane} CALIBRATION: NOTHING arrived in the 500 ms window while \
+             the registration was still LIVE. The link is silent, so the REAL \
+             arm's `after == 0` would pass on absence and prove nothing. This \
+             is the vacuity guard, and it has fired."
+        );
+        return;
+    }
+
+    assert!(
+        !still_live(),
+        "{plane}: the undeclare returned without gravestoning the handle, so \
+         the no-deadlock result above is about a call that did nothing"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "{plane}: the C drop(context) never ran, so the undeclare did not \
+         release the last Arc<CClosure> — the `after` assertion below would be \
+         measuring a LIVE registration, not a retired one"
+    );
+
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        after.load(Ordering::SeqCst),
+        0,
+        "{plane}: a delivery reached the callback AFTER it undeclared itself \
+         and its C drop(context) had run. The deferred-fire cell is taken \
+         across the C call (R311lh); a restore must not resurrect a cell whose \
+         registration was retired while it was taken."
+    );
+}
+
+// --- plane 2 of 4: QUERYABLE -----------------------------------------------
+
+unsafe extern "C" fn on_query_self_undeclare(
+    _query: *const wz_capi_pico::query::z_loaned_query_t,
+    ctx: *mut c_void,
+) {
+    let ctx = &*(ctx as *const ReentrantCtx);
+    if ctx.done.swap(true, Ordering::SeqCst) {
+        ctx.after.fetch_add(1, Ordering::SeqCst);
+        return;
+    }
+    ctx.entered.store(true, Ordering::SeqCst);
+    if !ctx.calibrate {
+        wz_capi_pico::z_undeclare_queryable(wz_capi_pico::z_queryable_move(
+            &mut *(ctx.handle as *mut wz_capi_pico::query::z_owned_queryable_t),
+        ));
+    }
+    ctx.returned.store(true, Ordering::SeqCst);
+}
+
+/// The reply closure the acceptor's `z_get` needs. Discards everything — the
+/// probe is about the RESPONDER's re-entrancy, not about replies.
+unsafe extern "C" fn on_reply_discard(
+    _reply: *mut wz_capi_pico::get::z_loaned_reply_t,
+    _ctx: *mut c_void,
+) {
+}
+unsafe extern "C" fn on_drop_noop(_ctx: *mut c_void) {}
+
+fn run_queryable_reentrancy_probe(calibrate: bool) {
+    let port = free_port();
+    let (mut session, stop, acceptor) = reentrancy_harness(port, |acc| unsafe {
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, c"demo/q".as_ptr()), Z_OK);
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            wz_capi_pico::z_closure_reply(
+                &mut closure,
+                Some(on_reply_discard),
+                Some(on_drop_noop),
+                std::ptr::null_mut()
+            ),
+            Z_OK
+        );
+        let _ = wz_capi_pico::z_get(
+            acc,
+            z_view_keyexpr_loan(&ke),
+            c"".as_ptr(),
+            wz_capi_pico::z_closure_reply_move(&mut closure),
+            std::ptr::null_mut(),
+        );
+    });
+
+    let handle: *mut wz_capi_pico::query::z_owned_queryable_t =
+        Box::into_raw(Box::new(unsafe { std::mem::zeroed() }));
+    let entered = Arc::new(AtomicBool::new(false));
+    let returned = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let after = Arc::new(AtomicUsize::new(0));
+    let ctx = Box::into_raw(Box::new(ReentrantCtx {
+        handle: handle as *mut c_void,
+        entered: entered.clone(),
+        returned: returned.clone(),
+        dropped: dropped.clone(),
+        after: after.clone(),
+        done: AtomicBool::new(false),
+        calibrate,
+    }));
+
+    unsafe {
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            wz_capi_pico::z_closure_query(
+                &mut closure,
+                Some(on_query_self_undeclare),
+                Some(on_drop_reentrant),
+                ctx as *mut c_void
+            ),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, c"demo/q".as_ptr()), Z_OK);
+        assert_eq!(
+            wz_capi_pico::z_declare_queryable(
+                z_session_loan(&session),
+                &mut *handle,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_query_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK
+        );
+    }
+
+    assert_reentrant_undeclare(
+        "queryable",
+        unsafe { &*ctx },
+        &entered,
+        &returned,
+        &dropped,
+        &after,
+        || unsafe { wz_capi_pico::z_internal_queryable_check(&*handle) },
+    );
+
+    stop.store(true, Ordering::SeqCst);
+    unsafe {
+        if calibrate {
+            wz_capi_pico::z_undeclare_queryable(wz_capi_pico::z_queryable_move(&mut *handle));
+        }
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+        drop(Box::from_raw(handle));
+    }
+    acceptor.join().expect("acceptor thread panicked");
+}
+
+/// R311y553 — the QUERYABLE plane's re-entrancy probe. See the block comment
+/// above [`ReentrantCtx`] for why each plane needs its own.
+#[test]
+fn undeclare_from_inside_a_queryable_callback_does_not_deadlock() {
+    run_queryable_reentrancy_probe(false);
+}
+
+/// The vacuity guard for the probe above: same window, undeclare SKIPPED,
+/// traffic REQUIRED. Without this, `after == 0` passes equally on a dead link.
+#[test]
+fn the_queryable_reentrancy_probe_window_carries_traffic_when_live() {
+    run_queryable_reentrancy_probe(true);
+}
+
+// --- plane 3 of 4: LIVELINESS SUBSCRIBER ------------------------------------
+
+/// The liveliness subscriber's callback is an ordinary sample callback (a token
+/// appearing is a PUT, one going away a DELETE), and its handle is an ordinary
+/// `z_owned_subscriber_t` — `SharedSession::undeclare_subscriber` searches BOTH
+/// id maps precisely because the C type does not record which kind it came
+/// from. That shared handle type is exactly why this plane needs its own probe
+/// rather than inheriting y549's: same `z_undeclare_subscriber` call, DIFFERENT
+/// SSOT entry (`live_subs`) and a different per-face registry behind it.
+unsafe extern "C" fn on_liveliness_self_undeclare(
+    _sample: *const z_loaned_sample_t,
+    ctx: *mut c_void,
+) {
+    let ctx = &*(ctx as *const ReentrantCtx);
+    if ctx.done.swap(true, Ordering::SeqCst) {
+        ctx.after.fetch_add(1, Ordering::SeqCst);
+        return;
+    }
+    ctx.entered.store(true, Ordering::SeqCst);
+    if !ctx.calibrate {
+        z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(
+            &mut *(ctx.handle as *mut z_owned_subscriber_t),
+        ));
+    }
+    ctx.returned.store(true, Ordering::SeqCst);
+}
+
+fn run_liveliness_reentrancy_probe(calibrate: bool) {
+    let port = free_port();
+    // The acceptor declares and drops a token each pass, so the subscriber sees
+    // an unending PUT / DELETE stream — the traffic the `after` window needs.
+    let (mut session, stop, acceptor) = reentrancy_harness(port, |acc| unsafe {
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut ke, c"demo/live".as_ptr()),
+            Z_OK
+        );
+        let mut token: wz_capi_pico::liveliness::z_owned_liveliness_token_t = std::mem::zeroed();
+        if wz_capi_pico::liveliness::z_liveliness_declare_token(
+            acc,
+            &mut token,
+            z_view_keyexpr_loan(&ke),
+            std::ptr::null(),
+        ) == Z_OK
+        {
+            std::thread::sleep(Duration::from_millis(10));
+            wz_capi_pico::liveliness::z_liveliness_token_drop(
+                wz_capi_pico::liveliness::z_liveliness_token_move(&mut token),
+            );
+        }
+    });
+
+    let handle: *mut z_owned_subscriber_t = Box::into_raw(Box::new(unsafe { std::mem::zeroed() }));
+    let entered = Arc::new(AtomicBool::new(false));
+    let returned = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let after = Arc::new(AtomicUsize::new(0));
+    let ctx = Box::into_raw(Box::new(ReentrantCtx {
+        handle: handle as *mut c_void,
+        entered: entered.clone(),
+        returned: returned.clone(),
+        dropped: dropped.clone(),
+        after: after.clone(),
+        done: AtomicBool::new(false),
+        calibrate,
+    }));
+
+    unsafe {
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(
+                &mut closure,
+                Some(on_liveliness_self_undeclare),
+                Some(on_drop_reentrant),
+                ctx as *mut c_void
+            ),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, c"demo/**".as_ptr()), Z_OK);
+        assert_eq!(
+            wz_capi_pico::liveliness::z_liveliness_declare_subscriber(
+                z_session_loan(&session),
+                &mut *handle,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+    }
+
+    assert_reentrant_undeclare(
+        "liveliness-subscriber",
+        unsafe { &*ctx },
+        &entered,
+        &returned,
+        &dropped,
+        &after,
+        || unsafe { wz_capi_pico::z_internal_subscriber_check(&*handle) },
+    );
+
+    stop.store(true, Ordering::SeqCst);
+    unsafe {
+        if calibrate {
+            z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut *handle));
+        }
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+        drop(Box::from_raw(handle));
+    }
+    acceptor.join().expect("acceptor thread panicked");
+}
+
+/// R311y553 — the LIVELINESS-SUBSCRIBER plane's re-entrancy probe.
+#[test]
+fn undeclare_from_inside_a_liveliness_subscriber_callback_does_not_deadlock() {
+    run_liveliness_reentrancy_probe(false);
+}
+
+/// The vacuity guard for the probe above.
+#[test]
+fn the_liveliness_reentrancy_probe_window_carries_traffic_when_live() {
+    run_liveliness_reentrancy_probe(true);
+}
+
+// --- plane 4 of 4: ADVANCED SUBSCRIBER --------------------------------------
+
+unsafe extern "C" fn on_advanced_self_undeclare(
+    _sample: *const z_loaned_sample_t,
+    ctx: *mut c_void,
+) {
+    let ctx = &*(ctx as *const ReentrantCtx);
+    if ctx.done.swap(true, Ordering::SeqCst) {
+        ctx.after.fetch_add(1, Ordering::SeqCst);
+        return;
+    }
+    ctx.entered.store(true, Ordering::SeqCst);
+    if !ctx.calibrate {
+        wz_capi_pico::advanced::ze_undeclare_advanced_subscriber(
+            wz_capi_pico::advanced::ze_advanced_subscriber_move(
+                &mut *(ctx.handle as *mut wz_capi_pico::advanced::ze_owned_advanced_subscriber_t),
+            ),
+        );
+    }
+    ctx.returned.store(true, Ordering::SeqCst);
+}
+
+fn run_advanced_reentrancy_probe(calibrate: bool) {
+    let port = free_port();
+    // A plain `z_put` is enough traffic: an advanced subscriber delivers
+    // ordinary Put samples through the same callback, and the recovery plane
+    // above it is not what this probe is about.
+    let (mut session, stop, acceptor) = reentrancy_harness(port, |acc| unsafe {
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, c"demo/adv".as_ptr()), Z_OK);
+        let mut payload = std::mem::zeroed();
+        assert_eq!(
+            z_bytes_copy_from_str(&mut payload, c"trigger".as_ptr()),
+            Z_OK
+        );
+        let _ = z_put(
+            acc,
+            z_view_keyexpr_loan(&ke),
+            wz_capi_pico::z_bytes_move(&mut payload),
+            std::ptr::null(),
+        );
+    });
+
+    let handle: *mut wz_capi_pico::advanced::ze_owned_advanced_subscriber_t =
+        Box::into_raw(Box::new(unsafe { std::mem::zeroed() }));
+    let entered = Arc::new(AtomicBool::new(false));
+    let returned = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let after = Arc::new(AtomicUsize::new(0));
+    let ctx = Box::into_raw(Box::new(ReentrantCtx {
+        handle: handle as *mut c_void,
+        entered: entered.clone(),
+        returned: returned.clone(),
+        dropped: dropped.clone(),
+        after: after.clone(),
+        done: AtomicBool::new(false),
+        calibrate,
+    }));
+
+    unsafe {
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(
+                &mut closure,
+                Some(on_advanced_self_undeclare),
+                Some(on_drop_reentrant),
+                ctx as *mut c_void
+            ),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, c"demo/adv".as_ptr()), Z_OK);
+        let mut opts: wz_capi_pico::advanced::ze_advanced_subscriber_options_t = std::mem::zeroed();
+        wz_capi_pico::advanced::ze_advanced_subscriber_options_default(&mut opts);
+        assert_eq!(
+            wz_capi_pico::advanced::ze_declare_advanced_subscriber(
+                z_session_loan(&session),
+                &mut *handle,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                &mut opts,
+            ),
+            Z_OK
+        );
+    }
+
+    assert_reentrant_undeclare(
+        "advanced-subscriber",
+        unsafe { &*ctx },
+        &entered,
+        &returned,
+        &dropped,
+        &after,
+        || unsafe { wz_capi_pico::advanced::ze_internal_advanced_subscriber_check(&*handle) },
+    );
+
+    stop.store(true, Ordering::SeqCst);
+    unsafe {
+        if calibrate {
+            wz_capi_pico::advanced::ze_undeclare_advanced_subscriber(
+                wz_capi_pico::advanced::ze_advanced_subscriber_move(&mut *handle),
+            );
+        }
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        z_session_drop(z_session_move(&mut session));
+        drop(Box::from_raw(handle));
+    }
+    acceptor.join().expect("acceptor thread panicked");
+}
+
+/// R311y553 — the ADVANCED-SUBSCRIBER plane's re-entrancy probe, the fourth and
+/// last of the SSOT sinks the debt ledger carried as uninstrumented.
+#[test]
+fn undeclare_from_inside_an_advanced_subscriber_callback_does_not_deadlock() {
+    run_advanced_reentrancy_probe(false);
+}
+
+/// The vacuity guard for the probe above.
+#[test]
+fn the_advanced_reentrancy_probe_window_carries_traffic_when_live() {
+    run_advanced_reentrancy_probe(true);
+}
