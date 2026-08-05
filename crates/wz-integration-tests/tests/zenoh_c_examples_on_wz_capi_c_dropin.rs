@@ -665,6 +665,151 @@ int main(void) {
     printf("delete.reliability=%d\n", (int)duo.reliability);
 #endif
     printf("delete.allowed_destination=%d\n", (int)duo.allowed_destination);
+
+    z_get_options_t go;
+    z_get_options_default(&go);
+    printf("get.target=%d\n", (int)go.target);
+    printf("get.consolidation.mode=%d\n", (int)go.consolidation.mode);
+    printf("get.payload_is_null=%d\n", go.payload == NULL);
+    printf("get.encoding_is_null=%d\n", go.encoding == NULL);
+    printf("get.congestion_control=%d\n", (int)go.congestion_control);
+    printf("get.is_express=%d\n", (int)go.is_express);
+    printf("get.allowed_destination=%d\n", (int)go.allowed_destination);
+#if defined(Z_FEATURE_UNSTABLE_API)
+    printf("get.accept_replies=%d\n", (int)go.accept_replies);
+#endif
+    printf("get.priority=%d\n", (int)go.priority);
+#if defined(Z_FEATURE_UNSTABLE_API)
+    printf("get.source_info_is_null=%d\n", go.source_info == NULL);
+#endif
+    printf("get.attachment_is_null=%d\n", go.attachment == NULL);
+    printf("get.timeout_ms=%llu\n", (unsigned long long)go.timeout_ms);
+
+    z_queryable_options_t qo;
+    z_queryable_options_default(&qo);
+    printf("queryable.complete=%d\n", (int)qo.complete);
+    printf("queryable.allowed_origin=%d\n", (int)qo.allowed_origin);
+
+    z_query_reply_options_t qro;
+    z_query_reply_options_default(&qro);
+    printf("query_reply.encoding_is_null=%d\n", qro.encoding == NULL);
+    printf("query_reply.congestion_control=%d\n", (int)qro.congestion_control);
+    printf("query_reply.priority=%d\n", (int)qro.priority);
+    printf("query_reply.is_express=%d\n", (int)qro.is_express);
+    printf("query_reply.timestamp_is_null=%d\n", qro.timestamp == NULL);
+#if defined(Z_FEATURE_UNSTABLE_API)
+    printf("query_reply.source_info_is_null=%d\n", qro.source_info == NULL);
+#endif
+    printf("query_reply.attachment_is_null=%d\n", qro.attachment == NULL);
+
+    z_querier_options_t qrqo;
+    z_querier_options_default(&qrqo);
+    printf("querier.target=%d\n", (int)qrqo.target);
+    printf("querier.consolidation.mode=%d\n", (int)qrqo.consolidation.mode);
+    printf("querier.congestion_control=%d\n", (int)qrqo.congestion_control);
+    printf("querier.is_express=%d\n", (int)qrqo.is_express);
+    printf("querier.allowed_destination=%d\n", (int)qrqo.allowed_destination);
+#if defined(Z_FEATURE_UNSTABLE_API)
+    printf("querier.accept_replies=%d\n", (int)qrqo.accept_replies);
+#endif
+    printf("querier.priority=%d\n", (int)qrqo.priority);
+    printf("querier.timeout_ms=%llu\n", (unsigned long long)qrqo.timeout_ms);
+
+    z_querier_get_options_t qgo;
+    z_querier_get_options_default(&qgo);
+    printf("querier_get.payload_is_null=%d\n", qgo.payload == NULL);
+    printf("querier_get.encoding_is_null=%d\n", qgo.encoding == NULL);
+#if defined(Z_FEATURE_UNSTABLE_API)
+    printf("querier_get.source_info_is_null=%d\n", qgo.source_info == NULL);
+#endif
+    printf("querier_get.attachment_is_null=%d\n", qgo.attachment == NULL);
+
+    z_liveliness_get_options_t lgo;
+    z_liveliness_get_options_default(&lgo);
+    printf("liveliness_get.timeout_ms=%llu\n", (unsigned long long)lgo.timeout_ms);
+
+    z_liveliness_subscriber_options_t lso;
+    z_liveliness_subscriber_options_default(&lso);
+    printf("liveliness_subscriber.history=%d\n", (int)lso.history);
+
+    z_subscriber_options_t so;
+    z_subscriber_options_default(&so);
+    printf("subscriber.allowed_origin=%d\n", (int)so.allowed_origin);
+
+    z_scout_options_t sco;
+    z_scout_options_default(&sco);
+    printf("scout.timeout_ms=%llu\n", (unsigned long long)sco.timeout_ms);
+    printf("scout.what=%d\n", (int)sco.what);
+
+#if defined(Z_FEATURE_UNSTABLE_API)
+    ze_advanced_publisher_cache_options_t apc;
+    ze_advanced_publisher_cache_options_default(&apc);
+    printf("adv_pub_cache.is_enabled=%d\n", (int)apc.is_enabled);
+    printf("adv_pub_cache.max_samples=%zu\n", apc.max_samples);
+    printf("adv_pub_cache.congestion_control=%d\n", (int)apc.congestion_control);
+    printf("adv_pub_cache.priority=%d\n", (int)apc.priority);
+    printf("adv_pub_cache.is_express=%d\n", (int)apc.is_express);
+
+    ze_advanced_publisher_sample_miss_detection_options_t apm;
+    ze_advanced_publisher_sample_miss_detection_options_default(&apm);
+    printf("adv_pub_miss.is_enabled=%d\n", (int)apm.is_enabled);
+    printf("adv_pub_miss.heartbeat_mode=%d\n", (int)apm.heartbeat_mode);
+    printf("adv_pub_miss.heartbeat_period_ms=%llu\n",
+           (unsigned long long)apm.heartbeat_period_ms);
+
+    ze_advanced_publisher_options_t apo;
+    ze_advanced_publisher_options_default(&apo);
+    printf("adv_pub.publisher_options.congestion_control=%d\n",
+           (int)apo.publisher_options.congestion_control);
+    printf("adv_pub.publisher_options.priority=%d\n", (int)apo.publisher_options.priority);
+    printf("adv_pub.publisher_options.is_express=%d\n", (int)apo.publisher_options.is_express);
+    printf("adv_pub.publisher_options.reliability=%d\n", (int)apo.publisher_options.reliability);
+    printf("adv_pub.publisher_options.allowed_destination=%d\n",
+           (int)apo.publisher_options.allowed_destination);
+    printf("adv_pub.cache.is_enabled=%d\n", (int)apo.cache.is_enabled);
+    printf("adv_pub.sample_miss_detection.is_enabled=%d\n",
+           (int)apo.sample_miss_detection.is_enabled);
+    printf("adv_pub.publisher_detection=%d\n", (int)apo.publisher_detection);
+    printf("adv_pub.publisher_detection_metadata_is_null=%d\n",
+           apo.publisher_detection_metadata == NULL);
+
+    ze_advanced_publisher_put_options_t appo;
+    ze_advanced_publisher_put_options_default(&appo);
+    printf("adv_pub_put.put_options.encoding_is_null=%d\n",
+           appo.put_options.encoding == NULL);
+    printf("adv_pub_put.put_options.attachment_is_null=%d\n",
+           appo.put_options.attachment == NULL);
+
+    ze_advanced_subscriber_history_options_t ash;
+    ze_advanced_subscriber_history_options_default(&ash);
+    printf("adv_sub_history.is_enabled=%d\n", (int)ash.is_enabled);
+    printf("adv_sub_history.detect_late_publishers=%d\n", (int)ash.detect_late_publishers);
+    printf("adv_sub_history.max_samples=%zu\n", ash.max_samples);
+    printf("adv_sub_history.max_age_ms=%llu\n", (unsigned long long)ash.max_age_ms);
+
+    ze_advanced_subscriber_last_sample_miss_detection_options_t asl;
+    ze_advanced_subscriber_last_sample_miss_detection_options_default(&asl);
+    printf("adv_sub_last_miss.is_enabled=%d\n", (int)asl.is_enabled);
+    printf("adv_sub_last_miss.periodic_queries_period_ms=%llu\n",
+           (unsigned long long)asl.periodic_queries_period_ms);
+
+    ze_advanced_subscriber_recovery_options_t asr;
+    ze_advanced_subscriber_recovery_options_default(&asr);
+    printf("adv_sub_recovery.is_enabled=%d\n", (int)asr.is_enabled);
+    printf("adv_sub_recovery.last_sample_miss_detection.is_enabled=%d\n",
+           (int)asr.last_sample_miss_detection.is_enabled);
+
+    ze_advanced_subscriber_options_t aso;
+    ze_advanced_subscriber_options_default(&aso);
+    printf("adv_sub.subscriber_options.allowed_origin=%d\n",
+           (int)aso.subscriber_options.allowed_origin);
+    printf("adv_sub.history.is_enabled=%d\n", (int)aso.history.is_enabled);
+    printf("adv_sub.recovery.is_enabled=%d\n", (int)aso.recovery.is_enabled);
+    printf("adv_sub.query_timeout_ms=%llu\n", (unsigned long long)aso.query_timeout_ms);
+    printf("adv_sub.subscriber_detection=%d\n", (int)aso.subscriber_detection);
+    printf("adv_sub.subscriber_detection_metadata_is_null=%d\n",
+           aso.subscriber_detection_metadata == NULL);
+#endif
     return 0;
 }
 "#,
@@ -727,19 +872,62 @@ int main(void) {
     // Asserted BEFORE the diff: two empty captures are equal, and an equality
     // between them would report the strongest result this file can produce
     // while measuring nothing.
-    for required in [
+    // The UNSTABLE half of the probe sits behind the header's own
+    // `#if defined(Z_FEATURE_UNSTABLE_API)`, so on a no-unstable oracle it
+    // compiles to nothing and the diff below never sees it. That is correct,
+    // and it is also exactly how a whole half of this leg could go silently
+    // unmeasured — so which half to expect is read from the oracle's
+    // `zenoh_configure.h` rather than inferred from what happened to print.
+    let configure = std::fs::read_to_string(include.join("zenoh_configure.h"))
+        .expect("the oracle ships zenoh_configure.h");
+    let unstable = configure.contains("#define Z_FEATURE_UNSTABLE_API");
+    let mut expected: Vec<&str> = vec![
         "publisher.congestion_control=",
         "put.congestion_control=",
         "delete.congestion_control=",
-    ] {
+        "get.congestion_control=",
+        "querier.congestion_control=",
+        "query_reply.congestion_control=",
+        "querier_get.encoding_is_null=",
+        "queryable.allowed_origin=",
+        "subscriber.allowed_origin=",
+        "liveliness_get.timeout_ms=",
+        "liveliness_subscriber.history=",
+        "scout.timeout_ms=",
+    ];
+    if unstable {
+        expected.extend([
+            // The two fields that exist ONLY here, and both of which were wrong
+            // before R311y545 measured them.
+            "publisher.reliability=",
+            "get.accept_replies=",
+            // One line per ze_advanced_* family, so a family dropped from the
+            // probe is a failed assertion rather than a shorter diff.
+            "adv_pub_cache.is_enabled=",
+            "adv_pub_miss.is_enabled=",
+            "adv_pub.publisher_detection=",
+            "adv_pub_put.put_options.encoding_is_null=",
+            "adv_sub_history.is_enabled=",
+            "adv_sub_last_miss.is_enabled=",
+            "adv_sub_recovery.is_enabled=",
+            "adv_sub.query_timeout_ms=",
+        ]);
+    }
+    for required in expected {
         assert!(
             ref_stdout.contains(required),
             "the reference arm printed no `{required}` line, so the diff below \
              would compare two outputs neither of which contains a field this leg \
-             exists for. One assertion per STRUCT, because the three \
+             exists for. One assertion per STRUCT, because the \
              `*_options_default` families are independent exports and a probe that \
-             silently stopped printing one would still diff EQUAL.\n\
-             --- stdout on real libzenohc ---\n{ref_stdout}"
+             silently stopped printing one would still diff EQUAL. This oracle \
+             {} Z_FEATURE_UNSTABLE_API.\n\
+             --- stdout on real libzenohc ---\n{ref_stdout}",
+            if unstable {
+                "DEFINES"
+            } else {
+                "does not define"
+            }
         );
     }
     assert_eq!(

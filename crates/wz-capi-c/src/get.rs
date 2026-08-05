@@ -63,6 +63,14 @@ pub const Z_QUERY_TARGET_BEST_MATCHING: c_int = 0;
 /// signed `c_int` and not an index.
 pub const Z_CONSOLIDATION_MODE_AUTO: c_int = -1;
 
+/// `ZC_REPLY_KEYEXPR_ANY` = 0 — replies to any keyexpr query.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub const ZC_REPLY_KEYEXPR_ANY: c_int = 0;
+/// `ZC_REPLY_KEYEXPR_MATCHING_QUERY` = 1 — upstream's default
+/// (`ReplyKeyExpr::default()`); replies only to intersecting queries.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub const ZC_REPLY_KEYEXPR_MATCHING_QUERY: c_int = 1;
+
 /// zenoh-c `z_query_consolidation_t` — a one-field wrapper around the mode.
 #[repr(C)]
 pub struct z_query_consolidation_t {
@@ -135,11 +143,21 @@ pub unsafe extern "C" fn z_get_options_default(this_: *mut z_get_options_t) {
             },
             payload: std::ptr::null_mut(),
             encoding: std::ptr::null_mut(),
-            congestion_control: 1,
+            // R311y545 — BLOCK, and it is 0 in zenoh-c (the enum is
+            // INVERTED against zenoh-pico's). This literal was 1, which
+            // spells DROP here; upstream's request-side default is
+            // `CongestionControl::DEFAULT_REQUEST` = Block. Named rather
+            // than a literal now, because the literal is what went wrong.
+            congestion_control: crate::publisher::Z_CONGESTION_CONTROL_BLOCK,
             is_express: false,
             allowed_destination: 0,
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-            accept_replies: 0,
+            // R311y545 — MATCHING_QUERY (1), MEASURED against the real
+            // libzenohc on the unstable oracle; upstream's default is
+            // `ReplyKeyExpr::default()`, not ANY. This was 0, and Layer
+            // C1cc cannot see it: the field exists only under
+            // Z_FEATURE_UNSTABLE_API, which the installed header lacks.
+            accept_replies: ZC_REPLY_KEYEXPR_MATCHING_QUERY,
             priority: 5,
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
             source_info: std::ptr::null_mut(),

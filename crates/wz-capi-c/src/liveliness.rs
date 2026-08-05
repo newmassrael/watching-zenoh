@@ -364,7 +364,12 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(this_: *mut z_liveline
         return;
     }
     // SAFETY: the caller's contract.
-    unsafe { *this_ = z_liveliness_get_options_t { timeout_ms: 0 } };
+    // R311y545 — 10_000, MEASURED against the real libzenohc, not 0. Upstream
+    // gives the liveliness get an explicit 10 s default where the plain
+    // `z_get` default is 0; wz had 0 on both. This tree already carried "the
+    // 10 s default is matched by INSPECTION, not measurement" as a residual,
+    // and the measurement says it was not matched.
+    unsafe { *this_ = z_liveliness_get_options_t { timeout_ms: 10_000 } };
 }
 
 /// Query the liveliness tokens currently alive under `key_expr` (zenoh-c

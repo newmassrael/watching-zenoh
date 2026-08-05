@@ -75,11 +75,21 @@ pub unsafe extern "C" fn z_querier_options_default(this_: *mut z_querier_options
             consolidation: z_query_consolidation_t {
                 mode: crate::get::Z_CONSOLIDATION_MODE_AUTO,
             },
-            congestion_control: 1,
+            // R311y545 — BLOCK, and it is 0 in zenoh-c (the enum is
+            // INVERTED against zenoh-pico's). This literal was 1, which
+            // spells DROP here; upstream's request-side default is
+            // `CongestionControl::DEFAULT_REQUEST` = Block. Named rather
+            // than a literal now, because the literal is what went wrong.
+            congestion_control: crate::publisher::Z_CONGESTION_CONTROL_BLOCK,
             is_express: false,
             allowed_destination: 0,
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-            accept_replies: 0,
+            // R311y545 — MATCHING_QUERY (1), MEASURED against the real
+            // libzenohc on the unstable oracle; upstream's default is
+            // `ReplyKeyExpr::default()`, not ANY. This was 0, and Layer
+            // C1cc cannot see it: the field exists only under
+            // Z_FEATURE_UNSTABLE_API, which the installed header lacks.
+            accept_replies: crate::get::ZC_REPLY_KEYEXPR_MATCHING_QUERY,
             priority: 5,
             timeout_ms: 0,
         }

@@ -333,26 +333,67 @@ fn handle_inbound_keepalive_updates_last_inbound_at() {
     );
 }
 
+/// R311y545 — this test used to be
+/// `handle_inbound_non_keepalive_does_not_touch_keepalive_slot`, and it
+/// asserted a property the code has not had since R311la.
+///
+/// ## It was both WRONG and VACUOUS, and the two are the same fact
+///
+/// R311la moved the RX-activity stamp out of the KeepAlive arm and onto EVERY
+/// successfully decoded transport message, for zenoh-pico `_received` parity
+/// (`unicast/rx.c:88` sets the flag per decoded message, and the lease expires
+/// only when nothing arrived in the window). The reason is live: R311kx's TX
+/// suppression guarantees a busy peer sends no KeepAlives, so a data-only peer
+/// was being expired after one lease window. `session_actions.rs:3270` is the
+/// unconditional stamp.
+///
+/// The old test seeded the slot with `now_monotonic_ms()` and asserted the slot
+/// still held that value afterwards. The production code overwrites it with
+/// `now_monotonic_ms()` — so the assertion held whenever the clock had not
+/// ticked between the two calls, which is almost always, and failed when a
+/// millisecond happened to elapse. It read GREEN for the same reason it was
+/// WRONG: the two values it compared were the same number by coincidence, not
+/// by the property it named. Measured at 0/20 in isolation and 0/20 for the
+/// whole binary; it surfaced once inside a full Layer C1 run.
+///
+/// The replacement seeds a SENTINEL the monotonic clock cannot produce, so the
+/// assertion discriminates whether or not the clock ticks, and asserts the
+/// stamp lands inside the call window — the same shape the KeepAlive sibling
+/// above uses.
 #[test]
-fn handle_inbound_non_keepalive_does_not_touch_keepalive_slot() {
+fn handle_inbound_stamps_rx_activity_for_a_non_keepalive_frame() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
 
-    // Seed the slot to verify a non-KeepAlive frame leaves it
-    // untouched (no spurious overwrite).
-    let seeded = actions.clock.now_monotonic_ms();
-    *actions.link.last_inbound_at.lock().unwrap() = Some(seeded);
+    // A value the monotonic clock cannot return, so "unchanged" and "restamped
+    // with an equal value" are distinguishable. The old seed was the clock's
+    // own reading, which made them the same number.
+    const SENTINEL: u64 = u64::MAX;
+    *actions.link.last_inbound_at.lock().unwrap() = Some(SENTINEL);
 
     // Drive an InitAck wire through handle_inbound (R68a path).
     let cookie = vec![0xAB, 0xCD];
     let wire = craft_initack_wire(&cookie);
+    let pre = actions.clock.now_monotonic_ms();
     let _ = actions.handle_inbound(&wire).expect("InitAck parses");
+    let post = actions.clock.now_monotonic_ms();
 
-    let after = *actions.link.last_inbound_at.lock().unwrap();
-    assert_eq!(
-        after,
-        Some(seeded),
-        "non-KeepAlive frames must NOT mutate the keepalive slot"
+    let after = actions
+        .link
+        .last_inbound_at
+        .lock()
+        .unwrap()
+        .expect("the slot stays populated");
+    assert_ne!(
+        after, SENTINEL,
+        "R311la: a non-KeepAlive frame must ALSO stamp the RX-activity slot \
+         (zenoh-pico `_received` parity), or a data-only peer is expired after \
+         one lease window"
+    );
+    assert!(
+        after >= pre && after <= post,
+        "the restamp must lie within the handle_inbound call window: \
+         got {after}, window {pre}..={post}"
     );
 }
 
