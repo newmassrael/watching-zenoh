@@ -9142,7 +9142,8 @@ layer_c1cc_api_compat_c() {
         upstream_z_bytes_on_wz_capi_c_prints_identically_to_real_libzenohc \
         upstream_z_pub_on_wz_capi_c_carries_its_put_encoding_to_a_real_pico \
         upstream_z_pub_thr_on_wz_capi_c_carries_its_publisher_qos_to_a_real_pico \
-        a_wz_capi_c_queryable_reply_encoding_reaches_a_real_pico_as_it_does_on_libzenohc; do
+        a_wz_capi_c_queryable_reply_encoding_reaches_a_real_pico_as_it_does_on_libzenohc \
+        a_wz_capi_c_get_encoding_reaches_a_real_pico_queryable_as_it_does_on_libzenohc; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \

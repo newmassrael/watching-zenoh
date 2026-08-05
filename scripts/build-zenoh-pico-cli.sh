@@ -267,13 +267,23 @@ fi
 # guard is needed here (they compile whether or not the flag is set;
 # the cmake config sets it ON for z_sub_attachment regardless). This
 # makes the CLI the FOREIGN witness for wz's QUERY-carrier source_info
-# propagation (tests/wz_query_source_info_to_pico_zqueryable.rs). Anchor
+# propagation (tests/wz_query_source_info_to_pico_zqueryable.rs).
+#
+# R311y548 EXTENDS it with `with query encoding:` (z_query_encoding, also
+# declared unconditionally). R311y547 wired the zenoh-c ABI's
+# `z_get_options_t::encoding` onto the Query value ext and could only prove it
+# at the seam, recording an explicit NON-CLAIM: "no zenoh-pico example renders
+# the encoding of a query it received". That was true of the STOCK example and
+# is not a property of pico -- the accessor has always been there. Adding the
+# print is the same move R311y240 made for the sample QoS, and it turns the
+# non-claim into a foreign witness.
+# Anchor
 # is the `// Process value` comment (survives the insert), so — like the
 # z_sub_attachment patch — hard-reject when the marker is already present
 # rather than double-insert. Reverted by the shared trap.
 z_qabl_src="$EXAMPLES_DIR/unix/c11/z_queryable.c"
-if grep -q "with query source_info" "$z_qabl_src"; then
-    echo "build-zenoh-pico-cli: z_queryable.c already prints 'with query source_info'" >&2
+if grep -q "with query source_info" "$z_qabl_src" || grep -q "with query encoding" "$z_qabl_src"; then
+    echo "build-zenoh-pico-cli: z_queryable.c already carries a wz print patch" >&2
     echo "  — revert with 'git -C \"$VENDOR_DIR\" checkout -- examples/unix/c11/z_queryable.c'" >&2
     echo "  or re-verify the patch against the current vendor pin." >&2
     exit 2
@@ -285,8 +295,16 @@ if grep -q "// Process value" "$z_qabl_src"; then
     if (wz_qsi != NULL) {\
         z_entity_global_id_t wz_qgid = z_source_info_id(wz_qsi);\
         printf("    with query source_info eid: %u sn: %u\\n", (unsigned)z_entity_global_id_eid(\&wz_qgid), (unsigned)z_source_info_sn(wz_qsi));\
-    }
+    }\
+    z_owned_string_t wz_qenc;\
+    z_encoding_to_string(z_query_encoding(query), \&wz_qenc);\
+    printf("    with query encoding: %.*s\\n", (int)z_string_len(z_loan(wz_qenc)), z_string_data(z_loan(wz_qenc)));\
+    z_drop(z_move(wz_qenc));
     ' "$z_qabl_src"
+    if ! grep -q "with query encoding" "$z_qabl_src"; then
+        echo "build-zenoh-pico-cli: query encoding-print patch failed to land in $z_qabl_src" >&2
+        exit 2
+    fi
     if ! grep -q "with query source_info" "$z_qabl_src"; then
         echo "build-zenoh-pico-cli: query source_info-print patch failed to land in $z_qabl_src" >&2
         exit 2

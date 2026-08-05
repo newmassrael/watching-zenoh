@@ -110,7 +110,16 @@ changelog that authorized the bump.
   `#ifdef Z_FEATURE_UNSTABLE_API` guard: `z_query_source_info` +
   `z_source_info_id` / `z_source_info_sn` are declared unconditionally
   (`primitives.h:1013` / `:1156`), whereas the Put carrier's
-  `z_sample_source_info` is UNSTABLE-gated (`:2218` block).
+  `z_sample_source_info` is UNSTABLE-gated (`:2218` block). R311y548
+  EXTENDS that same third patch with `with query encoding: ..`
+  (`z_query_encoding` + `z_encoding_to_string`, also declared
+  unconditionally), so the CLI additionally witnesses the encoding a
+  querier attached to its query value
+  (`crates/wz-integration-tests/tests/zenoh_c_capi_c_pico_interop.rs`,
+  `a_wz_capi_c_get_encoding_reaches_a_real_pico_queryable_as_it_does_on_libzenohc`).
+  R311y547 had recorded that half as a NON-CLAIM on the grounds that no
+  pico example rendered it — true of the STOCK example, and not a
+  property of pico, since the accessor has always been there.
   A FOURTH in-place patch (R311y245) adds `with reply source_info eid:
   .. sn: ..` (`z_sample_source_info` on the reply sample + a NULL check,
   under `#ifdef Z_FEATURE_UNSTABLE_API` — a Reply body IS a Put
