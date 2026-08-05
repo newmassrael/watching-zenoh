@@ -814,7 +814,16 @@ const _: () = {
 /// width disagreement surfaces as an assertion on a returned integer instead of
 /// as memory corruption. The names live in [`WZ_CAPI_C_LAYOUT_NAMES`] and are
 /// read out of the same artifact, so the gate never re-transcribes them either.
-pub const WZ_CAPI_C_LAYOUT_NAMES: &[&str] = &[
+/// ## Why the table SPLITS in two (R311y543)
+///
+/// `WZ_CAPI_C_LAYOUT_NAMES_BASE` is what every arm has. The `ze_advanced_*`
+/// plane is `#if defined(Z_FEATURE_UNSTABLE_API)` in upstream's header, so on a
+/// no-unstable build those types do not exist to compare against — putting them
+/// in one flat table would make the gate assert a size against a header that
+/// declares nothing of the name. The split lets the C probe append exactly the
+/// same half when (and only when) the oracle's `zenoh_configure.h` defines the
+/// feature, which is the condition the cdylib arm is chosen by anyway.
+pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     "z_owned_session_t",
     "z_owned_bytes_t",
     "z_view_keyexpr_t",
@@ -867,12 +876,80 @@ pub const WZ_CAPI_C_LAYOUT_NAMES: &[&str] = &[
     "z_querier_options_t",
     "z_querier_get_options_t",
     "z_scout_options_t",
+    // R311y543 — the base subscriber options. NOT unstable-gated in upstream's
+    // header (present on both installed oracles), and it is the struct
+    // `ze_advanced_subscriber_options_t` embeds at offset 0.
+    "z_subscriber_options_t",
 ];
 
-/// This build's footprint table, in [`WZ_CAPI_C_LAYOUT_NAMES`] order.
-fn layout_values() -> [usize; WZ_CAPI_C_LAYOUT_NAMES.len()] {
+/// The `Z_FEATURE_UNSTABLE_API`-only half of the table — the `ze_advanced_*`
+/// plane [`crate::advanced`] declares. Empty on the no-unstable arm, where
+/// upstream declares none of these types.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub const WZ_CAPI_C_LAYOUT_NAMES_UNSTABLE: &[&str] = &[
+    "z_entity_global_id_t",
+    // The ALIGNMENT is the tell for this one — 4, not 8 — so it is pinned
+    // beside the size rather than left to be implied by it.
+    "z_entity_global_id_t/align",
+    "ze_miss_t",
+    "ze_owned_closure_miss_t",
+    "ze_owned_advanced_publisher_t",
+    "ze_owned_advanced_subscriber_t",
+    "ze_owned_sample_miss_listener_t",
+    "ze_advanced_publisher_cache_options_t",
+    "ze_advanced_publisher_sample_miss_detection_options_t",
+    "ze_advanced_publisher_options_t",
+    "ze_advanced_publisher_put_options_t",
+    "ze_advanced_subscriber_history_options_t",
+    "ze_advanced_subscriber_last_sample_miss_detection_options_t",
+    "ze_advanced_subscriber_recovery_options_t",
+    "ze_advanced_subscriber_options_t",
+];
+
+/// The no-unstable arm's unstable half: empty, because upstream's header
+/// declares none of those types there.
+#[cfg(feature = "zenoh-c-no-unstable-api")]
+pub const WZ_CAPI_C_LAYOUT_NAMES_UNSTABLE: &[&str] = &[];
+
+/// The `Z_FEATURE_SHARED_MEMORY` **and** `Z_FEATURE_UNSTABLE_API` half — the
+/// provider / buffer plane [`crate::shm`] declares. Upstream gates every one of
+/// these on BOTH features together, so this is a third half rather than a
+/// second axis folded into the unstable one.
+#[cfg(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+pub const WZ_CAPI_C_LAYOUT_NAMES_SHM: &[&str] = &[
+    "z_owned_shm_t",
+    "z_owned_shm_mut_t",
+    "z_owned_shm_provider_t",
+    "z_alloc_alignment_t",
+    "z_buf_layout_alloc_result_t",
+    "z_buf_alloc_result_t",
+];
+
+/// Empty on every arm whose header declares no SHM plane.
+#[cfg(not(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+)))]
+pub const WZ_CAPI_C_LAYOUT_NAMES_SHM: &[&str] = &[];
+
+/// The full name table for THIS build: base half, then unstable, then SHM.
+pub fn layout_names() -> Vec<&'static str> {
+    WZ_CAPI_C_LAYOUT_NAMES_BASE
+        .iter()
+        .chain(WZ_CAPI_C_LAYOUT_NAMES_UNSTABLE.iter())
+        .chain(WZ_CAPI_C_LAYOUT_NAMES_SHM.iter())
+        .copied()
+        .collect()
+}
+
+/// This build's footprint table, in [`layout_names`] order.
+fn layout_values() -> Vec<usize> {
     use std::mem::{align_of, size_of};
-    [
+    #[allow(unused_mut)]
+    let mut values: Vec<usize> = vec![
         size_of::<z_owned_session_t>(),
         size_of::<z_owned_bytes_t>(),
         size_of::<z_view_keyexpr_t>(),
@@ -924,7 +1001,39 @@ fn layout_values() -> [usize; WZ_CAPI_C_LAYOUT_NAMES.len()] {
         size_of::<crate::querier::z_querier_options_t>(),
         size_of::<crate::querier::z_querier_get_options_t>(),
         size_of::<crate::scout::z_scout_options_t>(),
-    ]
+        size_of::<crate::sub::z_subscriber_options_t>(),
+    ];
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    values.extend_from_slice(&[
+        size_of::<crate::advanced::z_entity_global_id_t>(),
+        align_of::<crate::advanced::z_entity_global_id_t>(),
+        size_of::<crate::advanced::ze_miss_t>(),
+        size_of::<crate::advanced::ze_owned_closure_miss_t>(),
+        size_of::<crate::advanced::ze_owned_advanced_publisher_t>(),
+        size_of::<crate::advanced::ze_owned_advanced_subscriber_t>(),
+        size_of::<crate::advanced::ze_owned_sample_miss_listener_t>(),
+        size_of::<crate::advanced::ze_advanced_publisher_cache_options_t>(),
+        size_of::<crate::advanced::ze_advanced_publisher_sample_miss_detection_options_t>(),
+        size_of::<crate::advanced::ze_advanced_publisher_options_t>(),
+        size_of::<crate::advanced::ze_advanced_publisher_put_options_t>(),
+        size_of::<crate::advanced::ze_advanced_subscriber_history_options_t>(),
+        size_of::<crate::advanced::ze_advanced_subscriber_last_sample_miss_detection_options_t>(),
+        size_of::<crate::advanced::ze_advanced_subscriber_recovery_options_t>(),
+        size_of::<crate::advanced::ze_advanced_subscriber_options_t>(),
+    ]);
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    values.extend_from_slice(&[
+        size_of::<crate::shm::z_owned_shm_t>(),
+        size_of::<crate::shm::z_owned_shm_mut_t>(),
+        size_of::<crate::shm::z_owned_shm_provider_t>(),
+        size_of::<crate::shm::z_alloc_alignment_t>(),
+        size_of::<crate::shm::z_buf_layout_alloc_result_t>(),
+        size_of::<crate::shm::z_buf_alloc_result_t>(),
+    ]);
+    values
 }
 
 /// The NUL-terminated name of layout entry `index`, or NULL past the end.
@@ -945,11 +1054,11 @@ pub unsafe extern "C" fn wz_capi_c_layout_name(index: usize) -> *const std::ffi:
     use std::sync::OnceLock;
     static NUL_TERMINATED: OnceLock<Vec<std::ffi::CString>> = OnceLock::new();
     let table = NUL_TERMINATED.get_or_init(|| {
-        WZ_CAPI_C_LAYOUT_NAMES
-            .iter()
+        layout_names()
+            .into_iter()
             // The names are ASCII literals in this file, so the only way this
             // could fail is an embedded NUL nobody can write by accident.
-            .map(|name| std::ffi::CString::new(*name).expect("a layout name has no interior NUL"))
+            .map(|name| std::ffi::CString::new(name).expect("a layout name has no interior NUL"))
             .collect()
     });
     table
@@ -981,23 +1090,54 @@ pub unsafe extern "C" fn wz_capi_c_layout(out: *mut usize, cap: usize) -> usize 
 mod layout_tests {
     use super::*;
 
-    /// The names and the values are two lists that must stay the same length —
-    /// the one thing the array form cannot check at the type level, because
-    /// `layout_values` is sized FROM the names.
+    /// The names and the values are two lists that must stay the same length.
     ///
-    /// It can still catch the real mistake: an entry appended to the names and
-    /// forgotten in the values makes `layout_values` fail to compile, and an
-    /// entry appended to the values alone overflows the array. So this test
-    /// exists for the third case — a name added and a value added in the WRONG
-    /// position, which compiles and would silently compare `z_owned_mutex_t`
-    /// against a condvar. Duplicate names are what that looks like.
+    /// Until R311y543 `layout_values` was an array SIZED from the names, so a
+    /// forgotten value failed to compile. The two-half split (base + unstable)
+    /// gives up that coupling — a `Vec` has no length in its type — so the
+    /// length equality is asserted here instead, and it is the check that
+    /// catches an entry added to one half and forgotten in the other.
+    ///
+    /// The distinctness half catches the other mistake: a name added and a
+    /// value added in the WRONG position, which compiles and would silently
+    /// compare `z_owned_mutex_t` against a condvar. Duplicate names are what
+    /// that looks like.
     #[test]
     fn every_layout_entry_has_a_distinct_name() {
+        let names = layout_names();
         let mut seen = std::collections::BTreeSet::new();
-        for name in WZ_CAPI_C_LAYOUT_NAMES {
+        for name in &names {
             assert!(seen.insert(*name), "duplicate layout entry name: {name}");
         }
+        assert_eq!(
+            names.len(),
+            layout_values().len(),
+            "the name table and the value table disagree on length — an entry \
+             was added to one half and forgotten in the other"
+        );
         assert_eq!(seen.len(), layout_values().len());
+    }
+
+    /// The names a C-side gate reads through `wz_capi_c_layout_name` must BE
+    /// the names this build has, at the same indices — the export is the only
+    /// thing standing between the arms gate and a second, drifting copy of the
+    /// table.
+    #[test]
+    fn the_exported_names_match_the_table_index_for_index() {
+        let names = layout_names();
+        for (i, expected) in names.iter().enumerate() {
+            // SAFETY: `i` is in range and the returned pointer is 'static.
+            let ptr = unsafe { wz_capi_c_layout_name(i) };
+            assert!(
+                !ptr.is_null(),
+                "entry {i} ({expected}) exported a NULL name"
+            );
+            // SAFETY: a 'static NUL-terminated ASCII literal from this file.
+            let got = unsafe { std::ffi::CStr::from_ptr(ptr) };
+            assert_eq!(got.to_str().expect("ASCII"), *expected);
+        }
+        // SAFETY: one past the end is the documented end-of-table signal.
+        assert!(unsafe { wz_capi_c_layout_name(names.len()) }.is_null());
     }
 
     /// A short buffer is TRUNCATED, not overrun, and the true count still comes
@@ -1007,7 +1147,7 @@ mod layout_tests {
         let mut buf = [usize::MAX; 4];
         // SAFETY: `buf` is a valid, writable 4-slot array and `cap` says so.
         let total = unsafe { wz_capi_c_layout(buf.as_mut_ptr(), 3) };
-        assert_eq!(total, WZ_CAPI_C_LAYOUT_NAMES.len());
+        assert_eq!(total, layout_names().len());
         assert_eq!(buf[0], std::mem::size_of::<z_owned_session_t>());
         assert_eq!(
             buf[3],

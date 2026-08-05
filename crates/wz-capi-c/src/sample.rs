@@ -130,6 +130,37 @@ pub unsafe extern "C" fn z_sample_keyexpr(
     })
 }
 
+/// Mutably borrow a delivered sample's payload (zenoh-c
+/// `z_sample_payload_mut`).
+///
+/// UNGATED upstream — it is declared on the no-unstable header too
+/// (`zenoh_commons.h:4638` there, `:4393` on the shared-memory oracle) — so it
+/// is exported on every arm even though the corpus reaches it only through
+/// `z_sub_shm.c`, which hands the result straight to
+/// `z_bytes_as_mut_loaned_shm`.
+///
+/// The pointer is taken with `addr_of_mut!` rather than by reborrowing a shared
+/// reference: handing back a `*mut` derived from a `&` would be a provenance
+/// laundering the caller is entitled to write through.
+///
+/// # Safety
+/// `this_` must be null or a live loaned sample. The returned pointer borrows
+/// the sample and is valid for as long as it is.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_payload_mut(
+    this_: *mut z_loaned_sample_t,
+) -> *mut z_loaned_bytes_t {
+    guard_val(std::ptr::null_mut(), || {
+        if this_.is_null() {
+            return std::ptr::null_mut();
+        }
+        let m = this_ as *mut SampleMarshal;
+        // SAFETY: the caller's contract — `this_` aims at a live `SampleMarshal`,
+        // and the field projection creates no intermediate reference.
+        unsafe { std::ptr::addr_of_mut!((*m).loaned_payload) }
+    })
+}
+
 /// Borrow a delivered sample's payload (zenoh-c `z_sample_payload`).
 ///
 /// # Safety

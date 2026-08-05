@@ -59,6 +59,14 @@
 #![allow(non_camel_case_types)]
 
 pub mod abi;
+// The `ze_advanced_*` plane is `#if defined(Z_FEATURE_UNSTABLE_API)` in
+// upstream's header, so it exists on the unstable arms and nowhere else. The
+// `cfg` mirrors upstream's `#if` rather than exporting symbols a program
+// compiled against the no-unstable header could never name — and it is what
+// makes the layout table's unstable half measurable, since on that arm there is
+// no upstream size to compare against.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub mod advanced;
 pub mod bytes;
 pub mod config;
 pub mod encoding;
@@ -79,6 +87,15 @@ pub mod sample;
 pub mod scout;
 pub mod serde;
 pub mod session;
+// The SHM provider / buffer plane is
+// `#if (defined(Z_FEATURE_SHARED_MEMORY) && defined(Z_FEATURE_UNSTABLE_API))`
+// upstream, so it carries the same two-feature gate. On any other arm its
+// symbols would name types no header declares.
+#[cfg(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+pub mod shm;
 pub mod slice;
 pub mod string;
 pub mod sub;

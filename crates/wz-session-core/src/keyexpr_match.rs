@@ -173,8 +173,13 @@ fn matches_chunks(pattern: &[&str], target: &[&str]) -> bool {
                 pi += 1;
                 continue;
             }
+            // R311y543 — `*` reaches every chunk EXCEPT a verbatim one. The
+            // guard is here rather than only in `chunk_matches` so the refusal
+            // falls through to the mismatch arm below: an enclosing `**` frame
+            // must still get its chance to backtrack, and an early `return
+            // false` would take that away.
             #[cfg(feature = "keyexpr-wildcard-single")]
-            if pat == "*" {
+            if pat == "*" && !is_verbatim_chunk(target[ti]) {
                 pi += 1;
                 ti += 1;
                 continue;
@@ -190,6 +195,14 @@ fn matches_chunks(pattern: &[&str], target: &[&str]) -> bool {
         // backtrack by absorbing one more target chunk into `**`.
         #[cfg(feature = "keyexpr-wildcard-double")]
         if let Some(saved_pi) = star_star_pi {
+            // R311y543 — the chunk `**` is about to swallow is
+            // `target[star_star_ti]`, BEFORE the increment. `**` does not cross
+            // a verbatim chunk (zenoh `it_intersect`, classical.rs:88-93), so
+            // when that chunk is one, the frame is spent and the match fails
+            // here instead of absorbing it.
+            if star_star_ti < target.len() && is_verbatim_chunk(target[star_star_ti]) {
+                return false;
+            }
             star_star_ti += 1;
             ti = star_star_ti;
             pi = saved_pi + 1;
@@ -214,11 +227,47 @@ fn matches_chunks(pattern: &[&str], target: &[&str]) -> bool {
 /// off the `$*` route is elided and every chunk takes the literal
 /// byte-equal path.
 fn chunk_matches(pattern: &str, target: &str) -> bool {
+    if pattern == target {
+        return true;
+    }
+    // R311y543 — @verbatim. A chunk beginning with `@` is zenoh's ADMIN
+    // namespace and no wildcard reaches into it; only a byte-equal chunk does,
+    // which the fast path above already answered. See [`is_verbatim_chunk`].
+    if is_verbatim_chunk(pattern) || is_verbatim_chunk(target) {
+        return false;
+    }
     #[cfg(feature = "keyexpr-dollar-star")]
     if pattern.contains("$*") {
         return chunk_matches_with_dsl(pattern, target);
     }
-    pattern == target
+    false
+}
+
+/// zenoh's `MayHaveVerbatim::has_direct_verbatim`
+/// (`commons/zenoh-keyexpr/src/key_expr/intersect/mod.rs:115`): a chunk that
+/// begins with `@` is VERBATIM — it belongs to the admin namespace and is
+/// reachable only by a byte-equal chunk, never by `*`, `**` or a `$*` DSL
+/// chunk.
+///
+/// ## Why this landed at R311y543, and what it cost before
+///
+/// `keyexpr_prefix`'s module note recorded until this round that wz is
+/// "uniformly @-blind" and that full @verbatim is "a re-openable stack-wide
+/// atom". It was re-opened by a MEASUREMENT rather than by a review: upstream's
+/// `z_advanced_sub.c` subscribing on `demo/capic/**` against a real zenoh-pico
+/// advanced publisher received the 4 data samples AND 7 samples of zenoh's own
+/// `@adv/pub/<zid>/<eid>/_` beacon traffic, where the real `libzenohc.so` on the
+/// identical wire received the 4 and none of the 7. A plain `z_sub.c` shows the
+/// same split, so this is the keyexpr rule and not an advanced-subscriber
+/// filter — a user subscription was being handed the router's internal
+/// namespace.
+///
+/// The rule is a chunk CLASS, not a wildcard behaviour, so it is unconditional
+/// rather than feature-gated: with every wildcard toggle off, chunk equality
+/// already gives the same answer, and with any of them on the guard is what
+/// keeps `@` out of their reach.
+pub(crate) const fn is_verbatim_chunk(chunk: &str) -> bool {
+    matches!(chunk.as_bytes(), [b'@', ..])
 }
 
 /// Intra-chunk substring DSL matcher. The pattern chunk is split on
@@ -467,10 +516,15 @@ fn intersect_chunks(a: &[&str], b: &[&str]) -> bool {
             if intersect_chunks(&a[1..], b) {
                 return true;
             }
-            if b.is_empty() {
-                return false;
+            // R311y543 — `**` does not cross a verbatim chunk, so the
+            // consume-one-more step is unavailable when b's next chunk is one.
+            // Zero-consumption above is unaffected: `**` may still END before an
+            // `@` chunk that the rest of `a` then matches byte-equally.
+            match b.first() {
+                None => false,
+                Some(next) if is_verbatim_chunk(next) => false,
+                Some(_) => intersect_chunks(a, &b[1..]),
             }
-            intersect_chunks(a, &b[1..])
         }
         #[cfg(feature = "keyexpr-wildcard-double")]
         (_, Some(&"**")) => intersect_chunks(b, a),
@@ -496,6 +550,16 @@ fn intersect_chunks(a: &[&str], b: &[&str]) -> bool {
 /// share at least one literal value. With both wildcard toggles
 /// off this reduces to chunk equality.
 fn chunk_intersects(a: &str, b: &str) -> bool {
+    // R311y543 — zenoh `chunk_intersect` (classical.rs:65-72) in its own order:
+    // byte equality FIRST, then the verbatim refusal, then the wildcard rules.
+    // The order is load-bearing — `@adv` vs `@adv` intersects, and every other
+    // pairing involving an `@` chunk does not.
+    if a == b {
+        return true;
+    }
+    if is_verbatim_chunk(a) || is_verbatim_chunk(b) {
+        return false;
+    }
     // `*` on either side matches any single chunk; both-sides `*`
     // trivially intersect.
     #[cfg(feature = "keyexpr-wildcard-single")]
@@ -596,10 +660,13 @@ fn includes_chunks(a: &[&str], b: &[&str]) -> bool {
             if includes_chunks(&a[1..], b) {
                 return true;
             }
-            if b.is_empty() {
-                return false;
+            // R311y543 — same verbatim stop as `intersect_chunks`: a's `**`
+            // cannot cover an `@` chunk of b's.
+            match b.first() {
+                None => false,
+                Some(next) if is_verbatim_chunk(next) => false,
+                Some(_) => includes_chunks(a, &b[1..]),
             }
-            includes_chunks(a, &b[1..])
         }
         #[cfg(feature = "keyexpr-wildcard-double")]
         (_, Some(&"**")) => {
@@ -624,6 +691,14 @@ fn includes_chunks(a: &[&str], b: &[&str]) -> bool {
 /// equality.
 #[cfg(feature = "keyexpr-includes")]
 fn chunk_includes(a: &str, b: &str) -> bool {
+    // R311y543 — verbatim first, in the same order the intersect side uses: an
+    // `@` chunk is covered only by itself.
+    if a == b {
+        return true;
+    }
+    if is_verbatim_chunk(a) || is_verbatim_chunk(b) {
+        return false;
+    }
     #[cfg(feature = "keyexpr-wildcard-single")]
     {
         // a `*` covers any single chunk.

@@ -1541,7 +1541,29 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         // bounded `_sn=last+1..hb` recovery GET (zenoh advanced_subscriber.rs:
         // 1053-1145). Callback-driven (no task); the GET re-enters Session::query
         // OUTSIDE the state lock, the sample-driven re-entrancy discipline.
-        let heartbeat_sub = if heartbeat {
+        //
+        // R311y543 — and it DEGRADES rather than failing. The derived keyexpr
+        // is `<base>/@adv/pub/**`, so a base ending in `**` — which is upstream
+        // `z_advanced_sub.c`'s own default, `demo/example/**` — produces the
+        // `**` + literal + `*`-shape shape wz's outbound gate refuses because it
+        // SIGABRTs a real zenoh-pico peer (R299 bug #3 / R300). Until now that
+        // refusal came back through `?` and took the LIVE subscription with it:
+        // `SharedSession::declare_advanced_subscriber` swallows a failed declare
+        // with `if let Ok(sub)`, so a C program subscribing on `demo/example/**`
+        // through either ABI got NO subscriber at all and received nothing,
+        // where the real `libzenohc.so` receives every sample. Measured, on the
+        // wire, against a real zenoh-pico advanced publisher.
+        //
+        // The gate is not the thing to weaken — the keyexpr it refuses really
+        // does crash a pico peer. The live subscription is the contract and the
+        // `@adv` recovery channels are an enhancement, so an unusable derived
+        // keyexpr costs the enhancement and nothing else. The history and
+        // recovery GETs already degrade this way (their failures are not
+        // propagated); this makes the heartbeat subscriber agree with them.
+        let heartbeat_sub = if heartbeat
+            && crate::advanced_ke::adv_ke_is_outbound_safe(&crate::advanced_ke::heartbeat_sub_ke(
+                &base_keyexpr,
+            )) {
             let hb_state = Arc::clone(&state);
             let hb_session = session.clone();
             let hb_base = base_keyexpr.clone();

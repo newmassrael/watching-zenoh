@@ -269,9 +269,20 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
     let Some((include, _libdir_ref, _examples)) = oracle_or_note() else {
         return;
     };
+    // WHICH zenoh-c build this is, read BEFORE the probe list is built rather
+    // than after it. R311y543: the `ze_advanced_*` plane is
+    // `#if defined(Z_FEATURE_UNSTABLE_API)` in upstream's header, so on a
+    // no-unstable oracle a probe naming those types does not COMPILE — the
+    // feature set has to be known before the probe source is written, not only
+    // in time to advise about a mismatch.
+    let configure = std::fs::read_to_string(include.join("zenoh_configure.h"))
+        .expect("the oracle ships zenoh_configure.h");
+    let unstable = configure.contains("#define Z_FEATURE_UNSTABLE_API");
+    let shm = unstable && configure.contains("#define Z_FEATURE_SHARED_MEMORY");
+
     // (name, C expression). ONE list, so the name and the thing measured cannot
     // drift apart — the previous shape kept them in two.
-    let probes: &[(&str, &str)] = &[
+    let base: &[(&str, &str)] = &[
         ("z_owned_session_t", "sizeof(z_owned_session_t)"),
         ("z_owned_bytes_t", "sizeof(z_owned_bytes_t)"),
         ("z_view_keyexpr_t", "sizeof(z_view_keyexpr_t)"),
@@ -357,7 +368,89 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         ("z_querier_options_t", "sizeof(z_querier_options_t)"),
         ("z_querier_get_options_t", "sizeof(z_querier_get_options_t)"),
         ("z_scout_options_t", "sizeof(z_scout_options_t)"),
+        // R311y543 — the base subscriber options. Not unstable-gated, and the
+        // struct `ze_advanced_subscriber_options_t` embeds at offset 0.
+        ("z_subscriber_options_t", "sizeof(z_subscriber_options_t)"),
     ];
+    // R311y543 — the `ze_advanced_*` plane, measured ONLY where upstream
+    // declares it. The order must match `abi.rs`'s
+    // `WZ_CAPI_C_LAYOUT_NAMES_UNSTABLE` exactly: the two tables are compared
+    // index for index, so a reordering here compares an advanced publisher
+    // against a miss closure and passes or fails for the wrong reason.
+    let unstable_probes: &[(&str, &str)] = &[
+        ("z_entity_global_id_t", "sizeof(z_entity_global_id_t)"),
+        (
+            "z_entity_global_id_t/align",
+            "_Alignof(z_entity_global_id_t)",
+        ),
+        ("ze_miss_t", "sizeof(ze_miss_t)"),
+        ("ze_owned_closure_miss_t", "sizeof(ze_owned_closure_miss_t)"),
+        (
+            "ze_owned_advanced_publisher_t",
+            "sizeof(ze_owned_advanced_publisher_t)",
+        ),
+        (
+            "ze_owned_advanced_subscriber_t",
+            "sizeof(ze_owned_advanced_subscriber_t)",
+        ),
+        (
+            "ze_owned_sample_miss_listener_t",
+            "sizeof(ze_owned_sample_miss_listener_t)",
+        ),
+        (
+            "ze_advanced_publisher_cache_options_t",
+            "sizeof(ze_advanced_publisher_cache_options_t)",
+        ),
+        (
+            "ze_advanced_publisher_sample_miss_detection_options_t",
+            "sizeof(ze_advanced_publisher_sample_miss_detection_options_t)",
+        ),
+        (
+            "ze_advanced_publisher_options_t",
+            "sizeof(ze_advanced_publisher_options_t)",
+        ),
+        (
+            "ze_advanced_publisher_put_options_t",
+            "sizeof(ze_advanced_publisher_put_options_t)",
+        ),
+        (
+            "ze_advanced_subscriber_history_options_t",
+            "sizeof(ze_advanced_subscriber_history_options_t)",
+        ),
+        (
+            "ze_advanced_subscriber_last_sample_miss_detection_options_t",
+            "sizeof(ze_advanced_subscriber_last_sample_miss_detection_options_t)",
+        ),
+        (
+            "ze_advanced_subscriber_recovery_options_t",
+            "sizeof(ze_advanced_subscriber_recovery_options_t)",
+        ),
+        (
+            "ze_advanced_subscriber_options_t",
+            "sizeof(ze_advanced_subscriber_options_t)",
+        ),
+    ];
+    // R311y543 — the SHM provider / buffer plane. Upstream gates every one of
+    // these on `Z_FEATURE_SHARED_MEMORY` AND `Z_FEATURE_UNSTABLE_API` together,
+    // so this is a third half rather than the unstable half widened. Same
+    // ordering obligation as above, against `WZ_CAPI_C_LAYOUT_NAMES_SHM`.
+    let shm_probes: &[(&str, &str)] = &[
+        ("z_owned_shm_t", "sizeof(z_owned_shm_t)"),
+        ("z_owned_shm_mut_t", "sizeof(z_owned_shm_mut_t)"),
+        ("z_owned_shm_provider_t", "sizeof(z_owned_shm_provider_t)"),
+        ("z_alloc_alignment_t", "sizeof(z_alloc_alignment_t)"),
+        (
+            "z_buf_layout_alloc_result_t",
+            "sizeof(z_buf_layout_alloc_result_t)",
+        ),
+        ("z_buf_alloc_result_t", "sizeof(z_buf_alloc_result_t)"),
+    ];
+    let probes: Vec<(&str, &str)> = base
+        .iter()
+        .chain(if unstable { unstable_probes } else { &[] }.iter())
+        .chain(if shm { shm_probes } else { &[] }.iter())
+        .copied()
+        .collect();
 
     let dir = tempfile::tempdir().expect("tempdir for the layout probe");
     let src = dir.path().join("layout.c");
@@ -429,10 +522,8 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
     // named only the unstable axis sent a reader to the wrong build the moment
     // this ran against the SHM oracle — which is exactly what R311y541's probe
     // caught it doing.
-    let configure = std::fs::read_to_string(include.join("zenoh_configure.h"))
-        .expect("the oracle ships zenoh_configure.h");
     let mut wanted: Vec<&str> = Vec::new();
-    if !configure.contains("#define Z_FEATURE_UNSTABLE_API") {
+    if !unstable {
         wanted.push("zenoh-c-no-unstable-api");
     }
     if configure.contains("#define Z_FEATURE_SHARED_MEMORY") {

@@ -2347,11 +2347,37 @@ jobs:
       # functions of (zenoh-c version, script content, pinned toolchain), which
       # is the same argument the existing zenoh-c oracle cache makes.
       #
-      # It also needs NO pico CLIs and no zenohd, so it provisions strictly less
-      # than the `ci` job despite building more.
+      # It needs no zenohd. R311y543 added the pico CLIs to what it DOES need:
+      # Layer C1ce grew five RUN legs, and two of them put a real zenoh-pico
+      # binary on the far side as the foreign counterparty — which is what makes
+      # their agreement an agreement on the wire rather than on a library. The
+      # earlier form of this note said "NO pico CLIs"; that is why the build step
+      # below now exists.
+
+      - name: Install system dependencies
+        # cmake + pkg-config are what `build-zenoh-pico-cli.sh` and the pinned
+        # Mbed TLS it provisions need. Deliberately the same NARROW list the
+        # `ci` job installs, and deliberately NOT `libmbedtls-dev` — pico's
+        # `Z_FEATURE_LINK_TLS` arm resolves Mbed TLS through pkg-config and
+        # Ubuntu's package ships no `.pc` at all, so the distro package would
+        # satisfy the compiler and still fail pico's configure step.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            pkg-config
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
+
+      - name: Build zenoh-pico CLI binaries (Layer C1ce foreign-counterparty dep)
+        # The FOREIGN half of two C1ce legs: `z_pub` drives upstream's
+        # `z_sub_shm.c` and `z_advanced_pub` drives its `z_advanced_sub.c`, so
+        # the party on the wire opposite wz shares no code with either arm.
+        # Built BEFORE the C1ce step for the ordinary reason — `zenoh_pico_cli_binary`
+        # asserts the binary exists, and C1ce runs under WZ_C1CE_REQUIRE=1, so an
+        # absent CLI is a red rather than a skip.
+        run: bash scripts/build-zenoh-pico-cli.sh
 
       - name: Cache the zenoh-c oracle (pinned 1.5.0)
         # SAME key as the `ci` job's, deliberately: `install-zenoh-c.sh` clones

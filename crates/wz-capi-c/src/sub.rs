@@ -73,7 +73,7 @@ unsafe impl Sync for CClosure {}
 ///
 /// The borrowed sample is valid only for the duration of the call, which is
 /// zenoh-c's contract and why the C side must copy anything it keeps.
-fn make_subscriber_callback(
+pub(crate) fn make_subscriber_callback(
     closure: Arc<CClosure>,
 ) -> impl FnMut(&dyn SampleView) + Send + 'static {
     move |view: &dyn SampleView| {
@@ -126,6 +126,41 @@ impl Drop for SubscriberState {
     fn drop(&mut self) {
         self.shared.undeclare_subscriber(self.id);
     }
+}
+
+/// Options for `z_declare_subscriber` (`zenoh_commons.h:464-470`).
+///
+/// TRANSPARENT upstream and exactly ONE field wide, which is the whole reason it
+/// is declared rather than left as the `*mut c_void` this plane used until the
+/// advanced subscriber needed it: `ze_advanced_subscriber_options_t` EMBEDS one
+/// at offset 0, so its four bytes set every later field's offset. The pico ABI's
+/// equivalent is a one-byte dummy, so the two option structs are genuinely
+/// different sizes and neither may borrow the other's number.
+///
+/// The field is carried for layout; `allowed_origin` is a NAMED gap, the same
+/// one [`z_declare_subscriber`] already records.
+#[repr(C)]
+pub struct z_subscriber_options_t {
+    /// Restrict matching publications by their origin locality.
+    pub allowed_origin: crate::publisher::zc_locality_t,
+}
+
+/// Fill in the default subscriber options (zenoh-c
+/// `z_subscriber_options_default`).
+///
+/// # Safety
+/// `this_` must be null or a valid, writable options struct.
+#[no_mangle]
+pub unsafe extern "C" fn z_subscriber_options_default(this_: *mut z_subscriber_options_t) {
+    if this_.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        *this_ = z_subscriber_options_t {
+            allowed_origin: crate::publisher::ZC_LOCALITY_ANY,
+        }
+    };
 }
 
 /// Construct a sample closure from its parts (zenoh-c `z_closure_sample`).
@@ -201,7 +236,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
     subscriber: *mut z_owned_subscriber_t,
     key_expr: *const z_loaned_keyexpr_t,
     callback: *mut z_moved_closure_sample_t,
-    _options: *mut c_void,
+    _options: *mut z_subscriber_options_t,
 ) -> ZResult {
     guarded(|| {
         if subscriber.is_null() || callback.is_null() {
@@ -279,7 +314,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
     session: *const z_loaned_session_t,
     key_expr: *const z_loaned_keyexpr_t,
     callback: *mut z_moved_closure_sample_t,
-    options: *mut c_void,
+    options: *mut z_subscriber_options_t,
 ) -> ZResult {
     let mut sink = z_owned_subscriber_t::null_value();
     // SAFETY: the caller's contract, delegated — the local sink absorbs the

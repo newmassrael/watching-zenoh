@@ -28,8 +28,14 @@
 //!   4. Assert the two boolean answers agree.
 //!
 //! Corpus shape: canonical zenoh keyexprs only (no leading or
-//! trailing `/`, no `@` verbatim chunks since wz does not implement
-//! that feature, no `$*$*` non-canonical runs). The fixture exercises
+//! trailing `/`, no `$*$*` non-canonical runs). R311y543 removed `@`
+//! verbatim chunks from that exclusion list — they were excluded
+//! "since wz does not implement that feature", which measured the gap
+//! by declining to measure it; `keyexpr_intersect_verbatim_chunks`
+//! now differentials the class, including the ONE case where zenoh and
+//! zenoh-pico disagree with each other. The PROPERTY fuzz below still
+//! generates no `@`, because its generator would have to model that
+//! divergence to stay meaningful. The fixture exercises
 //! literal-vs-literal, single-side `*` / `**`, two-side `*` / `**`,
 //! intra-chunk `$*` on one side, and intra-chunk `$*` on both sides
 //! across multiple anchor-compatibility shapes.
@@ -213,6 +219,70 @@ fn keyexpr_intersect_depth_edge_cases() {
     assert_agree("a/**/b", "a/b"); // ** absorbs zero in middle
     assert_agree("**/a", "a"); // leading ** absorbs zero
     assert_agree("a/**", "a/b/c/d/e");
+}
+
+// wz-proves: keyexpr-intersect codec-parity partial
+// wz-proves: keyexpr-wildcard-double codec-parity partial
+#[test]
+fn keyexpr_intersect_verbatim_chunks() {
+    // R311y543 — the `@verbatim` class, which this fixture's corpus note
+    // EXCLUDED ("no `@` verbatim chunks since wz does not implement that
+    // feature") until wz implemented it. pico has had it all along
+    // (`keyexpr_match_template.h:216-219` — "one is verbatim, the other is not,
+    // so no match"), so the exclusion was measuring wz's gap by not measuring
+    // it. These cases turn that back into a differential.
+    //
+    // The shape that found the gap in the first place, at its own scale:
+    // upstream's advanced publisher beacons under `<base>/@adv/pub/<zid>/<eid>/_`
+    // and a user subscription on `<base>/**` must not reach it.
+    assert_agree("demo/example/**", "demo/example/x/@adv/pub/zid/0/_");
+    assert_agree("demo/example/**", "demo/example/x");
+    // A `*` does not reach a verbatim chunk either, on either side.
+    assert_agree("demo/*/temp", "demo/@adv/temp");
+    assert_agree("demo/@adv/temp", "demo/*/temp");
+    // Only a verbatim chunk reaches one — and byte equality still wins.
+    assert_agree("demo/@adv/temp", "demo/@adv/temp");
+    assert_agree("demo/@adv/temp", "demo/@other/temp");
+    // A `**` may still cover the NON-verbatim chunks before a verbatim one, so
+    // the rule is a stop rather than a blanket refusal.
+    assert_agree("demo/**/@adv/x", "demo/a/b/@adv/x");
+    assert_agree("**", "@adv");
+    assert_agree("**/@adv", "@adv");
+    // A `$*` chunk is a wildcard for this purpose too — when only ONE side is
+    // verbatim, both implementations refuse.
+    assert_agree("demo/ad$*/x", "demo/@adv/x");
+
+    // ── a NAMED divergence, where zenoh and zenoh-pico disagree with each
+    //    other and wz has to pick one ──────────────────────────────────────
+    //
+    // `@ad$*` vs `@adv`: BOTH chunks are verbatim, and the two upstreams
+    // resolve that differently.
+    //
+    //   * zenoh (Rust): `chunk_intersect` returns on byte equality FIRST and
+    //     then refuses if EITHER side is verbatim
+    //     (`commons/zenoh-keyexpr/src/key_expr/intersect/classical.rs:65-72`),
+    //     so a `$*` inside a verbatim chunk is inert and the answer is NO.
+    //   * zenoh-pico: refuses only when the two sides DISAGREE about being
+    //     verbatim (`keyexpr_match_template.h:216-219`), then falls through to
+    //     the ordinary DSL comparison — so the answer is YES.
+    //
+    // wz follows ZENOH, for the reason the rest of this round follows it: the
+    // rule was implemented because a REAL `libzenohc.so` was the reference arm
+    // that showed wz leaking the `@adv` namespace, and a drop-in that split the
+    // difference would match neither. Both answers are asserted rather than
+    // just wz's, so a change on either side of the divergence fails here
+    // instead of drifting.
+    assert!(
+        !wz_intersects("demo/@ad$*/x", "demo/@adv/x"),
+        "wz follows zenoh: two DIFFERENT verbatim chunks never intersect, so \
+         the `$*` is inert"
+    );
+    assert!(
+        zenoh_pico_intersects("demo/@ad$*/x", "demo/@adv/x"),
+        "zenoh-pico refuses only a verbatim/non-verbatim MISMATCH, so it \
+         applies the DSL here and says yes. If this assertion ever fails, pico \
+         moved toward zenoh and wz's divergence note above is stale."
+    );
 }
 
 // ── R297b property fuzz layer ───────────────────────────────────

@@ -509,15 +509,23 @@ mod tests {
             "the cache retained all three sequenced samples"
         );
 
-        // A loopback GET over `demo/data/**` covers BOTH the cache
-        // queryable KE (`demo/data/@adv/pub/<zid>/<eid>/_`) and the reply
-        // keys (`demo/data`, the original sample key the cache replies
-        // under) — the `reply ⊆ query` contract holds.
+        // The loopback GET goes over `demo/data/@adv/**`, which is exactly what
+        // `advanced_ke::history_get_ke` builds and what a real advanced
+        // SUBSCRIBER puts on the wire.
+        //
+        // R311y543 — it used to be `demo/data/**`, and that stopped covering the
+        // cache queryable when the @verbatim rule landed. The change is the rule
+        // working rather than a regression: `@adv` is zenoh's ADMIN namespace and
+        // a `**` does not reach into it (`zenoh-keyexpr` classical.rs:65-72), so
+        // upstream's own `demo/data/**` would not have found this cache either.
+        // A user GET reaching a router's internal namespace was the same defect
+        // this round found on the SUBSCRIBE side, measured against the real
+        // `libzenohc.so`.
         let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
         let rec = Arc::clone(&replies);
         session
             .query(
-                "demo/data/**",
+                "demo/data/@adv/**",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
                 move |reply: &dyn ReplyView| {
                     rec.lock()

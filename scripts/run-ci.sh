@@ -9065,9 +9065,24 @@ layer_c1cc_api_compat_c() {
     # BOTH ABI arms are clippy-gated, not just the one this oracle selects: the
     # other arm is still shipped code and a `#[cfg]` that stops compiling is
     # invisible until someone with the other oracle tries it.
-    (cd crates && cargo clippy -p wz-capi-c --all-targets --quiet -- -D warnings) || return 1
-    (cd crates && cargo clippy -p wz-capi-c --features zenoh-c-no-unstable-api \
-        --all-targets --quiet -- -D warnings) || return 1
+    # R311y543 — all FOUR arms, not the two this loop used to cover. The crate's
+    # `#[cfg]` surface is now two independent axes (`zenoh-c-no-unstable-api` and
+    # `zenoh-c-shared-memory`), and the `ze_advanced_*` / `z_shm_*` modules sit
+    # behind different combinations of them — so an arm nobody compiles is an arm
+    # whose `cfg` can stop building unnoticed, which is exactly the shape that
+    # redded hosted CI at R311y536.
+    for capi_c_arm in \
+        "" \
+        "zenoh-c-no-unstable-api" \
+        "zenoh-c-shared-memory" \
+        "zenoh-c-no-unstable-api,zenoh-c-shared-memory"; do
+        if [[ -z "$capi_c_arm" ]]; then
+            (cd crates && cargo clippy -p wz-capi-c --all-targets --quiet -- -D warnings) || return 1
+        else
+            (cd crates && cargo clippy -p wz-capi-c --features "$capi_c_arm" \
+                --all-targets --quiet -- -D warnings) || return 1
+        fi
+    done
     # Via the guarded helper, NOT a bare `| grep -q`: this script sets
     # `set -o pipefail`, so grep's early exit races its upstream's SIGPIPE and
     # reds the lane. The first draft here did exactly that and the lane failed
@@ -9075,6 +9090,11 @@ layer_c1cc_api_compat_c() {
     # close, documented at its own definition.
     _runci_guarded_test "C1cc wz-capi-c unit" + \
         cargo test -p wz-capi-c --quiet || return 1
+    # R311y543 — the SHM arm carries unit tests the other three do not (the
+    # segment allocator's), so running only the default arm would leave them
+    # ungated. Same argument as the clippy loop above.
+    _runci_guarded_test "C1cc wz-capi-c unit (shared-memory arm)" + \
+        cargo test -p wz-capi-c --features zenoh-c-shared-memory --quiet || return 1
     if [[ ! -f "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include/zenoh.h" \
        || ! -f "${WZ_ZENOH_C_EXAMPLES:-$HOME/zenoh-c-ref/examples}/z_put.c" ]]; then
         if [[ -n "${WZ_C1CC_REQUIRE:-}" ]]; then
@@ -9188,6 +9208,13 @@ layer_c1ce_api_compat_c_shm_oracle() {
     # Build the arm THIS oracle selects — which is the default plus
     # `zenoh-c-shared-memory`, resolved by reading both defines rather than one.
     WZ_ZENOH_C_PREFIX="$shm" _runci_build_capi_c_for_oracle C1ce || return 1
+    # The OBSERVER the publishing legs adjudicate with. Built here rather than
+    # inherited from Layer C1cc, because `--layer C1ce` on its own is a supported
+    # invocation and because a STALE observer is not a missing one: this lane's
+    # `@adv`-namespace assertion is about wz's keyexpr matcher, so an observer
+    # binary predating a change to it reds the lane for a reason that is no
+    # longer true. That happened while these legs were being written.
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
     # The C-compiler footprint check, now against the OTHER header. It is a
     # different mechanism from `check-capi-c-opaque-arms.sh`'s generator: one
     # asks a C compiler for `sizeof` on an installed header, the other asks
@@ -9197,6 +9224,27 @@ layer_c1ce_api_compat_c_shm_oracle() {
         cargo test -p wz-integration-tests \
         --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
         --exact the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation || rc=1
+    # R311y543 — the RUN legs for the two planes this oracle is what makes
+    # reachable. Layer C1cc cannot host them: against the INSTALLED header
+    # (neither Z_FEATURE_SHARED_MEMORY nor Z_FEATURE_UNSTABLE_API) these six
+    # examples do not COMPILE, which is why they sat ORACLE-ONLY for so long.
+    #
+    # Named --exact one per invocation, as C1cc does: a rename or a silently
+    # dropped test then fails the lane instead of shrinking it.
+    #
+    # Two of them additionally need the zenoh-pico CLIs as the foreign
+    # counterparty; ci.yml's capi-c-arms job builds them ahead of this lane.
+    for leg in \
+        upstream_z_pub_shm_on_wz_capi_c_publishes_the_same_shm_chunk_on_both_arms \
+        upstream_z_advanced_pub_on_wz_capi_c_puts_the_same_sample_and_no_adv_leak \
+        upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_on_both_arms \
+        upstream_z_advanced_sub_on_wz_capi_c_receives_the_same_samples_from_real_pico \
+        upstream_z_get_shm_on_wz_capi_c_is_answered_identically_by_a_real_pico_queryable; do
+        WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce $leg" 1 \
+            cargo test -p wz-integration-tests \
+            --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \
+            --exact "$leg" || rc=1
+    done
     # REPORTED, never enforced, exactly as C1cc's is.
     WZ_ZENOH_C_PREFIX="$shm" python3 scripts/lib/capi_c_coverage.py || rc=1
 

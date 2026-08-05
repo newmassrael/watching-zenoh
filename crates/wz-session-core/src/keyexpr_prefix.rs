@@ -24,20 +24,30 @@
 //! runtime `.contains('*')` check that [`crate::storage_strip_prefix`] used, so
 //! both consumers validate non-wildness through ONE typed gate.
 //!
-//! @verbatim (`@`): wz does NOT implement @verbatim chunk semantics ANYWHERE —
-//! `keyexpr_match` / `keyexpr_canon` are uniformly @-blind (treat `@` as an
-//! ordinary byte; see `crates/wz-integration-tests/tests/
-//! layer3_keyexpr_intersect.rs:31`). To stay CONSISTENT with the rest of the wz
-//! keyexpr stack, this port likewise treats `@` as ordinary — zenoh's two
-//! @verbatim guards (`is_chunk_matching`'s verbatim-only-matches-verbatim rule
-//! and the `**`-must-not-cross-`@` stop-loop) are intentionally OMITTED. Both
-//! guards key off the PREFIX, so results differ from zenoh only when the prefix
-//! (the namespace / mount prefix) itself contains an `@` chunk — an `@` in the
-//! target alone never diverges (confirmed by differential fuzz). Making strip
-//! @-aware while the matcher stays @-blind would be the WORSE choice (an
-//! internally inconsistent keyexpr stack where a sample strips one way and
-//! matches another); full @verbatim support is a re-openable stack-wide atom
-//! (canon + match + strip together), not a namespace-local concern.
+//! @verbatim (`@`): IMPLEMENTED since R311y543, and this note used to say the
+//! opposite.
+//!
+//! It said wz "does NOT implement @verbatim chunk semantics ANYWHERE", that this
+//! port therefore omitted zenoh's two guards on purpose, and that full support
+//! was "a re-openable stack-wide atom (canon + match + strip together), not a
+//! namespace-local concern". That reasoning was sound and its conclusion — that
+//! strip must not go @-aware while the matcher stayed @-blind — is why the two
+//! moved in the SAME round rather than one of them alone.
+//!
+//! What re-opened it was a measurement rather than a review. Upstream's
+//! `z_advanced_sub.c` on `demo/capic/**`, against a real zenoh-pico advanced
+//! publisher, was handed zenoh's own `@adv/pub/<zid>/<eid>/_` beacon traffic
+//! alongside its data, where the real `libzenohc.so` on the identical wire was
+//! handed the data alone. A user subscription receiving the router's internal
+//! namespace is not a stylistic difference, so
+//! [`crate::keyexpr_match::is_verbatim_chunk`] landed there and both of zenoh's
+//! guards landed here: `is_chunk_matching`'s verbatim-only-matches-verbatim rule
+//! (`borrowed.rs:297-300`) and the `**`-must-not-cross-`@` stop-loop
+//! (`borrowed.rs:350-384`).
+//!
+//! `keyexpr_canon` is unchanged and does not need to change: canonicity is a
+//! grammar question and `@` is an ordinary byte to the grammar. The atom that
+//! was carried was match + strip, and it is those two that closed.
 
 #[cfg(feature = "alloc")]
 use alloc::string::{String, ToString as _};
@@ -109,8 +119,14 @@ pub fn strip_nonwild_prefix<'t>(target: &'t str, prefix: NonWildKeyExpr<'_>) -> 
 
 /// Match a single wildcard-bearing `target` chunk against a non-wild `prefix`
 /// chunk (no `/` in either). Port of zenoh's private `is_chunk_matching`
-/// (`borrowed.rs:293`) with the `@`-verbatim guard omitted (see module docs).
+/// (`borrowed.rs:293`), INCLUDING its `@`-verbatim guard since R311y543.
 fn is_chunk_matching(target: &[u8], prefix: &[u8]) -> bool {
+    // zenoh `borrowed.rs:297-300`: a verbatim chunk is matched only by a
+    // verbatim chunk. The byte-equality of the two is then decided by the walk
+    // below exactly as for any other pair, so `@demo` still strips `@demo`.
+    if prefix.first() == Some(&b'@') && target.first() != Some(&b'@') {
+        return false;
+    }
     let mut ti = 0usize;
     let mut pi = 0usize;
     let mut tprev = b'/';
@@ -146,8 +162,7 @@ fn is_chunk_matching(target: &[u8], prefix: &[u8]) -> bool {
 }
 
 /// Chunk-walk core. Port of zenoh's private `strip_nonwild_prefix_inner`
-/// (`borrowed.rs:331`) with the `@`-verbatim branch collapsed to its no-`@`
-/// arm (see module docs).
+/// (`borrowed.rs:331`), INCLUDING its `@`-verbatim branch since R311y543.
 fn strip_inner<'t>(target: &'t [u8], prefix: &[u8]) -> Option<&'t [u8]> {
     let mut ti = 0usize;
     let mut pi = 0usize;
@@ -164,9 +179,33 @@ fn strip_inner<'t>(target: &'t [u8], prefix: &[u8]) -> Option<&'t [u8]> {
                 .unwrap_or(prefix.len() - pi);
         let tchunk = &target[ti..te];
         if tchunk.len() == 2 && tchunk[0] == b'*' {
-            // `**`: @-blind, it matches every remaining prefix chunk, so keep the
-            // `**` and the rest of `target` as the suffix.
-            return Some(&target[ti..]);
+            // `**` — and the answer depends on whether the REMAINING PREFIX has
+            // a verbatim chunk, which is zenoh `borrowed.rs:350-384`.
+            let remaining = &prefix[pi..];
+            let Some(mut p) = remaining.iter().position(|&c| c == b'@') else {
+                // No `@` left to cross: `**` covers every remaining prefix chunk
+                // and the suffix is `**` plus the rest of the target.
+                return Some(&target[ti..]);
+            };
+            if te + 1 >= target.len() {
+                // `**` is the LAST target chunk and it may not reach a verbatim
+                // chunk, so there is nothing left to cover the prefix with.
+                return None;
+            }
+            // Walk `p` backwards a chunk at a time, letting `**` absorb as many
+            // NON-verbatim prefix chunks as it can before the verbatim one.
+            loop {
+                if let Some(tail) = strip_inner(&target[(te + 1)..], &remaining[p..]) {
+                    return Some(tail);
+                }
+                if p == 0 {
+                    return None;
+                }
+                p -= 2;
+                while p > 0 && remaining[p - 1] != b'/' {
+                    p -= 1;
+                }
+            }
         }
         if te == target.len() {
             // target has no more chunks than prefix and the last is non-`**`, so
@@ -322,20 +361,34 @@ mod tests {
         assert_eq!(strip_nonwild_prefix("home/kitchen", nw2), None);
     }
 
-    /// @-blind divergence from zenoh: wz treats `@` as ordinary, so a `*`/`**`
-    /// chunk DOES cross a `@verbatim` chunk (zenoh returns `None` for these).
-    /// Documents the deliberate stack-wide @-blind choice (see module docs).
+    /// R311y543 — the @verbatim half, which was a DIVERGENCE until this round.
+    ///
+    /// This test used to be named `strip_at_is_treated_as_ordinary` and asserted
+    /// the opposite of every case below, documenting wz's stack-wide @-blindness
+    /// as deliberate. It stopped being defensible when the matcher went @-aware:
+    /// a keyexpr stack where a sample strips one way and matches another is the
+    /// internally-inconsistent state the module note said would be the worse
+    /// choice, so the strip path moved with it.
     #[test]
-    fn strip_at_is_treated_as_ordinary() {
-        // zenoh: None (verbatim `@demo` not matchable by `*`). wz @-blind: matches.
+    fn strip_refuses_to_cross_a_verbatim_chunk() {
+        // A `*` does not match a verbatim chunk (zenoh `borrowed.rs:297-300`).
         let nw = NonWildKeyExpr::new("@demo/example/test").unwrap();
-        assert_eq!(
-            strip_nonwild_prefix("*/example/test/something", nw),
-            Some("something")
-        );
-        // A literal `@` prefix still strips literally (this agrees with zenoh).
+        assert_eq!(strip_nonwild_prefix("*/example/test/something", nw), None);
+        // Nor does a `**`, whichever side of the verbatim chunk it starts on.
+        assert_eq!(strip_nonwild_prefix("**", nw), None);
+        assert_eq!(strip_nonwild_prefix("**/something", nw), None);
+        // A literal `@` chunk still strips literally — the rule is "only a
+        // verbatim chunk matches a verbatim chunk", not "verbatim never matches".
         assert_eq!(
             strip_nonwild_prefix("@demo/x", NonWildKeyExpr::new("@demo").unwrap()),
+            Some("x")
+        );
+        // And a `**` still covers the NON-verbatim chunks that precede one: the
+        // prefix `demo/@adv` is reached by absorbing `demo` and then matching
+        // `@adv` byte for byte. Without this case the fix could be "refuse any
+        // prefix containing @" and the assertions above would all still pass.
+        assert_eq!(
+            strip_nonwild_prefix("**/@adv/x", NonWildKeyExpr::new("demo/@adv").unwrap()),
             Some("x")
         );
     }
