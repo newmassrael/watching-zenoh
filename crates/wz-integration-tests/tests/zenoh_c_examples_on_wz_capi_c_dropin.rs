@@ -424,14 +424,29 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
     // not just option fields — `z_owned_bytes_t` is 40 with it and 32 without —
     // so the message can name the cargo feature to flip instead of leaving a
     // reader with two numbers and no next step.
+    // TWO axes, not one. R311y540 measured that `Z_FEATURE_SHARED_MEMORY` moves
+    // 8 of the types below and `Z_FEATURE_UNSTABLE_API` moves 2, so advice that
+    // named only the unstable axis sent a reader to the wrong build the moment
+    // this ran against the SHM oracle — which is exactly what R311y541's probe
+    // caught it doing.
     let configure = std::fs::read_to_string(include.join("zenoh_configure.h"))
         .expect("the oracle ships zenoh_configure.h");
-    let advice = if configure.contains("#define Z_FEATURE_UNSTABLE_API") {
-        "this oracle DEFINES Z_FEATURE_UNSTABLE_API, so build wz-capi-c with its \
-         DEFAULT features"
+    let mut wanted: Vec<&str> = Vec::new();
+    if !configure.contains("#define Z_FEATURE_UNSTABLE_API") {
+        wanted.push("zenoh-c-no-unstable-api");
+    }
+    if configure.contains("#define Z_FEATURE_SHARED_MEMORY") {
+        wanted.push("zenoh-c-shared-memory");
+    }
+    let advice = if wanted.is_empty() {
+        "this oracle defines NEITHER Z_FEATURE_UNSTABLE_API's absence nor \
+         Z_FEATURE_SHARED_MEMORY, so build wz-capi-c with its DEFAULT features"
+            .to_string()
     } else {
-        "this oracle does NOT define Z_FEATURE_UNSTABLE_API, so build wz-capi-c \
-         with --features zenoh-c-no-unstable-api"
+        format!(
+            "this oracle's zenoh_configure.h selects wz-capi-c --features {}",
+            wanted.join(",")
+        )
     };
 
     for (i, (name, _)) in probes.iter().enumerate() {

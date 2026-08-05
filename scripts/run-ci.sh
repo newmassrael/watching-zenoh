@@ -9033,9 +9033,27 @@ _runci_build_capi_c_for_oracle() {
     local lane="$1"
     local capi_c_features=()
     local zc_configure="${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include/zenoh_configure.h"
-    if [[ -f "$zc_configure" ]] && ! grep -q '^#define Z_FEATURE_UNSTABLE_API' "$zc_configure"; then
-        capi_c_features=(--features zenoh-c-no-unstable-api)
-        echo "  Layer $lane: oracle has no Z_FEATURE_UNSTABLE_API -> building wz-capi-c with zenoh-c-no-unstable-api"
+    # TWO axes, not one (R311y540 measured the second). `Z_FEATURE_UNSTABLE_API`
+    # moves 2 of the types wz declares and `Z_FEATURE_SHARED_MEMORY` moves 8, so
+    # reading only the first would build the wrong cdylib the moment a lane is
+    # pointed at an SHM oracle — and the failure would be a SIZE mismatch, which
+    # is a corrupted caller frame rather than a link error.
+    #
+    # Absent header => no features, i.e. the default arm. That is unchanged, and
+    # it is fine: the layout leg SKIPs when the oracle is absent, so nothing
+    # compares the build against anything.
+    if [[ -f "$zc_configure" ]]; then
+        if ! grep -q '^#define Z_FEATURE_UNSTABLE_API' "$zc_configure"; then
+            capi_c_features+=(--features zenoh-c-no-unstable-api)
+        fi
+        if grep -q '^#define Z_FEATURE_SHARED_MEMORY' "$zc_configure"; then
+            capi_c_features+=(--features zenoh-c-shared-memory)
+        fi
+    fi
+    if [[ ${#capi_c_features[@]} -gt 0 ]]; then
+        echo "  Layer $lane: oracle selects wz-capi-c ${capi_c_features[*]}"
+    else
+        echo "  Layer $lane: oracle selects wz-capi-c default features (unstable, no shm)"
     fi
     (cd crates && cargo build -p wz-capi-c "${capi_c_features[@]}" --quiet)
 }
@@ -9123,6 +9141,71 @@ layer_c1cc_api_compat_c() {
     if [[ -n "${WZ_C1CC_OPAQUE_ARMS:-}" ]]; then
         bash scripts/check-capi-c-opaque-arms.sh || return 1
     fi
+}
+
+# ─── Layer C1ce — §5.27 api-compat-c against the SHARED-MEMORY oracle ───
+#
+# R311y541. Layer C1cc measures wz against whatever zenoh-c is INSTALLED, and
+# `install-zenoh-c.sh` installs upstream's published archive — the build with
+# neither `Z_FEATURE_SHARED_MEMORY` nor `Z_FEATURE_UNSTABLE_API`. Against that
+# header SEVEN of upstream's 29 examples do not COMPILE at all, so C1cc reports
+# them ORACLE-ONLY and keeps them out of its denominator. That is honest and it
+# is also permanent: no amount of wz work moves a number whose denominator
+# excludes them.
+#
+# `install-zenoh-c-shm.sh` builds the other oracle from source, and against it
+# the denominator becomes the whole corpus. The measured effect of turning it on
+# is the point of this lane: 22 of 22 becomes 21 of 29, which is NOT a
+# regression — it is the same library measured against a corpus that no longer
+# hides the part it does not implement. `z_sub_shm` moving from LINKS to
+# MISSING(3) is the same thing at one example's scale: against an SHM header it
+# needs three symbols it did not need before.
+#
+# SKIPs when that oracle is absent, because building it takes minutes and pulls
+# the whole zenoh graph; WZ_C1CE_REQUIRE=1 turns the skip into a failure on a
+# job that provisions it.
+layer_c1ce_api_compat_c_shm_oracle() {
+    local shm="${WZ_ZENOH_C_SHM_PREFIX:-$repo_root/target/zenoh-c-shm}"
+    if [[ ! -f "$shm/include/zenoh.h" || ! -f "$shm/lib/libzenohc.so" ]]; then
+        if [[ -n "${WZ_C1CE_REQUIRE:-}" ]]; then
+            echo "  Layer C1ce FAIL — required (WZ_C1CE_REQUIRE set) but the" >&2
+            echo "  shared-memory zenoh-c oracle is absent at $shm." >&2
+            echo "  Provision it with: bash scripts/install-zenoh-c-shm.sh" >&2
+            return 1
+        fi
+        echo "  Layer C1ce SKIP (no shared-memory zenoh-c oracle at $shm;"
+        echo "  provision with: bash scripts/install-zenoh-c-shm.sh)"
+        return 0
+    fi
+    # The examples corpus still comes from the reference clone; only the headers
+    # and the reference library change.
+    if [[ ! -f "${WZ_ZENOH_C_EXAMPLES:-$HOME/zenoh-c-ref/examples}/z_put.c" ]]; then
+        echo "  Layer C1ce SKIP (the zenoh-c examples clone is absent)"
+        return 0
+    fi
+
+    local rc=0
+    # Build the arm THIS oracle selects — which is the default plus
+    # `zenoh-c-shared-memory`, resolved by reading both defines rather than one.
+    WZ_ZENOH_C_PREFIX="$shm" _runci_build_capi_c_for_oracle C1ce || return 1
+    # The C-compiler footprint check, now against the OTHER header. It is a
+    # different mechanism from `check-capi-c-opaque-arms.sh`'s generator: one
+    # asks a C compiler for `sizeof` on an installed header, the other asks
+    # upstream's own build to print the sizes. Agreement between two independent
+    # mechanisms is what makes the SHM arm's numbers trustworthy.
+    WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce layout" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
+        --exact the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation || rc=1
+    # REPORTED, never enforced, exactly as C1cc's is.
+    WZ_ZENOH_C_PREFIX="$shm" python3 scripts/lib/capi_c_coverage.py || rc=1
+
+    # Leave the cdylib as the DEFAULT oracle wants it. Layers that run after this
+    # one read the same artifact path, and a lane that hands the next one a
+    # cdylib built for a different header is the one-shared-artifact hazard this
+    # tree has already been bitten by.
+    _runci_build_capi_c_for_oracle "C1ce restore" || rc=1
+    return $rc
 }
 
 # ─── Layer C1cd — §5.27 api-compat-c ATTACHMENT, pico + zenohd ──────
@@ -9506,6 +9589,7 @@ run_layer L layer_l_lockfile_freshness || overall=1
 run_layer C1bp layer_c1bp_plugin_dynamic_loading || overall=1
 run_layer C1bv layer_c1bv_dynamic_volume_loading || overall=1
 run_layer C1cc layer_c1cc_api_compat_c || overall=1
+run_layer C1ce layer_c1ce_api_compat_c_shm_oracle || overall=1
 run_layer C1cd layer_c1cd_api_compat_c_attachment || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
