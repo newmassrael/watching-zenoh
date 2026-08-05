@@ -108,6 +108,26 @@ cmake -S "$SRC" -B "$BUILD" \
     -DZENOHC_BUILD_WITH_EXAMPLES=FALSE \
     -DZENOHC_BUILD_WITH_TESTS=FALSE
 
+# CARGO_TERM_COLOR=never, and it is the whole fix for a hosted red that stood
+# from R311y542 to R311y559.
+#
+# zenoh-c generates `zenoh_opaque.h` by compiling `build-resources/opaque-types`,
+# whose `get_opaque_type_data!` macro DELIBERATELY panics at const-eval with
+# `'type: X, align: A, size: S'` — and then PARSES those 97 rustc diagnostics out
+# of stderr. With colour forced ON (GitHub Actions sets `CARGO_TERM_COLOR: always`
+# workflow-wide, ci.yml:56) rustc wraps every one of them in ANSI escapes, the
+# plain-text-anchored parser matches zero, and the build dies with "there are 0
+# errors in the input data, but only 97 of them were processed". Locally cargo
+# auto-disables colour into a pipe, which is why it never reproduced here.
+#
+# Set HERE rather than in the workflow so every caller is covered — a lane, a
+# hand-run, a future script — and so the fix travels with the thing it protects.
+#
+# MEASURED, a controlled pair on one machine (same script, same scratch prefix,
+# same pinned toolchain): CARGO_TERM_COLOR=always FAILS identically to hosted;
+# unset, it installs cleanly.
+export CARGO_TERM_COLOR=never
+
 say "building (cold runs compile the whole zenoh graph; this takes minutes)"
 cmake --build "$BUILD" --config Release
 say "installing to $PREFIX"

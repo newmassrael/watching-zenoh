@@ -1384,10 +1384,19 @@ pub unsafe extern "C" fn ze_advanced_publisher_delete(
         else {
             return Z_ERR_NULL;
         };
-        match state.shared.advanced_publisher_delete(state.id) {
-            true => Z_OK,
-            false => Z_ERR_GENERIC,
-        }
+        // BEST-EFFORT, and `Z_OK` even when no face carried it — because the
+        // sibling `ze_advanced_publisher_put` is, for the reason
+        // `SharedSession::advanced_publisher_put` states: the fan-out is
+        // per-face and a C caller has no per-face handle to retry with.
+        //
+        // Upstream returns the underlying impl's result from BOTH
+        // (`src/api/advanced_publisher.c:407,423` — one `_z_publisher_*_impl`
+        // call each), so wz diverges here. That divergence is ONE named thing
+        // covering both entry points rather than two behaviours: a publisher
+        // declared before its first peer must not answer `Z_OK` to a put and an
+        // error to a delete.
+        let _delivered = state.shared.advanced_publisher_delete(state.id);
+        Z_OK
     })
 }
 

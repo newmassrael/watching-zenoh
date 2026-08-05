@@ -2421,6 +2421,11 @@ jobs:
 
       - name: Provision the shared-memory zenoh-c oracle (cache miss only)
         if: steps.zenoh-c-shm-cache.outputs.cache-hit != 'true'
+        # The colour-vs-parser trap that reded this job from R311y542 to
+        # R311y559 is fixed inside the SCRIPT, not here — see
+        # `scripts/install-zenoh-c-shm.sh`. Left as a pointer so a future
+        # reader of the workflow-wide `CARGO_TERM_COLOR: always` (line 56)
+        # finds the interaction instead of rediscovering it.
         run: bash scripts/install-zenoh-c-shm.sh
 
       - name: Cache the opaque-type size tables
