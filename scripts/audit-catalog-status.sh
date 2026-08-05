@@ -305,21 +305,28 @@ for atom in sorted(atoms):
         # The tag -> status RELATION: a tag is legal on a SET of statuses.
         if status not in IMPL_TAGS[tag]:
             fail_tag_status.append((atom, tag, status))
-    elif status != "active":
+    else:
         # R311y299 — separate "typo'd a tag" from "wrote no tag". impl_tag()
         # returns None for both, so the old single message misdiagnosed
         # `BEYOND_PICO` / `OUT OF SCOPE` as a MISSING tag and printed the
         # wrong instruction. A head token that is ALL-CAPS and tag-shaped but
         # not in the closed set is a typo; anything else is genuinely untagged.
+        #
+        # R311y554 — the ACTIVE arm is now a FAILURE too (the one-line promotion
+        # this file's own note at the tally block reserved for "when UNAUDITED
+        # hits 0"). It had to be promoted, not merely allowed to reach 0: the
+        # arm degraded the gate from EXACT to LOWER BOUND *silently*, R311y545
+        # tripped it by prepending a paragraph to api-compat-c's reason, and
+        # EIGHT rounds passed with the atom this arc was working on excluded
+        # from the frontier list — because no round in the window ran A3. A
+        # count that can quietly stop being exact is a count nobody can quote.
+        # `unaudited` stays in the report so the EXACT branch keeps printing
+        # its own precondition rather than asserting exactness from silence.
         head = _head(atom)
         if head and re.fullmatch(r"[A-Z][A-Z _-]{2,}", head):
             fail_bad_tag.append((atom, head))
         else:
             fail_untagged.append(atom)
-    else:
-        # status == "active" and no tag. NOT a failure yet -- but NOT silently
-        # skipped either, which is exactly what this gate did until R311y299.
-        unaudited.append(atom)
 
 # R311y343 — invariant #6: COMPLETE must rest on a TEST, not on a code read.
 #
@@ -415,6 +422,13 @@ print("  atoms=%d active=%d declared-cargo-features=%d" % (len(atoms), active_n,
 # UNAUDITED hits 0, promote the active arm to fail_untagged (one-line change)
 # and the bound becomes exact.
 #
+# R311y554 — DONE, and the reason it could not stay optional is above the
+# classification `else:`. UNAUDITED reaching 0 was never the hard part; the
+# hard part is that it can leave 0 again without anyone noticing, which is
+# exactly what R311y545..y552 did. The active arm now FAILS, so the next
+# reason-prefix edit reds this lane instead of demoting its headline number
+# to a lower bound in silence.
+#
 # R311y302 wrote a storage BLOCKER here: the §5.11-storage / §5.24-storage-backend
 # atoms anchor to zenoh's `zenoh-plugin-storage-manager` + `zenoh-backend-traits`,
 # neither is a cargo dependency of anything, so no build provisions them, and
@@ -482,7 +496,7 @@ if fail_unlinked:
 
 if fail_untagged:
     ok = False
-    print("FAIL: non-active atom whose reason does not START with an implementation tag: %d" % len(fail_untagged))
+    print("FAIL: atom whose reason does not START with an implementation tag: %d" % len(fail_untagged))
     print("    (without the tag the inventory cannot say whether this atom is built,")
     print("     so 'what work remains' degrades back to grepping English prose.)")
     for a in fail_untagged:
