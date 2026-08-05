@@ -886,6 +886,13 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     // same reason `z_publisher_options_t` does.
     "z_put_options_t",
     "z_delete_options_t",
+    // R311y557 — `z_timestamp_t`, newly declared so the `timestamp` field on
+    // the put / delete / publisher option structs has a type to point at. The
+    // ALIGNMENT is pinned beside the size because upstream declares this one
+    // `ALIGN(8) { uint8_t _0[24]; }` and 24 bytes at align 4 would also be 24
+    // bytes — the size alone cannot tell the two apart.
+    "z_timestamp_t",
+    "z_timestamp_t/align",
 ];
 
 /// The `Z_FEATURE_UNSTABLE_API`-only half of the table — the `ze_advanced_*`
@@ -1010,6 +1017,8 @@ fn layout_values() -> Vec<usize> {
         size_of::<crate::sub::z_subscriber_options_t>(),
         size_of::<crate::put::z_put_options_t>(),
         size_of::<crate::put::z_delete_options_t>(),
+        size_of::<crate::timestamp::z_timestamp_t>(),
+        align_of::<crate::timestamp::z_timestamp_t>(),
     ];
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     values.extend_from_slice(&[

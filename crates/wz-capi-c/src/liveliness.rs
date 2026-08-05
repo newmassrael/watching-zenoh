@@ -113,6 +113,9 @@ pub(crate) fn make_liveliness_callback(
             Vec::new(),
             None,
             liveliness_kind_of(sample.kind),
+            // A liveliness sample is a token transition, not a timestamped
+            // value; upstream's carries none either.
+            None,
         );
         // Bind AFTER the move out of `new` — see `SampleMarshal::bind`.
         marshal.bind();

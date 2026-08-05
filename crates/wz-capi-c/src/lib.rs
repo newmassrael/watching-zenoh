@@ -100,4 +100,5 @@ pub mod slice;
 pub mod string;
 pub mod sub;
 pub mod sync;
+pub mod timestamp;
 pub mod zid;

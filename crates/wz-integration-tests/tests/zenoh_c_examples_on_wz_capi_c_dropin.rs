@@ -373,6 +373,12 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         ("z_subscriber_options_t", "sizeof(z_subscriber_options_t)"),
         ("z_put_options_t", "sizeof(z_put_options_t)"),
         ("z_delete_options_t", "sizeof(z_delete_options_t)"),
+        // R311y557 — `z_timestamp_t`, the type the option structs' `timestamp`
+        // field points at. Its ALIGNMENT is measured beside its size for the
+        // reason `abi.rs` states: upstream declares it `ALIGN(8)` over a
+        // 24-byte array, and 24 bytes at align 4 would compare equal on size.
+        ("z_timestamp_t", "sizeof(z_timestamp_t)"),
+        ("z_timestamp_t/align", "_Alignof(z_timestamp_t)"),
     ];
     // R311y543 — the `ze_advanced_*` plane, measured ONLY where upstream
     // declares it. The order must match `abi.rs`'s

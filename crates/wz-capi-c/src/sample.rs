@@ -55,6 +55,13 @@ pub(crate) struct SampleMarshal {
     payload: BytesState,
     attachment: Option<BytesState>,
     kind: z_sample_kind_t,
+    /// R311y557 — the sample's own timestamp, or `None` when it carries none.
+    ///
+    /// Stored BY VALUE inside the marshal (24 bytes, `Copy`) rather than behind
+    /// a box, because `z_sample_timestamp` hands out a borrowed pointer to it
+    /// and that pointer's lifetime is the marshal's — the same contract
+    /// `z_sample_attachment` has, reached the same way.
+    timestamp: Option<crate::timestamp::z_timestamp_t>,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
@@ -68,12 +75,14 @@ impl SampleMarshal {
         payload: Vec<u8>,
         attachment: Option<Vec<u8>>,
         kind: z_sample_kind_t,
+        timestamp: Option<crate::timestamp::z_timestamp_t>,
     ) -> Self {
         Self {
             keyexpr: KeyexprState { keyexpr },
             payload: BytesState::whole(payload),
             attachment: attachment.map(BytesState::whole),
             kind,
+            timestamp,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),
@@ -216,6 +225,32 @@ pub unsafe extern "C" fn z_sample_attachment(
     })
 }
 
+/// Borrow a delivered sample's timestamp, or NULL when it carries none
+/// (zenoh-c `z_sample_timestamp`).
+///
+/// R311y557. NULL is not an error and is the ordinary answer: a sample is
+/// stamped only when its publisher set `z_put_options_t::timestamp` or the
+/// node clock is stamping, and upstream returns NULL for the rest. The pointer
+/// borrows the marshal, exactly as [`z_sample_attachment`] does.
+///
+/// # Safety
+/// `this_` must be null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_timestamp(
+    this_: *const z_loaned_sample_t,
+) -> *const crate::timestamp::z_timestamp_t {
+    guard_val(std::ptr::null(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { marshal(this_) } {
+            Some(m) => match m.timestamp.as_ref() {
+                Some(ts) => ts as *const crate::timestamp::z_timestamp_t,
+                None => std::ptr::null(),
+            },
+            None => std::ptr::null(),
+        }
+    })
+}
+
 /// Construct a non-owned string over a keyexpr (zenoh-c
 /// `z_keyexpr_as_view_string`).
 ///
@@ -260,6 +295,10 @@ pub(crate) fn with_marshalled<R>(
         view.payload().to_vec(),
         view.attachment().map(<[u8]>::to_vec),
         sample_kind_of(view.kind()),
+        // R311y557 — the delivered timestamp, so `z_sample_timestamp` answers
+        // what the publisher stamped rather than always NULL.
+        view.timestamp()
+            .map(crate::timestamp::z_timestamp_t::from_hint),
     );
     // Bind AFTER the move out of `new` — the marshal is at its final address
     // only here. See `SampleMarshal::bind`.
@@ -431,6 +470,10 @@ impl SampleMarshal {
                 .as_ref()
                 .map(|state| BytesState::whole(state.payload.clone())),
             kind: self.kind,
+            // `Copy`, and owned by value — the deep copy carries the same
+            // 24 bytes rather than a pointer into the source marshal, so a
+            // sample that outlives its callback keeps its own timestamp.
+            timestamp: self.timestamp,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),

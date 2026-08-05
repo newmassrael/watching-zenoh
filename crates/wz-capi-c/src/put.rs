@@ -163,11 +163,21 @@ unsafe fn resolve_put_options(options: *mut z_put_options_t) -> PublishOptions {
         Some(hint) => qos.with_encoding(hint),
         None => qos,
     };
+    // R311y557 — the TIMESTAMP, which was carried for layout only until the
+    // `z_timestamp_t` family existed to point at. NULL is upstream's "unstamped"
+    // and is what `z_put_options_default` writes, so the common path is
+    // unchanged; a caller that minted one with `z_timestamp_new` now has it on
+    // the wire (the `MsgPut` T-flag) and in this session's own loopback sample.
+    // SAFETY: the caller's contract for the pointer.
+    let with_timestamp = match unsafe { crate::timestamp::timestamp_hint(opts.timestamp) } {
+        Some(hint) => with_encoding.with_timestamp(hint),
+        None => with_encoding,
+    };
     // SAFETY: as above. TAKEN — upstream documents every owned options field as
     // consumed on return.
     match unsafe { take_payload(opts.attachment) } {
-        Some(blob) => with_encoding.with_attachment(blob),
-        None => with_encoding,
+        Some(blob) => with_timestamp.with_attachment(blob),
+        None => with_timestamp,
     }
 }
 
@@ -182,11 +192,20 @@ unsafe fn resolve_delete_options(options: *const z_delete_options_t) -> PublishO
     }
     // SAFETY: the caller's contract.
     let opts = unsafe { &*options };
-    base.with_priority(priority_from_c(opts.priority))
+    let qos = base
+        .with_priority(priority_from_c(opts.priority))
         .with_congestion_control(congestion_from_c(opts.congestion_control))
         .with_express(opts.is_express)
         // R311y554 — HONOURED, as on the put side.
-        .with_locality(locality_from_c(opts.allowed_destination))
+        .with_locality(locality_from_c(opts.allowed_destination));
+    // R311y557 — and the timestamp, as on the put side. A Del body carries the
+    // same T-flag a Put does, which is what lets a storage backend order a
+    // deletion against the value it deletes.
+    // SAFETY: the caller's contract for the pointer.
+    match unsafe { crate::timestamp::timestamp_hint(opts.timestamp) } {
+        Some(hint) => qos.with_timestamp(hint),
+        None => qos,
+    }
 }
 
 /// Fill in the default put options (zenoh-c `z_put_options_default`).
