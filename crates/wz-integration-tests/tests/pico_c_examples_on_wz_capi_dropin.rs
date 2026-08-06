@@ -4239,7 +4239,20 @@ fn pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping() {
 /// - ST arm `Z_FEATURE_MULTI_THREAD 0` — the same for LEGS 33/34.
 /// - and the programs themselves must NOT take a feature-gated stub branch,
 ///   which is the direct observation rather than an inference from the header.
-// wz-proves: api-compat-pico pico->wz partial
+/// # R311y571 — this witnesses NO atom, and used to claim one
+///
+/// It read `api-compat-pico pico->wz partial`, and nothing in it reaches a
+/// foreign implementation: it parses the CMake-generated `config.h` and runs
+/// upstream's examples linked against WZ's cdylib. Every answer comes from wz.
+/// The claim survived because A4 asked what the FILE reaches, and this file
+/// spawns a real pico CLI in its other 36 legs — so a self-witnessing test sat
+/// inside a foreign-classed file and counted as foreign proof. A4-8 is the
+/// invariant that now asks per TEST.
+///
+/// What it actually is: the POSITIVE CONTROL for those 36 legs. If the header
+/// arms were mis-configured every one of them would run a stub `main` and pass
+/// on a `printf`. That is worth gating and is not a parity claim.
+// wz-proves: none -- positive control for this file's 36 drop-in legs (asserts the header arms and that no program took a feature-gated stub branch); reaches no foreign implementation
 #[test]
 #[ignore = "reads the CMake-generated pico config and runs the drop-in binaries; \
             run by run-ci Layer E"]

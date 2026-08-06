@@ -417,6 +417,8 @@ def main() -> int:
 
     fail_name, fail_denominator, fail_foreign = [], [], []
     fail_undeclared, fail_containment, fail_excluded, fail_kind, fail_malformed = [], [], [], [], []
+    # A4-8 (R311y571): the per-TEST half of A4-3. See its report block.
+    fail_self_witness = []
 
     # (full/partial) x (all lanes / only the lanes hosted CI actually runs)
     proven_full: dict[str, set[str]] = {}   # atom -> {kinds}
@@ -480,6 +482,17 @@ def main() -> int:
                 if not (KIND_CLASS[kind] & cf.classes):
                     fail_kind.append((rel, t.name, atom, kind, ",".join(sorted(cf.classes))))
                     continue
+                # A4-8 — the same question one level finer. A4-3 and A4-7 above
+                # ask what the FILE reaches; this asks what THIS TEST reaches.
+                # A file that spawns a foreign implementation anywhere licensed
+                # every test in it to claim foreign proof, so a self-witnessing
+                # test sat inside a foreign-classed file and counted.
+                if not (KIND_CLASS[kind] & t.classes):
+                    fail_self_witness.append(
+                        (rel, t.name, atom, kind,
+                         ",".join(sorted(cf.classes)) or "-",
+                         ",".join(sorted(t.classes)) or "-"))
+                    continue
                 # A4-5 containment applies ONLY to cfg-gated (active) atoms.
                 #
                 # A FOUNDATIONAL atom has ZERO cfg(feature=..) sites of its OWN by A3
@@ -530,7 +543,7 @@ def main() -> int:
 
     fail_host_gated = assert_host_gated_ci_targets()
 
-    ok = not (fail_name or fail_denominator or fail_foreign or fail_undeclared
+    ok = not (fail_self_witness or fail_name or fail_denominator or fail_foreign or fail_undeclared
               or fail_containment or fail_excluded or fail_kind or fail_malformed
               or fail_host_gated)
 
@@ -655,6 +668,25 @@ def main() -> int:
         for rel, fn, atom, kind, classes in fail_kind:
             print("    - %s::%s claims `%s %s` but the file's foreign classes are [%s]"
                   % (rel, fn, atom, kind, classes))
+
+    if fail_self_witness:
+        ok = False
+        print("FAIL [A4-8] a SELF-witnessing test claims foreign proof: %d"
+              % len(fail_self_witness))
+        print("    A4-3 and A4-7 ask what the FILE reaches. A file that spawns or")
+        print("    links a foreign implementation ANYWHERE licensed every test in it")
+        print("    to claim foreign proof, so a test that only ever drives wz could")
+        print("    sit inside one and count. R311y569 and R311y570 both recorded")
+        print("    that this axis cannot tell a self-witness from a foreign one;")
+        print("    this is that distinction.")
+        print("    The call graph is resolved through file-local fns, `common::*`")
+        print("    helpers, `use zenoh_pico_sys::*` imports, and a re-exec whose")
+        print("    target is named in a STRING literal. If a real foreign route is")
+        print("    missed here it is one of those four shapes -- extend the resolver")
+        print("    in crossimpl_corpus.py rather than weakening the claim.")
+        for rel, fn, atom, kind, fclasses, tclasses in fail_self_witness:
+            print("    - %s::%s claims `%s %s`; file reaches [%s] but this test "
+                  "reaches [%s]" % (rel, fn, atom, kind, fclasses, tclasses))
 
     if fail_host_gated:
         ok = False

@@ -370,6 +370,114 @@ def helper_classes() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     return by_helper, pkgs_by_helper
 
 
+def local_fn_bodies(code: str) -> dict[str, str]:
+    """Every `fn NAME` in one file, mapped to its brace-matched body.
+
+    R311y571 — the per-TEST half of [`helper_classes`]. That one resolves the
+    shared `common::*` helpers; this one resolves a file's OWN functions, which
+    is where a twice-and-diff leg keeps its `run_both_arms()`. Both are needed
+    for the same reason: a test reaches a foreign implementation through a call,
+    not by naming the resolver.
+
+    Any indent and any `fn`, so `impl` methods and functions nested inside
+    `mod tests` are included — a harness struct's method is as much a route to
+    the oracle as a free function is.
+    """
+    bodies: dict[str, str] = {}
+    for m in re.finditer(r"\bfn\s+([A-Za-z0-9_]+)", code):
+        name = m.group(1)
+        open_at = code.find("{", m.end())
+        if open_at < 0:
+            continue
+        depth, i, n = 0, open_at, len(code)
+        while i < n:
+            if code[i] == "{":
+                depth += 1
+            elif code[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        # Later definitions win only if the earlier one was not closed; a name
+        # defined twice in one file (an `impl` twin) contributes both bodies.
+        bodies[name] = bodies.get(name, "") + code[open_at:i]
+    return bodies
+
+
+def pico_ffi_imports(code: str) -> set[str]:
+    """Names a file pulls in from `zenoh_pico_sys`, so a test that CALLS one is
+    reaching the linked C library even though it never names the crate.
+
+    The `codec` class is the only one attached to a crate rather than to a
+    resolver function, and that difference is exactly what a naive per-test scan
+    gets wrong: `use zenoh_pico_sys::{_z_scout_encode, ...}` sits at the top of
+    the file and the test body says `_z_scout_encode(..)`. Measured before it
+    was believed — the first version of the per-test resolver reported 56 codec
+    tests as reaching nothing, which was its own blind spot and not a finding.
+    """
+    names: set[str] = set()
+    for m in re.finditer(r"\buse\s+" + PICO_FFI_CRATE + r"\s*::\s*(\{[^}]*\}|[A-Za-z0-9_]+)",
+                         code):
+        names |= set(re.findall(r"[A-Za-z0-9_]+", m.group(1)))
+    for m in re.finditer(PICO_FFI_CRATE + r"\s*::\s*([A-Za-z0-9_]+)", code):
+        names.add(m.group(1))
+    names.discard("self")
+    return names
+
+
+def reexec_edges(raw_code: str, local: dict[str, str]) -> dict[str, set[str]]:
+    """Call edges a RE-EXEC harness makes through a string literal.
+
+    `layer3_keyexpr_canon.rs` measures pico's real `_z_keyexpr_canonize` by
+    re-running the test binary with `--exact <name>`, because the outcome under
+    test is a SIGABRT that would take the parent process with it. The name is a
+    string, `strip_code` removes strings, and the call graph then ends at the
+    spawning helper -- three true `codec-parity` claims looked self-witnessed.
+
+    Only an EXACT match against a function this file defines counts, and only
+    inside a string literal. A comment is deliberately not enough: this module's
+    header records that a lone `// zenohd_binary(` comment must never buy a test
+    its corpus membership, and the same reasoning applies to an edge.
+    """
+    edges: dict[str, set[str]] = {}
+    for name, body in local.items():
+        found = {lit for lit in re.findall(r'"([^"\\\n]*)"', body) if lit in local}
+        if found:
+            edges[name] = found
+    return edges
+
+
+def reachable_classes(fn_name: str, local: dict[str, str],
+                      by_helper: dict[str, set[str]],
+                      ffi_names: frozenset[str] = frozenset(),
+                      edges: dict[str, set[str]] | None = None) -> set[str]:
+    """The foreign classes ONE function can reach, through the call graph."""
+    classes: set[str] = set()
+    seen: set[str] = set()
+    stack = [fn_name]
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        body = local.get(name)
+        if body is None:
+            continue
+        for ident in set(re.findall(r"[A-Za-z0-9_]+", body)):
+            if ident in FOREIGN_ROOTS:
+                classes.add(FOREIGN_ROOTS[ident])
+            if ident in by_helper:
+                classes |= by_helper[ident]
+            if ident == PICO_FFI_CRATE or ident in ffi_names:
+                classes.add("codec")
+            if ident in local and ident not in seen:
+                stack.append(ident)
+        for target in (edges or {}).get(name, ()):
+            if target not in seen:
+                stack.append(target)
+    return classes
+
+
 class TestFn:
     def __init__(self, name: str, line: int):
         self.name = name
@@ -378,6 +486,9 @@ class TestFn:
         self.none_reason: str | None = None
         self.has_ignore = False
         self.bad_claim_lines: list[tuple[int, str]] = []
+        # R311y571 — the classes THIS test reaches, as opposed to the ones its
+        # FILE reaches. See `CorpusFile.classes`.
+        self.classes: set[str] = set()
 
     @property
     def declared(self) -> bool:
@@ -431,6 +542,10 @@ def scan_file(path: Path, by_helper: dict[str, set[str]],
     # is not a test, and cannot carry its atoms into `proven`. ("Comment out the flaky
     # interop test" must not keep its proofs green.) strip_code preserves line structure,
     # so the two views stay index-aligned.
+    local_bodies = local_fn_bodies(code)
+    ffi_names = frozenset(pico_ffi_imports(code))
+    edges = reexec_edges(raw, local_fn_bodies(raw))
+
     lines = raw.splitlines()
     code_lines = code.splitlines()
     while len(code_lines) < len(lines):
@@ -476,6 +591,7 @@ def scan_file(path: Path, by_helper: dict[str, set[str]],
                     break
                 j += 1
             t = TestFn(fn_name, idx + 1)
+            t.classes = reachable_classes(fn_name, local_bodies, by_helper, ffi_names, edges)
             t.has_ignore = has_ignore
             t.claims = [(a, k, p) for (_, a, k, p) in pending]
             t.none_reason = pending_none
